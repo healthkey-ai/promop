@@ -89,7 +89,40 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
         queryset = self.get_queryset().order_by('-created_at')
         serializer = PatientListSerializer(queryset, many=True)
         return Response(serializer.data)
-    
+
+    def create(self, request):
+        """Create a new patient record, creating a Person if needed"""
+        data = request.data
+
+        # Resolve or create Person
+        person_id = data.get('person_id') or data.get('person')
+        if person_id:
+            try:
+                person = Person.objects.get(person_id=int(person_id))
+            except Person.DoesNotExist:
+                person = Person.objects.create(
+                    person_id=int(person_id),
+                    year_of_birth=datetime.now().year - 50,
+                    gender_source_value='unknown',
+                    race_source_value='unknown',
+                    ethnicity_source_value='unknown',
+                )
+        else:
+            last_person = Person.objects.order_by('-person_id').first()
+            new_person_id = last_person.person_id + 1 if last_person else 1000
+            person = Person.objects.create(
+                person_id=new_person_id,
+                year_of_birth=datetime.now().year - 50,
+                gender_source_value='unknown',
+                race_source_value='unknown',
+                ethnicity_source_value='unknown',
+            )
+
+        serializer = PatientInfoSerializer(data=data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        serializer.save(person=person)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
     def retrieve(self, request, pk=None):
         """Get detailed patient info for a specific person"""
         try:
@@ -120,11 +153,11 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
         try:
             person = Person.objects.get(person_id=pk)
             patient_info = PatientInfo.objects.get(person=person)
-            
-            serializer = self.get_serializer(patient_info, data=request.data, partial=True)
+
+            serializer = self.get_serializer(patient_info, data=request.data, partial=partial)
             serializer.is_valid(raise_exception=True)
             serializer.save()
-            
+
             return Response(serializer.data)
         except Person.DoesNotExist:
             return Response({'error': 'Person not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -1311,10 +1344,12 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
                         'calcium_mg_dl': calcium,
                         'magnesium_mg_dl': magnesium,
                         'bilirubin_total_mg_dl': bilirubin_total,
+                        'serum_bilirubin_level_direct': bilirubin_direct,
                         'alt_u_l': alt,
                         'ast_u_l': ast,
                         'alkaline_phosphatase_u_l': alkaline_phosphatase,
                         'albumin_g_dl': albumin,
+                        'total_protein': total_protein,
                         'troponin_ng_ml': troponin,
                         'bnp_pg_ml': bnp,
                         'glucose_mg_dl': glucose,
@@ -1493,11 +1528,19 @@ def logout_view(request):
 @require_http_methods(["GET"])
 def health_check(request):
     """Health check endpoint for monitoring"""
+    from django.db import connection
+    try:
+        connection.ensure_connection()
+        db_status = 'connected'
+    except Exception:
+        db_status = 'error'
+
+    http_status = 200 if db_status == 'connected' else 503
     return JsonResponse({
-        'status': 'healthy',
+        'status': 'healthy' if db_status == 'connected' else 'unhealthy',
         'service': 'ctomop',
-        'database': 'connected'
-    })
+        'database': db_status,
+    }, status=http_status)
 
 
 @csrf_exempt
