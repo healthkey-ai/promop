@@ -115,7 +115,7 @@ class CurrentUserViewSet(viewsets.ViewSet):
         })
 
 @method_decorator(csrf_exempt, name='dispatch')
-class PatientInfoViewSet(viewsets.ModelViewSet):
+class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PatientInfoSerializer
     permission_classes = [IsAuthenticated]
     
@@ -190,26 +190,6 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
         except PatientInfo.DoesNotExist:
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
-    
-    def update(self, request, pk=None, partial=False):
-        """Update patient info for a specific person"""
-        try:
-            person = Person.objects.get(person_id=pk)
-            patient_info = PatientInfo.objects.get(person=person)
-
-            serializer = self.get_serializer(patient_info, data=request.data, partial=partial)
-            serializer.is_valid(raise_exception=True)
-            serializer.save()
-
-            return Response(serializer.data)
-        except Person.DoesNotExist:
-            return Response({'error': 'Person not found'}, status=status.HTTP_404_NOT_FOUND)
-        except PatientInfo.DoesNotExist:
-            return Response({'error': 'Patient info not found'}, status=status.HTTP_404_NOT_FOUND)
-    
-    def partial_update(self, request, pk=None):
-        """Partial update (PATCH) for patient info"""
-        return self.update(request, pk, partial=True)
     
     @action(detail=False, methods=['post'])
     def upload_csv(self, request):
@@ -1466,23 +1446,6 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
             
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    
-    @action(detail=True, methods=['patch'])
-    def update_patient(self, request, pk=None):
-        """Update a specific patient's info"""
-        try:
-            person = Person.objects.get(person_id=pk)
-            patient_info = PatientInfo.objects.get(person=person)
-            
-            serializer = self.get_serializer(patient_info, data=request.data, partial=True)
-            serializer.is_valid(raise_exception=True)
-            serializer.save()
-            
-            return Response(serializer.data)
-        except Person.DoesNotExist:
-            return Response({'error': 'Person not found'}, status=status.HTTP_404_NOT_FOUND)
-        except PatientInfo.DoesNotExist:
-            return Response({'error': 'Patient info not found'}, status=status.HTTP_404_NOT_FOUND)
     
     @action(detail=False, methods=['delete'])
     def bulk_delete(self, request):

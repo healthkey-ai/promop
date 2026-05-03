@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from omop_core.models import (
-    PatientInfo, Person,
+    PatientInfo,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument,
 )
@@ -50,31 +50,31 @@ class PatientListSerializer(serializers.ModelSerializer):
 
 
 class PatientInfoSerializer(serializers.ModelSerializer):
+    """Read-only serializer for PatientInfo. All fields are derived from OMOP tables via refresh_patient_info."""
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)
     patient_name = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
     gender = serializers.SerializerMethodField()
-    refractory_status = serializers.CharField(source='treatment_refractory_status', required=False, allow_null=True, allow_blank=True)
-    
+    refractory_status = serializers.CharField(source='treatment_refractory_status', read_only=True)
+
     class Meta:
         model = PatientInfo
         fields = '__all__'
-        read_only_fields = ['person', 'created_at', 'updated_at']
-    
+        read_only_fields = '__all__'
+
     def get_patient_name(self, obj):
-        # Get name from Person model (OMOP extension)
         if obj.person:
             full_name = f"{obj.person.given_name or ''} {obj.person.family_name or ''}".strip()
             return full_name if full_name else f"Patient {obj.person.person_id}"
         return f"Patient {obj.person.person_id}"
-    
+
     def get_age(self, obj):
         if obj.date_of_birth:
             today = date.today()
             age = today.year - obj.date_of_birth.year - ((today.month, today.day) < (obj.date_of_birth.month, obj.date_of_birth.day))
             return age
         return None
-    
+
     def get_gender(self, obj):
         if obj.person and obj.person.gender_concept:
             gender_name = obj.person.gender_concept.concept_name
@@ -85,12 +85,6 @@ class PatientInfoSerializer(serializers.ModelSerializer):
             else:
                 return 'Other'
         return 'Unknown'
-    
-    def update(self, instance, validated_data):
-        # Handle the refractory_status mapping
-        if 'treatment_refractory_status' in validated_data:
-            instance.treatment_refractory_status = validated_data.pop('treatment_refractory_status')
-        return super().update(instance, validated_data)
 
 # ---------------------------------------------------------------------------
 # OMOP clinical event serializers

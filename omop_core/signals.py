@@ -13,7 +13,7 @@ Signal suppression during bulk uploads:
 """
 
 import logging
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 
 from .models import (
@@ -65,4 +65,29 @@ def observation_saved(sender, instance, **kwargs):
 
 @receiver(post_save, sender=ProcedureOccurrence)
 def procedure_occurrence_saved(sender, instance, **kwargs):
+    _refresh_for_instance(instance)
+
+
+@receiver(post_delete, sender=ConditionOccurrence)
+def condition_occurrence_deleted(sender, instance, **kwargs):
+    _refresh_for_instance(instance)
+
+
+@receiver(post_delete, sender=DrugExposure)
+def drug_exposure_deleted(sender, instance, **kwargs):
+    _refresh_for_instance(instance)
+
+
+@receiver(post_delete, sender=Measurement)
+def measurement_deleted(sender, instance, **kwargs):
+    _refresh_for_instance(instance)
+
+
+@receiver(post_delete, sender=Observation)
+def observation_deleted(sender, instance, **kwargs):
+    _refresh_for_instance(instance)
+
+
+@receiver(post_delete, sender=ProcedureOccurrence)
+def procedure_occurrence_deleted(sender, instance, **kwargs):
     _refresh_for_instance(instance)
