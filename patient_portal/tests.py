@@ -21,7 +21,7 @@ from rest_framework.test import APIClient
 from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
     Person, PatientInfo,
-    ConditionOccurrence, DrugExposure, Measurement,
+    ConditionOccurrence, DrugExposure, Measurement, ProcedureOccurrence,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 
@@ -498,3 +498,306 @@ class UIViewsReflectUploadedDataTest(FhirUploadBase):
                 len(ee_results), 0,
                 f'No EpisodeEvents for episode_id={ep_pk} (LOT {ep["episode_number"]})',
             )
+
+
+# ---------------------------------------------------------------------------
+# 4. Direct OMOP endpoint CRUD tests
+# ---------------------------------------------------------------------------
+
+class OmopEndpointAuthTest(FhirUploadBase):
+    """Unauthenticated requests to OMOP endpoints must be rejected with 401."""
+
+    def setUp(self):
+        # Deliberately do NOT authenticate
+        self.client = APIClient()
+
+    def test_conditions_requires_auth(self):
+        resp = self.client.get('/api/conditions/')
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_measurements_requires_auth(self):
+        resp = self.client.get('/api/measurements/')
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_drug_exposures_requires_auth(self):
+        resp = self.client.get('/api/drug-exposures/')
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_observations_requires_auth(self):
+        resp = self.client.get('/api/observations/')
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_procedures_requires_auth(self):
+        resp = self.client.get('/api/procedures/')
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_episodes_requires_auth(self):
+        resp = self.client.get('/api/episodes/')
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_episode_events_requires_auth(self):
+        resp = self.client.get('/api/episode-events/')
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_documents_requires_auth(self):
+        resp = self.client.get('/api/documents/')
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class OmopObservationsEndpointTest(FhirUploadBase):
+    """Tests for /api/observations/ — list, filter, create, update, delete."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from omop_core.models import Concept, Domain, Vocabulary, ConceptClass
+        from omop_core.models import Observation as OmopObservation
+        vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        domain_type = Domain.objects.get(domain_id='Type Concept')
+        cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
+        today = date.today()
+        far_future = date(2099, 12, 31)
+        cls._obs_concept, _ = Concept.objects.get_or_create(
+            concept_id=9999901,
+            defaults={
+                'concept_name': 'Smoking status',
+                'domain': domain_type,
+                'vocabulary': vocab,
+                'concept_class': cc,
+                'concept_code': '9999901',
+                'valid_start_date': today,
+                'valid_end_date': far_future,
+            },
+        )
+        cls._person = Person.objects.create(
+            person_id=88801,
+            year_of_birth=1980,
+            gender_source_value='female',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        cls._obs = OmopObservation.objects.create(
+            observation_id=88801,
+            person=cls._person,
+            observation_concept=cls._obs_concept,
+            observation_date=date(2024, 1, 10),
+            observation_type_concept=cls._obs_concept,
+            value_as_string='Never',
+            observation_source_value='Smoking status',
+        )
+
+    def test_list_observations_returns_all(self):
+        resp = self.client.get('/api/observations/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = [r.get('observation_id', r.get('id')) for r in resp.data]
+        self.assertIn(88801, ids)
+
+    def test_filter_observations_by_person_id(self):
+        resp = self.client.get('/api/observations/', {'person_id': 88801})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list(resp.data)), 1)
+        self.assertEqual(list(resp.data)[0]['observation_source_value'], 'Smoking status')
+
+    def test_filter_observations_excludes_other_persons(self):
+        resp = self.client.get('/api/observations/', {'person_id': 99999})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list(resp.data)), 0)
+
+    def test_retrieve_single_observation(self):
+        resp = self.client.get('/api/observations/88801/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['value_as_string'], 'Never')
+
+    def test_create_observation(self):
+        from omop_core.models import Observation as OmopObservation
+        payload = {
+            'observation_id': 88802,
+            'person': self._person.person_id,
+            'observation_concept': self._obs_concept.concept_id,
+            'observation_date': '2024-06-01',
+            'observation_type_concept': self._obs_concept.concept_id,
+            'value_as_string': 'Former',
+            'observation_source_value': 'Smoking status',
+        }
+        resp = self.client.post('/api/observations/', payload, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(OmopObservation.objects.filter(observation_id=88802).exists())
+
+    def test_update_observation(self):
+        from omop_core.models import Observation as OmopObservation
+        resp = self.client.patch('/api/observations/88801/', {'value_as_string': 'Current'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(OmopObservation.objects.get(observation_id=88801).value_as_string, 'Current')
+
+    def test_delete_observation(self):
+        from omop_core.models import Observation as OmopObservation
+        resp = self.client.delete('/api/observations/88801/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(OmopObservation.objects.filter(observation_id=88801).exists())
+
+
+class OmopProceduresEndpointTest(FhirUploadBase):
+    """Tests for /api/procedures/ — list, filter, create, update, delete."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from omop_core.models import Concept, Domain, Vocabulary, ConceptClass
+        vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        domain_type = Domain.objects.get(domain_id='Type Concept')
+        cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
+        today = date.today()
+        far_future = date(2099, 12, 31)
+        cls._proc_concept, _ = Concept.objects.get_or_create(
+            concept_id=9999902,
+            defaults={
+                'concept_name': 'Biopsy',
+                'domain': domain_type,
+                'vocabulary': vocab,
+                'concept_class': cc,
+                'concept_code': '9999902',
+                'valid_start_date': today,
+                'valid_end_date': far_future,
+            },
+        )
+        cls._person = Person.objects.create(
+            person_id=88802,
+            year_of_birth=1965,
+            gender_source_value='female',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        cls._proc = ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=88801,
+            person=cls._person,
+            procedure_concept=cls._proc_concept,
+            procedure_date=date(2023, 5, 20),
+            procedure_type_concept=cls._proc_concept,
+            procedure_source_value='Core needle biopsy',
+        )
+
+    def test_list_procedures_returns_record(self):
+        resp = self.client.get('/api/procedures/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = [r.get('procedure_occurrence_id', r.get('id')) for r in resp.data]
+        self.assertIn(88801, ids)
+
+    def test_filter_procedures_by_person_id(self):
+        resp = self.client.get('/api/procedures/', {'person_id': 88802})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = list(resp.data)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['procedure_source_value'], 'Core needle biopsy')
+
+    def test_filter_procedures_excludes_other_persons(self):
+        resp = self.client.get('/api/procedures/', {'person_id': 99999})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list(resp.data)), 0)
+
+    def test_retrieve_single_procedure(self):
+        resp = self.client.get('/api/procedures/88801/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['procedure_source_value'], 'Core needle biopsy')
+
+    def test_create_procedure(self):
+        payload = {
+            'procedure_occurrence_id': 88802,
+            'person': self._person.person_id,
+            'procedure_concept': self._proc_concept.concept_id,
+            'procedure_date': '2024-03-10',
+            'procedure_type_concept': self._proc_concept.concept_id,
+            'procedure_source_value': 'Lumpectomy',
+        }
+        resp = self.client.post('/api/procedures/', payload, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(ProcedureOccurrence.objects.filter(procedure_occurrence_id=88802).exists())
+
+    def test_update_procedure(self):
+        resp = self.client.patch('/api/procedures/88801/',
+                                 {'procedure_source_value': 'Excisional biopsy'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            ProcedureOccurrence.objects.get(procedure_occurrence_id=88801).procedure_source_value,
+            'Excisional biopsy',
+        )
+
+    def test_delete_procedure(self):
+        resp = self.client.delete('/api/procedures/88801/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(ProcedureOccurrence.objects.filter(procedure_occurrence_id=88801).exists())
+
+
+class OmopDocumentsEndpointTest(FhirUploadBase):
+    """Tests for /api/documents/ — list, filter by person, create, update, delete."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from omop_core.models import PatientDocument
+        cls._person = Person.objects.create(
+            person_id=88803,
+            year_of_birth=1970,
+            gender_source_value='female',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        cls._doc = PatientDocument.objects.create(
+            person=cls._person,
+            doc_type='NGS',
+            title='NGS Panel Report',
+            file_url='https://storage.example.com/ngs-report.pdf',
+            file_name='ngs-report.pdf',
+            verified=False,
+        )
+
+    def test_list_documents_returns_record(self):
+        resp = self.client.get('/api/documents/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        titles = [r.get('title') for r in resp.data]
+        self.assertIn('NGS Panel Report', titles)
+
+    def test_filter_documents_by_person_id(self):
+        resp = self.client.get('/api/documents/', {'person_id': 88803})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = list(resp.data)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['doc_type'], 'NGS')
+
+    def test_filter_documents_excludes_other_persons(self):
+        resp = self.client.get('/api/documents/', {'person_id': 99999})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list(resp.data)), 0)
+
+    def test_retrieve_single_document(self):
+        resp = self.client.get(f'/api/documents/{self._doc.pk}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['file_name'], 'ngs-report.pdf')
+
+    def test_create_document(self):
+        from omop_core.models import PatientDocument
+        payload = {
+            'person': self._person.person_id,
+            'doc_type': 'IMAGING',
+            'title': 'CT Scan',
+            'file_url': 'https://storage.example.com/ct-scan.pdf',
+            'file_name': 'ct-scan.pdf',
+            'verified': False,
+        }
+        resp = self.client.post('/api/documents/', payload, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(
+            PatientDocument.objects.filter(person=self._person, doc_type='IMAGING').exists()
+        )
+
+    def test_update_document_verified_flag(self):
+        from omop_core.models import PatientDocument
+        resp = self.client.patch(f'/api/documents/{self._doc.pk}/', {'verified': True}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(PatientDocument.objects.get(pk=self._doc.pk).verified)
+
+    def test_delete_document(self):
+        from omop_core.models import PatientDocument
+        pk = self._doc.pk
+        resp = self.client.delete(f'/api/documents/{pk}/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(PatientDocument.objects.filter(pk=pk).exists())

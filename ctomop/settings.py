@@ -78,7 +78,7 @@ TEMPLATES = [
 WSGI_APPLICATION = 'ctomop.wsgi.application'
 
 # Database
-if 'DATABASE_URL' in os.environ:
+if os.environ.get('DATABASE_URL'):
     DATABASES = {
         'default': dj_database_url.config(
             default=os.environ.get('DATABASE_URL'),
@@ -139,8 +139,8 @@ CORS_ALLOW_CREDENTIALS = True
 # REST Framework - Allow unauthenticated access for now
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework.authentication.SessionAuthentication',
         'rest_framework.authentication.BasicAuthentication',
+        'patient_portal.api.authentication.CsrfExemptSessionAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.AllowAny',
