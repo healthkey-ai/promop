@@ -19,6 +19,55 @@ from omop_core.models import (
 # Public API
 # ---------------------------------------------------------------------------
 
+# Fields that are entirely derived from OMOP tables and must be reset before
+# each refresh so deletions are reflected (not just additions).
+_OMOP_DERIVED_FIELDS = [
+    # Disease / condition
+    'disease', 'diagnosis_date', 'condition_clinical_status', 'disease_slug',
+    # Therapy lines
+    'first_line_therapy', 'first_line_date', 'first_line_start_date', 'first_line_end_date',
+    'second_line_therapy', 'second_line_date', 'second_line_start_date', 'second_line_end_date',
+    'later_therapy', 'later_date', 'later_therapies',
+    'concomitant_medications',
+    # Labs
+    'hemoglobin_level', 'hemoglobin_level_units',
+    'serum_creatinine_level', 'serum_creatinine_level_units',
+    'platelet_count', 'platelet_count_units',
+    'serum_calcium_level', 'serum_calcium_level_units',
+    'serum_bilirubin_level_total', 'serum_bilirubin_level_total_units',
+    'albumin_level', 'albumin_level_units',
+    # Vitals
+    'systolic_blood_pressure', 'diastolic_blood_pressure', 'heartrate',
+    'weight', 'weight_units', 'height', 'height_units', 'temperature',
+    # Performance
+    'ecog_performance_status', 'karnofsky_performance_score',
+    # Biomarkers
+    'pd_l1_tumor_cels', 'pd_l1_assay',
+    'estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status', 'tnbc_status',
+    # Genomics
+    'genetic_mutations',
+    # CLL
+    'absolute_lymphocyte_count', 'serum_beta2_microglobulin_level',
+    'binet_stage', 'tumor_burden', 'disease_activity',
+    'bone_marrow_involvement', 'hepatomegaly', 'splenomegaly', 'lymphadenopathy',
+    'btk_inhibitor_refractory', 'bcl2_inhibitor_refractory', 'lymphocyte_doubling_time',
+    # Lymphoma
+    'flipi_score', 'gelf_criteria_status', 'tumor_grade',
+    # Assessment
+    'best_response', 'measurable_disease_by_recist_status',
+    # Procedures
+    'prior_procedures',
+]
+
+
+def _clear_derived_fields(patient_info: PatientInfo) -> None:
+    """Reset all OMOP-derived fields to None so deletions are reflected."""
+    for field in _OMOP_DERIVED_FIELDS:
+        if hasattr(patient_info, field):
+            default = [] if field in ('prior_procedures', 'later_therapies', 'genetic_mutations') else None
+            setattr(patient_info, field, default)
+
+
 def refresh_patient_info(person: Person) -> PatientInfo:
     """Derive and upsert PatientInfo from OMOP tables for a given person.
 
@@ -33,6 +82,9 @@ def refresh_patient_info(person: Person) -> PatientInfo:
             patient_info = PatientInfo.objects.select_for_update().get(person=person)
         except PatientInfo.DoesNotExist:
             patient_info = PatientInfo(person=person)
+
+        # Clear all OMOP-derived fields before re-deriving so deletions are reflected.
+        _clear_derived_fields(patient_info)
 
         # Populate all sections
         for section_fn in [
@@ -200,14 +252,22 @@ def _get_treatment_data(person: Person) -> dict:
     except Exception:
         pass
 
-    # Fallback: chronological DrugExposure ordering
-    therapy_details = []
+    # Fallback: group by start date so combination regimens count as one line.
+    # Sort chronologically: earliest date = line 1.
+    from collections import defaultdict
+    date_groups = defaultdict(list)
     for drug in drug_exposures:
-        therapy_details.append({
-            'drug': drug.drug_concept.concept_name if drug.drug_concept else 'Unknown',
-            'start_date': str(drug.drug_exposure_start_date),
-            'end_date': str(drug.drug_exposure_end_date) if drug.drug_exposure_end_date else None,
-        })
+        name = drug.drug_concept.concept_name if drug.drug_concept else 'Unknown'
+        date_groups[drug.drug_exposure_start_date].append(name)
+
+    therapy_details = [
+        {
+            'drug': ' + '.join(date_groups[d]),
+            'start_date': str(d),
+            'end_date': None,
+        }
+        for d in sorted(date_groups.keys())
+    ]
 
     if len(therapy_details) >= 1:
         data['first_line_therapy'] = therapy_details[0]['drug']
@@ -225,19 +285,6 @@ def _get_treatment_data(person: Person) -> dict:
             {'therapy': d['drug'], 'startDate': d['start_date'], 'endDate': d['end_date']}
             for d in later_drugs
         ]
-
-    drug_names = [
-        de.drug_concept.concept_name.lower() if de.drug_concept else ''
-        for de in drug_exposures
-    ]
-    platinum_terms = ['platinum', 'carboplatin', 'cisplatin', 'oxaliplatin']
-    if any(any(t in name for t in platinum_terms) for name in drug_names):
-        data['prior_therapy'] = 'Platinum-based chemotherapy'
-
-    immuno_terms = ['pembrolizumab', 'nivolumab', 'atezolizumab', 'durvalumab']
-    if any(any(t in name for t in immuno_terms) for name in drug_names):
-        existing = data.get('prior_therapy', '')
-        data['prior_therapy'] = (existing + '; Immunotherapy').strip('; ')
 
     return data
 
@@ -547,6 +594,8 @@ def _get_laboratory_data(person: Person) -> dict:
             continue
         concept_name = measurement.measurement_concept.concept_name.lower()
         for lab_key, (field_name, unit_field) in lab_mappings.items():
+            if field_name in data:
+                continue  # already captured most-recent value for this lab
             if lab_key in concept_name and measurement.value_as_number:
                 data[field_name] = measurement.value_as_number
                 data[f'{field_name}_units'] = unit_field
