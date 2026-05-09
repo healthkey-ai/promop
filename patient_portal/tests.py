@@ -1478,20 +1478,20 @@ class ProcedureToPatientInfoTest(_SignalBase):
 
 
 # ---------------------------------------------------------------------------
-# 7. HealthTree SMART on FHIR integration tests
+# 7. Service client SMART on FHIR integration tests
 #
-# These tests simulate HealthTree's two primary flows:
+# These tests simulate a generic service client's two primary flows:
 #   A. Reading patient data with a patient/*.read token
 #   B. Writing OMOP records with a patient/*.write token and verifying
 #      that PatientInfo is automatically refreshed from the written data
 #
-# Token setup mirrors what HealthTree would receive after the PKCE
-# authorization_code exchange. All tokens are inserted directly into the
+# Token setup mirrors what any confidential service client receives after
+# the client_credentials exchange. Tokens are inserted directly into the
 # DB to avoid round-tripping the full OAuth2 flow in tests.
 # ---------------------------------------------------------------------------
 
 class _SmartBase(TestCase):
-    """Shared fixtures for HealthTree SMART tests."""
+    """Shared fixtures for service client SMART tests."""
 
     @classmethod
     def setUpTestData(cls):
@@ -1501,41 +1501,41 @@ class _SmartBase(TestCase):
 
         _make_vocab_fixtures()
 
-        cls.healthtree_user = User.objects.create_user(
-            username='healthtree_svc', password='ht_pass'
+        cls.foundation_user = User.objects.create_user(
+            username='foundation_svc', password='foundation_pass'
         )
 
         cls.app = Application.objects.create(
-            name='HealthTree EHR',
-            client_id='healthtree-client-id',
-            client_type=Application.CLIENT_PUBLIC,
-            authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE,
-            user=cls.healthtree_user,
+            name='Foundation EHR',
+            client_id='foundation-client-id',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=cls.foundation_user,
         )
 
-        # Read-only token — HealthTree reads patient data
+        # Read-only token — service client reads patient data
         cls.read_token = AccessToken.objects.create(
-            user=cls.healthtree_user,
+            user=cls.foundation_user,
             application=cls.app,
-            token='ht-read-token-111',
+            token='foundation-read-token-111',
             expires=tz.now() + datetime.timedelta(hours=1),
             scope='patient/*.read openid launch/patient',
         )
 
-        # Read+write token — HealthTree writes OMOP records
+        # Read+write token — service client writes OMOP records
         cls.write_token = AccessToken.objects.create(
-            user=cls.healthtree_user,
+            user=cls.foundation_user,
             application=cls.app,
-            token='ht-write-token-222',
+            token='foundation-write-token-222',
             expires=tz.now() + datetime.timedelta(hours=1),
             scope='patient/*.read patient/*.write openid launch/patient',
         )
 
         # Expired token — must be rejected
         cls.expired_token = AccessToken.objects.create(
-            user=cls.healthtree_user,
+            user=cls.foundation_user,
             application=cls.app,
-            token='ht-expired-token-333',
+            token='foundation-expired-token-333',
             expires=tz.now() - datetime.timedelta(seconds=1),
             scope='patient/*.read patient/*.write openid',
         )
@@ -1544,7 +1544,7 @@ class _SmartBase(TestCase):
         cls.person = Person.objects.create(
             person_id=70001,
             given_name='Alice',
-            family_name='HealthTree',
+            family_name='Foundation',
             year_of_birth=1980,
             gender_source_value='female',
             race_source_value='unknown',
@@ -1571,8 +1571,8 @@ class _SmartBase(TestCase):
         return self._bearer(self.write_token.token)
 
 
-class SmartHealthTreeReadTest(_SmartBase):
-    """HealthTree reads patient OMOP data using a patient/*.read Bearer token."""
+class SmartServiceClientReadTest(_SmartBase):
+    """Service client reads patient OMOP data using a patient/*.read Bearer token."""
 
     @classmethod
     def setUpTestData(cls):
@@ -1697,8 +1697,8 @@ class SmartHealthTreeReadTest(_SmartBase):
         self.assertNotIn(70102, ids)
 
 
-class SmartHealthTreeWriteTest(_SmartBase):
-    """HealthTree writes OMOP records using a patient/*.write Bearer token
+class SmartServiceClientWriteTest(_SmartBase):
+    """Service client writes OMOP records using a patient/*.write Bearer token
     and verifies PatientInfo is automatically refreshed."""
 
     def test_write_token_creates_condition(self):
@@ -1875,14 +1875,14 @@ class SmartPatientInfoReadOnlyTest(_SmartBase):
 
 
 class SmartFhirUploadTest(_SmartBase):
-    """HealthTree can bulk-ingest a patient via the FHIR upload endpoint
+    """Service client can bulk-ingest a patient via the FHIR upload endpoint
     using a write-scoped Bearer token."""
 
     def test_fhir_upload_with_write_token_succeeds(self):
         bundle = _make_fhir_bundle()
         bundle_bytes = json.dumps(bundle).encode('utf-8')
         fhir_file = io.BytesIO(bundle_bytes)
-        fhir_file.name = 'healthtree_bundle.json'
+        fhir_file.name = 'service_bundle.json'
         resp = self.write_client.post(
             '/api/patient-info/upload_fhir/',
             {'file': fhir_file},
@@ -1895,7 +1895,7 @@ class SmartFhirUploadTest(_SmartBase):
         bundle = _make_fhir_bundle()
         bundle_bytes = json.dumps(bundle).encode('utf-8')
         fhir_file = io.BytesIO(bundle_bytes)
-        fhir_file.name = 'healthtree_bundle2.json'
+        fhir_file.name = 'service_bundle2.json'
         self.write_client.post(
             '/api/patient-info/upload_fhir/',
             {'file': fhir_file},
@@ -1914,7 +1914,7 @@ class SmartFhirUploadTest(_SmartBase):
         bundle = _make_fhir_bundle()
         bundle_bytes = json.dumps(bundle).encode('utf-8')
         fhir_file = io.BytesIO(bundle_bytes)
-        fhir_file.name = 'healthtree_bundle3.json'
+        fhir_file.name = 'service_bundle3.json'
         resp = self.read_client.post(
             '/api/patient-info/upload_fhir/',
             {'file': fhir_file},
@@ -1922,3 +1922,76 @@ class SmartFhirUploadTest(_SmartBase):
         )
         # upload_fhir is AllowAny — read token is still accepted
         self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
+
+
+# ---------------------------------------------------------------------------
+# HKI-AUTH-01: client_credentials grant — service-to-service token acquisition
+# ---------------------------------------------------------------------------
+
+class ClientCredentialsTokenTest(TestCase):
+    """
+    Verify that a confidential service client can obtain a Bearer token via
+    POST /o/token/ with grant_type=client_credentials, then use it to call
+    protected API endpoints.  No user session or browser redirect involved.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import Application
+        _make_vocab_fixtures()
+
+        cls.service_user = User.objects.create_user(
+            username='svc_token_user', password='irrelevant'
+        )
+        cls.app = Application.objects.create(
+            name='Test Service Client',
+            client_id='test-service-client',
+            client_secret='test-service-secret',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=cls.service_user,
+        )
+
+    def test_client_credentials_returns_access_token(self):
+        """POST /o/token/ with client_credentials yields a Bearer token."""
+        resp = self.client.post('/o/token/', {
+            'grant_type': 'client_credentials',
+            'client_id': self.app.client_id,
+            'client_secret': 'test-service-secret',
+            'scope': 'patient/*.read',
+        })
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn('access_token', data)
+        self.assertEqual(data['token_type'].lower(), 'bearer')
+
+    def test_client_credentials_token_accesses_api(self):
+        """Token obtained via client_credentials can call a protected endpoint."""
+        token_resp = self.client.post('/o/token/', {
+            'grant_type': 'client_credentials',
+            'client_id': self.app.client_id,
+            'client_secret': 'test-service-secret',
+            'scope': 'patient/*.read',
+        })
+        token = token_resp.json()['access_token']
+
+        api_client = APIClient()
+        api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+        resp = api_client.get('/api/conditions/')
+        self.assertEqual(resp.status_code, 200)
+
+    def test_wrong_secret_is_rejected(self):
+        """Invalid client_secret must return 401."""
+        resp = self.client.post('/o/token/', {
+            'grant_type': 'client_credentials',
+            'client_id': self.app.client_id,
+            'client_secret': 'wrong-secret',
+            'scope': 'patient/*.read',
+        })
+        self.assertEqual(resp.status_code, 401)
+
+    def test_client_credentials_advertised_in_smart_config(self):
+        """SMART discovery endpoint must advertise client_credentials grant."""
+        resp = self.client.get('/.well-known/smart-configuration')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('client_credentials', resp.json()['grant_types_supported'])

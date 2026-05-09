@@ -8,6 +8,7 @@ from oauth2_provider.contrib.rest_framework import (
     TokenHasReadWriteScope,
     TokenMatchesOASRequirements,
 )
+from .permissions import ScopedTokenPermission
 from django.contrib.auth.models import User
 from django.contrib.auth import logout, login, authenticate
 from django.views.decorators.csrf import csrf_exempt
@@ -129,7 +130,7 @@ class CurrentUserViewSet(viewsets.ViewSet):
 @method_decorator(csrf_exempt, name='dispatch')
 class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PatientInfoSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [ScopedTokenPermission]
     
     def get_queryset(self):
         return PatientInfo.objects.all().select_related('person')
@@ -1595,56 +1596,49 @@ class _OmopFilterMixin:
 @method_decorator(csrf_exempt, name='dispatch')
 class ConditionOccurrenceViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ConditionOccurrenceSerializer
-    permission_classes = [IsAuthenticatedOrTokenHasScope]
-    required_scopes = ['patient/*.read']
+    permission_classes = [ScopedTokenPermission]
     queryset = ConditionOccurrence.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class DrugExposureViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = DrugExposureSerializer
-    permission_classes = [IsAuthenticatedOrTokenHasScope]
-    required_scopes = ['patient/*.read']
+    permission_classes = [ScopedTokenPermission]
     queryset = DrugExposure.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class MeasurementViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
-    permission_classes = [IsAuthenticatedOrTokenHasScope]
-    required_scopes = ['patient/*.read']
+    permission_classes = [ScopedTokenPermission]
     queryset = Measurement.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class ObservationViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ObservationSerializer
-    permission_classes = [IsAuthenticatedOrTokenHasScope]
-    required_scopes = ['patient/*.read']
+    permission_classes = [ScopedTokenPermission]
     queryset = Observation.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class ProcedureOccurrenceViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ProcedureOccurrenceSerializer
-    permission_classes = [IsAuthenticatedOrTokenHasScope]
-    required_scopes = ['patient/*.read']
+    permission_classes = [ScopedTokenPermission]
     queryset = ProcedureOccurrence.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class EpisodeViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = EpisodeSerializer
-    permission_classes = [IsAuthenticatedOrTokenHasScope]
-    required_scopes = ['patient/*.read']
+    permission_classes = [ScopedTokenPermission]
     queryset = Episode.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class EpisodeEventViewSet(viewsets.ModelViewSet):
     serializer_class = EpisodeEventSerializer
-    permission_classes = [IsAuthenticatedOrTokenHasScope]
-    required_scopes = ['patient/*.read']
+    permission_classes = [ScopedTokenPermission]
 
     def get_queryset(self):
         episode_id = self.request.query_params.get('episode_id')
@@ -1726,8 +1720,7 @@ def vocabulary_list(request, model_name):
 @method_decorator(csrf_exempt, name='dispatch')
 class PatientDocumentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = PatientDocumentSerializer
-    permission_classes = [IsAuthenticatedOrTokenHasScope]
-    required_scopes = ['patient/*.read']
+    permission_classes = [ScopedTokenPermission]
     queryset = PatientDocument.objects.all()
 
 

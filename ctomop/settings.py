@@ -172,6 +172,13 @@ OAUTH2_PROVIDER = {
     'PKCE_REQUIRED': True,
     # Allow http for local dev; https enforced in production via ALLOWED_REDIRECT_URI_SCHEMES
     'ALLOWED_REDIRECT_URI_SCHEMES': ['https', 'http'],
+    # client_credentials enables service-to-service auth for any API client
+    # (hospital systems, foundations, platform services) without a user session
+    'ALLOWED_GRANT_TYPES': [
+        'authorization_code',
+        'client_credentials',
+        'refresh_token',
+    ],
     'OIDC_ENABLED': True,
     'OIDC_ISS_ENDPOINT': os.environ.get('OIDC_ISS_ENDPOINT', ''),
 }
