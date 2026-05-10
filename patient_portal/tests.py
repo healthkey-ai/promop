@@ -1908,9 +1908,7 @@ class SmartFhirUploadTest(_SmartBase):
         self.assertIsNotNone(pi.disease)
 
     def test_fhir_upload_with_read_only_token_is_rejected(self):
-        """upload_fhir is AllowAny by default, but this verifies the token
-        is at least parsed — the endpoint should succeed even with a read token
-        since it's a bulk ingest action (not gated by write scope at the view level)."""
+        """upload_fhir requires patient/*.write scope — a read-only token must be rejected."""
         bundle = _make_fhir_bundle()
         bundle_bytes = json.dumps(bundle).encode('utf-8')
         fhir_file = io.BytesIO(bundle_bytes)
@@ -1920,8 +1918,22 @@ class SmartFhirUploadTest(_SmartBase):
             {'file': fhir_file},
             format='multipart',
         )
-        # upload_fhir is AllowAny — read token is still accepted
-        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_fhir_upload_unauthenticated_is_rejected(self):
+        """upload_fhir must reject requests with no credentials."""
+        from rest_framework.test import APIClient as _APIClient
+        anon = _APIClient()
+        bundle = _make_fhir_bundle()
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'service_bundle_anon.json'
+        resp = anon.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
 
 # ---------------------------------------------------------------------------

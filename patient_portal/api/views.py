@@ -2,12 +2,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from oauth2_provider.contrib.rest_framework import (
-    OAuth2Authentication,
-    IsAuthenticatedOrTokenHasScope,
-    TokenHasReadWriteScope,
-    TokenMatchesOASRequirements,
-)
+from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from .permissions import ScopedTokenPermission
 from django.contrib.auth.models import User
 from django.contrib.auth import logout, login, authenticate
@@ -74,7 +69,7 @@ def smart_configuration(request):
         'introspection_endpoint': f'{base}/o/introspect/',
         'scopes_supported': list(settings.OAUTH2_PROVIDER.get('SCOPES', {}).keys()),
         'response_types_supported': ['code'],
-        'grant_types_supported': ['authorization_code', 'refresh_token'],
+        'grant_types_supported': ['authorization_code', 'client_credentials', 'refresh_token'],
         'code_challenge_methods_supported': ['S256'],
         'capabilities': [
             'launch-standalone',
@@ -280,7 +275,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
     
-    @action(detail=False, methods=['post'], permission_classes=[AllowAny], authentication_classes=[])
+    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission])
     def upload_fhir(self, request):
         """Upload patients from FHIR JSON file"""
         if 'file' not in request.FILES:
@@ -1733,6 +1728,5 @@ class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     Filter by person: GET /api/trial-enrollments/?person_id=42
     """
     serializer_class = PatientTrialEnrollmentSerializer
-    permission_classes = [IsAuthenticatedOrTokenHasScope]
-    required_scopes = ['patient/*.read']
+    permission_classes = [ScopedTokenPermission]
     queryset = PatientTrialEnrollment.objects.all()
