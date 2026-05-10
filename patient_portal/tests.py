@@ -232,35 +232,40 @@ class FhirUploadBase(TestCase):
 class FhirUploadOmopTablesTest(FhirUploadBase):
     """Verify that uploading a FHIR bundle populates the correct OMOP tables."""
 
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle_bytes = json.dumps(_make_fhir_bundle()).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'test_bundle.json'
+        cls._upload_response = _client.post(
+            '/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart'
+        )
+        cls._person = Person.objects.filter(family_name='Smith', given_name='Jane').first()
+        assert cls._person is not None, 'Setup: person not found after upload'
+
     def test_upload_returns_success(self):
-        response = self._upload_bundle()
-        self.assertIn(response.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED],
-                      msg=f'Upload failed: {response.data}')
+        self.assertIn(self._upload_response.status_code,
+                      [status.HTTP_200_OK, status.HTTP_201_CREATED],
+                      msg=f'Upload failed: {self._upload_response.data}')
 
     def test_person_created(self):
-        self._upload_bundle()
-        person = self._get_person()
-        self.assertIsNotNone(person, 'Person record not created for Jane Smith')
-        self.assertEqual(person.year_of_birth, 1975)
-        self.assertEqual(person.month_of_birth, 3)
-        self.assertEqual(person.day_of_birth, 15)
+        self.assertIsNotNone(self._person, 'Person record not created for Jane Smith')
+        self.assertEqual(self._person.year_of_birth, 1975)
+        self.assertEqual(self._person.month_of_birth, 3)
+        self.assertEqual(self._person.day_of_birth, 15)
 
     def test_condition_occurrence_created(self):
         """A ConditionOccurrence row should exist for the breast cancer Condition resource."""
-        self._upload_bundle()
-        person = self._get_person()
-        self.assertIsNotNone(person)
-        conditions = ConditionOccurrence.objects.filter(person=person)
+        conditions = ConditionOccurrence.objects.filter(person=self._person)
         self.assertGreater(conditions.count(), 0, 'No ConditionOccurrence created')
-        co = conditions.first()
-        self.assertEqual(co.condition_start_date, date(2022, 1, 15))
+        self.assertEqual(conditions.first().condition_start_date, date(2022, 1, 15))
 
     def test_measurements_created_for_each_observation(self):
         """A Measurement row should exist for each LOINC-coded Observation."""
-        self._upload_bundle()
-        person = self._get_person()
-        self.assertIsNotNone(person)
-        measurements = Measurement.objects.filter(person=person)
+        measurements = Measurement.objects.filter(person=self._person)
         self.assertGreaterEqual(measurements.count(), 3,
                                 f'Expected ≥3 Measurement rows, got {measurements.count()}')
         source_values = list(measurements.values_list('measurement_source_value', flat=True))
@@ -271,10 +276,7 @@ class FhirUploadOmopTablesTest(FhirUploadBase):
 
     def test_drug_exposures_created_per_lot(self):
         """One DrugExposure per MedicationStatement (therapy line)."""
-        self._upload_bundle()
-        person = self._get_person()
-        self.assertIsNotNone(person)
-        drug_exposures = DrugExposure.objects.filter(person=person)
+        drug_exposures = DrugExposure.objects.filter(person=self._person)
         self.assertEqual(drug_exposures.count(), 2,
                          f'Expected 2 DrugExposure rows, got {drug_exposures.count()}')
         source_values = set(drug_exposures.values_list('drug_source_value', flat=True))
@@ -283,10 +285,7 @@ class FhirUploadOmopTablesTest(FhirUploadBase):
 
     def test_episodes_created_with_correct_lot_numbers(self):
         """Episode rows should exist with the correct episode_number for each LOT."""
-        self._upload_bundle()
-        person = self._get_person()
-        self.assertIsNotNone(person)
-        episodes = Episode.objects.filter(person=person).order_by('episode_number')
+        episodes = Episode.objects.filter(person=self._person).order_by('episode_number')
         self.assertEqual(episodes.count(), 2,
                          f'Expected 2 Episode rows, got {episodes.count()}')
         self.assertEqual(episodes[0].episode_number, 1)
@@ -297,10 +296,7 @@ class FhirUploadOmopTablesTest(FhirUploadBase):
 
     def test_episode_events_link_drug_exposures_to_episodes(self):
         """Each Episode should have at least one EpisodeEvent linking it to a DrugExposure."""
-        self._upload_bundle()
-        person = self._get_person()
-        self.assertIsNotNone(person)
-        for episode in Episode.objects.filter(person=person):
+        for episode in Episode.objects.filter(person=self._person):
             ee_count = EpisodeEvent.objects.filter(episode_id=episode.episode_id).count()
             self.assertGreater(
                 ee_count, 0,
@@ -315,56 +311,51 @@ class FhirUploadOmopTablesTest(FhirUploadBase):
 class FhirUploadPatientInfoTest(FhirUploadBase):
     """Verify PatientInfo is created and correctly derived from uploaded FHIR data."""
 
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle_bytes = json.dumps(_make_fhir_bundle()).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'test_bundle.json'
+        _client.post('/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart')
+        cls._person = Person.objects.filter(family_name='Smith', given_name='Jane').first()
+        assert cls._person is not None, 'Setup: person not found after upload'
+        cls._pi = PatientInfo.objects.get(person=cls._person)
+
     def test_patient_info_created(self):
-        self._upload_bundle()
-        person = self._get_person()
-        self.assertIsNotNone(person)
-        pi = PatientInfo.objects.filter(person=person).first()
-        self.assertIsNotNone(pi, 'PatientInfo not created for uploaded patient')
+        self.assertIsNotNone(self._pi, 'PatientInfo not created for uploaded patient')
 
     def test_disease_populated_from_condition(self):
-        self._upload_bundle()
-        pi = PatientInfo.objects.get(person=self._get_person())
-        self.assertIsNotNone(pi.disease, 'PatientInfo.disease not populated')
+        self.assertIsNotNone(self._pi.disease, 'PatientInfo.disease not populated')
 
     def test_demographics_populated(self):
-        self._upload_bundle()
-        pi = PatientInfo.objects.get(person=self._get_person())
-        self.assertEqual(pi.date_of_birth, date(1975, 3, 15))
-        self.assertIsNotNone(pi.gender)
+        self.assertEqual(self._pi.date_of_birth, date(1975, 3, 15))
+        self.assertIsNotNone(self._pi.gender)
 
     def test_hemoglobin_populated_from_loinc_718_7(self):
-        self._upload_bundle()
-        pi = PatientInfo.objects.get(person=self._get_person())
-        self.assertIsNotNone(pi.hemoglobin_g_dl)
-        self.assertAlmostEqual(float(pi.hemoglobin_g_dl), 11.2, places=1)
+        self.assertIsNotNone(self._pi.hemoglobin_g_dl)
+        self.assertAlmostEqual(float(self._pi.hemoglobin_g_dl), 11.2, places=1)
 
     def test_wbc_populated_from_loinc_6690_2(self):
-        self._upload_bundle()
-        pi = PatientInfo.objects.get(person=self._get_person())
-        self.assertIsNotNone(pi.wbc_count_thousand_per_ul)
-        self.assertAlmostEqual(float(pi.wbc_count_thousand_per_ul), 4.5, places=1)
+        self.assertIsNotNone(self._pi.wbc_count_thousand_per_ul)
+        self.assertAlmostEqual(float(self._pi.wbc_count_thousand_per_ul), 4.5, places=1)
 
     def test_creatinine_populated_from_loinc_2160_0(self):
-        self._upload_bundle()
-        pi = PatientInfo.objects.get(person=self._get_person())
-        self.assertIsNotNone(pi.serum_creatinine_mg_dl)
-        self.assertAlmostEqual(float(pi.serum_creatinine_mg_dl), 0.9, places=1)
+        self.assertIsNotNone(self._pi.serum_creatinine_mg_dl)
+        self.assertAlmostEqual(float(self._pi.serum_creatinine_mg_dl), 0.9, places=1)
 
     def test_first_line_therapy_from_medication_statement(self):
-        self._upload_bundle()
-        pi = PatientInfo.objects.get(person=self._get_person())
-        self.assertEqual(pi.first_line_therapy, 'AC-T')
-        self.assertEqual(pi.first_line_start_date, date(2022, 3, 1))
-        self.assertEqual(pi.first_line_end_date,   date(2022, 9, 1))
-        self.assertEqual(pi.first_line_outcome,    'CR')
+        self.assertEqual(self._pi.first_line_therapy, 'AC-T')
+        self.assertEqual(self._pi.first_line_start_date, date(2022, 3, 1))
+        self.assertEqual(self._pi.first_line_end_date,   date(2022, 9, 1))
+        self.assertEqual(self._pi.first_line_outcome,    'CR')
 
     def test_second_line_therapy_from_medication_statement(self):
-        self._upload_bundle()
-        pi = PatientInfo.objects.get(person=self._get_person())
-        self.assertEqual(pi.second_line_therapy,    'Kadcyla')
-        self.assertEqual(pi.second_line_start_date, date(2023, 1, 15))
-        self.assertIsNone(pi.second_line_end_date,  'Open-ended LOT 2 should have no end date')
+        self.assertEqual(self._pi.second_line_therapy,    'Kadcyla')
+        self.assertEqual(self._pi.second_line_start_date, date(2023, 1, 15))
+        self.assertIsNone(self._pi.second_line_end_date,  'Open-ended LOT 2 should have no end date')
 
 
 # ---------------------------------------------------------------------------
