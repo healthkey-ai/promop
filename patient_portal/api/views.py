@@ -292,8 +292,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 return Response({'error': 'FHIR file must be a Bundle'}, status=status.HTTP_400_BAD_REQUEST)
             
             created_count = 0
+            updated_count = 0
             errors = []
-            
+
             # Group resources by patient
             patients_data = {}
             
@@ -394,25 +395,37 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     given_name = ' '.join(name.get('given', [])) if name.get('given') else ''
                     family_name = name.get('family', '')
                     
-                    # Create Person with OMOP-compliant birth date fields and names
-                    person = Person.objects.create(
-                        person_id=person_id,
-                        gender_concept=gender_concept,
-                        year_of_birth=year_of_birth or datetime.now().year - 50,
-                        month_of_birth=month_of_birth,
-                        day_of_birth=day_of_birth,
-                        ethnicity_concept=None,
-                        given_name=given_name,
-                        family_name=family_name,
-                    )
-                    
-                    # Create User for authentication (optional, not used for display)
-                    User.objects.create(
-                        id=person.person_id,
-                        username=f'patient{person.person_id}',
-                        first_name=given_name,
-                        last_name=family_name,
-                    )
+                    # Upsert Person: match on name + birth year to avoid duplicates on re-upload
+                    person = None
+                    person_is_new = False
+                    if (given_name or family_name) and year_of_birth:
+                        person = Person.objects.filter(
+                            given_name=given_name,
+                            family_name=family_name,
+                            year_of_birth=year_of_birth,
+                        ).first()
+                    if person is None:
+                        last_person = Person.objects.all().order_by('-person_id').first()
+                        person_id = last_person.person_id + 1 if last_person else 1000
+                        person = Person.objects.create(
+                            person_id=person_id,
+                            gender_concept=gender_concept,
+                            year_of_birth=year_of_birth or datetime.now().year - 50,
+                            month_of_birth=month_of_birth,
+                            day_of_birth=day_of_birth,
+                            ethnicity_concept=None,
+                            given_name=given_name,
+                            family_name=family_name,
+                        )
+                        person_is_new = True
+                        User.objects.get_or_create(
+                            username=f'patient{person.person_id}',
+                            defaults={
+                                'id': person.person_id,
+                                'first_name': given_name,
+                                'last_name': family_name,
+                            },
+                        )
                     
                     # Extract disease, stage, and histologic type from Condition
                     disease = 'Breast Cancer'
@@ -447,12 +460,10 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             except ValueError:
                                 pass
                     
-                    # Create ConditionOccurrence for the diagnosis
+                    # Upsert ConditionOccurrence for the diagnosis
                     if condition_date:
                         from omop_core.models import ConditionOccurrence
-                        last_condition = ConditionOccurrence.objects.all().order_by('-condition_occurrence_id').first()
-                        condition_id = last_condition.condition_occurrence_id + 1 if last_condition else 1
-                        
+
                         # Get breast cancer concept (using a standard concept ID)
                         breast_cancer_concept = None
                         try:
@@ -467,18 +478,25 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             type_concept = Concept.objects.filter(concept_id=32817).first()
                             if not type_concept:
                                 type_concept = breast_cancer_concept
-                            
-                            _co = ConditionOccurrence(
-                                condition_occurrence_id=condition_id,
+
+                            if not ConditionOccurrence.objects.filter(
                                 person=person,
                                 condition_concept=breast_cancer_concept,
                                 condition_start_date=condition_date.date(),
-                                condition_start_datetime=condition_date,
-                                condition_type_concept=type_concept,
-                                condition_source_value=disease,
-                            )
-                            _co._skip_patient_info_refresh = True
-                            _co.save()
+                            ).exists():
+                                last_condition = ConditionOccurrence.objects.all().order_by('-condition_occurrence_id').first()
+                                condition_id = last_condition.condition_occurrence_id + 1 if last_condition else 1
+                                _co = ConditionOccurrence(
+                                    condition_occurrence_id=condition_id,
+                                    person=person,
+                                    condition_concept=breast_cancer_concept,
+                                    condition_start_date=condition_date.date(),
+                                    condition_start_datetime=condition_date,
+                                    condition_type_concept=type_concept,
+                                    condition_source_value=disease,
+                                )
+                                _co._skip_patient_info_refresh = True
+                                _co.save()
                     
                     # Process observations and create Measurement records
                     from omop_core.models import Measurement
@@ -1004,22 +1022,33 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             type_concept = Concept.objects.filter(concept_id=32856).first()
                             if not type_concept:
                                 type_concept = measurement_concept
-                            
-                            _m = Measurement(
-                                measurement_id=measurement_id,
+
+                            existing_m = Measurement.objects.filter(
                                 person=person,
                                 measurement_concept=measurement_concept,
                                 measurement_date=obs_date.date(),
-                                measurement_datetime=obs_date,
-                                measurement_type_concept=type_concept,
-                                value_as_number=value_number,
-                                value_as_string=value_string,
-                                measurement_source_value=obs_name[:50],
-                                unit_source_value=unit[:50] if unit else None,
-                            )
-                            _m._skip_patient_info_refresh = True
-                            _m.save()
-                            measurement_id += 1
+                            ).first()
+                            if existing_m:
+                                existing_m.value_as_number = value_number
+                                existing_m.value_as_string = value_string
+                                existing_m._skip_patient_info_refresh = True
+                                existing_m.save()
+                            else:
+                                _m = Measurement(
+                                    measurement_id=measurement_id,
+                                    person=person,
+                                    measurement_concept=measurement_concept,
+                                    measurement_date=obs_date.date(),
+                                    measurement_datetime=obs_date,
+                                    measurement_type_concept=type_concept,
+                                    value_as_number=value_number,
+                                    value_as_string=value_string,
+                                    measurement_source_value=obs_name[:50],
+                                    unit_source_value=unit[:50] if unit else None,
+                                )
+                                _m._skip_patient_info_refresh = True
+                                _m.save()
+                                measurement_id += 1
                     
                     # Extract therapy information from MedicationStatement resources
                     therapy_lines = {}  # {line_number: {'regimen': name, 'start_date': date, 'end_date': date, 'outcome': outcome}}
@@ -1203,54 +1232,63 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             if drug_type_concept is None and regimen_concept is not None:
                                 drug_type_concept = regimen_concept
 
-                            _de = DrugExposure(
-                                drug_exposure_id=drug_exposure_id,
+                            # Upsert DrugExposure: skip if same person+regimen+start already exists
+                            _de = DrugExposure.objects.filter(
                                 person=person,
-                                drug_concept=regimen_concept,
-                                drug_exposure_start_date=lot_start,
-                                drug_exposure_end_date=lot_end,
-                                drug_type_concept=drug_type_concept,
                                 drug_source_value=(lot_data.get('regimen') or '')[:50],
-                            )
-                            _de._skip_patient_info_refresh = True
-                            _de.save()
+                                drug_exposure_start_date=lot_start,
+                            ).first()
+                            if _de is None:
+                                _de = DrugExposure(
+                                    drug_exposure_id=drug_exposure_id,
+                                    person=person,
+                                    drug_concept=regimen_concept,
+                                    drug_exposure_start_date=lot_start,
+                                    drug_exposure_end_date=lot_end,
+                                    drug_type_concept=drug_type_concept,
+                                    drug_source_value=(lot_data.get('regimen') or '')[:50],
+                                )
+                                _de._skip_patient_info_refresh = True
+                                _de.save()
+                                drug_exposure_id += 1
 
-                            # Create Episode for this LOT
-                            # OMOP standard concepts for LOT episodes
+                            # Upsert Episode for this LOT
                             ep_concept = Concept.objects.filter(concept_id=32531).first()  # Treatment Regimen
                             if ep_concept is None:
                                 ep_concept = regimen_concept
-                            ep_obj_concept = regimen_concept  # drug that is the object of this episode
+                            ep_obj_concept = regimen_concept
                             ep_type_concept = Concept.objects.filter(concept_id=32817).first()  # EHR
                             if ep_type_concept is None:
                                 ep_type_concept = regimen_concept
 
-                            _ep = Episode(
-                                episode_id=episode_id_counter,
+                            _ep = Episode.objects.filter(
                                 person=person,
-                                episode_concept=ep_concept,
-                                episode_object_concept=ep_obj_concept,
-                                episode_type_concept=ep_type_concept,
-                                episode_start_date=lot_start or datetime.now().date(),
-                                episode_end_date=lot_end,
-                                episode_number=lot_num,
                                 episode_source_value=f'LOT-{lot_num}',
-                            )
-                            _ep.save()
+                            ).first()
+                            if _ep is None:
+                                _ep = Episode(
+                                    episode_id=episode_id_counter,
+                                    person=person,
+                                    episode_concept=ep_concept,
+                                    episode_object_concept=ep_obj_concept,
+                                    episode_type_concept=ep_type_concept,
+                                    episode_start_date=lot_start or datetime.now().date(),
+                                    episode_end_date=lot_end,
+                                    episode_number=lot_num,
+                                    episode_source_value=f'LOT-{lot_num}',
+                                )
+                                _ep.save()
+                                episode_id_counter += 1
 
-                            # Link drug exposure to episode
-                            # OMOP concept 1147094 = drug_exposure.drug_exposure_id field
+                            # Link drug exposure to episode (idempotent)
                             ee_field_concept = Concept.objects.filter(concept_id=1147094).first()
                             if ee_field_concept is None:
                                 ee_field_concept = regimen_concept
-                            EpisodeEvent.objects.create(
+                            EpisodeEvent.objects.get_or_create(
                                 episode_id=_ep.episode_id,
-                                event_id=drug_exposure_id,
-                                episode_event_field_concept=ee_field_concept,
+                                event_id=_de.drug_exposure_id,
+                                defaults={'episode_event_field_concept': ee_field_concept},
                             )
-
-                            drug_exposure_id += 1
-                            episode_id_counter += 1
                         except Exception as _e:
                             logger.warning(f"Could not write DrugExposure/Episode for LOT {lot_num}: {_e}")
 
@@ -1440,8 +1478,11 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         setattr(patient_info, _field, _val)
                     patient_info.save()
                     
-                    created_count += 1
-                    logger.info(f"Successfully imported patient {fhir_patient_id} ({person.person_id}) with {measurement_id - (last_measurement.measurement_id + 1 if last_measurement else 1)} measurements (dates converted to timezone-aware UTC)")
+                    if person_is_new:
+                        created_count += 1
+                    else:
+                        updated_count += 1
+                    logger.info(f"Successfully {'created' if person_is_new else 'updated'} patient {fhir_patient_id} ({person.person_id})")
                     
                 except Exception as e:
                     errors.append(f"Patient {fhir_patient_id}: {str(e)}")
@@ -1449,12 +1490,13 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({
                 'success': True,
                 'created_count': created_count,
+                'updated_count': updated_count,
                 'errors': errors
             })
-            
+
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     @action(detail=False, methods=['delete'])
     def bulk_delete(self, request):
         """Delete multiple patients by person_ids"""

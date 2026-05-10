@@ -1935,6 +1935,40 @@ class SmartFhirUploadTest(_SmartBase):
         )
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
+    def _upload(self, name):
+        bundle = _make_fhir_bundle()
+        fhir_file = io.BytesIO(json.dumps(bundle).encode())
+        fhir_file.name = name
+        return self.write_client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+        )
+
+    def test_fhir_upload_upsert_no_duplicates(self):
+        """Re-uploading the same bundle must not create duplicate records."""
+        from omop_core.models import Person, Measurement, ConditionOccurrence
+
+        resp1 = self._upload('bundle_upsert_1.json')
+        self.assertIn(resp1.status_code, [200, 201])
+        self.assertEqual(resp1.json()['created_count'], 1)
+
+        person_count_after_first = Person.objects.count()
+        measurement_count_after_first = Measurement.objects.count()
+        condition_count_after_first = ConditionOccurrence.objects.count()
+
+        resp2 = self._upload('bundle_upsert_2.json')
+        self.assertIn(resp2.status_code, [200, 201])
+        data2 = resp2.json()
+        # Second upload should update, not create
+        self.assertEqual(data2['created_count'], 0)
+        self.assertEqual(data2['updated_count'], 1)
+
+        # Record counts must not increase
+        self.assertEqual(Person.objects.count(), person_count_after_first)
+        self.assertEqual(Measurement.objects.count(), measurement_count_after_first)
+        self.assertEqual(ConditionOccurrence.objects.count(), condition_count_after_first)
+
 
 # ---------------------------------------------------------------------------
 # HKI-AUTH-01: client_credentials grant — service-to-service token acquisition
