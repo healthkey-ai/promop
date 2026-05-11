@@ -1271,6 +1271,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 person=person,
                                 measurement_concept=measurement_concept,
                                 measurement_date=obs_date.date(),
+                                measurement_source_value=obs_name[:50],
                             ).first()
                             if existing_m:
                                 existing_m.value_as_number = value_number

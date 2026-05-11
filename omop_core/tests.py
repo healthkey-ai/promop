@@ -220,7 +220,7 @@ class RefreshPatientInfoDiseaseTest(_OmopBase):
             condition_type_concept=self.type_concept,
         )
         pi = refresh_patient_info(self.person)
-        self.assertIn('cancer', pi.disease.lower())
+        self.assertIn('neoplasm', pi.disease.lower())
 
     def test_diagnosis_date_from_condition(self):
         ConditionOccurrence.objects.create(
@@ -436,7 +436,7 @@ class ConditionSignalTest(_OmopBase):
         )
         pi = PatientInfo.objects.get(person=self.person)
         self.assertIsNotNone(pi.disease)
-        self.assertIn('cancer', pi.disease.lower())
+        self.assertIn('neoplasm', pi.disease.lower())
 
     def test_condition_delete_clears_disease(self):
         PatientInfo.objects.create(person=self.person)

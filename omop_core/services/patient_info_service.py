@@ -125,27 +125,51 @@ _SOURCE_VALUE_LAB_FIELDS = {
     'Lymphocytes [#/volume] in Blood':            'alc_thousand_per_ul',
     'Monocytes [#/volume] in Blood':              'amc_thousand_per_ul',
     'Calcium [Mass/volume] in Serum or Plasma':   'serum_calcium_mg_dl',
-    'Creatinine [Mass/volume] in Serum or Plasm': 'serum_creatinine_mg_dl',  # truncated to 50
+    # Short aliases used by the FHIR bundle generator
+    'Serum Calcium':                              'serum_calcium_mg_dl',
+    'Calcium':                                    'serum_calcium_mg_dl',
+    'Creatinine [Mass/volume] in Serum or Plasma': 'serum_creatinine_mg_dl',
+    'Serum Creatinine':                           'serum_creatinine_mg_dl',
+    'Creatinine':                                 'serum_creatinine_mg_dl',
     'Creatinine Clearance':                       'creatinine_clearance_ml_min',
     'GFR/BSA pred CKD-EPI ArA':                  'egfr_ml_min_173m2',
-    'Urea nitrogen [Mass/volume] in Serum or Pl': 'bun_mg_dl',               # truncated to 50
+    'Urea nitrogen [Mass/volume] in Serum or Plasma': 'bun_mg_dl',
+    'Blood Urea Nitrogen':                        'bun_mg_dl',
     'Sodium [Moles/volume] in Serum or Plasma':   'sodium_meq_l',
-    'Potassium [Moles/volume] in Serum or Plasm': 'potassium_meq_l',         # truncated to 50
+    'Sodium':                                     'sodium_meq_l',
+    'Potassium [Moles/volume] in Serum or Plasma': 'potassium_meq_l',
+    'Potassium':                                  'potassium_meq_l',
     'Magnesium [Mass/volume] in Serum or Plasma': 'magnesium_mg_dl',
-    'Bilirubin.total [Mass/volume] in Serum or':  'bilirubin_total_mg_dl',   # truncated to 50
-    'Alanine aminotransferase [Enzymatic activi':  'alt_u_l',                 # truncated to 50
-    'Aspartate aminotransferase [Enzymatic acti':  'ast_u_l',                 # truncated to 50
-    'Alkaline phosphatase [Enzymatic activity/v':  'alkaline_phosphatase_u_l',# truncated to 50
+    'Magnesium':                                  'magnesium_mg_dl',
+    'Bilirubin.total [Mass/volume] in Serum or Plasma': 'bilirubin_total_mg_dl',
+    'Total Bilirubin':                            'bilirubin_total_mg_dl',
+    'Alanine aminotransferase [Enzymatic activity/volum': 'alt_u_l',
+    'ALT':                                        'alt_u_l',
+    'Aspartate aminotransferase [Enzymatic activity/vol': 'ast_u_l',
+    'AST':                                        'ast_u_l',
+    'Alkaline phosphatase [Enzymatic activity/volume] i': 'alkaline_phosphatase_u_l',
+    'Alkaline Phosphatase':                       'alkaline_phosphatase_u_l',
     'Albumin [Mass/volume] in Serum or Plasma':    'albumin_g_dl',
+    'Albumin':                                     'albumin_g_dl',
     'Protein [Mass/volume] in Serum or Plasma':    'total_protein',
-    'Troponin I.cardiac [Mass/volume] in Serum':   'troponin_ng_ml',          # truncated to 50
+    'Troponin I.cardiac [Mass/volume] in Serum or Plasm': 'troponin_ng_ml',
     'BNP [Mass/volume] in Serum or Plasma':        'bnp_pg_ml',
     'Glucose [Mass/volume] in Serum or Plasma':    'glucose_mg_dl',
+    'Glucose':                                     'glucose_mg_dl',
     'Hemoglobin A1c/Hemoglobin.total in Blood':    'hba1c_percent',
-    'Lactate dehydrogenase [Enzymatic activity/':  'ldh_u_l',                 # truncated to 50
-    'Beta-2-Microglobulin [Mass/volume] in Seru':  'beta2_microglobulin',     # truncated to 50
-    'C reactive protein [Mass/volume] in Serum':   'c_reactive_protein',      # truncated to 50
+    'HbA1c':                                       'hba1c_percent',
+    'Lactate dehydrogenase [Enzymatic activity/volume] ': 'ldh_u_l',
+    'LDH':                                         'ldh_u_l',
+    'Beta-2-Microglobulin [Mass/volume] in Serum or Pla': 'beta2_microglobulin',
+    'C reactive protein [Mass/volume] in Serum or Plasm': 'c_reactive_protein',
     'Erythrocyte sedimentation rate':              'esr',
+    # Short aliases used by the FHIR bundle generator
+    'White blood cell count':                     'wbc_count_thousand_per_ul',
+    'Red blood cell count':                       'rbc_million_per_ul',
+    'Platelets':                                  'platelet_count_thousand_per_ul',
+    'Absolute Neutrophil Count':                  'anc_thousand_per_ul',
+    'Absolute Lymphocyte Count':                  'alc_thousand_per_ul',
+    'Absolute Monocyte Count':                    'amc_thousand_per_ul',
 }
 
 
@@ -259,10 +283,20 @@ def _get_location_data(person: Person) -> dict:
 def _get_disease_data(person: Person) -> dict:
     data = {}
 
-    # Most-recent cancer condition
+    # Most-recent oncologic condition — match common OMOP oncology terms
+    from django.db.models import Q
     cancer_condition = ConditionOccurrence.objects.filter(
         person=person,
-        condition_concept__concept_name__icontains='cancer'
+    ).filter(
+        Q(condition_concept__concept_name__icontains='cancer')
+        | Q(condition_concept__concept_name__icontains='neoplasm')
+        | Q(condition_concept__concept_name__icontains='malignant')
+        | Q(condition_concept__concept_name__icontains='lymphoma')
+        | Q(condition_concept__concept_name__icontains='leukemia')
+        | Q(condition_concept__concept_name__icontains='myeloma')
+        | Q(condition_concept__concept_name__icontains='carcinoma')
+        | Q(condition_concept__concept_name__icontains='sarcoma')
+        | Q(condition_concept__concept_name__icontains='tumor')
     ).order_by('-condition_start_date').first()
 
     if cancer_condition:
