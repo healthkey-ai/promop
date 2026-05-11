@@ -1849,17 +1849,15 @@ class SmartPatientInfoReadOnlyTest(_SmartBase):
         )
         self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
-    def test_patient_info_patch_returns_405(self):
-        pi = PatientInfo.objects.filter(person=self.person).first()
-        if pi is None:
-            from omop_core.services.patient_info_service import refresh_patient_info
-            pi = refresh_patient_info(self.person)
+    def test_patient_info_patch_succeeds_with_write_token(self):
+        """PATCH is now supported — write-through to OMOP was added in HKI-PDS-01."""
+        PatientInfo.objects.get_or_create(person=self.person)
         resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
-            {'disease': 'Should not be written directly'},
+            {'disease': 'Updated disease'},
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_patient_info_delete_returns_405(self):
         resp = self.write_client.delete(f'/api/patient-info/{self.person.person_id}/')
