@@ -158,6 +158,9 @@ _LAB_FIELD_TO_LOINC = {
     'alkaline_phosphatase_u_l':      ('6768-6',   'U/L',             'Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma'),
     'alkaline_phosphatase':          ('6768-6',   'U/L',             'Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma'),
     'albumin_g_dl':                  ('1751-7',   'g/dL',            'Albumin [Mass/volume] in Serum or Plasma'),
+    'total_protein':                 ('2885-2',   'g/dL',            'Protein [Mass/volume] in Serum or Plasma'),
+    'troponin_ng_ml':                ('10839-9',  'ng/mL',           'Troponin I.cardiac [Mass/volume] in Serum or Plasma'),
+    'bnp_pg_ml':                     ('42637-9',  'pg/mL',           'BNP [Mass/volume] in Serum or Plasma'),
     'glucose_mg_dl':                 ('2345-7',   'mg/dL',           'Glucose [Mass/volume] in Serum or Plasma'),
     'hba1c_percent':                 ('4548-4',   '%',               'Hemoglobin A1c/Hemoglobin.total in Blood'),
     'inr':                           ('6301-6',   '{INR}',           'INR in Platelet poor plasma'),
@@ -306,25 +309,30 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         try:
             person = Person.objects.get(person_id=pk)
             patient_info = PatientInfo.objects.get(person=person)
-            
-            # Get the User associated with this person (not the logged-in user)
-            try:
-                patient_user = User.objects.get(id=person.person_id)
-                user_serializer = UserSerializer(patient_user)
-                user_data = user_serializer.data
-            except User.DoesNotExist:
-                user_data = None
-            
-            patient_serializer = PatientInfoSerializer(patient_info)
-            
-            return Response({
-                'patient_info': patient_serializer.data,
-                'user': user_data
-            })
         except Person.DoesNotExist:
             return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
         except PatientInfo.DoesNotExist:
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # AUTH-04: enforce per-patient row-level org scoping
+        org = get_request_org(request)
+        if org is not None and patient_info.organization != org:
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Get the User associated with this person (not the logged-in user)
+        try:
+            patient_user = User.objects.get(id=person.person_id)
+            user_serializer = UserSerializer(patient_user)
+            user_data = user_serializer.data
+        except User.DoesNotExist:
+            user_data = None
+
+        patient_serializer = PatientInfoSerializer(patient_info)
+
+        return Response({
+            'patient_info': patient_serializer.data,
+            'user': user_data
+        })
 
     def partial_update(self, request, pk=None):
         """PATCH /api/patient-info/{person_id}/ — update PatientInfo and write through to OMOP."""
@@ -1229,15 +1237,26 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             elif value_concept.get('coding'):
                                 value_string = value_concept['coding'][0].get('display')
                         
-                        # Find or create measurement concept
+                        # Find measurement concept — LOINC lookup first (FHIR-06/07/08),
+                        # fall back to name-based, then generic lab concept.
                         measurement_concept = None
-                        try:
+                        obs_loinc = None
+                        for _c in obs_code.get('coding', []):
+                            if _c.get('system') == 'http://loinc.org':
+                                obs_loinc = _c.get('code')
+                                break
+                        if obs_loinc:
                             measurement_concept = Concept.objects.filter(
-                                concept_name__icontains=obs_name[:50]
+                                concept_code=obs_loinc,
+                                vocabulary_id='LOINC',
                             ).first()
-                        except:
-                            pass
-                        
+                        if not measurement_concept:
+                            try:
+                                measurement_concept = Concept.objects.filter(
+                                    concept_name__icontains=obs_name[:50]
+                                ).first()
+                            except Exception:
+                                pass
                         if not measurement_concept:
                             # Use a generic lab test concept if not found
                             measurement_concept = Concept.objects.filter(concept_id=3000963).first()
@@ -1625,46 +1644,18 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             'later_discontinuation_reason': later_discontinuation_reason,
                             'later_outcome': later_outcome,
                         })
-                    # Labs & other FHIR-derived fields not yet written to OMOP
+                    # Labs are now written to the OMOP Measurement table (FHIR-06/07/08)
+                    # and derived into PatientInfo via refresh_patient_info (FHIR-09).
+                    # Only fields not yet modelled in OMOP are patched directly below.
                     _patch.update({k: v for k, v in {
-                        'hemoglobin_g_dl': hemoglobin_g_dl,
-                        'hematocrit_percent': hematocrit_percent,
-                        'wbc_count_thousand_per_ul': wbc_count,
-                        'rbc_million_per_ul': rbc_count,
-                        'platelet_count_thousand_per_ul': platelet_count,
-                        'anc_thousand_per_ul': anc_count,
-                        'alc_thousand_per_ul': alc_count,
-                        'amc_thousand_per_ul': amc_count,
-                        'serum_calcium_mg_dl': serum_calcium,
-                        'serum_creatinine_mg_dl': serum_creatinine,
-                        'creatinine_clearance_ml_min': creatinine_clearance,
-                        'egfr_ml_min_173m2': egfr,
-                        'bun_mg_dl': bun,
-                        'sodium_meq_l': sodium,
-                        'potassium_meq_l': potassium,
-                        'calcium_mg_dl': calcium,
-                        'magnesium_mg_dl': magnesium,
-                        'bilirubin_total_mg_dl': bilirubin_total,
                         'serum_bilirubin_level_direct': bilirubin_direct,
-                        'alt_u_l': alt,
-                        'ast_u_l': ast,
-                        'alkaline_phosphatase_u_l': alkaline_phosphatase,
-                        'albumin_g_dl': albumin,
-                        'total_protein': total_protein,
-                        'troponin_ng_ml': troponin,
-                        'bnp_pg_ml': bnp,
-                        'glucose_mg_dl': glucose,
-                        'hba1c_percent': hba1c,
-                        'ldh_u_l': ldh,
+                        'calcium_mg_dl': calcium,
                         'inr': inr,
                         'pt_seconds': pt,
                         'ptt_seconds': ptt,
                         'cea_ng_ml': cea,
                         'ca19_9_u_ml': ca19_9,
                         'psa_ng_ml': psa,
-                        'beta2_microglobulin': beta2_microglobulin,
-                        'c_reactive_protein': c_reactive_protein,
-                        'esr': esr,
                         'smoking_status': smoking_status,
                         'pack_years': pack_years,
                         'alcohol_use': alcohol_use,

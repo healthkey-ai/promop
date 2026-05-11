@@ -29,13 +29,26 @@ _OMOP_DERIVED_FIELDS = [
     'second_line_therapy', 'second_line_date', 'second_line_start_date', 'second_line_end_date',
     'later_therapy', 'later_date', 'later_therapies',
     'concomitant_medications',
-    # Labs
+    # Legacy labs (derived via name-based Measurement lookup)
     'hemoglobin_level', 'hemoglobin_level_units',
     'serum_creatinine_level', 'serum_creatinine_level_units',
     'platelet_count', 'platelet_count_units',
     'serum_calcium_level', 'serum_calcium_level_units',
     'serum_bilirubin_level_total', 'serum_bilirubin_level_total_units',
     'albumin_level', 'albumin_level_units',
+    # CBC (LOINC-derived)
+    'hemoglobin_g_dl', 'hematocrit_percent', 'wbc_count_thousand_per_ul',
+    'rbc_million_per_ul', 'platelet_count_thousand_per_ul',
+    'anc_thousand_per_ul', 'alc_thousand_per_ul', 'amc_thousand_per_ul',
+    # CMP (LOINC-derived)
+    'serum_calcium_mg_dl', 'serum_creatinine_mg_dl', 'creatinine_clearance_ml_min',
+    'egfr_ml_min_173m2', 'bun_mg_dl', 'sodium_meq_l', 'potassium_meq_l', 'magnesium_mg_dl',
+    # LFT / cardiac (LOINC-derived)
+    'bilirubin_total_mg_dl', 'alt_u_l', 'ast_u_l', 'alkaline_phosphatase_u_l',
+    'albumin_g_dl', 'total_protein', 'troponin_ng_ml', 'bnp_pg_ml',
+    'glucose_mg_dl', 'hba1c_percent', 'ldh_u_l',
+    # Other markers (LOINC-derived)
+    'beta2_microglobulin', 'c_reactive_protein', 'esr',
     # Vitals
     'systolic_blood_pressure', 'diastolic_blood_pressure', 'heartrate',
     'weight', 'weight_units', 'height', 'height_units', 'temperature',
@@ -58,6 +71,82 @@ _OMOP_DERIVED_FIELDS = [
     # Procedures
     'prior_procedures',
 ]
+
+
+# LOINC code → (PatientInfo field name, coercion function)
+# Used to derive UI lab fields from the OMOP Measurement table.
+_LOINC_LAB_FIELDS = {
+    # CBC
+    '718-7':   ('hemoglobin_g_dl',               float),
+    '20570-8': ('hematocrit_percent',             float),
+    '6690-2':  ('wbc_count_thousand_per_ul',      float),
+    '789-8':   ('rbc_million_per_ul',             float),
+    '777-3':   ('platelet_count_thousand_per_ul', float),
+    '751-8':   ('anc_thousand_per_ul',            float),
+    '731-0':   ('alc_thousand_per_ul',            float),
+    '742-7':   ('amc_thousand_per_ul',            float),
+    # CMP
+    '17861-6': ('serum_calcium_mg_dl',            float),
+    '2160-0':  ('serum_creatinine_mg_dl',         float),
+    '2164-2':  ('creatinine_clearance_ml_min',    float),
+    '62238-1': ('egfr_ml_min_173m2',              float),
+    '3094-0':  ('bun_mg_dl',                      float),
+    '2951-2':  ('sodium_meq_l',                   float),
+    '2823-3':  ('potassium_meq_l',                float),
+    '2601-3':  ('magnesium_mg_dl',                float),
+    # LFT / cardiac
+    '1975-2':  ('bilirubin_total_mg_dl',          float),
+    '1742-6':  ('alt_u_l',                        int),
+    '1920-8':  ('ast_u_l',                        int),
+    '6768-6':  ('alkaline_phosphatase_u_l',       int),
+    '1751-7':  ('albumin_g_dl',                   float),
+    '2885-2':  ('total_protein',                  float),
+    '10839-9': ('troponin_ng_ml',                 float),
+    '42637-9': ('bnp_pg_ml',                      int),
+    '2345-7':  ('glucose_mg_dl',                  int),
+    '4548-4':  ('hba1c_percent',                  float),
+    '2532-0':  ('ldh_u_l',                        int),
+    # Other markers
+    '1952-1':  ('beta2_microglobulin',            float),
+    '1988-5':  ('c_reactive_protein',             float),
+    '30341-2': ('esr',                            int),
+}
+
+# Source-value fallback map for environments where LOINC Concepts aren't loaded.
+# Key  = measurement_source_value (as stored by the FHIR upload pipeline or PATCH write-through)
+# Value = PatientInfo field name
+_SOURCE_VALUE_LAB_FIELDS = {
+    'Hemoglobin [Mass/volume] in Blood':          'hemoglobin_g_dl',
+    'Hematocrit [Volume Fraction] of Blood':      'hematocrit_percent',
+    'Leukocytes [#/volume] in Blood':             'wbc_count_thousand_per_ul',
+    'Erythrocytes [#/volume] in Blood':           'rbc_million_per_ul',
+    'Platelets [#/volume] in Blood':              'platelet_count_thousand_per_ul',
+    'Neutrophils [#/volume] in Blood':            'anc_thousand_per_ul',
+    'Lymphocytes [#/volume] in Blood':            'alc_thousand_per_ul',
+    'Monocytes [#/volume] in Blood':              'amc_thousand_per_ul',
+    'Calcium [Mass/volume] in Serum or Plasma':   'serum_calcium_mg_dl',
+    'Creatinine [Mass/volume] in Serum or Plasm': 'serum_creatinine_mg_dl',  # truncated to 50
+    'Creatinine Clearance':                       'creatinine_clearance_ml_min',
+    'GFR/BSA pred CKD-EPI ArA':                  'egfr_ml_min_173m2',
+    'Urea nitrogen [Mass/volume] in Serum or Pl': 'bun_mg_dl',               # truncated to 50
+    'Sodium [Moles/volume] in Serum or Plasma':   'sodium_meq_l',
+    'Potassium [Moles/volume] in Serum or Plasm': 'potassium_meq_l',         # truncated to 50
+    'Magnesium [Mass/volume] in Serum or Plasma': 'magnesium_mg_dl',
+    'Bilirubin.total [Mass/volume] in Serum or':  'bilirubin_total_mg_dl',   # truncated to 50
+    'Alanine aminotransferase [Enzymatic activi':  'alt_u_l',                 # truncated to 50
+    'Aspartate aminotransferase [Enzymatic acti':  'ast_u_l',                 # truncated to 50
+    'Alkaline phosphatase [Enzymatic activity/v':  'alkaline_phosphatase_u_l',# truncated to 50
+    'Albumin [Mass/volume] in Serum or Plasma':    'albumin_g_dl',
+    'Protein [Mass/volume] in Serum or Plasma':    'total_protein',
+    'Troponin I.cardiac [Mass/volume] in Serum':   'troponin_ng_ml',          # truncated to 50
+    'BNP [Mass/volume] in Serum or Plasma':        'bnp_pg_ml',
+    'Glucose [Mass/volume] in Serum or Plasma':    'glucose_mg_dl',
+    'Hemoglobin A1c/Hemoglobin.total in Blood':    'hba1c_percent',
+    'Lactate dehydrogenase [Enzymatic activity/':  'ldh_u_l',                 # truncated to 50
+    'Beta-2-Microglobulin [Mass/volume] in Seru':  'beta2_microglobulin',     # truncated to 50
+    'C reactive protein [Mass/volume] in Serum':   'c_reactive_protein',      # truncated to 50
+    'Erythrocyte sedimentation rate':              'esr',
+}
 
 
 def _clear_derived_fields(patient_info: PatientInfo) -> None:
@@ -580,26 +669,50 @@ def _get_laboratory_data(person: Person) -> dict:
 
     measurements = Measurement.objects.filter(person=person).order_by('-measurement_date')
 
-    lab_mappings = {
-        'hemoglobin': ['hemoglobin_level', 'G/DL'],
-        'platelet': ['platelet_count', 'CELLS/UL'],
-        'creatinine': ['serum_creatinine_level', 'MG/DL'],
-        'calcium': ['serum_calcium_level', 'MG/DL'],
-        'bilirubin': ['serum_bilirubin_level_total', 'MG/DL'],
-        'albumin': ['albumin_level', 'G/DL'],
+    # --- Legacy fields via concept-name matching ---
+    legacy_lab_mappings = {
+        'hemoglobin': ('hemoglobin_level', 'G/DL'),
+        'platelet': ('platelet_count', 'CELLS/UL'),
+        'creatinine': ('serum_creatinine_level', 'MG/DL'),
+        'calcium': ('serum_calcium_level', 'MG/DL'),
+        'bilirubin': ('serum_bilirubin_level_total', 'MG/DL'),
+        'albumin': ('albumin_level', 'G/DL'),
     }
-
     for measurement in measurements:
         if not measurement.measurement_concept:
             continue
         concept_name = measurement.measurement_concept.concept_name.lower()
-        for lab_key, (field_name, unit_field) in lab_mappings.items():
+        for lab_key, (field_name, unit_field) in legacy_lab_mappings.items():
             if field_name in data:
-                continue  # already captured most-recent value for this lab
+                continue
             if lab_key in concept_name and measurement.value_as_number:
                 data[field_name] = measurement.value_as_number
                 data[f'{field_name}_units'] = unit_field
                 break
+
+    # --- New UI fields via LOINC concept code (primary path) ---
+    loinc_ms = measurements.filter(
+        measurement_concept__vocabulary_id='LOINC',
+        measurement_concept__concept_code__in=_LOINC_LAB_FIELDS.keys(),
+        value_as_number__isnull=False,
+    ).select_related('measurement_concept')
+    for m in loinc_ms:
+        code = m.measurement_concept.concept_code
+        field, cast = _LOINC_LAB_FIELDS[code]
+        if field not in data:
+            data[field] = cast(m.value_as_number)
+
+    # --- New UI fields via measurement_source_value (fallback when LOINC concepts absent) ---
+    unfound = {f for (f, _) in _LOINC_LAB_FIELDS.values() if f not in data}
+    if unfound:
+        sv_ms = measurements.filter(
+            measurement_source_value__in=_SOURCE_VALUE_LAB_FIELDS.keys(),
+            value_as_number__isnull=False,
+        )
+        for m in sv_ms:
+            field = _SOURCE_VALUE_LAB_FIELDS.get(m.measurement_source_value)
+            if field and field not in data:
+                data[field] = float(m.value_as_number)
 
     return data
 

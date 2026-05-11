@@ -2179,9 +2179,15 @@ class MultiTenantIsolationTest(_SmartBase):
         self.assertNotIn(self.patient_a.id, ids)
 
     def test_org_a_token_cannot_retrieve_org_b_patient_detail(self):
-        """Org A token must receive 404 for Org B's patient detail."""
-        resp = self._client(self.token_a.token).get(f'/api/patient-info/{self.patient_b.id}/')
+        """Org A token must receive 404 for Org B's patient detail (AUTH-04)."""
+        resp = self._client(self.token_a.token).get(f'/api/patient-info/{self.person_b.person_id}/')
         self.assertEqual(resp.status_code, 404)
+
+    def test_org_a_token_can_retrieve_own_patient_detail(self):
+        """Org A token must be able to retrieve its own patient detail (AUTH-04)."""
+        resp = self._client(self.token_a.token).get(f'/api/patient-info/{self.person_a.person_id}/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('patient_info', resp.json())
 
     def test_org_a_token_sees_only_org_a_omop_conditions(self):
         """Org A token must not see ConditionOccurrences belonging to Org B's patient."""
