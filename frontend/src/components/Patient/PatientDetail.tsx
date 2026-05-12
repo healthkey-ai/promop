@@ -1078,7 +1078,7 @@ const PatientDetail: React.FC = () => {
         </Typography>
       </Grid>
       {renderTextField('Ki-67 Proliferation Index (%)', 'ki67_proliferation_index', false, 'number')}
-      {renderTextField('PD-L1 Status (%)', 'pd_l1_tumor_cels', false, 'number')}
+      {renderTextField('PD-L1 Status (%)', 'pd_l1_tumor_cells', false, 'number')}
       {renderTextField('Oncotype DX Score', 'oncotype_dx_score', false, 'number')}
       
       <Grid item xs={12}>

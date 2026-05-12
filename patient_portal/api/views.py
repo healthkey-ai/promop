@@ -236,13 +236,14 @@ def _extract_provenance(request):
     return source, source_user_id, modification_reason
 
 
-def _record_provenance(record, source, source_user_id, target_patient_id=None, modification_reason=None):
+def _record_provenance(record, source, source_user_id, target_patient_id=None, modification_reason=None, organization=None):
     """Create a ProvenanceRecord pointing at any model instance."""
     ProvenanceRecord.objects.create(
         source=source,
         source_user_id=source_user_id or '',
         target_patient_id=target_patient_id,
         modification_reason=modification_reason,
+        organization=organization,
         content_type=ContentType.objects.get_for_model(record),
         object_id=record.pk,
     )
@@ -360,7 +361,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         serializer.save()
 
         if prov_source:
-            _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason)
+            _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
         today = datetime.now().date()
         for field, value in request.data.items():
@@ -379,7 +380,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             measurement_date=today,
                         ).first()
                         if m_after:
-                            _record_provenance(m_after, prov_source, prov_user_id, modification_reason=prov_reason)
+                            _record_provenance(m_after, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
                 except Exception:
                     pass
 
@@ -400,18 +401,20 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         if org is not None and patient_info.organization != org:
             return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        records = list(ProvenanceRecord.objects.filter(
+        from django.db.models import Q
+        # Build a single query for all provenance records across PatientInfo + OMOP tables
+        q = Q(
             content_type=ContentType.objects.get_for_model(PatientInfo),
             object_id=patient_info.pk,
-        ))
+        )
         for model_cls in [Measurement, ConditionOccurrence, DrugExposure, ProcedureOccurrence]:
             omop_ids = list(model_cls.objects.filter(person_id=person.person_id).values_list('pk', flat=True))
             if omop_ids:
-                records += list(ProvenanceRecord.objects.filter(
+                q |= Q(
                     content_type=ContentType.objects.get_for_model(model_cls),
                     object_id__in=omop_ids,
-                ))
-        records.sort(key=lambda r: r.created_at, reverse=True)
+                )
+        records = ProvenanceRecord.objects.filter(q).select_related('content_type').order_by('-created_at')
         return Response(ProvenanceRecordSerializer(records, many=True).data)
 
     @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission])
@@ -599,23 +602,39 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     heart_rate = None
                     ecog = None
                     
-                    if patient_resource.get('extension'):
-                        for ext in patient_resource['extension']:
-                            url = ext.get('url', '')
-                            if 'ethnicity' in url:
-                                ethnicity = ext.get('valueString')
-                            elif 'bodyWeight' in url:
-                                weight = ext.get('valueQuantity', {}).get('value')
-                            elif 'bodyHeight' in url:
-                                height = ext.get('valueQuantity', {}).get('value')
-                            elif 'systolic-bp' in url:
-                                systolic_bp = ext.get('valueQuantity', {}).get('value')
-                            elif 'diastolic-bp' in url:
-                                diastolic_bp = ext.get('valueQuantity', {}).get('value')
-                            elif 'heartRate' in url:
-                                heart_rate = ext.get('valueQuantity', {}).get('value')
-                            elif 'ecog-performance-status' in url:
-                                ecog = ext.get('valueInteger')
+                    # Explicit extension URL → (value_key, parser) registry.
+                    # Using exact URL matching avoids false positives from substring checks.
+                    _PATIENT_EXTENSIONS = {
+                        'http://ctomop.io/fhir/StructureDefinition/ethnicity':
+                            ('valueString', lambda e: e.get('valueString')),
+                        'http://ctomop.io/fhir/StructureDefinition/bodyWeight':
+                            ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
+                        'http://ctomop.io/fhir/StructureDefinition/bodyHeight':
+                            ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
+                        'http://ctomop.io/fhir/StructureDefinition/systolic-bp':
+                            ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
+                        'http://ctomop.io/fhir/StructureDefinition/diastolic-bp':
+                            ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
+                        'http://ctomop.io/fhir/StructureDefinition/heartRate':
+                            ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
+                        'http://ctomop.io/fhir/StructureDefinition/ecog-performance-status':
+                            ('valueInteger', lambda e: e.get('valueInteger')),
+                    }
+                    ext_results = {}
+                    for ext in patient_resource.get('extension', []):
+                        url = ext.get('url', '')
+                        if url in _PATIENT_EXTENSIONS:
+                            _, parser = _PATIENT_EXTENSIONS[url]
+                            ext_results[url] = parser(ext)
+
+                    base = 'http://ctomop.io/fhir/StructureDefinition/'
+                    ethnicity   = ext_results.get(f'{base}ethnicity')
+                    weight      = ext_results.get(f'{base}bodyWeight')
+                    height      = ext_results.get(f'{base}bodyHeight')
+                    systolic_bp = ext_results.get(f'{base}systolic-bp')
+                    diastolic_bp = ext_results.get(f'{base}diastolic-bp')
+                    heart_rate  = ext_results.get(f'{base}heartRate')
+                    ecog        = ext_results.get(f'{base}ecog-performance-status')
                     
                     # Get gender concept from FHIR
                     gender_concept = get_gender_concept(patient_resource.get('gender', ''))
@@ -729,7 +748,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 _co.save()
                                 _pt_condition_ids.append(_co.condition_occurrence_id)
                                 if prov_source:
-                                    _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason)
+                                    _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
                     # Process observations and create Measurement records
                     from omop_core.models import Measurement
@@ -1267,11 +1286,14 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             if not type_concept:
                                 type_concept = measurement_concept
 
+                            # Use LOINC code as source_value when available — it's short,
+                            # unique, and avoids collisions from truncating long display names.
+                            source_value = obs_loinc if obs_loinc else obs_name[:50]
                             existing_m = Measurement.objects.filter(
                                 person=person,
                                 measurement_concept=measurement_concept,
                                 measurement_date=obs_date.date(),
-                                measurement_source_value=obs_name[:50],
+                                measurement_source_value=source_value,
                             ).first()
                             if existing_m:
                                 existing_m.value_as_number = value_number
@@ -1288,14 +1310,14 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     measurement_type_concept=type_concept,
                                     value_as_number=value_number,
                                     value_as_string=value_string,
-                                    measurement_source_value=obs_name[:50],
+                                    measurement_source_value=source_value,
                                     unit_source_value=unit[:50] if unit else None,
                                 )
                                 _m._skip_patient_info_refresh = True
                                 _m.save()
                                 _pt_measurement_ids.append(_m.measurement_id)
                                 if prov_source:
-                                    _record_provenance(_m, prov_source, prov_user_id, modification_reason=prov_reason)
+                                    _record_provenance(_m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
                                 measurement_id += 1
                     
                     # Extract therapy information from MedicationStatement resources
@@ -1500,7 +1522,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 _de.save()
                                 _pt_drug_exposure_ids.append(_de.drug_exposure_id)
                                 if prov_source:
-                                    _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason)
+                                    _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
                                 drug_exposure_id += 1
 
                             # Upsert Episode for this LOT
@@ -1611,7 +1633,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     if ki67_index is not None:
                         _patch['ki67_proliferation_index'] = ki67_index
                     if pdl1_percentage is not None:
-                        _patch['pd_l1_tumor_cels'] = pdl1_percentage
+                        _patch['pd_l1_tumor_cells'] = pdl1_percentage
                     if genetic_mutations:
                         _patch['genetic_mutations'] = genetic_mutations
                     # Therapy lines (denormalized PatientInfo fields)
@@ -1709,7 +1731,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         setattr(patient_info, _field, _val)
                     patient_info.save()
                     if prov_source:
-                        _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason)
+                        _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
                     
                     patients_result.append({
                         'person_id': person.person_id,

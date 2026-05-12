@@ -55,7 +55,7 @@ _OMOP_DERIVED_FIELDS = [
     # Performance
     'ecog_performance_status', 'karnofsky_performance_score',
     # Biomarkers
-    'pd_l1_tumor_cels', 'pd_l1_assay',
+    'pd_l1_tumor_cells', 'pd_l1_assay',
     'estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status', 'tnbc_status',
     # Genomics
     'genetic_mutations',
@@ -520,7 +520,7 @@ def _get_biomarker_data(person: Person) -> dict:
     )
     if pdl1_measurements.exists():
         pdl1_test = pdl1_measurements.first()
-        data['pd_l1_tumor_cels'] = int(pdl1_test.value_as_number) if pdl1_test.value_as_number else None
+        data['pd_l1_tumor_cells'] = int(pdl1_test.value_as_number) if pdl1_test.value_as_number else None
         data['pd_l1_assay'] = pdl1_test.value_source_value
 
     er_measurements = measurements.filter(measurement_concept__concept_code='16112-5')
@@ -736,7 +736,19 @@ def _get_laboratory_data(person: Person) -> dict:
         if field not in data:
             data[field] = cast(m.value_as_number)
 
-    # --- New UI fields via measurement_source_value (fallback when LOINC concepts absent) ---
+    # --- New UI fields via LOINC code stored as source_value (FHIR upload path) ---
+    unfound = {f for (f, _) in _LOINC_LAB_FIELDS.values() if f not in data}
+    if unfound:
+        loinc_sv_ms = measurements.filter(
+            measurement_source_value__in=_LOINC_LAB_FIELDS.keys(),
+            value_as_number__isnull=False,
+        )
+        for m in loinc_sv_ms:
+            field, cast = _LOINC_LAB_FIELDS[m.measurement_source_value]
+            if field not in data:
+                data[field] = cast(m.value_as_number)
+
+    # --- New UI fields via display-name source_value (legacy/generator path) ---
     unfound = {f for (f, _) in _LOINC_LAB_FIELDS.values() if f not in data}
     if unfound:
         sv_ms = measurements.filter(

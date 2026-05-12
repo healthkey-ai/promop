@@ -15,6 +15,10 @@ class ProvenanceRecord(models.Model):
     source_user_id = models.CharField(max_length=255, blank=True, default='')
     target_patient_id = models.CharField(max_length=255, null=True, blank=True)
     modification_reason = models.TextField(null=True, blank=True)
+    organization = models.ForeignKey(
+        'Organization', on_delete=models.SET_NULL, null=True, blank=True,
+        help_text="Tenant organization that authorized this write",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
@@ -1146,7 +1150,7 @@ class PatientInfo(models.Model):
     genetic_mutations = models.JSONField(blank=True, null=False, default=list)
 
     # PD-L1 and biomarkers
-    pd_l1_tumor_cels = models.IntegerField(blank=True, null=True)
+    pd_l1_tumor_cells = models.IntegerField(blank=True, null=True)
     pd_l1_assay = models.TextField(blank=True, null=True)
     pd_l1_ic_percentage = models.IntegerField(blank=True, null=True)
     pd_l1_combined_positive_score = models.IntegerField(blank=True, null=True)

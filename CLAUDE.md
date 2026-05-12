@@ -402,6 +402,17 @@ Expected output: `MISSING from DB: []` and `EXTRA in DB: []`.
 - **Render DB internal hostname**: `dpg-d6ptpqi4d50c739fufqg-a` (only reachable from Render)
 - **Render DB external hostname**: `dpg-d6ptpqi4d50c739fufqg-a.oregon-postgres.render.com`
 
+## Database Selection Rule
+
+**Always use the correct DB for the current branch:**
+
+| Branch | DATABASE_URL |
+|---|---|
+| `dev` | `postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev` |
+| `main` / production | `postgresql://ctomop_user:K7mqaHP5krJHiojJFtZmCOepH3Lj66jl@dpg-d6ptpqi4d50c739fufqg-a.oregon-postgres.render.com/ctomop` |
+
+When running any `manage.py` command (migrate, shell, test, etc.) always prefix with the appropriate `DATABASE_URL=...` for the current branch. Never use the production DB when on `dev`.
+
 ---
 
 ## FHIR Upload Architecture

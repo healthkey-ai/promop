@@ -205,4 +205,4 @@ class ProvenanceRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProvenanceRecord
         fields = ['id', 'source', 'source_user_id', 'target_patient_id',
-                  'modification_reason', 'created_at', 'record_type', 'object_id']
+                  'modification_reason', 'created_at', 'record_type', 'object_id', 'organization']
