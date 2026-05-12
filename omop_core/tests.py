@@ -276,13 +276,13 @@ class RefreshPatientInfoLabsFromMeasurementTest(_OmopBase):
         self.assertAlmostEqual(float(pi.wbc_count_thousand_per_ul), 4.5, places=1)
 
     def test_creatinine_derived_from_measurement_source_value(self):
-        self._make_measurement(92303, 'Creatinine [Mass/volume] in Serum or Plasm', 0.9)
+        self._make_measurement(92303, 'Creatinine [Mass/volume] in Serum or Plasma', 0.9)
         pi = refresh_patient_info(self.person)
         self.assertIsNotNone(pi.serum_creatinine_mg_dl)
         self.assertAlmostEqual(float(pi.serum_creatinine_mg_dl), 0.9, places=1)
 
     def test_alt_derived_from_measurement_source_value(self):
-        self._make_measurement(92304, 'Alanine aminotransferase [Enzymatic activi', 55)
+        self._make_measurement(92304, 'Alanine aminotransferase [Enzymatic activity/volum', 55)
         pi = refresh_patient_info(self.person)
         self.assertIsNotNone(pi.alt_u_l)
         self.assertEqual(pi.alt_u_l, 55)
