@@ -79,9 +79,7 @@ TEMPLATES = [
 WSGI_APPLICATION = 'ctomop.wsgi.application'
 
 # Database
-# EXT_DB_URL takes priority (external Render URL for local dev / CI / tests).
-# Falls back to DATABASE_URL (internal Render URL used by the deployed service).
-_db_url = os.environ.get('EXT_DB_URL') or os.environ.get('DATABASE_URL')
+_db_url = os.environ.get('DATABASE_URL')
 if _db_url:
     DATABASES = {
         'default': dj_database_url.config(
