@@ -12,6 +12,7 @@ Test flow:
 import io
 import json
 from datetime import date
+from hashlib import sha256
 
 from django.contrib.auth.models import User
 from django.test import TestCase
@@ -868,19 +869,23 @@ class SmartTokenAuthTest(TestCase):
         )
 
         # Token with patient/*.read — should allow GET
+        _t = 'test-read-token-abc123'
         cls.read_token = AccessToken.objects.create(
             user=cls.user,
             application=cls.app,
-            token='test-read-token-abc123',
+            token=_t,
+            token_checksum=sha256(_t.encode()).hexdigest(),
             expires=tz.now() + datetime.timedelta(hours=1),
             scope='patient/*.read openid',
         )
 
         # Token with no useful scope — should be denied
+        _t = 'test-empty-token-xyz789'
         cls.empty_scope_token = AccessToken.objects.create(
             user=cls.user,
             application=cls.app,
-            token='test-empty-token-xyz789',
+            token=_t,
+            token_checksum=sha256(_t.encode()).hexdigest(),
             expires=tz.now() + datetime.timedelta(hours=1),
             scope='',
         )
@@ -1512,28 +1517,34 @@ class _SmartBase(TestCase):
         )
 
         # Read-only token — service client reads patient data
+        _t = 'foundation-read-token-111'
         cls.read_token = AccessToken.objects.create(
             user=cls.foundation_user,
             application=cls.app,
-            token='foundation-read-token-111',
+            token=_t,
+            token_checksum=sha256(_t.encode()).hexdigest(),
             expires=tz.now() + datetime.timedelta(hours=1),
             scope='patient/*.read openid launch/patient',
         )
 
         # Read+write token — service client writes OMOP records
+        _t = 'foundation-write-token-222'
         cls.write_token = AccessToken.objects.create(
             user=cls.foundation_user,
             application=cls.app,
-            token='foundation-write-token-222',
+            token=_t,
+            token_checksum=sha256(_t.encode()).hexdigest(),
             expires=tz.now() + datetime.timedelta(hours=1),
             scope='patient/*.read patient/*.write openid launch/patient',
         )
 
         # Expired token — must be rejected
+        _t = 'foundation-expired-token-333'
         cls.expired_token = AccessToken.objects.create(
             user=cls.foundation_user,
             application=cls.app,
-            token='foundation-expired-token-333',
+            token=_t,
+            token_checksum=sha256(_t.encode()).hexdigest(),
             expires=tz.now() - datetime.timedelta(seconds=1),
             scope='patient/*.read patient/*.write openid',
         )
@@ -2101,10 +2112,12 @@ class MultiTenantIsolationTest(_SmartBase):
             user=cls.user_a,
         )
         ApplicationOrganization.objects.create(application=cls.app_a, organization=cls.org_a)
+        _t = 'org-a-read-token'
         cls.token_a = AccessToken.objects.create(
             user=cls.user_a,
             application=cls.app_a,
-            token='org-a-read-token',
+            token=_t,
+            token_checksum=sha256(_t.encode()).hexdigest(),
             expires=tz.now() + datetime.timedelta(hours=1),
             scope='patient/*.read',
         )
@@ -2120,10 +2133,12 @@ class MultiTenantIsolationTest(_SmartBase):
             user=cls.user_b,
         )
         ApplicationOrganization.objects.create(application=cls.app_b, organization=cls.org_b)
+        _t = 'org-b-read-token'
         cls.token_b = AccessToken.objects.create(
             user=cls.user_b,
             application=cls.app_b,
-            token='org-b-read-token',
+            token=_t,
+            token_checksum=sha256(_t.encode()).hexdigest(),
             expires=tz.now() + datetime.timedelta(hours=1),
             scope='patient/*.read',
         )
