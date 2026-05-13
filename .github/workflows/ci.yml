@@ -46,7 +46,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
           SECRET_KEY: ci-secret-key
           DEBUG: 'True'
-        run: python manage.py test omop_core patient_portal --verbosity=2
+        run: python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
   frontend:
     name: Frontend tests
