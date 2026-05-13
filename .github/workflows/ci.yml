@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run migrations
+        env:
+          DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+          SECRET_KEY: ci-secret-key
+          DEBUG: 'True'
+        run: python manage.py migrate --noinput
+
+      - name: Run tests
+        env:
+          DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+          SECRET_KEY: ci-secret-key
+          DEBUG: 'True'
+        run: python manage.py test omop_core patient_portal --keepdb --verbosity=2
+
+  frontend:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: cd frontend && npm ci
+
+      - name: Run tests
+        run: cd frontend && npm test -- --watchAll=false --ci
