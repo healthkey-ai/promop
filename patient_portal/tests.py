@@ -2363,6 +2363,20 @@ class ProvenancePatchTest(_SmartBase):
         )
         self.assertEqual(ProvenanceRecord.objects.count(), before)
 
+    def test_patch_returns_previous_values(self):
+        """PATCH response must include previous_values snapshot of changed fields."""
+        self.patient_info.disease = 'Multiple Myeloma'
+        self.patient_info.save()
+        resp = self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'disease': 'CLL', 'source': 'EHR_SYNC'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn('previous_values', data)
+        self.assertEqual(data['previous_values'].get('disease'), 'Multiple Myeloma')
+
     def test_admin_correction_requires_modification_reason(self):
         resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
@@ -2393,6 +2407,30 @@ class ProvenancePatchTest(_SmartBase):
         self.assertEqual(resp.status_code, 200)
         sources = [r['source'] for r in resp.json()]
         self.assertIn('EHR_SYNC', sources)
+
+
+    def test_omop_write_endpoint_records_provenance(self):
+        """POST to a direct OMOP endpoint with source header records provenance."""
+        resp = self.write_client.post(
+            '/api/conditions/',
+            {
+                'person': self.person.person_id,
+                'condition_concept_id': 0,
+                'condition_start_date': '2024-01-01',
+                'condition_type_concept_id': 0,
+            },
+            format='json',
+            HTTP_X_PROVENANCE_SOURCE='EHR_SYNC',
+            HTTP_X_PROVENANCE_USER_ID='ehr-omop-001',
+        )
+        self.assertEqual(resp.status_code, 201)
+        from omop_core.models import ConditionOccurrence
+        co = ConditionOccurrence.objects.filter(person=self.person).order_by('-id').first()
+        self.assertIsNotNone(co)
+        prov = ProvenanceRecord.objects.filter(object_id=co.pk).first()
+        self.assertIsNotNone(prov, 'No ProvenanceRecord created for direct OMOP write')
+        self.assertEqual(prov.source, 'EHR_SYNC')
+        self.assertEqual(prov.source_user_id, 'ehr-omop-001')
 
 
 class ProvenanceFhirUploadTest(_SmartBase):

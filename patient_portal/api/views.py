@@ -356,6 +356,14 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Capture previous values for fields being changed (exclude provenance meta-fields)
+        _prov_meta = {'source', 'source_user_id', 'modification_reason'}
+        previous_values = {
+            field: getattr(patient_info, field, None)
+            for field in request.data
+            if field not in _prov_meta and hasattr(patient_info, field)
+        }
+
         serializer = PatientInfoSerializer(patient_info, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
@@ -384,7 +392,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 except Exception:
                     pass
 
-        return Response(serializer.data)
+        return Response({**serializer.data, 'previous_values': previous_values})
 
     @action(detail=True, methods=['get'], permission_classes=[ScopedTokenPermission])
     def provenance(self, request, pk=None):
@@ -1902,43 +1910,59 @@ class _OmopFilterMixin:
         return qs
 
 
+class _ProvenanceMixin:
+    """Record provenance on create/update when source headers/body fields are present."""
+    def _prov(self, obj):
+        source, user_id, reason = _extract_provenance(self.request)
+        if source:
+            _record_provenance(obj, source, user_id, modification_reason=reason, organization=get_request_org(self.request))
+
+    def perform_create(self, serializer):
+        obj = serializer.save()
+        self._prov(obj)
+
+    def perform_update(self, serializer):
+        obj = serializer.save()
+        self._prov(obj)
+
+
 @method_decorator(csrf_exempt, name='dispatch')
-class ConditionOccurrenceViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+class ConditionOccurrenceViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ConditionOccurrenceSerializer
     permission_classes = [ScopedTokenPermission]
     queryset = ConditionOccurrence.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class DrugExposureViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+class DrugExposureViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = DrugExposureSerializer
     permission_classes = [ScopedTokenPermission]
     queryset = DrugExposure.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class MeasurementViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+class MeasurementViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
     permission_classes = [ScopedTokenPermission]
     queryset = Measurement.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ObservationViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+class ObservationViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ObservationSerializer
     permission_classes = [ScopedTokenPermission]
     queryset = Observation.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ProcedureOccurrenceViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+class ProcedureOccurrenceViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ProcedureOccurrenceSerializer
     permission_classes = [ScopedTokenPermission]
     queryset = ProcedureOccurrence.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class EpisodeViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+class EpisodeViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = EpisodeSerializer
     permission_classes = [ScopedTokenPermission]
     queryset = Episode.objects.all()
