@@ -29,6 +29,8 @@ from omop_core.models import (
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.patient_info_service import refresh_patient_info
+from omop_core.services.omop_write_service import sync_to_omop
+from omop_core.services.mappings import get_gender_concept
 from datetime import datetime
 import csv
 import json
@@ -84,31 +86,6 @@ def smart_configuration(request):
     })
 
 
-def get_gender_concept(gender_str):
-    """Map gender string to OMOP gender concept"""
-    if not gender_str:
-        return None
-    
-    gender_map = {
-        'male': 8507,
-        'm': 8507,
-        'female': 8532,
-        'f': 8532,
-        'unknown': 8551,
-        'other': 8551,
-        'ambiguous': 8570,
-    }
-    
-    gender_lower = gender_str.lower().strip()
-    concept_id = gender_map.get(gender_lower)
-    
-    if concept_id:
-        try:
-            return Concept.objects.get(concept_id=concept_id)
-        except Concept.DoesNotExist:
-            return None
-    return None
-
 @method_decorator(csrf_exempt, name='dispatch')
 class CurrentUserViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
@@ -122,105 +99,6 @@ class CurrentUserViewSet(viewsets.ViewSet):
         return Response({
             'user': user_serializer.data
         })
-
-# Maps PatientInfo field name → (LOINC code, unit string, display name)
-# Used by partial_update to write through to the OMOP Measurement table.
-_LAB_FIELD_TO_LOINC = {
-    # Blood counts
-    'hemoglobin_g_dl':               ('718-7',    'g/dL',            'Hemoglobin [Mass/volume] in Blood'),
-    'hematocrit_percent':            ('20570-8',  '%',               'Hematocrit [Volume Fraction] of Blood'),
-    'wbc_count_thousand_per_ul':     ('6690-2',   '10*3/uL',         'Leukocytes [#/volume] in Blood'),
-    'rbc_million_per_ul':            ('789-8',    '10*6/uL',         'Erythrocytes [#/volume] in Blood'),
-    'platelet_count_thousand_per_ul':('777-3',    '10*3/uL',         'Platelets [#/volume] in Blood'),
-    'anc_thousand_per_ul':           ('751-8',    '10*3/uL',         'Neutrophils [#/volume] in Blood'),
-    'alc_thousand_per_ul':           ('731-0',    '10*3/uL',         'Lymphocytes [#/volume] in Blood'),
-    'amc_thousand_per_ul':           ('742-7',    '10*3/uL',         'Monocytes [#/volume] in Blood'),
-    # Kidney / electrolytes
-    'serum_creatinine_mg_dl':        ('2160-0',   'mg/dL',           'Creatinine [Mass/volume] in Serum or Plasma'),
-    'creatinine_mg_dl':              ('2160-0',   'mg/dL',           'Creatinine [Mass/volume] in Serum or Plasma'),
-    'serum_calcium_mg_dl':           ('17861-6',  'mg/dL',           'Calcium [Mass/volume] in Serum or Plasma'),
-    'calcium_mg_dl':                 ('17861-6',  'mg/dL',           'Calcium [Mass/volume] in Serum or Plasma'),
-    'egfr_ml_min_173m2':             ('62238-1',  'mL/min/1.73m2',   'GFR/BSA pred CKD-EPI ArA'),
-    'egfr':                          ('62238-1',  'mL/min/1.73m2',   'GFR/BSA pred CKD-EPI ArA'),
-    'bun_mg_dl':                     ('3094-0',   'mg/dL',           'Urea nitrogen [Mass/volume] in Serum or Plasma'),
-    'blood_urea_nitrogen':           ('3094-0',   'mg/dL',           'Urea nitrogen [Mass/volume] in Serum or Plasma'),
-    'sodium_meq_l':                  ('2951-2',   'mEq/L',           'Sodium [Moles/volume] in Serum or Plasma'),
-    'serum_sodium':                  ('2951-2',   'mEq/L',           'Sodium [Moles/volume] in Serum or Plasma'),
-    'potassium_meq_l':               ('2823-3',   'mEq/L',           'Potassium [Moles/volume] in Serum or Plasma'),
-    'serum_potassium':               ('2823-3',   'mEq/L',           'Potassium [Moles/volume] in Serum or Plasma'),
-    'magnesium_mg_dl':               ('2601-3',   'mg/dL',           'Magnesium [Mass/volume] in Serum or Plasma'),
-    'magnesium':                     ('2601-3',   'mg/dL',           'Magnesium [Mass/volume] in Serum or Plasma'),
-    'phosphorus':                    ('2777-1',   'mg/dL',           'Phosphate [Mass/volume] in Serum or Plasma'),
-    # Liver function
-    'bilirubin_total_mg_dl':         ('1975-2',   'mg/dL',           'Bilirubin.total [Mass/volume] in Serum or Plasma'),
-    'alt_u_l':                       ('1742-6',   'U/L',             'Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma'),
-    'ast_u_l':                       ('1920-8',   'U/L',             'Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma'),
-    'alkaline_phosphatase_u_l':      ('6768-6',   'U/L',             'Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma'),
-    'alkaline_phosphatase':          ('6768-6',   'U/L',             'Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma'),
-    'albumin_g_dl':                  ('1751-7',   'g/dL',            'Albumin [Mass/volume] in Serum or Plasma'),
-    'total_protein':                 ('2885-2',   'g/dL',            'Protein [Mass/volume] in Serum or Plasma'),
-    'troponin_ng_ml':                ('10839-9',  'ng/mL',           'Troponin I.cardiac [Mass/volume] in Serum or Plasma'),
-    'bnp_pg_ml':                     ('42637-9',  'pg/mL',           'BNP [Mass/volume] in Serum or Plasma'),
-    'glucose_mg_dl':                 ('2345-7',   'mg/dL',           'Glucose [Mass/volume] in Serum or Plasma'),
-    'hba1c_percent':                 ('4548-4',   '%',               'Hemoglobin A1c/Hemoglobin.total in Blood'),
-    'inr':                           ('6301-6',   '{INR}',           'INR in Platelet poor plasma'),
-    'pt_seconds':                    ('5902-2',   's',               'Prothrombin time (PT)'),
-    'ptt_seconds':                   ('3173-2',   's',               'aPTT in Platelet poor plasma'),
-    # Oncology markers
-    'ldh_u_l':                       ('2532-0',   'U/L',             'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma'),
-    'ldh_level':                     ('2532-0',   'U/L',             'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma'),
-    'ldh':                           ('2532-0',   'U/L',             'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma'),
-    'beta2_microglobulin':           ('1952-1',   'mg/L',            'Beta-2-Microglobulin [Mass/volume] in Serum or Plasma'),
-    'c_reactive_protein':            ('1988-5',   'mg/L',            'C reactive protein [Mass/volume] in Serum or Plasma'),
-    'esr':                           ('30341-2',  'mm/h',            'Erythrocyte sedimentation rate'),
-    'ki67_proliferation_index':      ('85319-2',  '%',               'Ki-67 Ag [Presence] in Tissue by Immune stain'),
-    # Vital signs
-    'weight':                        ('29463-7',  'kg',              'Body weight'),
-    'height':                        ('8302-2',   'cm',              'Body height'),
-    'systolic_blood_pressure':       ('8480-6',   'mm[Hg]',          'Systolic blood pressure'),
-    'diastolic_blood_pressure':      ('8462-4',   'mm[Hg]',          'Diastolic blood pressure'),
-    'heartrate':                     ('8867-4',   '/min',            'Heart rate'),
-    # Performance status
-    'ecog_performance_status':       ('89247-1',  '{score}',         'ECOG Performance Status score'),
-    'karnofsky_performance_score':   ('89243-0',  '{score}',         'Karnofsky Performance Status score'),
-}
-
-
-def _upsert_omop_measurement(person, field_name, value, today):
-    """Create or update a Measurement row for a single PatientInfo lab/vital field."""
-    loinc_code, unit, display = _LAB_FIELD_TO_LOINC[field_name]
-    concept = (
-        Concept.objects.filter(concept_code=loinc_code, vocabulary_id='LOINC').first()
-        or Concept.objects.filter(concept_id=3000963).first()
-    )
-    if concept is None:
-        return
-    type_concept = Concept.objects.filter(concept_id=32856).first() or concept
-    existing = Measurement.objects.filter(
-        person=person,
-        measurement_concept=concept,
-        measurement_date=today,
-    ).first()
-    if existing:
-        existing.value_as_number = value
-        existing._skip_patient_info_refresh = True
-        existing.save(update_fields=['value_as_number'])
-    else:
-        last = Measurement.objects.order_by('-measurement_id').first()
-        new_id = (last.measurement_id + 1) if last else 1
-        m = Measurement(
-            measurement_id=new_id,
-            person=person,
-            measurement_concept=concept,
-            measurement_date=today,
-            measurement_type_concept=type_concept,
-            value_as_number=value,
-            measurement_source_value=loinc_code,
-            unit_source_value=unit,
-        )
-        m._skip_patient_info_refresh = True
-        m.save()
-
 
 def _extract_provenance(request):
     """Return (source, source_user_id, modification_reason) from headers or POST body."""
@@ -371,26 +249,11 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         if prov_source:
             _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
-        today = datetime.now().date()
-        for field, value in request.data.items():
-            if field in _LAB_FIELD_TO_LOINC and value is not None:
-                try:
-                    m_before = Measurement.objects.filter(
-                        person=person,
-                        measurement_source_value=_LAB_FIELD_TO_LOINC[field][0],
-                        measurement_date=today,
-                    ).first()
-                    _upsert_omop_measurement(person, field, value, today)
-                    if prov_source:
-                        m_after = Measurement.objects.filter(
-                            person=person,
-                            measurement_source_value=_LAB_FIELD_TO_LOINC[field][0],
-                            measurement_date=today,
-                        ).first()
-                        if m_after:
-                            _record_provenance(m_after, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                except Exception:
-                    pass
+        changed_fields = {f for f in request.data if f not in _prov_meta}
+        try:
+            sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
+        except Exception:
+            pass
 
         return Response({**serializer.data, 'previous_values': previous_values})
 
@@ -1895,6 +1758,21 @@ def auth_test(request):
 # OMOP clinical event ViewSets
 # =============================================================================
 
+def _next_pk(model, pk_field):
+    """Return max(pk_field) + 1, or 1 if the table is empty."""
+    last = model.objects.order_by(f'-{pk_field}').values_list(pk_field, flat=True).first()
+    return (last + 1) if last else 1
+
+
+_MODEL_PK_MAP = {
+    'ConditionOccurrence': ('condition_occurrence_id', ConditionOccurrence),
+    'DrugExposure':        ('drug_exposure_id',        DrugExposure),
+    'Measurement':         ('measurement_id',          Measurement),
+    'Observation':         ('observation_id',          Observation),
+    'ProcedureOccurrence': ('procedure_occurrence_id', ProcedureOccurrence),
+}
+
+
 class _OmopFilterMixin:
     """Filter by person_id query param and restrict to the requesting org's patients."""
     def get_queryset(self):
@@ -1918,6 +1796,22 @@ class _ProvenanceMixin:
             _record_provenance(obj, source, user_id, modification_reason=reason, organization=get_request_org(self.request))
 
     def perform_create(self, serializer):
+        # Auto-generate PK if not supplied
+        model_name = serializer.Meta.model.__name__
+        if model_name in _MODEL_PK_MAP:
+            pk_field, model_cls = _MODEL_PK_MAP[model_name]
+            if pk_field not in serializer.validated_data:
+                serializer.validated_data[pk_field] = _next_pk(model_cls, pk_field)
+
+        # Org-scoping: reject cross-org writes
+        org = get_request_org(self.request)
+        if org is not None:
+            person = serializer.validated_data.get('person')
+            if person:
+                if not PatientInfo.objects.filter(person=person, organization=org).exists():
+                    from rest_framework.exceptions import PermissionDenied
+                    raise PermissionDenied('Person does not belong to your organization.')
+
         obj = serializer.save()
         self._prov(obj)
 

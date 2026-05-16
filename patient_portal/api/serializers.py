@@ -101,6 +101,7 @@ class ConditionOccurrenceSerializer(serializers.ModelSerializer):
             'stop_reason', 'condition_source_value', 'condition_source_concept',
             'condition_status_source_value',
         ]
+        extra_kwargs = {'condition_occurrence_id': {'required': False}}
 
 
 class DrugExposureSerializer(serializers.ModelSerializer):
@@ -115,6 +116,7 @@ class DrugExposureSerializer(serializers.ModelSerializer):
             'drug_source_value', 'drug_source_concept',
             'route_source_value', 'dose_unit_source_value',
         ]
+        extra_kwargs = {'drug_exposure_id': {'required': False}}
 
 
 class MeasurementSerializer(serializers.ModelSerializer):
@@ -129,6 +131,7 @@ class MeasurementSerializer(serializers.ModelSerializer):
             'measurement_source_value', 'measurement_source_concept',
             'unit_source_value', 'value_source_value',
         ]
+        extra_kwargs = {'measurement_id': {'required': False}}
 
 
 class ObservationSerializer(serializers.ModelSerializer):
@@ -143,6 +146,7 @@ class ObservationSerializer(serializers.ModelSerializer):
             'observation_source_value', 'observation_source_concept',
             'unit_source_value', 'qualifier_source_value', 'value_source_value',
         ]
+        extra_kwargs = {'observation_id': {'required': False}}
 
 
 class ProcedureOccurrenceSerializer(serializers.ModelSerializer):
@@ -156,6 +160,7 @@ class ProcedureOccurrenceSerializer(serializers.ModelSerializer):
             'procedure_source_value', 'procedure_source_concept',
             'modifier_source_value',
         ]
+        extra_kwargs = {'procedure_occurrence_id': {'required': False}}
 
 
 class EpisodeSerializer(serializers.ModelSerializer):
