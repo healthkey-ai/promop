@@ -89,25 +89,31 @@ class Command(BaseCommand):
         ConceptRelationship.objects.all().delete()
         Concept.objects.filter(vocabulary_id__in=VOCAB_SCOPE).delete()
         Relationship.objects.all().delete()
+        Vocabulary.objects.filter(vocabulary_id__in=VOCAB_SCOPE).delete()
 
     def _load_relationships(self, base, dry_run):
         count = 0
         batch = []
         with _open_tsv(base, 'RELATIONSHIP.csv') as f:
             for row in csv.DictReader(f, delimiter='\t'):
-                if not dry_run:
-                    batch.append(Relationship(
+                try:
+                    obj = Relationship(
                         relationship_id=row['relationship_id'][:20],
                         relationship_name=row['relationship_name'][:255],
                         is_hierarchical=int(row['is_hierarchical'] or 0),
                         defines_ancestry=int(row['defines_ancestry'] or 0),
                         reverse_relationship_id=row['reverse_relationship_id'][:20],
                         relationship_concept_id=int(row['relationship_concept_id'] or 0),
-                    ))
+                    )
+                except (ValueError, KeyError) as exc:
+                    self.stderr.write(f'Warning: skipping malformed relationship row: {exc}')
+                    continue
+                count += 1
+                if not dry_run:
+                    batch.append(obj)
                     if len(batch) >= BATCH:
                         _bulk(Relationship, batch, dry_run)
                         batch = []
-                count += 1
         _bulk(Relationship, batch, dry_run)
         return count
 
@@ -169,40 +175,50 @@ class Command(BaseCommand):
             for row in csv.DictReader(f, delimiter='\t'):
                 if not _concept_in_scope(row):
                     continue
+                try:
+                    concept_id = int(row['concept_id'])
+                    start = _parse_date(row['valid_start_date'])
+                    end = _parse_date(row['valid_end_date'])
+                except (ValueError, KeyError) as exc:
+                    self.stderr.write(f'Warning: skipping malformed concept row: {exc}')
+                    continue
+                count += 1
                 if not dry_run:
                     batch.append(Concept(
-                        concept_id=int(row['concept_id']),
+                        concept_id=concept_id,
                         concept_name=row['concept_name'][:255],
                         domain_id=row['domain_id'][:20],
                         vocabulary_id=row['vocabulary_id'][:20],
                         concept_class_id=row['concept_class_id'][:20],
                         standard_concept=row['standard_concept'][:1] if row['standard_concept'] else None,
                         concept_code=row['concept_code'][:50],
-                        valid_start_date=_parse_date(row['valid_start_date']),
-                        valid_end_date=_parse_date(row['valid_end_date']),
+                        valid_start_date=start,
+                        valid_end_date=end,
                         invalid_reason=row['invalid_reason'][:1] if row.get('invalid_reason') else None,
                     ))
                     if len(batch) >= BATCH:
                         _bulk(Concept, batch, dry_run)
                         batch = []
-                count += 1
         _bulk(Concept, batch, dry_run)
         return count
 
     def _load_concept_relationships(self, base, dry_run):
-        loaded_ids = (
-            set(Concept.objects.filter(vocabulary_id__in=VOCAB_SCOPE)
-                               .values_list('concept_id', flat=True))
-            if not dry_run else set()
+        loaded_ids = set(
+            Concept.objects.filter(vocabulary_id__in=VOCAB_SCOPE)
+                           .values_list('concept_id', flat=True)
         )
         count = 0
         batch = []
         with _open_tsv(base, 'CONCEPT_RELATIONSHIP.csv') as f:
             for row in csv.DictReader(f, delimiter='\t'):
-                c1 = int(row['concept_id_1'])
-                c2 = int(row['concept_id_2'])
-                if not dry_run and (c1 not in loaded_ids or c2 not in loaded_ids):
+                try:
+                    c1 = int(row['concept_id_1'])
+                    c2 = int(row['concept_id_2'])
+                except (ValueError, KeyError):
                     continue
+                if c1 not in loaded_ids or c2 not in loaded_ids:
+                    continue
+                count += 1
                 if not dry_run:
                     batch.append(ConceptRelationship(
                         concept_1_id=c1,
@@ -215,24 +231,26 @@ class Command(BaseCommand):
                     if len(batch) >= BATCH:
                         _bulk(ConceptRelationship, batch, dry_run)
                         batch = []
-                count += 1
         _bulk(ConceptRelationship, batch, dry_run)
         return count
 
     def _load_concept_ancestors(self, base, dry_run):
-        hemonc_ids = (
-            set(Concept.objects.filter(vocabulary_id='HemOnc')
-                               .values_list('concept_id', flat=True))
-            if not dry_run else set()
+        hemonc_ids = set(
+            Concept.objects.filter(vocabulary_id='HemOnc')
+                           .values_list('concept_id', flat=True)
         )
         count = 0
         batch = []
         with _open_tsv(base, 'CONCEPT_ANCESTOR.csv') as f:
             for row in csv.DictReader(f, delimiter='\t'):
-                anc = int(row['ancestor_concept_id'])
-                desc = int(row['descendant_concept_id'])
-                if not dry_run and (anc not in hemonc_ids or desc not in hemonc_ids):
+                try:
+                    anc = int(row['ancestor_concept_id'])
+                    desc = int(row['descendant_concept_id'])
+                except (ValueError, KeyError):
                     continue
+                if anc not in hemonc_ids or desc not in hemonc_ids:
+                    continue
+                count += 1
                 if not dry_run:
                     batch.append(ConceptAncestor(
                         ancestor_concept_id=anc,
@@ -243,6 +261,5 @@ class Command(BaseCommand):
                     if len(batch) >= BATCH:
                         _bulk(ConceptAncestor, batch, dry_run)
                         batch = []
-                count += 1
         _bulk(ConceptAncestor, batch, dry_run)
         return count
