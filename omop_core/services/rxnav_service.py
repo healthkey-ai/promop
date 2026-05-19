@@ -22,11 +22,11 @@ def resolve_drug(drug_source_value: str):
     if not drug_source_value or not drug_source_value.strip():
         return None
 
-    normalized = drug_source_value.strip().lower()
+    search_name = drug_source_value.strip().lower()
 
     # Check local vocab by name
     existing = Concept.objects.filter(
-        concept_name__iexact=normalized,
+        concept_name__iexact=search_name,
         vocabulary_id__in=['RxNorm', 'RxNorm Extension'],
     ).first()
     if existing:
@@ -34,7 +34,7 @@ def resolve_drug(drug_source_value: str):
 
     # Try RxNav
     try:
-        rxcui, canonical_name = _rxnav_lookup(drug_source_value)
+        rxcui, canonical_name = _rxnav_lookup(drug_source_value.strip())
         if not rxcui:
             return None
 
@@ -84,14 +84,17 @@ def _create_rxnorm_concept(rxcui: str, canonical_name: str):
         defaults={'concept_class_name': 'Ingredient', 'concept_class_concept_id': 0},
     )
     max_id = Concept.objects.order_by('-concept_id').values_list('concept_id', flat=True).first() or 2_000_000_000
-    return Concept.objects.create(
-        concept_id=max_id + 1,
-        concept_name=canonical_name[:255],
-        vocabulary=vocab,
-        domain=domain,
-        concept_class=cc,
+    concept, _ = Concept.objects.get_or_create(
         concept_code=str(rxcui)[:50],
-        standard_concept='S',
-        valid_start_date=date(1970, 1, 1),
-        valid_end_date=date(2099, 12, 31),
+        vocabulary=vocab,
+        defaults={
+            'concept_id': max_id + 1,
+            'concept_name': canonical_name[:255],
+            'domain': domain,
+            'concept_class': cc,
+            'standard_concept': 'S',
+            'valid_start_date': date(1970, 1, 1),
+            'valid_end_date': date(2099, 12, 31),
+        },
     )
+    return concept
