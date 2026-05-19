@@ -31,7 +31,7 @@ from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.patient_info_service import refresh_patient_info
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.omop_write_service import sync_to_omop
-from omop_core.services.mappings import get_gender_concept
+from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from datetime import datetime
 import csv
 import json
@@ -255,6 +255,17 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
         except Exception:
             pass
+
+        if prov_source:
+            for field in changed_fields:
+                if field in LAB_FIELD_TO_LOINC:
+                    loinc_code = LAB_FIELD_TO_LOINC[field][0]
+                    m = Measurement.objects.filter(
+                        person=patient_info.person,
+                        measurement_source_value=loinc_code,
+                    ).order_by('-measurement_id').first()
+                    if m:
+                        _record_provenance(m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
         return Response({**serializer.data, 'previous_values': previous_values})
 
