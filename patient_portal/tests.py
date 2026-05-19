@@ -11,6 +11,8 @@ Test flow:
 
 import io
 import json
+import os
+import tempfile
 from datetime import date
 
 from django.contrib.auth.models import User
@@ -3044,3 +3046,146 @@ class VocabularyRelationshipModelTest(TestCase):
                 concept_1=self.c1, concept_2=self.c2, relationship=r,
                 valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
             )
+
+
+# ---------------------------------------------------------------------------
+# load_athena_vocabularies management command tests
+# ---------------------------------------------------------------------------
+
+class AthenaVocabularyLoadTest(TestCase):
+    """Test load_athena_vocabularies management command with minimal fixture TSV files."""
+
+    def _write_tsv(self, directory, filename, headers, rows):
+        path = os.path.join(directory, filename)
+        with open(path, 'w', newline='') as f:
+            f.write('\t'.join(headers) + '\n')
+            for row in rows:
+                f.write('\t'.join(str(v) for v in row) + '\n')
+
+    def _write_minimal_athena(self, directory):
+        """Write the minimal set of Athena TSV files needed for tests."""
+        self._write_tsv(directory, 'RELATIONSHIP.csv',
+            ['relationship_id', 'relationship_name', 'is_hierarchical',
+             'defines_ancestry', 'reverse_relationship_id', 'relationship_concept_id'],
+            [['Maps to', 'Maps to value', '0', '0', 'Mapped from', '44818965'],
+             ['Is a', 'Is a', '1', '1', 'Subsumes', '44818723']],
+        )
+        self._write_tsv(directory, 'VOCABULARY.csv',
+            ['vocabulary_id', 'vocabulary_name', 'vocabulary_reference',
+             'vocabulary_version', 'vocabulary_concept_id'],
+            [['HemOnc', 'HemOnc Oncology', '', 'v2024', '0'],
+             ['RxNorm', 'RxNorm', '', '2024AA', '0'],
+             ['SNOMED', 'SNOMED CT', '', '2024', '0']],  # should be skipped
+        )
+        self._write_tsv(directory, 'DOMAIN.csv',
+            ['domain_id', 'domain_name', 'domain_concept_id'],
+            [['Drug', 'Drug', '13']],
+        )
+        self._write_tsv(directory, 'CONCEPT_CLASS.csv',
+            ['concept_class_id', 'concept_class_name', 'concept_class_concept_id'],
+            [['HemOnc Class', 'HemOnc Class', '0'],
+             ['Ingredient', 'Ingredient', '0'],
+             ['Branded Drug', 'Branded Drug', '0'],
+             ['Clinical Finding', 'Clinical Finding', '0']],
+        )
+        self._write_tsv(directory, 'CONCEPT.csv',
+            ['concept_id', 'concept_name', 'domain_id', 'vocabulary_id',
+             'concept_class_id', 'standard_concept', 'concept_code',
+             'valid_start_date', 'valid_end_date', 'invalid_reason'],
+            # HemOnc concepts — should be loaded
+            [['5000001', 'Proteasome inhibitor', 'Drug', 'HemOnc', 'HemOnc Class', 'S', 'PI', '19700101', '20991231', ''],
+             ['5000002', 'bortezomib',           'Drug', 'HemOnc', 'HemOnc Class', 'S', 'HO-Bort', '19700101', '20991231', ''],
+             # RxNorm Ingredient — should be loaded
+             ['5000003', 'bortezomib',           'Drug', 'RxNorm', 'Ingredient', 'S', '1421', '19700101', '20991231', ''],
+             # RxNorm Branded — should be loaded
+             ['5000004', 'Velcade',              'Drug', 'RxNorm', 'Branded Drug', 'S', '213269', '19700101', '20991231', ''],
+             # SNOMED concept — should be SKIPPED (not in vocabulary scope)
+             ['5000099', 'Some SNOMED concept',  'Condition', 'SNOMED', 'Clinical Finding', 'S', '123456', '19700101', '20991231', '']],
+        )
+        self._write_tsv(directory, 'CONCEPT_RELATIONSHIP.csv',
+            ['concept_id_1', 'concept_id_2', 'relationship_id',
+             'valid_start_date', 'valid_end_date', 'invalid_reason'],
+            # RxNorm bortezomib → HemOnc bortezomib (both in scope)
+            [['5000003', '5000002', 'Maps to', '19700101', '20991231', ''],
+             # Edge to out-of-scope SNOMED concept — should be SKIPPED
+             ['5000003', '5000099', 'Maps to', '19700101', '20991231', '']],
+        )
+        self._write_tsv(directory, 'CONCEPT_ANCESTOR.csv',
+            ['ancestor_concept_id', 'descendant_concept_id',
+             'min_levels_of_separation', 'max_levels_of_separation'],
+            # HemOnc: PI class is ancestor of bortezomib HemOnc concept
+            [['5000001', '5000002', '1', '1'],
+             # Edge referencing out-of-scope concept — should be SKIPPED
+             ['5000001', '5000099', '2', '2']],
+        )
+
+    def test_load_creates_relationship_rows(self):
+        from omop_core.models import Relationship
+        from django.core.management import call_command
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_minimal_athena(tmpdir)
+            call_command('load_athena_vocabularies', path=tmpdir)
+        self.assertTrue(Relationship.objects.filter(relationship_id='Maps to').exists())
+        self.assertTrue(Relationship.objects.filter(relationship_id='Is a').exists())
+
+    def test_load_filters_concepts_to_scope(self):
+        from omop_core.models import Concept
+        from django.core.management import call_command
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_minimal_athena(tmpdir)
+            call_command('load_athena_vocabularies', path=tmpdir)
+        self.assertTrue(Concept.objects.filter(concept_id=5000001).exists())  # HemOnc
+        self.assertTrue(Concept.objects.filter(concept_id=5000003).exists())  # RxNorm Ingredient
+        self.assertTrue(Concept.objects.filter(concept_id=5000004).exists())  # RxNorm Branded
+        self.assertFalse(Concept.objects.filter(concept_id=5000099).exists())  # SNOMED — excluded
+
+    def test_load_filters_concept_relationships(self):
+        from omop_core.models import ConceptRelationship
+        from django.core.management import call_command
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_minimal_athena(tmpdir)
+            call_command('load_athena_vocabularies', path=tmpdir)
+        # Edge between two in-scope concepts should be loaded
+        self.assertTrue(ConceptRelationship.objects.filter(
+            concept_1_id=5000003, concept_2_id=5000002
+        ).exists())
+        # Edge to out-of-scope SNOMED concept should be skipped
+        self.assertFalse(ConceptRelationship.objects.filter(
+            concept_2_id=5000099
+        ).exists())
+
+    def test_load_concept_ancestors_hemonc_only(self):
+        from omop_core.models import ConceptAncestor
+        from django.core.management import call_command
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_minimal_athena(tmpdir)
+            call_command('load_athena_vocabularies', path=tmpdir)
+        self.assertTrue(ConceptAncestor.objects.filter(
+            ancestor_concept_id=5000001, descendant_concept_id=5000002
+        ).exists())
+        # Out-of-scope ancestor edge should be skipped
+        self.assertFalse(ConceptAncestor.objects.filter(
+            descendant_concept_id=5000099
+        ).exists())
+
+    def test_idempotent_reload(self):
+        from omop_core.models import Concept
+        from django.core.management import call_command
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_minimal_athena(tmpdir)
+            call_command('load_athena_vocabularies', path=tmpdir)
+            count_after_first = Concept.objects.filter(vocabulary_id='HemOnc').count()
+            call_command('load_athena_vocabularies', path=tmpdir)
+            count_after_second = Concept.objects.filter(vocabulary_id='HemOnc').count()
+        self.assertEqual(count_after_first, count_after_second)
+
+    def test_dry_run_writes_nothing(self):
+        from omop_core.models import Concept, Relationship
+        from django.core.management import call_command
+        before_concepts = Concept.objects.count()
+        before_rels = Relationship.objects.count()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_minimal_athena(tmpdir)
+            call_command('load_athena_vocabularies', path=tmpdir, dry_run=True)
+        self.assertEqual(Concept.objects.count(), before_concepts)
+        self.assertEqual(Relationship.objects.count(), before_rels)
