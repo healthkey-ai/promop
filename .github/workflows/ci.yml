@@ -15,6 +15,26 @@ jobs:
     name: Backend tests
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ctomop_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ctomop_test
+      SECRET_KEY: ci-secret-key
+      DEBUG: 'True'
+
     steps:
       - uses: actions/checkout@v4
 
@@ -26,30 +46,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Check required secrets
-        run: |
-          if [ -z "$DATABASE_URL" ]; then
-            echo "ERROR: DEV_DATABASE_URL secret is not set."
-            echo "Go to GitHub → Settings → Secrets → Actions → New repository secret"
-            echo "Name: DEV_DATABASE_URL"
-            echo "Value: postgresql://ctomop_dev_user:...@.../ctomop_dev"
-            exit 1
-          fi
-        env:
-          DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
-
       - name: Run migrations
-        env:
-          DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
-          SECRET_KEY: ci-secret-key
-          DEBUG: 'True'
         run: python manage.py migrate --noinput
 
       - name: Run tests
-        env:
-          DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
-          SECRET_KEY: ci-secret-key
-          DEBUG: 'True'
         run: python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
   frontend:
