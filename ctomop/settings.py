@@ -251,8 +251,11 @@ if not DEBUG:
 
 # ── Firebase Admin SDK ────────────────────────────────────────────────────
 def _init_firebase_admin():
-    import firebase_admin
-    from firebase_admin import credentials as fb_credentials
+    try:
+        import firebase_admin
+        from firebase_admin import credentials as fb_credentials
+    except ImportError:
+        return
 
     if firebase_admin._apps:
         return
@@ -266,11 +269,14 @@ def _init_firebase_admin():
                 return None
         cred = _EmulatorCredential()
     else:
-        cred = fb_credentials.ApplicationDefault()
+        try:
+            cred = fb_credentials.ApplicationDefault()
+        except Exception:
+            return
 
     try:
         firebase_admin.initialize_app(cred, options)
-    except ValueError:
+    except (ValueError, Exception):
         pass
 
 
