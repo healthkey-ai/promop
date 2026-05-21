@@ -1,4 +1,9 @@
 node_modules
 dist
 *.local
+*.tsbuildinfo
+*.d.ts
+!src/**/*.d.ts
+*.js
+!src/**/*.js
 .DS_Store

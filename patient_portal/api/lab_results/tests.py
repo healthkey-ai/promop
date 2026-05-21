@@ -245,3 +245,183 @@ class ResultsSummaryViewTest(TestCase):
         resp = self.client.get('/api/lab-results/summary/', {'person_id': 9999})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['results'], [])
+
+
+class ValuesViewTest(TestCase):
+    def setUp(self):
+        _setup_vocab()
+        self.user = User.objects.create_user(username='valreader', password='test')
+        self.person = Person.objects.create(person_id=3001)
+        PatientInfo.objects.create(person=self.person)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+        type_concept = Concept.objects.get(concept_id=32883)
+        hgb_concept = Concept.objects.get(concept_id=3000963)
+
+        for i in range(3):
+            Measurement.objects.create(
+                measurement_id=100 + i,
+                person_id=3001,
+                measurement_concept=hgb_concept,
+                measurement_date=date(2026, 5, 10 + i),
+                measurement_type_concept=type_concept,
+                value_as_number=Decimal(f'{12 + i}.0'),
+                range_low=Decimal('12.0'),
+                range_high=Decimal('15.5'),
+                unit_source_value='g/dL',
+            )
+
+    def test_values_returns_paginated_list(self):
+        resp = self.client.get('/api/lab-results/values/', {
+            'person_id': 3001,
+            'concept_code': '718-7',
+        })
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['count'], 3)
+        self.assertEqual(len(resp.data['results']), 3)
+        self.assertEqual(resp.data['results'][0]['measurement_id'], 102)
+
+    def test_values_requires_person_id(self):
+        resp = self.client.get('/api/lab-results/values/', {'concept_code': '718-7'})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_values_requires_concept_code(self):
+        resp = self.client.get('/api/lab-results/values/', {'person_id': 3001})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_values_unknown_concept_404(self):
+        resp = self.client.get('/api/lab-results/values/', {
+            'person_id': 3001,
+            'concept_code': 'NOPE-0',
+        })
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class MeasurementDetailViewTest(TestCase):
+    def setUp(self):
+        _setup_vocab()
+        self.user = User.objects.create_user(username='measuser', password='test')
+        self.person = Person.objects.create(person_id=4001)
+        PatientInfo.objects.create(person=self.person)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+        type_concept = Concept.objects.get(concept_id=32883)
+        hgb_concept = Concept.objects.get(concept_id=3000963)
+
+        self.measurement = Measurement.objects.create(
+            measurement_id=200,
+            person_id=4001,
+            measurement_concept=hgb_concept,
+            measurement_date=date(2026, 5, 15),
+            measurement_type_concept=type_concept,
+            value_as_number=Decimal('13.5'),
+            range_low=Decimal('12.0'),
+            range_high=Decimal('15.5'),
+            unit_source_value='g/dL',
+        )
+
+    def test_get_measurement(self):
+        resp = self.client.get('/api/lab-results/measurements/200/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['measurement_id'], 200)
+        self.assertEqual(resp.data['status'], 'in_range')
+
+    def test_get_measurement_not_found(self):
+        resp = self.client.get('/api/lab-results/measurements/999/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_patch_value(self):
+        resp = self.client.patch(
+            '/api/lab-results/measurements/200/',
+            {'value': '11.0'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.value_as_number, Decimal('11.0'))
+
+    def test_patch_range(self):
+        resp = self.client.patch(
+            '/api/lab-results/measurements/200/',
+            {'range_low': '10.0', 'range_high': '16.0'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.range_low, Decimal('10.0'))
+        self.assertEqual(self.measurement.range_high, Decimal('16.0'))
+
+    def test_patch_invalid_value(self):
+        resp = self.client.patch(
+            '/api/lab-results/measurements/200/',
+            {'value': 'not-a-number'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_patch_measured_at(self):
+        resp = self.client.patch(
+            '/api/lab-results/measurements/200/',
+            {'measured_at': '2026-06-01'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.measurement_date, date(2026, 6, 1))
+
+    def test_delete_measurement(self):
+        resp = self.client.delete('/api/lab-results/measurements/200/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Measurement.objects.filter(measurement_id=200).exists())
+
+    def test_delete_not_found(self):
+        resp = self.client.delete('/api/lab-results/measurements/999/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class VisitDeleteViewTest(TestCase):
+    def setUp(self):
+        _setup_vocab()
+        self.user = User.objects.create_user(username='visitdel', password='test')
+        self.person = Person.objects.create(person_id=5001)
+        PatientInfo.objects.create(person=self.person)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+        type_concept = Concept.objects.get(concept_id=32883)
+        visit_concept = Concept.objects.get(concept_id=9202)
+        hgb_concept = Concept.objects.get(concept_id=3000963)
+
+        self.visit = VisitOccurrence.objects.create(
+            visit_occurrence_id=500,
+            person_id=5001,
+            visit_concept=visit_concept,
+            visit_start_date=date(2026, 5, 15),
+            visit_end_date=date(2026, 5, 15),
+            visit_type_concept=type_concept,
+            visit_source_value='bloodwork.pdf',
+        )
+
+        for i in range(3):
+            Measurement.objects.create(
+                measurement_id=500 + i,
+                person_id=5001,
+                measurement_concept=hgb_concept,
+                measurement_date=date(2026, 5, 15),
+                measurement_type_concept=type_concept,
+                value_as_number=Decimal('13.5'),
+                visit_occurrence=self.visit,
+            )
+
+    def test_delete_visit_cascades_measurements(self):
+        resp = self.client.delete('/api/lab-results/visits/500/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['deleted_measurements'], 3)
+        self.assertFalse(VisitOccurrence.objects.filter(visit_occurrence_id=500).exists())
+        self.assertFalse(Measurement.objects.filter(visit_occurrence_id=500).exists())
+
+    def test_delete_visit_not_found(self):
+        resp = self.client.delete('/api/lab-results/visits/9999/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
