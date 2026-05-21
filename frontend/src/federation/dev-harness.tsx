@@ -9,7 +9,7 @@ const apiClient = axios.create({
   withCredentials: true,
 });
 
-function App() {
+export default function DevHarness() {
   return (
     <div style={{ maxWidth: 900, margin: "0 auto", padding: "2rem" }}>
       <h1 style={{ marginBottom: "1rem", fontSize: "1.5rem", fontWeight: 700 }}>
@@ -22,6 +22,6 @@ function App() {
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <DevHarness />
   </StrictMode>,
 );

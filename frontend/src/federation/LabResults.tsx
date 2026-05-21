@@ -186,7 +186,7 @@ function LabResultsInner({
 
   const activeTest = selectedTestProp ?? selectedTest;
 
-  const cards = data?.results ?? [];
+  const cards = useMemo(() => data?.results ?? [], [data?.results]);
 
   const categoryGroups = useMemo(() => {
     const groups = new Map<string, LabResultCard[]>();
