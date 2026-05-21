@@ -1,5 +1,5 @@
-export function fmtNum(n: number): string {
-  return String(Number(n.toFixed(2)));
+export function fmtNum(n: number | string): string {
+  return String(Number(Number(n).toFixed(2)));
 }
 
 export function formatShortDate(iso: string): string {

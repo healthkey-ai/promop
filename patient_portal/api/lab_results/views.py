@@ -9,13 +9,34 @@ from rest_framework.views import APIView
 
 from omop_core.models import (
     CareSite, Concept, LoincClass, LoincCodeClass,
-    Measurement, VisitOccurrence,
+    Measurement, PatientInfo, VisitOccurrence,
 )
 from patient_portal.api.permissions import ScopedTokenPermission, get_request_org
 
 from .serializers import LabResultCardSerializer, LabValueSerializer
 
 MAX_VALUES_PER_CONCEPT = 10
+
+
+def _resolve_person_id(request):
+    """Return (person_id, error_response) from query param or authenticated user's email."""
+    person_id = request.query_params.get('person_id')
+    if person_id:
+        return int(person_id), None
+
+    if not request.user or not request.user.is_authenticated:
+        return None, Response(
+            {'detail': 'person_id query parameter is required.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    pi = PatientInfo.objects.filter(email=request.user.email).first()
+    if pi is None:
+        return None, Response(
+            {'detail': 'No patient record linked to your account.'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    return pi.person_id, None
 
 
 class LabResultsPagination(PageNumberPagination):
@@ -56,31 +77,26 @@ def _build_category_cache():
 
 class ResultsSummaryView(APIView):
     """
-    GET /api/lab-results/summary/?person_id=X&page=1&page_size=50
+    GET /api/lab-results/summary/?page=1&page_size=50[&person_id=X]
 
-    Returns lab results grouped by effective concept (LOINC or HK-Labs custom),
-    with up to 10 most recent values per concept, category, status, and provenance.
+    person_id is optional — when omitted, resolved from the authenticated user's email.
     """
     permission_classes = [ScopedTokenPermission]
 
     def get(self, request):
-        person_id = request.query_params.get('person_id')
-        if not person_id:
-            return Response(
-                {'detail': 'person_id query parameter is required.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        person_id, err = _resolve_person_id(request)
+        if err:
+            return err
 
         org = get_request_org(request)
         if org is not None:
-            from omop_core.models import PatientInfo
             if not PatientInfo.objects.filter(person_id=person_id, organization=org).exists():
                 return Response(
                     {'detail': 'Person not found in your organization.'},
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-        cards = self._build_cards(int(person_id))
+        cards = self._build_cards(person_id)
 
         paginator = LabResultsPagination()
         page = paginator.paginate_queryset(cards, request)
@@ -223,21 +239,18 @@ class ResultsSummaryView(APIView):
 
 class ValuesView(APIView):
     """
-    GET /api/lab-results/values/?concept_code=718-7&person_id=X&page=1&page_size=50
+    GET /api/lab-results/values/?concept_code=718-7&page=1&page_size=50[&person_id=X]
 
-    Returns paginated measurement values for a specific concept, ordered by date desc.
+    person_id is optional — when omitted, resolved from the authenticated user's email.
     """
     permission_classes = [ScopedTokenPermission]
 
     def get(self, request):
-        person_id = request.query_params.get('person_id')
-        concept_code = request.query_params.get('concept_code')
+        person_id, err = _resolve_person_id(request)
+        if err:
+            return err
 
-        if not person_id:
-            return Response(
-                {'detail': 'person_id query parameter is required.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        concept_code = request.query_params.get('concept_code')
         if not concept_code:
             return Response(
                 {'detail': 'concept_code query parameter is required.'},
@@ -246,7 +259,6 @@ class ValuesView(APIView):
 
         org = get_request_org(request)
         if org is not None:
-            from omop_core.models import PatientInfo
             if not PatientInfo.objects.filter(person_id=person_id, organization=org).exists():
                 return Response(
                     {'detail': 'Person not found in your organization.'},

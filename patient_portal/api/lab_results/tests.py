@@ -237,9 +237,17 @@ class ResultsSummaryViewTest(TestCase):
         v2 = card['values'][1]
         self.assertEqual(v2['status'], 'below')
 
-    def test_summary_requires_person_id(self):
+    def test_summary_resolves_person_from_email(self):
+        self.user.email = 'reader@example.com'
+        self.user.save()
+        PatientInfo.objects.filter(person=self.person).update(email='reader@example.com')
         resp = self.client.get('/api/lab-results/summary/')
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data['results']), 1)
+
+    def test_summary_no_linked_patient_404(self):
+        resp = self.client.get('/api/lab-results/summary/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_summary_empty_for_unknown_person(self):
         resp = self.client.get('/api/lab-results/summary/', {'person_id': 9999})
@@ -282,9 +290,17 @@ class ValuesViewTest(TestCase):
         self.assertEqual(len(resp.data['results']), 3)
         self.assertEqual(resp.data['results'][0]['measurement_id'], 102)
 
-    def test_values_requires_person_id(self):
+    def test_values_resolves_person_from_email(self):
+        self.user.email = 'valreader@example.com'
+        self.user.save()
+        PatientInfo.objects.filter(person=self.person).update(email='valreader@example.com')
         resp = self.client.get('/api/lab-results/values/', {'concept_code': '718-7'})
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['count'], 3)
+
+    def test_values_no_linked_patient_404(self):
+        resp = self.client.get('/api/lab-results/values/', {'concept_code': '718-7'})
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_values_requires_concept_code(self):
         resp = self.client.get('/api/lab-results/values/', {'person_id': 3001})
@@ -379,6 +395,55 @@ class MeasurementDetailViewTest(TestCase):
     def test_delete_not_found(self):
         resp = self.client.delete('/api/lab-results/measurements/999/')
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class AutoProvisionTest(TestCase):
+    """Test that _get_or_create auto-provisions Person + PatientInfo."""
+
+    def setUp(self):
+        _setup_vocab()
+
+    def test_new_user_gets_person_and_patient_info(self):
+        from patient_portal.api.authentication import _ensure_person
+
+        user = User.objects.create_user(
+            username='newpatient@example.com',
+            email='newpatient@example.com',
+        )
+        _ensure_person(user)
+
+        pi = PatientInfo.objects.get(email='newpatient@example.com')
+        self.assertIsNotNone(pi.person_id)
+        self.assertTrue(Person.objects.filter(person_id=pi.person_id).exists())
+
+    def test_existing_patient_info_not_duplicated(self):
+        from patient_portal.api.authentication import _ensure_person
+
+        person = Person.objects.create(person_id=9001)
+        PatientInfo.objects.create(person=person, email='existing@example.com')
+
+        user = User.objects.create_user(
+            username='existing@example.com',
+            email='existing@example.com',
+        )
+        _ensure_person(user)
+
+        self.assertEqual(PatientInfo.objects.filter(email='existing@example.com').count(), 1)
+
+    def test_autoprovisioned_user_can_access_summary(self):
+        from patient_portal.api.authentication import _ensure_person
+
+        user = User.objects.create_user(
+            username='autouser@example.com',
+            email='autouser@example.com',
+        )
+        _ensure_person(user)
+
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get('/api/lab-results/summary/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['results'], [])
 
 
 class VisitDeleteViewTest(TestCase):

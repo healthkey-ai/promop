@@ -62,7 +62,7 @@ export default defineConfig(({ mode }) => {
       target: "esnext",
     },
     server: {
-      port: 5176,
+      port: 3001,
       strictPort: true,
       proxy: {
         "/api": {

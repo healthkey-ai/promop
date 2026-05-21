@@ -270,10 +270,10 @@ function LabResultsInner({
 
   return (
     <div className="space-y-6">
-      <h2 className="text-lg font-semibold">Lab Results</h2>
+      <h2 className="text-lg font-medium text-foreground/70">Lab Results</h2>
       {categoryGroups.map(([category, groupCards]) => (
         <div key={category}>
-          <h3 className="mb-2 text-sm font-semibold text-foreground">
+          <h3 className="mb-2 text-sm font-semibold text-foreground/70">
             {category}
           </h3>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

@@ -43,8 +43,8 @@ class ScopedTokenPermission(BasePermission):
     def has_permission(self, request, view):
         token = request.auth
 
-        # Session auth: no OAuth2 token — fall back to user.is_authenticated
-        if token is None:
+        # Session auth or service-token: no OAuth2 token — fall back to user.is_authenticated
+        if token is None or token == "service-token":
             return bool(request.user and request.user.is_authenticated)
 
         if not hasattr(token, 'scope') or timezone.now() >= token.expires:

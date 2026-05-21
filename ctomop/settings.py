@@ -163,9 +163,23 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 
+# ── Pluggable partner auth providers ──────────────────────────────────────
+# PartnerAuthentication iterates these in order; the first provider that
+# recognises the bearer token wins.
+PARTNER_AUTH_PROVIDERS = [
+    "patient_portal.api.providers.firebase.FirebaseTokenProvider",
+]
+
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "healthtree-test")
+FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get("FIREBASE_SKIP_REVOCATION_CHECK", "true").lower() in ("1", "true")
+
 # REST Framework
+SERVICE_AUTH_TOKEN = os.environ.get("SERVICE_AUTH_TOKEN", "")
+
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        'patient_portal.api.authentication.ServiceTokenAuthentication',
+        'patient_portal.api.authentication.PartnerAuthentication',
         'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
         'rest_framework.authentication.BasicAuthentication',
         'patient_portal.api.authentication.CsrfExemptSessionAuthentication',
@@ -233,3 +247,31 @@ if not DEBUG:
         csrf_origins.append(render_url)
     
     CSRF_TRUSTED_ORIGINS = csrf_origins
+
+
+# ── Firebase Admin SDK ────────────────────────────────────────────────────
+def _init_firebase_admin():
+    import firebase_admin
+    from firebase_admin import credentials as fb_credentials
+
+    if firebase_admin._apps:
+        return
+
+    project_id = FIREBASE_PROJECT_ID
+    options = {"projectId": project_id} if project_id else {}
+
+    if os.environ.get("FIREBASE_AUTH_EMULATOR_HOST"):
+        class _EmulatorCredential(fb_credentials.Base):
+            def get_credential(self):
+                return None
+        cred = _EmulatorCredential()
+    else:
+        cred = fb_credentials.ApplicationDefault()
+
+    try:
+        firebase_admin.initialize_app(cred, options)
+    except ValueError:
+        pass
+
+
+_init_firebase_admin()
