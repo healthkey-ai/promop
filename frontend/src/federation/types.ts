@@ -57,3 +57,11 @@ export interface PaginatedResponse<T> {
   previous: string | null;
   results: T[];
 }
+
+export interface LabValuesResponse extends PaginatedResponse<LabResultValue> {
+  concept_id: number;
+  concept_code: string;
+  concept_name: string;
+  vocabulary_id: string;
+  category: string;
+}

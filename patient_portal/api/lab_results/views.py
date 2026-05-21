@@ -241,6 +241,9 @@ class ValuesView(APIView):
     """
     GET /api/lab-results/values/?concept_code=718-7&page=1&page_size=50[&person_id=X]
 
+    Returns paginated measurement values plus concept metadata (concept_name,
+    category, vocabulary_id) so the detail view doesn't need the summary endpoint.
+
     person_id is optional — when omitted, resolved from the authenticated user's email.
     """
     permission_classes = [ScopedTokenPermission]
@@ -271,6 +274,14 @@ class ValuesView(APIView):
                 {'detail': f'Concept with code {concept_code} not found.'},
                 status=status.HTTP_404_NOT_FOUND,
             )
+
+        category_cache = _build_category_cache()
+        if concept.vocabulary_id == 'LOINC':
+            category = category_cache.get(concept.concept_code, 'Uncategorized')
+        elif concept.vocabulary_id == 'HK-Labs':
+            category = 'Uncategorized'
+        else:
+            category = 'Other'
 
         measurements = (
             Measurement.objects
@@ -317,7 +328,13 @@ class ValuesView(APIView):
             })
 
         serializer = LabValueSerializer(values, many=True)
-        return paginator.get_paginated_response(serializer.data)
+        paginated = paginator.get_paginated_response(serializer.data)
+        paginated.data['concept_id'] = concept.concept_id
+        paginated.data['concept_code'] = concept.concept_code
+        paginated.data['concept_name'] = concept.concept_name
+        paginated.data['vocabulary_id'] = concept.vocabulary_id
+        paginated.data['category'] = category
+        return paginated
 
     def _load_provenance(self, measurements):
         visit_ids = {m.visit_occurrence_id for m in measurements if m.visit_occurrence_id}

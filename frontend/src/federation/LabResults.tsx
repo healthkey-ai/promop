@@ -3,7 +3,7 @@ import { ArrowLeft, Pencil, Trash2 } from "lucide-react";
 
 import { LabsProvider } from "./LabsProvider";
 import type { LabResultsProps, LabResultCard, LabResultValue } from "./types";
-import { useLabResultsSummary, useUpdateMeasurement, useDeleteMeasurement } from "./hooks";
+import { useLabResultsSummary, useLabValues, useUpdateMeasurement, useDeleteMeasurement } from "./hooks";
 import { ConfirmDeleteDialog } from "@/components/labs/ConfirmDeleteDialog";
 import { EditMeasurementDialog } from "@/components/labs/EditMeasurementDialog";
 import { LabValueCard } from "@/components/labs/LabValueCard";
@@ -14,28 +14,62 @@ import { LabTrendChart } from "@/components/labs/LabTrendChart";
 import { PaginationControls } from "@/components/labs/PaginationControls";
 import { Button } from "@/components/ui-labs/button";
 import { Card, CardContent } from "@/components/ui-labs/card";
-import { useLocalPagination } from "@/lib/pagination";
+import { useLocalPagination, type PageSize } from "@/lib/pagination";
 
 function ResultDetail({
-  card,
+  conceptCode,
   onBack,
   onResultDeleted,
 }: {
-  card: LabResultCard;
+  conceptCode: string;
   onBack: () => void;
   onResultDeleted?: (measurementId: number) => void;
 }) {
+  const { page, pageSize, setPage, setPageSize } = useLocalPagination(50);
+  const { data, isLoading, isError } = useLabValues({ conceptCode, page, pageSize });
   const updateMeasurement = useUpdateMeasurement();
   const deleteMeasurement = useDeleteMeasurement();
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [editingMeasurement, setEditingMeasurement] = useState<LabResultValue | null>(null);
 
-  const values = card.values;
+  const values = data?.results ?? [];
+  const totalCount = data?.count ?? 0;
   const latest = values[0];
-  const testName = card.concept_name;
-  const category = card.category;
+  const testName = data?.concept_name ?? "";
+  const category = data?.category ?? "";
   const isQualitative = latest && latest.value == null && latest.value_string != null;
   const unit = latest?.unit ?? "";
+
+  if (isError) {
+    return (
+      <div className="space-y-4">
+        <button
+          type="button"
+          onClick={onBack}
+          className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <ArrowLeft className="h-4 w-4" /> Back to results
+        </button>
+        <Card>
+          <CardContent className="p-6 text-center">
+            <p className="text-sm font-medium text-foreground">Something went wrong</p>
+            <p className="mt-1 text-sm text-muted-foreground">Could not load values.</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (isLoading) {
+    return (
+      <div className="space-y-4">
+        <div className="h-4 w-24 animate-pulse rounded bg-muted" />
+        <div className="h-6 w-48 animate-pulse rounded bg-muted" />
+        <div className="h-48 animate-pulse rounded-md bg-muted" />
+        <div className="h-32 animate-pulse rounded-md bg-muted" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -68,7 +102,7 @@ function ResultDetail({
         )}
       </div>
 
-      {!isQualitative && (
+      {!isQualitative && values.length > 0 && (
         <Card>
           <CardContent className="p-4">
             <LabTrendChart values={values} unit={unit} />
@@ -141,6 +175,15 @@ function ResultDetail({
             </ul>
           </Card>
         )}
+        {totalCount > pageSize && (
+          <PaginationControls
+            page={page}
+            pageSize={pageSize}
+            totalCount={totalCount}
+            onPageChange={setPage}
+            onPageSizeChange={setPageSize}
+          />
+        )}
       </div>
 
       <EditMeasurementDialog
@@ -180,11 +223,52 @@ function LabResultsInner({
   onResultDeleted,
 }: Pick<LabResultsProps, "selectedTest" | "onNavigateToDetail" | "onBack" | "onResultDeleted">) {
   const { page, pageSize, setPage, setPageSize } = useLocalPagination(50);
-  const { data, isLoading, isError } = useLabResultsSummary({ page, pageSize });
-  const totalCount = data?.count ?? 0;
   const [selectedTest, setSelectedTest] = useState<string | null>(null);
 
   const activeTest = selectedTestProp ?? selectedTest;
+
+  if (activeTest) {
+    return (
+      <ResultDetail
+        conceptCode={activeTest}
+        onBack={onBack ?? (() => setSelectedTest(null))}
+        onResultDeleted={onResultDeleted}
+      />
+    );
+  }
+
+  return (
+    <SummaryList
+      page={page}
+      pageSize={pageSize}
+      onPageChange={setPage}
+      onPageSizeChange={setPageSize}
+      onNavigate={(conceptCode) => {
+        if (onNavigateToDetail) {
+          onNavigateToDetail(conceptCode);
+        } else {
+          setSelectedTest(conceptCode);
+        }
+      }}
+    />
+  );
+}
+
+function SummaryList({
+  page,
+  pageSize,
+  onPageChange,
+  onPageSizeChange,
+  onNavigate,
+}: {
+  page: number;
+  pageSize: PageSize;
+  onPageChange: (p: number) => void;
+  onPageSizeChange: (s: PageSize) => void;
+  onNavigate: (conceptCode: string) => void;
+}) {
+  const { data, isLoading, isError } = useLabResultsSummary({ page, pageSize });
+  const totalCount = data?.count ?? 0;
 
   const cards = useMemo(() => data?.results ?? [], [data?.results]);
 
@@ -203,27 +287,6 @@ function LabResultsInner({
     });
   }, [cards]);
 
-  const handleNavigate = (conceptCode: string) => {
-    if (onNavigateToDetail) {
-      onNavigateToDetail(conceptCode);
-    } else {
-      setSelectedTest(conceptCode);
-    }
-  };
-
-  if (activeTest) {
-    const activeCard = cards.find((c) => c.concept_code === activeTest);
-    if (activeCard) {
-      return (
-        <ResultDetail
-          card={activeCard}
-          onBack={onBack ?? (() => setSelectedTest(null))}
-          onResultDeleted={onResultDeleted}
-        />
-      );
-    }
-  }
-
   if (isError) {
     return (
       <Card>
@@ -231,7 +294,7 @@ function LabResultsInner({
           <p className="text-sm font-medium text-foreground">Something went wrong</p>
           <p className="mt-1 text-sm text-muted-foreground">
             Could not load results.{" "}
-            <Button type="button" variant="link" className="h-auto p-0" onClick={() => setPage(1)}>
+            <Button type="button" variant="link" className="h-auto p-0" onClick={() => onPageChange(1)}>
               Go to page 1
             </Button>
           </p>
@@ -281,7 +344,7 @@ function LabResultsInner({
               <LabValueCard
                 key={card.concept_id}
                 card={card}
-                onNavigate={handleNavigate}
+                onNavigate={onNavigate}
               />
             ))}
           </div>
@@ -292,8 +355,8 @@ function LabResultsInner({
           page={page}
           pageSize={pageSize}
           totalCount={totalCount}
-          onPageChange={setPage}
-          onPageSizeChange={setPageSize}
+          onPageChange={onPageChange}
+          onPageSizeChange={onPageSizeChange}
         />
       )}
     </div>

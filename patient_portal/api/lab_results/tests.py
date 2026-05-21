@@ -290,6 +290,18 @@ class ValuesViewTest(TestCase):
         self.assertEqual(len(resp.data['results']), 3)
         self.assertEqual(resp.data['results'][0]['measurement_id'], 102)
 
+    def test_values_includes_concept_metadata(self):
+        resp = self.client.get('/api/lab-results/values/', {
+            'person_id': 3001,
+            'concept_code': '718-7',
+        })
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['concept_id'], 3000963)
+        self.assertEqual(resp.data['concept_code'], '718-7')
+        self.assertEqual(resp.data['concept_name'], 'Hemoglobin [Mass/volume] in Blood')
+        self.assertEqual(resp.data['vocabulary_id'], 'LOINC')
+        self.assertEqual(resp.data['category'], 'Hematology')
+
     def test_values_resolves_person_from_email(self):
         self.user.email = 'valreader@example.com'
         self.user.save()

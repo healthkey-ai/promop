@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { AxiosInstance } from "axios";
-import type { LabResultCard, LabResultValue, PaginatedResponse } from "./types";
+import type { LabResultCard, PaginatedResponse, LabValuesResponse } from "./types";
 
 const KEYS = {
   summary: (params: Record<string, unknown>) => ["labs", "summary", params] as const,
@@ -48,7 +48,7 @@ export function useLabValues(
   return useQuery({
     queryKey: KEYS.values(params.conceptCode, { page: params.page, pageSize: params.pageSize }),
     queryFn: async () => {
-      const resp = await apiClient!.get<PaginatedResponse<LabResultValue>>(
+      const resp = await apiClient!.get<LabValuesResponse>(
         "/lab-results/values/",
         {
           params: {
