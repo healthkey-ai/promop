@@ -59,6 +59,9 @@ class PartnerAuthentication(BaseAuthentication):
 
         return None
 
+    def authenticate_header(self, request):
+        return "Bearer"
+
     @staticmethod
     def _get_or_create(provider, claims, field, value):
         created = False
@@ -135,6 +138,9 @@ class ServiceTokenAuthentication(BaseAuthentication):
             return None
 
         return (user, "service-token")
+
+    def authenticate_header(self, request):
+        return "Bearer"
 
 
 class CsrfExemptSessionAuthentication(SessionAuthentication):
