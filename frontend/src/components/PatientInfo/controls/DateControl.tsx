@@ -1,5 +1,4 @@
-import React from "react";
-import { Input } from "../../shadcn/input";
+import { Input } from "@/components/shadcn/input";
 
 export default function DateControl({
   value,

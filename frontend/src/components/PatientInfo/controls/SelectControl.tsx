@@ -1,11 +1,11 @@
-import React, { useMemo } from "react";
+import { useMemo } from "react";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "../../shadcn/select";
+} from "@/components/shadcn/select";
 
 type Option = { value: unknown; label: string };
 

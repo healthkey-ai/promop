@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import api from '../api/axios';
+import { useState, useEffect } from "react";
+import api from "@/api/axios";
 
 export interface VocabOption {
   value: string;
@@ -16,22 +16,11 @@ interface CacheEntry {
   source: VocabSource | null;
 }
 
-// Module-level cache so the same vocabulary is never fetched twice across components.
 const cache = new Map<string, CacheEntry>();
 
-/**
- * Fetch a controlled vocabulary from GET /api/vocabularies/{modelName}/.
- *
- * @param modelName  The model name slug, e.g. 'ethnicity', 'toxicity-grade'.
- * @param valueField 'title' — use the display title as the option value (backward-compatible
- *                             for text fields that already store the title string in the DB).
- *                   'code'  — use the code as the option value (for integer/coded fields;
- *                             integer codes are returned as strings so existing parseInt
- *                             handlers in onChange work unchanged).
- */
 export const useVocabulary = (
   modelName: string,
-  valueField: 'code' | 'title' = 'title',
+  valueField: "code" | "title" = "title",
 ): { options: VocabOption[]; loading: boolean; source: VocabSource | null } => {
   const cacheKey = `${modelName}:${valueField}`;
   const cached = cache.get(cacheKey);
@@ -43,6 +32,7 @@ export const useVocabulary = (
     if (cache.has(cacheKey)) return;
 
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
     setLoading(true);
 
     api
@@ -51,7 +41,7 @@ export const useVocabulary = (
         if (cancelled) return;
         const data: { code: string | number; title: string; source_name?: string; source_url?: string }[] = res.data;
         const opts: VocabOption[] = data.map((item) => ({
-          value: valueField === 'code' ? String(item.code) : item.title,
+          value: valueField === "code" ? String(item.code) : item.title,
           label: item.title,
         }));
         const first = data[0];
@@ -63,9 +53,7 @@ export const useVocabulary = (
         setOptions(opts);
         setSource(src);
       })
-      .catch((err) => {
-        console.error(`useVocabulary: failed to fetch "${modelName}":`, err);
-      })
+      .catch(() => {})
       .finally(() => {
         if (!cancelled) setLoading(false);
       });

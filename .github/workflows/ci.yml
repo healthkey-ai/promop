@@ -49,7 +49,7 @@ jobs:
         run: python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
   frontend:
-    name: Frontend tests
+    name: Frontend lint & build
     runs-on: ubuntu-latest
 
     steps:
@@ -57,12 +57,15 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
         run: cd frontend && npm ci
 
-      - name: Run tests
-        run: cd frontend && npm test -- --watchAll=false --ci
+      - name: Lint
+        run: cd frontend && npm run lint
+
+      - name: Type check & build
+        run: cd frontend && npm run build

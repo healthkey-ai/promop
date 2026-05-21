@@ -1,10 +1,9 @@
-import React from 'react';
 import Field from '../Field';
 import Section from '../Section';
 
 interface Props {
-  formData: any;
-  onChange: (field: string, value: any) => void;
+  formData: Record<string, unknown>;
+  onChange: (field: string, value: unknown) => void;
 }
 
 export default function BloodTab({ formData, onChange }: Props) {

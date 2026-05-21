@@ -1,6 +1,5 @@
-import React from 'react';
-import { useVocabulary } from '../../../hooks/useVocabulary';
-import { Button } from '../../shadcn/button';
+import { useVocabulary } from '@/hooks/useVocabulary';
+import { Button } from '@/components/shadcn/button';
 import Field from '../Field';
 import Section from '../Section';
 import SelectControl from '../controls/SelectControl';
@@ -20,8 +19,8 @@ import {
 } from '../patientConstants';
 
 interface Props {
-  formData: any;
-  onChange: (field: string, value: any) => void;
+  formData: Record<string, unknown>;
+  onChange: (field: string, value: unknown) => void;
   onMutationAdd: () => void;
   onMutationRemove: (index: number) => void;
   onMutationChange: (index: number, field: string, value: string) => void;
@@ -40,8 +39,8 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
   const { source: stagingModalitySource } = useVocabulary('staging-modality', 'title');
   const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
 
-  const histOptions = histologicOptions.length ? histologicOptions.map((o: any) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
-  const mutations = formData?.genetic_mutations || [];
+  const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
+  const mutations = (formData?.genetic_mutations || []) as { gene: string; mutation: string; origin: string; interpretation: string }[];
 
   return (
     <>
@@ -107,7 +106,7 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
           <Button variant="outline" size="sm" onClick={onMutationAdd}>Add Mutation</Button>
         </div>
 
-        {mutations.map((mutation: any, index: number) => (
+        {mutations.map((mutation: { gene: string; mutation: string; origin: string; interpretation: string }, index: number) => (
           <div key={index} className="mb-4 p-4 border border-portal-border rounded-md">
             <div className="flex items-center justify-between mb-3">
               <span className="text-sm font-medium text-portal-text-primary">Mutation {index + 1}</span>
@@ -173,7 +172,7 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
   const { source: flipiSource }   = useVocabulary('flipi-score', 'code');
   const { source: flGradeSource } = useVocabulary('follicular-lymphoma-grade', 'title');
   const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
-  const histOptions = histologicOptions.length ? histologicOptions.map((o: any) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
+  const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
 
   return (
     <>
@@ -306,7 +305,7 @@ function CLLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>
 
 function OtherSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
   const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
-  const histOptions = histologicOptions.length ? histologicOptions.map((o: any) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
+  const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
 
   return (
     <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">

@@ -1,22 +1,20 @@
 import axios from 'axios';
-import { ACCESS_TOKEN_KEY, refreshAccessToken, clearTokens } from '../utils/oauth';
+import { ACCESS_TOKEN_KEY, refreshAccessToken, clearTokens } from '@/utils/oauth';
 
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: import.meta.env.VITE_API_URL || '/api',
   headers: {
     'Content-Type': 'application/json',
   },
   withCredentials: true,
 });
 
-// Attach Bearer token (OAuth2) or fall back to CSRF (session auth)
 api.interceptors.request.use(
   (config) => {
     const accessToken = sessionStorage.getItem(ACCESS_TOKEN_KEY);
     if (accessToken) {
       config.headers['Authorization'] = `Bearer ${accessToken}`;
     } else {
-      // Session-based fallback: attach CSRF token
       const csrfToken = document.cookie
         .split('; ')
         .find(row => row.startsWith('csrftoken='))
@@ -30,7 +28,6 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// On 401: try a silent token refresh once, then redirect to login
 let isRefreshing = false;
 let failedQueue: Array<{ resolve: (v: unknown) => void; reject: (e: unknown) => void }> = [];
 
@@ -73,7 +70,6 @@ api.interceptors.response.use(
         isRefreshing = false;
       }
 
-      // Refresh failed — clear tokens and redirect to login
       clearTokens();
       if (!window.location.pathname.includes('/login')) {
         window.location.href = '/login';
@@ -85,12 +81,8 @@ api.interceptors.response.use(
 );
 
 export default api;
-// ---------------------------------------------------------------------------
-// OMOP write API helpers
-// ---------------------------------------------------------------------------
 
 export const omopApi = {
-  // OMOP clinical event tables (filter by ?person_id=N)
   conditions: {
     list: (personId: number) => api.get(`/conditions/?person_id=${personId}`),
     create: (data: Record<string, unknown>) => api.post('/conditions/', data),
@@ -123,8 +115,6 @@ export const omopApi = {
     create: (data: Record<string, unknown>) => api.post('/episodes/', data),
     update: (id: number, data: Record<string, unknown>) => api.patch(`/episodes/${id}/`, data),
   },
-
-  // HealthTree parity tables
   patientConditions: {
     list: (personId: number) => api.get(`/patient-conditions/?person_id=${personId}`),
     create: (data: Record<string, unknown>) => api.post('/patient-conditions/', data),

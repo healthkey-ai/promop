@@ -1,8 +1,7 @@
-import React from 'react';
-import { useVocabulary } from '../../../hooks/useVocabulary';
+import { useVocabulary } from '@/hooks/useVocabulary';
 import Field from '../Field';
 import Section from '../Section';
-import { Input } from '../../shadcn/input';
+import { Input } from '@/components/shadcn/input';
 import {
   GENDER_OPTIONS, COUNTRY_OPTIONS, US_STATES, ETHNICITY_OPTIONS,
   DISEASE_OPTIONS, STAGE_OPTIONS, HISTOLOGIC_TYPE_OPTIONS,
@@ -10,8 +9,8 @@ import {
 } from '../patientConstants';
 
 interface Props {
-  formData: any;
-  onChange: (field: string, value: any) => void;
+  formData: Record<string, unknown>;
+  onChange: (field: string, value: unknown) => void;
   editedName: string;
   onNameChange: (name: string) => void;
   onZipcodeChange: (zip: string) => void;
@@ -35,8 +34,8 @@ export default function GeneralTab({ formData, onChange, editedName, onNameChang
   const { source: ethnicitySource }   = useVocabulary('ethnicity', 'title');
   const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
 
-  const age = formData?.date_of_birth ? calculateAge(formData.date_of_birth) : null;
-  const histOptions = histologicOptions.length ? histologicOptions.map((o: any) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
+  const age = formData?.date_of_birth ? calculateAge(formData.date_of_birth as string) : null;
+  const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
 
   return (
     <div>
@@ -76,7 +75,7 @@ export default function GeneralTab({ formData, onChange, editedName, onNameChang
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-portal-text-primary">Postal Code / Zip Code</label>
             <Input
-              value={formData?.postal_code || ''}
+              value={(formData?.postal_code as string) || ''}
               onChange={(e) => onZipcodeChange(e.target.value)}
               placeholder="Enter 5-digit US zip code to auto-fill city and state"
             />

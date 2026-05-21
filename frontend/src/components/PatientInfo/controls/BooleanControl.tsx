@@ -1,4 +1,3 @@
-import React from "react";
 import SelectControl from "./SelectControl";
 
 export default function BooleanControl({
