@@ -8,9 +8,9 @@ no external calls) before the real verify() is invoked.
 from __future__ import annotations
 
 import logging
-import traceback
 
 from rest_framework.authentication import BaseAuthentication, SessionAuthentication
+from rest_framework.exceptions import AuthenticationFailed
 
 from patient_portal.models import Identity
 
@@ -40,13 +40,14 @@ class PartnerAuthentication(BaseAuthentication):
 
             try:
                 claims = provider.verify(token)
-            except Exception:
-                logger.error(
-                    "partner_auth: %s.verify raised:\n%s",
-                    type(provider).__name__,
-                    traceback.format_exc(),
-                )
+            except AuthenticationFailed:
                 raise
+            except Exception:
+                logger.warning(
+                    "partner_auth: %s.verify failed",
+                    type(provider).__name__,
+                )
+                continue
 
             if claims is None:
                 continue
@@ -75,6 +76,7 @@ class PartnerAuthentication(BaseAuthentication):
 
 def _ensure_person(identity, claims=None):
     """Auto-provision an OMOP Person + PatientInfo + PatientUser."""
+    from django.db import transaction
     from omop_core.models import PatientInfo, Person
     from patient_portal.models import PatientUser
 
@@ -87,29 +89,33 @@ def _ensure_person(identity, claims=None):
     elif identity.email:
         email = identity.email
 
-    if email and PatientInfo.objects.filter(email=email).exists():
-        return
-
-    last = Person.objects.order_by("-person_id").first()
-    new_id = (last.person_id + 1) if last else 1000
-
-    person = Person.objects.create(
-        person_id=new_id,
-        year_of_birth=1900,
-        gender_source_value="unknown",
-        race_source_value="unknown",
-        ethnicity_source_value="unknown",
-    )
     if email:
-        PatientInfo.objects.create(person=person, email=email)
+        pi = PatientInfo.objects.filter(email=email).first()
+        if pi:
+            PatientUser.objects.get_or_create(identity=identity, defaults={'person': pi.person})
+            return
 
-    PatientUser.objects.create(
-        identity=identity,
-        person=person,
-    )
+    with transaction.atomic():
+        last = Person.objects.select_for_update().order_by("-person_id").first()
+        new_id = (last.person_id + 1) if last else 1000
+
+        person = Person.objects.create(
+            person_id=new_id,
+            year_of_birth=1900,
+            gender_source_value="unknown",
+            race_source_value="unknown",
+            ethnicity_source_value="unknown",
+        )
+        if email:
+            PatientInfo.objects.create(person=person, email=email)
+
+        PatientUser.objects.create(
+            identity=identity,
+            person=person,
+        )
     logger.info(
-        "partner_auth: auto-provisioned Person %d for identity %s",
-        new_id, identity,
+        "partner_auth: auto-provisioned Person %d for identity pk=%d",
+        new_id, identity.pk,
     )
 
 

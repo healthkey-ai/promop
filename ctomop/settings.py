@@ -27,7 +27,14 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-your-default-key-chan
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
-ALLOWED_HOSTS = ['*']
+if DEBUG:
+    ALLOWED_HOSTS = ['*']
+else:
+    ALLOWED_HOSTS = [
+        h.strip()
+        for h in os.environ.get('ALLOWED_HOSTS', '').split(',')
+        if h.strip()
+    ]
 
 # Application definition
 INSTALLED_APPS = [
@@ -180,20 +187,27 @@ PARTNER_AUTH_PROVIDERS = [
     "patient_portal.api.providers.firebase.FirebaseTokenProvider",
 ]
 
-FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "healthtree-test")
-FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get("FIREBASE_SKIP_REVOCATION_CHECK", "true").lower() in ("1", "true")
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "healthtree-test" if DEBUG else "")
+FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(
+    "FIREBASE_SKIP_REVOCATION_CHECK", "true" if DEBUG else "false"
+).lower() in ("1", "true")
 
 # REST Framework
 SERVICE_AUTH_TOKEN = os.environ.get("SERVICE_AUTH_TOKEN", "")
 
-REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': [
-        'patient_portal.api.authentication.ServiceTokenAuthentication',
-        'patient_portal.api.authentication.PartnerAuthentication',
-        'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
+_auth_classes = [
+    'patient_portal.api.authentication.ServiceTokenAuthentication',
+    'patient_portal.api.authentication.PartnerAuthentication',
+    'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
+]
+if DEBUG:
+    _auth_classes += [
         'rest_framework.authentication.BasicAuthentication',
         'patient_portal.api.authentication.CsrfExemptSessionAuthentication',
-    ],
+    ]
+
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': _auth_classes,
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],

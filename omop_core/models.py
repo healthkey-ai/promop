@@ -251,6 +251,12 @@ class Concept(models.Model):
 
     class Meta:
         db_table = 'concept'
+        indexes = [
+            models.Index(
+                fields=['vocabulary_id', 'concept_code'],
+                name='ix_concept_vocab_code',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.concept_id}: {self.concept_name}"
@@ -1019,7 +1025,7 @@ class PatientInfo(models.Model):
     person = models.OneToOneField(Person, on_delete=models.CASCADE, related_name='patient_info')
     
     # General Information
-    email = models.EmailField(max_length=255, null=True, blank=True)
+    email = models.EmailField(max_length=255, null=True, blank=True, db_index=True)
     date_of_birth = models.DateField(null=True, blank=True)
     
     # Demographics

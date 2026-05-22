@@ -1,6 +1,7 @@
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 
+from django.contrib.contenttypes.models import ContentType
 from django.db.models import Q as models_Q
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
@@ -9,13 +10,45 @@ from rest_framework.views import APIView
 
 from omop_core.models import (
     CareSite, Concept, LoincClass, LoincCodeClass,
-    Measurement, PatientInfo, VisitOccurrence,
+    Measurement, PatientInfo, ProvenanceRecord, VisitOccurrence,
 )
 from patient_portal.api.permissions import ScopedTokenPermission, get_request_org
 
 from .serializers import LabResultCardSerializer, LabValueSerializer
 
 MAX_VALUES_PER_CONCEPT = 10
+
+
+def _load_visit_provenance(visit_ids):
+    """Load lab_name + report_filename for a set of visit_occurrence_ids."""
+    if not visit_ids:
+        return {}
+
+    visits = VisitOccurrence.objects.filter(
+        visit_occurrence_id__in=visit_ids
+    ).values('visit_occurrence_id', 'care_site_id', 'visit_source_value')
+
+    care_site_ids = set()
+    visit_data = {}
+    for v in visits:
+        visit_data[v['visit_occurrence_id']] = v
+        if v['care_site_id']:
+            care_site_ids.add(v['care_site_id'])
+
+    care_site_names = {}
+    if care_site_ids:
+        care_site_names = dict(
+            CareSite.objects.filter(care_site_id__in=care_site_ids)
+            .values_list('care_site_id', 'care_site_name')
+        )
+
+    result = {}
+    for vid, v in visit_data.items():
+        result[vid] = {
+            'lab_name': care_site_names.get(v['care_site_id']) if v['care_site_id'] else None,
+            'report_filename': v['visit_source_value'],
+        }
+    return result
 
 
 def _resolve_person_id(request):
@@ -95,6 +128,9 @@ MEASUREMENT_TYPE_LABELS = {
 }
 
 
+from functools import lru_cache
+
+@lru_cache(maxsize=1)
 def _build_category_cache():
     """Build LOINC concept_code → category display name cache."""
     class_names = dict(LoincClass.objects.values_list('code', 'display_name'))
@@ -231,41 +267,12 @@ class ResultsSummaryView(APIView):
         return cards
 
     def _load_provenance(self, concept_groups):
-        """Load lab_name + report_filename for all visit_occurrence_ids referenced."""
         visit_ids = set()
         for meas_list in concept_groups.values():
             for m in meas_list:
                 if m.visit_occurrence_id:
                     visit_ids.add(m.visit_occurrence_id)
-
-        if not visit_ids:
-            return {}
-
-        visits = VisitOccurrence.objects.filter(
-            visit_occurrence_id__in=visit_ids
-        ).values('visit_occurrence_id', 'care_site_id', 'visit_source_value')
-
-        care_site_ids = set()
-        visit_data = {}
-        for v in visits:
-            visit_data[v['visit_occurrence_id']] = v
-            if v['care_site_id']:
-                care_site_ids.add(v['care_site_id'])
-
-        care_site_names = {}
-        if care_site_ids:
-            care_site_names = dict(
-                CareSite.objects.filter(care_site_id__in=care_site_ids)
-                .values_list('care_site_id', 'care_site_name')
-            )
-
-        result = {}
-        for vid, v in visit_data.items():
-            result[vid] = {
-                'lab_name': care_site_names.get(v['care_site_id']) if v['care_site_id'] else None,
-                'report_filename': v['visit_source_value'],
-            }
-        return result
+        return _load_visit_provenance(visit_ids)
 
 
 class ValuesView(APIView):
@@ -299,7 +306,10 @@ class ValuesView(APIView):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-        concept = Concept.objects.filter(concept_code=concept_code).first()
+        concept = Concept.objects.filter(
+            concept_code=concept_code,
+            vocabulary_id__in=['LOINC', 'HK-Labs'],
+        ).first()
         if not concept:
             return Response(
                 {'detail': f'Concept with code {concept_code} not found.'},
@@ -369,34 +379,7 @@ class ValuesView(APIView):
 
     def _load_provenance(self, measurements):
         visit_ids = {m.visit_occurrence_id for m in measurements if m.visit_occurrence_id}
-        if not visit_ids:
-            return {}
-
-        visits = VisitOccurrence.objects.filter(
-            visit_occurrence_id__in=visit_ids
-        ).values('visit_occurrence_id', 'care_site_id', 'visit_source_value')
-
-        care_site_ids = set()
-        visit_data = {}
-        for v in visits:
-            visit_data[v['visit_occurrence_id']] = v
-            if v['care_site_id']:
-                care_site_ids.add(v['care_site_id'])
-
-        care_site_names = {}
-        if care_site_ids:
-            care_site_names = dict(
-                CareSite.objects.filter(care_site_id__in=care_site_ids)
-                .values_list('care_site_id', 'care_site_name')
-            )
-
-        result = {}
-        for vid, v in visit_data.items():
-            result[vid] = {
-                'lab_name': care_site_names.get(v['care_site_id']) if v['care_site_id'] else None,
-                'report_filename': v['visit_source_value'],
-            }
-        return result
+        return _load_visit_provenance(visit_ids)
 
 
 class MeasurementDetailView(APIView):
@@ -499,7 +482,17 @@ class MeasurementDetailView(APIView):
             updated = True
 
         if 'measured_at' in data:
-            m.measurement_date = data['measured_at']
+            from datetime import date as date_type
+            try:
+                if isinstance(data['measured_at'], str):
+                    m.measurement_date = date_type.fromisoformat(data['measured_at'])
+                else:
+                    m.measurement_date = data['measured_at']
+            except (ValueError, TypeError):
+                return Response(
+                    {'detail': 'Invalid measured_at date.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             updated = True
 
         if 'range_low' in data:
@@ -530,6 +523,14 @@ class MeasurementDetailView(APIView):
 
         if updated:
             m.save()
+            ProvenanceRecord.objects.create(
+                source='ADMIN_CORRECTION',
+                source_user_id=f"{getattr(request.user, 'issuer', '')}|{getattr(request.user, 'sub', '')}",
+                target_patient_id=str(m.person_id),
+                modification_reason='measurement_update',
+                content_type=ContentType.objects.get_for_model(Measurement),
+                object_id=measurement_id,
+            )
 
         return Response({'detail': 'Updated.'}, status=status.HTTP_200_OK)
 
@@ -540,6 +541,15 @@ class MeasurementDetailView(APIView):
                 {'detail': 'Measurement not found.'},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        person_id = m.person_id
+        ProvenanceRecord.objects.create(
+            source='ADMIN_CORRECTION',
+            source_user_id=f"{getattr(request.user, 'issuer', '')}|{getattr(request.user, 'sub', '')}",
+            target_patient_id=str(person_id),
+            modification_reason='measurement_delete',
+            content_type=ContentType.objects.get_for_model(Measurement),
+            object_id=measurement_id,
+        )
         m.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -586,6 +596,15 @@ class VisitDeleteView(APIView):
                     {'detail': 'Visit not found.'},
                     status=status.HTTP_404_NOT_FOUND,
                 )
+
+        ProvenanceRecord.objects.create(
+            source='ADMIN_CORRECTION',
+            source_user_id=f"{getattr(request.user, 'issuer', '')}|{getattr(request.user, 'sub', '')}",
+            target_patient_id=str(visit.person_id),
+            modification_reason='visit_delete',
+            content_type=ContentType.objects.get_for_model(VisitOccurrence),
+            object_id=visit_id,
+        )
 
         meas_count, _ = Measurement.objects.filter(
             visit_occurrence=visit,

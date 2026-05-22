@@ -192,22 +192,55 @@ class SyncView(APIView):
             else DOCUMENT_EXTRACTION_CONCEPT_ID
         )
 
+        # Pre-fetch required concepts to avoid N+1 queries
+        visit_concept = Concept.objects.filter(concept_id=OUTPATIENT_VISIT_CONCEPT_ID).first()
+        type_concept = Concept.objects.filter(concept_id=type_concept_id).first()
+        if not visit_concept:
+            return Response(
+                {'detail': f'Required OMOP concept {OUTPATIENT_VISIT_CONCEPT_ID} (Outpatient Visit) not found. Run vocabulary import.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        if not type_concept:
+            return Response(
+                {'detail': f'Required OMOP concept {type_concept_id} not found. Run vocabulary import.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        items = data['measurements']
+        loinc_codes = {item.get('loinc_code') for item in items if item.get('loinc_code')}
+        loinc_cache = {}
+        if loinc_codes:
+            loinc_cache = {
+                c.concept_code: c
+                for c in Concept.objects.filter(vocabulary_id='LOINC', concept_code__in=loinc_codes)
+            }
+        unit_codes = {item.get('unit') for item in items if item.get('unit')}
+        ucum_cache = {}
+        if unit_codes:
+            ucum_cache = {
+                c.concept_code: c.concept_id
+                for c in Concept.objects.filter(vocabulary_id='UCUM', concept_code__in=unit_codes)
+            }
+
         care_site = self._get_or_create_care_site(data.get('lab_name'))
         visit = self._create_visit_occurrence(
             person_id=person_id,
             care_site=care_site,
             lab_date=data.get('lab_date') or date.today(),
             report_filename=data.get('report_filename'),
-            type_concept_id=type_concept_id,
+            visit_concept=visit_concept,
+            type_concept=type_concept,
         )
 
         measurement_ids = []
-        for item in data['measurements']:
+        for item in items:
             m_id = self._create_measurement(
                 person_id=person_id,
                 item=item,
                 visit=visit,
-                type_concept_id=type_concept_id,
+                type_concept=type_concept,
+                loinc_cache=loinc_cache,
+                ucum_cache=ucum_cache,
             )
             measurement_ids.append(m_id)
 
@@ -293,7 +326,7 @@ class SyncView(APIView):
                 PatientUser.objects.create(identity=identity, person=pi.person)
                 return pi.person_id
 
-        last = Person.objects.order_by("-person_id").first()
+        last = Person.objects.select_for_update().order_by("-person_id").first()
         new_id = (last.person_id + 1) if last else 1000
         person = Person.objects.create(
             person_id=new_id,
@@ -318,22 +351,8 @@ class SyncView(APIView):
             care_site_source_value=lab_name[:50],
         )
 
-    def _create_visit_occurrence(self, person_id, care_site, lab_date, report_filename, type_concept_id):
+    def _create_visit_occurrence(self, person_id, care_site, lab_date, report_filename, visit_concept, type_concept):
         visit_id = _next_pk(VisitOccurrence, 'visit_occurrence_id')
-        visit_concept = Concept.objects.filter(concept_id=OUTPATIENT_VISIT_CONCEPT_ID).first()
-        type_concept = Concept.objects.filter(concept_id=type_concept_id).first()
-
-        if not visit_concept:
-            raise ValueError(
-                f"Required OMOP concept {OUTPATIENT_VISIT_CONCEPT_ID} (Outpatient Visit) not found. "
-                "Run vocabulary import before syncing."
-            )
-        if not type_concept:
-            raise ValueError(
-                f"Required OMOP concept {type_concept_id} not found. "
-                "Run vocabulary import before syncing."
-            )
-
         return VisitOccurrence.objects.create(
             visit_occurrence_id=visit_id,
             person_id=person_id,
@@ -345,7 +364,7 @@ class SyncView(APIView):
             visit_source_value=(report_filename or '')[:50],
         )
 
-    def _create_measurement(self, person_id, item, visit, type_concept_id):
+    def _create_measurement(self, person_id, item, visit, type_concept, loinc_cache, ucum_cache):
         loinc_code = item.get('loinc_code')
         test_name = item['test_name']
 
@@ -354,10 +373,7 @@ class SyncView(APIView):
         measurement_source_value = item.get('match_method') or ''
 
         if loinc_code:
-            concept = Concept.objects.filter(
-                vocabulary_id='LOINC',
-                concept_code=loinc_code,
-            ).first()
+            concept = loinc_cache.get(loinc_code)
             if concept:
                 measurement_concept_id = concept.concept_id
             else:
@@ -370,19 +386,7 @@ class SyncView(APIView):
         unit_concept_id = None
         unit_str = item.get('unit')
         if unit_str:
-            ucum_concept = Concept.objects.filter(
-                vocabulary_id='UCUM',
-                concept_code=unit_str,
-            ).first()
-            if ucum_concept:
-                unit_concept_id = ucum_concept.concept_id
-
-        type_concept = Concept.objects.filter(concept_id=type_concept_id).first()
-        if not type_concept:
-            raise ValueError(
-                f"Required OMOP concept {type_concept_id} not found. "
-                "Run vocabulary import before syncing."
-            )
+            unit_concept_id = ucum_cache.get(unit_str)
 
         m_id = _next_pk(Measurement, 'measurement_id')
         Measurement.objects.create(
