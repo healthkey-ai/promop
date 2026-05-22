@@ -35,7 +35,6 @@ class TokenClaims:
 
     issuer: str
     sub: str
-    uid: str
     email: str
     name: str | None
     raw: dict[str, Any]
@@ -46,8 +45,8 @@ class TokenProvider(abc.ABC):
 
     Each concrete provider knows how to verify a specific kind of bearer
     token (Firebase ID token, a foreign JWT signed with a shared secret,
-    an opaque OAuth2 access token, etc.) and map it to a local user
-    via a lookup field on the User model.
+    an opaque OAuth2 access token, etc.) and resolve to an Identity via
+    the (issuer, sub) tuple.
     """
 
     @abc.abstractmethod
@@ -60,15 +59,3 @@ class TokenProvider(abc.ABC):
         """Return normalized claims if *token* is valid, or None if
         verification fails.  Raise AuthenticationFailed for tokens that
         are recognised but invalid/expired."""
-
-    @abc.abstractmethod
-    def user_lookup(self, claims: TokenClaims) -> tuple[str, str]:
-        """Return (field_name, field_value) used to find or create the
-        local User.  Example: ("email", "user@example.com")."""
-
-    def provision_defaults(self, claims: TokenClaims) -> dict[str, Any]:
-        """Extra field defaults when auto-creating a new User."""
-        defaults: dict[str, Any] = {}
-        if claims.email:
-            defaults["email"] = claims.email
-        return defaults

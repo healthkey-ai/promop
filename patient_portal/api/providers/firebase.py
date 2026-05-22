@@ -44,11 +44,7 @@ class FirebaseTokenProvider(TokenProvider):
         return TokenClaims(
             issuer=decoded.get("iss", ""),
             sub=decoded["uid"],
-            uid=decoded["uid"],
             email=decoded.get("email", ""),
             name=decoded.get("name"),
             raw=decoded,
         )
-
-    def user_lookup(self, claims: TokenClaims) -> tuple[str, str]:
-        return ("email", claims.email)
