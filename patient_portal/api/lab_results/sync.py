@@ -131,9 +131,10 @@ class SyncView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # Authorization: resolve actor and check access
+        # Authorization: check access only when actor is explicitly identified
         actor_identity = self._resolve_actor_identity(actor_iss, actor_sub, request.user)
-        if actor_identity and is_on_behalf_of:
+        has_explicit_actor = bool(actor_iss and actor_sub)
+        if has_explicit_actor and actor_identity and is_on_behalf_of:
             if not can_access_patient(actor_identity, person_id):
                 return Response(
                     {'detail': 'Actor does not have access to this patient.'},
