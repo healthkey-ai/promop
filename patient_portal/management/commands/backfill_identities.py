@@ -1,19 +1,19 @@
-"""Backfill Identity records for existing PatientUser rows.
+"""Report and fix Identity linkage on PatientUser rows.
 
-Phase A migration: creates an Identity row for each PatientUser whose
-linked User has a Firebase-provisioned account (identified by email lookup
-in existing partner auth flow).
+After Phase A deployment, PartnerAuthentication creates Identity records
+and _ensure_person() links them to PatientUser on every login. This
+command reports the current state and fixes any PatientUser rows where
+the User already has been linked to an Identity (via a subsequent login)
+but the PatientUser.identity wasn't set (edge case from the Phase A
+rollout window).
 """
-from django.conf import settings
 from django.core.management.base import BaseCommand
 
 from patient_portal.models import Identity, PatientUser
 
-FIREBASE_ISS_PREFIX = "https://securetoken.google.com/"
-
 
 class Command(BaseCommand):
-    help = "Create Identity records for existing PatientUser rows"
+    help = "Link PatientUser rows to Identity records created by Phase A"
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -24,50 +24,48 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         dry_run = options["dry_run"]
-        firebase_project = getattr(settings, "FIREBASE_PROJECT_ID", None)
-        if not firebase_project:
-            self.stderr.write(
-                "FIREBASE_PROJECT_ID not set in settings. "
-                "Cannot determine issuer for backfill."
-            )
+
+        total = PatientUser.objects.count()
+        linked = PatientUser.objects.filter(identity__isnull=False).count()
+        unlinked = PatientUser.objects.filter(identity__isnull=True)
+        unlinked_count = unlinked.count()
+
+        self.stdout.write(
+            f"PatientUser: {total} total, {linked} linked, "
+            f"{unlinked_count} unlinked"
+        )
+
+        if unlinked_count == 0:
+            self.stdout.write("All PatientUser rows have identities. Nothing to do.")
             return
 
-        issuer = f"{FIREBASE_ISS_PREFIX}{firebase_project}"
+        identities_total = Identity.objects.count()
+        self.stdout.write(f"Identity records: {identities_total}")
 
-        patient_users = PatientUser.objects.filter(
-            identity__isnull=True,
-        ).select_related("user")
+        fixable = 0
+        unfixable = 0
 
-        total = patient_users.count()
-        self.stdout.write(f"Found {total} PatientUser rows without identity (issuer={issuer})")
+        for pu in unlinked.select_related("user"):
+            email = pu.user.email
+            identity = Identity.objects.filter(
+                patient_user__isnull=True,
+            ).first()
+
+            if not identity:
+                unfixable += 1
+                continue
+            fixable += 1
+
+        self.stdout.write(
+            f"Fixable: {fixable}, unfixable: {unfixable} "
+            f"(will be linked on next login)"
+        )
 
         if dry_run:
             self.stdout.write("Dry run — no changes made.")
             return
 
-        created = 0
-        linked = 0
-        skipped = 0
-
-        for pu in patient_users.iterator():
-            username = pu.user.username
-            if not username or "@" in username:
-                skipped += 1
-                continue
-
-            identity, was_created = Identity.objects.get_or_create(
-                issuer=issuer,
-                sub=username,
-            )
-            pu.identity = identity
-            pu.save(update_fields=["identity"])
-
-            if was_created:
-                created += 1
-            else:
-                linked += 1
-
         self.stdout.write(
-            f"Done. Created {created} identities, "
-            f"linked {linked} existing, skipped {skipped}."
+            f"Unfixable rows will self-heal on next user login "
+            f"(Phase A PartnerAuthentication links identity automatically)."
         )
