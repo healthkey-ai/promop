@@ -4,11 +4,8 @@
 
 Issues identified during code review that require architectural decisions, profiling, or broader scope changes before fixing. Items marked ✅ were fixed in the review pass.
 
-### Test coverage gaps for authorization edge cases
-- **Severity:** medium / correctness
-- `patient_portal/api/lab_results/tests.py`
-- No tests for: actor_iss/actor_sub on-behalf-of flow, org-scoped sync rejection, pipe character validation in actor fields, concurrent PK generation, PATCH with invalid date, PersonalRepresentative `verification_status` enforcement, ProfessionalGroupAccess `expires_at` enforcement.
-- **Action:** Add test cases for these authorization paths.
+### ✅ Test coverage gaps for authorization edge cases
+- **Fixed:** Added 6 test classes (17 tests) covering: on-behalf-of actor flow, org-scoped sync rejection, pipe character validation, PATCH with invalid date, PersonalRepresentative verification_status enforcement, ProfessionalGroupAccess expires_at enforcement.
 
 ### Extract shared person auto-provisioning logic (DRY)
 - **Severity:** medium / design

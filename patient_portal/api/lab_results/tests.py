@@ -508,3 +508,367 @@ class VisitDeleteViewTest(TestCase):
     def test_delete_visit_not_found(self):
         resp = self.client.delete('/api/lab-results/visits/9999/')
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class SyncOnBehalfOfTest(TestCase):
+    """Tests for actor_iss/actor_sub on-behalf-of sync flow."""
+
+    def setUp(self):
+        _setup_vocab()
+        self.service_user = Identity.objects.create_user(email='service@test.com', password='test')
+        self.service_user.is_superuser = True
+        self.service_user.save()
+
+        self.actor = Identity.objects.create_user(email='actor@test.com', password='test')
+
+        self.person = Person.objects.create(person_id=2001)
+        PatientUser.objects.create(identity=self.actor, person=self.person)
+
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.service_user)
+
+    def _sync_payload(self, **overrides):
+        base = {
+            'person_id': 2001,
+            'actor_iss': 'urn:local',
+            'actor_sub': self.actor.sub,
+            'measurements': [{
+                'test_name': 'Glucose',
+                'loinc_code': '718-7',
+                'value': '100.0',
+                'unit': 'mg/dL',
+                'measured_at': '2026-05-01',
+            }],
+            'source_type': 'document_extraction',
+        }
+        base.update(overrides)
+        return base
+
+    def test_on_behalf_of_with_valid_actor(self):
+        resp = self.client.post('/api/lab-results/sync/', self._sync_payload(), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_on_behalf_of_actor_not_found(self):
+        resp = self.client.post('/api/lab-results/sync/', self._sync_payload(
+            actor_iss='urn:unknown', actor_sub='nonexistent',
+        ), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('Actor identity not found', resp.data['detail'])
+
+    def test_on_behalf_of_actor_no_access(self):
+        other_person = Person.objects.create(person_id=2002)
+        no_access_actor = Identity.objects.create_user(email='noaccess@test.com', password='test')
+        resp = self.client.post('/api/lab-results/sync/', self._sync_payload(
+            person_id=other_person.person_id,
+            actor_iss='urn:local',
+            actor_sub=no_access_actor.sub,
+        ), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('does not have access', resp.data['detail'])
+
+    def test_on_behalf_of_without_actor_fields_non_superuser(self):
+        non_su = Identity.objects.create_user(email='nonsu@test.com', password='test')
+        client = APIClient()
+        client.force_authenticate(user=non_su)
+        resp = client.post('/api/lab-results/sync/', {
+            'person_id': 2001,
+            'measurements': [{
+                'test_name': 'Glucose',
+                'loinc_code': '718-7',
+                'value': '100.0',
+                'unit': 'mg/dL',
+                'measured_at': '2026-05-01',
+            }],
+            'source_type': 'document_extraction',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('actor_iss and actor_sub required', resp.data['detail'])
+
+    def test_on_behalf_of_superuser_without_actor_fields_succeeds(self):
+        resp = self.client.post('/api/lab-results/sync/', {
+            'person_id': 2001,
+            'measurements': [{
+                'test_name': 'Glucose',
+                'loinc_code': '718-7',
+                'value': '100.0',
+                'unit': 'mg/dL',
+                'measured_at': '2026-05-01',
+            }],
+            'source_type': 'document_extraction',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+
+class PipeCharacterValidationTest(TestCase):
+    """Tests for pipe character rejection in actor fields."""
+
+    def setUp(self):
+        _setup_vocab()
+        self.user = Identity.objects.create_user(email='pipe@test.com', password='test')
+        self.user.is_superuser = True
+        self.user.save()
+        Person.objects.create(person_id=3001)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def test_pipe_in_actor_iss_rejected(self):
+        resp = self.client.post('/api/lab-results/sync/', {
+            'person_id': 3001,
+            'actor_iss': 'urn:local|evil',
+            'actor_sub': 'test',
+            'measurements': [{
+                'test_name': 'WBC', 'value': '5.0',
+                'unit': 'K/uL', 'measured_at': '2026-05-01',
+            }],
+            'source_type': 'document_extraction',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_pipe_in_actor_sub_rejected(self):
+        resp = self.client.post('/api/lab-results/sync/', {
+            'person_id': 3001,
+            'actor_iss': 'urn:local',
+            'actor_sub': 'test|evil',
+            'measurements': [{
+                'test_name': 'WBC', 'value': '5.0',
+                'unit': 'K/uL', 'measured_at': '2026-05-01',
+            }],
+            'source_type': 'document_extraction',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class PatchInvalidDateTest(TestCase):
+    """Test PATCH with invalid date returns 400."""
+
+    def setUp(self):
+        _setup_vocab()
+        self.user = Identity.objects.create_user(email='patchdate@test.com', password='test')
+        self.person = Person.objects.create(person_id=4001)
+        PatientUser.objects.create(identity=self.user, person=self.person)
+        type_concept = Concept.objects.get(concept_id=32883)
+        hgb_concept = Concept.objects.get(concept_id=3000963)
+        self.measurement = Measurement.objects.create(
+            measurement_id=4000,
+            person=self.person,
+            measurement_concept=hgb_concept,
+            measurement_date=date(2026, 1, 1),
+            measurement_type_concept=type_concept,
+            value_as_number=14.0,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def test_patch_invalid_date_string(self):
+        resp = self.client.patch(
+            '/api/lab-results/measurements/4000/',
+            {'measured_at': 'not-a-date'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Invalid measured_at date', resp.data['detail'])
+
+    def test_patch_empty_date_string(self):
+        resp = self.client.patch(
+            '/api/lab-results/measurements/4000/',
+            {'measured_at': ''},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class PersonalRepresentativeAccessTest(TestCase):
+    """Tests for PersonalRepresentative verification_status enforcement."""
+
+    def setUp(self):
+        from omop_core.models import PersonalRepresentative
+        _setup_vocab()
+        self.patient_identity = Identity.objects.create_user(
+            email='patient@test.com', password='test',
+        )
+        self.rep_identity = Identity.objects.create_user(
+            email='rep@test.com', password='test',
+        )
+        self.person = Person.objects.create(person_id=5001)
+        PatientUser.objects.create(identity=self.patient_identity, person=self.person)
+        PatientInfo.objects.create(person=self.person, email='patient@test.com')
+
+        type_concept = Concept.objects.get(concept_id=32883)
+        hgb_concept = Concept.objects.get(concept_id=3000963)
+        Measurement.objects.create(
+            measurement_id=5000,
+            person=self.person,
+            measurement_concept=hgb_concept,
+            measurement_date=date(2026, 1, 1),
+            measurement_type_concept=type_concept,
+            value_as_number=12.0,
+        )
+
+        self.rep = PersonalRepresentative.objects.create(
+            representative=self.rep_identity,
+            person_id=self.person.person_id,
+            relationship='parent',
+            verification_status='PENDING',
+        )
+        self.client = APIClient()
+
+    def test_pending_representative_denied_summary(self):
+        self.client.force_authenticate(user=self.rep_identity)
+        resp = self.client.get(f'/api/lab-results/summary/?person_id={self.person.person_id}')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_verified_representative_allowed_summary(self):
+        self.rep.verification_status = 'VERIFIED'
+        self.rep.save()
+        self.client.force_authenticate(user=self.rep_identity)
+        resp = self.client.get(f'/api/lab-results/summary/?person_id={self.person.person_id}')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_rejected_representative_denied_summary(self):
+        self.rep.verification_status = 'REJECTED'
+        self.rep.save()
+        self.client.force_authenticate(user=self.rep_identity)
+        resp = self.client.get(f'/api/lab-results/summary/?person_id={self.person.person_id}')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class ProfessionalGroupAccessTest(TestCase):
+    """Tests for ProfessionalGroupAccess expires_at enforcement."""
+
+    def setUp(self):
+        from omop_core.models import (
+            Organization, PatientGroup, PatientGroupMembership,
+            ProfessionalGroupAccess,
+        )
+        from django.utils import timezone
+        from datetime import timedelta
+        _setup_vocab()
+
+        self.org = Organization.objects.create(name='Test Org', slug='test-org')
+        self.group = PatientGroup.objects.create(
+            organization=self.org, name='Oncology', slug='oncology',
+        )
+        self.doctor = Identity.objects.create_user(email='doctor@test.com', password='test')
+        self.person = Person.objects.create(person_id=6001)
+        PatientInfo.objects.create(person=self.person, email='p6001@test.com')
+
+        PatientGroupMembership.objects.create(group=self.group, person_id=self.person.person_id)
+
+        type_concept = Concept.objects.get(concept_id=32883)
+        hgb_concept = Concept.objects.get(concept_id=3000963)
+        Measurement.objects.create(
+            measurement_id=6000,
+            person=self.person,
+            measurement_concept=hgb_concept,
+            measurement_date=date(2026, 1, 1),
+            measurement_type_concept=type_concept,
+            value_as_number=11.0,
+        )
+
+        self.grant = ProfessionalGroupAccess.objects.create(
+            identity=self.doctor,
+            group=self.group,
+            role='doctor',
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.doctor)
+
+    def test_active_grant_allows_access(self):
+        resp = self.client.get(f'/api/lab-results/summary/?person_id={self.person.person_id}')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_expired_grant_denied(self):
+        from django.utils import timezone
+        from datetime import timedelta
+        self.grant.expires_at = timezone.now() - timedelta(days=1)
+        self.grant.save()
+        resp = self.client.get(f'/api/lab-results/summary/?person_id={self.person.person_id}')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_null_expires_at_allows_access(self):
+        self.grant.expires_at = None
+        self.grant.save()
+        resp = self.client.get(f'/api/lab-results/summary/?person_id={self.person.person_id}')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+
+class OrgScopedSyncRejectionTest(TestCase):
+    """Tests for org-scoped sync rejection via OAuth2 token."""
+
+    def setUp(self):
+        from omop_core.models import Organization, ApplicationOrganization
+        from oauth2_provider.models import Application
+        _setup_vocab()
+
+        self.org = Organization.objects.create(name='Org A', slug='org-a')
+        self.user = Identity.objects.create_user(email='orguser@test.com', password='test')
+        PatientUser.objects.create(
+            identity=self.user,
+            person=Person.objects.create(person_id=7099),
+        )
+
+        self.app = Application.objects.create(
+            name='Test App',
+            user=self.user,
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+        )
+        ApplicationOrganization.objects.create(application=self.app, organization=self.org)
+
+        self.person_in_org = Person.objects.create(person_id=7001)
+        PatientInfo.objects.create(
+            person=self.person_in_org, email='p7001@test.com', organization=self.org,
+        )
+
+        self.person_outside_org = Person.objects.create(person_id=7002)
+        PatientInfo.objects.create(person=self.person_outside_org, email='p7002@test.com')
+
+        self.client = APIClient()
+
+    def _make_token(self, suffix):
+        from oauth2_provider.models import AccessToken
+        from django.utils import timezone
+        from datetime import timedelta
+        return AccessToken.objects.create(
+            user=self.user,
+            application=self.app,
+            token=f'test-token-{suffix}',
+            expires=timezone.now() + timedelta(hours=1),
+            scope='patient/*.write',
+        )
+
+    def _sync_payload(self, person_id):
+        return {
+            'person_id': person_id,
+            'actor_iss': self.user.issuer,
+            'actor_sub': self.user.sub,
+            'measurements': [{
+                'test_name': 'WBC', 'value': '5.0',
+                'unit': 'K/uL', 'measured_at': '2026-05-01',
+            }],
+            'source_type': 'document_extraction',
+        }
+
+    def test_sync_allowed_for_person_in_org(self):
+        from omop_core.models import PersonalRepresentative
+        PersonalRepresentative.objects.create(
+            representative=self.user, person_id=7001,
+            relationship='caregiver', verification_status='VERIFIED',
+        )
+        token = self._make_token('in-org')
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+        resp = self.client.post('/api/lab-results/sync/', self._sync_payload(7001), format='json')
+        self.assertIn(resp.status_code, [status.HTTP_201_CREATED, status.HTTP_200_OK])
+
+    def test_sync_rejected_for_person_outside_org(self):
+        from omop_core.models import PersonalRepresentative
+        PersonalRepresentative.objects.create(
+            representative=self.user, person_id=7002,
+            relationship='caregiver', verification_status='VERIFIED',
+        )
+        token = self._make_token('outside-org')
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+        resp = self.client.post('/api/lab-results/sync/', self._sync_payload(7002), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('Person not in your organization', resp.data['detail'])
