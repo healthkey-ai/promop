@@ -4,18 +4,6 @@
 
 Issues identified during code review that require architectural decisions, profiling, or broader scope changes before fixing. Items marked ✅ were fixed in the review pass.
 
-### _next_pk holds row locks for entire sync transaction
-- **Severity:** medium / performance
-- `patient_portal/api/lab_results/sync.py:49-56`
-- Every `_next_pk` call acquires a row lock via `select_for_update()` held until the entire `@transaction.atomic` POST completes. 500 measurements = 500+ lock acquisitions serializing all concurrent syncs. Empty table race: if no rows exist, `select_for_update` locks nothing and two concurrent transactions can both create pk=1.
-- **Action:** Migrate OMOP tables (Measurement, VisitOccurrence, CareSite, Concept) from manual IntegerField PKs to PostgreSQL sequences via Django's BigAutoField.
-
-### Frontend test coverage missing
-- **Severity:** medium / design
-- `frontend/src/App.test.tsx` (deleted), no replacements added
-- PR deleted all existing frontend test files and jest config. CI now runs only `lint` + `build`. No tests for the new federation hooks (`useLabResultsSummary`, `useLabValues`, `useUpdateMeasurement`, `useDeleteMeasurement`), lab components, or Module Federation boundary behavior.
-- **Action:** Add vitest configuration (`vitest.config.ts`), add a `test` script to `package.json`, add a `test` step to CI, and write tests for federation hooks and key lab components.
-
 ### Test coverage gaps for authorization edge cases
 - **Severity:** medium / correctness
 - `patient_portal/api/lab_results/tests.py`
@@ -27,3 +15,10 @@ Issues identified during code review that require architectural decisions, profi
 - `patient_portal/api/lab_results/sync.py:_resolve_person_from_identity` and `patient_portal/api/authentication.py:_ensure_person`
 - Nearly identical logic in two places: check PatientUser, check email match, create Person with max(person_id)+1, create PatientUser. The sync copy previously had a bug the auth copy didn't (missing `transaction.atomic`), now fixed. Keeping two copies will cause drift again.
 - **Action:** Extract into a shared `resolve_or_create_person(identity, email=None)` function in `patient_portal/services.py` and call from both places.
+
+### _next_pk holds row locks for entire sync transaction
+- **Severity:** medium / performance
+- `patient_portal/api/lab_results/sync.py:49-56`
+- Every `_next_pk` call acquires a row lock via `select_for_update()` held until the entire `@transaction.atomic` POST completes. 500 measurements = 500+ lock acquisitions serializing all concurrent syncs. Empty table race: if no rows exist, `select_for_update` locks nothing and two concurrent transactions can both create pk=1.
+- **Action:** Migrate OMOP tables (Measurement, VisitOccurrence, CareSite, Concept) from manual IntegerField PKs to PostgreSQL sequences via Django's BigAutoField.
+

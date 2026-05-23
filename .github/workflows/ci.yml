@@ -71,5 +71,8 @@ jobs:
       - name: Lint
         run: cd frontend && npm run lint
 
+      - name: Test
+        run: cd frontend && npm test
+
       - name: Type check & build
         run: cd frontend && npm run build
