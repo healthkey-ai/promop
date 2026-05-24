@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Optional
 
-from omop_core.models import Concept, DrugExposure, ProcedureOccurrence
+from omop_core.models import Concept, ConceptAncestor, ConceptRelationship, DrugExposure, ProcedureOccurrence
 from omop_core.services.mappings import (
     CONCEPT_TREATMENT_REGIMEN,
     CONCEPT_EHR_TYPE,
@@ -24,6 +24,9 @@ from omop_core.services.mappings import (
 )
 from omop_core.services.lot_regimens import (
     DRUG_SUBTYPE_MAP,
+    HEMONC_CART_CLASSES,
+    HEMONC_MYELOMA_CLASSES,
+    HEMONC_STEROID_CLASSES,
     MYELOMA_REGIMEN_LOOKUP,
     PROCEDURE_SNOMED_MAP,
     REGIMEN_LOOKUP,
@@ -105,8 +108,33 @@ def _drug_key(exposure: DrugExposure) -> str:
     return (exposure.drug_source_value or '').lower().strip()
 
 
-def _drug_subtype(key: str) -> str:
-    return DRUG_SUBTYPE_MAP.get(key, 'mixed')
+def _classify_drug(drug_concept_id: int, drug_source_value: str) -> str:
+    if drug_concept_id:
+        hemonc_ids = list(
+            ConceptRelationship.objects.filter(
+                concept_1_id=drug_concept_id,
+                relationship_id='Maps to',
+                concept_2__vocabulary_id='HemOnc',
+            ).values_list('concept_2_id', flat=True)
+        )
+        if hemonc_ids:
+            ancestor_names = set(
+                ConceptAncestor.objects.filter(
+                    descendant_concept_id__in=hemonc_ids,
+                ).values_list('ancestor_concept__concept_name', flat=True)
+            )
+            ancestor_names.update(
+                Concept.objects.filter(concept_id__in=hemonc_ids)
+                               .values_list('concept_name', flat=True)
+            )
+            if ancestor_names & HEMONC_CART_CLASSES:
+                return 'cart'
+            if ancestor_names & HEMONC_MYELOMA_CLASSES:
+                return 'myeloma'
+            if ancestor_names & HEMONC_STEROID_CLASSES:
+                return 'steroid'
+            return 'mixed'
+    return DRUG_SUBTYPE_MAP.get(drug_source_value.lower().strip(), 'mixed')
 
 
 def _build_drug_eras(exposures) -> list[_DrugEra]:
@@ -117,7 +145,9 @@ def _build_drug_eras(exposures) -> list[_DrugEra]:
     eras = []
     for drug_key, exps in by_drug.items():
         exps_sorted = sorted(exps, key=lambda e: e.drug_exposure_start_date)
-        subtype = _drug_subtype(drug_key)
+        rep = exps_sorted[0]
+        concept_id = rep.drug_concept_id or 0
+        subtype = _classify_drug(concept_id, drug_key)
         current = None
         for exp in exps_sorted:
             start = exp.drug_exposure_start_date

@@ -56,6 +56,29 @@ DRUG_SUBTYPE_MAP: dict[str, str] = {
 
 STEROID_SUBTYPES = frozenset({'steroid'})
 
+# HemOnc ancestor class names used by _classify_drug() in lot_inference_service.py
+HEMONC_MYELOMA_CLASSES: frozenset[str] = frozenset({
+    'Proteasome inhibitor',
+    'Immunomodulatory agent',
+    'Anti-CD38 monoclonal antibody',
+    'Anti-SLAMF7 monoclonal antibody',
+    'Nuclear export inhibitor',
+    'Alkylating agent',
+    'BCL-2 inhibitor',
+    'BCMA-targeted agent',
+    'Anti-CD38 antibody-drug conjugate',
+    'Cereblon E3 ligase modulator',
+})
+
+HEMONC_CART_CLASSES: frozenset[str] = frozenset({
+    'CAR T-cell therapy',
+})
+
+HEMONC_STEROID_CLASSES: frozenset[str] = frozenset({
+    'Corticosteroid',
+    'Supportive care agent',
+})
+
 # ---------------------------------------------------------------------------
 # Procedure SNOMED → event subtype (HealthTree-derived)
 # ---------------------------------------------------------------------------

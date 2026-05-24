@@ -2075,6 +2075,111 @@ class SmartFhirUploadTest(_SmartBase):
 
 
 # ---------------------------------------------------------------------------
+# 8. DrugClassification tests — HemOnc vocabulary-backed _classify_drug()
+# ---------------------------------------------------------------------------
+
+class DrugClassificationTest(TestCase):
+    """Test _classify_drug() HemOnc two-step lookup + DRUG_SUBTYPE_MAP fallback."""
+
+    def setUp(self):
+        _make_vocab_fixtures()
+        self.hemonc_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc Oncology', 'vocabulary_concept_id': 0},
+        )
+        self.rxnorm_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RxNorm',
+            defaults={'vocabulary_name': 'RxNorm', 'vocabulary_concept_id': 0},
+        )
+        self.domain_drug = Domain.objects.get(domain_id='Drug')
+        self.cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='HemOnc Class',
+            defaults={'concept_class_name': 'HemOnc Class', 'concept_class_concept_id': 0},
+        )
+        self.cc_ing, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Ingredient',
+            defaults={'concept_class_name': 'Ingredient', 'concept_class_concept_id': 0},
+        )
+
+        self.pi_class = Concept.objects.create(
+            concept_id=8800001, concept_name='Proteasome inhibitor',
+            domain=self.domain_drug, vocabulary=self.hemonc_vocab, concept_class=self.cc,
+            concept_code='PI', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        self.bort_hemonc = Concept.objects.create(
+            concept_id=8800002, concept_name='bortezomib',
+            domain=self.domain_drug, vocabulary=self.hemonc_vocab, concept_class=self.cc,
+            concept_code='HO-Bort', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        self.cart_class = Concept.objects.create(
+            concept_id=8800003, concept_name='CAR T-cell therapy',
+            domain=self.domain_drug, vocabulary=self.hemonc_vocab, concept_class=self.cc,
+            concept_code='CART', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        self.cart_drug = Concept.objects.create(
+            concept_id=8800004, concept_name='idecabtagene vicleucel',
+            domain=self.domain_drug, vocabulary=self.hemonc_vocab, concept_class=self.cc,
+            concept_code='IdecelHemOnc', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        self.bort_rxnorm = Concept.objects.create(
+            concept_id=8810001, concept_name='bortezomib',
+            domain=self.domain_drug, vocabulary=self.rxnorm_vocab, concept_class=self.cc_ing,
+            concept_code='1421', standard_concept='S',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+        self.maps_to, _ = Relationship.objects.get_or_create(
+            relationship_id='Maps to',
+            defaults={
+                'relationship_name': 'Maps to', 'is_hierarchical': 0,
+                'defines_ancestry': 0, 'reverse_relationship_id': 'Mapped from',
+                'relationship_concept_id': 0,
+            },
+        )
+        ConceptRelationship.objects.get_or_create(
+            concept_1=self.bort_rxnorm, concept_2=self.bort_hemonc, relationship=self.maps_to,
+            defaults={'valid_start_date': date(1970, 1, 1), 'valid_end_date': date(2099, 12, 31)},
+        )
+        ConceptRelationship.objects.get_or_create(
+            concept_1=self.cart_drug, concept_2=self.cart_class, relationship=self.maps_to,
+            defaults={'valid_start_date': date(1970, 1, 1), 'valid_end_date': date(2099, 12, 31)},
+        )
+        ConceptAncestor.objects.get_or_create(
+            ancestor_concept=self.pi_class, descendant_concept=self.bort_hemonc,
+            defaults={'min_levels_of_separation': 1, 'max_levels_of_separation': 1},
+        )
+        ConceptAncestor.objects.get_or_create(
+            ancestor_concept=self.cart_class, descendant_concept=self.cart_drug,
+            defaults={'min_levels_of_separation': 0, 'max_levels_of_separation': 0},
+        )
+
+    def test_rxnorm_bortezomib_classifies_as_myeloma(self):
+        from omop_core.services.lot_inference_service import _classify_drug
+        result = _classify_drug(self.bort_rxnorm.concept_id, 'bortezomib')
+        self.assertEqual(result, 'myeloma')
+
+    def test_cart_drug_classifies_as_cart(self):
+        from omop_core.services.lot_inference_service import _classify_drug
+        result = _classify_drug(self.cart_drug.concept_id, 'idecabtagene vicleucel')
+        self.assertEqual(result, 'cart')
+
+    def test_zero_concept_id_falls_back_to_drug_subtype_map(self):
+        from omop_core.services.lot_inference_service import _classify_drug
+        result = _classify_drug(0, 'bortezomib')
+        self.assertEqual(result, 'myeloma')  # bortezomib is in DRUG_SUBTYPE_MAP
+
+    def test_novel_drug_not_in_hemonc_returns_mixed(self):
+        from omop_core.services.lot_inference_service import _classify_drug
+        novel = Concept.objects.create(
+            concept_id=8899999, concept_name='noveldrugxyz',
+            domain=self.domain_drug, vocabulary=self.rxnorm_vocab, concept_class=self.cc_ing,
+            concept_code='NOVEL99', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        result = _classify_drug(novel.concept_id, 'noveldrugxyz')
+        self.assertEqual(result, 'mixed')
+
+
+# ---------------------------------------------------------------------------
 # HKI-AUTH-01: client_credentials grant — service-to-service token acquisition
 # ---------------------------------------------------------------------------
 
@@ -3924,3 +4029,78 @@ class DiseasePersistenceTest(_SmartBase):
             'sync_to_omop wiped PatientInfo.disease — _skip_patient_info_refresh '
             'not set on ConditionOccurrence (issue #113)',
         )
+
+
+class FhirRxNavIntegrationTest(_SmartBase):
+    """FHIR upload for a drug unknown in local vocab → RxNav called → concept resolved."""
+
+    def _fhir_file(self, drug_name, filename='rxnav_test.json'):
+        """Build a multipart-upload file object for the given drug name."""
+        bundle = {
+            'resourceType': 'Bundle',
+            'type': 'collection',
+            'entry': [
+                {'resource': {
+                    'resourceType': 'Patient',
+                    'id': 'rxnav-test-pt-1',
+                    'name': [{'family': 'RxNavTest', 'given': ['Patient']}],
+                    'gender': 'female',
+                    'birthDate': '1970-01-01',
+                }},
+                {'resource': {
+                    'resourceType': 'MedicationStatement',
+                    'id': 'rxnav-med-1',
+                    'status': 'completed',
+                    'subject': {'reference': 'Patient/rxnav-test-pt-1'},
+                    'medicationCodeableConcept': {'text': drug_name},
+                    'effectivePeriod': {'start': '2023-01-15', 'end': '2023-07-01'},
+                    'extension': [
+                        {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line',
+                         'valueInteger': 1},
+                    ],
+                }},
+            ],
+        }
+        f = io.BytesIO(json.dumps(bundle).encode('utf-8'))
+        f.name = filename
+        return f
+
+    def test_fhir_upload_uses_rxnav_for_unknown_drug(self):
+        """FHIR bundle with unknown drug name → RxNav resolves it → DrugExposure concept set."""
+        from unittest.mock import patch
+        from omop_core.models import DrugExposure
+
+        with patch(
+            'omop_core.services.rxnav_service._rxnav_lookup',
+            return_value=('1421', 'bortezomib'),
+        ):
+            response = self.write_client.post(
+                '/api/patient-info/upload_fhir/',
+                {'file': self._fhir_file('Velcade')},
+                format='multipart',
+            )
+
+        self.assertIn(response.status_code, [200, 201])
+        de = DrugExposure.objects.filter(drug_source_value='Velcade').first()
+        self.assertIsNotNone(de, 'DrugExposure for Velcade not created')
+        self.assertNotEqual(
+            de.drug_concept_id, 0,
+            'drug_concept_id should be set via RxNav; got 0',
+        )
+
+    def test_fhir_upload_unknown_drug_rxnav_fails_gracefully(self):
+        """RxNav returns nothing → FHIR upload still succeeds, uses fallback concept."""
+        from unittest.mock import patch
+        from omop_core.models import DrugExposure
+
+        with patch(
+            'omop_core.services.rxnav_service._rxnav_lookup',
+            return_value=(None, None),
+        ):
+            response = self.write_client.post(
+                '/api/patient-info/upload_fhir/',
+                {'file': self._fhir_file('completely-unknown-drug-xyz', 'rxnav_fallback.json')},
+                format='multipart',
+            )
+
+        self.assertIn(response.status_code, [200, 201])
