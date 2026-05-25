@@ -169,6 +169,11 @@ else:
 
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
+# Serve federation remote build (remoteEntry.js + chunks) at root path
+federation_root = BASE_DIR / 'frontend' / 'dist' / 'remote'
+if federation_root.exists():
+    WHITENOISE_ROOT = federation_root
+
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
