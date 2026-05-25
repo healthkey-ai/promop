@@ -277,6 +277,7 @@ class Command(BaseCommand):
         p['bmi'] = round(p['weight'] / (p['height'] / 100) ** 2, 1)
         p['systolic_bp'] = random.randint(105, 160)
         p['diastolic_bp'] = random.randint(60, 95)
+        p['heart_rate'] = random.randint(58, 105)
 
         # Cytogenetic risk
         cyto = []
@@ -498,27 +499,35 @@ class Command(BaseCommand):
             }],
             'telecom': [{'system': 'phone', 'value': f"+1-555-{random.randint(100,999)}-{random.randint(1000,9999)}", 'use': 'home'}],
             'extension': [
-                {'url': 'http://hl7.org/fhir/us/core/StructureDefinition/us-core-ethnicity',
+                # ctomop-recognised extensions (exact URLs the FHIR importer parses)
+                {'url': 'http://ctomop.io/fhir/StructureDefinition/ethnicity',
                  'valueString': p['ethnicity']},
-                {'url': 'http://hl7.org/fhir/StructureDefinition/patient-bodyWeight',
+                {'url': 'http://ctomop.io/fhir/StructureDefinition/bodyWeight',
                  'valueQuantity': {'value': p['weight'], 'unit': 'kg'}},
-                {'url': 'http://hl7.org/fhir/StructureDefinition/patient-bodyHeight',
+                {'url': 'http://ctomop.io/fhir/StructureDefinition/bodyHeight',
                  'valueQuantity': {'value': p['height'], 'unit': 'cm'}},
-                {'url': 'http://hl7.org/fhir/StructureDefinition/patient-ecog-performance-status',
+                {'url': 'http://ctomop.io/fhir/StructureDefinition/ecog-performance-status',
                  'valueInteger': p['ecog']},
-                {'url': 'http://hl7.org/fhir/StructureDefinition/patient-karnofsky-score',
+                {'url': 'http://ctomop.io/fhir/StructureDefinition/karnofsky-score',
                  'valueInteger': p['kps']},
-                {'url': 'http://example.org/fhir/StructureDefinition/mm-sct-history',
+                {'url': 'http://ctomop.io/fhir/StructureDefinition/systolic-bp',
+                 'valueQuantity': {'value': p['systolic_bp'], 'unit': 'mmHg'}},
+                {'url': 'http://ctomop.io/fhir/StructureDefinition/diastolic-bp',
+                 'valueQuantity': {'value': p['diastolic_bp'], 'unit': 'mmHg'}},
+                {'url': 'http://ctomop.io/fhir/StructureDefinition/heartRate',
+                 'valueQuantity': {'value': p['heart_rate'], 'unit': 'beats/min'}},
+                # MM-specific extensions
+                {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
                  'valueString': p['sct_history']},
-                {'url': 'http://example.org/fhir/StructureDefinition/mm-cytogenetic-markers',
+                {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-cytogenetic-markers',
                  'valueString': ','.join(p['cytogenetics']) if p['cytogenetics'] else ''},
-                {'url': 'http://example.org/fhir/StructureDefinition/mm-refractory-status',
+                {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-refractory-status',
                  'valueString': ','.join(p['refractory']) if p['refractory'] else ''},
-                {'url': 'http://example.org/fhir/StructureDefinition/mm-plasma-cell-leukemia',
+                {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-plasma-cell-leukemia',
                  'valueBoolean': p['plasma_cell_leukemia']},
-                {'url': 'http://example.org/fhir/StructureDefinition/mm-disease-progression',
+                {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-disease-progression',
                  'valueString': p['progression']},
-                {'url': 'http://example.org/fhir/StructureDefinition/mm-measurable-disease-imwg',
+                {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-measurable-disease-imwg',
                  'valueBoolean': p['measurable_disease_imwg']},
             ],
         }
@@ -728,6 +737,17 @@ class Command(BaseCommand):
         }
 
     def _therapy_medications(self, p, diag_date):
+        """
+        Generate MedicationStatement resources the ctomop FHIR importer can parse.
+
+        Structure per therapy line:
+          - One regimen-level MedicationStatement (no partOf) with the regimen name
+            as medicationCodeableConcept.text, effectivePeriod, therapy-line and
+            therapy-outcome extensions.  The importer uses this to populate
+            first_line_therapy / second_line_therapy / later_therapies.
+          - One individual-drug MedicationStatement per drug (with partOf pointing
+            to the regimen entry) for OMOP DrugExposure records.
+        """
         meds = []
         nl = p['prior_lines']
         if nl == 0:
@@ -738,50 +758,68 @@ class Command(BaseCommand):
         for line_num in range(1, nl + 1):
             is_last = line_num == nl
 
-            # Pick regimen: use later regimens for lines 3+
             if line_num <= 2:
                 name, drugs = _reg(_EARLY_REGIMENS)
             else:
                 name, drugs = _reg(_LATER_REGIMENS)
 
-            # Ensure drug list is de-duplicated across lines when possible
             duration_days = random.randint(84, 365)
             line_end = line_start + timedelta(days=duration_days)
 
             outcome_weights = _OUTCOME_WEIGHTS_LAST if is_last else _OUTCOME_WEIGHTS_PENULTIMATE
             outcome = _weighted_choice(_OUTCOMES, outcome_weights)
 
+            regimen_id = f"med-{p['id']}-line{line_num}-regimen"
+
+            # Regimen-level entry — no partOf, regimen name as text
+            meds.append({
+                'resourceType': 'MedicationStatement',
+                'id': regimen_id,
+                'status': 'completed' if not is_last else 'active',
+                'medicationCodeableConcept': {
+                    'coding': [{'system': 'http://ctomop.io/fhir/mm-regimen', 'code': name}],
+                    'text': name,
+                },
+                'subject': {'reference': f"Patient/{p['id']}"},
+                'effectivePeriod': {
+                    'start': line_start.strftime('%Y-%m-%d'),
+                    'end': line_end.strftime('%Y-%m-%d'),
+                },
+                'extension': [
+                    {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line',
+                     'valueInteger': line_num},
+                    {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-outcome',
+                     'valueString': outcome},
+                ],
+                'note': [{'text': f"Line {line_num}: {name} — {outcome}"}],
+            })
+
+            # Individual drug entries with partOf
             for drug_key in drugs:
                 if drug_key not in _DRUG_INFO:
                     continue
                 rxcui, display = _DRUG_INFO[drug_key]
-                med_id = f"med-{p['id']}-line{line_num}-{drug_key}"
                 meds.append({
-                    'resourceType': 'MedicationRequest',
-                    'id': med_id,
+                    'resourceType': 'MedicationStatement',
+                    'id': f"med-{p['id']}-line{line_num}-{drug_key}",
                     'status': 'completed' if not is_last else 'active',
-                    'intent': 'order',
                     'medicationCodeableConcept': {
                         'coding': [{'system': 'http://www.nlm.nih.gov/research/umls/rxnorm',
                                     'code': rxcui, 'display': display}],
                         'text': display,
                     },
                     'subject': {'reference': f"Patient/{p['id']}"},
-                    'authoredOn': line_start.strftime('%Y-%m-%d'),
+                    'effectivePeriod': {
+                        'start': line_start.strftime('%Y-%m-%d'),
+                        'end': line_end.strftime('%Y-%m-%d'),
+                    },
+                    'partOf': [{'reference': f"MedicationStatement/{regimen_id}"}],
                     'extension': [
-                        {'url': 'http://example.org/fhir/StructureDefinition/therapy-line',
+                        {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line',
                          'valueInteger': line_num},
-                        {'url': 'http://example.org/fhir/StructureDefinition/regimen-name',
-                         'valueString': name},
-                        {'url': 'http://example.org/fhir/StructureDefinition/therapy-outcome',
-                         'valueString': outcome},
-                        {'url': 'http://example.org/fhir/StructureDefinition/therapy-end-date',
-                         'valueDate': line_end.strftime('%Y-%m-%d')},
                     ],
-                    'note': [{'text': f"Line {line_num}: {name} — outcome: {outcome}"}],
                 })
 
-            # Next line starts 4-12 weeks after previous ends
             line_start = line_end + timedelta(days=random.randint(28, 84))
 
         return meds
