@@ -353,8 +353,8 @@ describe('LabsTab - new_field', () => {
 ### Running Tests
 
 ```bash
-# Backend tests — always run against the dev PostgreSQL DB
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+# Backend tests — run against local PostgreSQL (matches CI)
+DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
   .venv/bin/python manage.py test omop_core patient_portal --keepdb
 
 # Frontend tests
@@ -368,7 +368,7 @@ cd frontend && npm test -- --watchAll=false
 **Every new feature must have tests written and run before the work is considered complete.**
 
 - Write tests immediately after implementing the feature — not as a follow-up.
-- Tests must be run against the dev PostgreSQL database (see Running Tests above).
+- Tests must be run against local PostgreSQL (see Running Tests above).
 - The feature is not done until the tests pass.
 
 **What to test for a new API endpoint or middleware:**
@@ -426,14 +426,15 @@ Expected output: `MISSING from DB: []` and `EXTRA in DB: []`.
 
 ## Database Selection Rule
 
-**Always use the correct DB for the current branch:**
+**Use local PostgreSQL for development and tests. Use Render databases only for migrations and sync checks.**
 
-| Branch | DATABASE_URL |
+| Purpose | DATABASE_URL |
 |---|---|
-| `dev` | `postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev` |
-| `main` / production | `postgresql://ctomop_user:K7mqaHP5krJHiojJFtZmCOepH3Lj66jl@dpg-d6ptpqi4d50c739fufqg-a.oregon-postgres.render.com/ctomop` |
+| Tests & local dev | `postgresql://postgres@localhost:5432/ctomop_test` |
+| Staging migrations | `postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev` |
+| Production (read-only checks) | `postgresql://ctomop_user:K7mqaHP5krJHiojJFtZmCOepH3Lj66jl@dpg-d6ptpqi4d50c739fufqg-a.oregon-postgres.render.com/ctomop` |
 
-When running any `manage.py` command (migrate, shell, test, etc.) always prefix with the appropriate `DATABASE_URL=...` for the current branch. Never use the production DB when on `dev`.
+Never use the production DB for writes. Never use remote databases for running tests — use local PostgreSQL to match CI.
 
 ---
 

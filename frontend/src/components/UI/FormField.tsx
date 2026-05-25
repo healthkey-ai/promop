@@ -1,6 +1,6 @@
 import React from 'react';
 import { VocabularyTooltip } from './VocabularyTooltip';
-import { VocabSource } from '../../hooks/useVocabulary';
+import { VocabSource } from '@/hooks/useVocabulary';
 
 interface FormFieldProps {
   label: string;

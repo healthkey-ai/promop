@@ -27,7 +27,14 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-your-default-key-chan
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
-ALLOWED_HOSTS = ['*']
+if DEBUG:
+    ALLOWED_HOSTS = ['*']
+else:
+    ALLOWED_HOSTS = [
+        h.strip()
+        for h in os.environ.get('ALLOWED_HOSTS', 'ctomop.onrender.com').split(',')
+        if h.strip()
+    ]
 
 # Application definition
 INSTALLED_APPS = [
@@ -121,6 +128,12 @@ else:
         }
     }
 
+AUTH_USER_MODEL = "patient_portal.Identity"
+
+AUTHENTICATION_BACKENDS = [
+    "patient_portal.backends.EmailBackend",
+]
+
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -159,20 +172,59 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# CORS settings - Allow all for now
-CORS_ALLOW_ALL_ORIGINS = True
+# CORS settings
+if DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True
+else:
+    CORS_ALLOW_ALL_ORIGINS = False
+    CORS_ALLOWED_ORIGINS = [
+        origin.strip()
+        for origin in os.environ.get('CORS_ALLOWED_ORIGINS', '').split(',')
+        if origin.strip()
+    ]
 CORS_ALLOW_CREDENTIALS = True
 
+# ── Pluggable partner auth providers ──────────────────────────────────────
+# PartnerAuthentication iterates these in order; the first provider that
+# recognises the bearer token wins.
+PARTNER_AUTH_PROVIDERS = [
+    "patient_portal.api.providers.firebase.FirebaseTokenProvider",
+]
+
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "healthtree-test" if DEBUG else "")
+FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(
+    "FIREBASE_SKIP_REVOCATION_CHECK", "true" if DEBUG else "false"
+).lower() in ("1", "true")
+
 # REST Framework
-REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': [
-        'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
+SERVICE_AUTH_TOKEN = os.environ.get("SERVICE_AUTH_TOKEN", "")
+
+_auth_classes = [
+    'patient_portal.api.authentication.ServiceTokenAuthentication',
+    'patient_portal.api.authentication.PartnerAuthentication',
+    'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
+]
+if DEBUG:
+    _auth_classes += [
         'rest_framework.authentication.BasicAuthentication',
         'patient_portal.api.authentication.CsrfExemptSessionAuthentication',
-    ],
+    ]
+
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': _auth_classes,
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+        'rest_framework.throttling.ScopedRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '60/minute',
+        'user': '300/minute',
+        'sync': '10/minute',
+    },
 }
 
 # SMART on FHIR / OAuth2 provider configuration
@@ -233,3 +285,42 @@ if not DEBUG:
         csrf_origins.append(render_url)
     
     CSRF_TRUSTED_ORIGINS = csrf_origins
+
+
+# ── Firebase Admin SDK ────────────────────────────────────────────────────
+def _init_firebase_admin():
+    try:
+        import firebase_admin
+        from firebase_admin import credentials as fb_credentials
+    except ImportError:
+        return
+
+    if firebase_admin._apps:
+        return
+
+    project_id = FIREBASE_PROJECT_ID
+    options = {"projectId": project_id} if project_id else {}
+
+    if os.environ.get("FIREBASE_AUTH_EMULATOR_HOST"):
+        class _EmulatorCredential(fb_credentials.Base):
+            def get_credential(self):
+                return None
+        cred = _EmulatorCredential()
+    else:
+        try:
+            cred = fb_credentials.ApplicationDefault()
+        except Exception:
+            return
+
+    try:
+        firebase_admin.initialize_app(cred, options)
+    except ValueError:
+        pass  # Already initialized
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Firebase Admin SDK initialization failed", exc_info=True,
+        )
+
+
+_init_firebase_admin()

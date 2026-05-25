@@ -1,20 +1,20 @@
-import React, { useMemo, useRef } from 'react';
-import { VocabSource } from '../../hooks/useVocabulary';
+import { useMemo, useRef } from 'react';
+import { VocabSource } from '@/hooks/useVocabulary';
 import { VocabularyTooltip } from '../UI/VocabularyTooltip';
 import SelectControl from './controls/SelectControl';
 import BooleanControl from './controls/BooleanControl';
 import MultiSelectControl from './controls/MultiSelectControl';
 import DateControl from './controls/DateControl';
 import TextNumberControl from './controls/TextNumberControl';
-import { stringsToOptions, optionKey } from './utils';
+import { stringsToOptions } from './utils';
 
 interface FieldProps {
   label: string;
   name: string;
   type: 'text' | 'number' | 'date' | 'select' | 'multiselect' | 'boolean' | 'email';
-  value: any;
+  value: unknown;
   options?: string[];
-  onChange: (name: string, value: any) => void;
+  onChange: (name: string, value: unknown) => void;
   disabled?: boolean;
   vocabSource?: VocabSource | null;
   fullWidth?: boolean;
@@ -99,7 +99,7 @@ export default function Field({
       case 'boolean':
         return (
           <BooleanControl
-            value={value}
+            value={value as boolean | null | undefined}
             disabled={disabled}
             onChange={(v) => onChange(name, v)}
           />
@@ -108,7 +108,7 @@ export default function Field({
       case 'date':
         return (
           <DateControl
-            value={formatDateForInput(value)}
+            value={formatDateForInput(value as string)}
             disabled={disabled}
             onChange={(v) => onChange(name, v)}
           />
@@ -118,7 +118,7 @@ export default function Field({
         return (
           <TextNumberControl
             type={type}
-            value={value === 0 ? 0 : (value ?? '')}
+            value={value === 0 ? 0 : ((value ?? '') as string | number | null)}
             disabled={disabled}
             onChange={(v) => onChange(name, v)}
           />

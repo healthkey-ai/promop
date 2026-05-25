@@ -1,10 +1,9 @@
-import React from 'react';
 import Field from '../Field';
 import Section from '../Section';
 
 interface Props {
-  formData: any;
-  onChange: (field: string, value: any) => void;
+  formData: Record<string, unknown>;
+  onChange: (field: string, value: unknown) => void;
 }
 
 export default function LabsTab({ formData, onChange }: Props) {
@@ -44,6 +43,13 @@ export default function LabsTab({ formData, onChange }: Props) {
           <Field label="Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" type="number" value={formData?.beta2_microglobulin} onChange={onChange} />
           <Field label="C-Reactive Protein (mg/L)" name="c_reactive_protein" type="number" value={formData?.c_reactive_protein} onChange={onChange} />
           <Field label="ESR (mm/hr)" name="esr" type="number" value={formData?.esr} onChange={onChange} />
+        </div>
+      </Section>
+
+      <Section title="Diagnostic Tests">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <Field label="Pulmonary Function Test Normal" name="pulmonary_function_test_result" type="boolean" value={formData?.pulmonary_function_test_result} onChange={onChange} />
+          <Field label="Bone Imaging Normal" name="bone_imaging_result" type="boolean" value={formData?.bone_imaging_result} onChange={onChange} />
         </div>
       </Section>
     </div>

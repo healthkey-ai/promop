@@ -18,7 +18,7 @@ def index(request):
 def dashboard(request):
     """Patient dashboard showing health summary"""
     try:
-        patient_user = PatientUser.objects.get(user=request.user)
+        patient_user = PatientUser.objects.get(identity=request.user)
         patient_info = PatientInfo.objects.filter(person=patient_user.person).first()
         
         # Get recent measurements
@@ -35,7 +35,7 @@ def dashboard(request):
         unread_messages = PatientMessage.objects.filter(
             patient_user=patient_user,
             sender_is_patient=False,
-            read_at__isnull=True
+            is_read=False
         ).count()
         
         context = {
@@ -53,9 +53,9 @@ def dashboard(request):
 def health_records(request):
     """View detailed health records"""
     try:
-        patient_user = get_object_or_404(PatientUser, user=request.user)
+        patient_user = get_object_or_404(PatientUser, identity=request.user)
         patient_info = PatientInfo.objects.filter(person=patient_user.person).first()
-        
+
         # Get all measurements
         measurements = Measurement.objects.filter(
             person=patient_user.person
@@ -80,8 +80,8 @@ def health_records(request):
 def messages_list(request):
     """View and send messages"""
     try:
-        patient_user = get_object_or_404(PatientUser, user=request.user)
-        
+        patient_user = get_object_or_404(PatientUser, identity=request.user)
+
         if request.method == 'POST':
             subject = request.POST.get('subject')
             message_text = request.POST.get('message')
@@ -114,8 +114,8 @@ def messages_list(request):
 def consent_management(request):
     """Manage consents for data sharing and clinical trials"""
     try:
-        patient_user = get_object_or_404(PatientUser, user=request.user)
-        
+        patient_user = get_object_or_404(PatientUser, identity=request.user)
+
         if request.method == 'POST':
             consent_type = request.POST.get('consent_type')
             consent_granted = request.POST.get('consent_granted') == 'on'
@@ -162,7 +162,7 @@ def patient_login(request):
         if user is not None:
             # Check if user has a patient profile
             try:
-                patient_user = PatientUser.objects.get(user=user)
+                patient_user = PatientUser.objects.get(identity=user)
                 login(request, user)
                 patient_user.last_login = timezone.now()
                 patient_user.save()
@@ -188,7 +188,7 @@ def update_health_records(request):
         return redirect('patient_portal:health_records')
     
     try:
-        patient_user = get_object_or_404(PatientUser, user=request.user)
+        patient_user = get_object_or_404(PatientUser, identity=request.user)
         patient_info, created = PatientInfo.objects.get_or_create(person=patient_user.person)
         
         tab = request.POST.get('tab', 'general')
@@ -217,9 +217,12 @@ def update_health_records(request):
         # Update based on tab
         if tab == 'general':
             # Update user name
-            request.user.first_name = get_value('first_name') or request.user.first_name
-            request.user.last_name = get_value('last_name') or request.user.last_name
-            request.user.save()
+            first_name = get_value('first_name') or ''
+            last_name = get_value('last_name') or ''
+            new_name = f"{first_name} {last_name}".strip()
+            if new_name:
+                request.user.name = new_name
+                request.user.save()
             
             # Update patient info
             patient_info.patient_age = get_value('patient_age', int)

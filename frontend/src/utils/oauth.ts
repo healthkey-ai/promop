@@ -1,30 +1,13 @@
-/**
- * SMART on FHIR / OAuth2 PKCE utilities for the ctomop React SPA.
- *
- * Flow:
- *  1. Call `startPkceLogin()` — generates code_verifier, stores it in
- *     sessionStorage, then redirects to `/o/authorize/`.
- *  2. The authorization server redirects back to `/auth/callback?code=…&state=…`.
- *  3. `AuthCallback` calls `exchangeCodeForToken(code)` to POST to `/o/token/`.
- *  4. The access token is stored in sessionStorage and injected into axios via
- *     the interceptor in `api/axios.ts`.
- */
-
-const CLIENT_ID = process.env.REACT_APP_OAUTH_CLIENT_ID ?? 'ctomop-smart-app';
+const CLIENT_ID = import.meta.env.VITE_OAUTH_CLIENT_ID ?? 'ctomop-smart-app';
 const REDIRECT_URI =
-  process.env.REACT_APP_OAUTH_REDIRECT_URI ??
+  import.meta.env.VITE_OAUTH_REDIRECT_URI ??
   `${window.location.origin}/auth/callback`;
 const SCOPES = 'openid patient/*.read offline_access';
 
-// Storage keys
 const CODE_VERIFIER_KEY = 'pkce_code_verifier';
 const STATE_KEY = 'pkce_state';
 export const ACCESS_TOKEN_KEY = 'access_token';
 export const REFRESH_TOKEN_KEY = 'refresh_token';
-
-// ---------------------------------------------------------------------------
-// PKCE helpers
-// ---------------------------------------------------------------------------
 
 function randomBytes(length: number): Uint8Array {
   const array = new Uint8Array(length);
@@ -49,21 +32,16 @@ async function sha256(plain: string): Promise<ArrayBuffer> {
 
 async function generatePkce(): Promise<{ verifier: string; challenge: string }> {
   const verifierBytes = randomBytes(32);
-  const verifier = base64UrlEncode(verifierBytes.buffer);
+  const verifier = base64UrlEncode(verifierBytes.buffer as ArrayBuffer);
   const challengeBuffer = await sha256(verifier);
   const challenge = base64UrlEncode(challengeBuffer);
   return { verifier, challenge };
 }
 
 function generateState(): string {
-  return base64UrlEncode(randomBytes(16).buffer);
+  return base64UrlEncode(randomBytes(16).buffer as ArrayBuffer);
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/** Kick off the PKCE authorization-code flow. Redirects the browser. */
 export async function startPkceLogin(): Promise<void> {
   const { verifier, challenge } = await generatePkce();
   const state = generateState();
@@ -92,7 +70,6 @@ export interface TokenResponse {
   scope: string;
 }
 
-/** Exchange the authorization code for tokens. Call from the callback route. */
 export async function exchangeCodeForToken(
   code: string,
   returnedState: string
@@ -128,20 +105,17 @@ export async function exchangeCodeForToken(
 
   const tokens: TokenResponse = await resp.json();
 
-  // Store tokens; never use localStorage (XSS risk)
   sessionStorage.setItem(ACCESS_TOKEN_KEY, tokens.access_token);
   if (tokens.refresh_token) {
     sessionStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh_token);
   }
 
-  // Clean up PKCE values
   sessionStorage.removeItem(CODE_VERIFIER_KEY);
   sessionStorage.removeItem(STATE_KEY);
 
   return tokens;
 }
 
-/** Attempt a silent token refresh using the stored refresh_token. */
 export async function refreshAccessToken(): Promise<TokenResponse | null> {
   const refreshToken = sessionStorage.getItem(REFRESH_TOKEN_KEY);
   if (!refreshToken) return null;
@@ -171,7 +145,6 @@ export async function refreshAccessToken(): Promise<TokenResponse | null> {
   return tokens;
 }
 
-/** Remove all stored tokens (call on logout). */
 export function clearTokens(): void {
   sessionStorage.removeItem(ACCESS_TOKEN_KEY);
   sessionStorage.removeItem(REFRESH_TOKEN_KEY);
@@ -179,7 +152,6 @@ export function clearTokens(): void {
   sessionStorage.removeItem(STATE_KEY);
 }
 
-/** Returns true if there is a (possibly expired) access token stored. */
 export function hasAccessToken(): boolean {
   return !!sessionStorage.getItem(ACCESS_TOKEN_KEY);
 }

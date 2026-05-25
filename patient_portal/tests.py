@@ -15,7 +15,7 @@ import os
 import tempfile
 from datetime import date
 
-from django.contrib.auth.models import User
+from patient_portal.models import Identity
 from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -205,8 +205,8 @@ class FhirUploadBase(TestCase):
     @classmethod
     def setUpTestData(cls):
         _make_vocab_fixtures()
-        cls.admin = User.objects.create_superuser(
-            username='testadmin', password='testpass', email='admin@test.com'
+        cls.admin = Identity.objects.create_superuser(
+            email='admin@test.com', password='testpass'
         )
 
     def setUp(self):
@@ -858,8 +858,8 @@ class SmartTokenAuthTest(TestCase):
         from django.utils import timezone as tz
         import datetime
 
-        cls.user = User.objects.create_user(
-            username='smartuser', password='smartpass'
+        cls.user = Identity.objects.create_user(
+            email='smartuser@test.com', password='smartpass'
         )
 
         cls.app = Application.objects.create(
@@ -1502,8 +1502,8 @@ class _SmartBase(TestCase):
 
         _make_vocab_fixtures()
 
-        cls.foundation_user = User.objects.create_user(
-            username='foundation_svc', password='foundation_pass'
+        cls.foundation_user = Identity.objects.create_user(
+            email='foundation_svc@test.com', password='foundation_pass'
         )
 
         cls.app = Application.objects.create(
@@ -1867,7 +1867,7 @@ class SmartServiceClientWriteTest(_SmartBase):
 
         # Create Org A with a write-scoped token
         org_a = Organization.objects.create(name='Org A Cross-write Test', slug='org-a-cross-write')
-        user_a = User.objects.create_user(username='svc_cross_a_write', password='x')
+        user_a = Identity.objects.create_user(email='svc_cross_a_write@test.com', password='x')
         app_a = Application.objects.create(
             name='Org A Cross Write App',
             client_id='cross-a-write-client',
@@ -2090,8 +2090,8 @@ class ClientCredentialsTokenTest(TestCase):
         from oauth2_provider.models import Application
         _make_vocab_fixtures()
 
-        cls.service_user = User.objects.create_user(
-            username='svc_token_user', password='irrelevant'
+        cls.service_user = Identity.objects.create_user(
+            email='svc_token_user@test.com', password='irrelevant'
         )
         cls.app = Application.objects.create(
             name='Test Service Client',
@@ -2166,7 +2166,7 @@ class MultiTenantIsolationTest(_SmartBase):
 
         # --- Org A ---
         cls.org_a = Organization.objects.create(name='Org A', slug='org-a')
-        cls.user_a = User.objects.create_user(username='svc_org_a', password='x')
+        cls.user_a = Identity.objects.create_user(email='svc_org_a@test.com', password='x')
         cls.app_a = Application.objects.create(
             name='Org A App',
             client_id='org-a-client',
@@ -2185,7 +2185,7 @@ class MultiTenantIsolationTest(_SmartBase):
 
         # --- Org B ---
         cls.org_b = Organization.objects.create(name='Org B', slug='org-b')
-        cls.user_b = User.objects.create_user(username='svc_org_b', password='x')
+        cls.user_b = Identity.objects.create_user(email='svc_org_b@test.com', password='x')
         cls.app_b = Application.objects.create(
             name='Org B App',
             client_id='org-b-client',
@@ -2289,7 +2289,7 @@ class MultiTenantIsolationTest(_SmartBase):
 
     def test_superuser_session_sees_all_patients(self):
         """Superuser session auth bypasses org scoping and sees all patients."""
-        su = User.objects.create_superuser(username='su_iso', password='su_pass', email='su@test.com')
+        su = Identity.objects.create_superuser(email='su@test.com', password='su_pass')
         c = APIClient()
         c.force_authenticate(user=su)
         resp = c.get('/api/patient-info/')

@@ -26,8 +26,8 @@ export interface PatientInfo {
   stage?: string;
   karnofsky_performance_status?: number;
   ecog_performance_status?: number;
-  active_malignancies?: string;
-  active_infection?: boolean;
+  no_other_active_malignancies?: boolean;
+  no_active_infection_status?: boolean;
   preexisting_conditions?: string[];
   peripheral_neuropathy_grade?: number;
   
@@ -41,8 +41,7 @@ export interface PatientInfo {
   molecular_markers?: string;
   plasma_cell_leukemia?: boolean;
   progression?: string;
-  toxicity_grade_maximum?: number;
-  measurable_disease_imwg?: string;
+  measurable_disease_imwg?: boolean;
   
   // Treatment
   prior_therapy?: string;
@@ -116,17 +115,15 @@ export interface PatientInfo {
   magnesium_mg_dl?: number;
   
   // Labs
-  m_protein_serum?: number;
-  m_protein_urine?: number;
   ldh_u_l?: number;
-  pulmonary_function_test?: boolean;
+  pulmonary_function_test_result?: boolean;
   bone_imaging_result?: boolean;
-  num_lesions?: number;
-  clonal_plasma_percent?: number;
-  lvef_percent?: number;
-  hiv_status?: string;
-  hepatitis_b_status?: string;
-  hepatitis_c_status?: string;
+  hiv_status?: boolean;
+  hepatitis_b_status?: boolean;
+  hepatitis_c_status?: boolean;
+  no_hiv_status?: boolean;
+  no_hepatitis_b_status?: boolean;
+  no_hepatitis_c_status?: boolean;
   
   bilirubin_total_mg_dl?: number;
   alt_u_l?: number;

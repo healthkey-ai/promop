@@ -1,24 +1,23 @@
 from django.core.management.base import BaseCommand
-from django.contrib.auth.models import User
+from patient_portal.models import Identity
 
 class Command(BaseCommand):
     help = 'Creates admin user with default credentials'
 
     def handle(self, *args, **options):
-        username = 'admin'
+        email = 'admin@example.com'
         password = '1database'
-        
-        if User.objects.filter(username=username).exists():
-            self.stdout.write(self.style.WARNING(f'User "{username}" already exists'))
+
+        if Identity.objects.filter(email=email).exists():
+            self.stdout.write(self.style.WARNING(f'User "{email}" already exists'))
             # Update password in case it changed
-            user = User.objects.get(username=username)
+            user = Identity.objects.get(email=email)
             user.set_password(password)
             user.save()
-            self.stdout.write(self.style.SUCCESS(f'Updated password for user "{username}"'))
+            self.stdout.write(self.style.SUCCESS(f'Updated password for user "{email}"'))
         else:
-            User.objects.create_superuser(
-                username=username,
-                email='admin@example.com',
+            Identity.objects.create_superuser(
+                email=email,
                 password=password
             )
-            self.stdout.write(self.style.SUCCESS(f'Successfully created superuser "{username}"'))
+            self.stdout.write(self.style.SUCCESS(f'Successfully created superuser "{email}"'))

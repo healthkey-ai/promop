@@ -11,8 +11,12 @@ from omop_core.models import (
     Relationship, ConceptRelationship, ConceptAncestor,
 )
 
-VOCAB_SCOPE = frozenset({'HemOnc', 'RxNorm', 'RxNorm Extension', 'ATC'})
+VOCAB_SCOPE = frozenset({
+    'HemOnc', 'RxNorm', 'RxNorm Extension', 'ATC', 'LOINC', 'UCUM',
+    'Visit', 'Type Concept',
+})
 RXNORM_CLASS_SCOPE = frozenset({'Ingredient', 'Clinical Drug', 'Branded Drug', 'Clinical Drug Comp'})
+LOINC_DOMAIN_SCOPE = frozenset({'Measurement', 'Observation'})
 BATCH = 1000
 
 
@@ -38,7 +42,9 @@ def _concept_in_scope(row):
         return row['concept_code'].startswith('L')
     if vid in ('RxNorm', 'RxNorm Extension'):
         return row['concept_class_id'] in RXNORM_CLASS_SCOPE
-    return True  # HemOnc: all
+    if vid == 'LOINC':
+        return row['domain_id'] in LOINC_DOMAIN_SCOPE
+    return True  # HemOnc, UCUM: all
 
 
 def _bulk(model, batch, dry_run):

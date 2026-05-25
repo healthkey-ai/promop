@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
@@ -66,6 +67,143 @@ class ApplicationOrganization(models.Model):
         return f"{self.application.name} → {self.organization.name}"
 
 
+class PatientGroup(models.Model):
+    """A group of patients for access control purposes."""
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='patient_groups',
+    )
+    name = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=60)
+    description = models.TextField(blank=True, default='')
+    rule_managed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        db_table = 'patient_group'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['organization', 'slug'],
+                name='uq_patient_group_org_slug',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.organization.slug}/{self.name}"
+
+
+class PatientGroupMembership(models.Model):
+    """Links a patient (by person_id) to a group. No FK to Person — different DB."""
+    SOURCE_CHOICES = [
+        ('manual', 'Manual assignment'),
+        ('rule', 'Rule-based auto-assignment'),
+    ]
+    group = models.ForeignKey(
+        PatientGroup, on_delete=models.CASCADE, related_name='memberships',
+    )
+    person_id = models.BigIntegerField(db_index=True)
+    source = models.CharField(max_length=10, choices=SOURCE_CHOICES, default='manual')
+    added_at = models.DateTimeField(auto_now_add=True)
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        db_table = 'patient_group_membership'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['group', 'person_id'],
+                name='uq_group_person',
+            ),
+        ]
+
+    def __str__(self):
+        return f"Person {self.person_id} in {self.group.name}"
+
+
+class ProfessionalGroupAccess(models.Model):
+    """Grants a professional (Identity) access to a patient group."""
+    ROLE_CHOICES = [
+        ('admin', 'Admin'),
+        ('navigator', 'Navigator'),
+        ('doctor', 'Doctor'),
+    ]
+    identity = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name='group_access_grants',
+    )
+    group = models.ForeignKey(
+        PatientGroup, on_delete=models.CASCADE, related_name='access_grants',
+    )
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    granted_at = models.DateTimeField(auto_now_add=True)
+    granted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        db_table = 'professional_group_access'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['identity', 'group'],
+                name='uq_identity_group',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.identity} → {self.group.name} ({self.role})"
+
+
+class PersonalRepresentative(models.Model):
+    """Links an Identity to a person they represent (child, parent, spouse, etc.).
+    No FK to Person — different DB."""
+    RELATIONSHIP_CHOICES = [
+        ('parent', 'Parent'),
+        ('child', 'Child'),
+        ('spouse', 'Spouse'),
+        ('guardian', 'Guardian'),
+        ('caregiver', 'Caregiver'),
+        ('other', 'Other'),
+    ]
+    VERIFICATION_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('VERIFIED', 'Verified'),
+        ('REJECTED', 'Rejected'),
+    ]
+    representative = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name='represented_persons',
+    )
+    person_id = models.BigIntegerField(db_index=True)
+    relationship = models.CharField(max_length=20, choices=RELATIONSHIP_CHOICES)
+    verification_status = models.CharField(
+        max_length=20, choices=VERIFICATION_CHOICES, default='PENDING',
+    )
+    granted_at = models.DateTimeField(auto_now_add=True)
+    granted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        db_table = 'personal_representative'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['representative', 'person_id'],
+                name='uq_representative_person',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.representative} represents Person {self.person_id} ({self.relationship})"
+
+
 class Vocabulary(models.Model):
     """OMOP CDM Vocabulary table - standardized vocabularies."""
     vocabulary_id = models.CharField(max_length=20, primary_key=True)
@@ -122,6 +260,12 @@ class Concept(models.Model):
 
     class Meta:
         db_table = 'concept'
+        indexes = [
+            models.Index(
+                fields=['vocabulary_id', 'concept_code'],
+                name='ix_concept_vocab_code',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.concept_id}: {self.concept_name}"
@@ -467,6 +611,16 @@ class Measurement(models.Model):
 
     class Meta:
         db_table = 'measurement'
+        indexes = [
+            models.Index(
+                fields=['person', 'measurement_concept', 'measurement_date'],
+                name='ix_meas_person_concept_date',
+            ),
+            models.Index(
+                fields=['person', 'measurement_source_concept', 'measurement_date'],
+                name='ix_meas_person_srcconcept_date',
+            ),
+        ]
 
     def __str__(self):
         return f"Measurement {self.measurement_id} for Person {self.person_id}"
@@ -501,6 +655,56 @@ class Observation(models.Model):
 
     def __str__(self):
         return f"Observation {self.observation_id} for Person {self.person_id}"
+
+
+class CareSite(models.Model):
+    """OMOP CDM Care Site table — healthcare delivery locations (labs, clinics)."""
+    care_site_id = models.BigIntegerField(primary_key=True)
+    care_site_name = models.CharField(max_length=255, null=True, blank=True)
+    place_of_service_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT,
+        related_name='care_sites', db_column='place_of_service_concept_id',
+        null=True, blank=True,
+    )
+    location = models.ForeignKey(
+        Location, on_delete=models.SET_NULL,
+        db_column='location_id', null=True, blank=True,
+    )
+    care_site_source_value = models.CharField(max_length=50, null=True, blank=True)
+    place_of_service_source_value = models.CharField(max_length=50, null=True, blank=True)
+
+    class Meta:
+        db_table = 'care_site'
+
+    def __str__(self):
+        return f"CareSite {self.care_site_id}: {self.care_site_name}"
+
+
+class LoincClass(models.Model):
+    """LOINC CLASS → display name mapping from LoincClass.csv (loinc.org archive)."""
+    code = models.CharField(max_length=32, primary_key=True)
+    display_name = models.CharField(max_length=128)
+
+    class Meta:
+        db_table = 'loinc_class'
+
+    def __str__(self):
+        return f"{self.code}: {self.display_name}"
+
+
+class LoincCodeClass(models.Model):
+    """Maps LOINC codes to their CLASS value (from Loinc.csv)."""
+    loinc_num = models.CharField(max_length=20, primary_key=True)
+    loinc_class = models.ForeignKey(
+        LoincClass, on_delete=models.CASCADE,
+        db_column='loinc_class_code', to_field='code',
+    )
+
+    class Meta:
+        db_table = 'loinc_code_class'
+
+    def __str__(self):
+        return f"{self.loinc_num} → {self.loinc_class_id}"
 
 
 # Choice classes for PatientInfo model
@@ -830,7 +1034,7 @@ class PatientInfo(models.Model):
     person = models.OneToOneField(Person, on_delete=models.CASCADE, related_name='patient_info')
     
     # General Information
-    email = models.EmailField(max_length=255, null=True, blank=True)
+    email = models.EmailField(max_length=255, null=True, blank=True, db_index=True)
     date_of_birth = models.DateField(null=True, blank=True)
     
     # Demographics

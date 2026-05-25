@@ -3,7 +3,7 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
-from django.contrib.auth.models import User
+from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
@@ -32,6 +32,7 @@ from omop_core.services.patient_info_service import refresh_patient_info
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.omop_write_service import sync_to_omop
 from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
+from omop_core.services.pk import next_pk
 from datetime import datetime
 import csv
 import json
@@ -199,12 +200,13 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         if org is not None and patient_info.organization != org:
             return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Get the User associated with this person (not the logged-in user)
+        # Get the Identity associated with this person (not the logged-in user)
+        from patient_portal.models import PatientUser
         try:
-            patient_user = User.objects.get(id=person.person_id)
-            user_serializer = UserSerializer(patient_user)
+            patient_user = PatientUser.objects.get(person=person)
+            user_serializer = UserSerializer(patient_user.identity)
             user_data = user_serializer.data
-        except User.DoesNotExist:
+        except PatientUser.DoesNotExist:
             user_data = None
 
         patient_serializer = PatientInfoSerializer(patient_info)
@@ -550,12 +552,12 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             family_name=family_name,
                         )
                         person_is_new = True
-                        User.objects.get_or_create(
-                            username=f'patient{person.person_id}',
+                        full_name = f"{given_name} {family_name}".strip()
+                        identity, _ = Identity.objects.get_or_create(
+                            sub=f'patient{person.person_id}',
                             defaults={
-                                'id': person.person_id,
-                                'first_name': given_name,
-                                'last_name': family_name,
+                                'issuer': 'urn:local',
+                                'name': full_name,
                             },
                         )
                     
@@ -1665,10 +1667,12 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     person = Person.objects.get(person_id=person_id)
                     # Delete PatientInfo
                     PatientInfo.objects.filter(person=person).delete()
-                    # Delete associated User if exists
+                    # Delete associated Identity if exists (via PatientUser)
+                    from patient_portal.models import PatientUser as PU
                     try:
-                        User.objects.filter(id=person_id).delete()
-                    except User.DoesNotExist:
+                        pu = PU.objects.get(person=person)
+                        pu.identity.delete()
+                    except PU.DoesNotExist:
                         pass
                     # Delete Person
                     person.delete()
@@ -1719,7 +1723,6 @@ def login_view(request):
         logger.error('Login error: %s\n%s', str(e), traceback.format_exc())
         return Response({
             'error': 'Login failed',
-            'detail': str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @csrf_exempt
@@ -1753,7 +1756,9 @@ def health_check(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def auth_test(request):
-    """Test auth endpoint to diagnose login 500"""
+    """Test auth endpoint — DEBUG only."""
+    if not settings.DEBUG:
+        return Response({'detail': 'Not available'}, status=status.HTTP_404_NOT_FOUND)
     import traceback as tb
     try:
         step = 'start'
@@ -1770,12 +1775,6 @@ def auth_test(request):
 # =============================================================================
 # OMOP clinical event ViewSets
 # =============================================================================
-
-def _next_pk(model, pk_field):
-    """Return max(pk_field) + 1, or 1 if the table is empty."""
-    last = model.objects.order_by(f'-{pk_field}').values_list(pk_field, flat=True).first()
-    return (last + 1) if last else 1
-
 
 _MODEL_PK_MAP = {
     'ConditionOccurrence': ('condition_occurrence_id', ConditionOccurrence),
@@ -1814,7 +1813,7 @@ class _ProvenanceMixin:
         if model_name in _MODEL_PK_MAP:
             pk_field, model_cls = _MODEL_PK_MAP[model_name]
             if pk_field not in serializer.validated_data:
-                serializer.validated_data[pk_field] = _next_pk(model_cls, pk_field)
+                serializer.validated_data[pk_field] = next_pk(model_cls, pk_field)
 
         # Org-scoping: reject cross-org writes
         org = get_request_org(self.request)
@@ -1852,6 +1851,35 @@ class MeasurementViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewS
     serializer_class = MeasurementSerializer
     permission_classes = [ScopedTokenPermission]
     queryset = Measurement.objects.all()
+    ordering_fields = ['measurement_date', 'measurement_id']
+    ordering = ['-measurement_date']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        concept_id = self.request.query_params.get('measurement_concept_id')
+        if concept_id:
+            qs = qs.filter(measurement_concept_id=concept_id)
+        source_concept_id = self.request.query_params.get('measurement_source_concept_id')
+        if source_concept_id:
+            qs = qs.filter(measurement_source_concept_id=source_concept_id)
+        concept_code = self.request.query_params.get('concept_code')
+        if concept_code:
+            from omop_core.models import Concept
+            cids = list(
+                Concept.objects.filter(concept_code=concept_code)
+                .values_list('concept_id', flat=True)
+            )
+            qs = qs.filter(measurement_concept_id__in=cids)
+        date_gte = self.request.query_params.get('measurement_date__gte')
+        if date_gte:
+            qs = qs.filter(measurement_date__gte=date_gte)
+        date_lte = self.request.query_params.get('measurement_date__lte')
+        if date_lte:
+            qs = qs.filter(measurement_date__lte=date_lte)
+        visit_id = self.request.query_params.get('visit_occurrence_id')
+        if visit_id:
+            qs = qs.filter(visit_occurrence_id=visit_id)
+        return qs
 
 
 @method_decorator(csrf_exempt, name='dispatch')

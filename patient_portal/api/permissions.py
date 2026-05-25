@@ -1,6 +1,8 @@
 from django.utils import timezone
 from rest_framework.permissions import BasePermission
 
+from .providers.base import TokenClaims
+
 
 def get_request_org(request):
     """
@@ -9,12 +11,13 @@ def get_request_org(request):
     Returns None (no scoping) for:
       - superusers (can see all orgs)
       - session-authenticated requests (backward compat)
+      - partner-auth requests (Firebase, SAML — no org scoping)
       - service clients not linked to any organization
     """
     if request.user and request.user.is_superuser:
         return None
     token = getattr(request, 'auth', None)
-    if token is None:
+    if token is None or isinstance(token, TokenClaims):
         return None
     try:
         return token.application.org_profile.organization
@@ -33,8 +36,9 @@ class ScopedTokenPermission(BasePermission):
     Safe methods   (GET, HEAD, OPTIONS) → patient/*.read  or user/*.read
     Unsafe methods (POST, PUT, PATCH, DELETE) → patient/*.write or user/*.write
 
-    Session-authenticated users bypass scope checks for backward compatibility
-    with the existing admin UI.
+    Partner-auth (Firebase, SAML) and session-authenticated users bypass
+    scope checks — they are already authenticated via token verification
+    or session cookie.
 
     NOTE: patient population scoping (multi-tenant isolation per HealthTree
     integration) is tracked separately under HKI-SEC-04 and HKI-AUTH-04.
@@ -43,8 +47,9 @@ class ScopedTokenPermission(BasePermission):
     def has_permission(self, request, view):
         token = request.auth
 
-        # Session auth: no OAuth2 token — fall back to user.is_authenticated
-        if token is None:
+        # Partner auth, session auth, or service-token: no OAuth2 scopes to check.
+        # TODO(security): these paths get full read+write with no scope enforcement.
+        if token is None or token == "service-token" or isinstance(token, TokenClaims):
             return bool(request.user and request.user.is_authenticated)
 
         if not hasattr(token, 'scope') or timezone.now() >= token.expires:

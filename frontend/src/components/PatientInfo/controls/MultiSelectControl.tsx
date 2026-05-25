@@ -1,8 +1,8 @@
-import React, { useMemo } from "react";
-import { Popover, PopoverContent, PopoverTrigger } from "../../shadcn/popover";
-import { Command, CommandGroup, CommandItem } from "../../shadcn/command";
-import { Checkbox } from "../../shadcn/checkbox";
-import { Button } from "../../shadcn/button";
+import { useMemo } from "react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/shadcn/popover";
+import { Command, CommandGroup, CommandItem } from "@/components/shadcn/command";
+import { Checkbox } from "@/components/shadcn/checkbox";
+import { Button } from "@/components/shadcn/button";
 import type { Option } from "../utils";
 import { optionKey } from "../utils";
 

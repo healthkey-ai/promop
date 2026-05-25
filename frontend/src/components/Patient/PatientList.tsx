@@ -1,27 +1,7 @@
-import React, { useState, useEffect } from 'react';
-import {
-  Box,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
-  Paper,
-  Button,
-  Typography,
-  CircularProgress,
-  Alert,
-  Checkbox,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogContentText,
-  DialogActions,
-} from '@mui/material';
-import { useNavigate } from 'react-router-dom';
-import { Upload, FileText, Trash2 } from 'lucide-react';
-import api from '../../api/axios';
+import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { Upload, FileText, Trash2 } from "lucide-react";
+import api from "@/api/axios";
 
 interface Patient {
   person_id: number;
@@ -32,7 +12,7 @@ interface Patient {
   updated_at: string;
 }
 
-const PatientList: React.FC = () => {
+export default function PatientList() {
   const navigate = useNavigate();
   const [patients, setPatients] = useState<Patient[]>([]);
   const [loading, setLoading] = useState(true);
@@ -41,235 +21,213 @@ const PatientList: React.FC = () => {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
-  useEffect(() => {
-    fetchPatients();
-  }, []);
-
   const fetchPatients = async () => {
     try {
       setLoading(true);
-      const response = await api.get('/patient-info/');
+      const response = await api.get("/patient-info/");
       setPatients(response.data);
       setError(null);
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to fetch patients');
+    } catch (err) {
+      const msg =
+        err && typeof err === "object" && "response" in err
+          ? (err as { response?: { data?: { error?: string } } }).response?.data?.error
+          : undefined;
+      setError(msg || "Failed to fetch patients");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleSelectAll = (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (event.target.checked) {
-      setSelectedIds(new Set(patients.map(p => p.person_id)));
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
+    fetchPatients();
+  }, []);
+
+  const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.checked) {
+      setSelectedIds(new Set(patients.map((p) => p.person_id)));
     } else {
       setSelectedIds(new Set());
     }
   };
 
   const handleSelectOne = (personId: number) => {
-    const newSelected = new Set(selectedIds);
-    if (newSelected.has(personId)) {
-      newSelected.delete(personId);
-    } else {
-      newSelected.add(personId);
-    }
-    setSelectedIds(newSelected);
-  };
-
-  const handleDeleteClick = () => {
-    if (selectedIds.size > 0) {
-      setDeleteDialogOpen(true);
-    }
+    const next = new Set(selectedIds);
+    if (next.has(personId)) next.delete(personId);
+    else next.add(personId);
+    setSelectedIds(next);
   };
 
   const handleDeleteConfirm = async () => {
     try {
       setDeleting(true);
-      await api.delete('/patient-info/bulk_delete/', {
-        data: { person_ids: Array.from(selectedIds) }
+      await api.delete("/patient-info/bulk_delete/", {
+        data: { person_ids: Array.from(selectedIds) },
       });
-      
-      // Refresh the list
       await fetchPatients();
       setSelectedIds(new Set());
       setDeleteDialogOpen(false);
       setError(null);
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to delete patients');
+    } catch (err) {
+      const msg =
+        err && typeof err === "object" && "response" in err
+          ? (err as { response?: { data?: { error?: string } } }).response?.data?.error
+          : undefined;
+      setError(msg || "Failed to delete patients");
     } finally {
       setDeleting(false);
     }
   };
 
-  const handleDeleteCancel = () => {
-    setDeleteDialogOpen(false);
-  };
-
-  const handleUploadCSV = () => {
-    navigate('/upload-csv');
-  };
-
-  const handleUploadFHIR = () => {
-    navigate('/upload-fhir');
-  };
-
-  const handleRowClick = (personId: number) => {
-    navigate(`/patient/${personId}`);
-  };
-
   const formatDate = (dateString: string) => {
-    if (!dateString) return 'N/A';
+    if (!dateString) return "N/A";
     try {
-      const date = new Date(dateString);
-      return date.toLocaleDateString();
+      return new Date(dateString).toLocaleDateString();
     } catch {
-      return 'Invalid Date';
+      return "Invalid Date";
     }
   };
 
   if (loading) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="400px">
-        <CircularProgress />
-      </Box>
+      <div className="flex min-h-[400px] items-center justify-center">
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+      </div>
     );
   }
 
   const isAllSelected = patients.length > 0 && selectedIds.size === patients.length;
-  const isIndeterminate = selectedIds.size > 0 && selectedIds.size < patients.length;
 
   return (
-    <Box>
-      <Box display="flex" justifyContent="space-between" alignItems="center" mb={3}>
-        <Typography variant="h4">Patient Records</Typography>
-        <Box display="flex" gap={2}>
+    <div className="p-6">
+      <div className="mb-6 flex items-center justify-between">
+        <h1 className="text-2xl font-bold text-foreground">Patient Records</h1>
+        <div className="flex gap-2">
           {selectedIds.size > 0 && (
-            <Button
-              variant="outlined"
-              color="error"
-              startIcon={<Trash2 size={20} />}
-              onClick={handleDeleteClick}
+            <button
+              onClick={() => setDeleteDialogOpen(true)}
+              className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
             >
-              Delete Records ({selectedIds.size})
-            </Button>
+              <Trash2 size={16} />
+              Delete ({selectedIds.size})
+            </button>
           )}
-          <Button
-            variant="outlined"
-            startIcon={<Upload size={20} />}
-            onClick={handleUploadCSV}
+          <button
+            onClick={() => navigate("/upload-csv")}
+            className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
           >
+            <Upload size={16} />
             Upload CSV
-          </Button>
-          <Button
-            variant="contained"
-            startIcon={<FileText size={20} />}
-            onClick={handleUploadFHIR}
+          </button>
+          <button
+            onClick={() => navigate("/upload-fhir")}
+            className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
           >
+            <FileText size={16} />
             Upload FHIR
-          </Button>
-        </Box>
-      </Box>
+          </button>
+        </div>
+      </div>
 
       {error && (
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <div className="mb-4 rounded-md bg-destructive/10 p-4 text-sm text-destructive">
           {error}
-        </Alert>
+        </div>
       )}
 
-      <TableContainer component={Paper}>
-        <Table>
-          <TableHead>
-            <TableRow>
-              <TableCell padding="checkbox">
-                <Checkbox
-                  indeterminate={isIndeterminate}
+      <div className="overflow-hidden rounded-lg border border-border bg-background shadow-sm">
+        <table className="w-full text-left text-sm">
+          <thead className="border-b border-border bg-muted/50">
+            <tr>
+              <th className="w-10 px-4 py-3">
+                <input
+                  type="checkbox"
                   checked={isAllSelected}
                   onChange={handleSelectAll}
+                  className="h-4 w-4 rounded border-input"
                 />
-              </TableCell>
-              <TableCell>ID</TableCell>
-              <TableCell>Name</TableCell>
-              <TableCell>Age</TableCell>
-              <TableCell>Disease</TableCell>
-              <TableCell>Stage</TableCell>
-              <TableCell>Last Updated</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
+              </th>
+              <th className="px-4 py-3 font-medium text-muted-foreground">ID</th>
+              <th className="px-4 py-3 font-medium text-muted-foreground">Name</th>
+              <th className="px-4 py-3 font-medium text-muted-foreground">Age</th>
+              <th className="px-4 py-3 font-medium text-muted-foreground">Disease</th>
+              <th className="px-4 py-3 font-medium text-muted-foreground">Stage</th>
+              <th className="px-4 py-3 font-medium text-muted-foreground">Last Updated</th>
+            </tr>
+          </thead>
+          <tbody>
             {patients.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={7} align="center">
-                  <Typography color="text.secondary" py={4}>
-                    No patients found. Upload a CSV or FHIR file to get started.
-                  </Typography>
-                </TableCell>
-              </TableRow>
+              <tr>
+                <td colSpan={7} className="py-12 text-center text-muted-foreground">
+                  No patients found. Upload a CSV or FHIR file to get started.
+                </td>
+              </tr>
             ) : (
               patients.map((patient) => (
-                <TableRow
+                <tr
                   key={patient.person_id}
-                  hover
-                  sx={{ cursor: 'pointer' }}
+                  className="border-b border-border last:border-0 hover:bg-muted/30 cursor-pointer"
                 >
-                  <TableCell padding="checkbox" onClick={(e) => e.stopPropagation()}>
-                    <Checkbox
+                  <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
                       checked={selectedIds.has(patient.person_id)}
                       onChange={() => handleSelectOne(patient.person_id)}
+                      className="h-4 w-4 rounded border-input"
                     />
-                  </TableCell>
-                  <TableCell onClick={() => handleRowClick(patient.person_id)}>
+                  </td>
+                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
                     {patient.person_id}
-                  </TableCell>
-                  <TableCell onClick={() => handleRowClick(patient.person_id)}>
+                  </td>
+                  <td className="px-4 py-3 font-medium" onClick={() => navigate(`/patient/${patient.person_id}`)}>
                     {patient.patient_name}
-                  </TableCell>
-                  <TableCell onClick={() => handleRowClick(patient.person_id)}>
-                    {patient.age ?? 'N/A'}
-                  </TableCell>
-                  <TableCell onClick={() => handleRowClick(patient.person_id)}>
-                    {patient.disease || 'N/A'}
-                  </TableCell>
-                  <TableCell onClick={() => handleRowClick(patient.person_id)}>
-                    {patient.stage || 'N/A'}
-                  </TableCell>
-                  <TableCell onClick={() => handleRowClick(patient.person_id)}>
+                  </td>
+                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                    {patient.age ?? "N/A"}
+                  </td>
+                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                    {patient.disease || "N/A"}
+                  </td>
+                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                    {patient.stage || "N/A"}
+                  </td>
+                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
                     {formatDate(patient.updated_at)}
-                  </TableCell>
-                </TableRow>
+                  </td>
+                </tr>
               ))
             )}
-          </TableBody>
-        </Table>
-      </TableContainer>
+          </tbody>
+        </table>
+      </div>
 
-      {/* Delete Confirmation Dialog */}
-      <Dialog
-        open={deleteDialogOpen}
-        onClose={handleDeleteCancel}
-      >
-        <DialogTitle>Confirm Delete</DialogTitle>
-        <DialogContent>
-          <DialogContentText>
-            Are you sure you want to delete {selectedIds.size} patient record{selectedIds.size !== 1 ? 's' : ''}?
-            This action cannot be undone.
-          </DialogContentText>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={handleDeleteCancel} disabled={deleting}>
-            Cancel
-          </Button>
-          <Button
-            onClick={handleDeleteConfirm}
-            color="error"
-            variant="contained"
-            disabled={deleting}
-          >
-            {deleting ? <CircularProgress size={24} /> : 'Delete'}
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </Box>
+      {deleteDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="w-full max-w-md rounded-lg bg-background p-6 shadow-xl">
+            <h2 className="text-lg font-semibold">Confirm Delete</h2>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Are you sure you want to delete {selectedIds.size} patient record
+              {selectedIds.size !== 1 ? "s" : ""}? This action cannot be undone.
+            </p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                onClick={() => setDeleteDialogOpen(false)}
+                disabled={deleting}
+                className="rounded-md border border-input px-4 py-2 text-sm font-medium hover:bg-accent disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteConfirm}
+                disabled={deleting}
+                className="rounded-md bg-destructive px-4 py-2 text-sm font-medium text-destructive-foreground hover:bg-destructive/90 disabled:opacity-50"
+              >
+                {deleting ? "Deleting..." : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
-};
-
-export default PatientList;
+}

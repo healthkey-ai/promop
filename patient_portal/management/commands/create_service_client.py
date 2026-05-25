@@ -20,7 +20,7 @@ patient/*.write for writes.
 import secrets
 
 from django.core.management.base import BaseCommand
-from django.contrib.auth.models import User
+from patient_portal.models import Identity
 
 
 class Command(BaseCommand):
@@ -46,14 +46,14 @@ class Command(BaseCommand):
         owner = None
         if options['owner_username']:
             try:
-                owner = User.objects.get(username=options['owner_username'])
-            except User.DoesNotExist:
+                owner = Identity.objects.get(email=options['owner_username'])
+            except Identity.DoesNotExist:
                 self.stderr.write(self.style.ERROR(
                     f"User '{options['owner_username']}' not found."
                 ))
                 return
         else:
-            owner = User.objects.filter(is_superuser=True).first()
+            owner = Identity.objects.filter(is_superuser=True).first()
             if not owner:
                 self.stderr.write(self.style.WARNING(
                     'No superuser found. Create one first with: manage.py createsuperuser'

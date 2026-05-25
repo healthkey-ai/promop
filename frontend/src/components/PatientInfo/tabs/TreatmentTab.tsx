@@ -1,5 +1,4 @@
-import React from 'react';
-import { useVocabulary } from '../../../hooks/useVocabulary';
+import { useVocabulary } from '@/hooks/useVocabulary';
 import Field from '../Field';
 import Section from '../Section';
 import {
@@ -13,17 +12,17 @@ import {
 } from '../patientConstants';
 
 interface Props {
-  formData: any;
-  onChange: (field: string, value: any) => void;
+  formData: Record<string, unknown>;
+  onChange: (field: string, value: unknown) => void;
   diseaseType: 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'other';
 }
 
-function getTherapyOptions(diseaseType: string, line: 'first' | 'second' | 'later', bcFirst: any[], bcSecond: any[], bcLater: any[]) {
+function getTherapyOptions(diseaseType: string, line: 'first' | 'second' | 'later', bcFirst: { value: string }[], bcSecond: { value: string }[], bcLater: { value: string }[]) {
   switch (diseaseType) {
     case 'breast':
-      if (line === 'first') return bcFirst.length ? bcFirst.map((o: any) => o.value) : BREAST_CANCER_FIRST_LINE;
-      if (line === 'second') return bcSecond.length ? bcSecond.map((o: any) => o.value) : BREAST_CANCER_SECOND_LINE;
-      return bcLater.length ? bcLater.map((o: any) => o.value) : BREAST_CANCER_LATER_LINE;
+      if (line === 'first') return bcFirst.length ? bcFirst.map((o) => o.value) : BREAST_CANCER_FIRST_LINE;
+      if (line === 'second') return bcSecond.length ? bcSecond.map((o) => o.value) : BREAST_CANCER_SECOND_LINE;
+      return bcLater.length ? bcLater.map((o) => o.value) : BREAST_CANCER_LATER_LINE;
     case 'lymphoma':
       if (line === 'first') return LYMPHOMA_FIRST_LINE;
       if (line === 'second') return LYMPHOMA_SECOND_LINE;

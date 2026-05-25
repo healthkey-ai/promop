@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from django.contrib.auth.models import User
+from patient_portal.models import Identity
 from omop_core.models import (
     PatientInfo,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
@@ -11,8 +11,8 @@ from datetime import date
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
-        model = User
-        fields = ['id', 'username', 'email', 'first_name', 'last_name']
+        model = Identity
+        fields = ['id', 'sub', 'email', 'name']
 
 
 class PatientListSerializer(serializers.ModelSerializer):
