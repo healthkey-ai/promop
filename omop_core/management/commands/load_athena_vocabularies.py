@@ -1,8 +1,12 @@
 import csv
+import io
 import os
+import sys
 import time
 from datetime import date
 from pathlib import Path
+
+csv.field_size_limit(sys.maxsize)
 
 from django.core.management.base import BaseCommand, CommandError
 
@@ -34,6 +38,13 @@ def _open_tsv(base, filename):
     return open(path, encoding='utf-8', newline='')
 
 
+def _open_gcs_blob(bucket, filename):
+    blob = bucket.blob(filename)
+    if not blob.exists():
+        raise CommandError(f'Required blob not found: gs://{bucket.name}/{filename}')
+    return io.TextIOWrapper(blob.open('rb'), encoding='utf-8', newline='')
+
+
 def _concept_in_scope(row):
     vid = row['vocabulary_id']
     if vid not in VOCAB_SCOPE:
@@ -56,8 +67,10 @@ class Command(BaseCommand):
     help = 'Load OHDSI Athena vocabulary TSV files into OMOP vocabulary tables'
 
     def add_arguments(self, parser):
-        parser.add_argument('--path', required=True,
+        parser.add_argument('--path',
                             help='Directory containing Athena TSV files')
+        parser.add_argument('--bucket',
+                            help='GCS bucket name to stream files from (alternative to --path)')
         parser.add_argument('--replace', action='store_true',
                             help='Clear vocabulary rows before loading')
         parser.add_argument('--dry-run', action='store_true', dest='dry_run',
@@ -65,30 +78,48 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         base = options['path']
+        bucket_name = options['bucket']
         replace = options['replace']
         dry_run = options['dry_run']
+
+        if not base and not bucket_name:
+            raise CommandError('Provide either --path or --bucket')
+
+        self._gcs_bucket = None
+        if bucket_name:
+            from google.cloud import storage as gcs
+            self._gcs_bucket = gcs.Client().bucket(bucket_name)
+            self.stdout.write(f'Streaming from gs://{bucket_name}/')
+
         t0 = time.monotonic()
+
+        self._base = base
 
         if replace and not dry_run:
             self._clear()
             self.stdout.write('Cleared existing vocabulary data.')
 
         counts = {
-            'relationship':         self._load_relationships(base, dry_run),
-            'vocabulary':           self._load_small(base, 'VOCABULARY.csv', dry_run,
+            'relationship':         self._load_relationships(dry_run),
+            'vocabulary':           self._load_small('VOCABULARY.csv', dry_run,
                                         self._vocab_row),
-            'domain':               self._load_small(base, 'DOMAIN.csv', dry_run,
+            'domain':               self._load_small('DOMAIN.csv', dry_run,
                                         self._domain_row),
-            'concept_class':        self._load_small(base, 'CONCEPT_CLASS.csv', dry_run,
+            'concept_class':        self._load_small('CONCEPT_CLASS.csv', dry_run,
                                         self._cc_row),
-            'concept':              self._load_concepts(base, dry_run),
-            'concept_relationship': self._load_concept_relationships(base, dry_run),
-            'concept_ancestor':     self._load_concept_ancestors(base, dry_run),
+            'concept':              self._load_concepts(dry_run),
+            'concept_relationship': self._load_concept_relationships(dry_run),
+            'concept_ancestor':     self._load_concept_ancestors(dry_run),
         }
         verb = 'would load' if dry_run else 'loaded'
         for table, n in counts.items():
             self.stdout.write(f'  {table}: {n} rows {verb}')
         self.stdout.write(f'Done in {time.monotonic() - t0:.1f}s')
+
+    def _open(self, filename):
+        if self._gcs_bucket:
+            return _open_gcs_blob(self._gcs_bucket, filename)
+        return _open_tsv(self._base, filename)
 
     def _clear(self):
         ConceptAncestor.objects.all().delete()
@@ -97,10 +128,10 @@ class Command(BaseCommand):
         Relationship.objects.all().delete()
         Vocabulary.objects.filter(vocabulary_id__in=VOCAB_SCOPE).delete()
 
-    def _load_relationships(self, base, dry_run):
+    def _load_relationships(self, dry_run):
         count = 0
         batch = []
-        with _open_tsv(base, 'RELATIONSHIP.csv') as f:
+        with self._open('RELATIONSHIP.csv') as f:
             for row in csv.DictReader(f, delimiter='\t'):
                 try:
                     obj = Relationship(
@@ -148,13 +179,13 @@ class Command(BaseCommand):
             concept_class_concept_id=int(row.get('concept_class_concept_id') or 0),
         )
 
-    def _load_small(self, base, filename, dry_run, row_fn):
+    def _load_small(self, filename, dry_run, row_fn):
         """Generic loader for small lookup tables (Vocabulary, Domain, ConceptClass)."""
         count = 0
         batch = []
         model = None
         try:
-            f = _open_tsv(base, filename)
+            f = self._open(filename)
         except CommandError:
             return 0
         with f:
@@ -174,10 +205,10 @@ class Command(BaseCommand):
             model.objects.bulk_create(batch, ignore_conflicts=True)
         return count
 
-    def _load_concepts(self, base, dry_run):
+    def _load_concepts(self, dry_run):
         count = 0
         batch = []
-        with _open_tsv(base, 'CONCEPT.csv') as f:
+        with self._open('CONCEPT.csv') as f:
             for row in csv.DictReader(f, delimiter='\t'):
                 if not _concept_in_scope(row):
                     continue
@@ -208,14 +239,14 @@ class Command(BaseCommand):
         _bulk(Concept, batch, dry_run)
         return count
 
-    def _load_concept_relationships(self, base, dry_run):
+    def _load_concept_relationships(self, dry_run):
         loaded_ids = set(
             Concept.objects.filter(vocabulary_id__in=VOCAB_SCOPE)
                            .values_list('concept_id', flat=True)
         )
         count = 0
         batch = []
-        with _open_tsv(base, 'CONCEPT_RELATIONSHIP.csv') as f:
+        with self._open('CONCEPT_RELATIONSHIP.csv') as f:
             for row in csv.DictReader(f, delimiter='\t'):
                 try:
                     c1 = int(row['concept_id_1'])
@@ -240,14 +271,14 @@ class Command(BaseCommand):
         _bulk(ConceptRelationship, batch, dry_run)
         return count
 
-    def _load_concept_ancestors(self, base, dry_run):
+    def _load_concept_ancestors(self, dry_run):
         hemonc_ids = set(
             Concept.objects.filter(vocabulary_id='HemOnc')
                            .values_list('concept_id', flat=True)
         )
         count = 0
         batch = []
-        with _open_tsv(base, 'CONCEPT_ANCESTOR.csv') as f:
+        with self._open('CONCEPT_ANCESTOR.csv') as f:
             for row in csv.DictReader(f, delimiter='\t'):
                 try:
                     anc = int(row['ancestor_concept_id'])

@@ -1,5 +1,6 @@
 asgiref==3.8.1
 google-cloud-bigquery==3.25.0
+google-cloud-storage==2.18.2
 certifi==2024.8.30
 cffi==1.16.0
 charset-normalizer==3.3.2
