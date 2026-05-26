@@ -166,9 +166,13 @@ class SyncView(APIView):
 
     @transaction.atomic
     def post(self, request):
+        import sys
+        logger.info("sync: start")
+        sys.stderr.flush()
         serializer = SyncRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        logger.info("sync: validated")
 
         actor_iss = data.get('actor_iss', '')
         actor_sub = data.get('actor_sub', '')
@@ -176,7 +180,9 @@ class SyncView(APIView):
         is_on_behalf_of = bool(person_id)
 
         if not person_id:
+            logger.info("sync: resolving person from identity iss=%s sub=%s", actor_iss, actor_sub[:8])
             person_id = self._resolve_person_from_identity(actor_iss, actor_sub)
+            logger.info("sync: resolved person_id=%s", person_id)
             if person_id is None:
                 return Response(
                     {'detail': 'Cannot resolve person from actor identity.'},
