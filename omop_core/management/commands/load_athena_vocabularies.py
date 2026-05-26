@@ -1,5 +1,4 @@
 import csv
-import os
 import sys
 import time
 from datetime import date
@@ -8,6 +7,7 @@ from pathlib import Path
 csv.field_size_limit(sys.maxsize)
 
 from django.core.management.base import BaseCommand, CommandError
+from django.db import connection
 
 from omop_core.models import (
     Vocabulary, Domain, ConceptClass, Concept,
@@ -20,8 +20,8 @@ VOCAB_SCOPE = frozenset({
 })
 RXNORM_CLASS_SCOPE = frozenset({'Ingredient', 'Clinical Drug', 'Branded Drug', 'Clinical Drug Comp'})
 LOINC_DOMAIN_SCOPE = frozenset({'Measurement', 'Observation'})
-BATCH = 1000
-PROGRESS_EVERY = 100_000
+BATCH = 5000
+PROGRESS_EVERY = 500_000
 
 
 def _parse_date(s):
@@ -53,22 +53,40 @@ def _download_gcs_blob(bucket, filename, log):
     return open(dest, encoding='utf-8', newline='')
 
 
-def _concept_in_scope(row):
-    vid = row['vocabulary_id']
+def _header_index(header_row):
+    """Build column-name → index map from a TSV header row."""
+    return {col: i for i, col in enumerate(header_row)}
+
+
+def _concept_in_scope(vid, concept_code, concept_class_id, domain_id):
     if vid not in VOCAB_SCOPE:
         return False
     if vid == 'ATC':
-        return row['concept_code'].startswith('L')
+        return concept_code.startswith('L')
     if vid in ('RxNorm', 'RxNorm Extension'):
-        return row['concept_class_id'] in RXNORM_CLASS_SCOPE
+        return concept_class_id in RXNORM_CLASS_SCOPE
     if vid == 'LOINC':
-        return row['domain_id'] in LOINC_DOMAIN_SCOPE
-    return True  # HemOnc, UCUM: all
+        return domain_id in LOINC_DOMAIN_SCOPE
+    return True
 
 
-def _bulk(model, batch, dry_run):
-    if not dry_run and batch:
-        model.objects.bulk_create(batch, ignore_conflicts=True)
+def _copy_rows(table, columns, rows, log):
+    """Use PostgreSQL COPY into temp table, then upsert to handle duplicates."""
+    if not rows:
+        return
+    connection.ensure_connection()
+    cols = ', '.join(columns)
+    tmp = f'_tmp_{table}'
+    with connection.connection.cursor() as cur:
+        cur.execute(f'DROP TABLE IF EXISTS {tmp}')
+        cur.execute(
+            f'CREATE TEMP TABLE {tmp} AS SELECT {cols} FROM {table} WHERE false'
+        )
+        with cur.copy(f'COPY {tmp} ({cols}) FROM STDIN') as copy:
+            for row in rows:
+                copy.write_row(row)
+        cur.execute(f'INSERT INTO {table} ({cols}) SELECT {cols} FROM {tmp} ON CONFLICT DO NOTHING')
+        cur.execute(f'DROP TABLE {tmp}')
 
 
 class Command(BaseCommand):
@@ -108,12 +126,9 @@ class Command(BaseCommand):
 
         counts = {
             'relationship':         self._load_relationships(dry_run),
-            'vocabulary':           self._load_small('VOCABULARY.csv', dry_run,
-                                        self._vocab_row),
-            'domain':               self._load_small('DOMAIN.csv', dry_run,
-                                        self._domain_row),
-            'concept_class':        self._load_small('CONCEPT_CLASS.csv', dry_run,
-                                        self._cc_row),
+            'vocabulary':           self._load_vocabularies(dry_run),
+            'domain':               self._load_domains(dry_run),
+            'concept_class':        self._load_concept_classes(dry_run),
             'concept':              self._load_concepts(dry_run),
             'concept_relationship': self._load_concept_relationships(dry_run),
             'concept_ancestor':     self._load_concept_ancestors(dry_run),
@@ -140,7 +155,6 @@ class Command(BaseCommand):
                 self._log(f'  Cleaned up {filename}.')
 
     def _clear(self):
-        from django.db import connection
         self._log('Clearing existing vocabulary data...')
         t = time.monotonic()
         with connection.cursor() as cur:
@@ -162,86 +176,135 @@ class Command(BaseCommand):
         self._log(f'  Clear phase done in {time.monotonic() - t:.0f}s')
 
     def _load_relationships(self, dry_run):
-        self._log('Loading relationships...')
+        self._log('Loading RELATIONSHIP.csv...')
+        t = time.monotonic()
         count = 0
-        batch = []
+        rows = []
         with self._open('RELATIONSHIP.csv') as f:
-            for row in csv.DictReader(f, delimiter='\t'):
+            reader = csv.reader(f, delimiter='\t')
+            idx = _header_index(next(reader))
+            for cols in reader:
                 try:
-                    obj = Relationship(
-                        relationship_id=row['relationship_id'][:20],
-                        relationship_name=row['relationship_name'][:255],
-                        is_hierarchical=int(row['is_hierarchical'] or 0),
-                        defines_ancestry=int(row['defines_ancestry'] or 0),
-                        reverse_relationship_id=row['reverse_relationship_id'][:20],
-                        relationship_concept_id=int(row['relationship_concept_id'] or 0),
+                    row = (
+                        cols[idx['relationship_id']][:20],
+                        cols[idx['relationship_name']][:255],
+                        int(cols[idx['is_hierarchical']] or 0),
+                        int(cols[idx['defines_ancestry']] or 0),
+                        cols[idx['reverse_relationship_id']][:20],
+                        int(cols[idx['relationship_concept_id']] or 0),
                     )
-                except (ValueError, KeyError) as exc:
+                except (ValueError, KeyError, IndexError) as exc:
                     self._log(f'Warning: skipping malformed relationship row: {exc}')
                     continue
                 count += 1
                 if not dry_run:
-                    batch.append(obj)
-                    if len(batch) >= BATCH:
-                        _bulk(Relationship, batch, dry_run)
-                        batch = []
-        _bulk(Relationship, batch, dry_run)
+                    rows.append(row)
+                    if len(rows) >= BATCH:
+                        _copy_rows('relationship',
+                                   ('relationship_id', 'relationship_name', 'is_hierarchical',
+                                    'defines_ancestry', 'reverse_relationship_id', 'relationship_concept_id'),
+                                   rows, self._log)
+                        rows = []
+        if not dry_run:
+            _copy_rows('relationship',
+                       ('relationship_id', 'relationship_name', 'is_hierarchical',
+                        'defines_ancestry', 'reverse_relationship_id', 'relationship_concept_id'),
+                       rows, self._log)
+        self._cleanup('RELATIONSHIP.csv')
+        self._log(f'  RELATIONSHIP.csv: {count:,} rows in {time.monotonic() - t:.0f}s')
         return count
 
-    def _vocab_row(self, row):
-        if row['vocabulary_id'] not in VOCAB_SCOPE:
-            return None
-        return Vocabulary(
-            vocabulary_id=row['vocabulary_id'][:20],
-            vocabulary_name=row['vocabulary_name'][:255],
-            vocabulary_reference=(row.get('vocabulary_reference') or '')[:255],
-            vocabulary_version=(row.get('vocabulary_version') or '')[:255],
-            vocabulary_concept_id=int(row.get('vocabulary_concept_id') or 0),
-        )
-
-    def _domain_row(self, row):
-        return Domain(
-            domain_id=row['domain_id'][:20],
-            domain_name=row['domain_name'][:255],
-            domain_concept_id=int(row.get('domain_concept_id') or 0),
-        )
-
-    def _cc_row(self, row):
-        return ConceptClass(
-            concept_class_id=row['concept_class_id'][:20],
-            concept_class_name=row['concept_class_name'][:255],
-            concept_class_concept_id=int(row.get('concept_class_concept_id') or 0),
-        )
-
-    def _load_small(self, filename, dry_run, row_fn):
-        """Generic loader for small lookup tables (Vocabulary, Domain, ConceptClass)."""
-        self._log(f'Loading {filename}...')
+    def _load_vocabularies(self, dry_run):
+        self._log('Loading VOCABULARY.csv...')
         t = time.monotonic()
         count = 0
-        batch = []
-        model = None
+        rows = []
         try:
-            f = self._open(filename)
+            f = self._open('VOCABULARY.csv')
         except CommandError:
-            self._log(f'  {filename} not found, skipping.')
+            self._log('  VOCABULARY.csv not found, skipping.')
             return 0
         with f:
-            for row in csv.DictReader(f, delimiter='\t'):
-                obj = row_fn(row)
-                if obj is None:
+            reader = csv.reader(f, delimiter='\t')
+            idx = _header_index(next(reader))
+            for cols in reader:
+                vid = cols[idx['vocabulary_id']]
+                if vid not in VOCAB_SCOPE:
                     continue
-                if model is None:
-                    model = type(obj)
-                if not dry_run:
-                    batch.append(obj)
-                    if len(batch) >= BATCH:
-                        model.objects.bulk_create(batch, ignore_conflicts=True)
-                        batch = []
                 count += 1
-        if model and batch and not dry_run:
-            model.objects.bulk_create(batch, ignore_conflicts=True)
-        self._cleanup(filename)
-        self._log(f'  {filename}: {count:,} rows loaded in {time.monotonic() - t:.0f}s')
+                if not dry_run:
+                    rows.append((
+                        vid[:20],
+                        cols[idx['vocabulary_name']][:255],
+                        (cols[idx.get('vocabulary_reference', -1)] if 'vocabulary_reference' in idx else '')[:255] or '',
+                        (cols[idx.get('vocabulary_version', -1)] if 'vocabulary_version' in idx else '')[:255] or '',
+                        int(cols[idx['vocabulary_concept_id']] or 0) if 'vocabulary_concept_id' in idx else 0,
+                    ))
+        if not dry_run and rows:
+            _copy_rows('vocabulary',
+                       ('vocabulary_id', 'vocabulary_name', 'vocabulary_reference',
+                        'vocabulary_version', 'vocabulary_concept_id'),
+                       rows, self._log)
+        self._cleanup('VOCABULARY.csv')
+        self._log(f'  VOCABULARY.csv: {count:,} rows in {time.monotonic() - t:.0f}s')
+        return count
+
+    def _load_domains(self, dry_run):
+        self._log('Loading DOMAIN.csv...')
+        t = time.monotonic()
+        count = 0
+        rows = []
+        try:
+            f = self._open('DOMAIN.csv')
+        except CommandError:
+            self._log('  DOMAIN.csv not found, skipping.')
+            return 0
+        with f:
+            reader = csv.reader(f, delimiter='\t')
+            idx = _header_index(next(reader))
+            for cols in reader:
+                count += 1
+                if not dry_run:
+                    rows.append((
+                        cols[idx['domain_id']][:20],
+                        cols[idx['domain_name']][:255],
+                        int(cols[idx['domain_concept_id']] or 0) if 'domain_concept_id' in idx else 0,
+                    ))
+        if not dry_run and rows:
+            _copy_rows('domain',
+                       ('domain_id', 'domain_name', 'domain_concept_id'),
+                       rows, self._log)
+        self._cleanup('DOMAIN.csv')
+        self._log(f'  DOMAIN.csv: {count:,} rows in {time.monotonic() - t:.0f}s')
+        return count
+
+    def _load_concept_classes(self, dry_run):
+        self._log('Loading CONCEPT_CLASS.csv...')
+        t = time.monotonic()
+        count = 0
+        rows = []
+        try:
+            f = self._open('CONCEPT_CLASS.csv')
+        except CommandError:
+            self._log('  CONCEPT_CLASS.csv not found, skipping.')
+            return 0
+        with f:
+            reader = csv.reader(f, delimiter='\t')
+            idx = _header_index(next(reader))
+            for cols in reader:
+                count += 1
+                if not dry_run:
+                    rows.append((
+                        cols[idx['concept_class_id']][:20],
+                        cols[idx['concept_class_name']][:255],
+                        int(cols[idx['concept_class_concept_id']] or 0) if 'concept_class_concept_id' in idx else 0,
+                    ))
+        if not dry_run and rows:
+            _copy_rows('concept_class',
+                       ('concept_class_id', 'concept_class_name', 'concept_class_concept_id'),
+                       rows, self._log)
+        self._cleanup('CONCEPT_CLASS.csv')
+        self._log(f'  CONCEPT_CLASS.csv: {count:,} rows in {time.monotonic() - t:.0f}s')
         return count
 
     def _load_concepts(self, dry_run):
@@ -249,39 +312,63 @@ class Command(BaseCommand):
         t = time.monotonic()
         count = 0
         scanned = 0
-        batch = []
+        rows = []
         with self._open('CONCEPT.csv') as f:
-            for row in csv.DictReader(f, delimiter='\t'):
+            reader = csv.reader(f, delimiter='\t')
+            idx = _header_index(next(reader))
+            i_id = idx['concept_id']
+            i_name = idx['concept_name']
+            i_domain = idx['domain_id']
+            i_vocab = idx['vocabulary_id']
+            i_class = idx['concept_class_id']
+            i_std = idx['standard_concept']
+            i_code = idx['concept_code']
+            i_start = idx['valid_start_date']
+            i_end = idx['valid_end_date']
+            i_invalid = idx['invalid_reason']
+            for cols in reader:
                 scanned += 1
                 if scanned % PROGRESS_EVERY == 0:
-                    self._log(f'  concepts: scanned {scanned:,} rows, {count:,} in scope...')
-                if not _concept_in_scope(row):
+                    self._log(f'  concepts: scanned {scanned:,}, {count:,} in scope ({time.monotonic() - t:.0f}s)...')
+                vid = cols[i_vocab]
+                if not _concept_in_scope(vid, cols[i_code], cols[i_class], cols[i_domain]):
                     continue
                 try:
-                    concept_id = int(row['concept_id'])
-                    start = _parse_date(row['valid_start_date'])
-                    end = _parse_date(row['valid_end_date'])
-                except (ValueError, KeyError) as exc:
+                    concept_id = int(cols[i_id])
+                    start = _parse_date(cols[i_start])
+                    end = _parse_date(cols[i_end])
+                except (ValueError, IndexError) as exc:
                     self._log(f'Warning: skipping malformed concept row: {exc}')
                     continue
                 count += 1
                 if not dry_run:
-                    batch.append(Concept(
-                        concept_id=concept_id,
-                        concept_name=row['concept_name'][:255],
-                        domain_id=row['domain_id'][:20],
-                        vocabulary_id=row['vocabulary_id'][:20],
-                        concept_class_id=row['concept_class_id'][:20],
-                        standard_concept=row['standard_concept'][:1] if row['standard_concept'] else None,
-                        concept_code=row['concept_code'][:50],
-                        valid_start_date=start,
-                        valid_end_date=end,
-                        invalid_reason=row['invalid_reason'][:1] if row.get('invalid_reason') else None,
+                    std = cols[i_std][:1] if cols[i_std] else None
+                    inv = cols[i_invalid][:1] if cols[i_invalid] else None
+                    rows.append((
+                        concept_id,
+                        cols[i_name][:255],
+                        cols[i_domain][:20],
+                        vid[:20],
+                        cols[i_class][:20],
+                        std,
+                        cols[i_code][:50],
+                        start.isoformat(),
+                        end.isoformat(),
+                        inv,
                     ))
-                    if len(batch) >= BATCH:
-                        _bulk(Concept, batch, dry_run)
-                        batch = []
-        _bulk(Concept, batch, dry_run)
+                    if len(rows) >= BATCH:
+                        _copy_rows('concept',
+                                   ('concept_id', 'concept_name', 'domain_id', 'vocabulary_id',
+                                    'concept_class_id', 'standard_concept', 'concept_code',
+                                    'valid_start_date', 'valid_end_date', 'invalid_reason'),
+                                   rows, self._log)
+                        rows = []
+        if not dry_run:
+            _copy_rows('concept',
+                       ('concept_id', 'concept_name', 'domain_id', 'vocabulary_id',
+                        'concept_class_id', 'standard_concept', 'concept_code',
+                        'valid_start_date', 'valid_end_date', 'invalid_reason'),
+                       rows, self._log)
         self._cleanup('CONCEPT.csv')
         self._log(f'  concepts: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
         return count
@@ -296,33 +383,48 @@ class Command(BaseCommand):
         self._log(f'  {len(loaded_ids):,} concept IDs in filter set')
         count = 0
         scanned = 0
-        batch = []
+        rows = []
         with self._open('CONCEPT_RELATIONSHIP.csv') as f:
-            for row in csv.DictReader(f, delimiter='\t'):
+            reader = csv.reader(f, delimiter='\t')
+            idx = _header_index(next(reader))
+            i_c1 = idx['concept_id_1']
+            i_c2 = idx['concept_id_2']
+            i_rel = idx['relationship_id']
+            i_start = idx['valid_start_date']
+            i_end = idx['valid_end_date']
+            i_invalid = idx['invalid_reason']
+            for cols in reader:
                 scanned += 1
                 if scanned % PROGRESS_EVERY == 0:
-                    self._log(f'  relationships: scanned {scanned:,} rows, {count:,} matched...')
+                    self._log(f'  relationships: scanned {scanned:,}, {count:,} matched ({time.monotonic() - t:.0f}s)...')
                 try:
-                    c1 = int(row['concept_id_1'])
-                    c2 = int(row['concept_id_2'])
-                except (ValueError, KeyError):
+                    c1 = int(cols[i_c1])
+                    c2 = int(cols[i_c2])
+                except (ValueError, IndexError):
                     continue
                 if c1 not in loaded_ids or c2 not in loaded_ids:
                     continue
                 count += 1
                 if not dry_run:
-                    batch.append(ConceptRelationship(
-                        concept_1_id=c1,
-                        concept_2_id=c2,
-                        relationship_id=row['relationship_id'][:20],
-                        valid_start_date=_parse_date(row['valid_start_date']),
-                        valid_end_date=_parse_date(row['valid_end_date']),
-                        invalid_reason=row['invalid_reason'][:1] if row.get('invalid_reason') else None,
+                    inv = cols[i_invalid][:1] if cols[i_invalid] else None
+                    rows.append((
+                        c1, c2,
+                        cols[i_rel][:20],
+                        _parse_date(cols[i_start]).isoformat(),
+                        _parse_date(cols[i_end]).isoformat(),
+                        inv,
                     ))
-                    if len(batch) >= BATCH:
-                        _bulk(ConceptRelationship, batch, dry_run)
-                        batch = []
-        _bulk(ConceptRelationship, batch, dry_run)
+                    if len(rows) >= BATCH:
+                        _copy_rows('concept_relationship',
+                                   ('concept_id_1', 'concept_id_2', 'relationship_id',
+                                    'valid_start_date', 'valid_end_date', 'invalid_reason'),
+                                   rows, self._log)
+                        rows = []
+        if not dry_run:
+            _copy_rows('concept_relationship',
+                       ('concept_id_1', 'concept_id_2', 'relationship_id',
+                        'valid_start_date', 'valid_end_date', 'invalid_reason'),
+                       rows, self._log)
         self._cleanup('CONCEPT_RELATIONSHIP.csv')
         self._log(f'  relationships: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
         return count
@@ -337,36 +439,44 @@ class Command(BaseCommand):
         self._log(f'  {len(hemonc_ids):,} HemOnc IDs in filter set')
         count = 0
         scanned = 0
-        batch = []
+        rows = []
         with self._open('CONCEPT_ANCESTOR.csv') as f:
-            for row in csv.DictReader(f, delimiter='\t'):
+            reader = csv.reader(f, delimiter='\t')
+            idx = _header_index(next(reader))
+            i_anc = idx['ancestor_concept_id']
+            i_desc = idx['descendant_concept_id']
+            i_min = idx['min_levels_of_separation']
+            i_max = idx['max_levels_of_separation']
+            for cols in reader:
                 scanned += 1
                 if scanned % PROGRESS_EVERY == 0:
-                    self._log(f'  ancestors: scanned {scanned:,} rows, {count:,} matched...')
+                    self._log(f'  ancestors: scanned {scanned:,}, {count:,} matched ({time.monotonic() - t:.0f}s)...')
                 try:
-                    anc = int(row['ancestor_concept_id'])
-                    desc = int(row['descendant_concept_id'])
-                except (ValueError, KeyError):
+                    anc = int(cols[i_anc])
+                    desc = int(cols[i_desc])
+                except (ValueError, IndexError):
                     continue
                 if anc not in hemonc_ids or desc not in hemonc_ids:
                     continue
                 count += 1
                 if not dry_run:
                     try:
-                        min_sep = int(row['min_levels_of_separation'])
-                        max_sep = int(row['max_levels_of_separation'])
-                    except (ValueError, KeyError):
+                        min_sep = int(cols[i_min])
+                        max_sep = int(cols[i_max])
+                    except (ValueError, IndexError):
                         continue
-                    batch.append(ConceptAncestor(
-                        ancestor_concept_id=anc,
-                        descendant_concept_id=desc,
-                        min_levels_of_separation=min_sep,
-                        max_levels_of_separation=max_sep,
-                    ))
-                    if len(batch) >= BATCH:
-                        _bulk(ConceptAncestor, batch, dry_run)
-                        batch = []
-        _bulk(ConceptAncestor, batch, dry_run)
+                    rows.append((anc, desc, min_sep, max_sep))
+                    if len(rows) >= BATCH:
+                        _copy_rows('concept_ancestor',
+                                   ('ancestor_concept_id', 'descendant_concept_id',
+                                    'min_levels_of_separation', 'max_levels_of_separation'),
+                                   rows, self._log)
+                        rows = []
+        if not dry_run:
+            _copy_rows('concept_ancestor',
+                       ('ancestor_concept_id', 'descendant_concept_id',
+                        'min_levels_of_separation', 'max_levels_of_separation'),
+                       rows, self._log)
         self._cleanup('CONCEPT_ANCESTOR.csv')
         self._log(f'  ancestors: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
         return count
