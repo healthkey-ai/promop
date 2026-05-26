@@ -1,11 +1,26 @@
 import csv
+import sys
 from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
 
 from omop_core.models import LoincClass, LoincCodeClass
 
+csv.field_size_limit(sys.maxsize)
 BATCH = 2000
+
+
+def _download_gcs_blob(bucket, filename, stdout):
+    blob = bucket.blob(filename)
+    if not blob.exists():
+        raise CommandError(f'Required blob not found: gs://{bucket.name}/{filename}')
+    dest = Path('/tmp/loinc') / filename
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    size_mb = (blob.size or 0) / 1048576
+    stdout.write(f'  Downloading {filename} ({size_mb:.0f}MB)...')
+    blob.download_to_filename(str(dest))
+    stdout.write(f'  Downloaded {filename}.')
+    return dest
 
 
 class Command(BaseCommand):
@@ -13,21 +28,35 @@ class Command(BaseCommand):
         'Load LOINC class data from the loinc.org archive.\n'
         '  --classes-csv: LoincClass.csv (CLASS → DISPLAY_NAME, ~470 rows)\n'
         '  --loinc-csv:   Loinc.csv (LOINC_NUM → CLASS mapping, ~100k rows)\n'
+        '  --bucket:      GCS bucket to download files from (alternative to local paths)\n'
         'Both files come from the quarterly Loinc_x.yy.zip archive.'
     )
 
     def add_arguments(self, parser):
-        parser.add_argument('--classes-csv', required=True,
+        parser.add_argument('--classes-csv',
                             help='Path to LoincClass.csv')
         parser.add_argument('--loinc-csv',
                             help='Path to Loinc.csv (loads LOINC_NUM → CLASS mapping)')
+        parser.add_argument('--bucket',
+                            help='GCS bucket name to download files from')
         parser.add_argument('--replace', action='store_true',
                             help='Clear existing rows before loading')
 
     def handle(self, *args, **options):
-        classes_path = Path(options['classes_csv'])
-        if not classes_path.exists():
-            raise CommandError(f'File not found: {classes_path}')
+        bucket_name = options.get('bucket')
+        gcs_bucket = None
+
+        if bucket_name:
+            from google.cloud import storage as gcs
+            gcs_bucket = gcs.Client().bucket(bucket_name)
+            self.stdout.write(f'Loading from gs://{bucket_name}/')
+            classes_path = _download_gcs_blob(gcs_bucket, 'LoincClass.csv', self.stdout)
+        else:
+            if not options.get('classes_csv'):
+                raise CommandError('Provide either --classes-csv or --bucket')
+            classes_path = Path(options['classes_csv'])
+            if not classes_path.exists():
+                raise CommandError(f'File not found: {classes_path}')
 
         if options['replace']:
             LoincCodeClass.objects.all().delete()
@@ -36,9 +65,13 @@ class Command(BaseCommand):
 
         self._load_classes(classes_path)
 
-        loinc_csv = options.get('loinc_csv')
-        if loinc_csv:
-            loinc_path = Path(loinc_csv)
+        if gcs_bucket:
+            loinc_path = _download_gcs_blob(gcs_bucket, 'Loinc.csv', self.stdout)
+            self._load_code_class_mapping(loinc_path)
+            loinc_path.unlink()
+            self.stdout.write('  Cleaned up Loinc.csv.')
+        elif options.get('loinc_csv'):
+            loinc_path = Path(options['loinc_csv'])
             if not loinc_path.exists():
                 raise CommandError(f'File not found: {loinc_path}')
             self._load_code_class_mapping(loinc_path)
