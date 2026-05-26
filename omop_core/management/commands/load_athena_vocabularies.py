@@ -1,5 +1,4 @@
 import csv
-import io
 import os
 import sys
 import time
@@ -38,11 +37,17 @@ def _open_tsv(base, filename):
     return open(path, encoding='utf-8', newline='')
 
 
-def _open_gcs_blob(bucket, filename):
+def _download_gcs_blob(bucket, filename, stdout):
     blob = bucket.blob(filename)
     if not blob.exists():
         raise CommandError(f'Required blob not found: gs://{bucket.name}/{filename}')
-    return io.TextIOWrapper(blob.open('rb'), encoding='utf-8', newline='')
+    dest = Path('/tmp/vocab') / filename
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    size_mb = (blob.size or 0) / 1048576
+    stdout.write(f'  Downloading {filename} ({size_mb:.0f}MB)...')
+    blob.download_to_filename(str(dest))
+    stdout.write(f'  Downloaded {filename}.')
+    return open(dest, encoding='utf-8', newline='')
 
 
 def _concept_in_scope(row):
@@ -89,7 +94,7 @@ class Command(BaseCommand):
         if bucket_name:
             from google.cloud import storage as gcs
             self._gcs_bucket = gcs.Client().bucket(bucket_name)
-            self.stdout.write(f'Streaming from gs://{bucket_name}/')
+            self.stdout.write(f'Loading from gs://{bucket_name}/ (download-one-process-delete)')
 
         t0 = time.monotonic()
 
@@ -118,8 +123,15 @@ class Command(BaseCommand):
 
     def _open(self, filename):
         if self._gcs_bucket:
-            return _open_gcs_blob(self._gcs_bucket, filename)
+            return _download_gcs_blob(self._gcs_bucket, filename, self.stdout)
         return _open_tsv(self._base, filename)
+
+    def _cleanup(self, filename):
+        if self._gcs_bucket:
+            tmp = Path('/tmp/vocab') / filename
+            if tmp.exists():
+                tmp.unlink()
+                self.stdout.write(f'  Cleaned up {filename}.')
 
     def _clear(self):
         ConceptAncestor.objects.all().delete()
@@ -237,6 +249,7 @@ class Command(BaseCommand):
                         _bulk(Concept, batch, dry_run)
                         batch = []
         _bulk(Concept, batch, dry_run)
+        self._cleanup('CONCEPT.csv')
         return count
 
     def _load_concept_relationships(self, dry_run):
@@ -269,6 +282,7 @@ class Command(BaseCommand):
                         _bulk(ConceptRelationship, batch, dry_run)
                         batch = []
         _bulk(ConceptRelationship, batch, dry_run)
+        self._cleanup('CONCEPT_RELATIONSHIP.csv')
         return count
 
     def _load_concept_ancestors(self, dry_run):
@@ -304,4 +318,5 @@ class Command(BaseCommand):
                         _bulk(ConceptAncestor, batch, dry_run)
                         batch = []
         _bulk(ConceptAncestor, batch, dry_run)
+        self._cleanup('CONCEPT_ANCESTOR.csv')
         return count
