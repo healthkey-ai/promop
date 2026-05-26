@@ -133,10 +133,24 @@ class Command(BaseCommand):
             'concept_relationship': self._load_concept_relationships(dry_run),
             'concept_ancestor':     self._load_concept_ancestors(dry_run),
         }
+        elapsed = time.monotonic() - t0
         verb = 'would load' if dry_run else 'loaded'
+        total = sum(counts.values())
+        self._log('')
+        self._log('=' * 60)
+        self._log('  LOAD SUMMARY')
+        self._log('=' * 60)
         for table, n in counts.items():
-            self._log(f'  {table}: {n:,} rows {verb}')
-        self._log(f'Done in {time.monotonic() - t0:.0f}s')
+            self._log(f'  {table:.<30s} {n:>12,} rows {verb}')
+        self._log(f'  {"TOTAL":.<30s} {total:>12,} rows')
+        self._log('-' * 60)
+        if hasattr(self, '_vocab_counts') and self._vocab_counts:
+            self._log('  Concepts by vocabulary:')
+            for vid, n in sorted(self._vocab_counts.items(), key=lambda x: -x[1]):
+                self._log(f'    {vid:.<28s} {n:>12,}')
+            self._log(f'  Scanned {self._concept_scanned:,} concept rows ({total and counts["concept"] * 100 // self._concept_scanned or 0}% in scope)')
+        self._log(f'  Elapsed: {elapsed:.0f}s')
+        self._log('=' * 60)
 
     def _log(self, msg):
         self.stdout.write(msg)
@@ -301,6 +315,7 @@ class Command(BaseCommand):
         t = time.monotonic()
         count = 0
         scanned = 0
+        vocab_counts = {}
         rows = []
         with self._open('CONCEPT.csv') as f:
             reader = csv.reader(f, delimiter='\t')
@@ -330,6 +345,7 @@ class Command(BaseCommand):
                     self._log(f'Warning: skipping malformed concept row: {exc}')
                     continue
                 count += 1
+                vocab_counts[vid] = vocab_counts.get(vid, 0) + 1
                 if not dry_run:
                     std = cols[i_std][:1] if cols[i_std] else None
                     inv = cols[i_invalid][:1] if cols[i_invalid] else None
@@ -360,6 +376,8 @@ class Command(BaseCommand):
                        rows, self._log)
         self._cleanup('CONCEPT.csv')
         self._log(f'  concepts: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
+        self._vocab_counts = vocab_counts
+        self._concept_scanned = scanned
         return count
 
     def _load_concept_relationships(self, dry_run):
