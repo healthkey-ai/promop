@@ -26,11 +26,11 @@ export function LabValueCard({ card, onNavigate }: Props) {
         <div className="mb-1 flex items-start justify-between gap-2">
           <div className="min-w-0">
             <h3 className="truncate text-base font-semibold text-foreground/70">
-              {card.concept_name}
+              {card.original_name || card.concept_name}
             </h3>
             {card.vocabulary_id === "LOINC" && (
               <p className="truncate text-xs text-muted-foreground">
-                LOINC {card.concept_code}
+                LOINC {card.concept_code} · {card.concept_name}
               </p>
             )}
           </div>
@@ -86,7 +86,7 @@ export function LabValueCard({ card, onNavigate }: Props) {
       type="button"
       onClick={() => onNavigate(card.concept_code)}
       className="block w-full cursor-pointer rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-healthkey-brand-700 focus-visible:ring-offset-2"
-      aria-label={`Open ${card.concept_name} trend`}
+      aria-label={`Open ${card.original_name || card.concept_name} trend`}
     >
       {cardContent}
     </button>

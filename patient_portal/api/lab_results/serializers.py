@@ -35,6 +35,7 @@ class LabResultCardSerializer(serializers.Serializer):
     concept_id = serializers.IntegerField()
     concept_code = serializers.CharField()
     concept_name = serializers.CharField()
+    original_name = serializers.CharField(allow_null=True)
     vocabulary_id = serializers.CharField()
     category = serializers.CharField()
     values = LabValueSerializer(many=True)

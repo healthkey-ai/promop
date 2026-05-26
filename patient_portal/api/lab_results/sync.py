@@ -443,7 +443,7 @@ class SyncView(APIView):
 
         measurement_concept_id = 0
         measurement_source_concept_id = None
-        measurement_source_value = item.get('match_method') or ''
+        measurement_source_value = test_name[:50]
 
         if loinc_code:
             concept = loinc_cache.get(loinc_code)
@@ -451,10 +451,8 @@ class SyncView(APIView):
                 measurement_concept_id = concept.concept_id
             else:
                 measurement_source_concept_id = hk_concept_cache.get(test_name)
-                measurement_source_value = test_name[:50]
         else:
             measurement_source_concept_id = hk_concept_cache.get(test_name)
-            measurement_source_value = test_name[:50]
 
         unit_concept_id = None
         unit_str = item.get('unit')

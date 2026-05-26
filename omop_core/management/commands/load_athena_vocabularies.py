@@ -140,6 +140,8 @@ class Command(BaseCommand):
             'concept_relationship': self._load_concept_relationships(dry_run),
             'concept_ancestor':     self._load_concept_ancestors(dry_run),
         }
+        if not dry_run:
+            self._seed_concept_zero()
         elapsed = time.monotonic() - t0
         verb = 'would load' if dry_run else 'loaded'
         total = sum(counts.values())
@@ -184,6 +186,34 @@ class Command(BaseCommand):
                 'concept, concept_class, domain, relationship, vocabulary CASCADE'
             )
         self._log(f'  Truncated all vocab tables in {time.monotonic() - t:.0f}s')
+
+    def _seed_concept_zero(self):
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='None',
+            defaults={'vocabulary_name': 'None', 'vocabulary_concept_id': 0},
+        )
+        Domain.objects.get_or_create(
+            domain_id='Metadata',
+            defaults={'domain_name': 'Metadata', 'domain_concept_id': 0},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Undefined',
+            defaults={'concept_class_name': 'Undefined', 'concept_class_concept_id': 0},
+        )
+        _, created = Concept.objects.get_or_create(
+            concept_id=0,
+            defaults={
+                'concept_name': 'No matching concept',
+                'domain_id': 'Metadata',
+                'vocabulary_id': 'None',
+                'concept_class_id': 'Undefined',
+                'concept_code': 'No matching concept',
+                'valid_start_date': '1970-01-01',
+                'valid_end_date': '2099-12-31',
+            },
+        )
+        if created:
+            self._log('Seeded concept_id=0 (No matching concept)')
 
     def _load_relationships(self, dry_run):
         self._log('Loading RELATIONSHIP.csv...')
