@@ -189,12 +189,14 @@ class SyncView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+        logger.info("sync: checking person exists pid=%s", person_id)
         if not Person.objects.filter(person_id=person_id).exists():
             return Response(
                 {'detail': 'Person not found.'},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        logger.info("sync: person exists, resolving actor identity")
         # Authorization
         actor_identity = self._resolve_actor_identity(actor_iss, actor_sub, request.user)
         has_explicit_actor = bool(actor_iss and actor_sub)
@@ -227,6 +229,7 @@ class SyncView(APIView):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
+        logger.info("sync: auth done, org=%s", org)
         source_type = data['source_type']
         type_concept_id = (
             PATIENT_SELF_REPORT_CONCEPT_ID
@@ -234,8 +237,11 @@ class SyncView(APIView):
             else DOCUMENT_EXTRACTION_CONCEPT_ID
         )
 
+        logger.info("sync: ensuring concepts")
         visit_concept = _ensure_concept(OUTPATIENT_VISIT_CONCEPT_ID)
+        logger.info("sync: visit_concept=%s", visit_concept)
         type_concept = _ensure_concept(type_concept_id)
+        logger.info("sync: type_concept=%s", type_concept)
         if visit_concept is None or type_concept is None:
             return Response(
                 {'detail': 'Required OMOP concepts not available. Run load_athena_vocabularies.'},
@@ -258,8 +264,9 @@ class SyncView(APIView):
                 for c in Concept.objects.filter(vocabulary_id='UCUM', concept_code__in=unit_codes)
             }
 
+        logger.info("sync: preloading hk concepts")
         hk_concept_cache = self._preload_hk_concepts(items, loinc_cache)
-
+        logger.info("sync: getting care site")
         care_site = self._get_or_create_care_site(data.get('lab_name'))
         visit = self._create_visit_occurrence(
             person_id=person_id,
