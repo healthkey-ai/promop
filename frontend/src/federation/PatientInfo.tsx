@@ -92,8 +92,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
 
   const initialName = useMemo(() => {
     if (!data) return "";
-    const user = data.user;
-    return user ? (user.name || user.email || "Patient") : "Patient";
+    return data.patient_name || data.user?.name || data.user?.email || "Patient";
   }, [data]);
 
   const [editedInfo, setEditedInfo] = useState<Record<string, unknown>>(initialInfo);
@@ -162,7 +161,8 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
   const handleNameChange = useCallback((name: string) => {
     if (readOnly) return;
     setEditedName(name);
-    scheduleAutoSave(pendingDataRef.current ?? editedInfoRef.current);
+    const base = pendingDataRef.current ?? editedInfoRef.current;
+    scheduleAutoSave({ ...base, patient_name: name });
   }, [scheduleAutoSave, readOnly]);
 
   const handleMutationAdd = useCallback(() => {

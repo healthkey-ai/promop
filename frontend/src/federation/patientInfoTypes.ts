@@ -15,4 +15,5 @@ export interface PatientInfoProps {
 export interface PatientInfoData {
   patient_info: Record<string, unknown>;
   user: { id: number; email: string; name: string } | null;
+  patient_name: string;
 }

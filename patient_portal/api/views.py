@@ -320,19 +320,30 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         if request.method == 'GET':
             user_serializer = UserSerializer(request.user)
             patient_serializer = PatientInfoSerializer(patient_info)
+            full_name = f"{person.given_name or ''} {person.family_name or ''}".strip()
             return Response({
                 'patient_info': patient_serializer.data,
                 'user': user_serializer.data,
+                'patient_name': full_name,
             })
 
         # PATCH
-        serializer = PatientInfoSerializer(patient_info, data=request.data, partial=True)
+        patient_name = request.data.pop('patient_name', None) if hasattr(request.data, 'pop') else request.data.get('patient_name')
+        patch_data = {k: v for k, v in request.data.items() if k != 'patient_name'}
+
+        if patient_name is not None:
+            parts = str(patient_name).strip().split(None, 1)
+            person.given_name = parts[0] if parts else ''
+            person.family_name = parts[1] if len(parts) > 1 else ''
+            person.save(update_fields=['given_name', 'family_name'])
+
+        serializer = PatientInfoSerializer(patient_info, data=patch_data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
 
-        changed_fields = set(request.data.keys())
+        changed_fields = set(patch_data.keys())
         try:
-            sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
+            sync_to_omop(patient_info, changed_fields, changed_data=dict(patch_data))
         except Exception:
             pass
 
