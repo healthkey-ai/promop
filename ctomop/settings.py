@@ -74,16 +74,33 @@ LOGGING = {
             '()': 'logging.Formatter',
             'format': '%(message)s',
         },
+        'verbose': {
+            'format': '[%(asctime)s] %(levelname)s %(name)s %(message)s',
+        },
     },
     'handlers': {
         'audit_stdout': {
             'class': 'logging.StreamHandler',
             'formatter': 'audit_json',
         },
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
     },
     'loggers': {
         'audit': {
             'handlers': ['audit_stdout'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'django.request': {
+            'handlers': ['console'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+        'patient_portal': {
+            'handlers': ['console'],
             'level': 'INFO',
             'propagate': False,
         },
