@@ -20,7 +20,7 @@ VOCAB_SCOPE = frozenset({
 })
 RXNORM_CLASS_SCOPE = frozenset({'Ingredient', 'Clinical Drug', 'Branded Drug', 'Clinical Drug Comp'})
 LOINC_DOMAIN_SCOPE = frozenset({'Measurement', 'Observation'})
-BATCH = 5000
+BATCH = 100_000
 PROGRESS_EVERY = 500_000
 
 
@@ -70,23 +70,28 @@ def _concept_in_scope(vid, concept_code, concept_class_id, domain_id):
     return True
 
 
-def _copy_rows(table, columns, rows, log):
-    """Use PostgreSQL COPY into temp table, then upsert to handle duplicates."""
+def _copy_rows(table, columns, rows, log, direct=False):
+    """COPY rows into table. direct=True skips temp table (use after TRUNCATE)."""
     if not rows:
         return
     connection.ensure_connection()
     cols = ', '.join(columns)
-    tmp = f'_tmp_{table}'
     with connection.connection.cursor() as cur:
-        cur.execute(f'DROP TABLE IF EXISTS {tmp}')
-        cur.execute(
-            f'CREATE TEMP TABLE {tmp} AS SELECT {cols} FROM {table} WHERE false'
-        )
-        with cur.copy(f'COPY {tmp} ({cols}) FROM STDIN') as copy:
-            for row in rows:
-                copy.write_row(row)
-        cur.execute(f'INSERT INTO {table} ({cols}) SELECT {cols} FROM {tmp} ON CONFLICT DO NOTHING')
-        cur.execute(f'DROP TABLE {tmp}')
+        if direct:
+            with cur.copy(f'COPY {table} ({cols}) FROM STDIN') as copy:
+                for row in rows:
+                    copy.write_row(row)
+        else:
+            tmp = f'_tmp_{table}'
+            cur.execute(f'DROP TABLE IF EXISTS {tmp}')
+            cur.execute(
+                f'CREATE TEMP TABLE {tmp} AS SELECT {cols} FROM {table} WHERE false'
+            )
+            with cur.copy(f'COPY {tmp} ({cols}) FROM STDIN') as copy:
+                for row in rows:
+                    copy.write_row(row)
+            cur.execute(f'INSERT INTO {table} ({cols}) SELECT {cols} FROM {tmp} ON CONFLICT DO NOTHING')
+            cur.execute(f'DROP TABLE {tmp}')
 
 
 class Command(BaseCommand):
@@ -121,7 +126,9 @@ class Command(BaseCommand):
 
         self._base = base
 
-        if replace and not dry_run:
+        self._direct = replace and not dry_run
+
+        if self._direct:
             self._clear()
 
         counts = {
@@ -174,7 +181,7 @@ class Command(BaseCommand):
         with connection.cursor() as cur:
             cur.execute(
                 'TRUNCATE concept_ancestor, concept_relationship, '
-                'concept, relationship, vocabulary CASCADE'
+                'concept, concept_class, domain, relationship, vocabulary CASCADE'
             )
         self._log(f'  Truncated all vocab tables in {time.monotonic() - t:.0f}s')
 
@@ -206,13 +213,13 @@ class Command(BaseCommand):
                         _copy_rows('relationship',
                                    ('relationship_id', 'relationship_name', 'is_hierarchical',
                                     'defines_ancestry', 'reverse_relationship_id', 'relationship_concept_id'),
-                                   rows, self._log)
+                                   rows, self._log, direct=self._direct)
                         rows = []
         if not dry_run:
             _copy_rows('relationship',
                        ('relationship_id', 'relationship_name', 'is_hierarchical',
                         'defines_ancestry', 'reverse_relationship_id', 'relationship_concept_id'),
-                       rows, self._log)
+                       rows, self._log, direct=self._direct)
         self._cleanup('RELATIONSHIP.csv')
         self._log(f'  RELATIONSHIP.csv: {count:,} rows in {time.monotonic() - t:.0f}s')
         return count
@@ -247,7 +254,7 @@ class Command(BaseCommand):
             _copy_rows('vocabulary',
                        ('vocabulary_id', 'vocabulary_name', 'vocabulary_reference',
                         'vocabulary_version', 'vocabulary_concept_id'),
-                       rows, self._log)
+                       rows, self._log, direct=self._direct)
         self._cleanup('VOCABULARY.csv')
         self._log(f'  VOCABULARY.csv: {count:,} rows in {time.monotonic() - t:.0f}s')
         return count
@@ -276,7 +283,7 @@ class Command(BaseCommand):
         if not dry_run and rows:
             _copy_rows('domain',
                        ('domain_id', 'domain_name', 'domain_concept_id'),
-                       rows, self._log)
+                       rows, self._log, direct=self._direct)
         self._cleanup('DOMAIN.csv')
         self._log(f'  DOMAIN.csv: {count:,} rows in {time.monotonic() - t:.0f}s')
         return count
@@ -305,7 +312,7 @@ class Command(BaseCommand):
         if not dry_run and rows:
             _copy_rows('concept_class',
                        ('concept_class_id', 'concept_class_name', 'concept_class_concept_id'),
-                       rows, self._log)
+                       rows, self._log, direct=self._direct)
         self._cleanup('CONCEPT_CLASS.csv')
         self._log(f'  CONCEPT_CLASS.csv: {count:,} rows in {time.monotonic() - t:.0f}s')
         return count
@@ -366,14 +373,14 @@ class Command(BaseCommand):
                                    ('concept_id', 'concept_name', 'domain_id', 'vocabulary_id',
                                     'concept_class_id', 'standard_concept', 'concept_code',
                                     'valid_start_date', 'valid_end_date', 'invalid_reason'),
-                                   rows, self._log)
+                                   rows, self._log, direct=self._direct)
                         rows = []
         if not dry_run:
             _copy_rows('concept',
                        ('concept_id', 'concept_name', 'domain_id', 'vocabulary_id',
                         'concept_class_id', 'standard_concept', 'concept_code',
                         'valid_start_date', 'valid_end_date', 'invalid_reason'),
-                       rows, self._log)
+                       rows, self._log, direct=self._direct)
         self._cleanup('CONCEPT.csv')
         self._log(f'  concepts: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
         self._vocab_counts = vocab_counts
@@ -425,13 +432,13 @@ class Command(BaseCommand):
                         _copy_rows('concept_relationship',
                                    ('concept_id_1', 'concept_id_2', 'relationship_id',
                                     'valid_start_date', 'valid_end_date', 'invalid_reason'),
-                                   rows, self._log)
+                                   rows, self._log, direct=self._direct)
                         rows = []
         if not dry_run:
             _copy_rows('concept_relationship',
                        ('concept_id_1', 'concept_id_2', 'relationship_id',
                         'valid_start_date', 'valid_end_date', 'invalid_reason'),
-                       rows, self._log)
+                       rows, self._log, direct=self._direct)
         self._cleanup('CONCEPT_RELATIONSHIP.csv')
         self._log(f'  relationships: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
         return count
@@ -477,13 +484,13 @@ class Command(BaseCommand):
                         _copy_rows('concept_ancestor',
                                    ('ancestor_concept_id', 'descendant_concept_id',
                                     'min_levels_of_separation', 'max_levels_of_separation'),
-                                   rows, self._log)
+                                   rows, self._log, direct=self._direct)
                         rows = []
         if not dry_run:
             _copy_rows('concept_ancestor',
                        ('ancestor_concept_id', 'descendant_concept_id',
                         'min_levels_of_separation', 'max_levels_of_separation'),
-                       rows, self._log)
+                       rows, self._log, direct=self._direct)
         self._cleanup('CONCEPT_ANCESTOR.csv')
         self._log(f'  ancestors: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
         return count
