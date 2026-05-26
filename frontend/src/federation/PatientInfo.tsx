@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Check, AlertCircle } from "lucide-react";
 
 import { PatientInfoProvider } from "./PatientInfoProvider";
@@ -76,6 +76,26 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
   const { data, isLoading, isError, error } = usePatientInfoMe();
   const patchMutation = usePatchPatientInfo();
 
+  const initialInfo = useMemo(() => {
+    if (!data) return {};
+    const d = { ...data.patient_info };
+    if (d.ecog_performance_status != null)
+      d.ecog_performance_status = String(d.ecog_performance_status);
+    if (d.estrogen_receptor_status && d.progesterone_receptor_status && d.her2_status) {
+      const erNeg = ["Negative", "ER-"].includes(String(d.estrogen_receptor_status));
+      const prNeg = ["Negative", "PR-"].includes(String(d.progesterone_receptor_status));
+      const her2Neg = ["Negative", "HER2-"].includes(String(d.her2_status));
+      d.tnbc_status = erNeg && prNeg && her2Neg;
+    }
+    return d;
+  }, [data]);
+
+  const initialName = useMemo(() => {
+    if (!data) return "";
+    const user = data.user;
+    return user ? (user.name || user.email || "Patient") : "Patient";
+  }, [data]);
+
   const [editedInfo, setEditedInfo] = useState<Record<string, unknown>>({});
   const [editedName, setEditedName] = useState("");
   const [activeTab, setActiveTab] = useState(0);
@@ -85,30 +105,17 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
   const pendingDataRef = useRef<Record<string, unknown> | null>(null);
   const editedInfoRef = useRef<Record<string, unknown>>({});
   const editedNameRef = useRef("");
+  const [prevData, setPrevData] = useState(data);
+
+  if (data && data !== prevData) {
+    setPrevData(data);
+    setEditedInfo(initialInfo);
+    setEditedName(initialName);
+  }
 
   useEffect(() => { editedInfoRef.current = editedInfo; }, [editedInfo]);
   useEffect(() => { editedNameRef.current = editedName; }, [editedName]);
   useEffect(() => () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current); }, []);
-
-  useEffect(() => {
-    if (!data) return;
-    const d = { ...data.patient_info };
-    if (d.ecog_performance_status != null)
-      d.ecog_performance_status = String(d.ecog_performance_status);
-
-    if (d.estrogen_receptor_status && d.progesterone_receptor_status && d.her2_status) {
-      const erNeg = ["Negative", "ER-"].includes(String(d.estrogen_receptor_status));
-      const prNeg = ["Negative", "PR-"].includes(String(d.progesterone_receptor_status));
-      const her2Neg = ["Negative", "HER2-"].includes(String(d.her2_status));
-      d.tnbc_status = erNeg && prNeg && her2Neg;
-    }
-
-    setEditedInfo(d);
-
-    const user = data.user;
-    const name = user ? (user.name || user.email || "Patient") : "Patient";
-    setEditedName(name);
-  }, [data]);
 
   const doSave = useCallback(() => {
     const info = pendingDataRef.current;
