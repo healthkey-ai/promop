@@ -21,6 +21,7 @@ VOCAB_SCOPE = frozenset({
 RXNORM_CLASS_SCOPE = frozenset({'Ingredient', 'Clinical Drug', 'Branded Drug', 'Clinical Drug Comp'})
 LOINC_DOMAIN_SCOPE = frozenset({'Measurement', 'Observation'})
 BATCH = 1000
+PROGRESS_EVERY = 100_000
 
 
 def _parse_date(s):
@@ -218,10 +219,16 @@ class Command(BaseCommand):
         return count
 
     def _load_concepts(self, dry_run):
+        self.stdout.write('Loading concepts...')
+        t = time.monotonic()
         count = 0
+        scanned = 0
         batch = []
         with self._open('CONCEPT.csv') as f:
             for row in csv.DictReader(f, delimiter='\t'):
+                scanned += 1
+                if scanned % PROGRESS_EVERY == 0:
+                    self.stdout.write(f'  concepts: scanned {scanned:,} rows, {count:,} in scope...')
                 if not _concept_in_scope(row):
                     continue
                 try:
@@ -250,17 +257,25 @@ class Command(BaseCommand):
                         batch = []
         _bulk(Concept, batch, dry_run)
         self._cleanup('CONCEPT.csv')
+        self.stdout.write(f'  concepts: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
         return count
 
     def _load_concept_relationships(self, dry_run):
+        self.stdout.write('Loading concept relationships...')
+        t = time.monotonic()
         loaded_ids = set(
             Concept.objects.filter(vocabulary_id__in=VOCAB_SCOPE)
                            .values_list('concept_id', flat=True)
         )
+        self.stdout.write(f'  {len(loaded_ids):,} concept IDs in filter set')
         count = 0
+        scanned = 0
         batch = []
         with self._open('CONCEPT_RELATIONSHIP.csv') as f:
             for row in csv.DictReader(f, delimiter='\t'):
+                scanned += 1
+                if scanned % PROGRESS_EVERY == 0:
+                    self.stdout.write(f'  relationships: scanned {scanned:,} rows, {count:,} matched...')
                 try:
                     c1 = int(row['concept_id_1'])
                     c2 = int(row['concept_id_2'])
@@ -283,17 +298,25 @@ class Command(BaseCommand):
                         batch = []
         _bulk(ConceptRelationship, batch, dry_run)
         self._cleanup('CONCEPT_RELATIONSHIP.csv')
+        self.stdout.write(f'  relationships: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
         return count
 
     def _load_concept_ancestors(self, dry_run):
+        self.stdout.write('Loading concept ancestors...')
+        t = time.monotonic()
         hemonc_ids = set(
             Concept.objects.filter(vocabulary_id='HemOnc')
                            .values_list('concept_id', flat=True)
         )
+        self.stdout.write(f'  {len(hemonc_ids):,} HemOnc IDs in filter set')
         count = 0
+        scanned = 0
         batch = []
         with self._open('CONCEPT_ANCESTOR.csv') as f:
             for row in csv.DictReader(f, delimiter='\t'):
+                scanned += 1
+                if scanned % PROGRESS_EVERY == 0:
+                    self.stdout.write(f'  ancestors: scanned {scanned:,} rows, {count:,} matched...')
                 try:
                     anc = int(row['ancestor_concept_id'])
                     desc = int(row['descendant_concept_id'])
@@ -319,4 +342,5 @@ class Command(BaseCommand):
                         batch = []
         _bulk(ConceptAncestor, batch, dry_run)
         self._cleanup('CONCEPT_ANCESTOR.csv')
+        self.stdout.write(f'  ancestors: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
         return count
