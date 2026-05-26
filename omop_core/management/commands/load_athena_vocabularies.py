@@ -155,25 +155,14 @@ class Command(BaseCommand):
                 self._log(f'  Cleaned up {filename}.')
 
     def _clear(self):
-        self._log('Clearing existing vocabulary data...')
+        self._log('Clearing existing vocabulary data (TRUNCATE)...')
         t = time.monotonic()
         with connection.cursor() as cur:
-            cur.execute('DELETE FROM concept_ancestor')
-            self._log(f'  Cleared concept_ancestor ({cur.rowcount:,} rows, {time.monotonic() - t:.0f}s)')
-            t1 = time.monotonic()
-            cur.execute('DELETE FROM concept_relationship')
-            self._log(f'  Cleared concept_relationship ({cur.rowcount:,} rows, {time.monotonic() - t1:.0f}s)')
-            t1 = time.monotonic()
-            placeholders = ','.join(['%s'] * len(VOCAB_SCOPE))
-            cur.execute(f'DELETE FROM concept WHERE vocabulary_id IN ({placeholders})', list(VOCAB_SCOPE))
-            self._log(f'  Cleared concept ({cur.rowcount:,} rows, {time.monotonic() - t1:.0f}s)')
-            t1 = time.monotonic()
-            cur.execute('DELETE FROM relationship')
-            self._log(f'  Cleared relationship ({cur.rowcount:,} rows, {time.monotonic() - t1:.0f}s)')
-            t1 = time.monotonic()
-            cur.execute(f'DELETE FROM vocabulary WHERE vocabulary_id IN ({placeholders})', list(VOCAB_SCOPE))
-            self._log(f'  Cleared vocabulary ({cur.rowcount:,} rows, {time.monotonic() - t1:.0f}s)')
-        self._log(f'  Clear phase done in {time.monotonic() - t:.0f}s')
+            cur.execute(
+                'TRUNCATE concept_ancestor, concept_relationship, '
+                'concept, relationship, vocabulary CASCADE'
+            )
+        self._log(f'  Truncated all vocab tables in {time.monotonic() - t:.0f}s')
 
     def _load_relationships(self, dry_run):
         self._log('Loading RELATIONSHIP.csv...')
