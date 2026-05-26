@@ -46,6 +46,7 @@ export interface LabResultCard {
   concept_id: number;
   concept_code: string;
   concept_name: string;
+  original_name: string | null;
   vocabulary_id: string;
   category: string;
   values: LabResultValue[];
@@ -62,6 +63,7 @@ export interface LabValuesResponse extends PaginatedResponse<LabResultValue> {
   concept_id: number;
   concept_code: string;
   concept_name: string;
+  original_name: string | null;
   vocabulary_id: string;
   category: string;
 }

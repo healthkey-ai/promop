@@ -35,7 +35,7 @@ function ResultDetail({
   const values = data?.results ?? [];
   const totalCount = data?.count ?? 0;
   const latest = values[0];
-  const testName = data?.concept_name ?? "";
+  const testName = data?.original_name || data?.concept_name || "";
   const category = data?.category ?? "";
   const isQualitative = latest && latest.value == null && latest.value_string != null;
   const unit = latest?.unit ?? "";
@@ -88,6 +88,11 @@ function ResultDetail({
           <p className="text-xs uppercase tracking-wide text-muted-foreground">{category}</p>
         )}
         <h2 className="text-xl font-bold text-foreground">{testName}</h2>
+        {data?.vocabulary_id === "LOINC" && (
+          <p className="text-xs text-muted-foreground">
+            LOINC {data.concept_code} · {data.concept_name}
+          </p>
+        )}
         {latest && (
           <p className="mt-1 text-sm text-muted-foreground">
             Latest:{" "}

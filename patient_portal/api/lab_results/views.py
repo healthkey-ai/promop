@@ -17,6 +17,16 @@ from .serializers import LabResultCardSerializer, LabValueSerializer, Measuremen
 
 MAX_VALUES_PER_CONCEPT = 10
 
+_MATCH_METHOD_VALUES = frozenset({
+    'loinc', 'alias_exact', 'name_fallback', 'manual', 'unmatched',
+})
+
+
+def _original_name(source_value):
+    if not source_value or source_value in _MATCH_METHOD_VALUES:
+        return None
+    return source_value
+
 
 def _load_visit_provenance(visit_ids):
     """Load lab_name + report_filename for a set of visit_occurrence_ids."""
@@ -254,6 +264,7 @@ class ResultsSummaryView(APIView):
             m.unit_concept_id,
             m.unit_source_value,
             m.visit_occurrence_id,
+            m.measurement_source_value,
             ROW_NUMBER() OVER (
                 PARTITION BY
                     CASE
@@ -346,10 +357,17 @@ class ResultsSummaryView(APIView):
                     'report_filename': report_filename,
                 })
 
+            original_name = None
+            for row in meas_rows:
+                original_name = _original_name(row.get('measurement_source_value'))
+                if original_name:
+                    break
+
             cards.append({
                 'concept_id': cid,
                 'concept_code': summary['concept_code'],
                 'concept_name': summary['concept_name'],
+                'original_name': original_name,
                 'vocabulary_id': summary['vocabulary_id'],
                 'category': summary['category'],
                 'values': values,
@@ -451,11 +469,18 @@ class ValuesView(APIView):
                 'report_filename': prov.get('report_filename'),
             })
 
+        original_name = None
+        for m in page:
+            original_name = _original_name(m.measurement_source_value)
+            if original_name:
+                break
+
         serializer = LabValueSerializer(values, many=True)
         paginated = paginator.get_paginated_response(serializer.data)
         paginated.data['concept_id'] = concept.concept_id
         paginated.data['concept_code'] = concept.concept_code
         paginated.data['concept_name'] = concept.concept_name
+        paginated.data['original_name'] = original_name
         paginated.data['vocabulary_id'] = concept.vocabulary_id
         paginated.data['category'] = category
         return paginated
