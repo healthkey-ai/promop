@@ -11,6 +11,7 @@ import { StatusDot } from "@/components/labs/StatusDot";
 import { DataSourceBadge } from "@/components/labs/DataSourceBadge";
 import { fmtNum, formatShortDate } from "@/lib/format";
 import { LabTrendChart } from "@/components/labs/LabTrendChart";
+import { LoadingIndicator } from "@/components/labs/LoadingIndicator";
 import { PaginationControls } from "@/components/labs/PaginationControls";
 import { Button } from "@/components/ui-labs/button";
 import { Card, CardContent } from "@/components/ui-labs/card";
@@ -61,14 +62,7 @@ function ResultDetail({
   }
 
   if (isLoading) {
-    return (
-      <div className="space-y-4">
-        <div className="h-4 w-24 animate-pulse rounded bg-muted" />
-        <div className="h-6 w-48 animate-pulse rounded bg-muted" />
-        <div className="h-48 animate-pulse rounded-md bg-muted" />
-        <div className="h-32 animate-pulse rounded-md bg-muted" />
-      </div>
-    );
+    return <LoadingIndicator className="py-12" text="Loading results..." />;
   }
 
   return (
@@ -309,16 +303,7 @@ function SummaryList({
   }
 
   if (isLoading) {
-    return (
-      <div className="space-y-3">
-        <div className="h-5 w-32 animate-pulse rounded bg-muted" />
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {[1, 2, 3].map((i) => (
-            <div key={i} className="h-32 animate-pulse rounded-md bg-muted" />
-          ))}
-        </div>
-      </div>
-    );
+    return <LoadingIndicator className="py-12" />;
   }
 
   if (categoryGroups.length === 0 && page === 1) {
