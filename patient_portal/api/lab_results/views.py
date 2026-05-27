@@ -9,7 +9,8 @@ from rest_framework.views import APIView
 
 from omop_core.models import (
     CareSite, Concept, LoincClass, LoincCodeClass,
-    Measurement, PatientInfo, ProvenanceRecord, VisitOccurrence,
+    Measurement, MeasurementOwnership, PatientInfo,
+    ProvenanceRecord, VisitOccurrence,
 )
 from patient_portal.api.permissions import ScopedTokenPermission, get_request_org
 
@@ -680,12 +681,35 @@ class VisitDeleteView(APIView):
                 object_id=visit_id,
             )
 
-            meas_count, _ = Measurement.objects.filter(
-                visit_occurrence=visit,
-            ).delete()
+            # Ownership-aware delete: only remove measurements with no remaining owners
+            owned_ids = list(
+                MeasurementOwnership.objects.filter(
+                    visit_occurrence_id=visit_id,
+                ).values_list('measurement_id', flat=True)
+            )
+            MeasurementOwnership.objects.filter(visit_occurrence_id=visit_id).delete()
+
+            if owned_ids:
+                still_owned = set(
+                    MeasurementOwnership.objects.filter(
+                        measurement_id__in=owned_ids,
+                    ).values_list('measurement_id', flat=True)
+                )
+                orphaned = [m_id for m_id in owned_ids if m_id not in still_owned]
+                if orphaned:
+                    Measurement.objects.filter(measurement_id__in=orphaned).delete()
+            else:
+                # Fallback for measurements created before ownership tracking
+                orphaned = list(
+                    Measurement.objects.filter(
+                        visit_occurrence=visit,
+                    ).values_list('measurement_id', flat=True)
+                )
+                Measurement.objects.filter(measurement_id__in=orphaned).delete()
+
             visit.delete()
 
         return Response(
-            {'deleted_measurements': meas_count},
+            {'deleted_measurements': len(orphaned)},
             status=status.HTTP_200_OK,
         )

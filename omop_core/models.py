@@ -626,6 +626,24 @@ class Measurement(models.Model):
         return f"Measurement {self.measurement_id} for Person {self.person_id}"
 
 
+class MeasurementOwnership(models.Model):
+    """Tracks which VisitOccurrences (uploads) contributed to a Measurement.
+
+    When the same lab result is uploaded multiple times, dedup reuses the
+    existing Measurement but adds an ownership record for each visit.
+    A Measurement is only deleted when its last ownership record is removed.
+    """
+    measurement_id = models.BigIntegerField()
+    visit_occurrence_id = models.BigIntegerField()
+
+    class Meta:
+        db_table = 'measurement_ownership'
+        unique_together = [('measurement_id', 'visit_occurrence_id')]
+        indexes = [
+            models.Index(fields=['visit_occurrence_id'], name='ix_measown_visit'),
+        ]
+
+
 class Observation(models.Model):
     """OMOP CDM Observation table - clinical facts that don't fit other domains."""
     observation_id = models.BigIntegerField(primary_key=True)

@@ -11,7 +11,8 @@ from rest_framework.test import APIClient
 
 from omop_core.models import (
     CareSite, Concept, ConceptClass, Domain, LoincClass, LoincCodeClass,
-    Measurement, Person, PatientInfo, Vocabulary, VisitOccurrence,
+    Measurement, MeasurementOwnership, Person, PatientInfo, Vocabulary,
+    VisitOccurrence,
 )
 
 
@@ -1084,3 +1085,148 @@ class SyncNonSuperuserTest(TestCase):
     def test_sync_nonexistent_person_denied(self):
         resp = self.client.post('/api/lab-results/sync/', self._payload(person_id=9999), format='json')
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class DedupSyncTest(TestCase):
+    """Tests for measurement deduplication on sync."""
+
+    def setUp(self):
+        _setup_vocab()
+        self.user = Identity.objects.create_user(email='dedup@test.com', password='test')
+        self.user.is_superuser = True
+        self.user.save()
+        self.person = Person.objects.create(person_id=3001)
+        PatientInfo.objects.create(person=self.person)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _payload(self, **overrides):
+        data = {
+            'person_id': 3001,
+            'measurements': [
+                {
+                    'loinc_code': '718-7',
+                    'test_name': 'Hemoglobin',
+                    'value': '13.5',
+                    'unit': 'g/dL',
+                    'measured_at': '2026-05-15',
+                },
+            ],
+            'lab_name': 'Quest',
+            'lab_date': '2026-05-15',
+            'report_filename': 'report.pdf',
+            'source_type': 'document_extraction',
+        }
+        data.update(overrides)
+        return data
+
+    def test_duplicate_upload_deduplicates(self):
+        """Same report uploaded twice creates one measurement, two visits, two ownership records."""
+        r1 = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
+        self.assertEqual(r1.status_code, 201)
+        self.assertEqual(r1.data['created_count'], 1)
+        self.assertEqual(r1.data['deduplicated_count'], 0)
+        m_id = r1.data['measurement_ids'][0]
+
+        r2 = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
+        self.assertEqual(r2.status_code, 201)
+        self.assertEqual(r2.data['created_count'], 0)
+        self.assertEqual(r2.data['deduplicated_count'], 1)
+        self.assertEqual(r2.data['measurement_ids'][0], m_id)
+
+        self.assertEqual(Measurement.objects.filter(person_id=3001).count(), 1)
+        self.assertEqual(MeasurementOwnership.objects.filter(measurement_id=m_id).count(), 2)
+
+    def test_different_value_not_deduplicated(self):
+        """Same test on same day with different value creates two measurements."""
+        r1 = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
+        self.assertEqual(r1.data['created_count'], 1)
+
+        payload2 = self._payload()
+        payload2['measurements'][0]['value'] = '14.0'
+        r2 = self.client.post('/api/lab-results/sync/', payload2, format='json')
+        self.assertEqual(r2.data['created_count'], 1)
+        self.assertEqual(r2.data['deduplicated_count'], 0)
+
+        self.assertEqual(Measurement.objects.filter(person_id=3001).count(), 2)
+
+    def test_qualitative_dedup(self):
+        """Qualitative results (value=null, value_string set) are deduplicated correctly."""
+        payload = self._payload()
+        payload['measurements'] = [{
+            'loinc_code': '718-7',
+            'test_name': 'Hemoglobin',
+            'value': None,
+            'value_string': 'Negative',
+            'measured_at': '2026-05-15',
+        }]
+        r1 = self.client.post('/api/lab-results/sync/', payload, format='json')
+        self.assertEqual(r1.data['created_count'], 1)
+
+        r2 = self.client.post('/api/lab-results/sync/', payload, format='json')
+        self.assertEqual(r2.data['created_count'], 0)
+        self.assertEqual(r2.data['deduplicated_count'], 1)
+        self.assertEqual(r2.data['measurement_ids'], r1.data['measurement_ids'])
+
+    def test_qualitative_different_string_not_deduplicated(self):
+        """Same test, same day, null value, different value_string creates two measurements."""
+        payload1 = self._payload()
+        payload1['measurements'] = [{
+            'loinc_code': '718-7',
+            'test_name': 'Hemoglobin',
+            'value': None,
+            'value_string': 'Negative',
+            'measured_at': '2026-05-15',
+        }]
+        self.client.post('/api/lab-results/sync/', payload1, format='json')
+
+        payload2 = self._payload()
+        payload2['measurements'] = [{
+            'loinc_code': '718-7',
+            'test_name': 'Hemoglobin',
+            'value': None,
+            'value_string': 'Positive',
+            'measured_at': '2026-05-15',
+        }]
+        r2 = self.client.post('/api/lab-results/sync/', payload2, format='json')
+        self.assertEqual(r2.data['created_count'], 1)
+        self.assertEqual(Measurement.objects.filter(person_id=3001).count(), 2)
+
+    def test_delete_one_of_two_owners_preserves_measurement(self):
+        """Deleting one visit when two own the measurement preserves the measurement."""
+        r1 = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
+        r2 = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
+        m_id = r1.data['measurement_ids'][0]
+        v1 = r1.data['visit_occurrence_id']
+
+        del_resp = self.client.delete(f'/api/lab-results/visits/{v1}/')
+        self.assertEqual(del_resp.status_code, 200)
+        self.assertEqual(del_resp.data['deleted_measurements'], 0)
+
+        # Measurement still exists, owned by second visit
+        self.assertTrue(Measurement.objects.filter(measurement_id=m_id).exists())
+        self.assertEqual(MeasurementOwnership.objects.filter(measurement_id=m_id).count(), 1)
+
+    def test_delete_last_owner_deletes_measurement(self):
+        """Deleting the last owning visit removes the measurement."""
+        r1 = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
+        r2 = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
+        m_id = r1.data['measurement_ids'][0]
+
+        self.client.delete(f'/api/lab-results/visits/{r1.data["visit_occurrence_id"]}/')
+        self.assertTrue(Measurement.objects.filter(measurement_id=m_id).exists())
+
+        self.client.delete(f'/api/lab-results/visits/{r2.data["visit_occurrence_id"]}/')
+        self.assertFalse(Measurement.objects.filter(measurement_id=m_id).exists())
+
+    def test_ownership_records_created_on_sync(self):
+        """Every sync creates ownership records for all measurements."""
+        r = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
+        visit_id = r.data['visit_occurrence_id']
+        m_id = r.data['measurement_ids'][0]
+
+        self.assertTrue(
+            MeasurementOwnership.objects.filter(
+                measurement_id=m_id, visit_occurrence_id=visit_id,
+            ).exists()
+        )

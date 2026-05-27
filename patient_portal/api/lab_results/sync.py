@@ -26,7 +26,8 @@ from rest_framework.views import APIView
 
 from omop_core.authorization import can_access_patient, get_actor_role
 from omop_core.models import (
-    CareSite, Concept, Measurement, Person, ProvenanceRecord, VisitOccurrence,
+    CareSite, Concept, Measurement, MeasurementOwnership,
+    Person, ProvenanceRecord, VisitOccurrence,
 )
 from omop_core.services.pk import next_pk, next_pk_batch
 from patient_portal.api.permissions import ScopedTokenPermission, get_request_org
@@ -267,10 +268,31 @@ class SyncView(APIView):
             type_concept=type_concept,
         )
 
-        measurement_ids = next_pk_batch(Measurement, 'measurement_id', len(items))
-        measurement_objects = []
-        for m_id, item in zip(measurement_ids, items):
-            measurement_objects.append(self._build_measurement(
+        # Dedup: check for existing measurements, only create new ones
+        all_measurement_ids = []
+        new_items = []
+        deduplicated_count = 0
+
+        for item in items:
+            existing_id = self._find_existing_measurement(
+                person_id, item, loinc_cache, hk_concept_cache,
+            )
+            if existing_id is not None:
+                all_measurement_ids.append(existing_id)
+                deduplicated_count += 1
+            else:
+                all_measurement_ids.append(None)
+                new_items.append(item)
+
+        new_ids = next_pk_batch(Measurement, 'measurement_id', len(new_items)) if new_items else []
+        new_id_iter = iter(new_ids)
+        new_objects = []
+        for i, item in enumerate(items):
+            if all_measurement_ids[i] is not None:
+                continue
+            m_id = next(new_id_iter)
+            all_measurement_ids[i] = m_id
+            new_objects.append(self._build_measurement(
                 measurement_id=m_id,
                 person_id=person_id,
                 item=item,
@@ -280,7 +302,20 @@ class SyncView(APIView):
                 ucum_cache=ucum_cache,
                 hk_concept_cache=hk_concept_cache,
             ))
-        Measurement.objects.bulk_create(measurement_objects)
+        if new_objects:
+            Measurement.objects.bulk_create(new_objects)
+
+        # Ownership: link all measurements (created + deduped) to this visit
+        MeasurementOwnership.objects.bulk_create(
+            [
+                MeasurementOwnership(
+                    measurement_id=m_id,
+                    visit_occurrence_id=visit.visit_occurrence_id,
+                )
+                for m_id in all_measurement_ids
+            ],
+            ignore_conflicts=True,
+        )
 
         # Provenance
         self._record_provenance(
@@ -290,15 +325,18 @@ class SyncView(APIView):
             target_person_id=person_id,
             is_on_behalf_of=is_on_behalf_of,
             visit=visit,
-            measurement_ids=measurement_ids,
+            measurement_ids=all_measurement_ids,
             org=org,
             source_type=source_type,
         )
 
+        created_count = len(new_objects)
         return Response({
             'visit_occurrence_id': visit.visit_occurrence_id,
-            'measurement_ids': measurement_ids,
-            'count': len(measurement_ids),
+            'measurement_ids': all_measurement_ids,
+            'count': len(all_measurement_ids),
+            'created_count': created_count,
+            'deduplicated_count': deduplicated_count,
         }, status=status.HTTP_201_CREATED)
 
     def _resolve_actor_identity(self, actor_iss, actor_sub, request_user):
@@ -476,3 +514,42 @@ class SyncView(APIView):
             unit_source_value=(item.get('source_unit') or item.get('unit') or '')[:50],
             value_source_value=(item.get('source_text') or '')[:50],
         )
+
+    _DEDUP_SQL = """
+    SELECT measurement_id FROM measurement
+    WHERE person_id = %s
+      AND measurement_date = %s
+      AND (measurement_concept_id = %s OR measurement_source_concept_id = %s)
+      AND value_as_number IS NOT DISTINCT FROM %s
+      AND value_as_string IS NOT DISTINCT FROM %s
+    LIMIT 1
+    """
+
+    def _find_existing_measurement(self, person_id, item, loinc_cache, hk_concept_cache):
+        """Return measurement_id of an existing duplicate, or None."""
+        loinc_code = item.get('loinc_code')
+        test_name = item['test_name']
+
+        concept_id = 0
+        source_concept_id = None
+        if loinc_code:
+            concept = loinc_cache.get(loinc_code)
+            if concept:
+                concept_id = concept.concept_id
+            else:
+                source_concept_id = hk_concept_cache.get(test_name)
+        else:
+            source_concept_id = hk_concept_cache.get(test_name)
+
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute(self._DEDUP_SQL, [
+                person_id,
+                item['measured_at'],
+                concept_id,
+                source_concept_id,
+                item.get('value'),
+                item.get('value_string') or '',
+            ])
+            row = cur.fetchone()
+        return row[0] if row else None
