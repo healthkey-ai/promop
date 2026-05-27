@@ -17,7 +17,7 @@ export function DataSourceBadge({ source, labName, reportFilename, timeAgo }: Pr
   }
 
   if (labName) parts.push(labName);
-  if (reportFilename && !labName) parts.push(reportFilename);
+  if (reportFilename) parts.push(reportFilename);
   if (timeAgo) parts.push(timeAgo);
 
   if (parts.length === 0) return null;
