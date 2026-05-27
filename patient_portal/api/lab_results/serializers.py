@@ -1,6 +1,11 @@
 from rest_framework import serializers
 
 
+class UploadProvenanceSerializer(serializers.Serializer):
+    lab_name = serializers.CharField(allow_null=True)
+    report_filename = serializers.CharField(allow_null=True)
+
+
 class LabValueSerializer(serializers.Serializer):
     measurement_id = serializers.IntegerField()
     value = serializers.DecimalField(max_digits=15, decimal_places=5, allow_null=True)
@@ -13,6 +18,7 @@ class LabValueSerializer(serializers.Serializer):
     source = serializers.CharField(allow_null=True)
     lab_name = serializers.CharField(allow_null=True)
     report_filename = serializers.CharField(allow_null=True)
+    uploads = UploadProvenanceSerializer(many=True, required=False, default=list)
 
 
 class MeasurementUpdateSerializer(serializers.Serializer):

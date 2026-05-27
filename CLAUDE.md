@@ -430,11 +430,12 @@ Expected output: `MISSING from DB: []` and `EXTRA in DB: []`.
 
 | Purpose | DATABASE_URL |
 |---|---|
-| Tests & local dev | `postgresql://postgres@localhost:5432/ctomop_test` |
+| Running tests | `postgresql://postgres@localhost:5432/ctomop_test` |
+| Local development (manual testing, sync uploads, shell exploration) | `postgresql://postgres@localhost:5432/ctomop_dev` |
 | Staging migrations | `postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev` |
 | Production (read-only checks) | `postgresql://ctomop_user:K7mqaHP5krJHiojJFtZmCOepH3Lj66jl@dpg-d6ptpqi4d50c739fufqg-a.oregon-postgres.render.com/ctomop` |
 
-Never use the production DB for writes. Never use remote databases for running tests — use local PostgreSQL to match CI.
+Never use the production DB for writes. Never use remote databases for running tests — use local PostgreSQL to match CI. Never write test data into `ctomop_dev` — use `ctomop_test` for automated tests.
 
 ---
 

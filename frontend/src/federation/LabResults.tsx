@@ -38,7 +38,8 @@ function ResultDetail({
   const latest = values[0];
   const testName = data?.original_name || data?.concept_name || "";
   const category = data?.category ?? "";
-  const isQualitative = latest && latest.value == null && latest.value_string != null;
+  const hasNumeric = values.some((v) => v.value != null);
+  const isQualitative = !hasNumeric;
   const unit = latest?.unit ?? "";
 
   if (isError) {
@@ -134,11 +135,22 @@ function ResultDetail({
                     </div>
                     <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
                       {r.measured_at && <span>{formatShortDate(r.measured_at)}</span>}
-                      <DataSourceBadge
-                        source={r.source}
-                        labName={r.lab_name}
-                        reportFilename={r.report_filename}
-                      />
+                      {r.uploads && r.uploads.length > 1 ? (
+                        r.uploads.map((u, i) => (
+                          <DataSourceBadge
+                            key={i}
+                            source={r.source}
+                            labName={u.lab_name}
+                            reportFilename={u.report_filename}
+                          />
+                        ))
+                      ) : (
+                        <DataSourceBadge
+                          source={r.source}
+                          labName={r.lab_name}
+                          reportFilename={r.report_filename}
+                        />
+                      )}
                       {(r.range_low != null || r.range_high != null) && (
                         <span>
                           ref{" "}

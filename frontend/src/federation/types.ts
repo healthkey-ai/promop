@@ -28,6 +28,11 @@ export interface LabResultsProps extends LabsBaseProps {
 
 export type LabValueStatus = "in_range" | "below" | "above" | "unknown";
 
+export interface UploadProvenance {
+  lab_name: string | null;
+  report_filename: string | null;
+}
+
 export interface LabResultValue {
   measurement_id: number;
   value: number | null;
@@ -40,6 +45,7 @@ export interface LabResultValue {
   source: string | null;
   lab_name: string | null;
   report_filename: string | null;
+  uploads?: UploadProvenance[];
 }
 
 export interface LabResultCard {
