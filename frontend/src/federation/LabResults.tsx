@@ -82,7 +82,7 @@ function ResultDetail({
         {category && (
           <p className="text-xs uppercase tracking-wide text-muted-foreground">{category}</p>
         )}
-        <h2 className="text-xl font-bold text-foreground">{testName}</h2>
+        <h2 className="text-lg font-medium text-foreground/70">{testName}</h2>
         {data?.vocabulary_id === "LOINC" && (
           <p className="text-xs text-muted-foreground">
             LOINC {data.concept_code} · {data.concept_name}
@@ -111,7 +111,7 @@ function ResultDetail({
       )}
 
       <div>
-        <h3 className="mb-2 text-sm font-semibold text-foreground">History</h3>
+        <h3 className="mb-2 text-sm font-medium text-foreground/70">History</h3>
         {values.length === 0 ? (
           <Card>
             <CardContent className="p-6 text-center">
@@ -338,7 +338,7 @@ function SummaryList({
       <h2 className="text-lg font-medium text-foreground/70">Lab Results</h2>
       {categoryGroups.map(([category, groupCards]) => (
         <div key={category}>
-          <h3 className="mb-2 text-sm font-semibold text-foreground/70">
+          <h3 className="mb-2 text-sm font-medium text-foreground/70">
             {category}
           </h3>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

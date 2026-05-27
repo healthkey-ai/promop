@@ -59,7 +59,7 @@ function PatientInfoSkeleton() {
           <div key={i} className="h-4 w-16 animate-pulse rounded bg-muted" />
         ))}
       </div>
-      <div className="space-y-10 rounded-2xl bg-background px-8 py-8 shadow-sm">
+      <div className="space-y-10 pt-2">
         <div>
           <div className="mb-2 h-6 w-20 animate-pulse rounded bg-muted" />
           <div className="mb-7 h-3.5 w-64 animate-pulse rounded bg-muted" />
@@ -245,7 +245,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-foreground">Patient Info</h1>
+        <h1 className="text-lg font-medium text-foreground/70">Health Profile</h1>
         <SaveStatusIndicator status={saveStatus} onRetry={doSave} />
       </div>
 
@@ -268,13 +268,13 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
         </nav>
       </div>
 
-      <div className="rounded-2xl bg-background shadow-sm">
-        <div className="px-8 pb-6 pt-8">
-          <h2 className="text-xl font-bold text-foreground">{tabLabels[activeTab]}</h2>
+      <div>
+        <div className="pb-4 pt-2">
+          <h2 className="text-base font-medium text-foreground/70">{tabLabels[activeTab]}</h2>
           <p className="mt-1 text-sm text-muted-foreground">{tabDescriptions[activeTab]}</p>
         </div>
 
-        <div className="px-8 pb-10">
+        <div>
           {activeTab === 0 && (
             <GeneralTab
               formData={editedInfo}
