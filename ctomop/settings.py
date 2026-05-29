@@ -233,14 +233,3 @@ if not DEBUG:
         csrf_origins.append(render_url)
     
     CSRF_TRUSTED_ORIGINS = csrf_origins
-
-
-# ---------------------------------------------------------------------------
-# Airflow integration
-# ---------------------------------------------------------------------------
-# REST API endpoint of the healthkey-etl Airflow instance and credentials.
-# `upload_fhir` triggers the `fhir_ingest` DAG through
-# `patient_portal.infrastructure.airflow_client`.
-AIRFLOW_URL = os.environ.get('AIRFLOW_URL', '')
-AIRFLOW_USERNAME = os.environ.get('AIRFLOW_USERNAME', '')
-AIRFLOW_PASSWORD = os.environ.get('AIRFLOW_PASSWORD', '')

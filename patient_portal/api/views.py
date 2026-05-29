@@ -37,11 +37,6 @@ import json
 import logging
 from io import StringIO
 from .permissions import ScopedTokenPermission, get_request_org
-from patient_portal.infrastructure.airflow_client import (
-    AirflowClientImplementation,
-    AirflowDag,
-    AirflowError,
-)
 from .serializers import (
     UserSerializer, PatientInfoSerializer, PatientListSerializer, ProvenanceRecordSerializer,
     ConditionOccurrenceSerializer, DrugExposureSerializer, MeasurementSerializer,
@@ -371,79 +366,1274 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     
     @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission])
     def upload_fhir(self, request):
-        """Trigger async FHIR Bundle ingestion via the healthkey-etl Airflow DAG.
-
-        The view validates the request, then hands the parsing + OMOP writes
-        off to the `fhir_ingest` DAG. Returns 202 Accepted with the assigned
-        `dag_run_id` so the caller can poll Airflow for status.
-        """
+        """Upload patients from FHIR JSON file"""
         if 'file' not in request.FILES:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
-
+        
         file = request.FILES['file']
         if not file.name.endswith('.json'):
             return Response({'error': 'File must be a JSON file'}, status=status.HTTP_400_BAD_REQUEST)
-
+        
         try:
             fhir_data = json.load(file)
-        except json.JSONDecodeError as e:
-            return Response({'error': f'Invalid JSON: {e}'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not isinstance(fhir_data, dict) or fhir_data.get('resourceType') != 'Bundle':
-            return Response({'error': 'FHIR file must be a Bundle'}, status=status.HTTP_400_BAD_REQUEST)
+            if fhir_data.get('resourceType') != 'Bundle':
+                return Response({'error': 'FHIR file must be a Bundle'}, status=status.HTTP_400_BAD_REQUEST)
 
-        prov_source, prov_user_id, prov_reason = _extract_provenance(request)
-        if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
-            return Response(
-                {'error': 'modification_reason is required when source is ADMIN_CORRECTION'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            prov_source, prov_user_id, prov_reason = _extract_provenance(request)
+            if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
+                return Response(
+                    {'error': 'modification_reason is required when source is ADMIN_CORRECTION'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        org = get_request_org(request)
+            created_count = 0
+            updated_count = 0
+            errors = []
+            patients_result = []
 
-        if not settings.AIRFLOW_URL:
-            return Response(
-                {'error': 'AIRFLOW_URL is not configured on this server'},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
+            # Group resources by patient
+            patients_data = {}
+            
+            for entry in fhir_data.get('entry', []):
+                resource = entry.get('resource', {})
+                resource_type = resource.get('resourceType')
+                
+                if resource_type == 'Patient':
+                    patient_id = resource.get('id', '')
+                    patients_data[patient_id] = {
+                        'patient': resource,
+                        'conditions': [],
+                        'observations': [],
+                        'medications': []
+                    }
+                elif resource_type == 'Condition':
+                    patient_ref = resource.get('subject', {}).get('reference', '')
+                    patient_id = patient_ref.split('/')[-1] if '/' in patient_ref else ''
+                    if patient_id in patients_data:
+                        patients_data[patient_id]['conditions'].append(resource)
+                elif resource_type == 'Observation':
+                    patient_ref = resource.get('subject', {}).get('reference', '')
+                    patient_id = patient_ref.split('/')[-1] if '/' in patient_ref else ''
+                    if patient_id in patients_data:
+                        patients_data[patient_id]['observations'].append(resource)
+                elif resource_type == 'MedicationStatement':
+                    patient_ref = resource.get('subject', {}).get('reference', '')
+                    patient_id = patient_ref.split('/')[-1] if '/' in patient_ref else ''
+                    if patient_id in patients_data:
+                        patients_data[patient_id]['medications'].append(resource)
+            
+            # Process each patient
+            for fhir_patient_id, data in patients_data.items():
+                try:
+                    _pt_measurement_ids = []
+                    _pt_condition_ids = []
+                    _pt_drug_exposure_ids = []
+                    _pt_procedure_ids = []
+                    _pt_episode_ids = []
+                    _pt_episode_event_ids = []
 
-        conf = {
-            'bundle': fhir_data,
-            'fhir_version': 'r4',
-            'provenance_source': prov_source,
-            'provenance_source_user_id': str(prov_user_id) if prov_user_id else '',
-            'provenance_target_patient_id': None,
-            'provenance_organization_id': org.id if org else None,
-            'provenance_modification_reason': prov_reason,
-        }
+                    patient_resource = data['patient']
 
-        client = AirflowClientImplementation(
-            airflow_url=settings.AIRFLOW_URL,
-            airflow_username=settings.AIRFLOW_USERNAME,
-            airflow_password=settings.AIRFLOW_PASSWORD,
-        )
-        dag_run_prefix = f"upload-org{org.id}" if org else "upload-noorg"
-        try:
-            dag_run_id = client.create_dag_run(
-                dag=AirflowDag.FHIR_INGEST,
-                dag_run_prefix=dag_run_prefix,
-                conf=conf,
-            )
-        except AirflowError as e:
-            return Response(
-                {'error': f'Failed to schedule FHIR ingestion: {e}'},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+                    # Generate new person_id
+                    last_person = Person.objects.all().order_by('-person_id').first()
+                    person_id = last_person.person_id + 1 if last_person else 1000
+                    
+                    # Parse birth date
+                    birth_date = None
+                    year_of_birth = None
+                    month_of_birth = None
+                    day_of_birth = None
+                    
+                    if patient_resource.get('birthDate'):
+                        birth_date = datetime.strptime(patient_resource['birthDate'], '%Y-%m-%d').date()
+                        year_of_birth = birth_date.year
+                        month_of_birth = birth_date.month
+                        day_of_birth = birth_date.day
+                    
+                    # Extract address information from FHIR
+                    country = None
+                    region = None
+                    city = None
+                    postal_code = None
+                    
+                    if patient_resource.get('address') and len(patient_resource['address']) > 0:
+                        address = patient_resource['address'][0]
+                        country = address.get('country')
+                        region = address.get('state')
+                        city = address.get('city')
+                        postal_code = address.get('postalCode')
+                    
+                    # Extract ethnicity and vital signs from extensions
+                    ethnicity = None
+                    weight = None
+                    height = None
+                    systolic_bp = None
+                    diastolic_bp = None
+                    heart_rate = None
+                    ecog = None
+                    
+                    # Explicit extension URL → (value_key, parser) registry.
+                    # Using exact URL matching avoids false positives from substring checks.
+                    _PATIENT_EXTENSIONS = {
+                        'http://ctomop.io/fhir/StructureDefinition/ethnicity':
+                            ('valueString', lambda e: e.get('valueString')),
+                        'http://ctomop.io/fhir/StructureDefinition/bodyWeight':
+                            ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
+                        'http://ctomop.io/fhir/StructureDefinition/bodyHeight':
+                            ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
+                        'http://ctomop.io/fhir/StructureDefinition/systolic-bp':
+                            ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
+                        'http://ctomop.io/fhir/StructureDefinition/diastolic-bp':
+                            ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
+                        'http://ctomop.io/fhir/StructureDefinition/heartRate':
+                            ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
+                        'http://ctomop.io/fhir/StructureDefinition/ecog-performance-status':
+                            ('valueInteger', lambda e: e.get('valueInteger')),
+                    }
+                    ext_results = {}
+                    for ext in patient_resource.get('extension', []):
+                        url = ext.get('url', '')
+                        if url in _PATIENT_EXTENSIONS:
+                            _, parser = _PATIENT_EXTENSIONS[url]
+                            ext_results[url] = parser(ext)
 
-        return Response(
-            {
+                    base = 'http://ctomop.io/fhir/StructureDefinition/'
+                    ethnicity   = ext_results.get(f'{base}ethnicity')
+                    weight      = ext_results.get(f'{base}bodyWeight')
+                    height      = ext_results.get(f'{base}bodyHeight')
+                    systolic_bp = ext_results.get(f'{base}systolic-bp')
+                    diastolic_bp = ext_results.get(f'{base}diastolic-bp')
+                    heart_rate  = ext_results.get(f'{base}heartRate')
+                    ecog        = ext_results.get(f'{base}ecog-performance-status')
+                    
+                    # Get gender concept from FHIR
+                    gender_concept = get_gender_concept(patient_resource.get('gender', ''))
+                    
+                    # Extract name from FHIR
+                    name = patient_resource.get('name', [{}])[0] if patient_resource.get('name') else {}
+                    given_name = ' '.join(name.get('given', [])) if name.get('given') else ''
+                    family_name = name.get('family', '')
+                    
+                    # Upsert Person: match on name + birth year to avoid duplicates on re-upload
+                    person = None
+                    person_is_new = False
+                    if (given_name or family_name) and year_of_birth:
+                        person = Person.objects.filter(
+                            given_name=given_name,
+                            family_name=family_name,
+                            year_of_birth=year_of_birth,
+                        ).first()
+                    if person is None:
+                        last_person = Person.objects.all().order_by('-person_id').first()
+                        person_id = last_person.person_id + 1 if last_person else 1000
+                        person = Person.objects.create(
+                            person_id=person_id,
+                            gender_concept=gender_concept,
+                            year_of_birth=year_of_birth or datetime.now().year - 50,
+                            month_of_birth=month_of_birth,
+                            day_of_birth=day_of_birth,
+                            ethnicity_concept=None,
+                            given_name=given_name,
+                            family_name=family_name,
+                        )
+                        person_is_new = True
+                        User.objects.get_or_create(
+                            username=f'patient{person.person_id}',
+                            defaults={
+                                'id': person.person_id,
+                                'first_name': given_name,
+                                'last_name': family_name,
+                            },
+                        )
+                    
+                    # Extract disease, stage, and histologic type from Condition
+                    disease = 'Breast Cancer'
+                    stage = ''
+                    histologic_type = ''
+                    condition_date = None
+                    
+                    for condition in data['conditions']:
+                        # Get histologic type from code
+                        code = condition.get('code', {})
+                        if code.get('text'):
+                            histologic_type = code['text']
+                        elif code.get('coding') and len(code['coding']) > 0:
+                            histologic_type = code['coding'][0].get('display', '')
+                        
+                        # Get stage
+                        stages = condition.get('stage', [])
+                        if stages and len(stages) > 0:
+                            stage_summary = stages[0].get('summary', {})
+                            if stage_summary.get('text'):
+                                stage_text = stage_summary['text']
+                                if 'Stage' in stage_text:
+                                    stage = stage_text.split('Stage')[-1].strip()
+                            elif stage_summary.get('coding') and len(stage_summary['coding']) > 0:
+                                stage = stage_summary['coding'][0].get('code', '')
+                        
+                        # Get condition onset date
+                        if condition.get('onsetDateTime'):
+                            try:
+                                naive_dt = datetime.strptime(condition['onsetDateTime'], '%Y-%m-%d')
+                                condition_date = timezone.make_aware(naive_dt)
+                            except ValueError:
+                                pass
+                    
+                    # Upsert ConditionOccurrence for the diagnosis
+                    if condition_date:
+                        from omop_core.models import ConditionOccurrence
+
+                        # Get breast cancer concept (using a standard concept ID)
+                        breast_cancer_concept = None
+                        try:
+                            breast_cancer_concept = Concept.objects.filter(
+                                concept_name__icontains='breast cancer'
+                            ).first()
+                        except:
+                            pass
+                        
+                        if breast_cancer_concept:
+                            # Get EHR type concept (32817 = EHR)
+                            type_concept = Concept.objects.filter(concept_id=32817).first()
+                            if not type_concept:
+                                type_concept = breast_cancer_concept
+
+                            if not ConditionOccurrence.objects.filter(
+                                person=person,
+                                condition_concept=breast_cancer_concept,
+                                condition_start_date=condition_date.date(),
+                            ).exists():
+                                last_condition = ConditionOccurrence.objects.all().order_by('-condition_occurrence_id').first()
+                                condition_id = last_condition.condition_occurrence_id + 1 if last_condition else 1
+                                _co = ConditionOccurrence(
+                                    condition_occurrence_id=condition_id,
+                                    person=person,
+                                    condition_concept=breast_cancer_concept,
+                                    condition_start_date=condition_date.date(),
+                                    condition_start_datetime=condition_date,
+                                    condition_type_concept=type_concept,
+                                    condition_source_value=disease,
+                                )
+                                _co._skip_patient_info_refresh = True
+                                _co.save()
+                                _pt_condition_ids.append(_co.condition_occurrence_id)
+                                if prov_source:
+                                    _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+
+                    # Process observations and create Measurement records
+                    from omop_core.models import Measurement
+                    last_measurement = Measurement.objects.all().order_by('-measurement_id').first()
+                    measurement_id = last_measurement.measurement_id + 1 if last_measurement else 1
+                    
+                    # Extract tumor characteristics and lab values from observations
+                    tumor_size = None
+                    lymph_node_status = None
+                    metastasis_status = None
+                    tumor_stage = None
+                    nodes_stage = None
+                    distant_metastasis_stage = None
+                    staging_modalities = None
+                    measurable_disease_by_recist_status = None
+                    bone_only_metastasis_status = None
+                    clonal_bone_marrow_b_lymphocytes = None
+                    er_status = None
+                    pr_status = None
+                    her2_status = None
+                    ki67_index = None
+                    pdl1_status = None
+                    pdl1_percentage = None
+                    genetic_mutations = []
+                    
+                    # Blood count values
+                    hemoglobin_g_dl = None
+                    hematocrit_percent = None
+                    wbc_count = None
+                    rbc_count = None
+                    platelet_count = None
+                    anc_count = None
+                    alc_count = None
+                    amc_count = None
+                    
+                    # Kidney function
+                    serum_calcium = None
+                    serum_creatinine = None
+                    creatinine_clearance = None
+                    egfr = None
+                    bun = None
+                    
+                    # Electrolytes
+                    sodium = None
+                    potassium = None
+                    calcium = None
+                    magnesium = None
+                    
+                    # Liver function
+                    bilirubin_total = None
+                    bilirubin_direct = None
+                    alt = None
+                    ast = None
+                    alkaline_phosphatase = None
+                    albumin = None
+                    total_protein = None
+                    
+                    # Cardiac & Other
+                    troponin = None
+                    bnp = None
+                    glucose = None
+                    hba1c = None
+                    ldh = None
+                    
+                    # Other markers
+                    beta2_microglobulin = None
+                    c_reactive_protein = None
+                    esr = None
+                    creatinine_clearance_rate = None
+                    
+                    # Coagulation
+                    inr = None
+                    pt = None
+                    ptt = None
+                    
+                    # Tumor markers
+                    cea = None
+                    ca19_9 = None
+                    psa = None
+                    
+                    # Behavior tab - Lifestyle
+                    smoking_status = None
+                    pack_years = None
+                    alcohol_use = None
+                    drinks_per_week = None
+                    exercise_frequency = None
+                    exercise_minutes_per_week = None
+                    diet_type = None
+                    
+                    # Behavior tab - Sleep & Wellbeing
+                    sleep_hours_per_night = None
+                    sleep_quality = None
+                    stress_level = None
+                    social_support = None
+                    
+                    # Behavior tab - Socioeconomic
+                    employment_status = None
+                    education_level = None
+                    marital_status = None
+                    insurance_type = None
+                    number_of_dependents = None
+                    annual_household_income = None
+                    
+                    # Cancer Assessment Fields
+                    ecog_assessment_date = None
+                    test_methodology = None
+                    test_date = None
+                    test_specimen_type = None
+                    report_interpretation = None
+                    oncotype_dx_score = None
+                    androgen_receptor_status = None
+                    
+                    # Treatment Fields
+                    therapy_intent = None
+                    reason_for_discontinuation = None
+                    therapy_intent_observations = []  # List of {'date': date, 'value': value}
+                    discontinuation_observations = []  # List of {'date': date, 'value': value}
+                    
+                    # Additional Lab Values
+                    ldh_new = None
+                    alkaline_phosphatase = None
+                    magnesium = None
+                    phosphorus = None
+                    
+                    # Reproductive Health
+                    pregnancy_test_date = None
+                    pregnancy_test_result_value = None
+                    contraceptive_use = None
+                    
+                    # Consent and Support
+                    consent_capability = None
+                    caregiver_availability_status = None
+                    
+                    # Mental Health and Substance Use
+                    no_mental_health_disorder_status = None
+                    no_substance_use_status = None
+                    substance_use_details = None
+                    
+                    # Geographic Exposure
+                    no_geographic_exposure_risk = None
+                    geographic_exposure_risk_details = None
+                    
+                    for observation in data['observations']:
+                        obs_code = observation.get('code', {})
+                        obs_text = obs_code.get('text', '').lower()
+                        value_number = observation.get('valueQuantity', {}).get('value') if observation.get('valueQuantity') else None
+                        value_codeable = observation.get('valueCodeableConcept', {}).get('text') if observation.get('valueCodeableConcept') else None
+                        
+                        # Get LOINC code for lab mapping
+                        loinc_code = None
+                        if obs_code.get('coding'):
+                            for coding in obs_code['coding']:
+                                if coding.get('system') == 'http://loinc.org':
+                                    loinc_code = coding.get('code')
+                                    break
+                        
+                        # Map LOINC codes to blood count fields
+                        if loinc_code == '718-7':  # Hemoglobin
+                            hemoglobin_g_dl = value_number
+                        elif loinc_code == '4544-3':  # Hematocrit
+                            hematocrit_percent = value_number
+                        elif loinc_code == '6690-2':  # WBC
+                            wbc_count = value_number
+                        elif loinc_code == '789-8':  # RBC
+                            rbc_count = value_number
+                        elif loinc_code == '777-3':  # Platelets
+                            platelet_count = value_number
+                        elif loinc_code == '751-8':  # ANC
+                            anc_count = value_number
+                        elif loinc_code == '731-0':  # ALC
+                            alc_count = value_number
+                        elif loinc_code == '742-7':  # AMC
+                            amc_count = value_number
+                        # Kidney function
+                        elif loinc_code == '17861-6' or loinc_code == '2000-8':  # Serum Calcium / Calcium
+                            serum_calcium = value_number
+                            calcium = value_number
+                        elif loinc_code == '2160-0':  # Serum Creatinine
+                            serum_creatinine = value_number
+                        elif loinc_code == '2164-2':  # Creatinine Clearance
+                            creatinine_clearance = value_number
+                        elif loinc_code == '33914-3':  # eGFR
+                            egfr = value_number
+                        elif loinc_code == '3094-0':  # BUN
+                            bun = value_number
+                        # Electrolytes
+                        elif loinc_code == '2951-2':  # Sodium
+                            sodium = value_number
+                        elif loinc_code == '2823-3':  # Potassium
+                            potassium = value_number
+                        elif loinc_code == '19123-9':  # Magnesium
+                            magnesium = value_number
+                        # Liver function
+                        elif loinc_code == '1975-2':  # Total Bilirubin
+                            bilirubin_total = value_number
+                        elif loinc_code == '1968-7':  # Direct Bilirubin
+                            bilirubin_direct = value_number
+                        elif loinc_code == '1742-6':  # ALT
+                            alt = value_number
+                        elif loinc_code == '1920-8':  # AST
+                            ast = value_number
+                        elif loinc_code == '6768-6':  # Alkaline Phosphatase
+                            alkaline_phosphatase = value_number
+                        elif loinc_code == '1751-7':  # Albumin
+                            albumin = value_number
+                        elif loinc_code == '2885-2':  # Total Protein
+                            total_protein = value_number
+                        # Other markers
+                        elif loinc_code == '1754-1' or loinc_code == '48346-3':  # Beta-2 Microglobulin
+                            beta2_microglobulin = value_number
+                        elif loinc_code == '1988-5':  # C-Reactive Protein
+                            c_reactive_protein = value_number
+                        elif loinc_code == '4537-7' or loinc_code == '30341-2':  # ESR
+                            esr = value_number
+                        elif loinc_code == '2164-2' or loinc_code == '33558-8':  # Creatinine Clearance Rate
+                            creatinine_clearance_rate = value_number
+                        # Cardiac & Other
+                        elif loinc_code == '10839-9' or loinc_code == '6598-7':  # Troponin
+                            troponin = value_number
+                        elif loinc_code == '42637-9':  # BNP
+                            bnp = value_number
+                        elif loinc_code == '2345-7':  # Glucose
+                            glucose = value_number
+                        elif loinc_code == '4548-4':  # HbA1c
+                            hba1c = value_number
+                        elif loinc_code == '2532-0':  # LDH
+                            ldh = value_number
+                        # Coagulation
+                        elif loinc_code == '6301-6':  # INR
+                            inr = value_number
+                        elif loinc_code == '5902-2':  # PT
+                            pt = value_number
+                        elif loinc_code == '3173-2':  # PTT
+                            ptt = value_number
+                        # Tumor markers
+                        elif loinc_code == '2039-6':  # CEA
+                            cea = value_number
+                        elif loinc_code == '25390-6':  # CA 19-9
+                            ca19_9 = value_number
+                        elif loinc_code == '2857-1':  # PSA
+                            psa = value_number
+                        # Behavior - Lifestyle
+                        elif loinc_code == '72166-2':  # Smoking Status
+                            smoking_status = value_codeable
+                        elif loinc_code == '63640-7':  # Pack Years
+                            pack_years = value_number
+                        elif loinc_code == '74013-4':  # Alcohol Use
+                            alcohol_use = value_codeable
+                        elif loinc_code == '11286-7':  # Drinks per Week
+                            drinks_per_week = value_number
+                        elif loinc_code == '68516-4':  # Exercise Frequency
+                            exercise_frequency = value_codeable
+                        elif loinc_code == '89555-7':  # Exercise Minutes per Week
+                            exercise_minutes_per_week = value_number
+                        elif loinc_code == '88365-2':  # Diet Type
+                            diet_type = value_codeable
+                        # Behavior - Sleep & Wellbeing
+                        elif loinc_code == '93832-4':  # Sleep Hours per Night
+                            sleep_hours_per_night = value_number
+                        elif loinc_code == '93831-6':  # Sleep Quality
+                            sleep_quality = value_codeable
+                        elif loinc_code == '73985-4':  # Stress Level
+                            stress_level = value_codeable
+                        elif loinc_code == '93033-9':  # Social Support
+                            social_support = value_codeable
+                        # Behavior - Socioeconomic
+                        elif loinc_code == '74165-2':  # Employment Status
+                            employment_status = value_codeable
+                        elif loinc_code == '82589-3':  # Education Level
+                            education_level = value_codeable
+                        elif loinc_code == '45404-1':  # Marital Status
+                            marital_status = value_codeable
+                        elif loinc_code == '76513-1':  # Insurance Type
+                            insurance_type = value_codeable
+                        elif loinc_code == '63512-8':  # Number of Dependents
+                            number_of_dependents = value_number
+                        elif loinc_code == '77243-3':  # Annual Household Income
+                            annual_household_income = value_number
+                        # Cancer Assessment Fields
+                        elif loinc_code == '89247-1':  # ECOG Performance Status
+                            # Store the date from effectiveDateTime
+                            if observation.get('effectiveDateTime'):
+                                ecog_assessment_date = observation['effectiveDateTime'][:10]
+                        elif loinc_code == '85337-4':  # Test Methodology
+                            test_methodology = value_codeable
+                            # Also check if this is Oncotype DX score
+                            if value_number is not None:
+                                oncotype_dx_score = value_number
+                        elif loinc_code == '31208-2':  # Specimen Source
+                            test_specimen_type = value_codeable
+                            if observation.get('effectiveDateTime'):
+                                test_date = observation['effectiveDateTime'][:10]
+                        elif loinc_code == '69548-6':  # Test Interpretation
+                            report_interpretation = value_codeable
+                        elif loinc_code == '16112-5':  # Androgen Receptor
+                            androgen_receptor_status = value_codeable
+                        elif loinc_code == '42804-5':  # Therapy Intent
+                            obs_date = observation.get('effectiveDateTime', '')[:10] if observation.get('effectiveDateTime') else None
+                            therapy_intent_observations.append({'date': obs_date, 'value': value_codeable})
+                            if not therapy_intent:  # Keep first for backwards compatibility
+                                therapy_intent = value_codeable
+                        elif loinc_code == '91379-3':  # Reason for Discontinuation
+                            obs_date = observation.get('effectiveDateTime', '')[:10] if observation.get('effectiveDateTime') else None
+                            discontinuation_observations.append({'date': obs_date, 'value': value_codeable})
+                            if not reason_for_discontinuation:  # Keep first for backwards compatibility
+                                reason_for_discontinuation = value_codeable
+                        # Additional Lab Values
+                        elif loinc_code == '14804-9':  # LDH
+                            ldh_new = value_number
+                        elif loinc_code == '6768-6':  # Alkaline Phosphatase
+                            alkaline_phosphatase = value_number
+                        elif loinc_code == '2601-3':  # Magnesium
+                            magnesium = value_number
+                        elif loinc_code == '2777-1':  # Phosphorus
+                            phosphorus = value_number
+                        # Reproductive Health
+                        elif loinc_code == '2106-3':  # Pregnancy Test
+                            pregnancy_test_result_value = value_codeable
+                            if observation.get('effectiveDateTime'):
+                                pregnancy_test_date = observation['effectiveDateTime'][:10]
+                        elif loinc_code == '8659-8':  # Contraceptive Use
+                            contraceptive_use = value_codeable and value_codeable.lower() in ['yes', 'true']
+                        # Consent and Support
+                        elif loinc_code == '75985-6':  # Ability to Consent
+                            consent_capability = value_codeable and value_codeable.lower() in ['yes', 'true']
+                        elif loinc_code == '74014-2':  # Caregiver Availability
+                            caregiver_availability_status = value_codeable and value_codeable.lower() in ['yes', 'true']
+                        # Mental Health and Substance Use
+                        elif loinc_code == '75618-3':  # Mental Health Disorders
+                            no_mental_health_disorder_status = value_codeable and value_codeable.lower() in ['no', 'false']
+                        elif loinc_code == '74204-0':  # Non-prescription Drug Use
+                            no_substance_use_status = value_codeable and value_codeable.lower() in ['no', 'false']
+                            if observation.get('note'):
+                                substance_use_details = observation['note'][0].get('text')
+                        # Geographic Exposure
+                        elif loinc_code == '82593-5':  # Geographic/Environmental Exposure Risk
+                            no_geographic_exposure_risk = value_codeable and value_codeable.lower() in ['no', 'false']
+                            if observation.get('note'):
+                                geographic_exposure_risk_details = observation['note'][0].get('text')
+                        
+                        # Check for tumor size
+                        if 'tumor size' in obs_text or 'size tumor' in obs_text:
+                            if observation.get('valueQuantity'):
+                                tumor_size = observation['valueQuantity'].get('value')
+                        
+                        # Check for lymph node status
+                        elif 'lymph node' in obs_text or 'lymph nodes' in obs_text:
+                            if observation.get('valueCodeableConcept'):
+                                value_concept = observation['valueCodeableConcept']
+                                if value_concept.get('text'):
+                                    lymph_node_status = value_concept['text']
+                                elif value_concept.get('coding'):
+                                    lymph_node_status = value_concept['coding'][0].get('display')
+                        
+                        # Check for metastasis status
+                        elif 'metastasis' in obs_text or 'metastases' in obs_text:
+                            if observation.get('valueCodeableConcept'):
+                                value_concept = observation['valueCodeableConcept']
+                                if value_concept.get('text'):
+                                    metastasis_status = value_concept['text']
+                                elif value_concept.get('coding'):
+                                    metastasis_status = value_concept['coding'][0].get('display')
+
+                        # TNM staging fields
+                        if obs_text == 'tumor stage' or loinc_code == '21905-5':
+                            tumor_stage = (observation.get('valueCodeableConcept') or {}).get('text')
+                        elif obs_text == 'nodes stage' or loinc_code == '21906-3':
+                            nodes_stage = (observation.get('valueCodeableConcept') or {}).get('text')
+                        elif obs_text == 'distant metastasis stage' or loinc_code == '21901-4':
+                            distant_metastasis_stage = (observation.get('valueCodeableConcept') or {}).get('text')
+                        elif obs_text == 'staging modality' or loinc_code == '85319-2':
+                            staging_modalities = observation.get('valueString')
+                        elif 'recist' in obs_text or loinc_code == '21908-9':
+                            val = observation.get('valueBoolean')
+                            if val is not None:
+                                measurable_disease_by_recist_status = val
+                        elif 'bone only metastasis' in obs_text or loinc_code == '44667-4':
+                            val = observation.get('valueBoolean')
+                            if val is not None:
+                                bone_only_metastasis_status = val
+                        elif 'clonal bone marrow b lymphocyte' in obs_text or loinc_code == '85319-5':
+                            if observation.get('valueQuantity'):
+                                clonal_bone_marrow_b_lymphocytes = observation['valueQuantity'].get('value')
+                        
+                        # Check for ER status
+                        elif 'estrogen receptor' in obs_text or obs_text == 'er':
+                            if observation.get('valueCodeableConcept'):
+                                value_concept = observation['valueCodeableConcept']
+                                if value_concept.get('text'):
+                                    er_status = value_concept['text']
+                                elif value_concept.get('coding'):
+                                    er_status = value_concept['coding'][0].get('display')
+                        
+                        # Check for PR status
+                        elif 'progesterone receptor' in obs_text or obs_text == 'pr':
+                            if observation.get('valueCodeableConcept'):
+                                value_concept = observation['valueCodeableConcept']
+                                if value_concept.get('text'):
+                                    pr_status = value_concept['text']
+                                elif value_concept.get('coding'):
+                                    pr_status = value_concept['coding'][0].get('display')
+                        
+                        # Check for HER2 status
+                        elif 'her2' in obs_text or 'her-2' in obs_text:
+                            if observation.get('valueCodeableConcept'):
+                                value_concept = observation['valueCodeableConcept']
+                                if value_concept.get('text'):
+                                    her2_status = value_concept['text']
+                                elif value_concept.get('coding'):
+                                    her2_status = value_concept['coding'][0].get('display')
+                        
+                        # Check for Ki67
+                        elif 'ki67' in obs_text or 'ki-67' in obs_text:
+                            if observation.get('valueQuantity'):
+                                ki67_index = observation['valueQuantity'].get('value')
+                        
+                        # Check for PD-L1
+                        elif 'pd-l1' in obs_text or 'pdl1' in obs_text:
+                            if observation.get('valueCodeableConcept'):
+                                value_concept = observation['valueCodeableConcept']
+                                if value_concept.get('text'):
+                                    pdl1_status = value_concept['text']
+                                elif value_concept.get('coding'):
+                                    pdl1_status = value_concept['coding'][0].get('display')
+                            # Check for PD-L1 percentage in component
+                            if observation.get('component'):
+                                for component in observation['component']:
+                                    comp_text = component.get('code', {}).get('text', '').lower()
+                                    if 'percentage' in comp_text or 'tumor cells' in comp_text:
+                                        if component.get('valueQuantity'):
+                                            pdl1_percentage = component['valueQuantity'].get('value')
+                        
+                        # Check for genetic mutations (component-based observations)
+                        elif 'gene' in obs_text and 'mutation' in obs_text:
+                            mutation_data = {
+                                'gene': None,
+                                'mutation': None,
+                                'origin': None,
+                                'interpretation': None
+                            }
+                            
+                            # Get interpretation from main valueCodeableConcept
+                            if observation.get('valueCodeableConcept'):
+                                value_concept = observation['valueCodeableConcept']
+                                if value_concept.get('text'):
+                                    mutation_data['interpretation'] = value_concept['text']
+                                elif value_concept.get('coding'):
+                                    mutation_data['interpretation'] = value_concept['coding'][0].get('display')
+                            
+                            # Extract gene, mutation, and origin from components
+                            if observation.get('component'):
+                                for component in observation['component']:
+                                    comp_code = component.get('code', {})
+                                    comp_text = comp_code.get('text', '').lower()
+                                    
+                                    if 'gene' in comp_text:
+                                        if component.get('valueCodeableConcept'):
+                                            mutation_data['gene'] = component['valueCodeableConcept'].get('text')
+                                    elif 'mutation' in comp_text or 'dna change' in comp_text:
+                                        if component.get('valueCodeableConcept'):
+                                            mutation_data['mutation'] = component['valueCodeableConcept'].get('text')
+                                    elif 'origin' in comp_text or 'source class' in comp_text:
+                                        if component.get('valueCodeableConcept'):
+                                            value = component['valueCodeableConcept'].get('text')
+                                            if value:
+                                                mutation_data['origin'] = value
+                                            elif component['valueCodeableConcept'].get('coding'):
+                                                mutation_data['origin'] = component['valueCodeableConcept']['coding'][0].get('display')
+                            
+                            # Only add if we have at least gene and mutation
+                            if mutation_data['gene'] and mutation_data['mutation']:
+                                genetic_mutations.append(mutation_data)
+                    
+                    for observation in data['observations']:
+                        obs_date = None
+                        if observation.get('effectiveDateTime'):
+                            try:
+                                naive_dt = datetime.strptime(observation['effectiveDateTime'], '%Y-%m-%d')
+                                obs_date = timezone.make_aware(naive_dt)
+                            except ValueError:
+                                continue
+                        
+                        if not obs_date:
+                            continue
+                        
+                        # Get observation name and value
+                        obs_code = observation.get('code', {})
+                        obs_name = obs_code.get('text', '')
+                        if not obs_name and obs_code.get('coding'):
+                            obs_name = obs_code['coding'][0].get('display', '')
+                        
+                        # Get value
+                        value_number = None
+                        value_string = None
+                        unit = None
+                        
+                        if observation.get('valueQuantity'):
+                            value_qty = observation['valueQuantity']
+                            value_number = value_qty.get('value')
+                            unit = value_qty.get('unit')
+                        elif observation.get('valueCodeableConcept'):
+                            value_concept = observation['valueCodeableConcept']
+                            if value_concept.get('text'):
+                                value_string = value_concept['text']
+                            elif value_concept.get('coding'):
+                                value_string = value_concept['coding'][0].get('display')
+                        
+                        # Find measurement concept — LOINC lookup first (FHIR-06/07/08),
+                        # fall back to name-based, then generic lab concept.
+                        measurement_concept = None
+                        obs_loinc = None
+                        for _c in obs_code.get('coding', []):
+                            if _c.get('system') == 'http://loinc.org':
+                                obs_loinc = _c.get('code')
+                                break
+                        if obs_loinc:
+                            measurement_concept = Concept.objects.filter(
+                                concept_code=obs_loinc,
+                                vocabulary_id='LOINC',
+                            ).first()
+                        if not measurement_concept:
+                            try:
+                                measurement_concept = Concept.objects.filter(
+                                    concept_name__icontains=obs_name[:50]
+                                ).first()
+                            except Exception:
+                                pass
+                        if not measurement_concept:
+                            # Use a generic lab test concept if not found
+                            measurement_concept = Concept.objects.filter(concept_id=3000963).first()
+                        
+                        if measurement_concept:
+                            # Get Lab type concept (32856 = Lab)
+                            type_concept = Concept.objects.filter(concept_id=32856).first()
+                            if not type_concept:
+                                type_concept = measurement_concept
+
+                            # Use LOINC code as source_value when available — it's short,
+                            # unique, and avoids collisions from truncating long display names.
+                            source_value = obs_loinc if obs_loinc else obs_name[:50]
+                            existing_m = Measurement.objects.filter(
+                                person=person,
+                                measurement_concept=measurement_concept,
+                                measurement_date=obs_date.date(),
+                                measurement_source_value=source_value,
+                            ).first()
+                            if existing_m:
+                                existing_m.value_as_number = value_number
+                                existing_m.value_as_string = value_string
+                                existing_m._skip_patient_info_refresh = True
+                                existing_m.save()
+                            else:
+                                _m = Measurement(
+                                    measurement_id=measurement_id,
+                                    person=person,
+                                    measurement_concept=measurement_concept,
+                                    measurement_date=obs_date.date(),
+                                    measurement_datetime=obs_date,
+                                    measurement_type_concept=type_concept,
+                                    value_as_number=value_number,
+                                    value_as_string=value_string,
+                                    measurement_source_value=source_value,
+                                    unit_source_value=unit[:50] if unit else None,
+                                )
+                                _m._skip_patient_info_refresh = True
+                                _m.save()
+                                _pt_measurement_ids.append(_m.measurement_id)
+                                if prov_source:
+                                    _record_provenance(_m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                measurement_id += 1
+                    
+                    # Extract therapy information from MedicationStatement resources
+                    therapy_lines = {}  # {line_number: {'regimen': name, 'start_date': date, 'end_date': date, 'outcome': outcome}}
+                    
+                    for medication in data.get('medications', []):
+                        # Get therapy line from extension
+                        therapy_line = None
+                        therapy_outcome = None
+                        
+                        for ext in medication.get('extension', []):
+                            if 'therapy-line' in ext.get('url', ''):
+                                therapy_line = ext.get('valueInteger')
+                            elif 'therapy-outcome' in ext.get('url', ''):
+                                therapy_outcome = ext.get('valueString')
+                        
+                        if therapy_line is None:
+                            continue
+                        
+                        # Check if this is a regimen (parent) or individual drug (partOf)
+                        if not medication.get('partOf'):
+                            # This is the named regimen
+                            regimen_name = medication.get('medicationCodeableConcept', {}).get('text', '')
+                            effective_period = medication.get('effectivePeriod', {})
+                            start_date = effective_period.get('start')
+                            end_date = effective_period.get('end')
+                            # Also support effectiveDateTime for backwards compatibility
+                            if not start_date:
+                                start_date = medication.get('effectiveDateTime')
+                            
+                            if therapy_line not in therapy_lines:
+                                therapy_lines[therapy_line] = {
+                                    'regimen': regimen_name,
+                                    'start_date': start_date,
+                                    'end_date': end_date,
+                                    'outcome': therapy_outcome
+                                }
+                            else:
+                                therapy_lines[therapy_line]['regimen'] = regimen_name
+                                if start_date:
+                                    therapy_lines[therapy_line]['start_date'] = start_date
+                                if end_date:
+                                    therapy_lines[therapy_line]['end_date'] = end_date
+                                therapy_lines[therapy_line]['outcome'] = therapy_outcome
+                    
+                    # Map therapy lines to first/second/later fields
+                    first_line_therapy = None
+                    first_line_date = None
+                    first_line_start_date = None
+                    first_line_end_date = None
+                    first_line_outcome = None
+                    first_line_intent = None
+                    first_line_discontinuation_reason = None
+                    second_line_therapy = None
+                    second_line_date = None
+                    second_line_start_date = None
+                    second_line_end_date = None
+                    second_line_outcome = None
+                    second_line_intent = None
+                    second_line_discontinuation_reason = None
+                    later_therapy = None
+                    later_date = None
+                    later_start_date = None
+                    later_end_date = None
+                    later_outcome = None
+                    later_intent = None
+                    later_discontinuation_reason = None
+                    
+                    if 1 in therapy_lines:
+                        first_line_therapy = therapy_lines[1]['regimen']
+                        if therapy_lines[1].get('start_date'):
+                            try:
+                                first_line_start_date = datetime.strptime(therapy_lines[1]['start_date'][:10], '%Y-%m-%d').date()
+                                first_line_date = first_line_start_date  # Keep for backwards compatibility
+                            except:
+                                pass
+                        if therapy_lines[1].get('end_date'):
+                            try:
+                                first_line_end_date = datetime.strptime(therapy_lines[1]['end_date'][:10], '%Y-%m-%d').date()
+                            except:
+                                pass
+                        first_line_outcome = therapy_lines[1]['outcome']
+                    
+                    if 2 in therapy_lines:
+                        second_line_therapy = therapy_lines[2]['regimen']
+                        if therapy_lines[2].get('start_date'):
+                            try:
+                                second_line_start_date = datetime.strptime(therapy_lines[2]['start_date'][:10], '%Y-%m-%d').date()
+                                second_line_date = second_line_start_date  # Keep for backwards compatibility
+                            except:
+                                pass
+                        if therapy_lines[2].get('end_date'):
+                            try:
+                                second_line_end_date = datetime.strptime(therapy_lines[2]['end_date'][:10], '%Y-%m-%d').date()
+                            except:
+                                pass
+                        second_line_outcome = therapy_lines[2]['outcome']
+                    
+                    # Map line 3 and 4 to "later" field (prioritize most recent)
+                    if 4 in therapy_lines:
+                        later_therapy = therapy_lines[4]['regimen']
+                        if therapy_lines[4].get('start_date'):
+                            try:
+                                later_start_date = datetime.strptime(therapy_lines[4]['start_date'][:10], '%Y-%m-%d').date()
+                                later_date = later_start_date  # Keep for backwards compatibility
+                            except:
+                                pass
+                        if therapy_lines[4].get('end_date'):
+                            try:
+                                later_end_date = datetime.strptime(therapy_lines[4]['end_date'][:10], '%Y-%m-%d').date()
+                            except:
+                                pass
+                        later_outcome = therapy_lines[4]['outcome']
+                    elif 3 in therapy_lines:
+                        later_therapy = therapy_lines[3]['regimen']
+                        if therapy_lines[3].get('start_date'):
+                            try:
+                                later_start_date = datetime.strptime(therapy_lines[3]['start_date'][:10], '%Y-%m-%d').date()
+                                later_date = later_start_date  # Keep for backwards compatibility
+                            except:
+                                pass
+                        if therapy_lines[3].get('end_date'):
+                            try:
+                                later_end_date = datetime.strptime(therapy_lines[3]['end_date'][:10], '%Y-%m-%d').date()
+                            except:
+                                pass
+                        later_outcome = therapy_lines[3]['outcome']
+                    
+                    # Match therapy intent and discontinuation observations to therapy lines by date
+                    for intent_obs in therapy_intent_observations:
+                        if intent_obs['date']:
+                            intent_date = intent_obs['date']
+                            # Match to first line
+                            if first_line_start_date and intent_date == str(first_line_start_date):
+                                first_line_intent = intent_obs['value']
+                            # Match to second line
+                            elif second_line_start_date and intent_date == str(second_line_start_date):
+                                second_line_intent = intent_obs['value']
+                            # Match to later line
+                            elif later_start_date and intent_date == str(later_start_date):
+                                later_intent = intent_obs['value']
+                    
+                    for disc_obs in discontinuation_observations:
+                        if disc_obs['date']:
+                            disc_date = disc_obs['date']
+                            # Match to first line
+                            if first_line_end_date and disc_date == str(first_line_end_date):
+                                first_line_discontinuation_reason = disc_obs['value']
+                            # Match to second line
+                            elif second_line_end_date and disc_date == str(second_line_end_date):
+                                second_line_discontinuation_reason = disc_obs['value']
+                            # Match to later line
+                            elif later_end_date and disc_date == str(later_end_date):
+                                later_discontinuation_reason = disc_obs['value']
+                    
+                    # --- Write DrugExposure records for each therapy line ---
+                    last_drug = DrugExposure.objects.all().order_by('-drug_exposure_id').first()
+                    drug_exposure_id = last_drug.drug_exposure_id + 1 if last_drug else 1
+                    last_episode = Episode.objects.all().order_by('-episode_id').first()
+                    episode_id_counter = last_episode.episode_id + 1 if last_episode else 1
+
+                    for lot_num, lot_data in sorted(therapy_lines.items()):
+                        try:
+                            lot_start = None
+                            lot_end = None
+                            if lot_data.get('start_date'):
+                                lot_start = datetime.strptime(lot_data['start_date'][:10], '%Y-%m-%d').date()
+                            if lot_data.get('end_date'):
+                                lot_end = datetime.strptime(lot_data['end_date'][:10], '%Y-%m-%d').date()
+
+                            regimen_concept = Concept.objects.filter(
+                                concept_name__icontains=lot_data.get('regimen', ''),
+                                domain__domain_id='Drug',
+                            ).first() if lot_data.get('regimen') else None
+                            # Fall back to any Drug domain concept when named one not found
+                            if regimen_concept is None:
+                                regimen_concept = Concept.objects.filter(
+                                    domain__domain_id='Drug'
+                                ).first()
+                            drug_type_concept = Concept.objects.filter(concept_id=32869).first()  # EHR prescription
+                            # Fall back to regimen_concept if type concept not found
+                            if drug_type_concept is None and regimen_concept is not None:
+                                drug_type_concept = regimen_concept
+
+                            # Upsert DrugExposure: skip if same person+regimen+start already exists
+                            _de = DrugExposure.objects.filter(
+                                person=person,
+                                drug_source_value=(lot_data.get('regimen') or '')[:50],
+                                drug_exposure_start_date=lot_start,
+                            ).first()
+                            if _de is None:
+                                _de = DrugExposure(
+                                    drug_exposure_id=drug_exposure_id,
+                                    person=person,
+                                    drug_concept=regimen_concept,
+                                    drug_exposure_start_date=lot_start,
+                                    drug_exposure_end_date=lot_end,
+                                    drug_type_concept=drug_type_concept,
+                                    drug_source_value=(lot_data.get('regimen') or '')[:50],
+                                )
+                                _de._skip_patient_info_refresh = True
+                                _de.save()
+                                _pt_drug_exposure_ids.append(_de.drug_exposure_id)
+                                if prov_source:
+                                    _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                drug_exposure_id += 1
+
+                            # Upsert Episode for this LOT
+                            ep_concept = Concept.objects.filter(concept_id=32531).first()  # Treatment Regimen
+                            if ep_concept is None:
+                                ep_concept = regimen_concept
+                            ep_obj_concept = regimen_concept
+                            ep_type_concept = Concept.objects.filter(concept_id=32817).first()  # EHR
+                            if ep_type_concept is None:
+                                ep_type_concept = regimen_concept
+
+                            _ep = Episode.objects.filter(
+                                person=person,
+                                episode_source_value=f'LOT-{lot_num}',
+                            ).first()
+                            if _ep is None:
+                                _ep = Episode(
+                                    episode_id=episode_id_counter,
+                                    person=person,
+                                    episode_concept=ep_concept,
+                                    episode_object_concept=ep_obj_concept,
+                                    episode_type_concept=ep_type_concept,
+                                    episode_start_date=lot_start or datetime.now().date(),
+                                    episode_end_date=lot_end,
+                                    episode_number=lot_num,
+                                    episode_source_value=f'LOT-{lot_num}',
+                                )
+                                _ep.save()
+                                _pt_episode_ids.append(_ep.episode_id)
+                                episode_id_counter += 1
+
+                            # Link drug exposure to episode (idempotent)
+                            ee_field_concept = Concept.objects.filter(concept_id=1147094).first()
+                            if ee_field_concept is None:
+                                ee_field_concept = regimen_concept
+                            _ee, _ = EpisodeEvent.objects.get_or_create(
+                                episode_id=_ep.episode_id,
+                                event_id=_de.drug_exposure_id,
+                                defaults={'episode_event_field_concept': ee_field_concept},
+                            )
+                            _pt_episode_event_ids.append(_ee.pk)
+                        except Exception as _e:
+                            logger.warning(f"Could not write DrugExposure/Episode for LOT {lot_num}: {_e}")
+
+                    # --- OMOP-first: refresh PatientInfo from OMOP tables ---
+                    patient_info = refresh_patient_info(person)
+
+                    # --- Patch fields from FHIR that aren't yet in OMOP tables ---
+                    # These fields come from FHIR parsing but are not (yet) stored in OMOP.
+                    # Once full OMOP write coverage is achieved, this patch block can be removed.
+                    _patch = {}
+                    if birth_date:
+                        _patch['date_of_birth'] = birth_date
+                    if disease:
+                        _patch['disease'] = disease
+                    if stage:
+                        _patch['stage'] = stage
+                    if histologic_type:
+                        _patch['histologic_type'] = histologic_type
+                    if country:
+                        _patch['country'] = country
+                    if region:
+                        _patch['region'] = region
+                    if city:
+                        _patch['city'] = city
+                    if postal_code:
+                        _patch['postal_code'] = postal_code
+                    if ethnicity:
+                        _patch['ethnicity'] = ethnicity
+                    if weight:
+                        _patch.update({'weight': weight, 'weight_units': 'kg'})
+                    if height:
+                        _patch.update({'height': height, 'height_units': 'cm'})
+                    if systolic_bp:
+                        _patch['systolic_blood_pressure'] = systolic_bp
+                    if diastolic_bp:
+                        _patch['diastolic_blood_pressure'] = diastolic_bp
+                    if heart_rate:
+                        _patch['heartrate'] = heart_rate
+                    if ecog is not None:
+                        _patch['ecog_performance_status'] = ecog
+                    if tumor_size:
+                        _patch['tumor_size'] = tumor_size
+                    if lymph_node_status:
+                        _patch['lymph_node_status'] = lymph_node_status
+                    if metastasis_status:
+                        _patch['metastasis_status'] = metastasis_status
+                    if tumor_stage:
+                        _patch['tumor_stage'] = tumor_stage
+                    if nodes_stage:
+                        _patch['nodes_stage'] = nodes_stage
+                    if distant_metastasis_stage:
+                        _patch['distant_metastasis_stage'] = distant_metastasis_stage
+                    if staging_modalities:
+                        _patch['staging_modalities'] = staging_modalities
+                    if measurable_disease_by_recist_status is not None:
+                        _patch['measurable_disease_by_recist_status'] = measurable_disease_by_recist_status
+                    if bone_only_metastasis_status is not None:
+                        _patch['bone_only_metastasis_status'] = bone_only_metastasis_status
+                    if clonal_bone_marrow_b_lymphocytes is not None:
+                        _patch['clonal_bone_marrow_b_lymphocytes'] = clonal_bone_marrow_b_lymphocytes
+                    if er_status:
+                        _patch['estrogen_receptor_status'] = er_status
+                    if pr_status:
+                        _patch['progesterone_receptor_status'] = pr_status
+                    if her2_status:
+                        _patch['her2_status'] = her2_status
+                    if ki67_index is not None:
+                        _patch['ki67_proliferation_index'] = ki67_index
+                    if pdl1_percentage is not None:
+                        _patch['pd_l1_tumor_cells'] = pdl1_percentage
+                    if genetic_mutations:
+                        _patch['genetic_mutations'] = genetic_mutations
+                    # Therapy lines (denormalized PatientInfo fields)
+                    if first_line_therapy:
+                        _patch.update({
+                            'first_line_therapy': first_line_therapy,
+                            'first_line_date': first_line_date,
+                            'first_line_start_date': first_line_start_date,
+                            'first_line_end_date': first_line_end_date,
+                            'first_line_intent': first_line_intent,
+                            'first_line_discontinuation_reason': first_line_discontinuation_reason,
+                            'first_line_outcome': first_line_outcome,
+                        })
+                    if second_line_therapy:
+                        _patch.update({
+                            'second_line_therapy': second_line_therapy,
+                            'second_line_date': second_line_date,
+                            'second_line_start_date': second_line_start_date,
+                            'second_line_end_date': second_line_end_date,
+                            'second_line_intent': second_line_intent,
+                            'second_line_discontinuation_reason': second_line_discontinuation_reason,
+                            'second_line_outcome': second_line_outcome,
+                        })
+                    if later_therapy:
+                        _patch.update({
+                            'later_therapy': later_therapy,
+                            'later_date': later_date,
+                            'later_start_date': later_start_date,
+                            'later_end_date': later_end_date,
+                            'later_intent': later_intent,
+                            'later_discontinuation_reason': later_discontinuation_reason,
+                            'later_outcome': later_outcome,
+                        })
+                    # Labs are now written to the OMOP Measurement table (FHIR-06/07/08)
+                    # and derived into PatientInfo via refresh_patient_info (FHIR-09).
+                    # Only fields not yet modelled in OMOP are patched directly below.
+                    _patch.update({k: v for k, v in {
+                        'serum_bilirubin_level_direct': bilirubin_direct,
+                        'calcium_mg_dl': calcium,
+                        'inr': inr,
+                        'pt_seconds': pt,
+                        'ptt_seconds': ptt,
+                        'cea_ng_ml': cea,
+                        'ca19_9_u_ml': ca19_9,
+                        'psa_ng_ml': psa,
+                        'smoking_status': smoking_status,
+                        'pack_years': pack_years,
+                        'alcohol_use': alcohol_use,
+                        'drinks_per_week': drinks_per_week,
+                        'exercise_frequency': exercise_frequency,
+                        'exercise_minutes_per_week': exercise_minutes_per_week,
+                        'diet_type': diet_type,
+                        'sleep_hours_per_night': sleep_hours_per_night,
+                        'sleep_quality': sleep_quality,
+                        'stress_level': stress_level,
+                        'social_support': social_support,
+                        'employment_status': employment_status,
+                        'education_level': education_level,
+                        'marital_status': marital_status,
+                        'insurance_type': insurance_type,
+                        'number_of_dependents': number_of_dependents,
+                        'annual_household_income': annual_household_income,
+                        'ecog_assessment_date': ecog_assessment_date,
+                        'test_methodology': test_methodology,
+                        'test_date': test_date,
+                        'test_specimen_type': test_specimen_type,
+                        'report_interpretation': report_interpretation,
+                        'oncotype_dx_score': oncotype_dx_score,
+                        'androgen_receptor_status': androgen_receptor_status,
+                        'therapy_intent': therapy_intent,
+                        'reason_for_discontinuation': reason_for_discontinuation,
+                        'ldh': ldh_new if ldh_new is not None else ldh,
+                        'alkaline_phosphatase': alkaline_phosphatase,
+                        'magnesium': magnesium,
+                        'phosphorus': phosphorus,
+                        'pregnancy_test_date': pregnancy_test_date,
+                        'pregnancy_test_result_value': pregnancy_test_result_value,
+                        'contraceptive_use': contraceptive_use if contraceptive_use is not None else False,
+                        'consent_capability': consent_capability if consent_capability is not None else True,
+                        'caregiver_availability_status': caregiver_availability_status if caregiver_availability_status is not None else True,
+                        'no_mental_health_disorder_status': no_mental_health_disorder_status if no_mental_health_disorder_status is not None else True,
+                        'no_substance_use_status': no_substance_use_status if no_substance_use_status is not None else True,
+                        'substance_use_details': substance_use_details,
+                        'no_geographic_exposure_risk': no_geographic_exposure_risk if no_geographic_exposure_risk is not None else True,
+                        'geographic_exposure_risk_details': geographic_exposure_risk_details,
+                    }.items() if v is not None})
+                    # Stamp the org derived from the OAuth2 token so this patient
+                    # is scoped to the uploading service client's tenant.
+                    upload_org = get_request_org(request)
+                    if upload_org is not None:
+                        _patch['organization'] = upload_org
+
+                    # Apply patch to PatientInfo (suppress signal-triggering save)
+                    for _field, _val in _patch.items():
+                        setattr(patient_info, _field, _val)
+                    patient_info.save()
+                    if prov_source:
+                        _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                    
+                    patients_result.append({
+                        'person_id': person.person_id,
+                        'patient_info_id': patient_info.pk,
+                        'measurement_ids': _pt_measurement_ids,
+                        'condition_ids': _pt_condition_ids,
+                        'drug_exposure_ids': _pt_drug_exposure_ids,
+                        'procedure_ids': _pt_procedure_ids,
+                        'episode_ids': _pt_episode_ids,
+                        'episode_event_ids': _pt_episode_event_ids,
+                    })
+
+                    if person_is_new:
+                        created_count += 1
+                    else:
+                        updated_count += 1
+                    logger.info(f"Successfully {'created' if person_is_new else 'updated'} patient {fhir_patient_id} ({person.person_id})")
+                    
+                except Exception as e:
+                    errors.append(f"Patient {fhir_patient_id}: {str(e)}")
+            
+            return Response({
                 'success': True,
-                'status': 'scheduled',
-                'dag_id': AirflowDag.FHIR_INGEST.value,
-                'dag_run_id': dag_run_id,
-            },
-            status=status.HTTP_202_ACCEPTED,
-        )
+                'created_count': created_count,
+                'updated_count': updated_count,
+                'patients': patients_result,
+                'errors': errors,
+            })
+
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=['delete'], permission_classes=[ScopedTokenPermission])
     def bulk_delete(self, request):
