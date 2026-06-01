@@ -337,7 +337,9 @@ class ValuesViewTest(TestCase):
 class MeasurementDetailViewTest(TestCase):
     def setUp(self):
         _setup_vocab()
-        self.user = Identity.objects.create_user(email='measuser@test.com', password='test')
+        # DELETE is privileged since the ScopedTokenPermission role change; this
+        # suite verifies delete behaviour, so the caller is staff.
+        self.user = Identity.objects.create_user(email='measuser@test.com', password='test', is_staff=True)
         self.person = Person.objects.create(person_id=4001)
         PatientInfo.objects.create(person=self.person)
         PatientUser.objects.create(identity=self.user, person=self.person)
@@ -467,7 +469,9 @@ class AutoProvisionTest(TestCase):
 class VisitDeleteViewTest(TestCase):
     def setUp(self):
         _setup_vocab()
-        self.user = Identity.objects.create_user(email='visitdel@test.com', password='test')
+        # DELETE is privileged since the ScopedTokenPermission role change; this
+        # suite verifies delete behaviour, so the caller is staff.
+        self.user = Identity.objects.create_user(email='visitdel@test.com', password='test', is_staff=True)
         self.person = Person.objects.create(person_id=5001)
         PatientInfo.objects.create(person=self.person)
         PatientUser.objects.create(identity=self.user, person=self.person)
@@ -582,8 +586,10 @@ class SyncOnBehalfOfTest(TestCase):
             }],
             'source_type': 'document_extraction',
         }, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('actor_iss and actor_sub required', resp.data['detail'])
+        # Since the ScopedTokenPermission role change a non-superuser/non-service
+        # caller is denied at the permission layer (before the actor-field
+        # validation is even reached).
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_on_behalf_of_superuser_without_actor_fields_succeeds(self):
         resp = self.client.post('/api/lab-results/sync/', {
@@ -891,6 +897,10 @@ class FirebaseAuthedSyncTest(TestCase):
             defaults={'email': 'patient@example.com'},
         )[0]
         self.firebase_user.set_unusable_password()
+        # POST sync is privileged since the ScopedTokenPermission role change;
+        # this suite exercises the request.user (non-service) person-resolution
+        # path, so the firebase identity is staff to retain write access.
+        self.firebase_user.is_staff = True
         self.firebase_user.save()
 
         self.person = Person.objects.create(person_id=9001)
@@ -967,6 +977,7 @@ class FirebaseAuthedSyncTest(TestCase):
             defaults={'email': 'emailmatch@example.com'},
         )[0]
         new_user.set_unusable_password()
+        new_user.is_staff = True  # privileged caller; see setUp note
         new_user.save()
         person2 = Person.objects.create(person_id=9002)
         PatientInfo.objects.create(person=person2, email='emailmatch@example.com')
@@ -1001,7 +1012,9 @@ class ServiceTokenSyncFallbackTest(TestCase):
         PatientUser.objects.create(identity=self.patient, person=self.person)
 
         self.client = APIClient()
-        self.client.force_authenticate(user=self.service_user)
+        # Production path: hk-labs calls this with a service token (request.auth
+        # == "service-token"), which ScopedTokenPermission grants full access.
+        self.client.force_authenticate(user=self.service_user, token="service-token")
 
     def test_service_token_resolves_person_from_actor_fields(self):
         resp = self.client.post('/api/lab-results/sync/', {
@@ -1043,7 +1056,13 @@ class ServiceTokenSyncFallbackTest(TestCase):
 
 
 class SyncNonSuperuserTest(TestCase):
-    """Test sync endpoint with a non-superuser identity using self-access (PatientUser link)."""
+    """A non-superuser/non-service identity is denied POST sync entirely.
+
+    Since the ScopedTokenPermission role change, write access requires a service
+    token or staff/superuser; a plain patient identity (even for its own person)
+    is rejected at the permission layer. Service-side ingest is covered by
+    ServiceTokenSyncFallbackTest / SyncOnBehalfOfTest.
+    """
 
     def setUp(self):
         _setup_vocab()
@@ -1071,10 +1090,10 @@ class SyncNonSuperuserTest(TestCase):
             'source_type': 'patient_self_report',
         }
 
-    def test_sync_own_data_succeeds(self):
+    def test_sync_own_data_denied(self):
+        # Own person, but a non-privileged caller can no longer POST sync.
         resp = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_sync_other_person_denied(self):
         other = Person.objects.create(person_id=2002)
@@ -1083,8 +1102,10 @@ class SyncNonSuperuserTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_sync_nonexistent_person_denied(self):
+        # Permission denial (403) now precedes the person lookup that previously
+        # produced a 404 for a non-privileged caller.
         resp = self.client.post('/api/lab-results/sync/', self._payload(person_id=9999), format='json')
-        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
 
 class DedupSyncTest(TestCase):
