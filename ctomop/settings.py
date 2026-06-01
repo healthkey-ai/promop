@@ -176,20 +176,15 @@ USE_TZ = True
 # Static files
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
-
-# Only include frontend static files if they exist
-frontend_static = BASE_DIR / 'frontend' / 'build' / 'static'
-if frontend_static.exists():
-    STATICFILES_DIRS = [frontend_static]
-else:
-    STATICFILES_DIRS = []
+STATICFILES_DIRS = []
 
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
-# Serve federation remote build (remoteEntry.js + chunks) at root path
-federation_root = BASE_DIR / 'frontend' / 'dist' / 'remote'
-if federation_root.exists():
-    WHITENOISE_ROOT = federation_root
+# Serve Vite build output (assets/, index.html, etc.) at the root URL via WhiteNoise.
+# Vite outputs to frontend/build/ with assets at /assets/... (no /static/ prefix).
+frontend_build = BASE_DIR / 'frontend' / 'build'
+if frontend_build.exists():
+    WHITENOISE_ROOT = frontend_build
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
