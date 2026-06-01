@@ -2,7 +2,7 @@ import { useVocabulary } from '@/hooks/useVocabulary';
 import Field from '../Field';
 import Section from '../Section';
 import {
-  YES_NO_OPTIONS, REFRACTORY_STATUS_OPTIONS, THERAPY_INTENT_OPTIONS,
+  REFRACTORY_STATUS_OPTIONS, THERAPY_INTENT_OPTIONS,
   DISCONTINUATION_REASON_OPTIONS, THERAPY_OUTCOME_OPTIONS, SUPPORTIVE_THERAPIES_OPTIONS,
   PLANNED_THERAPIES,
   BREAST_CANCER_FIRST_LINE, BREAST_CANCER_SECOND_LINE, BREAST_CANCER_LATER_LINE,
@@ -47,24 +47,30 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
 
   const breastSource = diseaseType === 'breast';
 
+  const linesCount = (() => {
+    const v = String(formData?.therapy_lines_count ?? '');
+    if (v === '3+') return 3;
+    return parseInt(v) || 0;
+  })();
+
   return (
     <div>
       <Section title="Treatment History">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Prior Therapy" name="prior_therapy" type="select"
-            value={formData?.prior_therapy} options={YES_NO_OPTIONS} onChange={onChange} disabled />
-          <Field label="Number of Prior Lines" name="therapy_lines_count" type="number"
-            value={formData?.therapy_lines_count} onChange={onChange} disabled />
+          <Field label="Number of Prior Lines" name="therapy_lines_count" type="select"
+            value={formData?.therapy_lines_count}
+            options={['0', '1', '2', '3+']}
+            onChange={onChange} />
           <Field label="Relapse Count" name="relapse_count" type="number"
             value={formData?.relapse_count} onChange={onChange} />
           <div className="sm:col-span-2">
             <Field label="Refractory Status" name="refractory_status" type="select"
-              value={formData?.refractory_status} options={REFRACTORY_STATUS_OPTIONS} onChange={onChange} disabled />
+              value={formData?.refractory_status} options={REFRACTORY_STATUS_OPTIONS} onChange={onChange} />
           </div>
         </div>
       </Section>
 
-      <Section title="First Line Therapy">
+      {linesCount >= 1 && <Section title="First Line Therapy">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="sm:col-span-2">
             <Field label="First Line Therapy" name="first_line_therapy" type="select"
@@ -79,9 +85,9 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
           <Field label="Reason for Discontinuation" name="first_line_discontinuation_reason" type="select" value={formData?.first_line_discontinuation_reason} options={DISCONTINUATION_REASON_OPTIONS} onChange={onChange} />
           <Field label="First Line Outcome" name="first_line_outcome" type="select" value={formData?.first_line_outcome} options={THERAPY_OUTCOME_OPTIONS} onChange={onChange} />
         </div>
-      </Section>
+      </Section>}
 
-      <Section title="Second Line Therapy">
+      {linesCount >= 2 && <Section title="Second Line Therapy">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="sm:col-span-2">
             <Field label="Second Line Therapy" name="second_line_therapy" type="select"
@@ -96,9 +102,9 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
           <Field label="Reason for Discontinuation" name="second_line_discontinuation_reason" type="select" value={formData?.second_line_discontinuation_reason} options={DISCONTINUATION_REASON_OPTIONS} onChange={onChange} />
           <Field label="Second Line Outcome" name="second_line_outcome" type="select" value={formData?.second_line_outcome} options={THERAPY_OUTCOME_OPTIONS} onChange={onChange} />
         </div>
-      </Section>
+      </Section>}
 
-      <Section title="Later Line Therapy">
+      {linesCount >= 3 && <Section title="Later Line Therapy">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="sm:col-span-2">
             <Field label="Later Line Therapy" name="later_therapy" type="select"
@@ -113,7 +119,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
           <Field label="Reason for Discontinuation" name="later_discontinuation_reason" type="select" value={formData?.later_discontinuation_reason} options={DISCONTINUATION_REASON_OPTIONS} onChange={onChange} />
           <Field label="Later Line Outcome" name="later_outcome" type="select" value={formData?.later_outcome} options={THERAPY_OUTCOME_OPTIONS} onChange={onChange} />
         </div>
-      </Section>
+      </Section>}
 
       <Section title="Supportive Therapy">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">

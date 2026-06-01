@@ -355,10 +355,41 @@ describe('LabsTab - new_field', () => {
 ```bash
 # Backend tests — run against local PostgreSQL (matches CI)
 DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
-  .venv/bin/python manage.py test omop_core patient_portal --keepdb
+  .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
-# Frontend tests
-cd frontend && npm test -- --watchAll=false
+# Frontend tests (install deps first if needed: cd frontend && npm ci)
+cd frontend && npm test -- --run
+```
+
+### Rule: Run Tests Before Every Push
+
+**Always run both test suites before pushing to any branch.** Do not push if any test is failing.
+
+```bash
+# One-liner to run everything from the repo root:
+DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
+  .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput \
+  && (cd frontend && npm test -- --run)
+```
+
+**Local PostgreSQL setup** (one-time, postgresql@14 via Homebrew):
+```bash
+# Start the server
+brew services start postgresql@14
+
+# Create postgres role and databases (run once)
+PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U $(whoami) -d postgres \
+  -c "CREATE ROLE postgres WITH SUPERUSER CREATEDB CREATEROLE LOGIN;"
+PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d postgres \
+  -c "CREATE DATABASE ctomop_test OWNER postgres;" \
+  -c "CREATE DATABASE ctomop_dev OWNER postgres;"
+
+# Apply migrations
+DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
+  .venv/bin/python manage.py migrate --noinput
+
+# Connect (use @14 bin directly — system psql binary has OpenSSL crash on this machine)
+PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -d ctomop_test
 ```
 
 ---
