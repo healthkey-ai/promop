@@ -78,6 +78,34 @@ class FhirSyncTests(TestCase):
     def _sync(self):
         return self.client.post('/api/fhir/sync/', {'bundle': SAMPLE_BUNDLE}, format='json')
 
+    def test_next_pk_batch_self_heals_after_legacy_explicit_pk_insert(self):
+        """Legacy MAX(id)+1 writers (views.py, lot_inference) set explicit PKs
+        without advancing the sequence; the sequence-based sync path must not
+        then hand out an already-used id (the duplicate-key 500 we hit in prod)."""
+        from omop_core.services.pk import next_pk_batch
+
+        self.assertEqual(self._sync().status_code, 201)
+        existing = ConditionOccurrence.objects.first()
+        self.assertIsNotNone(existing)
+
+        # Simulate the legacy path: explicit PK far ahead, sequence NOT advanced.
+        stranded_id = existing.condition_occurrence_id + 500
+        legacy = ConditionOccurrence(
+            condition_occurrence_id=stranded_id,
+            person=existing.person,
+            condition_concept=existing.condition_concept,
+            condition_start_date=existing.condition_start_date,
+            condition_type_concept=existing.condition_type_concept,
+            condition_source_value='legacy',
+        )
+        legacy._skip_patient_info_refresh = True
+        legacy.save()
+
+        # Sequence is now behind the table max → next_pk_batch must self-heal.
+        ids = next_pk_batch(ConditionOccurrence, 'condition_occurrence_id', 3)
+        self.assertTrue(all(i > stranded_id for i in ids), ids)
+        self.assertEqual(len(set(ids)), 3)
+
     def test_rejects_non_bundle(self):
         resp = self.client.post('/api/fhir/sync/', {'bundle': {'resourceType': 'Patient'}}, format='json')
         self.assertEqual(resp.status_code, 400)
