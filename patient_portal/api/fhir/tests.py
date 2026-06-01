@@ -125,3 +125,40 @@ class FhirSyncTests(TestCase):
         self.assertEqual(second['condition_ids'], [])
         self.assertEqual(second['drug_exposure_ids'], [])
         self.assertEqual(Measurement.objects.filter(person_id=first['person_id']).count(), 1)
+
+    def test_batched_ingest_does_not_scale_queries_with_bundle_size(self):
+        from datetime import date, timedelta
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        def make_bundle(n):
+            entries = [{"resource": {
+                "resourceType": "Patient", "id": "p",
+                "name": [{"family": "Quant"}], "birthDate": "1980-01-01", "gender": "male",
+            }}]
+            for i in range(n):
+                entries.append({"resource": {
+                    "resourceType": "Observation",
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "718-7"}],
+                             "text": "Hemoglobin"},
+                    "effectiveDateTime": (date(2026, 1, 1) + timedelta(days=i)).isoformat(),
+                    "valueQuantity": {"value": 13.0 + i, "unit": "g/dL"},
+                }})
+            return {"resourceType": "Bundle", "type": "collection", "entry": entries}
+
+        def run(email, n):
+            user = Identity.objects.create_user(email=email, password="test")
+            client = APIClient()
+            client.force_authenticate(user=user)
+            with CaptureQueriesContext(connection) as ctx:
+                resp = client.post('/api/fhir/sync/', {'bundle': make_bundle(n)}, format='json')
+            self.assertEqual(resp.status_code, 201, resp.content)
+            self.assertEqual(len(resp.json()['measurement_ids']), n)
+            return len(ctx.captured_queries)
+
+        run("warmup@example.com", 1)        # create fallback concepts/content types once
+        q_small = run("small@example.com", 5)
+        q_large = run("large@example.com", 40)
+        # 35 extra observations must add only a tiny, bounded number of queries —
+        # per-row ingest would add ~140. This is the real "doesn't scale" proof.
+        self.assertLess(q_large - q_small, 10, (q_small, q_large))
