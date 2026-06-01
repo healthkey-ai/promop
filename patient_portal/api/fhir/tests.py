@@ -126,6 +126,25 @@ class FhirSyncTests(TestCase):
         self.assertEqual(second['drug_exposure_ids'], [])
         self.assertEqual(Measurement.objects.filter(person_id=first['person_id']).count(), 1)
 
+    def test_medication_request_maps_to_drug_exposure(self):
+        # Epic R4 returns MedicationRequest (authoredOn), not MedicationStatement.
+        bundle = {
+            "resourceType": "Bundle", "type": "collection",
+            "entry": [{"resource": {
+                "resourceType": "MedicationRequest",
+                "subject": {"reference": "Patient/p1"},
+                "medicationCodeableConcept": {"text": "Lisinopril 10 MG"},
+                "authoredOn": "2025-09-10",
+            }}],
+        }
+        resp = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+        pid = resp.json()['person_id']
+        self.assertEqual(len(resp.json()['drug_exposure_ids']), 1)
+        de = DrugExposure.objects.get(person_id=pid)
+        self.assertEqual(de.drug_source_value, 'Lisinopril 10 MG')
+        self.assertEqual(de.drug_exposure_start_date.isoformat(), '2025-09-10')
+
     def test_batched_ingest_does_not_scale_queries_with_bundle_size(self):
         from datetime import date, timedelta
         from django.db import connection

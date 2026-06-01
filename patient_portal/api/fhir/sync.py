@@ -171,7 +171,9 @@ class FhirSyncView(APIView):
                 observations.append(res)
             elif rtype == 'Condition':
                 conditions.append(res)
-            elif rtype == 'MedicationStatement':
+            elif rtype in ('MedicationStatement', 'MedicationRequest'):
+                # Epic R4 exposes meds as MedicationRequest; both carry
+                # medicationCodeableConcept. Handled uniformly below.
                 medications.append(res)
 
         concept_cache = self._preload_concepts(observations, conditions, medications)
@@ -316,8 +318,13 @@ class FhirSyncView(APIView):
         seen = set(existing)
         rows = []
         for med in medications:
-            start = _parse_date((med.get('effectivePeriod') or {}).get('start')) or _parse_date(
-                med.get('effectiveDateTime'))
+            # MedicationStatement: effectivePeriod/effectiveDateTime.
+            # MedicationRequest (Epic R4): authoredOn.
+            start = (
+                _parse_date((med.get('effectivePeriod') or {}).get('start'))
+                or _parse_date(med.get('effectiveDateTime'))
+                or _parse_date(med.get('authoredOn'))
+            )
             if start is None:
                 continue
             codeable = med.get('medicationCodeableConcept')
