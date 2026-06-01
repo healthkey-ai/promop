@@ -105,12 +105,20 @@ def _resolve_person_id(request):
     except PatientUser.DoesNotExist:
         pass
 
-    # Fallback: resolve by email on PatientInfo
-    email_qs = PatientInfo.objects.filter(email=request.user.email)
+    # Fallback: resolve by email on PatientInfo.
+    # Without an org scope, only superusers may use the email fallback —
+    # a non-superuser without org context could otherwise match a patient
+    # from a different organisation via email collision.
+    email = getattr(request.user, 'email', '') or ''
     org = get_request_org(request)
-    if org is not None:
-        email_qs = email_qs.filter(organization=org)
-    pi = email_qs.first()
+    pi = None
+    if email:
+        email_qs = PatientInfo.objects.filter(email=email)
+        if org is not None:
+            pi = email_qs.filter(organization=org).first()
+        elif getattr(request.user, 'is_superuser', False):
+            pi = email_qs.first()
+        # else: non-superuser without org scope — email fallback disabled
     if pi is None:
         return None, Response(
             {'detail': 'No patient record linked to your account.'},

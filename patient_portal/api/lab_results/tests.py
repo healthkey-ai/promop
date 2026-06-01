@@ -1251,3 +1251,71 @@ class DedupSyncTest(TestCase):
                 measurement_id=m_id, visit_occurrence_id=visit_id,
             ).exists()
         )
+
+
+# ---------------------------------------------------------------------------
+# _resolve_person_id — email fallback cross-org safety (#17)
+# ---------------------------------------------------------------------------
+
+class ResolvePersonIdEmailFallbackTest(TestCase):
+    """
+    Verify that the email fallback in _resolve_person_id cannot match a
+    patient from a different organisation when the caller has no org scope.
+    """
+
+    def setUp(self):
+        _setup_vocab()
+        self.person = Person.objects.create(person_id=17001)
+        self.patient = PatientInfo.objects.create(
+            person=self.person, email='shared@example.com',
+        )
+
+    def _user(self, **kwargs):
+        import uuid
+        return Identity.objects.create_user(
+            email='shared@example.com',
+            password='x',
+            **kwargs,
+        )
+
+    def test_non_superuser_without_org_cannot_use_email_fallback(self):
+        """Non-superuser with no PatientUser link and no org scope gets 404."""
+        user = self._user()
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get('/api/lab-results/summary/')
+        # No PatientUser link + no org + not superuser → 404
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_superuser_without_org_can_use_email_fallback(self):
+        """Superuser with no PatientUser link may still resolve by email."""
+        user = self._user(is_superuser=True, is_staff=True)
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get('/api/lab-results/summary/')
+        # Superuser email fallback succeeds (200 even if no measurements)
+        self.assertNotEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_patient_with_patientuser_link_still_resolves(self):
+        """PatientUser link always works regardless of org scope."""
+        user = self._user()
+        PatientUser.objects.create(identity=user, person=self.person)
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get('/api/lab-results/summary/')
+        self.assertNotEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_ambiguous_email_across_orgs_blocked_for_non_superuser(self):
+        """If two patients share an email across orgs, non-superuser is blocked."""
+        from omop_core.models import Organization
+        org2 = Organization.objects.create(name='OtherOrg')
+        person2 = Person.objects.create(person_id=17002)
+        PatientInfo.objects.create(
+            person=person2, email='shared@example.com', organization=org2,
+        )
+        user = self._user()
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get('/api/lab-results/summary/')
+        # Two patients with same email, no org scope, non-superuser → 404
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
