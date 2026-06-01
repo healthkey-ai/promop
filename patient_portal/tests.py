@@ -3632,3 +3632,119 @@ class LotInferenceTest(_SmartBase):
         self.assertGreaterEqual(len(lots), 2)
         cart_lots = [l for l in lots if 'CAR T-Cell' in l.phase_label]
         self.assertEqual(len(cart_lots), 1)
+
+
+# ---------------------------------------------------------------------------
+# ScopedTokenPermission role-based enforcement
+# ---------------------------------------------------------------------------
+
+class ScopedTokenPermissionTest(TestCase):
+    """Verify role-based enforcement for non-OAuth2 auth paths."""
+
+    def setUp(self):
+        from django.test import RequestFactory
+        from patient_portal.api.permissions import ScopedTokenPermission
+
+        self.factory = RequestFactory()
+        self.permission = ScopedTokenPermission()
+
+    def _user(self, **kwargs):
+        import uuid
+        return Identity.objects.create_user(
+            email=f"perm-{uuid.uuid4()}@test.com",
+            password="x",
+            **kwargs,
+        )
+
+    def _req(self, method, auth, user):
+        req = getattr(self.factory, method.lower())("/")
+        req.auth = auth
+        req.user = user
+        return req
+
+    # --- service-token ---
+
+    def test_service_token_allows_delete(self):
+        req = self._req("DELETE", "service-token", self._user())
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_service_token_allows_post(self):
+        req = self._req("POST", "service-token", self._user())
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_service_token_allows_get(self):
+        req = self._req("GET", "service-token", self._user())
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    # --- staff / superuser ---
+
+    def test_superuser_allows_delete(self):
+        req = self._req("DELETE", None, self._user(is_superuser=True, is_staff=True))
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_staff_allows_post(self):
+        req = self._req("POST", None, self._user(is_staff=True))
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_staff_allows_delete(self):
+        req = self._req("DELETE", None, self._user(is_staff=True))
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    # --- patient (session auth, non-staff) ---
+
+    def test_patient_allows_get(self):
+        req = self._req("GET", None, self._user())
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_patient_allows_patch(self):
+        req = self._req("PATCH", None, self._user())
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_patient_denies_delete(self):
+        req = self._req("DELETE", None, self._user())
+        self.assertFalse(self.permission.has_permission(req, None))
+
+    def test_patient_denies_post(self):
+        req = self._req("POST", None, self._user())
+        self.assertFalse(self.permission.has_permission(req, None))
+
+    def test_patient_denies_put(self):
+        req = self._req("PUT", None, self._user())
+        self.assertFalse(self.permission.has_permission(req, None))
+
+    # --- unauthenticated ---
+
+    def test_unauthenticated_denies_get(self):
+        from django.contrib.auth.models import AnonymousUser
+        req = self._req("GET", None, AnonymousUser())
+        self.assertFalse(self.permission.has_permission(req, None))
+
+    # --- Firebase / partner auth (TokenClaims) ---
+
+    def test_firebase_patient_denies_delete(self):
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(issuer="https://securetoken.google.com/proj",
+                             sub="uid1", email="p@test.com", name="P", raw={})
+        req = self._req("DELETE", claims, self._user())
+        self.assertFalse(self.permission.has_permission(req, None))
+
+    def test_firebase_patient_denies_post(self):
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(issuer="https://securetoken.google.com/proj",
+                             sub="uid2", email="p2@test.com", name="P2", raw={})
+        req = self._req("POST", claims, self._user())
+        self.assertFalse(self.permission.has_permission(req, None))
+
+    def test_firebase_patient_allows_patch(self):
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(issuer="https://securetoken.google.com/proj",
+                             sub="uid3", email="p3@test.com", name="P3", raw={})
+        req = self._req("PATCH", claims, self._user())
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_firebase_staff_allows_delete(self):
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(issuer="https://securetoken.google.com/proj",
+                             sub="uid4", email="s@test.com", name="S", raw={})
+        req = self._req("DELETE", claims, self._user(is_staff=True))
+        self.assertTrue(self.permission.has_permission(req, None))

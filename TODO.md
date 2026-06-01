@@ -56,11 +56,8 @@
 - `f'Person {person_id} does not exist.'` enables person_id enumeration.
 - **Action:** Replace with generic `'Person not found.'`.
 
-#### #5 ScopedTokenPermission bypasses scope enforcement for partner auth
-- **Severity:** medium / security
-- `patient_portal/api/permissions.py:47-52`
-- Firebase/session/service-token users get full read+write access with no scope checks. A patient can delete visits/measurements.
-- **Action:** Document as security debt. Add role-based checks for non-OAuth2 auth paths before production PHI.
+#### ~~#5 ScopedTokenPermission bypasses scope enforcement for partner auth~~ ✓ FIXED
+- service-token → full access; staff/superuser → full access; patients → safe methods + PATCH only (POST/DELETE denied).
 
 #### #8 _get_or_create_hk_concept runs per-measurement without caching
 - **Severity:** medium / orm

@@ -36,9 +36,12 @@ class ScopedTokenPermission(BasePermission):
     Safe methods   (GET, HEAD, OPTIONS) → patient/*.read  or user/*.read
     Unsafe methods (POST, PUT, PATCH, DELETE) → patient/*.write or user/*.write
 
-    Partner-auth (Firebase, SAML) and session-authenticated users bypass
-    scope checks — they are already authenticated via token verification
-    or session cookie.
+    Role model for non-OAuth2 auth paths:
+
+      service-token         → full access (trusted backend service)
+      is_superuser/is_staff → full access
+      other authenticated   → safe methods + PATCH only
+                              (read + self-edit; POST/DELETE denied)
 
     NOTE: patient population scoping (multi-tenant isolation per HealthTree
     integration) is tracked separately under HKI-SEC-04 and HKI-AUTH-04.
@@ -47,11 +50,22 @@ class ScopedTokenPermission(BasePermission):
     def has_permission(self, request, view):
         token = request.auth
 
-        # Partner auth, session auth, or service-token: no OAuth2 scopes to check.
-        # TODO(security): these paths get full read+write with no scope enforcement.
-        if token is None or token == "service-token" or isinstance(token, TokenClaims):
+        # Service-to-service: trusted backend — full access.
+        if token == "service-token":
             return bool(request.user and request.user.is_authenticated)
 
+        # Partner-auth (Firebase, SAML) and session-auth: role-based enforcement.
+        if token is None or isinstance(token, TokenClaims):
+            if not (request.user and request.user.is_authenticated):
+                return False
+            # Staff and superusers retain full access.
+            if request.user.is_superuser or getattr(request.user, 'is_staff', False):
+                return True
+            # Regular authenticated users (patients): read + PATCH own data only.
+            # POST (sync, bulk upload) and DELETE (visits, measurements, bulk) are denied.
+            return request.method in _SAFE_METHODS or request.method == 'PATCH'
+
+        # OAuth2 token: enforce SMART on FHIR scopes.
         if not hasattr(token, 'scope') or timezone.now() >= token.expires:
             return False
 
