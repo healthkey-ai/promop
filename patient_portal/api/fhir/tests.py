@@ -71,7 +71,13 @@ SAMPLE_BUNDLE = {
 class FhirSyncTests(TestCase):
     def setUp(self):
         _ensure_pk_sequences()
-        self.user = Identity.objects.create_user(email='fhirsync@test.com', password='test')
+        # POST /api/fhir/sync/ is privileged since the ScopedTokenPermission role
+        # change (a5e0ac6): only service-token / staff / superuser may write —
+        # plain patient identities get 403. The connector calls it with a service
+        # token; these tests exercise the request.user person-resolution path, so
+        # authenticate as staff to retain write access.
+        self.user = Identity.objects.create_user(
+            email='fhirsync@test.com', password='test', is_staff=True)
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
 
@@ -198,7 +204,7 @@ class FhirSyncTests(TestCase):
             return {"resourceType": "Bundle", "type": "collection", "entry": entries}
 
         def run(email, n):
-            user = Identity.objects.create_user(email=email, password="test")
+            user = Identity.objects.create_user(email=email, password="test", is_staff=True)
             client = APIClient()
             client.force_authenticate(user=user)
             with CaptureQueriesContext(connection) as ctx:
