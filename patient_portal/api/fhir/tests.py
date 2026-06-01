@@ -71,12 +71,46 @@ SAMPLE_BUNDLE = {
 class FhirSyncTests(TestCase):
     def setUp(self):
         _ensure_pk_sequences()
-        self.user = Identity.objects.create_user(email='fhirsync@test.com', password='test')
+        # POST /api/fhir/sync/ is privileged since the ScopedTokenPermission role
+        # change (a5e0ac6): only service-token / staff / superuser may write —
+        # plain patient identities get 403. The connector calls it with a service
+        # token; these tests exercise the request.user person-resolution path, so
+        # authenticate as staff to retain write access.
+        self.user = Identity.objects.create_user(
+            email='fhirsync@test.com', password='test', is_staff=True)
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
 
     def _sync(self):
         return self.client.post('/api/fhir/sync/', {'bundle': SAMPLE_BUNDLE}, format='json')
+
+    def test_next_pk_batch_self_heals_after_legacy_explicit_pk_insert(self):
+        """Legacy MAX(id)+1 writers (views.py, lot_inference) set explicit PKs
+        without advancing the sequence; the sequence-based sync path must not
+        then hand out an already-used id (the duplicate-key 500 we hit in prod)."""
+        from omop_core.services.pk import next_pk_batch
+
+        self.assertEqual(self._sync().status_code, 201)
+        existing = ConditionOccurrence.objects.first()
+        self.assertIsNotNone(existing)
+
+        # Simulate the legacy path: explicit PK far ahead, sequence NOT advanced.
+        stranded_id = existing.condition_occurrence_id + 500
+        legacy = ConditionOccurrence(
+            condition_occurrence_id=stranded_id,
+            person=existing.person,
+            condition_concept=existing.condition_concept,
+            condition_start_date=existing.condition_start_date,
+            condition_type_concept=existing.condition_type_concept,
+            condition_source_value='legacy',
+        )
+        legacy._skip_patient_info_refresh = True
+        legacy.save()
+
+        # Sequence is now behind the table max → next_pk_batch must self-heal.
+        ids = next_pk_batch(ConditionOccurrence, 'condition_occurrence_id', 3)
+        self.assertTrue(all(i > stranded_id for i in ids), ids)
+        self.assertEqual(len(set(ids)), 3)
 
     def test_rejects_non_bundle(self):
         resp = self.client.post('/api/fhir/sync/', {'bundle': {'resourceType': 'Patient'}}, format='json')
@@ -170,7 +204,7 @@ class FhirSyncTests(TestCase):
             return {"resourceType": "Bundle", "type": "collection", "entry": entries}
 
         def run(email, n):
-            user = Identity.objects.create_user(email=email, password="test")
+            user = Identity.objects.create_user(email=email, password="test", is_staff=True)
             client = APIClient()
             client.force_authenticate(user=user)
             with CaptureQueriesContext(connection) as ctx:
