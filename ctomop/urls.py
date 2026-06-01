@@ -23,6 +23,7 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('patient_portal.api.urls')),
     path('api/lab-results/', include('patient_portal.api.lab_results.urls')),
+    path('api/fhir/', include('patient_portal.api.fhir.urls')),
     path('api/health/', views.health_check, name='health_check'),
     # OAuth2 / SMART on FHIR authorization server endpoints
     path('o/', include('oauth2_provider.urls', namespace='oauth2_provider')),
