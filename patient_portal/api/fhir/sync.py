@@ -189,6 +189,15 @@ class FhirSyncView(APIView):
                 person, medications, ehr_type, no_match, concept_cache, source_user_id, org),
         }
 
+        # The person's CURRENT record totals after this ingest — the accurate
+        # "records on file" the connector displays (immune to re-sync dedup or
+        # out-of-band data changes; the last chunk's value is the final count).
+        result['totals'] = {
+            'measurements': Measurement.objects.filter(person=person).count(),
+            'conditions': ConditionOccurrence.objects.filter(person=person).count(),
+            'medications': DrugExposure.objects.filter(person=person).count(),
+        }
+
         # NOTE: the denormalized PatientInfo is intentionally NOT rebuilt here.
         # refresh_patient_info is O(N) in the person's data (per-row queries) and
         # would put the synchronous ingest back into "slow request" territory.

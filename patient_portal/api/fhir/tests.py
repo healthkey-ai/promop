@@ -110,6 +110,10 @@ class FhirSyncTests(TestCase):
         # Every clinical row gets EHR_SYNC provenance.
         self.assertEqual(ProvenanceRecord.objects.filter(source='EHR_SYNC').count(), 3)
 
+        # Current "records on file" totals returned for the connector to display.
+        self.assertEqual(body['totals'],
+                         {'measurements': 1, 'conditions': 1, 'medications': 1})
+
         # Demographics filled onto the resolved Person.
         from omop_core.models import Person
         person = Person.objects.get(person_id=person_id)
