@@ -15,7 +15,7 @@ from omop_core.models import (
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, Survey, PatientSurveyResponse,
     # Controlled vocabulary lookup models
-    Ethnicity, StemCellTransplant, HistologicType, EstrogenReceptorStatus,
+    Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
     ProgesteroneReceptorStatus, Her2Status, HrStatus, HrdStatus,
     MutationOrigin, MutationGene, MutationInterpretation, MutationCode,
     TumorStage, NodesStage, DistantMetastasisStage, StagingModality,
@@ -2015,6 +2015,7 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
 _VOCABULARY_REGISTRY = {
     'ethnicity':                     Ethnicity,
     'stem-cell-transplant':          StemCellTransplant,
+    'sct-eligibility':               SctEligibility,
     'histologic-type':               HistologicType,
     'estrogen-receptor-status':      EstrogenReceptorStatus,
     'progesterone-receptor-status':  ProgesteroneReceptorStatus,

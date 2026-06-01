@@ -110,10 +110,9 @@ export const MRD_STATUS_OPTIONS = [
 ];
 export const MM_PROGRESSION_OPTIONS = ['Stable', 'Active', 'Smoldering', 'Progressive', 'Relapsed', 'Refractory'];
 export const STEM_CELL_TRANSPLANT_OPTIONS = [
-  'prior SCT', 'prior autologous SCT', 'prior allogeneic SCT',
-  'recent SCT', 'recent autologous SCT', 'recent allogeneic SCT',
-  'relapsed post-SCT', 'relapsed post-autologous SCT', 'relapsed post-allogeneic SCT',
-  'completed tandem SCT', 'never received SCT', 'pre-autologous SCT', 'pre-allogeneic SCT',
+  'autologous SCT',
+  'allogeneic SCT',
+  'tandem SCT',
 ];
 export const CYTOGENETIC_RISK_OPTIONS = ['Standard Risk', 'High Risk', 'Very High Risk'];
 export const THERAPY_OUTCOME_OPTIONS = [
