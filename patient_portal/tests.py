@@ -3796,3 +3796,127 @@ class PersonIdEnumerationTest(FhirUploadBase):
         self.assertEqual(resp.data['deleted_count'], 1)
         self.assertEqual(resp.data['errors'], [])
         self.assertFalse(P.objects.filter(person_id=78901).exists())
+
+
+# ---------------------------------------------------------------------------
+# Disease persistence tests — issues #110 / #113
+# ---------------------------------------------------------------------------
+
+class DiseasePersistenceTest(_SmartBase):
+    """PATCH /api/patient-info/{person_id}/ must preserve PatientInfo.disease.
+
+    When the user saves a disease selection the serializer writes it directly to
+    PatientInfo.  _sync_condition then creates a ConditionOccurrence to mirror
+    that change in the OMOP tables.  That post_save would normally trigger
+    refresh_patient_info → _clear_derived_fields → disease wiped.
+
+    The fix sets _skip_patient_info_refresh = True on the new ConditionOccurrence
+    so the user's selection survives the round-trip.
+    """
+
+    PERSON_ID = 95001
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Fresh person and empty PatientInfo for this class
+        cls.dp_person = Person.objects.create(
+            person_id=cls.PERSON_ID,
+            given_name='Disease',
+            family_name='PersistTest',
+            year_of_birth=1975,
+            gender_source_value='female',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        PatientInfo.objects.get_or_create(person=cls.dp_person)
+
+    # ------------------------------------------------------------------ #
+    # Issue #110: disease persists across a PATCH + DB re-fetch cycle     #
+    # ------------------------------------------------------------------ #
+
+    def test_disease_survives_patch_for_follicular_lymphoma(self):
+        """PATCH disease='Follicular Lymphoma' stays in DB after sync_to_omop."""
+        resp = self.write_client.patch(
+            f'/api/patient-info/{self.PERSON_ID}/',
+            {'disease': 'Follicular Lymphoma'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        pi = PatientInfo.objects.get(person=self.dp_person)
+        self.assertEqual(
+            pi.disease, 'Follicular Lymphoma',
+            'PatientInfo.disease was overwritten after PATCH — refresh_patient_info '
+            'must not run from _sync_condition (issue #110)',
+        )
+
+    def test_disease_survives_patch_for_cll(self):
+        """PATCH disease='Chronic Lymphocytic Leukemia (CLL)' stays in DB."""
+        resp = self.write_client.patch(
+            f'/api/patient-info/{self.PERSON_ID}/',
+            {'disease': 'Chronic Lymphocytic Leukemia (CLL)'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        pi = PatientInfo.objects.get(person=self.dp_person)
+        self.assertEqual(
+            pi.disease, 'Chronic Lymphocytic Leukemia (CLL)',
+            'PatientInfo.disease was overwritten after PATCH — '
+            'CLL selection must persist (issue #110)',
+        )
+
+    def test_disease_survives_patch_for_multiple_myeloma(self):
+        """PATCH disease='Multiple Myeloma' stays in DB."""
+        resp = self.write_client.patch(
+            f'/api/patient-info/{self.PERSON_ID}/',
+            {'disease': 'Multiple Myeloma'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        pi = PatientInfo.objects.get(person=self.dp_person)
+        self.assertEqual(pi.disease, 'Multiple Myeloma')
+
+    def test_get_after_patch_returns_saved_disease(self):
+        """GET /api/patient-info/{id}/ after PATCH returns the saved disease value.
+
+        Simulates the navigation-away-and-back scenario from issue #110.
+        """
+        self.write_client.patch(
+            f'/api/patient-info/{self.PERSON_ID}/',
+            {'disease': 'Follicular Lymphoma'},
+            format='json',
+        )
+
+        get_resp = self.read_client.get(f'/api/patient-info/{self.PERSON_ID}/')
+        self.assertEqual(get_resp.status_code, 200)
+        self.assertEqual(
+            get_resp.data['patient_info']['disease'], 'Follicular Lymphoma',
+            'GET after PATCH returned wrong disease — field was overwritten server-side '
+            '(issue #110)',
+        )
+
+    # ------------------------------------------------------------------ #
+    # Issue #113: _skip_patient_info_refresh flag prevents OMOP overwrite #
+    # ------------------------------------------------------------------ #
+
+    def test_disease_survives_sync_to_omop(self):
+        """disease persists after sync_to_omop runs _sync_condition directly."""
+        from omop_core.services.omop_write_service import sync_to_omop
+        from datetime import date
+
+        pi = PatientInfo.objects.get(person=self.dp_person)
+        pi.disease = 'Follicular Lymphoma'
+        pi.save(update_fields=['disease'])
+
+        # Call sync_to_omop directly — this runs _sync_condition internally
+        sync_to_omop(pi, {'disease'}, changed_data={'disease': 'Follicular Lymphoma'})
+
+        pi.refresh_from_db()
+        self.assertEqual(
+            pi.disease, 'Follicular Lymphoma',
+            'sync_to_omop wiped PatientInfo.disease — _skip_patient_info_refresh '
+            'not set on ConditionOccurrence (issue #113)',
+        )
