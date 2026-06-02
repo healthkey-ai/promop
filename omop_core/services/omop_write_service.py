@@ -118,7 +118,7 @@ def _sync_condition(person, patient_info, today: date, changed_data: dict = None
     last = ConditionOccurrence.objects.order_by('-condition_occurrence_id').first()
     new_id = (last.condition_occurrence_id + 1) if last else 1
 
-    ConditionOccurrence.objects.create(
+    co = ConditionOccurrence(
         condition_occurrence_id=new_id,
         person=person,
         condition_concept=condition_concept,
@@ -126,6 +126,12 @@ def _sync_condition(person, patient_info, today: date, changed_data: dict = None
         condition_type_concept=type_concept,
         condition_source_value=source_value,
     )
+    # Skip the post_save signal that calls refresh_patient_info — the PatientInfo
+    # disease field was already saved correctly by the serializer; re-deriving it
+    # from OMOP immediately would overwrite the user's selection with the OMOP
+    # concept name (which may differ in casing or be unresolved).
+    co._skip_patient_info_refresh = True
+    co.save()
 
 
 def _sync_demographics(person, patient_info, changed_data: dict = None) -> None:

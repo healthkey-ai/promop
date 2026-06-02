@@ -29,8 +29,18 @@ export function usePatchPatientInfo(apiClient?: AxiosInstance, apiBasePath = "")
       );
       return resp.data;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: KEYS.me });
+    onSuccess: (result: Record<string, unknown>) => {
+      // Update the cache with the PATCH response fields rather than invalidating.
+      // Invalidating would trigger a refetch that returns the DB state — which can
+      // differ from the user's selection when OMOP post-save signals run between
+      // the serializer.save() and the GET response (e.g. disease gets cleared by
+      // refresh_patient_info and not restored correctly).  Merging the PATCH result
+      // directly avoids a round-trip and keeps editedInfo in sync with the cache.
+      queryClient.setQueryData(KEYS.me, (old: PatientInfoData | undefined) => {
+        if (!old) return old;
+        const { previous_values: _pv, ...fields } = result;
+        return { ...old, patient_info: { ...old.patient_info, ...fields } };
+      });
     },
   });
 }
