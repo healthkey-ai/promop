@@ -1718,9 +1718,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     person.delete()
                     deleted_count += 1
                 except Person.DoesNotExist:
-                    errors.append(f"Person {person_id} not found")
-                except Exception as e:
-                    errors.append(f"Person {person_id}: {str(e)}")
+                    errors.append("Person not found.")
+                except Exception:
+                    errors.append("Delete failed.")
             
             return Response({
                 'success': True,
