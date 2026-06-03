@@ -1805,7 +1805,7 @@ class Survey(models.Model):
         max_length=100, unique=True, blank=True, null=True,
         help_text="Firestore document ID from ~/one (for syncing)",
     )
-    name = models.CharField(max_length=200)
+    name = models.CharField(max_length=200, unique=True)
     title = models.CharField(max_length=500)
     description = models.TextField(blank=True, default='')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
@@ -1846,7 +1846,7 @@ class PatientSurveyResponse(models.Model):
     started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     consent_date = models.DateTimeField(null=True, blank=True)
-    consent_signature = models.TextField(blank=True, default='')
+    consent_signature = models.TextField(blank=True, null=True, default=None)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

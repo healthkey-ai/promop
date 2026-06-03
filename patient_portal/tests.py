@@ -4447,3 +4447,223 @@ class SurveyAPITest(_SmartBase):
         }
         res = self.read_client.post('/api/survey-responses/', payload, format='json')
         self.assertEqual(res.status_code, 403)
+
+
+class SurveyModelExtendedTest(_SmartBase):
+    """Additional model-level tests for Survey and PatientSurveyResponse."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from omop_core.models import Survey
+        cls.survey = Survey.objects.create(
+            name='fl-proms',
+            title='FL Quality of Life',
+            status=Survey.STATUS_ACTIVE,
+            disease='Follicular Lymphoma',
+            pages=[],
+        )
+
+    def test_survey_estimated_minutes_nullable(self):
+        from omop_core.models import Survey
+        s = Survey.objects.get(name='fl-proms')
+        self.assertIsNone(s.estimated_minutes)
+
+    def test_survey_without_disease_allowed(self):
+        from omop_core.models import Survey
+        s = Survey.objects.create(
+            name='no-disease-survey',
+            title='General Survey',
+            status=Survey.STATUS_DRAFT,
+            pages=[],
+        )
+        self.assertEqual('', s.disease)
+
+    def test_response_values_dates_roundtrip(self):
+        from omop_core.models import PatientSurveyResponse
+        r = PatientSurveyResponse.objects.create(
+            person=self.person,
+            survey=self.survey,
+            values={'q1': 'yes'},
+            values_dates={'q1': '2025-01-15T09:30:00Z'},
+        )
+        r.refresh_from_db()
+        self.assertEqual(r.values_dates['q1'], '2025-01-15T09:30:00Z')
+
+    def test_response_consent_fields_nullable(self):
+        from omop_core.models import PatientSurveyResponse
+        r = PatientSurveyResponse.objects.create(
+            person=self.person,
+            survey=self.survey,
+            values={},
+        )
+        self.assertIsNone(r.consent_date)
+        self.assertIsNone(r.consent_signature)
+        self.assertIsNone(r.completed_at)
+
+    def test_response_timestamps_auto_set(self):
+        from omop_core.models import PatientSurveyResponse
+        r = PatientSurveyResponse.objects.create(
+            person=self.person,
+            survey=self.survey,
+            values={},
+        )
+        self.assertIsNotNone(r.created_at)
+        self.assertIsNotNone(r.updated_at)
+
+    def test_survey_timestamps_auto_set(self):
+        s = self.survey
+        self.assertIsNotNone(s.created_at)
+        self.assertIsNotNone(s.updated_at)
+
+
+class SurveyAPIExtendedTest(_SmartBase):
+    """Additional API tests for edge cases and merge behaviour."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from omop_core.models import Survey, PatientSurveyResponse
+        cls.survey = Survey.objects.create(
+            name='mm-ext-test',
+            title='MM Extended Test Survey',
+            status=Survey.STATUS_ACTIVE,
+            disease='Multiple Myeloma',
+            pages=[{'name': 'p1', 'inputs': [
+                {'name': 'fatigue', 'label': 'Fatigue', 'type': 'rating'},
+                {'name': 'pain', 'label': 'Pain', 'type': 'rating'},
+            ]}],
+        )
+        cls.response = PatientSurveyResponse.objects.create(
+            person=cls.person,
+            survey=cls.survey,
+            values={'fatigue': 5, 'pain': 3},
+            values_dates={
+                'fatigue': '2025-01-01T10:00:00Z',
+                'pain': '2025-01-01T10:00:00Z',
+            },
+            percent_complete=50,
+        )
+
+    def test_retrieve_survey_404(self):
+        res = self.read_client.get('/api/surveys/999999/')
+        self.assertEqual(res.status_code, 404)
+
+    def test_retrieve_response_404(self):
+        res = self.read_client.get('/api/survey-responses/999999/')
+        self.assertEqual(res.status_code, 404)
+
+    def test_patch_response_merges_without_overwriting(self):
+        """PATCH with one key must not erase the other existing key."""
+        res = self.write_client.patch(
+            f'/api/survey-responses/{self.response.id}/',
+            {'values': {'fatigue': 9}},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200)
+        # fatigue updated
+        self.assertEqual(res.data['values']['fatigue'], 9)
+        # pain must still be present
+        self.assertIn('pain', res.data['values'])
+        self.assertEqual(res.data['values']['pain'], 3)
+
+    def test_patch_response_updates_values_dates(self):
+        """PATCH with values_dates merges timestamps."""
+        res = self.write_client.patch(
+            f'/api/survey-responses/{self.response.id}/',
+            {
+                'values': {'fatigue': 8},
+                'values_dates': {'fatigue': '2025-06-01T12:00:00Z'},
+            },
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['values_dates']['fatigue'], '2025-06-01T12:00:00Z')
+        # pain timestamp preserved
+        self.assertIn('pain', res.data['values_dates'])
+
+    def test_patch_response_sets_completed_at(self):
+        from omop_core.models import Survey, PatientSurveyResponse
+        s = Survey.objects.create(
+            name='completion-test', title='Completion Test',
+            status=Survey.STATUS_ACTIVE, pages=[],
+        )
+        r = PatientSurveyResponse.objects.create(
+            person=self.person, survey=s, values={},
+        )
+        res = self.write_client.patch(
+            f'/api/survey-responses/{r.id}/',
+            {'completed_at': '2025-06-03T14:00:00Z', 'percent_complete': 100},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['percent_complete'], 100)
+        self.assertIsNotNone(res.data['completed_at'])
+
+    def test_create_response_duplicate_returns_400(self):
+        """Creating a second response for (person, survey) must fail with 400."""
+        payload = {
+            'person': self.person.person_id,
+            'survey': self.survey.id,
+            'values': {'fatigue': 1},
+        }
+        res = self.write_client.post('/api/survey-responses/', payload, format='json')
+        self.assertEqual(res.status_code, 400)
+
+    def test_list_responses_filtered_by_survey(self):
+        res = self.read_client.get(f'/api/survey-responses/?survey={self.survey.id}')
+        self.assertEqual(res.status_code, 200)
+        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
+        self.assertTrue(all(r['survey'] == self.survey.id for r in data))
+
+    def test_response_includes_survey_name(self):
+        res = self.read_client.get(f'/api/survey-responses/?person_id={self.person.person_id}')
+        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
+        matching = [r for r in data if r['survey'] == self.survey.id]
+        self.assertTrue(len(matching) > 0)
+        self.assertEqual(matching[0]['survey_name'], 'mm-ext-test')
+
+    def test_filter_surveys_unknown_disease_returns_empty(self):
+        res = self.read_client.get('/api/surveys/?disease=UnknownDiseaseXYZ')
+        self.assertEqual(res.status_code, 200)
+        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
+        self.assertEqual(len(data), 0)
+
+    def test_create_survey_missing_name_returns_400(self):
+        payload = {'title': 'No Name Survey', 'status': 'ACTIVE', 'pages': []}
+        res = self.write_client.post('/api/surveys/', payload, format='json')
+        self.assertEqual(res.status_code, 400)
+
+    def test_create_survey_with_external_id(self):
+        payload = {
+            'name': 'ext-id-survey',
+            'title': 'External ID Survey',
+            'status': 'DRAFT',
+            'pages': [],
+            'external_id': 'firestore-doc-abc123',
+        }
+        res = self.write_client.post('/api/surveys/', payload, format='json')
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.data['external_id'], 'firestore-doc-abc123')
+
+    def test_update_survey_blocked_with_read_token(self):
+        res = self.read_client.patch(
+            f'/api/surveys/{self.survey.id}/',
+            {'status': 'ARCHIVED'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 403)
+
+    def test_delete_survey_returns_405(self):
+        res = self.write_client.delete(f'/api/surveys/{self.survey.id}/')
+        self.assertEqual(res.status_code, 405)
+
+    def test_duplicate_survey_name_returns_400(self):
+        payload = {
+            'name': 'mm-ext-test',  # same as cls.survey
+            'title': 'Duplicate Name Survey',
+            'status': 'DRAFT',
+            'pages': [],
+        }
+        res = self.write_client.post('/api/surveys/', payload, format='json')
+        self.assertEqual(res.status_code, 400)

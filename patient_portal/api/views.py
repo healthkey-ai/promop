@@ -1438,7 +1438,13 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             ).first() if regimen_name else None
                             # Try RxNav for drugs not in local vocabulary
                             if regimen_concept is None and regimen_name:
-                                regimen_concept = _rxnav_resolve_drug(regimen_name)
+                                try:
+                                    regimen_concept = _rxnav_resolve_drug(regimen_name)
+                                except Exception as rxnav_exc:
+                                    logger.warning(
+                                        '{"event": "rxnav_resolve_failed", "drug": "%s", "error": "%s"}',
+                                        regimen_name, rxnav_exc,
+                                    )
                             # Final fallback to any Drug domain concept
                             if regimen_concept is None:
                                 regimen_concept = Concept.objects.filter(
@@ -2080,11 +2086,27 @@ class SurveyViewSet(viewsets.ModelViewSet):
 
     Filter by disease: GET /api/surveys/?disease=Multiple+Myeloma
     Filter by status:  GET /api/surveys/?status=ACTIVE
+    Surveys are archived via PATCH {status: ARCHIVED}; DELETE is not allowed.
     """
     serializer_class = SurveySerializer
     permission_classes = [ScopedTokenPermission]
     queryset = Survey.objects.all()
-    filterset_fields = ['status', 'disease']
+
+    def destroy(self, request, *args, **kwargs):
+        return Response(
+            {'detail': 'Surveys cannot be deleted. Set status to ARCHIVED instead.'},
+            status=405,
+        )
+
+    def get_queryset(self):
+        qs = Survey.objects.all()
+        disease = self.request.query_params.get('disease')
+        if disease is not None:
+            qs = qs.filter(disease=disease)
+        status = self.request.query_params.get('status')
+        if status is not None:
+            qs = qs.filter(status=status)
+        return qs
 
 
 class PatientSurveyResponseViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
@@ -2097,4 +2119,25 @@ class PatientSurveyResponseViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = PatientSurveyResponseSerializer
     permission_classes = [ScopedTokenPermission]
     queryset = PatientSurveyResponse.objects.select_related('survey').all()
-    filterset_fields = ['person', 'survey']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        survey_id = self.request.query_params.get('survey')
+        if survey_id:
+            qs = qs.filter(survey_id=survey_id)
+        return qs
+
+    def partial_update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        # Merge values and values_dates dicts rather than replacing them wholesale
+        data = request.data.copy()
+        if 'values' in data and isinstance(data['values'], dict):
+            merged = {**(instance.values or {}), **data['values']}
+            data['values'] = merged
+        if 'values_dates' in data and isinstance(data['values_dates'], dict):
+            merged_dates = {**(instance.values_dates or {}), **data['values_dates']}
+            data['values_dates'] = merged_dates
+        serializer = self.get_serializer(instance, data=data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(serializer.data)
