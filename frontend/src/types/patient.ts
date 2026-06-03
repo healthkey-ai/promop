@@ -17,7 +17,8 @@ export interface PatientInfo {
   weight_kg?: number;
   height_cm?: number;
   bmi?: number;
-  ethnicity?: string;
+  race?: string | null;
+  ethnicity?: string | null;
   systolic_bp?: number;
   diastolic_bp?: number;
   location?: string;
@@ -42,7 +43,8 @@ export interface PatientInfo {
   plasma_cell_leukemia?: boolean;
   progression?: string;
   measurable_disease_imwg?: boolean;
-  
+  mrd_status?: string | null;
+
   // Treatment
   prior_therapy?: string;
   prior_lines_of_therapy?: number;

@@ -12,7 +12,7 @@ import {
   DISEASE_OPTIONS,
   FLIPI_RISK_OPTIONS, GELF_OPTIONS, FL_TUMOR_GRADE_OPTIONS,
   ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS,
-  CYTOGENETIC_RISK_OPTIONS,
+  MRD_STATUS_OPTIONS, CYTOGENETIC_RISK_OPTIONS,
   BINET_STAGE_OPTIONS, TUMOR_BURDEN_OPTIONS, DISEASE_ACTIVITY_OPTIONS,
   RICHTER_TRANSFORMATION_OPTIONS, PROTEIN_EXPRESSION_OPTIONS,
   GENE_OPTIONS, MUTATION_OPTIONS, ORIGIN_OPTIONS, INTERPRETATION_OPTIONS,
@@ -217,6 +217,7 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
           <Field label="Durie-Salmon Stage" name="durie_salmon_stage" type="text" value={formData?.durie_salmon_stage} onChange={onChange} />
           <Field label="Progression Status" name="progression" type="select" value={formData?.progression} options={MM_PROGRESSION_OPTIONS} onChange={onChange} vocabSource={progressionSource} />
           <Field label="Measurable Disease (IMWG)" name="measurable_disease_imwg" type="boolean" value={formData?.measurable_disease_imwg} onChange={onChange} />
+          <Field label="MRD Status" name="mrd_status" type="select" value={formData?.mrd_status} options={MRD_STATUS_OPTIONS} onChange={onChange} />
           <div className="sm:col-span-2">
             <Field label="Stem Cell Transplant History" name="stem_cell_transplant_history" type="multiselect" value={formData?.stem_cell_transplant_history} options={STEM_CELL_TRANSPLANT_OPTIONS} onChange={onChange} />
           </div>

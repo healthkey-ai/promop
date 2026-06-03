@@ -13,7 +13,7 @@ from django.contrib.contenttypes.models import ContentType
 from omop_core.models import (
     Person, PatientInfo, Concept, ProvenanceRecord,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
-    PatientDocument, PatientTrialEnrollment,
+    PatientDocument, PatientTrialEnrollment, Survey, PatientSurveyResponse,
     # Controlled vocabulary lookup models
     Ethnicity, StemCellTransplant, HistologicType, EstrogenReceptorStatus,
     ProgesteroneReceptorStatus, Her2Status, HrStatus, HrdStatus,
@@ -33,6 +33,7 @@ from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.omop_write_service import sync_to_omop
 from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
+from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from datetime import datetime
 import csv
 import hashlib
@@ -46,6 +47,7 @@ from .serializers import (
     ObservationSerializer, ProcedureOccurrenceSerializer,
     EpisodeSerializer, EpisodeEventSerializer,
     PatientDocumentSerializer, PatientTrialEnrollmentSerializer,
+    SurveySerializer, PatientSurveyResponseSerializer,
 )
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
@@ -519,7 +521,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         city = address.get('city')
                         postal_code = address.get('postalCode')
                     
-                    # Extract ethnicity and vital signs from extensions
+                    # Extract race, ethnicity and vital signs from extensions
+                    race = None
                     ethnicity = None
                     weight = None
                     height = None
@@ -527,10 +530,14 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     diastolic_bp = None
                     heart_rate = None
                     ecog = None
+                    cytogenetics_str = None
+                    measurable_disease_imwg = None
                     
                     # Explicit extension URL → (value_key, parser) registry.
                     # Using exact URL matching avoids false positives from substring checks.
                     _PATIENT_EXTENSIONS = {
+                        'http://ctomop.io/fhir/StructureDefinition/race':
+                            ('valueString', lambda e: e.get('valueString')),
                         'http://ctomop.io/fhir/StructureDefinition/ethnicity':
                             ('valueString', lambda e: e.get('valueString')),
                         'http://ctomop.io/fhir/StructureDefinition/bodyWeight':
@@ -545,6 +552,10 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
                         'http://ctomop.io/fhir/StructureDefinition/ecog-performance-status':
                             ('valueInteger', lambda e: e.get('valueInteger')),
+                        'http://ctomop.io/fhir/StructureDefinition/mm-cytogenetic-markers':
+                            ('valueString', lambda e: e.get('valueString')),
+                        'http://ctomop.io/fhir/StructureDefinition/mm-measurable-disease-imwg':
+                            ('valueBoolean', lambda e: e.get('valueBoolean')),
                     }
                     ext_results = {}
                     for ext in patient_resource.get('extension', []):
@@ -554,13 +565,16 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             ext_results[url] = parser(ext)
 
                     base = 'http://ctomop.io/fhir/StructureDefinition/'
-                    ethnicity   = ext_results.get(f'{base}ethnicity')
-                    weight      = ext_results.get(f'{base}bodyWeight')
-                    height      = ext_results.get(f'{base}bodyHeight')
-                    systolic_bp = ext_results.get(f'{base}systolic-bp')
-                    diastolic_bp = ext_results.get(f'{base}diastolic-bp')
-                    heart_rate  = ext_results.get(f'{base}heartRate')
-                    ecog        = ext_results.get(f'{base}ecog-performance-status')
+                    race            = ext_results.get(f'{base}race')
+                    ethnicity       = ext_results.get(f'{base}ethnicity')
+                    weight          = ext_results.get(f'{base}bodyWeight')
+                    height          = ext_results.get(f'{base}bodyHeight')
+                    systolic_bp     = ext_results.get(f'{base}systolic-bp')
+                    diastolic_bp    = ext_results.get(f'{base}diastolic-bp')
+                    heart_rate      = ext_results.get(f'{base}heartRate')
+                    ecog            = ext_results.get(f'{base}ecog-performance-status')
+                    cytogenetics_str        = ext_results.get(f'{base}mm-cytogenetic-markers')
+                    measurable_disease_imwg = ext_results.get(f'{base}mm-measurable-disease-imwg')
                     
                     # Get gender concept from FHIR
                     gender_concept = get_gender_concept(patient_resource.get('gender', ''))
@@ -588,7 +602,10 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             year_of_birth=year_of_birth or datetime.now().year - 50,
                             month_of_birth=month_of_birth,
                             day_of_birth=day_of_birth,
+                            race_concept=None,
+                            race_source_value=race or 'unknown',
                             ethnicity_concept=None,
+                            ethnicity_source_value=ethnicity or 'unknown',
                             given_name=given_name,
                             family_name=family_name,
                         )
@@ -1414,11 +1431,15 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             if lot_data.get('end_date'):
                                 lot_end = datetime.strptime(lot_data['end_date'][:10], '%Y-%m-%d').date()
 
+                            regimen_name = lot_data.get('regimen', '')
                             regimen_concept = Concept.objects.filter(
-                                concept_name__icontains=lot_data.get('regimen', ''),
+                                concept_name__icontains=regimen_name,
                                 domain__domain_id='Drug',
-                            ).first() if lot_data.get('regimen') else None
-                            # Fall back to any Drug domain concept when named one not found
+                            ).first() if regimen_name else None
+                            # Try RxNav for drugs not in local vocabulary
+                            if regimen_concept is None and regimen_name:
+                                regimen_concept = _rxnav_resolve_drug(regimen_name)
+                            # Final fallback to any Drug domain concept
                             if regimen_concept is None:
                                 regimen_concept = Concept.objects.filter(
                                     domain__domain_id='Drug'
@@ -1517,6 +1538,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         _patch['city'] = city
                     if postal_code:
                         _patch['postal_code'] = postal_code
+                    if race:
+                        _patch['race'] = race
                     if ethnicity:
                         _patch['ethnicity'] = ethnicity
                     if weight:
@@ -1531,6 +1554,10 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         _patch['heartrate'] = heart_rate
                     if ecog is not None:
                         _patch['ecog_performance_status'] = ecog
+                    if cytogenetics_str is not None:
+                        _patch['cytogenic_markers'] = cytogenetics_str
+                    if measurable_disease_imwg is not None:
+                        _patch['measurable_disease_imwg'] = measurable_disease_imwg
                     if tumor_size:
                         _patch['tumor_size'] = tumor_size
                     if lymph_node_status:
@@ -2046,3 +2073,28 @@ class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = PatientTrialEnrollmentSerializer
     permission_classes = [ScopedTokenPermission]
     queryset = PatientTrialEnrollment.objects.all()
+
+
+class SurveyViewSet(viewsets.ModelViewSet):
+    """Survey definitions — create/read/update/archive surveys.
+
+    Filter by disease: GET /api/surveys/?disease=Multiple+Myeloma
+    Filter by status:  GET /api/surveys/?status=ACTIVE
+    """
+    serializer_class = SurveySerializer
+    permission_classes = [ScopedTokenPermission]
+    queryset = Survey.objects.all()
+    filterset_fields = ['status', 'disease']
+
+
+class PatientSurveyResponseViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+    """Patient survey responses — one record per (person, survey) pair.
+
+    Filter by person: GET /api/survey-responses/?person_id=42
+    Filter by survey: GET /api/survey-responses/?survey=3
+    Supports partial update (PATCH) for incremental autosave of individual answers.
+    """
+    serializer_class = PatientSurveyResponseSerializer
+    permission_classes = [ScopedTokenPermission]
+    queryset = PatientSurveyResponse.objects.select_related('survey').all()
+    filterset_fields = ['person', 'survey']

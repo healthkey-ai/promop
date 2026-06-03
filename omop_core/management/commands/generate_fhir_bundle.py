@@ -201,14 +201,17 @@ class Command(BaseCommand):
         zip_code = f"{random.randint(10000, 99999)}"
         phone = f"+1-555-{random.randint(100, 999)}-{random.randint(1000, 9999)}"
         
-        # Generate ethnicity
-        ethnicities = [
-            "Caucasian/White",
-            "Hispanic/Latino",
-            "Black/African-American",
-            "Asian",
-            "Native American"
+        # OMOP CDM standard: race and ethnicity are separate
+        races = [
+            'White',
+            'Black or African American',
+            'Asian',
+            'American Indian or Alaska Native',
+            'Native Hawaiian or Pacific Islander',
+            'Other Race',
         ]
+        race = random.choice(races)
+        ethnicities = ['Hispanic or Latino', 'Not Hispanic or Latino', 'Not Hispanic or Latino', 'Not Hispanic or Latino']
         ethnicity = random.choice(ethnicities)
         
         # Generate vital signs
@@ -236,7 +239,11 @@ class Command(BaseCommand):
             "birthDate": birth_date.strftime('%Y-%m-%d'),
             "extension": [
                 {
-                    "url": "http://hl7.org/fhir/us/core/StructureDefinition/us-core-ethnicity",
+                    "url": "http://ctomop.io/fhir/StructureDefinition/race",
+                    "valueString": race
+                },
+                {
+                    "url": "http://ctomop.io/fhir/StructureDefinition/ethnicity",
                     "valueString": ethnicity
                 },
                 {

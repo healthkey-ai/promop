@@ -2,6 +2,7 @@ db.*
 .env
 .env.*
 !.env.example
+.venv/
 data/
 
 # Node modules and frontend build

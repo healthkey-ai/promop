@@ -1083,6 +1083,7 @@ class PatientInfo(models.Model):
         help_text="Units for the patient's height"
     )
     bmi = models.FloatField(editable=False, help_text="Patient's BMI (computed)", blank=True, null=True)
+    race = models.TextField(blank=True, null=True)
     ethnicity = models.TextField(blank=True, null=True)
     systolic_blood_pressure = models.IntegerField(help_text="Patient's systolic blood pressure", blank=True, null=True)
     diastolic_blood_pressure = models.IntegerField(help_text="Patient's diastolic blood pressure", blank=True, null=True)
@@ -1451,6 +1452,7 @@ class PatientInfo(models.Model):
 
     # Measurable disease
     measurable_disease_imwg = models.BooleanField(blank=True, null=True)
+    mrd_status = models.CharField(max_length=50, blank=True, null=True)
 
     # Later therapies (structured list, mirrors cancerbot JSONField)
     later_therapies = models.JSONField(blank=True, null=False, default=list)
@@ -1786,5 +1788,74 @@ class PatientTrialEnrollment(models.Model):
 
     def __str__(self):
         return f"Person {self.person_id} — trial {self.trial_id} ({self.status})"
+
+
+class Survey(models.Model):
+    """Survey definition — mirrors the ~/one EpicForm survey structure stored in Firestore."""
+    STATUS_ACTIVE = 'ACTIVE'
+    STATUS_DRAFT = 'DRAFT'
+    STATUS_ARCHIVED = 'ARCHIVED'
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, 'Active'),
+        (STATUS_DRAFT, 'Draft'),
+        (STATUS_ARCHIVED, 'Archived'),
+    ]
+
+    external_id = models.CharField(
+        max_length=100, unique=True, blank=True, null=True,
+        help_text="Firestore document ID from ~/one (for syncing)",
+    )
+    name = models.CharField(max_length=200)
+    title = models.CharField(max_length=500)
+    description = models.TextField(blank=True, default='')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    disease = models.CharField(max_length=100, blank=True, default='')
+    pages = models.JSONField(
+        default=list,
+        help_text="Array of Form pages; each page has {name, title, inputs[]} matching EpicForm schema",
+    )
+    estimated_minutes = models.IntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'survey'
+        ordering = ['name']
+
+    def __str__(self):
+        return self.title
+
+
+class PatientSurveyResponse(models.Model):
+    """A patient's responses to one survey, plus completion tracking and consent."""
+    person = models.ForeignKey(
+        Person, on_delete=models.CASCADE, related_name='survey_responses',
+    )
+    survey = models.ForeignKey(
+        Survey, on_delete=models.CASCADE, related_name='responses',
+    )
+    values = models.JSONField(
+        default=dict,
+        help_text="Field-name → answer value map matching the survey's input names",
+    )
+    values_dates = models.JSONField(
+        default=dict,
+        help_text="Field-name → ISO timestamp of last update for each answer",
+    )
+    percent_complete = models.IntegerField(default=0)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    consent_date = models.DateTimeField(null=True, blank=True)
+    consent_signature = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'patient_survey_response'
+        unique_together = [('person', 'survey')]
+        ordering = ['-updated_at']
+
+    def __str__(self):
+        return f"Person {self.person_id} — {self.survey.name} ({self.percent_complete}%)"
 
 

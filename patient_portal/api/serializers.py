@@ -4,6 +4,7 @@ from omop_core.models import (
     PatientInfo,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
+    Survey, PatientSurveyResponse,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from datetime import date
@@ -212,3 +213,24 @@ class ProvenanceRecordSerializer(serializers.ModelSerializer):
         model = ProvenanceRecord
         fields = ['id', 'source', 'source_user_id', 'target_patient_id',
                   'modification_reason', 'created_at', 'record_type', 'object_id', 'organization']
+
+
+class SurveySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Survey
+        fields = ['id', 'external_id', 'name', 'title', 'description',
+                  'status', 'disease', 'pages', 'estimated_minutes', 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at']
+
+
+class PatientSurveyResponseSerializer(serializers.ModelSerializer):
+    survey_title = serializers.CharField(source='survey.title', read_only=True)
+    survey_name = serializers.CharField(source='survey.name', read_only=True)
+
+    class Meta:
+        model = PatientSurveyResponse
+        fields = ['id', 'person', 'survey', 'survey_title', 'survey_name',
+                  'values', 'values_dates', 'percent_complete',
+                  'started_at', 'completed_at', 'consent_date', 'consent_signature',
+                  'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at']

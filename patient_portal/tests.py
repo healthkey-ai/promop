@@ -2180,6 +2180,121 @@ class DrugClassificationTest(TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Task 2: ArtemisHemOncLotTest — integration: HemOnc-backed LOT classification
+# ---------------------------------------------------------------------------
+
+class ArtemisHemOncLotTest(TestCase):
+    """Integration: infer_lot_for_person classifies brand-name drug via HemOnc."""
+
+    def setUp(self):
+        _make_vocab_fixtures()
+        self.hemonc_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc Oncology', 'vocabulary_concept_id': 0},
+        )
+        self.rxnorm_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RxNorm',
+            defaults={'vocabulary_name': 'RxNorm', 'vocabulary_concept_id': 0},
+        )
+        self.domain_drug = Domain.objects.get(domain_id='Drug')
+        self.cc_ing, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Ingredient',
+            defaults={'concept_class_name': 'Ingredient', 'concept_class_concept_id': 0},
+        )
+        self.cc_hemonc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='HemOnc Class',
+            defaults={'concept_class_name': 'HemOnc Class', 'concept_class_concept_id': 0},
+        )
+
+        # HemOnc hierarchy: Proteasome inhibitor → bortezomib (HemOnc)
+        self.pi_class = Concept.objects.create(
+            concept_id=9900101, concept_name='Proteasome inhibitor',
+            domain=self.domain_drug, vocabulary=self.hemonc_vocab, concept_class=self.cc_hemonc,
+            concept_code='PI', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        self.bort_hemonc = Concept.objects.create(
+            concept_id=9900102, concept_name='bortezomib',
+            domain=self.domain_drug, vocabulary=self.hemonc_vocab, concept_class=self.cc_hemonc,
+            concept_code='HO-Bort', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        self.bort_rxnorm = Concept.objects.create(
+            concept_id=9900103, concept_name='bortezomib',
+            domain=self.domain_drug, vocabulary=self.rxnorm_vocab, concept_class=self.cc_ing,
+            concept_code='1421', standard_concept='S',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+        maps_to, _ = Relationship.objects.get_or_create(
+            relationship_id='Maps to',
+            defaults={
+                'relationship_name': 'Maps to', 'is_hierarchical': 0,
+                'defines_ancestry': 0, 'reverse_relationship_id': 'Mapped from',
+                'relationship_concept_id': 0,
+            },
+        )
+        ConceptRelationship.objects.get_or_create(
+            concept_1=self.bort_rxnorm, concept_2=self.bort_hemonc, relationship=maps_to,
+            defaults={'valid_start_date': date(1970, 1, 1), 'valid_end_date': date(2099, 12, 31)},
+        )
+        ConceptAncestor.objects.get_or_create(
+            ancestor_concept=self.pi_class, descendant_concept=self.bort_hemonc,
+            defaults={'min_levels_of_separation': 1, 'max_levels_of_separation': 1},
+        )
+
+        from omop_core.models import Person, DrugExposure
+        self.person = Person.objects.create(
+            person_id=7700001,
+            gender_concept_id=8532,
+            year_of_birth=1960,
+            race_concept_id=0,
+            ethnicity_concept_id=0,
+        )
+        self.drug_type, _ = Concept.objects.get_or_create(
+            concept_id=38000177,
+            defaults={
+                'concept_name': 'Prescription written',
+                'domain': self.domain_drug,
+                'vocabulary': self.rxnorm_vocab,
+                'concept_class': self.cc_ing,
+                'concept_code': '38000177',
+                'valid_start_date': date(1970, 1, 1),
+                'valid_end_date': date(2099, 12, 31),
+            },
+        )
+        DrugExposure.objects.create(
+            person=self.person,
+            drug_concept=self.bort_rxnorm,
+            drug_source_value='Velcade',
+            drug_type_concept=self.drug_type,
+            drug_exposure_start_date=date(2023, 1, 15),
+            drug_exposure_end_date=date(2023, 4, 15),
+        )
+
+    def test_brand_name_drug_classified_via_hemonc(self):
+        """Velcade with RxNorm concept_id → infer_lot_for_person returns a LOT."""
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        lots = infer_lot_for_person(self.person, force=True, dry_run=True)
+        self.assertGreater(len(lots), 0, 'Expected at least one LOT')
+        self.assertNotEqual(lots[0].regimen_name, '')
+
+    def test_novel_agent_no_hemonc_mapping_returns_mixed(self):
+        """Drug with concept_id but no HemOnc mapping → _classify_drug returns mixed."""
+        from omop_core.services.lot_inference_service import _classify_drug
+        novel = Concept.objects.create(
+            concept_id=9999999, concept_name='talquetamab',
+            domain=self.domain_drug, vocabulary=self.rxnorm_vocab, concept_class=self.cc_ing,
+            concept_code='TALQ99', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        self.assertEqual(_classify_drug(novel.concept_id, 'talquetamab'), 'mixed')
+
+    def test_infer_lot_is_callable_and_returns_list(self):
+        """Smoke test: infer_lot_for_person is callable, returns list."""
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        lots = infer_lot_for_person(self.person, force=True, dry_run=True)
+        self.assertIsInstance(lots, list)
+
+
+# ---------------------------------------------------------------------------
 # HKI-AUTH-01: client_credentials grant — service-to-service token acquisition
 # ---------------------------------------------------------------------------
 
@@ -4104,3 +4219,231 @@ class FhirRxNavIntegrationTest(_SmartBase):
             )
 
         self.assertIn(response.status_code, [200, 201])
+
+
+# =============================================================================
+# Survey models and API tests
+# =============================================================================
+
+class SurveyModelTest(_SmartBase):
+    """Survey and PatientSurveyResponse model-level tests."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from omop_core.models import Survey, PatientSurveyResponse
+        cls.survey = Survey.objects.create(
+            name='mm-quality-of-life',
+            title='Multiple Myeloma Quality of Life',
+            description='Patient-reported outcomes for MM patients.',
+            status=Survey.STATUS_ACTIVE,
+            disease='Multiple Myeloma',
+            pages=[
+                {
+                    'name': 'page1',
+                    'title': 'Symptoms',
+                    'inputs': [
+                        {'name': 'fatigue', 'label': 'Fatigue level', 'type': 'rating',
+                         'data': {'maxRating': 10}},
+                        {'name': 'pain', 'label': 'Pain level', 'type': 'rating',
+                         'data': {'maxRating': 10}},
+                        {'name': 'notes', 'label': 'Additional notes', 'type': 'textarea'},
+                    ],
+                }
+            ],
+            estimated_minutes=5,
+        )
+        cls.response = PatientSurveyResponse.objects.create(
+            person=cls.person,
+            survey=cls.survey,
+            values={'fatigue': 7, 'pain': 4, 'notes': 'Feeling tired'},
+            values_dates={'fatigue': '2024-03-01T10:00:00Z', 'pain': '2024-03-01T10:01:00Z'},
+            percent_complete=66,
+        )
+
+    def test_survey_saved_to_db(self):
+        from omop_core.models import Survey
+        s = Survey.objects.get(name='mm-quality-of-life')
+        self.assertEqual(s.title, 'Multiple Myeloma Quality of Life')
+        self.assertEqual(s.status, Survey.STATUS_ACTIVE)
+        self.assertEqual(s.disease, 'Multiple Myeloma')
+        self.assertEqual(len(s.pages), 1)
+        self.assertEqual(len(s.pages[0]['inputs']), 3)
+
+    def test_survey_pages_json_roundtrip(self):
+        from omop_core.models import Survey
+        s = Survey.objects.get(name='mm-quality-of-life')
+        self.assertEqual(s.pages[0]['inputs'][0]['name'], 'fatigue')
+        self.assertEqual(s.pages[0]['inputs'][0]['data']['maxRating'], 10)
+
+    def test_response_saved_to_db(self):
+        from omop_core.models import PatientSurveyResponse
+        r = PatientSurveyResponse.objects.get(person=self.person, survey=self.survey)
+        self.assertEqual(r.values['fatigue'], 7)
+        self.assertEqual(r.values['pain'], 4)
+        self.assertEqual(r.percent_complete, 66)
+
+    def test_response_person_survey_unique(self):
+        from omop_core.models import PatientSurveyResponse
+        from django.db import IntegrityError
+        with self.assertRaises(IntegrityError):
+            PatientSurveyResponse.objects.create(
+                person=self.person,
+                survey=self.survey,
+                values={},
+            )
+
+    def test_survey_external_id_nullable(self):
+        from omop_core.models import Survey
+        s = Survey.objects.get(name='mm-quality-of-life')
+        self.assertIsNone(s.external_id)
+
+    def test_survey_str(self):
+        self.assertEqual(str(self.survey), 'Multiple Myeloma Quality of Life')
+
+    def test_response_str(self):
+        self.assertIn(str(self.person.person_id), str(self.response))
+        self.assertIn('mm-quality-of-life', str(self.response))
+
+
+class SurveyAPITest(_SmartBase):
+    """REST API tests for /api/surveys/ and /api/survey-responses/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from omop_core.models import Survey, PatientSurveyResponse
+        cls.survey = Survey.objects.create(
+            name='cll-proms',
+            title='CLL Patient-Reported Outcomes',
+            status=Survey.STATUS_ACTIVE,
+            disease='Chronic Lymphocytic Leukemia (CLL)',
+            pages=[{'name': 'p1', 'inputs': [
+                {'name': 'fatigue', 'label': 'Fatigue', 'type': 'rating'}
+            ]}],
+        )
+        cls.response = PatientSurveyResponse.objects.create(
+            person=cls.person,
+            survey=cls.survey,
+            values={'fatigue': 3},
+            percent_complete=100,
+        )
+
+    # --- Survey CRUD ---
+
+    def test_list_surveys_requires_auth(self):
+        res = APIClient().get('/api/surveys/')
+        self.assertEqual(res.status_code, 401)
+
+    def test_list_surveys(self):
+        res = self.read_client.get('/api/surveys/')
+        self.assertEqual(res.status_code, 200)
+        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
+        names = [s['name'] for s in data]
+        self.assertIn('cll-proms', names)
+
+    def test_filter_surveys_by_disease(self):
+        res = self.read_client.get('/api/surveys/?disease=Chronic+Lymphocytic+Leukemia+%28CLL%29')
+        self.assertEqual(res.status_code, 200)
+        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
+        self.assertTrue(all(s['disease'] == 'Chronic Lymphocytic Leukemia (CLL)' for s in data))
+
+    def test_filter_surveys_by_status(self):
+        res = self.read_client.get('/api/surveys/?status=ACTIVE')
+        self.assertEqual(res.status_code, 200)
+        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
+        self.assertTrue(all(s['status'] == 'ACTIVE' for s in data))
+
+    def test_create_survey_requires_write_scope(self):
+        payload = {
+            'name': 'new-survey', 'title': 'New Survey',
+            'status': 'DRAFT', 'disease': 'Breast Cancer', 'pages': [],
+        }
+        res = self.read_client.post('/api/surveys/', payload, format='json')
+        self.assertEqual(res.status_code, 403)
+
+    def test_create_survey(self):
+        payload = {
+            'name': 'breast-cancer-proms', 'title': 'Breast Cancer PROMs',
+            'status': 'ACTIVE', 'disease': 'Breast Cancer',
+            'pages': [{'name': 'p1', 'inputs': [
+                {'name': 'q1', 'label': 'How are you?', 'type': 'radioGroup',
+                 'data': {'options': [{'value': 'good', 'label': 'Good'},
+                                      {'value': 'poor', 'label': 'Poor'}]}}
+            ]}],
+        }
+        res = self.write_client.post('/api/surveys/', payload, format='json')
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.data['name'], 'breast-cancer-proms')
+        self.assertEqual(len(res.data['pages'][0]['inputs']), 1)
+
+    def test_retrieve_survey(self):
+        res = self.read_client.get(f'/api/surveys/{self.survey.id}/')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['name'], 'cll-proms')
+        self.assertIn('pages', res.data)
+
+    def test_update_survey_status(self):
+        from omop_core.models import Survey
+        s = Survey.objects.create(
+            name='to-archive', title='To Archive',
+            status=Survey.STATUS_ACTIVE, pages=[],
+        )
+        res = self.write_client.patch(f'/api/surveys/{s.id}/', {'status': 'ARCHIVED'}, format='json')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['status'], 'ARCHIVED')
+
+    # --- Survey response CRUD ---
+
+    def test_list_responses_requires_auth(self):
+        res = APIClient().get('/api/survey-responses/')
+        self.assertEqual(res.status_code, 401)
+
+    def test_list_responses_filtered_by_person(self):
+        res = self.read_client.get(f'/api/survey-responses/?person_id={self.person.person_id}')
+        self.assertEqual(res.status_code, 200)
+        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]['values']['fatigue'], 3)
+
+    def test_list_responses_includes_survey_title(self):
+        res = self.read_client.get(f'/api/survey-responses/?person_id={self.person.person_id}')
+        data = res.data if isinstance(res.data, list) else res.data.get('results', [])
+        self.assertEqual(data[0]['survey_title'], 'CLL Patient-Reported Outcomes')
+
+    def test_create_response(self):
+        from omop_core.models import Survey
+        s2 = Survey.objects.create(
+            name='mm-proms-2', title='MM PROMs v2',
+            status=Survey.STATUS_ACTIVE, pages=[],
+        )
+        payload = {
+            'person': self.person.person_id,
+            'survey': s2.id,
+            'values': {'pain': 5, 'fatigue': 8},
+            'percent_complete': 50,
+        }
+        res = self.write_client.post('/api/survey-responses/', payload, format='json')
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.data['values']['pain'], 5)
+        self.assertEqual(res.data['percent_complete'], 50)
+
+    def test_patch_response_autosave(self):
+        """PATCH merges new answers without overwriting existing ones."""
+        res = self.write_client.patch(
+            f'/api/survey-responses/{self.response.id}/',
+            {'values': {'fatigue': 9}, 'percent_complete': 100},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['values']['fatigue'], 9)
+        self.assertEqual(res.data['percent_complete'], 100)
+
+    def test_response_not_writable_with_read_token(self):
+        payload = {
+            'person': self.person.person_id,
+            'survey': self.survey.id,
+            'values': {'fatigue': 1},
+        }
+        res = self.read_client.post('/api/survey-responses/', payload, format='json')
+        self.assertEqual(res.status_code, 403)
