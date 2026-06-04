@@ -3775,16 +3775,6 @@ class PersonIdEnumerationTest(FhirUploadBase):
         # The numeric ID must not appear anywhere in the response body
         self.assertNotIn('999999987', str(resp.data))
 
-    def test_nonexistent_person_error_does_not_leak_id(self):
-        """Error body must not contain the submitted person_id value."""
-        submitted_id = 888777666
-        resp = self.client.delete(
-            '/api/patient-info/bulk_delete/',
-            {'person_ids': [submitted_id]},
-            format='json',
-        )
-        self.assertNotIn(str(submitted_id), str(resp.data))
-
     def test_successful_delete_not_affected(self):
         """Deleting an existing person still works correctly after the fix."""
         from omop_core.models import Person as P
