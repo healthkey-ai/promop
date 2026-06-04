@@ -109,7 +109,7 @@ def _resolve_person_id(request):
     # Without an org scope, only superusers may use the email fallback —
     # a non-superuser without org context could otherwise match a patient
     # from a different organisation via email collision.
-    email = getattr(request.user, 'email', '') or ''
+    email = (getattr(request.user, 'email', '') or '').strip()
     org = get_request_org(request)
     pi = None
     if email:

@@ -1294,7 +1294,7 @@ class ResolvePersonIdEmailFallbackTest(TestCase):
         client.force_authenticate(user=user)
         resp = client.get('/api/lab-results/summary/')
         # Superuser email fallback succeeds (200 even if no measurements)
-        self.assertNotEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_patient_with_patientuser_link_still_resolves(self):
         """PatientUser link always works regardless of org scope."""
@@ -1303,7 +1303,7 @@ class ResolvePersonIdEmailFallbackTest(TestCase):
         client = APIClient()
         client.force_authenticate(user=user)
         resp = client.get('/api/lab-results/summary/')
-        self.assertNotEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_ambiguous_email_across_orgs_blocked_for_non_superuser(self):
         """If two patients share an email across orgs, non-superuser is blocked."""
