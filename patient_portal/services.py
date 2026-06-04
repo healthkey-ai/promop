@@ -26,9 +26,13 @@ def resolve_or_create_person(identity, email=None):
     if pu:
         return pu.person
 
-    email = email or identity.email or ""
+    email = (email or identity.email or "").strip()
     if email:
-        pi = PatientInfo.objects.filter(email=email).first()
+        email_qs = PatientInfo.objects.filter(email=email)
+        # Guard against cross-org collision: if multiple patients share the
+        # same email, skip the email match and auto-provision a new person
+        # rather than silently linking to the wrong patient.
+        pi = email_qs.first() if email_qs.count() == 1 else None
         if pi:
             PatientUser.objects.get_or_create(
                 identity=identity, defaults={"person": pi.person},
