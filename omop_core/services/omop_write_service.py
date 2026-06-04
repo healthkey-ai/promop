@@ -132,6 +132,7 @@ def _sync_condition(person, patient_info, today: date, changed_data: dict = None
     # concept name (which may differ in casing or be unresolved).
     co._skip_patient_info_refresh = True
     co.save()
+    del co._skip_patient_info_refresh
 
 
 def _sync_demographics(person, patient_info, changed_data: dict = None) -> None:

@@ -3903,7 +3903,11 @@ class DiseasePersistenceTest(_SmartBase):
     # ------------------------------------------------------------------ #
 
     def test_disease_survives_sync_to_omop(self):
-        """disease persists after sync_to_omop runs _sync_condition directly."""
+        """disease persists after sync_to_omop runs _sync_condition directly.
+
+        We verify this by checking that PatientInfo.disease is unchanged
+        immediately after sync_to_omop runs (no extra DB write occurred).
+        """
         from omop_core.services.omop_write_service import sync_to_omop
         from datetime import date
 
