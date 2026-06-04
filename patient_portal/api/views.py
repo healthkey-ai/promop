@@ -35,6 +35,7 @@ from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
 from datetime import datetime
 import csv
+import hashlib
 import json
 import logging
 from io import StringIO
@@ -1718,9 +1719,11 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     person.delete()
                     deleted_count += 1
                 except Person.DoesNotExist:
-                    errors.append(f"Person {person_id} not found")
-                except Exception as e:
-                    errors.append(f"Person {person_id}: {str(e)}")
+                    errors.append("Person not found.")
+                except Exception:
+                    id_hash = hashlib.sha256(str(person_id).encode()).hexdigest()[:12]
+                    logger.warning("bulk_delete: delete failed (id_hash=%s)", id_hash)
+                    errors.append("Delete failed.")
             
             return Response({
                 'success': True,

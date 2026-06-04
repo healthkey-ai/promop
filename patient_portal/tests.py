@@ -3748,3 +3748,51 @@ class ScopedTokenPermissionTest(TestCase):
                              sub="uid4", email="s@test.com", name="S", raw={})
         req = self._req("DELETE", claims, self._user(is_staff=True))
         self.assertTrue(self.permission.has_permission(req, None))
+
+
+# ---------------------------------------------------------------------------
+# Person ID enumeration fix — TODO #4
+# ---------------------------------------------------------------------------
+
+class PersonIdEnumerationTest(FhirUploadBase):
+    """bulk_delete error responses must not echo back submitted person IDs.
+
+    Returning f'Person {person_id} not found' lets an attacker confirm whether
+    a given person_id exists in the system.  Error strings must be generic.
+    """
+
+    def test_nonexistent_person_error_is_generic(self):
+        """DELETE bulk_delete with an unknown ID returns generic 'Person not found.'."""
+        resp = self.client.delete(
+            '/api/patient-info/bulk_delete/',
+            {'person_ids': [999999987]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        errors = resp.data.get('errors', [])
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0], 'Person not found.')
+        # The numeric ID must not appear anywhere in the response body
+        self.assertNotIn('999999987', str(resp.data))
+
+    def test_successful_delete_not_affected(self):
+        """Deleting an existing person still works correctly after the fix."""
+        from omop_core.models import Person as P
+        p = P.objects.create(
+            person_id=78901,
+            given_name='Tmp',
+            family_name='Delete',
+            year_of_birth=1990,
+            gender_source_value='unknown',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        resp = self.client.delete(
+            '/api/patient-info/bulk_delete/',
+            {'person_ids': [78901]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['deleted_count'], 1)
+        self.assertEqual(resp.data['errors'], [])
+        self.assertFalse(P.objects.filter(person_id=78901).exists())
