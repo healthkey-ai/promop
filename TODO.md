@@ -95,17 +95,11 @@
 - If `_ensure_concept()` returns None for required concepts, the FK assignment causes an `IntegrityError` with a confusing traceback.
 - **Action:** Add explicit null checks and return 503 with a clear message.
 
-#### #17 Email fallback in _resolve_person_id can match wrong patient
-- **Severity:** medium / drf
-- `patient_portal/api/lab_results/views.py:97-104`
-- Falls back to `PatientInfo.objects.filter(email=...).first()`. Email is not unique — could match a patient from a different organization.
-- **Action:** Add `.filter(organization=get_request_org(request))` or add a unique constraint on email.
+#### ~~#17 Email fallback in _resolve_person_id can match wrong patient~~ ✓ FIXED
+- Email fallback now disabled for non-superuser users without org scope; org-filtered when org present; superusers retain cross-org access.
 
-#### #18 SyncViewTest uses superuser, masking authorization bugs
-- **Severity:** medium / testing
-- `patient_portal/api/lab_results/tests.py:96-99`
-- All core sync tests use a superuser, so `can_access_patient()` always returns True. Authorization path never exercised.
-- **Action:** Add sync tests with a non-superuser identity that has self-access (PatientUser link).
+#### ~~#18 SyncViewTest uses superuser, masking authorization bugs~~ ✓ FIXED
+- Added `SyncNonSuperuserTest` (3 tests: own-data denied, other-person denied, nonexistent denied) and `SyncOnBehalfOfTest` (5 tests covering valid actor, actor-not-found 403, actor-no-access 403, non-superuser 403, superuser-without-actor succeeds).
 
 ### Low
 

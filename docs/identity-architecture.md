@@ -327,10 +327,14 @@ class PatientUser(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 ```
 
-- Person resolution: `Identity -> PatientUser -> Person`
+- Person resolution (write path / sync): `(actor_iss, actor_sub)` → Identity →
+  `resolve_or_create_person()` auto-provisions Person + PatientInfo + PatientUser
+- Person resolution (read path / API): `Identity → PatientUser → Person` (primary).
+  Email fallback on `PatientInfo.email` is restricted to prevent cross-org data
+  leaks: org-scoped requests filter by org; non-superusers without org scope
+  cannot use the email fallback; superusers retain cross-org access.
 - `PatientInfo.email` kept as clinical contact info (demographics, not auth)
 - `_ensure_person()` auto-provisions Person + PatientInfo + PatientUser on first login
-- Sync endpoint resolves `(actor_iss, actor_sub)` to person_id, auto-provisioning if needed
 
 ### Template for New Services
 
