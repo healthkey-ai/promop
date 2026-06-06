@@ -3,6 +3,16 @@
 from django.db import migrations, models
 
 
+def backfill_sct_eligibility(apps, schema_editor):
+    """Set sct_eligibility=[] on any rows where it is NULL (existing rows pre-migration)."""
+    PatientInfo = apps.get_model('omop_core', 'PatientInfo')
+    PatientInfo.objects.filter(sct_eligibility__isnull=True).update(sct_eligibility=[])
+
+
+def reverse_noop(apps, schema_editor):
+    pass
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -61,4 +71,5 @@ class Migration(migrations.Migration):
                 null=True,
             ),
         ),
+        migrations.RunPython(backfill_sct_eligibility, reverse_noop),
     ]

@@ -226,7 +226,37 @@ class Command(BaseCommand):
         ecog_choices = [0, 1, 2, 3, 4]
         ecog_weights = [30, 40, 20, 8, 2]  # Most patients have ECOG 0-2
         ecog = random.choices(ecog_choices, weights=ecog_weights)[0]
-        
+
+        # MM-specific SCT extensions (~70% of patients have prior SCT history)
+        sct_extensions = []
+        if random.random() < 0.70:
+            sct_types = random.choice([
+                ['autologous SCT'],
+                ['allogeneic SCT'],
+                ['tandem SCT'],
+                ['autologous SCT', 'tandem SCT'],
+            ])
+            days_ago = random.randint(365, 365 * 10)
+            from datetime import date as _date, timedelta as _td
+            sct_date = (_date.today() - _td(days=days_ago)).isoformat()
+            auto_choice = random.choice(['eligible for autologous SCT', 'ineligible for autologous SCT'])
+            allo_choice = random.choice(['eligible for allogeneic SCT', 'ineligible for allogeneic SCT'])
+            eligibility = [auto_choice] if random.random() < 0.5 else [auto_choice, allo_choice]
+            sct_extensions = [
+                {
+                    'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-date',
+                    'valueString': sct_date,
+                },
+                {
+                    'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
+                    'valueString': ','.join(sct_types),
+                },
+                {
+                    'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-eligibility',
+                    'valueString': ','.join(eligibility),
+                },
+            ]
+
         return {
             "resourceType": "Patient",
             "id": str(patient_id),
@@ -270,7 +300,7 @@ class Command(BaseCommand):
                     "url": "http://hl7.org/fhir/StructureDefinition/patient-ecog-performance-status",
                     "valueInteger": ecog
                 }
-            ],
+            ] + sct_extensions,
             "telecom": [{
                 "system": "phone",
                 "value": phone,

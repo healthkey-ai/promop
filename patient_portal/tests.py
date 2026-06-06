@@ -25,6 +25,7 @@ from omop_core.models import (
     Person, PatientInfo, ProvenanceRecord,
     ConditionOccurrence, DrugExposure, Measurement, ProcedureOccurrence,
     Relationship, ConceptRelationship, ConceptAncestor,
+    SctEligibility,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 
@@ -4805,3 +4806,143 @@ class SurveyCrossOrgTest(MultiTenantIsolationTest):
         )
         self.assertEqual(resp.status_code, 405,
                          'PUT must be disabled on survey responses')
+
+
+# ---------------------------------------------------------------------------
+# SCT fields tests (PR #115)
+# ---------------------------------------------------------------------------
+
+class SctEligibilityVocabTest(FhirUploadBase):
+    """Verify the sct-eligibility vocabulary endpoint returns expected values."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        for code, title in [
+            ('eligibleAuto',   'eligible for autologous SCT'),
+            ('eligibleAllo',   'eligible for allogeneic SCT'),
+            ('ineligibleAuto', 'ineligible for autologous SCT'),
+            ('ineligibleAllo', 'ineligible for allogeneic SCT'),
+        ]:
+            SctEligibility.objects.get_or_create(code=code, defaults={'title': title})
+
+    def test_vocab_endpoint_returns_four_values(self):
+        resp = self.client.get('/api/vocabularies/sct-eligibility/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data), 4)
+
+    def test_vocab_codes_present(self):
+        resp = self.client.get('/api/vocabularies/sct-eligibility/')
+        codes = {item['code'] for item in resp.data}
+        self.assertIn('eligibleAuto', codes)
+        self.assertIn('ineligibleAllo', codes)
+
+
+class SctFieldsModelTest(FhirUploadBase):
+    """Verify sct_date, sct_eligibility, and stem_cell_transplant_history persist correctly."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from datetime import date
+        cls.person = Person.objects.create(person_id=88001)
+        cls.patient = PatientInfo.objects.create(
+            person=cls.person,
+            disease='Multiple Myeloma',
+            stem_cell_transplant_history=['autologous SCT'],
+            sct_date=date(2022, 5, 10),
+            sct_eligibility=['eligible for autologous SCT'],
+        )
+
+    def test_sct_fields_saved_to_db(self):
+        p = PatientInfo.objects.get(pk=self.patient.pk)
+        self.assertEqual(p.stem_cell_transplant_history, ['autologous SCT'])
+        self.assertEqual(str(p.sct_date), '2022-05-10')
+        self.assertEqual(p.sct_eligibility, ['eligible for autologous SCT'])
+
+    def test_sct_fields_in_api_response(self):
+        # retrieve uses person_id in URL (ViewSet design); response is wrapped in patient_info
+        resp = self.client.get(f'/api/patient-info/{self.person.person_id}/')
+        self.assertEqual(resp.status_code, 200)
+        pi_data = resp.data['patient_info']
+        self.assertIn('sct_date', pi_data)
+        self.assertIn('sct_eligibility', pi_data)
+        self.assertIn('stem_cell_transplant_history', pi_data)
+        self.assertEqual(pi_data['sct_date'], '2022-05-10')
+
+    def test_sct_date_future_rejected(self):
+        from datetime import date, timedelta
+        future = (date.today() + timedelta(days=30)).isoformat()
+        resp = self.client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'sct_date': future},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('sct_date', resp.data)
+
+    def test_sct_eligibility_patch(self):
+        resp = self.client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'sct_eligibility': ['eligible for autologous SCT', 'ineligible for allogeneic SCT']},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.patient.refresh_from_db()
+        self.assertIn('eligible for autologous SCT', self.patient.sct_eligibility)
+
+
+class SctFhirUploadTest(FhirUploadBase):
+    """Verify that SCT extensions in a FHIR Patient resource are mapped to PatientInfo."""
+
+    def _upload_sct_bundle(self):
+        """FHIR bundle with SCT extensions on the Patient resource."""
+        patient_id = 'test-patient-sct-001'
+        bundle = {
+            'resourceType': 'Bundle',
+            'type': 'collection',
+            'entry': [
+                {
+                    'resource': {
+                        'resourceType': 'Patient',
+                        'id': patient_id,
+                        'name': [{'family': 'Jones', 'given': ['Bob']}],
+                        'gender': 'male',
+                        'birthDate': '1960-07-20',
+                        'extension': [
+                            {
+                                'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-date',
+                                'valueString': '2021-03-15',
+                            },
+                            {
+                                'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
+                                'valueString': 'autologous SCT,tandem SCT',
+                            },
+                            {
+                                'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-eligibility',
+                                'valueString': 'eligible for autologous SCT',
+                            },
+                        ],
+                    }
+                },
+            ],
+        }
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'sct_bundle.json'
+        return self.client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+        )
+
+    def test_sct_extensions_mapped_to_patient_info(self):
+        resp = self._upload_sct_bundle()
+        self.assertIn(resp.status_code, [200, 201],
+                      msg=f'Upload failed: {getattr(resp, "data", resp.content)}')
+        pi = PatientInfo.objects.filter(person__family_name='Jones', person__given_name='Bob').first()
+        self.assertIsNotNone(pi, 'PatientInfo not created for Bob Jones')
+        self.assertEqual(str(pi.sct_date), '2021-03-15')
+        self.assertIn('autologous SCT', pi.stem_cell_transplant_history)
+        self.assertIn('tandem SCT', pi.stem_cell_transplant_history)
+        self.assertIn('eligible for autologous SCT', pi.sct_eligibility)

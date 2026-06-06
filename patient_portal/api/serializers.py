@@ -88,6 +88,11 @@ class PatientInfoSerializer(serializers.ModelSerializer):
             return age
         return None
 
+    def validate_sct_date(self, value):
+        if value and value > date.today():
+            raise serializers.ValidationError("SCT date cannot be in the future.")
+        return value
+
 # ---------------------------------------------------------------------------
 # OMOP clinical event serializers
 # ---------------------------------------------------------------------------

@@ -533,6 +533,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     ecog = None
                     cytogenetics_str = None
                     measurable_disease_imwg = None
+                    sct_date_str = None
+                    sct_history_str = None
+                    sct_eligibility_str = None
                     
                     # Explicit extension URL → (value_key, parser) registry.
                     # Using exact URL matching avoids false positives from substring checks.
@@ -557,6 +560,12 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             ('valueString', lambda e: e.get('valueString')),
                         'http://ctomop.io/fhir/StructureDefinition/mm-measurable-disease-imwg':
                             ('valueBoolean', lambda e: e.get('valueBoolean')),
+                        'http://ctomop.io/fhir/StructureDefinition/mm-sct-date':
+                            ('valueString', lambda e: e.get('valueString')),
+                        'http://ctomop.io/fhir/StructureDefinition/mm-sct-history':
+                            ('valueString', lambda e: e.get('valueString')),
+                        'http://ctomop.io/fhir/StructureDefinition/mm-sct-eligibility':
+                            ('valueString', lambda e: e.get('valueString')),
                     }
                     ext_results = {}
                     for ext in patient_resource.get('extension', []):
@@ -576,6 +585,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     ecog            = ext_results.get(f'{base}ecog-performance-status')
                     cytogenetics_str        = ext_results.get(f'{base}mm-cytogenetic-markers')
                     measurable_disease_imwg = ext_results.get(f'{base}mm-measurable-disease-imwg')
+                    sct_date_str            = ext_results.get(f'{base}mm-sct-date')
+                    sct_history_str         = ext_results.get(f'{base}mm-sct-history')
+                    sct_eligibility_str     = ext_results.get(f'{base}mm-sct-eligibility')
                     
                     # Get gender concept from FHIR
                     gender_concept = get_gender_concept(patient_resource.get('gender', ''))
@@ -1565,6 +1577,20 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         _patch['cytogenic_markers'] = cytogenetics_str
                     if measurable_disease_imwg is not None:
                         _patch['measurable_disease_imwg'] = measurable_disease_imwg
+                    if sct_date_str:
+                        try:
+                            from datetime import date as _date
+                            _patch['sct_date'] = _date.fromisoformat(sct_date_str)
+                        except ValueError:
+                            pass
+                    if sct_history_str:
+                        _patch['stem_cell_transplant_history'] = [
+                            t.strip() for t in sct_history_str.split(',') if t.strip()
+                        ]
+                    if sct_eligibility_str:
+                        _patch['sct_eligibility'] = [
+                            t.strip() for t in sct_eligibility_str.split(',') if t.strip()
+                        ]
                     if tumor_size:
                         _patch['tumor_size'] = tumor_size
                     if lymph_node_status:
