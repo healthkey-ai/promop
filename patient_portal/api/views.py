@@ -2197,14 +2197,5 @@ class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.
         return qs
 
     def partial_update(self, request, *args, **kwargs):
-        instance = self.get_object()
-        # Merge values and values_dates dicts rather than replacing them wholesale
-        data = request.data.copy()
-        if 'values' in data and isinstance(data['values'], dict):
-            data['values'] = {**(instance.values or {}), **data['values']}
-        if 'values_dates' in data and isinstance(data['values_dates'], dict):
-            data['values_dates'] = {**(instance.values_dates or {}), **data['values_dates']}
-        serializer = self.get_serializer(instance, data=data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
-        return Response(serializer.data)
+        kwargs['partial'] = True
+        return self.update(request, *args, **kwargs)
