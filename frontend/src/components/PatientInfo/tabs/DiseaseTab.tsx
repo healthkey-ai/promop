@@ -206,6 +206,7 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
 
 function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
   const { source: progressionSource } = useVocabulary('disease-progression', 'title');
+  const { options: sctTypeOptions, source: sctTypeSource } = useVocabulary('stem-cell-transplant', 'title');
   const { options: sctEligibilityOptions, source: sctEligibilitySource } = useVocabulary('sct-eligibility', 'title');
 
   return (
@@ -220,7 +221,7 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
           <Field label="Measurable Disease (IMWG)" name="measurable_disease_imwg" type="boolean" value={formData?.measurable_disease_imwg} onChange={onChange} />
           <Field label="MRD Status" name="mrd_status" type="select" value={formData?.mrd_status} options={MRD_STATUS_OPTIONS} onChange={onChange} />
           <div className="sm:col-span-2">
-            <Field label="Prior SCT Type" name="stem_cell_transplant_history" type="multiselect" value={formData?.stem_cell_transplant_history} options={STEM_CELL_TRANSPLANT_OPTIONS} onChange={onChange} />
+            <Field label="Prior SCT Type" name="stem_cell_transplant_history" type="multiselect" value={formData?.stem_cell_transplant_history} options={sctTypeOptions.length ? sctTypeOptions.map((o: { value: string }) => o.value) : STEM_CELL_TRANSPLANT_OPTIONS} onChange={onChange} vocabSource={sctTypeSource} />
           </div>
           <Field label="SCT Date" name="sct_date" type="date" value={formData?.sct_date} onChange={onChange} />
           <div className="sm:col-span-2">
