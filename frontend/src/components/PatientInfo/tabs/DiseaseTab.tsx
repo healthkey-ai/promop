@@ -11,7 +11,7 @@ import {
   YES_NO_OPTIONS, ER_OPTIONS, PR_OPTIONS, HER2_OPTIONS, HR_OPTIONS, HRD_OPTIONS,
   DISEASE_OPTIONS,
   FLIPI_RISK_OPTIONS, GELF_OPTIONS, FL_TUMOR_GRADE_OPTIONS,
-  ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS,
+  ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS,
   MRD_STATUS_OPTIONS, CYTOGENETIC_RISK_OPTIONS,
   BINET_STAGE_OPTIONS, TUMOR_BURDEN_OPTIONS, DISEASE_ACTIVITY_OPTIONS,
   RICHTER_TRANSFORMATION_OPTIONS, PROTEIN_EXPRESSION_OPTIONS,
@@ -225,7 +225,7 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
           </div>
           <Field label="SCT Date" name="sct_date" type="date" value={formData?.sct_date} onChange={onChange} />
           <div className="sm:col-span-2">
-            <Field label="SCT Eligibility" name="sct_eligibility" type="multiselect" value={formData?.sct_eligibility} options={sctEligibilityOptions.length ? sctEligibilityOptions.map((o: { value: string }) => o.value) : []} onChange={onChange} vocabSource={sctEligibilitySource} />
+            <Field label="SCT Eligibility" name="sct_eligibility" type="multiselect" value={formData?.sct_eligibility} options={sctEligibilityOptions.length ? sctEligibilityOptions.map((o: { value: string }) => o.value) : SCT_ELIGIBILITY_OPTIONS} onChange={onChange} vocabSource={sctEligibilitySource} />
           </div>
         </div>
       </Section>

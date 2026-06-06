@@ -114,6 +114,12 @@ export const STEM_CELL_TRANSPLANT_OPTIONS = [
   'allogeneic SCT',
   'tandem SCT',
 ];
+export const SCT_ELIGIBILITY_OPTIONS = [
+  'eligible for autologous SCT',
+  'eligible for allogeneic SCT',
+  'ineligible for autologous SCT',
+  'ineligible for allogeneic SCT',
+];
 export const CYTOGENETIC_RISK_OPTIONS = ['Standard Risk', 'High Risk', 'Very High Risk'];
 export const THERAPY_OUTCOME_OPTIONS = [
   'Complete Response (CR)', 'Partial Response (PR)', 'Stable Disease (SD)', 'Progressive Disease (PD)',

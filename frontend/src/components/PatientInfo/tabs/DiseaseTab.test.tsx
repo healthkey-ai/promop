@@ -15,7 +15,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import DiseaseTab from './DiseaseTab';
 import { useVocabulary } from '@/hooks/useVocabulary';
-import { STEM_CELL_TRANSPLANT_OPTIONS } from '../patientConstants';
+import { STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS } from '../patientConstants';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -257,11 +257,11 @@ describe('MyelomaSection — SCT fields', () => {
     expect(onChange).toHaveBeenCalledWith('sct_eligibility', ['eligible for allogeneic SCT']);
   });
 
-  it('renders no options for SCT eligibility when vocab is empty', () => {
+  it('renders SCT_ELIGIBILITY_OPTIONS as fallback when vocab is empty', () => {
     setupVocabMock({ sctEligibilityEmpty: true });
     renderMyeloma();
-    expect(
-      screen.queryByTestId('ms-opt-eligible for autologous SCT'),
-    ).not.toBeInTheDocument();
+    SCT_ELIGIBILITY_OPTIONS.forEach((opt) => {
+      expect(screen.getByTestId(`ms-opt-${opt}`)).toBeInTheDocument();
+    });
   });
 });

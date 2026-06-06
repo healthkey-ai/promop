@@ -150,6 +150,36 @@ _SCT_VALUES = [
     'relapsedPostASCT', 'completedTandemSCT', 'completedAllogeneicSCT',
 ]
 
+# Maps the old internal sct_history code to the new StemCellTransplant vocabulary
+# strings (comma-joined for the FHIR valueString, split by the upload handler).
+_SCT_HISTORY_TO_VOCAB = {
+    'completedASCT':          ['autologous SCT'],
+    'relapsedPostASCT':       ['autologous SCT'],
+    'postASCT':               ['autologous SCT'],
+    'completedTandemSCT':     ['autologous SCT', 'tandem SCT'],
+    'completedAllogeneicSCT': ['allogeneic SCT'],
+    # Candidates/ineligible have no completed transplant
+    'preASCT':          [],
+    'eligibleForASCT':  [],
+    'ineligibleForASCT': [],
+    'neverReceivedSCT': [],
+    'sctIneligible':    [],
+}
+
+# Maps old sct_history code to SctEligibility vocab strings.
+_SCT_HISTORY_TO_ELIGIBILITY = {
+    'completedASCT':          ['eligible for autologous SCT'],
+    'relapsedPostASCT':       ['eligible for autologous SCT'],
+    'postASCT':               ['eligible for autologous SCT'],
+    'completedTandemSCT':     ['eligible for autologous SCT'],
+    'completedAllogeneicSCT': ['eligible for allogeneic SCT'],
+    'preASCT':                ['eligible for autologous SCT'],
+    'eligibleForASCT':        ['eligible for autologous SCT'],
+    'ineligibleForASCT':      ['ineligible for autologous SCT'],
+    'neverReceivedSCT':       ['ineligible for autologous SCT'],
+    'sctIneligible':          ['ineligible for autologous SCT'],
+}
+
 _ETHNICITIES = ['Caucasian/White', 'Hispanic/Latino', 'Black/African-American', 'Asian', 'Native American']
 _ETHNICITY_WEIGHTS = [65, 12, 15, 6, 2]  # Approximate US MM demographics
 
@@ -351,6 +381,14 @@ class Command(BaseCommand):
             sct = _weighted_choice(['relapsedPostASCT', 'completedASCT', 'ineligibleForASCT', 'sctIneligible', 'completedTandemSCT'],
                                    [35, 25, 20, 10, 10])
         p['sct_history'] = sct
+        p['sct_types']       = _SCT_HISTORY_TO_VOCAB.get(sct, [])
+        p['sct_eligibility'] = _SCT_HISTORY_TO_ELIGIBILITY.get(sct, [])
+        # Only patients who actually completed a transplant get a date
+        if p['sct_types']:
+            days_ago = random.randint(365, 365 * 8)
+            p['sct_date'] = (datetime.today() - timedelta(days=days_ago)).strftime('%Y-%m-%d')
+        else:
+            p['sct_date'] = None
 
         # Refractory status
         refractory = []
@@ -518,7 +556,11 @@ class Command(BaseCommand):
                  'valueQuantity': {'value': p['heart_rate'], 'unit': 'beats/min'}},
                 # MM-specific extensions
                 {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
-                 'valueString': p['sct_history']},
+                 'valueString': ','.join(p['sct_types'])},
+                *([{'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-date',
+                    'valueString': p['sct_date']}] if p['sct_date'] else []),
+                {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-eligibility',
+                 'valueString': ','.join(p['sct_eligibility'])},
                 {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-cytogenetic-markers',
                  'valueString': ','.join(p['cytogenetics']) if p['cytogenetics'] else ''},
                 {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-refractory-status',
