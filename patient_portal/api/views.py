@@ -603,9 +603,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             month_of_birth=month_of_birth,
                             day_of_birth=day_of_birth,
                             race_concept=None,
-                            race_source_value=race or 'unknown',
+                            race_source_value=race or None,
                             ethnicity_concept=None,
-                            ethnicity_source_value=ethnicity or 'unknown',
+                            ethnicity_source_value=ethnicity or None,
                             given_name=given_name,
                             family_name=family_name,
                         )
@@ -2109,7 +2109,7 @@ class SurveyViewSet(viewsets.ModelViewSet):
         return qs
 
 
-class PatientSurveyResponseViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     """Patient survey responses — one record per (person, survey) pair.
 
     Filter by person: GET /api/survey-responses/?person_id=42
@@ -2125,6 +2125,15 @@ class PatientSurveyResponseViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
         survey_id = self.request.query_params.get('survey')
         if survey_id:
             qs = qs.filter(survey_id=survey_id)
+        # Guard: unfiltered list leaks all responses when no org context.
+        # Require ?person_id= or staff/superuser for list actions.
+        if self.action == 'list':
+            org = get_request_org(self.request)
+            person_id = self.request.query_params.get('person_id')
+            user = self.request.user
+            is_privileged = user and (getattr(user, 'is_staff', False) or getattr(user, 'is_superuser', False))
+            if org is None and not person_id and not is_privileged:
+                return qs.none()
         return qs
 
     def partial_update(self, request, *args, **kwargs):
@@ -2132,11 +2141,9 @@ class PatientSurveyResponseViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
         # Merge values and values_dates dicts rather than replacing them wholesale
         data = request.data.copy()
         if 'values' in data and isinstance(data['values'], dict):
-            merged = {**(instance.values or {}), **data['values']}
-            data['values'] = merged
+            data['values'] = {**(instance.values or {}), **data['values']}
         if 'values_dates' in data and isinstance(data['values_dates'], dict):
-            merged_dates = {**(instance.values_dates or {}), **data['values_dates']}
-            data['values_dates'] = merged_dates
+            data['values_dates'] = {**(instance.values_dates or {}), **data['values_dates']}
         serializer = self.get_serializer(instance, data=data, partial=True)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)

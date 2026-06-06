@@ -222,6 +222,11 @@ class SurveySerializer(serializers.ModelSerializer):
                   'status', 'disease', 'pages', 'estimated_minutes', 'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at']
 
+    def validate_pages(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError('pages must be a list.')
+        return value
+
 
 class PatientSurveyResponseSerializer(serializers.ModelSerializer):
     survey_title = serializers.CharField(source='survey.title', read_only=True)
@@ -234,3 +239,21 @@ class PatientSurveyResponseSerializer(serializers.ModelSerializer):
                   'started_at', 'completed_at', 'consent_date', 'consent_signature',
                   'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at']
+
+    def validate_values(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('values must be a dict.')
+        return value
+
+    def validate_values_dates(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('values_dates must be a dict.')
+        return value
+
+    def update(self, instance, validated_data):
+        # Merge incoming values/values_dates into existing dicts (autosave support).
+        for field in ('values', 'values_dates'):
+            if field in validated_data:
+                current = getattr(instance, field) or {}
+                validated_data[field] = {**current, **validated_data[field]}
+        return super().update(instance, validated_data)

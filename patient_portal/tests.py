@@ -4430,6 +4430,10 @@ class SurveyAPITest(_SmartBase):
 
     def test_patch_response_autosave(self):
         """PATCH merges new answers without overwriting existing ones."""
+        from omop_core.models import PatientSurveyResponse
+        # Seed two fields so we can verify the pre-existing one survives the PATCH.
+        self.response.values = {'fatigue': 3, 'pain': 5}
+        self.response.save()
         res = self.write_client.patch(
             f'/api/survey-responses/{self.response.id}/',
             {'values': {'fatigue': 9}, 'percent_complete': 100},
@@ -4437,6 +4441,7 @@ class SurveyAPITest(_SmartBase):
         )
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data['values']['fatigue'], 9)
+        self.assertEqual(res.data['values']['pain'], 5, 'pre-existing key should survive merge')
         self.assertEqual(res.data['percent_complete'], 100)
 
     def test_response_not_writable_with_read_token(self):
