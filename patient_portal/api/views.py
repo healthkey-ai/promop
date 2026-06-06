@@ -2103,9 +2103,9 @@ class SurveyViewSet(viewsets.ModelViewSet):
         disease = self.request.query_params.get('disease')
         if disease is not None:
             qs = qs.filter(disease=disease)
-        status = self.request.query_params.get('status')
-        if status is not None:
-            qs = qs.filter(status=status)
+        status_filter = self.request.query_params.get('status')
+        if status_filter is not None:
+            qs = qs.filter(status=status_filter)
         return qs
 
 

@@ -12,7 +12,7 @@ import socket
 import sys
 from pathlib import Path
 
-from django.contrib.auth.models import User
+from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections, connections
 from django.test import RequestFactory
@@ -97,7 +97,7 @@ class Command(BaseCommand):
         # Get a user to authenticate requests — do this before the loop
         close_old_connections()
         try:
-            user = User.objects.get(username=options['username'])
+            user = get_user_model().objects.get(username=options['username'])
         except User.DoesNotExist:
             raise CommandError(
                 f"User '{options['username']}' not found. "
