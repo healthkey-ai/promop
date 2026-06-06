@@ -1579,10 +1579,14 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         _patch['measurable_disease_imwg'] = measurable_disease_imwg
                     if sct_date_str:
                         try:
-                            from datetime import date as _date
-                            _patch['sct_date'] = _date.fromisoformat(sct_date_str)
+                            parsed_sct_date = datetime.strptime(sct_date_str, '%Y-%m-%d').date()
+                            if parsed_sct_date <= datetime.today().date():
+                                _patch['sct_date'] = parsed_sct_date
                         except ValueError:
-                            pass
+                            logger.warning(
+                                "Ignoring invalid mm-sct-date '%s' for patient %s",
+                                sct_date_str, fhir_patient_id,
+                            )
                     if sct_history_str:
                         _patch['stem_cell_transplant_history'] = [
                             t.strip() for t in sct_history_str.split(',') if t.strip()

@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react';
+import { useMemo } from 'react';
 import { VocabSource } from '@/hooks/useVocabulary';
 import { VocabularyTooltip } from '../UI/VocabularyTooltip';
 import SelectControl from './controls/SelectControl';
@@ -53,7 +53,8 @@ export default function Field({
     return `${selectedLabels[0]}, ${selectedLabels[1]} +${selectedLabels.length - 2} more`;
   }, [selectedLabels]);
 
-  const isStringBackedRef = useRef<boolean>(value == null || typeof value === 'string');
+  // Derived per-render so it never goes stale when value changes from null → array
+  const isStringBacked = value == null || typeof value === 'string';
 
   const formatDateForInput = (dateString: string) => {
     if (!dateString) return '';
@@ -90,7 +91,7 @@ export default function Field({
             onChange={(nextValues) => {
               onChange(
                 name,
-                isStringBackedRef.current ? (nextValues as string[]).join(', ') : nextValues
+                isStringBacked ? (nextValues as string[]).join(', ') : nextValues
               );
             }}
           />

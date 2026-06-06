@@ -60,19 +60,30 @@ class Command(BaseCommand):
         qs = PatientInfo.objects.filter(disease='Multiple Myeloma')
         if not overwrite:
             # JSONField with default=list stores [] not NULL for new rows; match both.
-            qs = qs.filter(stem_cell_transplant_history=[]) | qs.filter(stem_cell_transplant_history__isnull=True)
+            from django.db.models import Q
+            qs = qs.filter(Q(stem_cell_transplant_history=[]) | Q(stem_cell_transplant_history__isnull=True))
 
         total = qs.count()
         if total == 0:
             self.stdout.write('No eligible MM PatientInfo records found.')
             return
 
+        # Hoist vocab lookups outside the loop — they're immutable during this command run.
+        sct_types_list = _get_sct_types()
+        all_eligibility = list(SctEligibility.objects.values_list('title', flat=True))
+        auto_options = [t for t in all_eligibility if 'autologous' in t] or [
+            'eligible for autologous SCT', 'ineligible for autologous SCT'
+        ]
+        allo_options = [t for t in all_eligibility if 'allogeneic' in t] or [
+            'eligible for allogeneic SCT', 'ineligible for allogeneic SCT'
+        ]
+
         updated = 0
         for pi in qs.iterator():
             has_sct = random.random() < 0.70  # 70% of MM patients have prior SCT
 
             if has_sct:
-                sct_types = [random.choice(_get_sct_types())]
+                sct_types = [random.choice(sct_types_list)]
                 # ~30% chance of tandem adds a second type
                 if sct_types[0] == 'tandem SCT' and random.random() < 0.3:
                     sct_types = ['autologous SCT', 'tandem SCT']  # tandem always paired with autologous
@@ -82,7 +93,9 @@ class Command(BaseCommand):
                 pi.stem_cell_transplant_history = []
                 pi.sct_date = None
 
-            pi.sct_eligibility = _random_eligibility()
+            auto = random.choice(auto_options)
+            allo = random.choice(allo_options)
+            pi.sct_eligibility = [auto] if random.random() < 0.5 else [auto, allo]
             pi.save(update_fields=['stem_cell_transplant_history', 'sct_date', 'sct_eligibility'])
             updated += 1
 
