@@ -481,6 +481,10 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     if patient_id in patients_data:
                         patients_data[patient_id]['medications'].append(resource)
             
+            # Hoist SCT vocabulary sets for FHIR upload validation (avoids N+1 per patient).
+            _allowed_sct_titles = set(StemCellTransplant.objects.values_list('title', flat=True))
+            _allowed_elig_titles = set(SctEligibility.objects.values_list('title', flat=True))
+
             # Process each patient
             for fhir_patient_id, data in patients_data.items():
                 try:
@@ -1583,17 +1587,20 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             if parsed_sct_date <= datetime.today().date():
                                 _patch['sct_date'] = parsed_sct_date
                         except ValueError:
+                            _id_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
                             logger.warning(
-                                "Ignoring invalid mm-sct-date '%s' for patient %s",
-                                sct_date_str, fhir_patient_id,
+                                "Ignoring invalid mm-sct-date for patient (id_hash=%s)",
+                                _id_hash,
                             )
                     if sct_history_str:
                         _patch['stem_cell_transplant_history'] = [
-                            t.strip() for t in sct_history_str.split(',') if t.strip()
+                            t.strip() for t in sct_history_str.split(',')
+                            if t.strip() and t.strip() in _allowed_sct_titles
                         ]
                     if sct_eligibility_str:
                         _patch['sct_eligibility'] = [
-                            t.strip() for t in sct_eligibility_str.split(',') if t.strip()
+                            t.strip() for t in sct_eligibility_str.split(',')
+                            if t.strip() and t.strip() in _allowed_elig_titles
                         ]
                     if tumor_size:
                         _patch['tumor_size'] = tumor_size
@@ -1739,10 +1746,14 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         created_count += 1
                     else:
                         updated_count += 1
-                    logger.info(f"Successfully {'created' if person_is_new else 'updated'} patient {fhir_patient_id} ({person.person_id})")
+                    _fhir_id_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
+                    logger.info("Successfully %s patient (id_hash=%s, person_id=%s)",
+                                'created' if person_is_new else 'updated',
+                                _fhir_id_hash, person.person_id)
                     
                 except Exception as e:
-                    errors.append(f"Patient {fhir_patient_id}: {str(e)}")
+                    _err_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
+                    errors.append(f"Patient (id_hash={_err_hash}): {str(e)}")
             
             return Response({
                 'success': True,

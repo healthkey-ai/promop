@@ -33,8 +33,12 @@ This file tells LLMs (Claude, Copilot, etc.) how to work on this codebase consis
 | React UI tabs | `frontend/src/components/PatientInfo/` — `GeneralTab.tsx`, `LabsTab.tsx`, `MultipleMyelomaTab.tsx`, `FollicularLymphomaTab.tsx` |
 | Patient detail page | `frontend/src/components/Patient/PatientDetail.tsx` |
 | API client | `frontend/src/utils/api.ts` and `frontend/src/api/axios.ts` |
-| FHIR bundle generator | `omop_core/management/commands/generate_fhir_bundle.py` |
+| FHIR bundle generator (breast cancer) | `omop_core/management/commands/generate_fhir_bundle.py` |
+| FHIR bundle generator (myeloma) | `omop_core/management/commands/generate_mm_fhir_bundle.py` |
 | FHIR upload loader | `patient_portal/api/views.py` — `upload_fhir_bundle` function/view |
+| BQ loader (HealthTree) | `omop_core/management/commands/load_from_healthtree_bq.py` |
+| SCT sample data seeder | `omop_core/management/commands/populate_sct_sample_data.py` |
+| SCT migration audit | `omop_core/management/commands/audit_sct_history.py` |
 | Backend tests | `omop_core/tests.py`, `patient_portal/tests.py` |
 | React tests | `frontend/src/App.test.tsx`, `frontend/src/components/**/*.test.tsx` |
 
@@ -421,6 +425,149 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -d ctomop_test
 **Test placement:**
 - Backend feature tests → `patient_portal/tests.py` (or `omop_core/tests.py` for model-level logic)
 - New test classes should inherit the appropriate base (`_SmartBase` for OAuth-authenticated tests, `TestCase` for pure model/logic tests)
+
+---
+
+## SCT Fields — Multiple Myeloma (PR #115)
+
+Three fields were added to `PatientInfo` for stem cell transplant tracking:
+
+| Field | Type | Vocabulary |
+|---|---|---|
+| `stem_cell_transplant_history` | `JSONField` (string list) | `StemCellTransplant` — 3 values: `autologous SCT`, `allogeneic SCT`, `tandem SCT` |
+| `sct_date` | `DateField` | — (free date, validated: no future dates) |
+| `sct_eligibility` | `JSONField` (string list) | `SctEligibility` — 4 values: `eligible/ineligible for autologous/allogeneic SCT` |
+
+### Vocabulary tables
+
+Both vocabularies live in `omop_core/models.py` as `VocabularyLookup` subclasses and are served via the `/api/vocabularies/` endpoint:
+
+- `/api/vocabularies/stem-cell-transplant/` — `StemCellTransplant`
+- `/api/vocabularies/sct-eligibility/` — `SctEligibility`
+
+### FHIR extensions (MM bundle)
+
+The MM FHIR generator (`generate_mm_fhir_bundle.py`) emits three extensions on the `Patient` resource. The upload handler (`views.py`) reads them back:
+
+| Extension URL suffix | Maps to field |
+|---|---|
+| `mm-sct-history` | `stem_cell_transplant_history` (comma-joined → split on ingest) |
+| `mm-sct-date` | `sct_date` (ISO date string, future dates silently dropped on ingest) |
+| `mm-sct-eligibility` | `sct_eligibility` (comma-joined → split on ingest) |
+
+On ingest, both comma-split lists are filtered against the live vocabulary tables before storing — unrecognized tokens are discarded.
+
+### BigQuery loader
+
+`load_from_healthtree_bq.py` maps the `has_transplant` / `procedures` BQ columns to vocabulary strings via `_infer_sct_type(procedures)`:
+
+- contains `'allogeneic'` or `'allo'` → `'allogeneic SCT'`
+- contains `'tandem'` → `'tandem SCT'`
+- anything else / empty → `'autologous SCT'` (default for MM)
+
+Multiple transplant lines of the same type are deduplicated.
+
+### Serializer validation
+
+`PatientInfoSerializer` enforces two rules:
+
+- `validate_sct_date` — rejects future dates with HTTP 400
+- `validate_sct_eligibility` — rejects contradictory pairs (e.g. `eligible` + `ineligible` for the same transplant type)
+
+### Seeding sample data
+
+```bash
+# Seed random SCT data onto MM PatientInfo records that have no SCT data yet
+DATABASE_URL="..." python manage.py populate_sct_sample_data
+
+# Overwrite existing values
+DATABASE_URL="..." python manage.py populate_sct_sample_data --overwrite
+```
+
+---
+
+## Rule: Data Migration Safety (Vocabulary Remapping)
+
+When a migration remaps or truncates a controlled-vocabulary JSONField, follow this checklist **before** applying to any database that has real data.
+
+### 1. Audit first
+
+Run the audit command against the target database to surface any values that the migration does not recognise:
+
+```bash
+# Staging
+DATABASE_URL="$STAGING_DATABASE_URL" python manage.py audit_sct_history
+
+# Production (read-only)
+DATABASE_URL="$DATABASE_URL" python manage.py audit_sct_history
+```
+
+The command exits with code 1 if unrecognized values are found. Resolve them before proceeding — either add a mapping to `_OLD_TO_NEW_SCT` in the migration, or accept that the values will be preserved as-is.
+
+### 2. Write a migration that preserves, not silently drops
+
+The bug pattern to avoid:
+
+```python
+# BAD — treats "maps to None" and "not in dict" identically; silently drops unknown values
+mapped = _OLD_TO_NEW_SCT.get(v)
+if mapped and mapped not in new:
+    new.append(mapped)
+```
+
+The correct pattern:
+
+```python
+# GOOD — distinguishes intentional None from "key not present"
+if v not in _OLD_TO_NEW_SCT:
+    # Preserve unrecognized string; it will be logged.
+    if v not in new:
+        new.append(v)
+    continue
+mapped = _OLD_TO_NEW_SCT[v]
+if mapped is not None and mapped not in new:   # None = intentionally cleared
+    new.append(mapped)
+```
+
+Always log unrecognized values at `WARNING` level (not `ERROR`, not silently) and `bulk_update` rather than sequential `save()`.
+
+### 3. Make replace/truncate operations targeted, not `.all().delete()`
+
+```python
+# BAD — destroys any rows added after the migration ran if replayed
+Model.objects.all().delete()
+for code, title in NEW_VALUES:
+    Model.objects.get_or_create(code=code, defaults={'title': title})
+
+# GOOD — deletes only old rows not in the new set; safe on replay
+Model.objects.exclude(code__in={code for code, _ in NEW_VALUES}).delete()
+for code, title in NEW_VALUES:
+    Model.objects.get_or_create(code=code, defaults={'title': title})
+```
+
+### 4. Document irreversible reverse migrations
+
+When the original values cannot be reconstructed, say so explicitly:
+
+```python
+def reverse_migrate_foo(apps, schema_editor):
+    # Original values cannot be recovered after remapping.
+    # Rolling back this migration leaves the JSONField in its new-vocabulary state,
+    # inconsistent with the restored vocabulary table. Manual correction is required.
+    pass
+```
+
+### 5. Order of operations for vocabulary truncation
+
+Always remap existing data rows **before** truncating the vocabulary table:
+
+```python
+operations = [
+    migrations.RunPython(seed_new_vocabulary, reverse_seed),       # 1. add new vocab rows
+    migrations.RunPython(remap_existing_data, reverse_noop),       # 2. remap PatientInfo rows
+    migrations.RunPython(replace_old_vocabulary, reverse_restore), # 3. truncate old vocab
+]
+```
 
 ---
 

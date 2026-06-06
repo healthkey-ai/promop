@@ -4844,7 +4844,6 @@ class SctFieldsModelTest(FhirUploadBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
-        from datetime import date
         cls.person = Person.objects.create(person_id=88001)
         cls.patient = PatientInfo.objects.create(
             person=cls.person,
@@ -4936,6 +4935,30 @@ class SctFhirUploadTest(FhirUploadBase):
             format='multipart',
         )
 
+    def _upload_bundle_with_extensions(self, extensions, patient_suffix='002'):
+        """Upload a minimal FHIR bundle with the given Patient extensions."""
+        bundle = {
+            'resourceType': 'Bundle',
+            'type': 'collection',
+            'entry': [{
+                'resource': {
+                    'resourceType': 'Patient',
+                    'id': f'test-patient-sct-{patient_suffix}',
+                    'name': [{'family': f'TestSct{patient_suffix}', 'given': ['X']}],
+                    'gender': 'female',
+                    'birthDate': '1970-01-01',
+                    'extension': extensions,
+                }
+            }],
+        }
+        fhir_file = io.BytesIO(json.dumps(bundle).encode())
+        fhir_file.name = 'bundle.json'
+        return self.client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+        )
+
     def test_sct_extensions_mapped_to_patient_info(self):
         resp = self._upload_sct_bundle()
         self.assertIn(resp.status_code, [200, 201],
@@ -4946,3 +4969,163 @@ class SctFhirUploadTest(FhirUploadBase):
         self.assertIn('autologous SCT', pi.stem_cell_transplant_history)
         self.assertIn('tandem SCT', pi.stem_cell_transplant_history)
         self.assertIn('eligible for autologous SCT', pi.sct_eligibility)
+
+    def test_invalid_sct_date_string_is_ignored(self):
+        """A malformed mm-sct-date value must be silently dropped; upload must still succeed."""
+        resp = self._upload_bundle_with_extensions([
+            {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-date',
+             'valueString': 'not-a-date'},
+            {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
+             'valueString': 'autologous SCT'},
+        ], patient_suffix='003')
+        self.assertIn(resp.status_code, [200, 201],
+                      msg=f'Upload failed: {getattr(resp, "data", resp.content)}')
+        pi = PatientInfo.objects.filter(person__family_name='TestSct003').first()
+        self.assertIsNotNone(pi)
+        self.assertIsNone(pi.sct_date, 'Invalid sct_date should be dropped, not stored')
+
+    def test_comma_only_sct_history_stores_empty_list(self):
+        """A valueString of only commas/whitespace must produce an empty list, not error."""
+        resp = self._upload_bundle_with_extensions([
+            {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
+             'valueString': ',  ,'},
+        ], patient_suffix='004')
+        self.assertIn(resp.status_code, [200, 201],
+                      msg=f'Upload failed: {getattr(resp, "data", resp.content)}')
+        pi = PatientInfo.objects.filter(person__family_name='TestSct004').first()
+        self.assertIsNotNone(pi)
+        self.assertEqual(pi.stem_cell_transplant_history or [], [],
+                         'Comma-only valueString should produce an empty list')
+
+    def test_unknown_vocab_tokens_filtered_from_sct_history(self):
+        """Tokens not in the StemCellTransplant vocabulary are silently discarded."""
+        resp = self._upload_bundle_with_extensions([
+            {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
+             'valueString': 'autologous SCT,unknown experimental SCT,allogeneic SCT'},
+        ], patient_suffix='005')
+        self.assertIn(resp.status_code, [200, 201],
+                      msg=f'Upload failed: {getattr(resp, "data", resp.content)}')
+        pi = PatientInfo.objects.filter(person__family_name='TestSct005').first()
+        self.assertIsNotNone(pi)
+        self.assertIn('autologous SCT', pi.stem_cell_transplant_history)
+        self.assertIn('allogeneic SCT', pi.stem_cell_transplant_history)
+        self.assertNotIn('unknown experimental SCT', pi.stem_cell_transplant_history,
+                         'Unrecognized vocab token must be filtered out')
+
+
+# ---------------------------------------------------------------------------
+# Data migration remapping tests (migration 0086)
+# ---------------------------------------------------------------------------
+
+class SctDataMigrationTest(TestCase):
+    """Unit tests for migrate_patientinfo_sct_history (migration 0086).
+
+    Calls the migration function directly using the live apps registry, which is
+    equivalent to what Django does when the migration runs against the real DB.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        import importlib
+        _mod = importlib.import_module(
+            'omop_core.migrations'
+            '.0086_seed_sct_eligibility_update_stem_cell_transplant'
+        )
+        cls._migrate_fn = staticmethod(_mod.migrate_patientinfo_sct_history)
+
+    def _run(self):
+        from django.apps import apps as django_apps
+        self._migrate_fn(django_apps, None)
+
+    def _make_patient(self, person_id, sct_history):
+        person = Person.objects.create(person_id=person_id)
+        return PatientInfo.objects.create(
+            person=person,
+            stem_cell_transplant_history=sct_history,
+        )
+
+    def test_old_strings_remapped_to_new_vocabulary(self):
+        """All 13 old strings remap to the correct new vocabulary string."""
+        CASES = [
+            ('prior SCT',                    'autologous SCT'),
+            ('prior autologous SCT',         'autologous SCT'),
+            ('prior allogeneic SCT',         'allogeneic SCT'),
+            ('recent SCT',                   'autologous SCT'),
+            ('recent autologous SCT',        'autologous SCT'),
+            ('recent allogeneic SCT',        'allogeneic SCT'),
+            ('relapsed post-SCT',            'autologous SCT'),
+            ('relapsed post-autologous SCT', 'autologous SCT'),
+            ('relapsed post-allogeneic SCT', 'allogeneic SCT'),
+            ('completed tandem SCT',         'tandem SCT'),
+            ('pre-autologous SCT',           'autologous SCT'),
+            ('pre-allogeneic SCT',           'allogeneic SCT'),
+        ]
+        patients = []
+        for idx, (old, _) in enumerate(CASES):
+            patients.append(self._make_patient(89100 + idx, [old]))
+
+        self._run()
+
+        for (old, expected), pi in zip(CASES, patients):
+            pi.refresh_from_db()
+            self.assertEqual(
+                pi.stem_cell_transplant_history, [expected],
+                f'{old!r} should remap to {expected!r}',
+            )
+
+    def test_never_received_sct_is_cleared(self):
+        """'never received SCT' maps to None and must be removed from the list."""
+        pi = self._make_patient(89200, ['never received SCT'])
+        self._run()
+        pi.refresh_from_db()
+        self.assertEqual(pi.stem_cell_transplant_history, [],
+                         "'never received SCT' should be cleared to []")
+
+    def test_deduplication_when_multiple_old_strings_map_to_same_value(self):
+        """Two old strings that map to the same new string produce only one entry."""
+        pi = self._make_patient(89201, ['prior SCT', 'recent SCT'])  # both → 'autologous SCT'
+        self._run()
+        pi.refresh_from_db()
+        self.assertEqual(pi.stem_cell_transplant_history, ['autologous SCT'],
+                         'Duplicate new values must be deduplicated')
+
+    def test_mixed_old_strings_remap_correctly(self):
+        """Mixed autologous/allogeneic old strings produce distinct new entries."""
+        pi = self._make_patient(89202, ['prior autologous SCT', 'prior allogeneic SCT'])
+        self._run()
+        pi.refresh_from_db()
+        self.assertIn('autologous SCT', pi.stem_cell_transplant_history)
+        self.assertIn('allogeneic SCT', pi.stem_cell_transplant_history)
+        self.assertEqual(len(pi.stem_cell_transplant_history), 2)
+
+    def test_unrecognized_string_is_preserved_not_dropped(self):
+        """A string not in the mapping must be kept as-is rather than silently deleted."""
+        pi = self._make_patient(89203, ['some future SCT type'])
+        self._run()
+        pi.refresh_from_db()
+        self.assertIn('some future SCT type', pi.stem_cell_transplant_history,
+                      'Unrecognized values must be preserved, not silently dropped')
+
+    def test_non_string_items_are_skipped(self):
+        """Non-string items (e.g. dicts from old BQ loader) must be removed."""
+        pi = self._make_patient(89204, [{'line_number': 1, 'procedures': 'ASCT'}])
+        self._run()
+        pi.refresh_from_db()
+        # Dict items have no valid string mapping and are not strings — they should be dropped.
+        self.assertEqual(pi.stem_cell_transplant_history, [],
+                         'Non-string items must be removed during migration')
+
+    def test_already_new_vocabulary_passes_through_unchanged(self):
+        """Rows already in the new 3-value vocabulary are left unchanged."""
+        pi = self._make_patient(89205, ['autologous SCT', 'tandem SCT'])
+        self._run()
+        pi.refresh_from_db()
+        self.assertEqual(pi.stem_cell_transplant_history, ['autologous SCT', 'tandem SCT'])
+
+    def test_empty_list_rows_are_skipped(self):
+        """Rows with an empty list are excluded from processing and remain []."""
+        pi = self._make_patient(89206, [])
+        self._run()
+        pi.refresh_from_db()
+        self.assertEqual(pi.stem_cell_transplant_history, [])

@@ -89,8 +89,20 @@ class PatientInfoSerializer(serializers.ModelSerializer):
         return None
 
     def validate_sct_date(self, value):
-        if value and value > date.today():
+        if value is not None and value > date.today():
             raise serializers.ValidationError("SCT date cannot be in the future.")
+        return value
+
+    def validate_sct_eligibility(self, value):
+        if not value:
+            return value
+        for transplant_type in ('autologous', 'allogeneic'):
+            eligible = f'eligible for {transplant_type} SCT'
+            ineligible = f'ineligible for {transplant_type} SCT'
+            if eligible in value and ineligible in value:
+                raise serializers.ValidationError(
+                    f"Cannot be both eligible and ineligible for {transplant_type} SCT."
+                )
         return value
 
 # ---------------------------------------------------------------------------

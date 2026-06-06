@@ -19,7 +19,18 @@ _OLD_TO_NEW_SCT = {
 
 
 def migrate_patientinfo_sct_history(apps, schema_editor):
-    """Remap old stem_cell_transplant_history strings to the new 3-value vocabulary."""
+    """Remap old stem_cell_transplant_history strings to the new 3-value vocabulary.
+
+    - Values in _OLD_TO_NEW_SCT are remapped to their new equivalents.
+    - 'never received SCT' maps to None and is intentionally cleared (removed from the list).
+    - Non-string items (e.g. dicts written by the BQ loader) are skipped and logged.
+    - Strings NOT in _OLD_TO_NEW_SCT are preserved as-is with a warning rather than
+      silently dropped. Run `manage.py audit_sct_history` before applying this migration
+      to production to surface any such values.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
     PatientInfo = apps.get_model('omop_core', 'PatientInfo')
     qs = PatientInfo.objects.exclude(
         stem_cell_transplant_history=[]
@@ -27,22 +38,49 @@ def migrate_patientinfo_sct_history(apps, schema_editor):
         stem_cell_transplant_history__isnull=True
     )
     rows_to_update = []
+    unrecognized: dict = {}
+
     for pi in qs.iterator():
         old = pi.stem_cell_transplant_history or []
         new = []
         for v in old:
-            mapped = _OLD_TO_NEW_SCT.get(v)
-            if mapped and mapped not in new:
+            if not isinstance(v, str):
+                # Non-string (e.g. dict from old BQ loader) — skip and report.
+                key = f'<{type(v).__name__}>'
+                unrecognized[key] = unrecognized.get(key, 0) + 1
+                continue
+            if v not in _OLD_TO_NEW_SCT:
+                # Unrecognized string — preserve rather than silently drop.
+                unrecognized[v] = unrecognized.get(v, 0) + 1
+                if v not in new:
+                    new.append(v)
+                continue
+            mapped = _OLD_TO_NEW_SCT[v]
+            # mapped is None → 'never received SCT', intentionally cleared (not added to new).
+            if mapped is not None and mapped not in new:
                 new.append(mapped)
+
         if old != new:
             pi.stem_cell_transplant_history = new
             rows_to_update.append(pi)
+
+    if unrecognized:
+        logger.warning(
+            "migrate_patientinfo_sct_history: %d unrecognized SCT value(s) preserved as-is "
+            "(not in _OLD_TO_NEW_SCT): %s — run `manage.py audit_sct_history` to review.",
+            sum(unrecognized.values()),
+            unrecognized,
+        )
+
     if rows_to_update:
         PatientInfo.objects.bulk_update(rows_to_update, ['stem_cell_transplant_history'])
 
 
 def reverse_migrate_patientinfo_sct_history(apps, schema_editor):
-    # Best-effort reverse: clear any values that matched new vocab (can't recover originals).
+    # Original SCT history strings cannot be recovered after remapping.
+    # Rolling back to migration 0085 will leave stem_cell_transplant_history values
+    # in the new 3-value format, inconsistent with the restored 13-value vocabulary.
+    # Manual data correction is required after a rollback.
     pass
 
 
@@ -66,7 +104,9 @@ def reverse_seed_sct_eligibility(apps, schema_editor):
 
 def replace_stem_cell_transplant_values(apps, schema_editor):
     StemCellTransplant = apps.get_model('omop_core', 'StemCellTransplant')
-    StemCellTransplant.objects.all().delete()
+    new_codes = {'autologousSCT', 'allogeneicSCT', 'tandemSCT'}
+    # Delete only old rows not in the new 3-value set, preserving any future additions.
+    StemCellTransplant.objects.exclude(code__in=new_codes).delete()
     for code, title in [
         ('autologousSCT', 'autologous SCT'),
         ('allogeneicSCT', 'allogeneic SCT'),
@@ -78,7 +118,13 @@ def replace_stem_cell_transplant_values(apps, schema_editor):
 def reverse_replace_stem_cell_transplant_values(apps, schema_editor):
     """Restore the original 13 StemCellTransplant vocabulary values."""
     StemCellTransplant = apps.get_model('omop_core', 'StemCellTransplant')
-    StemCellTransplant.objects.all().delete()
+    old_codes = {
+        'priorSCT', 'priorAutologousSCT', 'priorAllogeneicSCT', 'recentSCT',
+        'recentAutologousSCT', 'recentAllogeneicSCT', 'relapsedPostSCT',
+        'relapsedPostAutologousSCT', 'relapsedPostAllogeneicSCT', 'completedTandemSCT',
+        'neverReceivedSCT', 'preAutologousSCT', 'preAllogeneicSCT',
+    }
+    StemCellTransplant.objects.exclude(code__in=old_codes).delete()
     for code, title in [
         ('priorSCT',                  'prior SCT'),
         ('priorAutologousSCT',        'prior autologous SCT'),

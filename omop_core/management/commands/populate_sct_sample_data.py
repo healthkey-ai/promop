@@ -11,6 +11,7 @@ import random
 from datetime import date, timedelta
 
 from django.core.management.base import BaseCommand
+from django.db.models import Q
 
 from omop_core.models import PatientInfo, SctEligibility, StemCellTransplant
 
@@ -27,21 +28,6 @@ def _random_sct_date():
     days_ago = random.randint(365, 365 * 10)
     return date.today() - timedelta(days=days_ago)
 
-
-def _random_eligibility():
-    """Pick 1–2 eligibility values (no contradictory pairs)."""
-    auto_options = [t for t in SctEligibility.objects.values_list('title', flat=True) if 'autologous' in t]
-    allo_options = [t for t in SctEligibility.objects.values_list('title', flat=True) if 'allogeneic' in t]
-    # Fallback if vocab not yet seeded
-    if not auto_options:
-        auto_options = ['eligible for autologous SCT', 'ineligible for autologous SCT']
-    if not allo_options:
-        allo_options = ['eligible for allogeneic SCT', 'ineligible for allogeneic SCT']
-    auto = random.choice(auto_options)
-    allo = random.choice(allo_options)
-    if random.random() < 0.5:
-        return [auto]
-    return [auto, allo]
 
 
 class Command(BaseCommand):
@@ -60,7 +46,6 @@ class Command(BaseCommand):
         qs = PatientInfo.objects.filter(disease='Multiple Myeloma')
         if not overwrite:
             # JSONField with default=list stores [] not NULL for new rows; match both.
-            from django.db.models import Q
             qs = qs.filter(Q(stem_cell_transplant_history=[]) | Q(stem_cell_transplant_history__isnull=True))
 
         total = qs.count()

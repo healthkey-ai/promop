@@ -143,6 +143,20 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
+def _infer_sct_type(procedures: Any) -> str:
+    """Map a free-text BQ procedures value to one of the 3 SCT vocabulary strings.
+
+    Matches keywords case-insensitively; defaults to 'autologous SCT' (the most
+    common transplant type in MM) when the string is absent or unrecognized.
+    """
+    s = str(procedures).lower() if procedures else ''
+    if 'allogeneic' in s or 'allo' in s:
+        return 'allogeneic SCT'
+    if 'tandem' in s:
+        return 'tandem SCT'
+    return 'autologous SCT'
+
+
 def _serialize_row(row) -> dict:
     """
     Convert a BigQuery Row to a plain JSON-serialisable dict.
@@ -699,11 +713,14 @@ class Command(BaseCommand):
             else:
                 fields["treatment_refractory_status"] = "Unknown"
 
-        # Transplant / CAR-T flags — check any line
-        fields["stem_cell_transplant_history"] = [
-            {"line_number": r.get("line_number"), "procedures": r.get("procedures")}
+        # Transplant / CAR-T flags — check any line.
+        # Infer SCT vocabulary string from the free-text procedures field; deduplicate
+        # while preserving order (a patient may have multiple transplant lines of the
+        # same type).
+        fields["stem_cell_transplant_history"] = list(dict.fromkeys(
+            _infer_sct_type(r.get("procedures"))
             for r in lot_rows
             if r.get("has_transplant")
-        ]
+        ))
 
         return fields
