@@ -4759,3 +4759,23 @@ class SurveyCrossOrgTest(MultiTenantIsolationTest):
         )
         self.assertIn(resp.status_code, [403, 404],
                       'Org A must not patch a response for Org B patient')
+
+    def test_org_token_cannot_write_survey_template(self):
+        """An org-linked write token must not be able to mutate shared survey templates."""
+        resp = self._client(self.write_token_a.token).patch(
+            f'/api/surveys/{self.survey.id}/',
+            {'status': 'ARCHIVED'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403,
+                         'Partner org token must not archive shared survey templates')
+
+    def test_put_on_survey_response_is_not_allowed(self):
+        """PUT is disabled on survey responses — use PATCH for incremental autosave."""
+        resp = self._client(self.write_token_a.token).put(
+            f'/api/survey-responses/{self.response_a.id}/',
+            {'person': self.person_a.person_id, 'survey': self.survey.id, 'values': {'pain': 9}},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 405,
+                         'PUT must be disabled on survey responses')

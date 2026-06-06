@@ -1892,13 +1892,15 @@ class _ProvenanceMixin:
             if pk_field not in serializer.validated_data:
                 serializer.validated_data[pk_field] = next_pk(model_cls, pk_field)
 
-        # Org-scoping: reject cross-org writes
+        # Org-scoping: reject unknown or cross-org persons
         org = get_request_org(self.request)
         if org is not None:
             person = serializer.validated_data.get('person')
             if person:
+                from rest_framework.exceptions import NotFound, PermissionDenied
+                if not PatientInfo.objects.filter(person=person).exists():
+                    raise NotFound('Person not found.')
                 if not PatientInfo.objects.filter(person=person, organization=org).exists():
-                    from rest_framework.exceptions import PermissionDenied
                     raise PermissionDenied('Person does not belong to your organization.')
 
         obj = serializer.save()
@@ -1908,8 +1910,10 @@ class _ProvenanceMixin:
         org = get_request_org(self.request)
         if org is not None:
             person = serializer.validated_data.get('person') or serializer.instance.person
+            from rest_framework.exceptions import NotFound, PermissionDenied
+            if not PatientInfo.objects.filter(person=person).exists():
+                raise NotFound('Person not found.')
             if not PatientInfo.objects.filter(person=person, organization=org).exists():
-                from rest_framework.exceptions import PermissionDenied
                 raise PermissionDenied('Person does not belong to your organization.')
         obj = serializer.save()
         self._prov(obj)
@@ -2105,18 +2109,29 @@ class SurveyViewSet(viewsets.ModelViewSet):
     queryset = Survey.objects.all()
 
     def _require_admin_for_writes(self, request):
-        """Block session/partner-auth non-staff users from mutating survey templates.
+        """Block non-service callers from mutating shared survey templates.
 
-        OAuth2 write-scope tokens (service-to-service) are allowed — they already
-        require patient/*.write scope. Session and Firebase/SAML users are restricted
-        to staff/superuser so a patient session cannot archive a shared template.
+        Allowed:
+          - service-token (trusted backend string)
+          - OAuth2 tokens from internal service apps (no org_profile)
+          - Staff / superuser session users
+
+        Blocked:
+          - OAuth2 tokens from partner/EHR org apps (have an org_profile)
+          - Session / Firebase / SAML non-staff users (patients)
         """
         if request.method in ('GET', 'HEAD', 'OPTIONS'):
             return
         token = getattr(request, 'auth', None)
-        # OAuth2 tokens and service-tokens are trusted write paths — pass through.
-        if token == 'service-token' or (token is not None and not isinstance(token, TokenClaims)):
+        if token == 'service-token':
             return
+        if token is not None and not isinstance(token, TokenClaims):
+            # OAuth2: allow only internal service apps (no org).
+            # Partner org apps have an org_profile and must not touch shared templates.
+            if get_request_org(request) is None:
+                return
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Survey templates can only be modified by staff or service tokens.')
         # Session / Firebase / SAML: require staff.
         user = request.user
         if not (user and (getattr(user, 'is_staff', False) or getattr(user, 'is_superuser', False))):
@@ -2158,10 +2173,12 @@ class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.
     Filter by person: GET /api/survey-responses/?person_id=42
     Filter by survey: GET /api/survey-responses/?survey=3
     Supports partial update (PATCH) for incremental autosave of individual answers.
+    PUT is disabled: values/values_dates are append-only dicts; use PATCH.
     """
     serializer_class = PatientSurveyResponseSerializer
     permission_classes = [ScopedTokenPermission]
     queryset = PatientSurveyResponse.objects.select_related('survey').all()
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
     def get_queryset(self):
         qs = super().get_queryset()
