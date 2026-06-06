@@ -2519,6 +2519,32 @@ class MultiTenantIsolationTest(_SmartBase):
         self.assertIn(self.patient_a.id, ids)
         self.assertIn(self.patient_b.id, ids)
 
+    def test_bulk_delete_org_scoping(self):
+        """Org A write token must not be able to delete Org B's patient via bulk_delete."""
+        from oauth2_provider.models import AccessToken
+        from django.utils import timezone as tz
+        import datetime
+        write_token_a = AccessToken.objects.create(
+            user=self.user_a,
+            application=self.app_a,
+            token='org-a-bulk-delete-write-token',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='patient/*.write',
+        )
+        client_a = self._client(write_token_a.token)
+        resp = client_a.delete(
+            '/api/patient-info/bulk_delete/',
+            {'person_ids': [self.person_b.person_id]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        # Must report "not found" — not a successful delete
+        self.assertEqual(resp.data.get('deleted_count'), 0)
+        self.assertEqual(len(resp.data.get('errors', [])), 1)
+        # Org B's person must still exist
+        from omop_core.models import Person as P
+        self.assertTrue(P.objects.filter(person_id=self.person_b.person_id).exists())
+
 
 # ---------------------------------------------------------------------------
 # PatientInfo PATCH write-through tests (HKI-PDS-01 / issue #59)

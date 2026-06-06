@@ -1737,9 +1737,13 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             deleted_count = 0
             errors = []
             
+            org = get_request_org(request)
             for person_id in person_ids:
                 try:
                     person = Person.objects.get(person_id=person_id)
+                    if org is not None and not PatientInfo.objects.filter(person=person, organization=org).exists():
+                        errors.append("Person not found.")
+                        continue
                     # Delete PatientInfo
                     PatientInfo.objects.filter(person=person).delete()
                     # Delete associated Identity if exists (via PatientUser)
