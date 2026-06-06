@@ -4,6 +4,7 @@ from omop_core.models import (
     PatientInfo,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
+    Survey, PatientSurveyResponse,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from datetime import date
@@ -212,3 +213,52 @@ class ProvenanceRecordSerializer(serializers.ModelSerializer):
         model = ProvenanceRecord
         fields = ['id', 'source', 'source_user_id', 'target_patient_id',
                   'modification_reason', 'created_at', 'record_type', 'object_id', 'organization']
+
+
+class SurveySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Survey
+        fields = ['id', 'external_id', 'name', 'title', 'description',
+                  'status', 'disease', 'pages', 'estimated_minutes', 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at']
+
+    def validate_pages(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError('pages must be a list.')
+        return value
+
+
+class PatientSurveyResponseSerializer(serializers.ModelSerializer):
+    survey_title = serializers.CharField(source='survey.title', read_only=True)
+    survey_name = serializers.CharField(source='survey.name', read_only=True)
+
+    class Meta:
+        model = PatientSurveyResponse
+        fields = ['id', 'person', 'survey', 'survey_title', 'survey_name',
+                  'values', 'values_dates', 'percent_complete',
+                  'started_at', 'completed_at', 'consent_date', 'consent_signature',
+                  'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at']
+
+    def validate_percent_complete(self, value):
+        if not (0 <= value <= 100):
+            raise serializers.ValidationError('percent_complete must be between 0 and 100.')
+        return value
+
+    def validate_values(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('values must be a dict.')
+        return value
+
+    def validate_values_dates(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('values_dates must be a dict.')
+        return value
+
+    def update(self, instance, validated_data):
+        # Merge incoming values/values_dates into existing dicts (autosave support).
+        for field in ('values', 'values_dates'):
+            if field in validated_data:
+                current = getattr(instance, field) or {}
+                validated_data[field] = {**current, **validated_data[field]}
+        return super().update(instance, validated_data)

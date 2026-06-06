@@ -3,7 +3,7 @@ import Field from '../Field';
 import Section from '../Section';
 import { Input } from '@/components/shadcn/input';
 import {
-  GENDER_OPTIONS, COUNTRY_OPTIONS, US_STATES, ETHNICITY_OPTIONS,
+  GENDER_OPTIONS, COUNTRY_OPTIONS, US_STATES, RACE_OPTIONS, ETHNICITY_OPTIONS,
   DISEASE_OPTIONS, STAGE_OPTIONS, HISTOLOGIC_TYPE_OPTIONS,
   ECOG_OPTIONS, KARNOFSKY_OPTIONS,
 } from '../patientConstants';
@@ -93,13 +93,14 @@ export default function GeneralTab({ formData, onChange, editedName, onNameChang
         </div>
       </Section>
 
-      <Section title="Ethnicity" description="Self-reported ethnicity and background.">
+      <Section title="Race &amp; Ethnicity" description="Self-reported race and ethnicity (OMB standard categories).">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <div className="sm:col-span-2">
-            <Field label="Ethnicity" name="ethnicity" type="select"
-              value={formData?.ethnicity} options={ETHNICITY_OPTIONS}
-              onChange={onChange} vocabSource={ethnicitySource} />
-          </div>
+          <Field label="Race" name="race" type="select"
+            value={formData?.race} options={RACE_OPTIONS}
+            onChange={onChange} />
+          <Field label="Ethnicity" name="ethnicity" type="select"
+            value={formData?.ethnicity} options={ETHNICITY_OPTIONS}
+            onChange={onChange} vocabSource={ethnicitySource} />
         </div>
       </Section>
 

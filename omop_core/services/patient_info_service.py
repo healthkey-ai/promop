@@ -246,8 +246,14 @@ def _get_demographics(person: Person) -> dict:
         else:
             data['gender'] = 'U'
 
-    if person.race_concept:
-        data['ethnicity'] = person.race_concept.concept_name
+    if person.race_concept and person.race_concept.concept_id != 0:
+        data['race'] = person.race_concept.concept_name
+    elif person.race_source_value and person.race_source_value != 'unknown':
+        data['race'] = person.race_source_value
+    if person.ethnicity_concept and person.ethnicity_concept.concept_id != 0:
+        data['ethnicity'] = person.ethnicity_concept.concept_name
+    elif person.ethnicity_source_value and person.ethnicity_source_value != 'unknown':
+        data['ethnicity'] = person.ethnicity_source_value
 
     lang_skills = person.language_skills.select_related('language_concept').all()
     if lang_skills.exists():

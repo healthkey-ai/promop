@@ -6,7 +6,16 @@ export const US_STATES = [
   'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV',
   'WI', 'WY', 'DC', 'PR', 'GU', 'VI',
 ];
-export const ETHNICITY_OPTIONS = ['African/Black', 'Asian', 'Native American', "Other/Won't Say"];
+export const RACE_OPTIONS = [
+  'White',
+  'Black or African American',
+  'Asian',
+  'American Indian or Alaska Native',
+  'Native Hawaiian or Pacific Islander',
+  'Other Race',
+  'Unknown',
+];
+export const ETHNICITY_OPTIONS = ['Hispanic or Latino', 'Not Hispanic or Latino', 'Unknown'];
 export const DISEASE_OPTIONS = ['Breast Cancer', 'Follicular Lymphoma', 'Multiple Myeloma', 'Chronic Lymphocytic Leukemia (CLL)', 'Lung Cancer', 'Colon Cancer', 'Other'];
 export const STAGE_OPTIONS = ['0', 'I', 'IA', 'IB', 'II', 'IIA', 'IIB', 'III', 'IIIA', 'IIIB', 'IIIC', 'IV', 'Unknown'];
 export const HISTOLOGIC_TYPE_OPTIONS = [
@@ -91,6 +100,14 @@ export const FL_TUMOR_GRADE_OPTIONS = [
   'Grade 3b (solid sheets of centroblasts)',
 ];
 export const ISS_STAGE_OPTIONS = ['Stage I', 'Stage II', 'Stage III'];
+export const MRD_STATUS_OPTIONS = [
+  'MRD Negative (10⁻⁵)',
+  'MRD Negative (10⁻⁶)',
+  'Sustained MRD Negative',
+  'MRD Positive',
+  'Not Assessed',
+  'Unknown',
+];
 export const MM_PROGRESSION_OPTIONS = ['Stable', 'Active', 'Smoldering', 'Progressive', 'Relapsed', 'Refractory'];
 export const STEM_CELL_TRANSPLANT_OPTIONS = [
   'prior SCT', 'prior autologous SCT', 'prior allogeneic SCT',
