@@ -365,6 +365,15 @@ cd frontend && npm test -- --run
 
 **Always run both test suites before pushing to any branch.** Do not push if any test is failing.
 
+### Rule: Run Full Backend Test Suite After Every PR Merge into `dev`
+
+After merging any PR into `dev`, immediately run the full backend test suite against the staging DB to catch any integration regressions:
+
+```bash
+DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+  .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
+```
+
 ```bash
 # One-liner to run everything from the repo root:
 DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
