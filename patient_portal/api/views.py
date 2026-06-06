@@ -41,6 +41,7 @@ import json
 import logging
 from io import StringIO
 from .permissions import ScopedTokenPermission, get_request_org
+from .providers.base import TokenClaims
 from .serializers import (
     UserSerializer, PatientInfoSerializer, PatientListSerializer, ProvenanceRecordSerializer,
     ConditionOccurrenceSerializer, DrugExposureSerializer, MeasurementSerializer,
@@ -2084,6 +2085,11 @@ class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
 class SurveyViewSet(viewsets.ModelViewSet):
     """Survey definitions — create/read/update/archive surveys.
 
+    Surveys are global templates (no org FK). Reads are available to any
+    authenticated token. Writes (create/update/archive) require service-token
+    or staff — arbitrary write-scope patient tokens must not mutate the shared
+    template library.
+
     Filter by disease: GET /api/surveys/?disease=Multiple+Myeloma
     Filter by status:  GET /api/surveys/?status=ACTIVE
     Surveys are archived via PATCH {status: ARCHIVED}; DELETE is not allowed.
@@ -2091,6 +2097,37 @@ class SurveyViewSet(viewsets.ModelViewSet):
     serializer_class = SurveySerializer
     permission_classes = [ScopedTokenPermission]
     queryset = Survey.objects.all()
+
+    def _require_admin_for_writes(self, request):
+        """Block session/partner-auth non-staff users from mutating survey templates.
+
+        OAuth2 write-scope tokens (service-to-service) are allowed — they already
+        require patient/*.write scope. Session and Firebase/SAML users are restricted
+        to staff/superuser so a patient session cannot archive a shared template.
+        """
+        if request.method in ('GET', 'HEAD', 'OPTIONS'):
+            return
+        token = getattr(request, 'auth', None)
+        # OAuth2 tokens and service-tokens are trusted write paths — pass through.
+        if token == 'service-token' or (token is not None and not isinstance(token, TokenClaims)):
+            return
+        # Session / Firebase / SAML: require staff.
+        user = request.user
+        if not (user and (getattr(user, 'is_staff', False) or getattr(user, 'is_superuser', False))):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Survey templates can only be modified by staff or service tokens.')
+
+    def create(self, request, *args, **kwargs):
+        self._require_admin_for_writes(request)
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        self._require_admin_for_writes(request)
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        self._require_admin_for_writes(request)
+        return super().partial_update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         return Response(

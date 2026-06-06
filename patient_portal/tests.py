@@ -4673,3 +4673,73 @@ class SurveyAPIExtendedTest(_SmartBase):
         }
         res = self.write_client.post('/api/surveys/', payload, format='json')
         self.assertEqual(res.status_code, 400)
+
+
+# ---------------------------------------------------------------------------
+# Cross-org isolation for survey responses
+# ---------------------------------------------------------------------------
+
+class SurveyCrossOrgTest(MultiTenantIsolationTest):
+    """Org-scoped tokens must not read or write another org's survey responses."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from omop_core.models import Survey, PatientSurveyResponse
+        from oauth2_provider.models import AccessToken
+        from django.utils import timezone as tz
+        import datetime
+
+        cls.survey = Survey.objects.create(
+            name='cross-org-survey',
+            title='Cross Org Survey',
+            status=Survey.STATUS_ACTIVE,
+            pages=[],
+        )
+        cls.response_a = PatientSurveyResponse.objects.create(
+            person=cls.person_a,
+            survey=cls.survey,
+            values={'pain': 3},
+        )
+
+        # Write token for org A
+        cls.write_token_a = AccessToken.objects.create(
+            user=cls.user_a,
+            application=cls.app_a,
+            token='org-a-write-token',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='patient/*.write',
+        )
+
+    def test_org_a_cannot_list_org_b_responses(self):
+        """Org A token listing responses filtered by org-B person gets empty result."""
+        resp = self._client(self.token_a.token).get(
+            f'/api/survey-responses/?person_id={self.person_b.person_id}'
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.data if isinstance(resp.data, list) else resp.data.get('results', [])
+        self.assertEqual(len(data), 0, 'Org A must not see Org B survey responses')
+
+    def test_org_a_cannot_create_response_for_org_b_patient(self):
+        """Org A write token must be denied when posting a response for Org B's patient."""
+        from omop_core.models import Survey
+        payload = {
+            'person': self.person_b.person_id,
+            'survey': self.survey.id,
+            'values': {'pain': 9},
+        }
+        resp = self._client(self.write_token_a.token).post(
+            '/api/survey-responses/', payload, format='json'
+        )
+        self.assertIn(resp.status_code, [403, 404],
+                      'Org A must not create a response for Org B patient')
+
+    def test_org_a_sees_own_responses(self):
+        """Org A token can list its own survey responses."""
+        resp = self._client(self.token_a.token).get(
+            f'/api/survey-responses/?person_id={self.person_a.person_id}'
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.data if isinstance(resp.data, list) else resp.data.get('results', [])
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]['values']['pain'], 3)
