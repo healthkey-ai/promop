@@ -1905,6 +1905,12 @@ class _ProvenanceMixin:
         self._prov(obj)
 
     def perform_update(self, serializer):
+        org = get_request_org(self.request)
+        if org is not None:
+            person = serializer.validated_data.get('person') or serializer.instance.person
+            if not PatientInfo.objects.filter(person=person, organization=org).exists():
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied('Person does not belong to your organization.')
         obj = serializer.save()
         self._prov(obj)
 

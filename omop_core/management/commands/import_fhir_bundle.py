@@ -96,8 +96,9 @@ class Command(BaseCommand):
 
         # Get a user to authenticate requests — do this before the loop
         close_old_connections()
+        User = get_user_model()
         try:
-            user = get_user_model().objects.get(username=options['username'])
+            user = User.objects.get(username=options['username'])
         except User.DoesNotExist:
             raise CommandError(
                 f"User '{options['username']}' not found. "

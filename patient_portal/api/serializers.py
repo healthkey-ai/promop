@@ -240,6 +240,11 @@ class PatientSurveyResponseSerializer(serializers.ModelSerializer):
                   'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at']
 
+    def validate_percent_complete(self, value):
+        if not (0 <= value <= 100):
+            raise serializers.ValidationError('percent_complete must be between 0 and 100.')
+        return value
+
     def validate_values(self, value):
         if not isinstance(value, dict):
             raise serializers.ValidationError('values must be a dict.')

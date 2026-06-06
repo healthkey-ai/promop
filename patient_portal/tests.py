@@ -4743,3 +4743,19 @@ class SurveyCrossOrgTest(MultiTenantIsolationTest):
         data = resp.data if isinstance(resp.data, list) else resp.data.get('results', [])
         self.assertEqual(len(data), 1)
         self.assertEqual(data[0]['values']['pain'], 3)
+
+    def test_org_a_cannot_patch_org_b_response(self):
+        """Org A write token must be denied when patching a response owned by Org B's patient."""
+        from omop_core.models import PatientSurveyResponse
+        response_b = PatientSurveyResponse.objects.create(
+            person=self.person_b,
+            survey=self.survey,
+            values={'fatigue': 2},
+        )
+        resp = self._client(self.write_token_a.token).patch(
+            f'/api/survey-responses/{response_b.id}/',
+            {'values': {'fatigue': 9}},
+            format='json',
+        )
+        self.assertIn(resp.status_code, [403, 404],
+                      'Org A must not patch a response for Org B patient')

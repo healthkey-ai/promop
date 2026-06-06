@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
@@ -1842,7 +1843,7 @@ class PatientSurveyResponse(models.Model):
         default=dict,
         help_text="Field-name → ISO timestamp of last update for each answer",
     )
-    percent_complete = models.IntegerField(default=0)
+    percent_complete = models.IntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(100)])
     started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     consent_date = models.DateTimeField(null=True, blank=True)
