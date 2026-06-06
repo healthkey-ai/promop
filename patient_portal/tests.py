@@ -2262,6 +2262,7 @@ class ArtemisHemOncLotTest(TestCase):
             },
         )
         DrugExposure.objects.create(
+            drug_exposure_id=9900001,
             person=self.person,
             drug_concept=self.bort_rxnorm,
             drug_source_value='Velcade',
