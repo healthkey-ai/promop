@@ -1119,7 +1119,7 @@ class PatientInfo(models.Model):
     sct_date = models.DateField(blank=True, null=True)
     sct_eligibility = models.JSONField(blank=True, null=True, default=list,
         help_text="Multi-select from SctEligibility vocabulary")
-    plasma_cell_leukemia = models.BooleanField(blank=True, null=True, default=True)
+    plasma_cell_leukemia = models.BooleanField(blank=True, null=True, default=None)
     progression = models.TextField(blank=True, null=True)
 
     # Vital signs
