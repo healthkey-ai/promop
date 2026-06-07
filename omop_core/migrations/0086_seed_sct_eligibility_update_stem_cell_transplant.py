@@ -73,7 +73,11 @@ def migrate_patientinfo_sct_history(apps, schema_editor):
         )
 
     if rows_to_update:
-        PatientInfo.objects.bulk_update(rows_to_update, ['stem_cell_transplant_history'])
+        PatientInfo.objects.bulk_update(
+            rows_to_update,
+            ['stem_cell_transplant_history'],
+            batch_size=500,
+        )
 
 
 def reverse_migrate_patientinfo_sct_history(apps, schema_editor):

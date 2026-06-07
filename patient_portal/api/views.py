@@ -35,6 +35,7 @@ from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from datetime import datetime
+from django.utils.timezone import localdate
 import csv
 import hashlib
 import json
@@ -1584,7 +1585,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     if sct_date_str:
                         try:
                             parsed_sct_date = datetime.strptime(sct_date_str, '%Y-%m-%d').date()
-                            if parsed_sct_date <= datetime.today().date():
+                            if parsed_sct_date <= localdate():
                                 _patch['sct_date'] = parsed_sct_date
                         except ValueError:
                             _id_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
@@ -1747,9 +1748,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     else:
                         updated_count += 1
                     _fhir_id_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
-                    logger.info("Successfully %s patient (id_hash=%s, person_id=%s)",
+                    logger.info("Successfully %s patient (id_hash=%s)",
                                 'created' if person_is_new else 'updated',
-                                _fhir_id_hash, person.person_id)
+                                _fhir_id_hash)
                     
                 except Exception as e:
                     _err_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]

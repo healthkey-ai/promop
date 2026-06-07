@@ -554,13 +554,15 @@ class Command(BaseCommand):
                  'valueQuantity': {'value': p['diastolic_bp'], 'unit': 'mmHg'}},
                 {'url': 'http://ctomop.io/fhir/StructureDefinition/heartRate',
                  'valueQuantity': {'value': p['heart_rate'], 'unit': 'beats/min'}},
-                # MM-specific extensions
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
-                 'valueString': ','.join(p['sct_types'])},
+                # MM-specific extensions — omit entirely when empty so re-import
+                # doesn't silently leave stale values in the DB (upload handler
+                # treats absent extension as "no change", not "clear").
+                *([{'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
+                    'valueString': ','.join(p['sct_types'])}] if p['sct_types'] else []),
                 *([{'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-date',
                     'valueString': p['sct_date']}] if p['sct_date'] else []),
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-eligibility',
-                 'valueString': ','.join(p['sct_eligibility'])},
+                *([{'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-eligibility',
+                    'valueString': ','.join(p['sct_eligibility'])}] if p['sct_eligibility'] else []),
                 {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-cytogenetic-markers',
                  'valueString': ','.join(p['cytogenetics']) if p['cytogenetics'] else ''},
                 {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-refractory-status',

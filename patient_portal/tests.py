@@ -4894,6 +4894,24 @@ class SctFieldsModelTest(FhirUploadBase):
 class SctFhirUploadTest(FhirUploadBase):
     """Verify that SCT extensions in a FHIR Patient resource are mapped to PatientInfo."""
 
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from omop_core.models import StemCellTransplant, SctEligibility
+        for code, title in [
+            ('autologousSCT', 'autologous SCT'),
+            ('allogeneicSCT', 'allogeneic SCT'),
+            ('tandemSCT',     'tandem SCT'),
+        ]:
+            StemCellTransplant.objects.get_or_create(code=code, defaults={'title': title})
+        for code, title in [
+            ('eligibleAuto',   'eligible for autologous SCT'),
+            ('eligibleAllo',   'eligible for allogeneic SCT'),
+            ('ineligibleAuto', 'ineligible for autologous SCT'),
+            ('ineligibleAllo', 'ineligible for allogeneic SCT'),
+        ]:
+            SctEligibility.objects.get_or_create(code=code, defaults={'title': title})
+
     def _upload_sct_bundle(self):
         """FHIR bundle with SCT extensions on the Patient resource."""
         patient_id = 'test-patient-sct-001'
@@ -5129,3 +5147,24 @@ class SctDataMigrationTest(TestCase):
         self._run()
         pi.refresh_from_db()
         self.assertEqual(pi.stem_cell_transplant_history, [])
+
+    def test_audit_and_migration_dicts_are_identical(self):
+        """_OLD_TO_NEW_SCT must be identical in audit_sct_history and migration 0086.
+
+        Both files duplicate the mapping dict. This test catches any future divergence
+        so that the audit command always accurately predicts what the migration will do.
+        """
+        import importlib
+        audit_mod = importlib.import_module(
+            'omop_core.management.commands.audit_sct_history'
+        )
+        mig_mod = importlib.import_module(
+            'omop_core.migrations'
+            '.0086_seed_sct_eligibility_update_stem_cell_transplant'
+        )
+        self.assertEqual(
+            audit_mod._OLD_TO_NEW_SCT,
+            mig_mod._OLD_TO_NEW_SCT,
+            "_OLD_TO_NEW_SCT in audit_sct_history.py and migration 0086 have diverged. "
+            "Update both files to keep them in sync.",
+        )

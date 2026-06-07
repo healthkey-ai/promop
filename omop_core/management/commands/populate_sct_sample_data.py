@@ -63,8 +63,10 @@ class Command(BaseCommand):
             'eligible for allogeneic SCT', 'ineligible for allogeneic SCT'
         ]
 
+        _BATCH = 500
+        rows_to_update = []
         updated = 0
-        for pi in qs.iterator():
+        for pi in qs.iterator(chunk_size=_BATCH):
             has_sct = random.random() < 0.70  # 70% of MM patients have prior SCT
 
             if has_sct:
@@ -81,8 +83,21 @@ class Command(BaseCommand):
             auto = random.choice(auto_options)
             allo = random.choice(allo_options)
             pi.sct_eligibility = [auto] if random.random() < 0.5 else [auto, allo]
-            pi.save(update_fields=['stem_cell_transplant_history', 'sct_date', 'sct_eligibility'])
+            rows_to_update.append(pi)
             updated += 1
+
+            if len(rows_to_update) >= _BATCH:
+                PatientInfo.objects.bulk_update(
+                    rows_to_update,
+                    ['stem_cell_transplant_history', 'sct_date', 'sct_eligibility'],
+                )
+                rows_to_update.clear()
+
+        if rows_to_update:
+            PatientInfo.objects.bulk_update(
+                rows_to_update,
+                ['stem_cell_transplant_history', 'sct_date', 'sct_eligibility'],
+            )
 
         self.stdout.write(
             self.style.SUCCESS(f'Updated {updated}/{total} Multiple Myeloma PatientInfo records.')

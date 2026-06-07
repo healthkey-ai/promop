@@ -148,9 +148,13 @@ def _infer_sct_type(procedures: Any) -> str:
 
     Matches keywords case-insensitively; defaults to 'autologous SCT' (the most
     common transplant type in MM) when the string is absent or unrecognized.
+
+    Uses whole-word matching for 'allo' to avoid false positives on words like
+    'balloon' or 'callous'.
     """
+    import re
     s = str(procedures).lower() if procedures else ''
-    if 'allogeneic' in s or 'allo' in s:
+    if 'allogeneic' in s or re.search(r'\ballo\b', s):
         return 'allogeneic SCT'
     if 'tandem' in s:
         return 'tandem SCT'
