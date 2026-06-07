@@ -5,9 +5,11 @@ from omop_core.models import (
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
     Survey, PatientSurveyResponse,
+    StemCellTransplant, SctEligibility,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from datetime import date
+from django.utils.timezone import localdate
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -87,6 +89,42 @@ class PatientInfoSerializer(serializers.ModelSerializer):
             age = today.year - obj.date_of_birth.year - ((today.month, today.day) < (obj.date_of_birth.month, obj.date_of_birth.day))
             return age
         return None
+
+    def validate_sct_date(self, value):
+        if value is not None and value > localdate():
+            raise serializers.ValidationError("SCT date cannot be in the future.")
+        return value
+
+    def validate_stem_cell_transplant_history(self, value):
+        if not value:
+            return value
+        allowed = set(StemCellTransplant.objects.values_list('title', flat=True))
+        bad = [v for v in value if not isinstance(v, str) or v not in allowed]
+        if bad:
+            raise serializers.ValidationError(
+                f"Unrecognized stem_cell_transplant_history values: {bad}. "
+                f"Allowed: {sorted(allowed)}"
+            )
+        return value
+
+    def validate_sct_eligibility(self, value):
+        if not value:
+            return value
+        allowed = set(SctEligibility.objects.values_list('title', flat=True))
+        bad = [v for v in value if not isinstance(v, str) or v not in allowed]
+        if bad:
+            raise serializers.ValidationError(
+                f"Unrecognized sct_eligibility values: {bad}. "
+                f"Allowed: {sorted(allowed)}"
+            )
+        for transplant_type in ('autologous', 'allogeneic'):
+            eligible = f'eligible for {transplant_type} SCT'
+            ineligible = f'ineligible for {transplant_type} SCT'
+            if eligible in value and ineligible in value:
+                raise serializers.ValidationError(
+                    f"Cannot be both eligible and ineligible for {transplant_type} SCT."
+                )
+        return value
 
 # ---------------------------------------------------------------------------
 # OMOP clinical event serializers

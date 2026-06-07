@@ -813,6 +813,11 @@ class StemCellTransplant(VocabularyLookup):
         db_table = 'vocabulary_stem_cell_transplant'
 
 
+class SctEligibility(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_sct_eligibility'
+
+
 class HistologicType(VocabularyLookup):
     sort_key = models.IntegerField(blank=True, null=True)
 
@@ -1111,7 +1116,10 @@ class PatientInfo(models.Model):
     cytogenic_markers = models.TextField(blank=True, null=True)
     molecular_markers = models.TextField(blank=True, null=True)
     stem_cell_transplant_history = models.JSONField(blank=True, null=True, default=list)
-    plasma_cell_leukemia = models.BooleanField(blank=True, null=True, default=True)
+    sct_date = models.DateField(blank=True, null=True)
+    sct_eligibility = models.JSONField(blank=True, null=True, default=list,
+        help_text="Multi-select from SctEligibility vocabulary")
+    plasma_cell_leukemia = models.BooleanField(blank=True, null=True, default=None)
     progression = models.TextField(blank=True, null=True)
 
     # Vital signs

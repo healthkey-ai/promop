@@ -11,7 +11,7 @@ import {
   YES_NO_OPTIONS, ER_OPTIONS, PR_OPTIONS, HER2_OPTIONS, HR_OPTIONS, HRD_OPTIONS,
   DISEASE_OPTIONS,
   FLIPI_RISK_OPTIONS, GELF_OPTIONS, FL_TUMOR_GRADE_OPTIONS,
-  ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS,
+  ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS,
   MRD_STATUS_OPTIONS, CYTOGENETIC_RISK_OPTIONS,
   BINET_STAGE_OPTIONS, TUMOR_BURDEN_OPTIONS, DISEASE_ACTIVITY_OPTIONS,
   RICHTER_TRANSFORMATION_OPTIONS, PROTEIN_EXPRESSION_OPTIONS,
@@ -206,6 +206,8 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
 
 function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
   const { source: progressionSource } = useVocabulary('disease-progression', 'title');
+  const { options: sctTypeOptions, source: sctTypeSource } = useVocabulary('stem-cell-transplant', 'title');
+  const { options: sctEligibilityOptions, source: sctEligibilitySource } = useVocabulary('sct-eligibility', 'title');
 
   return (
     <>
@@ -219,7 +221,11 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
           <Field label="Measurable Disease (IMWG)" name="measurable_disease_imwg" type="boolean" value={formData?.measurable_disease_imwg} onChange={onChange} />
           <Field label="MRD Status" name="mrd_status" type="select" value={formData?.mrd_status} options={MRD_STATUS_OPTIONS} onChange={onChange} />
           <div className="sm:col-span-2">
-            <Field label="Stem Cell Transplant History" name="stem_cell_transplant_history" type="multiselect" value={formData?.stem_cell_transplant_history} options={STEM_CELL_TRANSPLANT_OPTIONS} onChange={onChange} />
+            <Field label="Prior SCT Type" name="stem_cell_transplant_history" type="multiselect" value={formData?.stem_cell_transplant_history} options={sctTypeOptions.length ? sctTypeOptions.map((o: { value: string }) => o.value) : STEM_CELL_TRANSPLANT_OPTIONS} onChange={onChange} vocabSource={sctTypeSource} />
+          </div>
+          <Field label="SCT Date" name="sct_date" type="date" value={formData?.sct_date} onChange={onChange} />
+          <div className="sm:col-span-2">
+            <Field label="SCT Eligibility" name="sct_eligibility" type="multiselect" value={formData?.sct_eligibility} options={sctEligibilityOptions.length ? sctEligibilityOptions.map((o: { value: string }) => o.value) : SCT_ELIGIBILITY_OPTIONS} onChange={onChange} vocabSource={sctEligibilitySource} />
           </div>
         </div>
       </Section>

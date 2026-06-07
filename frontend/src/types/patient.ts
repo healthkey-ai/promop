@@ -44,7 +44,9 @@ export interface PatientInfo {
   progression?: string;
   measurable_disease_imwg?: boolean;
   mrd_status?: string | null;
-
+  stem_cell_transplant_history?: string[] | null;
+  sct_date?: string | null;
+  sct_eligibility?: string[] | null;
   // Treatment
   prior_therapy?: string;
   prior_lines_of_therapy?: number;

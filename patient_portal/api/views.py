@@ -15,7 +15,7 @@ from omop_core.models import (
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, Survey, PatientSurveyResponse,
     # Controlled vocabulary lookup models
-    Ethnicity, StemCellTransplant, HistologicType, EstrogenReceptorStatus,
+    Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
     ProgesteroneReceptorStatus, Her2Status, HrStatus, HrdStatus,
     MutationOrigin, MutationGene, MutationInterpretation, MutationCode,
     TumorStage, NodesStage, DistantMetastasisStage, StagingModality,
@@ -35,6 +35,7 @@ from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from datetime import datetime
+from django.utils.timezone import localdate
 import csv
 import hashlib
 import json
@@ -481,6 +482,10 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     if patient_id in patients_data:
                         patients_data[patient_id]['medications'].append(resource)
             
+            # Hoist SCT vocabulary sets for FHIR upload validation (avoids N+1 per patient).
+            _allowed_sct_titles = set(StemCellTransplant.objects.values_list('title', flat=True))
+            _allowed_elig_titles = set(SctEligibility.objects.values_list('title', flat=True))
+
             # Process each patient
             for fhir_patient_id, data in patients_data.items():
                 try:
@@ -533,6 +538,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     ecog = None
                     cytogenetics_str = None
                     measurable_disease_imwg = None
+                    sct_date_str = None
+                    sct_history_str = None
+                    sct_eligibility_str = None
                     
                     # Explicit extension URL → (value_key, parser) registry.
                     # Using exact URL matching avoids false positives from substring checks.
@@ -557,6 +565,12 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             ('valueString', lambda e: e.get('valueString')),
                         'http://ctomop.io/fhir/StructureDefinition/mm-measurable-disease-imwg':
                             ('valueBoolean', lambda e: e.get('valueBoolean')),
+                        'http://ctomop.io/fhir/StructureDefinition/mm-sct-date':
+                            ('valueString', lambda e: e.get('valueString')),
+                        'http://ctomop.io/fhir/StructureDefinition/mm-sct-history':
+                            ('valueString', lambda e: e.get('valueString')),
+                        'http://ctomop.io/fhir/StructureDefinition/mm-sct-eligibility':
+                            ('valueString', lambda e: e.get('valueString')),
                     }
                     ext_results = {}
                     for ext in patient_resource.get('extension', []):
@@ -576,6 +590,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     ecog            = ext_results.get(f'{base}ecog-performance-status')
                     cytogenetics_str        = ext_results.get(f'{base}mm-cytogenetic-markers')
                     measurable_disease_imwg = ext_results.get(f'{base}mm-measurable-disease-imwg')
+                    sct_date_str            = ext_results.get(f'{base}mm-sct-date')
+                    sct_history_str         = ext_results.get(f'{base}mm-sct-history')
+                    sct_eligibility_str     = ext_results.get(f'{base}mm-sct-eligibility')
                     
                     # Get gender concept from FHIR
                     gender_concept = get_gender_concept(patient_resource.get('gender', ''))
@@ -1565,6 +1582,27 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         _patch['cytogenic_markers'] = cytogenetics_str
                     if measurable_disease_imwg is not None:
                         _patch['measurable_disease_imwg'] = measurable_disease_imwg
+                    if sct_date_str:
+                        try:
+                            parsed_sct_date = datetime.strptime(sct_date_str, '%Y-%m-%d').date()
+                            if parsed_sct_date <= localdate():
+                                _patch['sct_date'] = parsed_sct_date
+                        except ValueError:
+                            _id_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
+                            logger.warning(
+                                "Ignoring invalid mm-sct-date for patient (id_hash=%s)",
+                                _id_hash,
+                            )
+                    if sct_history_str:
+                        _patch['stem_cell_transplant_history'] = [
+                            t.strip() for t in sct_history_str.split(',')
+                            if t.strip() and t.strip() in _allowed_sct_titles
+                        ]
+                    if sct_eligibility_str:
+                        _patch['sct_eligibility'] = [
+                            t.strip() for t in sct_eligibility_str.split(',')
+                            if t.strip() and t.strip() in _allowed_elig_titles
+                        ]
                     if tumor_size:
                         _patch['tumor_size'] = tumor_size
                     if lymph_node_status:
@@ -1709,10 +1747,14 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         created_count += 1
                     else:
                         updated_count += 1
-                    logger.info(f"Successfully {'created' if person_is_new else 'updated'} patient {fhir_patient_id} ({person.person_id})")
+                    _fhir_id_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
+                    logger.info("Successfully %s patient (id_hash=%s)",
+                                'created' if person_is_new else 'updated',
+                                _fhir_id_hash)
                     
                 except Exception as e:
-                    errors.append(f"Patient {fhir_patient_id}: {str(e)}")
+                    _err_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
+                    errors.append(f"Patient (id_hash={_err_hash}): {str(e)}")
             
             return Response({
                 'success': True,
@@ -2015,6 +2057,7 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
 _VOCABULARY_REGISTRY = {
     'ethnicity':                     Ethnicity,
     'stem-cell-transplant':          StemCellTransplant,
+    'sct-eligibility':               SctEligibility,
     'histologic-type':               HistologicType,
     'estrogen-receptor-status':      EstrogenReceptorStatus,
     'progesterone-receptor-status':  ProgesteroneReceptorStatus,

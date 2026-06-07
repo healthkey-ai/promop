@@ -226,7 +226,7 @@ class Command(BaseCommand):
         ecog_choices = [0, 1, 2, 3, 4]
         ecog_weights = [30, 40, 20, 8, 2]  # Most patients have ECOG 0-2
         ecog = random.choices(ecog_choices, weights=ecog_weights)[0]
-        
+
         return {
             "resourceType": "Patient",
             "id": str(patient_id),
