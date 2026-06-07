@@ -5148,6 +5148,18 @@ class SctDataMigrationTest(TestCase):
         pi.refresh_from_db()
         self.assertEqual(pi.stem_cell_transplant_history, [])
 
+    def test_migration_is_idempotent(self):
+        """Running the migration twice produces the same result as running it once."""
+        pi = self._make_patient(89210, ['prior SCT', 'prior allogeneic SCT'])
+        self._run()
+        pi.refresh_from_db()
+        after_first = list(pi.stem_cell_transplant_history)
+
+        self._run()  # second run
+        pi.refresh_from_db()
+        self.assertEqual(pi.stem_cell_transplant_history, after_first)
+        self.assertEqual(sorted(after_first), ['allogeneic SCT', 'autologous SCT'])
+
     def test_audit_and_migration_dicts_are_identical(self):
         """_OLD_TO_NEW_SCT must be identical in audit_sct_history and migration 0086.
 
