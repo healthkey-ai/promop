@@ -1,7 +1,7 @@
 # ctomop API Surface
 
 > Base URL: `https://ctomop.onrender.com/api` (production) | `http://localhost:8000/api` (dev)
-> Last revised: 2026-05-11
+> Last revised: 2026-06-07
 
 ---
 
@@ -35,22 +35,23 @@ The convenience `PATCH /api/patient-info/{person_id}/` endpoint exists for field
 ## Table of contents
 
 1. [Authentication & authorization](#authentication--authorization)
-2. [PatientInfo read endpoints](#patientinfo-read-endpoints)
-3. [OMOP write endpoints](#omop-write-endpoints)
+2. [Person identity endpoints](#person-identity-endpoints) ← _new (phr-etl integration)_
+3. [PatientInfo read endpoints](#patientinfo-read-endpoints)
+4. [OMOP write endpoints](#omop-write-endpoints)
    - [PATCH /api/patient-info/{person_id}/ — field update convenience](#patch-apipatient-infoperson_id--field-update-convenience)
    - [POST /api/patient-info/upload_fhir/](#post-apipatient-infoupload_fhir)
    - [DELETE /api/patient-info/bulk_delete/](#delete-apipatient-infobulk_delete)
    - [OMOP clinical event endpoints](#omop-clinical-event-endpoints)
-4. [Document & trial endpoints](#document--trial-endpoints)
-5. [Vocabulary endpoint](#vocabulary-endpoint)
-6. [OAuth2 endpoints](#oauth2-endpoints)
-7. [OMOP write internals](#omop-write-internals)
+5. [Document & trial endpoints](#document--trial-endpoints)
+6. [Vocabulary & concept lookup endpoints](#vocabulary--concept-lookup-endpoints) ← _new (phr-etl integration)_
+7. [OAuth2 endpoints](#oauth2-endpoints)
+8. [OMOP write internals](#omop-write-internals)
    - [_upsert_omop_measurement](#_upsert_omop_measurement)
    - [_LAB_FIELD_TO_LOINC mapping](#_lab_field_to_loinc-mapping)
    - [FHIR upload pipeline](#fhir-upload-pipeline)
    - [refresh_patient_info signal chain](#refresh_patient_info-signal-chain)
-8. [Provenance tagging](#provenance-tagging)
-9. [Multi-tenant org scoping](#multi-tenant-org-scoping)
+9. [Provenance tagging](#provenance-tagging)
+10. [Multi-tenant org scoping](#multi-tenant-org-scoping)
 
 ---
 
@@ -74,6 +75,66 @@ Tokens must carry SMART on FHIR scopes:
 Expired tokens → **401**. Missing or insufficient scopes → **403**.
 
 Grant type: `client_credentials` via `POST /o/token/`
+
+---
+
+## Person identity endpoints
+
+These endpoints implement the phr-etl integration contract (branch `feature/phr-etl-integration`). They allow an external pipeline to resolve a Firebase identity to a stable OMOP `person_id` and to fill in demographic fields without clobbering data that is already present.
+
+Both endpoints require `patient/*.write` scope.
+
+---
+
+### POST /api/persons/find_or_create/
+
+Resolve an OpenID Connect identity (`actor_iss` + `actor_sub`) to a `Person` row, auto-provisioning on first call. The same `(actor_iss, actor_sub)` pair always returns the same `person_id` regardless of which organization or caller invokes it — this is how multi-org identity merge works.
+
+**Request body**
+```json
+{ "actor_iss": "https://securetoken.google.com/<project>", "actor_sub": "<firebase-uid>" }
+```
+
+**Response 201** (new person created)
+```json
+{ "person_id": 1234, "created": true }
+```
+
+**Response 200** (person already exists)
+```json
+{ "person_id": 1234, "created": false }
+```
+
+**Response 400** — `actor_iss` or `actor_sub` missing or blank.
+
+---
+
+### PATCH /api/persons/{person_id}/
+
+Fill-if-empty patch on Person demographic fields. Each field is only written when the existing value is `null` or a recognized placeholder (`""`, `"unknown"`, `"Unknown"`, `1900`, `0`). Real data is never clobbered.
+
+**Request body** (all fields optional)
+```json
+{
+  "given_name": "Jane",
+  "family_name": "Doe",
+  "year_of_birth": 1980,
+  "month_of_birth": 5,
+  "day_of_birth": 12,
+  "gender_source_value": "female",
+  "race_source_value": "White",
+  "ethnicity_source_value": "Not Hispanic or Latino"
+}
+```
+
+**Response 200**
+```json
+{ "person_id": 1234, "updated_fields": ["given_name", "family_name", "year_of_birth"] }
+```
+
+`updated_fields` lists only the fields that were actually written. Fields skipped because the existing value was real are omitted.
+
+**Response 404** — `person_id` not found.
 
 ---
 
@@ -321,7 +382,32 @@ Full CRUD. Org-scoped. These do not feed into PatientInfo.
 
 ---
 
-## Vocabulary endpoint
+## Vocabulary & concept lookup endpoints
+
+### GET /api/concepts/lookup/
+
+Batch translate `(vocabulary_id, concept_code)` pairs to OMOP `concept_id`. Used by phr-etl to resolve raw clinical codes before writing OMOP records — unknown codes fall back to `concept_id = 0` on the client side.
+
+Query param `lookup` is repeatable. Each value must be `VOCAB_ID:concept_code`.
+
+**Request**
+```
+GET /api/concepts/lookup/?lookup=LOINC:2160-0&lookup=LOINC:2345-7&lookup=SNOMED:44054006
+```
+
+**Response 200**
+```json
+{
+  "LOINC":  { "2160-0": 3013682, "2345-7": 3000963 },
+  "SNOMED": { "44054006": 201826 }
+}
+```
+
+Unknown codes return `null`. Requires `patient/*.read` scope (read-only).
+
+**Response 400** — no `lookup` params supplied, or a param is missing the `:` separator.
+
+---
 
 ### GET /api/vocabularies/{model_name}/
 

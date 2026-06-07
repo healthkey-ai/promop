@@ -5180,3 +5180,232 @@ class SctDataMigrationTest(TestCase):
             "_OLD_TO_NEW_SCT in audit_sct_history.py and migration 0086 have diverged. "
             "Update both files to keep them in sync.",
         )
+
+
+# =============================================================================
+# phr-etl integration endpoint tests
+# POST /api/persons/find_or_create/
+# PATCH /api/persons/{person_id}/
+# GET  /api/concepts/lookup/
+# =============================================================================
+
+class PersonFindOrCreateTest(_SmartBase):
+    """POST /api/persons/find_or_create/"""
+
+    URL = '/api/persons/find_or_create/'
+
+    def _auth(self):
+        return {'HTTP_AUTHORIZATION': f'Bearer {self.write_token.token}'}
+
+    def test_creates_person_on_first_call(self):
+        resp = self.client.post(
+            self.URL,
+            {'actor_iss': 'https://securetoken.google.com/proj', 'actor_sub': 'uid-abc'},
+            content_type='application/json',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertIn('person_id', resp.json())
+        self.assertTrue(resp.json()['created'])
+
+    def test_returns_same_person_id_on_repeat(self):
+        payload = {'actor_iss': 'https://securetoken.google.com/proj', 'actor_sub': 'uid-xyz'}
+        r1 = self.client.post(self.URL, payload, content_type='application/json', **self._auth())
+        r2 = self.client.post(self.URL, payload, content_type='application/json', **self._auth())
+        self.assertEqual(r1.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(r2.status_code, status.HTTP_200_OK)
+        self.assertEqual(r1.json()['person_id'], r2.json()['person_id'])
+        self.assertFalse(r2.json()['created'])
+
+    def test_different_subs_get_different_persons(self):
+        base = {'actor_iss': 'https://securetoken.google.com/proj'}
+        r1 = self.client.post(self.URL, {**base, 'actor_sub': 'uid-1'}, content_type='application/json', **self._auth())
+        r2 = self.client.post(self.URL, {**base, 'actor_sub': 'uid-2'}, content_type='application/json', **self._auth())
+        self.assertNotEqual(r1.json()['person_id'], r2.json()['person_id'])
+
+    def test_missing_actor_iss_returns_400(self):
+        resp = self.client.post(
+            self.URL, {'actor_sub': 'uid-abc'}, content_type='application/json', **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_missing_actor_sub_returns_400(self):
+        resp = self.client.post(
+            self.URL, {'actor_iss': 'https://securetoken.google.com/proj'}, content_type='application/json', **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_unauthenticated_returns_401(self):
+        resp = self.client.post(
+            self.URL,
+            {'actor_iss': 'https://securetoken.google.com/proj', 'actor_sub': 'uid-noauth'},
+            content_type='application/json',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
+class PersonDemographicPatchTest(_SmartBase):
+    """PATCH /api/persons/{person_id}/"""
+
+    def setUp(self):
+        from omop_core.models import Person
+        from omop_core.services.pk import next_pk
+        self.person = Person.objects.create(
+            person_id=next_pk(Person, 'person_id'),
+            given_name=None,
+            family_name=None,
+            year_of_birth=None,
+            gender_source_value=None,
+            race_source_value=None,
+            ethnicity_source_value=None,
+        )
+
+    def _url(self):
+        return f'/api/persons/{self.person.person_id}/'
+
+    def _auth(self):
+        return {'HTTP_AUTHORIZATION': f'Bearer {self.write_token.token}'}
+
+    def test_fills_null_fields(self):
+        resp = self.client.patch(
+            self._url(),
+            {'given_name': 'Jane', 'family_name': 'Doe', 'year_of_birth': 1980},
+            content_type='application/json',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.given_name, 'Jane')
+        self.assertEqual(self.person.family_name, 'Doe')
+        self.assertEqual(self.person.year_of_birth, 1980)
+
+    def test_does_not_clobber_existing_value(self):
+        self.person.given_name = 'Existing'
+        self.person.save(update_fields=['given_name'])
+        resp = self.client.patch(
+            self._url(),
+            {'given_name': 'Attempted Override'},
+            content_type='application/json',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.given_name, 'Existing')
+        self.assertNotIn('given_name', resp.json()['updated_fields'])
+
+    def test_overwrites_placeholder_string(self):
+        self.person.race_source_value = 'unknown'
+        self.person.save(update_fields=['race_source_value'])
+        self.client.patch(
+            self._url(),
+            {'race_source_value': 'White'},
+            content_type='application/json',
+            **self._auth(),
+        )
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.race_source_value, 'White')
+
+    def test_overwrites_placeholder_year(self):
+        self.person.year_of_birth = 1900
+        self.person.save(update_fields=['year_of_birth'])
+        self.client.patch(
+            self._url(),
+            {'year_of_birth': 1975},
+            content_type='application/json',
+            **self._auth(),
+        )
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.year_of_birth, 1975)
+
+    def test_unknown_person_returns_404(self):
+        resp = self.client.patch(
+            '/api/persons/999999/',
+            {'given_name': 'Ghost'},
+            content_type='application/json',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_updated_fields_list_in_response(self):
+        resp = self.client.patch(
+            self._url(),
+            {'given_name': 'Alice', 'family_name': 'Smith'},
+            content_type='application/json',
+            **self._auth(),
+        )
+        self.assertIn('given_name', resp.json()['updated_fields'])
+        self.assertIn('family_name', resp.json()['updated_fields'])
+
+
+class ConceptLookupTest(_SmartBase):
+    """GET /api/concepts/lookup/"""
+
+    URL = '/api/concepts/lookup/'
+
+    def setUp(self):
+        from omop_core.models import Concept, Vocabulary, Domain, ConceptClass
+        import datetime
+        # Minimal vocab/domain/class stubs needed for Concept FK constraints
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_reference': '', 'vocabulary_version': '',
+                      'vocabulary_concept_id': 0},
+        )
+        domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 0},
+        )
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+        self.concept = Concept.objects.get_or_create(
+            concept_id=3013682,
+            defaults={
+                'concept_name': 'Creatinine [Mass/volume] in Serum or Plasma',
+                'domain_id': 'Measurement',
+                'vocabulary_id': 'LOINC',
+                'concept_class_id': 'Lab Test',
+                'concept_code': '2160-0',
+                'valid_start_date': datetime.date(1970, 1, 1),
+                'valid_end_date': datetime.date(2099, 12, 31),
+            },
+        )[0]
+
+    def _auth(self):
+        return {'HTTP_AUTHORIZATION': f'Bearer {self.read_token.token}'}
+
+    def test_returns_concept_id_for_known_code(self):
+        resp = self.client.get(
+            self.URL, {'lookup': 'LOINC:2160-0'}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['LOINC']['2160-0'], 3013682)
+
+    def test_returns_null_for_unknown_code(self):
+        resp = self.client.get(
+            self.URL, {'lookup': 'LOINC:9999-X'}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(resp.json()['LOINC']['9999-X'])
+
+    def test_multiple_lookup_pairs(self):
+        resp = self.client.get(
+            f'{self.URL}?lookup=LOINC:2160-0&lookup=LOINC:9999-X', **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.json()['LOINC']
+        self.assertEqual(data['2160-0'], 3013682)
+        self.assertIsNone(data['9999-X'])
+
+    def test_missing_lookup_param_returns_400(self):
+        resp = self.client.get(self.URL, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_malformed_lookup_param_returns_400(self):
+        resp = self.client.get(f'{self.URL}?lookup=LOINC-2160-0', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_unauthenticated_returns_401(self):
+        resp = self.client.get(f'{self.URL}?lookup=LOINC:2160-0')
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
