@@ -5,6 +5,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
+from django.db import IntegrityError
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -1942,11 +1943,16 @@ class PersonViewSet(viewsets.GenericViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        person, created = Person.objects.get_or_create(
-            actor_iss=actor_iss,
-            actor_sub=actor_sub,
-            defaults={'person_id': next_pk(Person, 'person_id')},
-        )
+        try:
+            person, created = Person.objects.get_or_create(
+                actor_iss=actor_iss,
+                actor_sub=actor_sub,
+                defaults={'person_id': lambda: next_pk(Person, 'person_id')},
+            )
+        except IntegrityError:
+            # Concurrent first-call race: another request won the INSERT
+            person = Person.objects.get(actor_iss=actor_iss, actor_sub=actor_sub)
+            created = False
         http_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return Response({'person_id': person.person_id, 'created': created}, status=http_status)
 
@@ -1958,14 +1964,27 @@ class PersonViewSet(viewsets.GenericViewSet):
         """
         try:
             person = Person.objects.get(person_id=person_id)
-        except Person.DoesNotExist:
+        except (Person.DoesNotExist, ValueError):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        org = get_request_org(request)
+        if org is not None:
+            if not PatientInfo.objects.filter(person=person, organization=org).exists():
+                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         changed = []
         for field, (kind, placeholders) in _PERSON_PATCHABLE_FIELDS.items():
             if field not in request.data:
                 continue
             incoming = request.data[field]
+            if kind == 'int' and incoming is not None:
+                try:
+                    incoming = int(incoming)
+                except (TypeError, ValueError):
+                    return Response(
+                        {'detail': f"'{field}' must be an integer."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
             current  = getattr(person, field)
             if current in placeholders or current is None:
                 setattr(person, field, incoming)
@@ -2182,7 +2201,7 @@ def concept_lookup(request):
     hits = OmopConcept.objects.filter(
         vocabulary_id__in=all_vocab_ids,
         concept_code__in=all_codes,
-    ).values('vocabulary_id', 'concept_code', 'concept_id')
+    ).order_by('concept_id').values('vocabulary_id', 'concept_code', 'concept_id')
 
     for row in hits:
         v, c, cid = row['vocabulary_id'], row['concept_code'], row['concept_id']
