@@ -11,7 +11,8 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepare": "cd .. && bash scripts/install-hooks.sh"
   },
   "dependencies": {
     "@module-federation/runtime": "^2.4.0",

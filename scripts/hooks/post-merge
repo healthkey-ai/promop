@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Re-sync frontend lock file when package.json changes after a merge/pull.
+if git diff-tree -r --name-only --no-commit-id ORIG_HEAD HEAD | grep -q "^frontend/package.json$"; then
+  echo "frontend/package.json changed — running npm install to sync lock file..."
+  (cd "$(git rev-parse --show-toplevel)/frontend" && npm install --silent)
+  echo "Done."
+fi
