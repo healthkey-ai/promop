@@ -12,7 +12,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepare": "cd .. && bash scripts/install-hooks.sh"
+    "prepare": "test -f ../scripts/install-hooks.sh && cd .. && bash scripts/install-hooks.sh || true"
   },
   "dependencies": {
     "@module-federation/runtime": "^2.4.0",
