@@ -5,6 +5,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
+from django.db import IntegrityError
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -1896,6 +1897,106 @@ def auth_test(request):
         return Response({'status': 'error', 'step': step, 'error': str(e), 'traceback': tb.format_exc()}, status=500)
 
 # =============================================================================
+# Person ViewSet — identity resolution and demographic patch
+# =============================================================================
+
+# Fields considered "placeholder" values that a fill-if-empty PATCH may overwrite.
+_PERSON_STR_PLACEHOLDERS = {'', 'unknown', 'Unknown'}
+_PERSON_YEAR_PLACEHOLDER = {None, 0, 1900}
+_PERSON_INT_PLACEHOLDER  = {None, 0}
+
+_PERSON_PATCHABLE_FIELDS = {
+    'given_name':            ('str',  _PERSON_STR_PLACEHOLDERS),
+    'family_name':           ('str',  _PERSON_STR_PLACEHOLDERS),
+    'year_of_birth':         ('int',  _PERSON_YEAR_PLACEHOLDER),
+    'month_of_birth':        ('int',  _PERSON_INT_PLACEHOLDER),
+    'day_of_birth':          ('int',  _PERSON_INT_PLACEHOLDER),
+    'gender_source_value':   ('str',  _PERSON_STR_PLACEHOLDERS),
+    'race_source_value':     ('str',  _PERSON_STR_PLACEHOLDERS),
+    'ethnicity_source_value':('str',  _PERSON_STR_PLACEHOLDERS),
+}
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class PersonViewSet(viewsets.GenericViewSet):
+    """
+    Endpoints:
+      POST /api/persons/find_or_create/  — resolve OIDC identity to a Person row
+      PATCH /api/persons/{person_id}/    — fill-if-empty demographic patch
+    """
+    permission_classes = [ScopedTokenPermission]
+    queryset = Person.objects.all()
+    lookup_field = 'person_id'
+
+    @action(detail=False, methods=['post'], url_path='find_or_create')
+    def find_or_create(self, request):
+        """
+        POST /api/persons/find_or_create/
+        Body: { "actor_iss": "...", "actor_sub": "..." }
+        Response 200/201: { "person_id": 1234, "created": true }
+        """
+        actor_iss = request.data.get('actor_iss', '').strip()
+        actor_sub = request.data.get('actor_sub', '').strip()
+        if not actor_iss or not actor_sub:
+            return Response(
+                {'detail': 'actor_iss and actor_sub are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            person, created = Person.objects.get_or_create(
+                actor_iss=actor_iss,
+                actor_sub=actor_sub,
+                defaults={'person_id': lambda: next_pk(Person, 'person_id')},
+            )
+        except IntegrityError:
+            # Concurrent first-call race: another request won the INSERT
+            person = Person.objects.get(actor_iss=actor_iss, actor_sub=actor_sub)
+            created = False
+        http_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return Response({'person_id': person.person_id, 'created': created}, status=http_status)
+
+    def partial_update(self, request, person_id=None):
+        """
+        PATCH /api/persons/{person_id}/
+        Fill-if-empty: each field is only written when the current value is null or a placeholder.
+        Never clobbers real data.
+        """
+        try:
+            person = Person.objects.get(person_id=person_id)
+        except (Person.DoesNotExist, ValueError):
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        org = get_request_org(request)
+        if org is not None:
+            if not PatientInfo.objects.filter(person=person, organization=org).exists():
+                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        changed = []
+        for field, (kind, placeholders) in _PERSON_PATCHABLE_FIELDS.items():
+            if field not in request.data:
+                continue
+            incoming = request.data[field]
+            if kind == 'int' and incoming is not None:
+                try:
+                    incoming = int(incoming)
+                except (TypeError, ValueError):
+                    return Response(
+                        {'detail': f"'{field}' must be an integer."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            current  = getattr(person, field)
+            if current in placeholders or current is None:
+                setattr(person, field, incoming)
+                changed.append(field)
+
+        if changed:
+            person.save(update_fields=changed)
+
+        return Response({'person_id': person.person_id, 'updated_fields': changed})
+
+
+# =============================================================================
 # OMOP clinical event ViewSets
 # =============================================================================
 
@@ -2047,6 +2148,67 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
         if episode_id:
             qs = qs.filter(episode_id=episode_id)
         return qs
+
+
+# =============================================================================
+# OMOP concept lookup
+# GET /api/concepts/lookup/?lookup=LOINC:2160-0&lookup=SNOMED:44054006
+# =============================================================================
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_lookup(request):
+    """
+    Batch translate (vocabulary_id, concept_code) pairs to concept_id.
+
+    Query params (repeatable):
+        lookup=VOCAB_ID:concept_code
+
+    Response 200:
+        { "LOINC": { "2160-0": 3013682, "2345-7": null }, "SNOMED": { ... } }
+
+    Unknown codes return null; healthkey-etl substitutes concept_id=0 downstream.
+    """
+    from omop_core.models import Concept as OmopConcept
+
+    raw_pairs = request.query_params.getlist('lookup')
+    if not raw_pairs:
+        return Response(
+            {'detail': 'At least one ?lookup=VOCAB:code parameter is required.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Parse and group by vocabulary
+    by_vocab: dict[str, set[str]] = {}
+    for pair in raw_pairs:
+        if ':' not in pair:
+            return Response(
+                {'detail': f"Malformed lookup value '{pair}'. Expected format: VOCAB_ID:concept_code"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        vocab_id, concept_code = pair.split(':', 1)
+        by_vocab.setdefault(vocab_id, set()).add(concept_code)
+
+    # Build result skeleton: all codes default to null
+    result: dict[str, dict[str, int | None]] = {
+        vocab: {code: None for code in codes}
+        for vocab, codes in by_vocab.items()
+    }
+
+    # Single query across all requested (vocab, code) pairs
+    all_vocab_ids = list(by_vocab.keys())
+    all_codes = list({c for codes in by_vocab.values() for c in codes})
+    hits = OmopConcept.objects.filter(
+        vocabulary_id__in=all_vocab_ids,
+        concept_code__in=all_codes,
+    ).order_by('concept_id').values('vocabulary_id', 'concept_code', 'concept_id')
+
+    for row in hits:
+        v, c, cid = row['vocabulary_id'], row['concept_code'], row['concept_id']
+        if v in result and c in result[v]:
+            result[v][c] = cid
+
+    return Response(result)
 
 
 # =============================================================================

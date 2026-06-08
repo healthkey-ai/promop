@@ -2,6 +2,8 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     CurrentUserViewSet, PatientInfoViewSet, login_view, logout_view, auth_test,
+    # Person identity resolution
+    PersonViewSet,
     # OMOP clinical event ViewSets
     ConditionOccurrenceViewSet, DrugExposureViewSet, MeasurementViewSet,
     ObservationViewSet, ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
@@ -11,8 +13,8 @@ from .views import (
     PatientTrialEnrollmentViewSet,
     # Patient surveys
     SurveyViewSet, PatientSurveyResponseViewSet,
-    # Controlled vocabulary
-    vocabulary_list,
+    # Controlled vocabulary + OMOP concept lookup
+    vocabulary_list, concept_lookup,
 )
 
 router = DefaultRouter()
@@ -20,6 +22,9 @@ router = DefaultRouter()
 # Core PatientInfo
 router.register(r'user', CurrentUserViewSet, basename='user')
 router.register(r'patient-info', PatientInfoViewSet, basename='patient-info')
+
+# Person identity resolution + demographic patch
+router.register(r'persons', PersonViewSet, basename='persons')
 
 # OMOP clinical event tables
 # Filter by person: /api/conditions/?person_id=42
@@ -47,4 +52,5 @@ urlpatterns = [
     path('auth/logout/', logout_view, name='logout'),
     path('auth/test/', auth_test, name='auth_test'),
     path('vocabularies/<str:model_name>/', vocabulary_list, name='vocabulary-list'),
+    path('concepts/lookup/', concept_lookup, name='concept-lookup'),
 ]

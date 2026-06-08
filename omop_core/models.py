@@ -430,9 +430,20 @@ class Person(models.Model):
     # Name fields (extension to OMOP CDM for practical use)
     given_name = models.CharField(max_length=100, null=True, blank=True, help_text="First/Given name")
     family_name = models.CharField(max_length=100, null=True, blank=True, help_text="Last/Family name")
-    
+
+    # External identity (OpenID Connect) — used by phr-etl find_or_create
+    actor_iss = models.CharField(max_length=255, null=True, blank=True, help_text="OIDC issuer URL")
+    actor_sub = models.CharField(max_length=255, null=True, blank=True, help_text="OIDC subject (Firebase UID)")
+
     class Meta:
         db_table = 'person'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['actor_iss', 'actor_sub'],
+                condition=models.Q(actor_iss__isnull=False, actor_sub__isnull=False),
+                name='person_actor_iss_sub_unique',
+            )
+        ]
     
     def __str__(self):
         if self.given_name or self.family_name:
