@@ -115,20 +115,42 @@ class Migration(migrations.Migration):
                 ),
             ],
         ),
-        migrations.AddField(
-            model_name="patientinfo",
-            name="sct_date",
-            field=models.DateField(blank=True, null=True),
+        # Add sct_date to PatientInfo — idempotent (column may already exist in production)
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.AddField(
+                    model_name="patientinfo",
+                    name="sct_date",
+                    field=models.DateField(blank=True, null=True),
+                ),
+            ],
+            database_operations=[
+                migrations.RunSQL(
+                    sql='ALTER TABLE "patient_info" ADD COLUMN IF NOT EXISTS "sct_date" date NULL;',
+                    reverse_sql=migrations.RunSQL.noop,
+                ),
+            ],
         ),
-        migrations.AddField(
-            model_name="patientinfo",
-            name="sct_eligibility",
-            field=models.JSONField(
-                blank=True,
-                default=list,
-                help_text="Multi-select from SctEligibility vocabulary",
-                null=True,
-            ),
+        # Add sct_eligibility to PatientInfo — idempotent (column may already exist in production)
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.AddField(
+                    model_name="patientinfo",
+                    name="sct_eligibility",
+                    field=models.JSONField(
+                        blank=True,
+                        default=list,
+                        help_text="Multi-select from SctEligibility vocabulary",
+                        null=True,
+                    ),
+                ),
+            ],
+            database_operations=[
+                migrations.RunSQL(
+                    sql='ALTER TABLE "patient_info" ADD COLUMN IF NOT EXISTS "sct_eligibility" jsonb NULL;',
+                    reverse_sql=migrations.RunSQL.noop,
+                ),
+            ],
         ),
         migrations.RunPython(backfill_sct_eligibility, reverse_noop),
     ]
