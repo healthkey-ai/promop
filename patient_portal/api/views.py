@@ -715,6 +715,10 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
                     # Process observations and create Measurement records
+                    # Suppress signal-triggered PatientInfo refreshes for all OMOP
+                    # writes below — a single explicit refresh happens at the end.
+                    from omop_core.signals import _suppress as _omop_suppress
+                    _omop_suppress.active = True
                     logger.info("TIMING patient=%s phase=person_setup elapsed=%.1fs", fhir_patient_id[:8], _time.monotonic() - _pt_start)
                     from omop_core.models import Measurement
                     last_measurement = Measurement.objects.all().order_by('-measurement_id').first()
@@ -1544,6 +1548,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             logger.warning(f"Could not write DrugExposure/Episode for LOT {lot_num}: {_e}")
 
                     # --- OMOP-first: refresh PatientInfo from OMOP tables ---
+                    # Re-enable signals before the single intentional refresh.
+                    _omop_suppress.active = False
                     logger.info("TIMING patient=%s phase=drug_exposures elapsed=%.1fs", fhir_patient_id[:8], _time.monotonic() - _pt_start)
                     patient_info = refresh_patient_info(person)
                     infer_lot_for_person(person)
@@ -1760,6 +1766,11 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 _fhir_id_hash, _pt_total)
                     
                 except Exception as e:
+                    # Always clear suppression so it doesn't bleed into the next patient.
+                    try:
+                        _omop_suppress.active = False
+                    except NameError:
+                        pass
                     _err_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
                     errors.append(f"Patient (id_hash={_err_hash}): {str(e)}")
             
