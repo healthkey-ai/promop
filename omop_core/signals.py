@@ -43,12 +43,15 @@ def suppress_patient_info_refresh():
 
     Use around bulk OMOP writes and call refresh_patient_info() explicitly
     once at the end to keep PatientInfo in sync with a single DB round-trip.
+
+    Re-entrant safe: nested calls preserve the outer suppression state.
     """
+    was_active = getattr(_suppress, 'active', False)
     _suppress.active = True
     try:
         yield
     finally:
-        _suppress.active = False
+        _suppress.active = was_active
 
 
 def _refresh_for_instance(instance):
