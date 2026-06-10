@@ -13,6 +13,7 @@ Usage:
 """
 import io
 import json
+import time
 from pathlib import Path
 
 from django.contrib.auth import get_user_model
@@ -59,6 +60,7 @@ class Command(BaseCommand):
 
         total_created = 0
         total_errors = []
+        load_start = time.monotonic()
 
         for batch_num, batch_start in enumerate(range(0, len(patient_ids), batch_size), 1):
             batch_pids = set(patient_ids[batch_start: batch_start + batch_size])
@@ -78,12 +80,22 @@ class Command(BaseCommand):
             )
             self.stdout.flush()
 
+            batch_start_time = time.monotonic()
             result = self._run_batch(batch_json, user)
+            batch_elapsed = time.monotonic() - batch_start_time
+
             created = result.get("created_count", 0)
             errors = result.get("errors", [])
             total_created += created
             total_errors.extend(errors)
-            self.stdout.write(f" created={created} errors={len(errors)}")
+
+            per_patient = batch_elapsed / len(batch_pids) if batch_pids else 0
+            total_elapsed = time.monotonic() - load_start
+            self.stdout.write(
+                f" created={created} errors={len(errors)}"
+                f" ({batch_elapsed:.1f}s, {per_patient:.1f}s/patient,"
+                f" total={total_elapsed:.0f}s, {total_created}/{len(patient_ids)} done)"
+            )
 
         self.stdout.write(self.style.SUCCESS(
             f"\nDone. Created: {total_created}, errors: {len(total_errors)}"
