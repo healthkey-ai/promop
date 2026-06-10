@@ -488,8 +488,10 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             _allowed_elig_titles = set(SctEligibility.objects.values_list('title', flat=True))
 
             # Process each patient
+            import time as _time
             for fhir_patient_id, data in patients_data.items():
                 try:
+                    _pt_start = _time.monotonic()
                     _pt_measurement_ids = []
                     _pt_condition_ids = []
                     _pt_drug_exposure_ids = []
@@ -713,6 +715,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
                     # Process observations and create Measurement records
+                    logger.info("TIMING patient=%s phase=person_setup elapsed=%.1fs", fhir_patient_id[:8], _time.monotonic() - _pt_start)
                     from omop_core.models import Measurement
                     last_measurement = Measurement.objects.all().order_by('-measurement_id').first()
                     measurement_id = last_measurement.measurement_id + 1 if last_measurement else 1
@@ -1436,6 +1439,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 later_discontinuation_reason = disc_obs['value']
                     
                     # --- Write DrugExposure records for each therapy line ---
+                    logger.info("TIMING patient=%s phase=measurements elapsed=%.1fs", fhir_patient_id[:8], _time.monotonic() - _pt_start)
                     last_drug = DrugExposure.objects.all().order_by('-drug_exposure_id').first()
                     drug_exposure_id = last_drug.drug_exposure_id + 1 if last_drug else 1
                     last_episode = Episode.objects.all().order_by('-episode_id').first()
@@ -1540,6 +1544,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             logger.warning(f"Could not write DrugExposure/Episode for LOT {lot_num}: {_e}")
 
                     # --- OMOP-first: refresh PatientInfo from OMOP tables ---
+                    logger.info("TIMING patient=%s phase=drug_exposures elapsed=%.1fs", fhir_patient_id[:8], _time.monotonic() - _pt_start)
                     patient_info = refresh_patient_info(person)
                     infer_lot_for_person(person)
 
@@ -1749,9 +1754,10 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     else:
                         updated_count += 1
                     _fhir_id_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
-                    logger.info("Successfully %s patient (id_hash=%s)",
+                    _pt_total = _time.monotonic() - _pt_start
+                    logger.info("Successfully %s patient (id_hash=%s) total=%.1fs",
                                 'created' if person_is_new else 'updated',
-                                _fhir_id_hash)
+                                _fhir_id_hash, _pt_total)
                     
                 except Exception as e:
                     _err_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
