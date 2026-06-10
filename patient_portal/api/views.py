@@ -640,12 +640,20 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             },
                         )
                     
+                    # Suppress signal-triggered PatientInfo refreshes for all OMOP
+                    # writes below. Use __enter__/__exit__ explicitly so the finally
+                    # block guarantees cleanup even on BaseException (e.g. KeyboardInterrupt),
+                    # without requiring 1000 lines of re-indentation.
+                    from omop_core.signals import suppress_patient_info_refresh as _suppress_cm_fn
+                    _suppress_cm = _suppress_cm_fn()
+                    _suppress_cm.__enter__()
+
                     # Extract disease, stage, and histologic type from Condition
                     disease = 'Breast Cancer'
                     stage = ''
                     histologic_type = ''
                     condition_date = None
-                    
+
                     for condition in data['conditions']:
                         # Get histologic type from code
                         code = condition.get('code', {})
@@ -715,7 +723,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
                     # Process observations and create Measurement records
-                    logger.info("TIMING patient=%s phase=person_setup elapsed=%.1fs", fhir_patient_id[:8], _time.monotonic() - _pt_start)
+                    _timing_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
+                    logger.debug("TIMING patient=%s phase=person_setup elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
                     from omop_core.models import Measurement
                     last_measurement = Measurement.objects.all().order_by('-measurement_id').first()
                     measurement_id = last_measurement.measurement_id + 1 if last_measurement else 1
@@ -1439,7 +1448,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 later_discontinuation_reason = disc_obs['value']
                     
                     # --- Write DrugExposure records for each therapy line ---
-                    logger.info("TIMING patient=%s phase=measurements elapsed=%.1fs", fhir_patient_id[:8], _time.monotonic() - _pt_start)
+                    logger.debug("TIMING patient=%s phase=measurements elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
                     last_drug = DrugExposure.objects.all().order_by('-drug_exposure_id').first()
                     drug_exposure_id = last_drug.drug_exposure_id + 1 if last_drug else 1
                     last_episode = Episode.objects.all().order_by('-episode_id').first()
@@ -1544,7 +1553,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             logger.warning(f"Could not write DrugExposure/Episode for LOT {lot_num}: {_e}")
 
                     # --- OMOP-first: refresh PatientInfo from OMOP tables ---
-                    logger.info("TIMING patient=%s phase=drug_exposures elapsed=%.1fs", fhir_patient_id[:8], _time.monotonic() - _pt_start)
+                    # Release suppression before the single intentional refresh.
+                    _suppress_cm.__exit__(None, None, None)
+                    logger.debug("TIMING patient=%s phase=drug_exposures elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
                     patient_info = refresh_patient_info(person)
                     infer_lot_for_person(person)
 
@@ -1762,6 +1773,13 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 except Exception as e:
                     _err_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
                     errors.append(f"Patient (id_hash={_err_hash}): {str(e)}")
+                finally:
+                    # Guarantee suppression is cleared even on BaseException.
+                    # Safe to call on an already-exited context manager (re-entrant safe).
+                    try:
+                        _suppress_cm.__exit__(None, None, None)
+                    except NameError:
+                        pass  # exception raised before _suppress_cm was assigned
             
             return Response({
                 'success': True,
