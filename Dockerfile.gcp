@@ -35,6 +35,8 @@ COPY --from=backend /usr/local/bin /usr/local/bin
 COPY --from=backend /app /app
 COPY --from=frontend /app/frontend/dist/remote /app/frontend/dist/remote
 
+ENV WHITENOISE_ROOT=/app/frontend/dist/remote
+
 EXPOSE 8080
 
 CMD ["gunicorn", "ctomop.wsgi:application", \

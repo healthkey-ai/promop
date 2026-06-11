@@ -41,6 +41,8 @@ RUN cd frontend && npm run build && cd ..
 # Collect Django static files
 RUN python manage.py collectstatic --noinput --clear || true
 
+ENV WHITENOISE_ROOT=/app/frontend/build
+
 # Expose port
 EXPOSE 8000
 

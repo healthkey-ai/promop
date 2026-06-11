@@ -180,11 +180,14 @@ STATICFILES_DIRS = []
 
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
-# Serve Vite build output (assets/, index.html, etc.) at the root URL via WhiteNoise.
-# Vite outputs to frontend/build/ with assets at /assets/... (no /static/ prefix).
-frontend_build = BASE_DIR / 'frontend' / 'build'
-if frontend_build.exists():
-    WHITENOISE_ROOT = frontend_build
+_whitenoise_root = os.environ.get('WHITENOISE_ROOT', '')
+if _whitenoise_root:
+    WHITENOISE_ROOT = Path(_whitenoise_root)
+else:
+    for _candidate in (BASE_DIR / 'frontend' / 'dist' / 'remote', BASE_DIR / 'frontend' / 'build'):
+        if _candidate.exists():
+            WHITENOISE_ROOT = _candidate
+            break
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
