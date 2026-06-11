@@ -77,6 +77,42 @@ TEST_PATIENTS = [
         ),
     ),
 
+    # ── Multiple Myeloma — ht-phr local-stack demo login (demo@healthtree.org,
+    #    "Diana Demo"). person_id 9008 is the patient the host FindTrials page
+    #    resolves for the demo account; seeded here with the canonical disease
+    #    title so the trial-match demo is reproducible without manual DB edits.
+    dict(
+        person_id=9008,
+        person_defaults=dict(year_of_birth=1968, gender_source_value='F'),
+        pi=dict(
+            disease='multiple myeloma',
+            patient_age=56,
+            gender='F',
+            country='US',
+            prior_therapy='More than two lines of therapy',
+            first_line_therapy='VRd',
+            first_line_outcome='CR',
+            second_line_therapy='Daratumumab',
+            second_line_outcome='PD',
+            later_therapy='Pomalidomide',
+            later_outcome='PD',
+            progression='active',
+            stage='III',
+            ecog_performance_status=1,
+            karnofsky_performance_score=80,
+            hemoglobin_level='9.8',
+            platelet_count=120000,
+            creatinine_clearance_rate=58,
+            no_hiv_status=True,
+            no_hepatitis_b_status=True,
+            no_hepatitis_c_status=True,
+            no_other_active_malignancies=True,
+            monoclonal_protein_serum='2.0',
+            kappa_flc=165,
+            lambda_flc=6,
+        ),
+    ),
+
     # ── Follicular Lymphoma — treatment-naive, should match TEST-FL-001
     dict(
         person_id=9003,
