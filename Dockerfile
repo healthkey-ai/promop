@@ -36,7 +36,7 @@ COPY . .
 RUN ls -la /app/patient_portal/
 
 # Build frontend
-RUN cd frontend && npm run build && cd ..
+RUN cd frontend && npm run build:remote && cd ..
 
 # Collect Django static files
 RUN python manage.py collectstatic --noinput --clear || true
