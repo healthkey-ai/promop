@@ -602,6 +602,27 @@ Expected output: `MISSING from DB: []` and `EXTRA in DB: []`.
 
 ---
 
+## Module Federation (GCP Cloud Run)
+
+ctomop serves as a Module Federation **remote** (`labs_results_remote`) consumed by the ht-phr host app. There are two Dockerfiles with different build targets:
+
+| File | Build command | Output dir | Purpose |
+|------|--------------|------------|---------|
+| `Dockerfile` | `npm run build` | `frontend/build/` | Local dev — standalone SPA |
+| `Dockerfile.gcp` | `npm run build:remote` | `frontend/dist/remote/` | Cloud Run — federation remote (`remoteEntry.js`) |
+
+**`WHITENOISE_ROOT`** controls which directory WhiteNoise serves at the root URL. It is set via environment variable in each Dockerfile:
+- `Dockerfile`: `WHITENOISE_ROOT=/app/frontend/build`
+- `Dockerfile.gcp`: `WHITENOISE_ROOT=/app/frontend/dist/remote`
+
+When unset, `settings.py` auto-detects by checking `frontend/dist/remote` first, then `frontend/build`.
+
+**Do not** change `Dockerfile`'s build command to `build:remote` or `Dockerfile.gcp`'s to `build` — they serve different purposes. The deploy workflow (`deploy-staging.yml`) uses `-f Dockerfile.gcp`.
+
+If `remoteEntry.js` returns 500 on staging, check that `WHITENOISE_ROOT` points at `frontend/dist/remote` in `Dockerfile.gcp`.
+
+---
+
 ## Deployment
 
 - **Render service**: `https://ctomop.onrender.com`
