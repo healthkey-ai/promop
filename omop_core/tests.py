@@ -246,6 +246,37 @@ class RefreshPatientInfoDiseaseTest(_OmopBase):
         self.assertNotIn(' ', pi.disease_slug)
 
 
+class CanonicalizeDiseaseTest(_OmopBase):
+    """Raw OMOP concept names are mapped to EXACT's canonical disease titles."""
+
+    PERSON_ID = 90225
+
+    def test_canonicalize_helper_maps_known_aliases(self):
+        from omop_core.services.patient_info_service import _canonicalize_disease
+        self.assertEqual(_canonicalize_disease('myeloma'), 'multiple myeloma')
+        self.assertEqual(_canonicalize_disease('Myeloma'), 'multiple myeloma')
+        self.assertEqual(_canonicalize_disease('  MYELOMA  '), 'multiple myeloma')
+
+    def test_canonicalize_helper_passes_through_unknown(self):
+        from omop_core.services.patient_info_service import _canonicalize_disease
+        self.assertEqual(_canonicalize_disease('breast cancer'), 'breast cancer')
+        self.assertEqual(_canonicalize_disease(''), '')
+        self.assertIsNone(_canonicalize_disease(None))
+
+    def test_refresh_canonicalizes_bare_myeloma_condition(self):
+        myeloma_concept = _concept(90002, 'myeloma', self.dom_cond, self.vocab, self.cc)
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=92204,
+            person=self.person,
+            condition_concept=myeloma_concept,
+            condition_start_date=date(2022, 3, 1),
+            condition_type_concept=self.type_concept,
+        )
+        pi = refresh_patient_info(self.person)
+        self.assertEqual(pi.disease, 'multiple myeloma')
+        self.assertEqual(pi.disease_slug, 'multiple-myeloma')
+
+
 class RefreshPatientInfoLabsFromMeasurementTest(_OmopBase):
     """Labs are derived from Measurement records using source_value fallback."""
 
