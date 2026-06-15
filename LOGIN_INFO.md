@@ -1,8 +1,13 @@
 # Login Information
 
 ## Admin Credentials
-- **Username:** `admin`
-- **Password:** `1database`
+
+Set via environment variables on Render before deploying:
+
+- `ADMIN_EMAIL` — admin account email (default: `admin@example.com`)
+- `ADMIN_PASSWORD` — admin account password (**required**, no default)
+
+The `setup_admin` management command reads these on every deploy.
 
 ## API Endpoints
 
@@ -12,8 +17,8 @@ POST /api/auth/login/
 Content-Type: application/json
 
 {
-  "username": "admin",
-  "password": "1database"
+  "username": "<ADMIN_EMAIL>",
+  "password": "<ADMIN_PASSWORD>"
 }
 ```
 
@@ -28,8 +33,5 @@ GET /api/health/
 ```
 
 ## Notes
-- The admin user is automatically created on deployment
-- All API endpoints allow unauthenticated access for now (configured with AllowAny)
-- CORS is enabled for all origins
-- Frontend will be built and served from /frontend/build
+- The admin user is created/updated on every deployment via `setup_admin`
 - Django admin panel available at: `/admin/`
