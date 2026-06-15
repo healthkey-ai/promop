@@ -145,6 +145,47 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         org = get_request_org(self.request)
         if org is not None:
             qs = qs.filter(organization=org)
+        elif not (self.request.user and (
+            getattr(self.request.user, 'is_superuser', False) or
+            getattr(self.request.user, 'is_staff', False)
+        )):
+            # Session / partner-auth users: scope to only the patients they can
+            # access — their own record (PatientUser) and any patients in their
+            # professional groups (ProfessionalGroupAccess). Doctors/admins with
+            # group access see their whole panel; is_staff bypasses this entirely.
+            from patient_portal.models import PatientUser
+            from omop_core.models import PatientGroupMembership, ProfessionalGroupAccess
+            from django.utils import timezone
+            from django.db.models import Q
+
+            accessible_pids = set()
+
+            # Self-access
+            try:
+                accessible_pids.add(
+                    PatientUser.objects.get(identity=self.request.user).person_id
+                )
+            except PatientUser.DoesNotExist:
+                pass
+
+            # Professional group access (non-expired grants)
+            now = timezone.now()
+            actor_group_ids = ProfessionalGroupAccess.objects.filter(
+                identity=self.request.user,
+            ).filter(
+                Q(expires_at__isnull=True) | Q(expires_at__gt=now),
+            ).values_list('group_id', flat=True)
+
+            if actor_group_ids:
+                group_pids = PatientGroupMembership.objects.filter(
+                    group_id__in=actor_group_ids
+                ).values_list('person_id', flat=True)
+                accessible_pids.update(group_pids)
+
+            if not accessible_pids:
+                return qs.none()
+
+            qs = qs.filter(person_id__in=accessible_pids)
         return qs
 
     def get_serializer_class(self):
@@ -256,6 +297,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         # Capture previous values for fields being changed (exclude provenance meta-fields).
         # Use {field}_id for FK fields so we get a serializable PK, not a model object.
         _prov_meta = {'source', 'source_user_id', 'modification_reason'}
+        _read_only = set(PatientInfoSerializer.Meta.read_only_fields)
         def _prev_val(obj, field):
             fk_id = f'{field}_id'
             if hasattr(obj, fk_id):
@@ -264,7 +306,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         previous_values = {
             field: _prev_val(patient_info, field)
             for field in request.data
-            if field not in _prov_meta and hasattr(patient_info, field)
+            if field not in _prov_meta and field not in _read_only and hasattr(patient_info, field)
         }
 
         serializer = PatientInfoSerializer(patient_info, data=request.data, partial=True)
@@ -654,10 +696,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             year_of_birth=year_of_birth,
                         ).first()
                     if person is None:
-                        last_person = Person.objects.all().order_by('-person_id').first()
-                        person_id = last_person.person_id + 1 if last_person else 1000
+                        from omop_core.services.pk import next_pk as _next_pk
                         person = Person.objects.create(
-                            person_id=person_id,
+                            person_id=_next_pk(Person, 'person_id'),
                             gender_concept=gender_concept,
                             year_of_birth=year_of_birth or datetime.now().year - 50,
                             month_of_birth=month_of_birth,
@@ -1811,7 +1852,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 except Exception as e:
                     _last_exc = e
                     _err_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
-                    errors.append(f"Patient (id_hash={_err_hash}): {str(e)}")
+                    logger.exception("FHIR upload error for patient id_hash=%s", _err_hash)
+                    errors.append(f"Patient (id_hash={_err_hash}): processing failed")
                 finally:
                     # Roll back if the transaction was opened but never committed
                     # (i.e. an exception occurred during OMOP writes).
@@ -1856,12 +1898,21 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             errors = []
             
             org = get_request_org(request)
+            _is_privileged = request.user and (
+                getattr(request.user, 'is_superuser', False) or
+                getattr(request.user, 'is_staff', False)
+            )
             for person_id in person_ids:
                 try:
                     person = Person.objects.get(person_id=person_id)
                     if org is not None and not PatientInfo.objects.filter(person=person, organization=org).exists():
                         errors.append("Person not found.")
                         continue
+                    elif org is None and not _is_privileged:
+                        from omop_core.authorization import can_access_patient
+                        if not can_access_patient(request.user, person_id):
+                            errors.append("Person not found.")
+                            continue
                     # Delete PatientInfo
                     PatientInfo.objects.filter(person=person).delete()
                     # Delete associated Identity if exists (via PatientUser)
@@ -2046,6 +2097,10 @@ class PersonViewSet(viewsets.GenericViewSet):
         if org is not None:
             if not PatientInfo.objects.filter(person=person, organization=org).exists():
                 return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        elif not (getattr(request.user, 'is_superuser', False) or getattr(request.user, 'is_staff', False)):
+            from omop_core.authorization import can_access_patient
+            if not can_access_patient(request.user, person.person_id):
+                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         changed = []
         for field, (kind, placeholders) in _PERSON_PATCHABLE_FIELDS.items():
@@ -2146,13 +2201,14 @@ class _ProvenanceMixin:
                     raise NotFound('Person not found.')
                 if not PatientInfo.objects.filter(person=person, organization=org).exists():
                     raise PermissionDenied('Person does not belong to your organization.')
-        elif not (self.request.user.is_superuser or getattr(self.request.user, 'is_staff', False)):
+        elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
+            from omop_core.authorization import can_access_patient
+            from rest_framework.exceptions import PermissionDenied
             person = serializer.validated_data.get('person')
-            if person:
-                from omop_core.authorization import can_access_patient
-                from rest_framework.exceptions import PermissionDenied
-                if not can_access_patient(self.request.user, person.person_id):
-                    raise PermissionDenied('Access denied.')
+            if not person:
+                raise PermissionDenied('person is required.')
+            if not can_access_patient(self.request.user, person.person_id):
+                raise PermissionDenied('Access denied.')
 
         obj = serializer.save()
         self._prov(obj)
@@ -2166,13 +2222,14 @@ class _ProvenanceMixin:
                 raise NotFound('Person not found.')
             if not PatientInfo.objects.filter(person=person, organization=org).exists():
                 raise PermissionDenied('Person does not belong to your organization.')
-        elif not (self.request.user.is_superuser or getattr(self.request.user, 'is_staff', False)):
+        elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
+            from omop_core.authorization import can_access_patient
+            from rest_framework.exceptions import PermissionDenied
             person = serializer.validated_data.get('person') or serializer.instance.person
-            if person:
-                from omop_core.authorization import can_access_patient
-                from rest_framework.exceptions import PermissionDenied
-                if not can_access_patient(self.request.user, person.person_id):
-                    raise PermissionDenied('Access denied.')
+            if not person:
+                raise PermissionDenied('person is required.')
+            if not can_access_patient(self.request.user, person.person_id):
+                raise PermissionDenied('Access denied.')
         obj = serializer.save()
         self._prov(obj)
 
