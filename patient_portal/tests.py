@@ -5409,3 +5409,76 @@ class ConceptLookupTest(_SmartBase):
     def test_unauthenticated_returns_401(self):
         resp = self.client.get(f'{self.URL}?lookup=LOINC:2160-0')
         self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
+# ---------------------------------------------------------------------------
+# IDOR: PatientInfoViewSet row-level access (issue #134)
+# ---------------------------------------------------------------------------
+
+class PatientInfoIDORTest(TestCase):
+    """
+    Verify that a patient user cannot read or modify another patient's record
+    via retrieve, partial_update, or provenance when org scoping is absent
+    (partner-auth / session-auth path).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        # Patient A
+        cls.person_a = Person.objects.create(person_id=88801, family_name='Alpha', given_name='Alice')
+        cls.patient_a = PatientInfo.objects.create(person=cls.person_a)
+        cls.identity_a = Identity.objects.create_user(email='alice@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_a, person=cls.person_a)
+
+        # Patient B — the victim
+        cls.person_b = Person.objects.create(person_id=88802, family_name='Beta', given_name='Bob')
+        cls.patient_b = PatientInfo.objects.create(person=cls.person_b)
+        cls.identity_b = Identity.objects.create_user(email='bob@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_b, person=cls.person_b)
+
+        # Superuser
+        cls.superuser = Identity.objects.create_superuser(email='su@test.com', password='pw')
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def test_patient_cannot_retrieve_other_patient(self):
+        """GET /api/patient-info/{B}/ as patient A must return 404."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/patient-info/{self.person_b.person_id}/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_patient_can_retrieve_own_record(self):
+        """GET /api/patient-info/{A}/ as patient A must succeed."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/patient-info/{self.person_a.person_id}/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_patient_cannot_patch_other_patient(self):
+        """PATCH /api/patient-info/{B}/ as patient A must return 404."""
+        resp = self._client_as(self.identity_a).patch(
+            f'/api/patient-info/{self.person_b.person_id}/',
+            {'ecog_performance_status': 1},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_patient_cannot_access_other_provenance(self):
+        """GET /api/patient-info/{B}/provenance/ as patient A must return 404."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/patient-info/{self.person_b.person_id}/provenance/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_superuser_can_retrieve_any_patient(self):
+        """Superusers retain unrestricted read access."""
+        resp = self._client_as(self.superuser).get(
+            f'/api/patient-info/{self.person_b.person_id}/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)

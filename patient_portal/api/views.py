@@ -201,10 +201,15 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         except PatientInfo.DoesNotExist:
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # AUTH-04: enforce per-patient row-level org scoping
+        # AUTH-04: enforce per-patient row-level access
         org = get_request_org(request)
-        if org is not None and patient_info.organization != org:
-            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        if org is not None:
+            if patient_info.organization != org:
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        elif not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+            from omop_core.authorization import can_access_patient
+            if not can_access_patient(request.user, person.person_id):
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
         # Get the Identity associated with this person (not the logged-in user)
         from patient_portal.models import PatientUser
@@ -233,8 +238,13 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
 
         org = get_request_org(request)
-        if org is not None and patient_info.organization != org:
-            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        if org is not None:
+            if patient_info.organization != org:
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        elif not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+            from omop_core.authorization import can_access_patient
+            if not can_access_patient(request.user, person.person_id):
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
         prov_source, prov_user_id, prov_reason = _extract_provenance(request)
         if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
@@ -289,8 +299,13 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
 
         org = get_request_org(request)
-        if org is not None and patient_info.organization != org:
-            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        if org is not None:
+            if patient_info.organization != org:
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        elif not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+            from omop_core.authorization import can_access_patient
+            if not can_access_patient(request.user, person.person_id):
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
         from django.db.models import Q
         # Build a single query for all provenance records across PatientInfo + OMOP tables
