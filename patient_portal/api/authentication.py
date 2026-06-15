@@ -69,6 +69,8 @@ class PartnerAuthentication(BaseAuthentication):
                 continue
 
             identity = self._get_or_create_identity(claims)
+            if not identity.is_active:
+                return None
             _ensure_person(identity, claims)
             self._to_cache(token, identity.pk, claims)
             return (identity, claims)

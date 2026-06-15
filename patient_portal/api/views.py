@@ -2197,9 +2197,12 @@ class _ProvenanceMixin:
             person = serializer.validated_data.get('person')
             if person:
                 from rest_framework.exceptions import PermissionDenied
-                # Allow bootstrap (no PatientInfo yet). Block only cross-org writes.
+                # Allow bootstrap (no PatientInfo yet) and unclaimed patients (org=NULL).
+                # Block only when a PatientInfo exists and is already claimed by a different org.
                 existing_pi = PatientInfo.objects.filter(person=person).first()
-                if existing_pi is not None and existing_pi.organization != org:
+                if (existing_pi is not None
+                        and existing_pi.organization is not None
+                        and existing_pi.organization != org):
                     raise PermissionDenied('Person does not belong to your organization.')
         elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
             from omop_core.authorization import can_access_patient
@@ -2217,10 +2220,13 @@ class _ProvenanceMixin:
         org = get_request_org(self.request)
         if org is not None:
             person = serializer.validated_data.get('person') or serializer.instance.person
-            from rest_framework.exceptions import PermissionDenied
-            # On updates the patient must already have a PatientInfo; missing = data integrity error.
+            from rest_framework.exceptions import NotFound, PermissionDenied
+            # On updates the patient must already have a PatientInfo; missing = not found.
+            # Unclaimed patients (org=NULL) are allowed; only reject explicit cross-org.
             existing_pi = PatientInfo.objects.filter(person=person).first()
-            if existing_pi is None or existing_pi.organization != org:
+            if existing_pi is None:
+                raise NotFound('Person not found.')
+            if existing_pi.organization is not None and existing_pi.organization != org:
                 raise PermissionDenied('Person does not belong to your organization.')
         elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
             from omop_core.authorization import can_access_patient
@@ -2322,10 +2328,10 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
             allowed_pids = PatientInfo.objects.filter(organization=org).values('person_id')
             allowed_episodes = Episode.objects.filter(person_id__in=allowed_pids).values('episode_id')
             qs = qs.filter(episode_id__in=allowed_episodes)
-        elif not (self.request.user and (
+        elif self.request.user and not (
             getattr(self.request.user, 'is_superuser', False) or
             getattr(self.request.user, 'is_staff', False)
-        )):
+        ):
             from omop_core.authorization import can_access_patient
             from patient_portal.models import PatientUser
             person_id = self.request.query_params.get('person_id')
@@ -2346,6 +2352,21 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
                 except PatientUser.DoesNotExist:
                     return qs.none()
         return qs
+
+    def perform_create(self, serializer):
+        org = get_request_org(self.request)
+        if org is not None:
+            from rest_framework.exceptions import NotFound, PermissionDenied
+            episode_id = serializer.validated_data.get('episode_id')
+            if episode_id is not None:
+                try:
+                    episode = Episode.objects.get(episode_id=episode_id)
+                except Episode.DoesNotExist:
+                    raise NotFound('Episode not found.')
+                pi = PatientInfo.objects.filter(person_id=episode.person_id).first()
+                if pi is not None and pi.organization is not None and pi.organization != org:
+                    raise PermissionDenied('Episode does not belong to your organization.')
+        serializer.save()
 
 
 # =============================================================================
