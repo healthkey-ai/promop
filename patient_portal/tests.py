@@ -5636,3 +5636,58 @@ class PatientInfoOrganizationReadOnlyTest(TestCase):
         # organization is present in the response (readable)
         pi_data = resp.data.get('patient_info', resp.data)
         self.assertIn('organization', pi_data)
+
+
+# ---------------------------------------------------------------------------
+# Per-patient transaction boundary in upload_fhir (issue #149)
+# ---------------------------------------------------------------------------
+
+class FhirUploadTransactionTest(FhirUploadBase):
+    """
+    Verify that a mid-patient failure rolls back all DB writes for that
+    patient so no orphaned Person / OMOP rows persist.
+    """
+
+    def test_failed_patient_leaves_no_orphaned_rows(self):
+        """
+        If refresh_patient_info raises mid-patient, the Person and all OMOP
+        rows written before the error must be rolled back.
+        """
+        from unittest.mock import patch
+        from omop_core.services.patient_info_service import refresh_patient_info
+
+        person_id_before = (
+            Person.objects.order_by('-person_id').values_list('person_id', flat=True).first() or 0
+        )
+
+        bundle = _make_fhir_bundle()
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'bundle.json'
+
+        with patch(
+            'patient_portal.api.views.refresh_patient_info',
+            side_effect=RuntimeError('simulated mid-patient failure'),
+        ):
+            resp = self.client.post(
+                '/api/patient-info/upload_fhir/',
+                {'file': fhir_file},
+                format='multipart',
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        # The error is recorded, not a 500
+        self.assertGreater(len(resp.data.get('errors', [])), 0)
+
+        # No new Person row should have been committed
+        new_persons = Person.objects.filter(person_id__gt=person_id_before).count()
+        self.assertEqual(new_persons, 0, "Partial patient rows were not rolled back")
+
+    def test_successful_patient_commits_rows(self):
+        """Successful uploads still persist rows after the transaction fix."""
+        resp = self._upload_bundle()
+        self.assertEqual(resp.status_code, 200)
+        self.assertGreater(resp.data.get('created_count', 0), 0)
+        self.assertIsNotNone(
+            Person.objects.filter(family_name='Smith', given_name='Jane').first()
+        )

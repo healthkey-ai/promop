@@ -5,7 +5,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -626,6 +626,24 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     given_name = ' '.join(name.get('given', [])) if name.get('given') else ''
                     family_name = name.get('family', '')
                     
+                    # Suppress signal-triggered PatientInfo refreshes for all OMOP
+                    # writes below. Use __enter__/__exit__ explicitly so the finally
+                    # block guarantees cleanup even on BaseException (e.g. KeyboardInterrupt),
+                    # without requiring 1000 lines of re-indentation.
+                    from omop_core.signals import suppress_patient_info_refresh as _suppress_cm_fn
+                    _suppress_cm = _suppress_cm_fn()
+                    _suppress_cm.__enter__()
+
+                    # Wrap all per-patient DB writes — including Person creation — in a
+                    # savepoint so a failure mid-patient rolls back fully rather than
+                    # leaving orphaned rows. _atomic_entered tracks whether __enter__
+                    # was called so the finally block can roll back exactly once.
+                    _atomic_cm = transaction.atomic()
+                    _atomic_entered = False
+                    _last_exc = None
+                    _atomic_cm.__enter__()
+                    _atomic_entered = True
+
                     # Upsert Person: match on name + birth year to avoid duplicates on re-upload
                     person = None
                     person_is_new = False
@@ -660,14 +678,6 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 'name': full_name,
                             },
                         )
-                    
-                    # Suppress signal-triggered PatientInfo refreshes for all OMOP
-                    # writes below. Use __enter__/__exit__ explicitly so the finally
-                    # block guarantees cleanup even on BaseException (e.g. KeyboardInterrupt),
-                    # without requiring 1000 lines of re-indentation.
-                    from omop_core.signals import suppress_patient_info_refresh as _suppress_cm_fn
-                    _suppress_cm = _suppress_cm_fn()
-                    _suppress_cm.__enter__()
 
                     # Extract disease, stage, and histologic type from Condition
                     disease = 'Breast Cancer'
@@ -1574,7 +1584,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             logger.warning(f"Could not write DrugExposure/Episode for LOT {lot_num}: {_e}")
 
                     # --- OMOP-first: refresh PatientInfo from OMOP tables ---
-                    # Release suppression before the single intentional refresh.
+                    # Release suppression so the single intentional refresh can run.
+                    # We stay inside the atomic block so that a refresh failure rolls
+                    # back all OMOP writes for this patient.
                     _suppress_cm.__exit__(None, None, None)
                     logger.debug("TIMING patient=%s phase=drug_exposures elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
                     patient_info = refresh_patient_info(person)
@@ -1769,7 +1781,12 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     patient_info.save()
                     if prov_source:
                         _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                    
+
+                    # Commit all writes for this patient. Mark _atomic_entered=False
+                    # so the finally block knows the transaction was cleanly committed.
+                    _atomic_cm.__exit__(None, None, None)
+                    _atomic_entered = False
+
                     patients_result.append({
                         'person_id': person.person_id,
                         'patient_info_id': patient_info.pk,
@@ -1792,15 +1809,28 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 _fhir_id_hash, _pt_total)
                     
                 except Exception as e:
+                    _last_exc = e
                     _err_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
                     errors.append(f"Patient (id_hash={_err_hash}): {str(e)}")
                 finally:
+                    # Roll back if the transaction was opened but never committed
+                    # (i.e. an exception occurred during OMOP writes).
+                    if _atomic_entered:
+                        try:
+                            _atomic_cm.__exit__(
+                                type(_last_exc) if _last_exc else None,
+                                _last_exc,
+                                _last_exc.__traceback__ if _last_exc else None,
+                            )
+                        except Exception:
+                            pass
                     # Guarantee suppression is cleared even on BaseException.
-                    # Safe to call on an already-exited context manager (re-entrant safe).
+                    # Use bare except to handle NameError (assigned before entry) and
+                    # any error from calling __exit__ a second time on success path.
                     try:
                         _suppress_cm.__exit__(None, None, None)
-                    except NameError:
-                        pass  # exception raised before _suppress_cm was assigned
+                    except Exception:
+                        pass
             
             return Response({
                 'success': True,
