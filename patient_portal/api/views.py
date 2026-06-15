@@ -5,7 +5,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -145,6 +145,47 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         org = get_request_org(self.request)
         if org is not None:
             qs = qs.filter(organization=org)
+        elif not (self.request.user and (
+            getattr(self.request.user, 'is_superuser', False) or
+            getattr(self.request.user, 'is_staff', False)
+        )):
+            # Session / partner-auth users: scope to only the patients they can
+            # access — their own record (PatientUser) and any patients in their
+            # professional groups (ProfessionalGroupAccess). Doctors/admins with
+            # group access see their whole panel; is_staff bypasses this entirely.
+            from patient_portal.models import PatientUser
+            from omop_core.models import PatientGroupMembership, ProfessionalGroupAccess
+            from django.utils import timezone
+            from django.db.models import Q
+
+            accessible_pids = set()
+
+            # Self-access
+            try:
+                accessible_pids.add(
+                    PatientUser.objects.get(identity=self.request.user).person_id
+                )
+            except PatientUser.DoesNotExist:
+                pass
+
+            # Professional group access (non-expired grants)
+            now = timezone.now()
+            actor_group_ids = ProfessionalGroupAccess.objects.filter(
+                identity=self.request.user,
+            ).filter(
+                Q(expires_at__isnull=True) | Q(expires_at__gt=now),
+            ).values_list('group_id', flat=True)
+
+            if actor_group_ids:
+                group_pids = PatientGroupMembership.objects.filter(
+                    group_id__in=actor_group_ids
+                ).values_list('person_id', flat=True)
+                accessible_pids.update(group_pids)
+
+            if not accessible_pids:
+                return qs.none()
+
+            qs = qs.filter(person_id__in=accessible_pids)
         return qs
 
     def get_serializer_class(self):
@@ -253,12 +294,19 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Capture previous values for fields being changed (exclude provenance meta-fields)
+        # Capture previous values for fields being changed (exclude provenance meta-fields).
+        # Use {field}_id for FK fields so we get a serializable PK, not a model object.
         _prov_meta = {'source', 'source_user_id', 'modification_reason'}
+        _read_only = set(PatientInfoSerializer.Meta.read_only_fields)
+        def _prev_val(obj, field):
+            fk_id = f'{field}_id'
+            if hasattr(obj, fk_id):
+                return getattr(obj, fk_id, None)
+            return getattr(obj, field, None)
         previous_values = {
-            field: getattr(patient_info, field, None)
+            field: _prev_val(patient_info, field)
             for field in request.data
-            if field not in _prov_meta and hasattr(patient_info, field)
+            if field not in _prov_meta and field not in _read_only and hasattr(patient_info, field)
         }
 
         serializer = PatientInfoSerializer(patient_info, data=request.data, partial=True)
@@ -620,6 +668,24 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     given_name = ' '.join(name.get('given', [])) if name.get('given') else ''
                     family_name = name.get('family', '')
                     
+                    # Suppress signal-triggered PatientInfo refreshes for all OMOP
+                    # writes below. Use __enter__/__exit__ explicitly so the finally
+                    # block guarantees cleanup even on BaseException (e.g. KeyboardInterrupt),
+                    # without requiring 1000 lines of re-indentation.
+                    from omop_core.signals import suppress_patient_info_refresh as _suppress_cm_fn
+                    _suppress_cm = _suppress_cm_fn()
+                    _suppress_cm.__enter__()
+
+                    # Wrap all per-patient DB writes — including Person creation — in a
+                    # savepoint so a failure mid-patient rolls back fully rather than
+                    # leaving orphaned rows. _atomic_entered tracks whether __enter__
+                    # was called so the finally block can roll back exactly once.
+                    _atomic_cm = transaction.atomic()
+                    _atomic_entered = False
+                    _last_exc = None
+                    _atomic_cm.__enter__()
+                    _atomic_entered = True
+
                     # Upsert Person: match on name + birth year to avoid duplicates on re-upload
                     person = None
                     person_is_new = False
@@ -630,10 +696,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             year_of_birth=year_of_birth,
                         ).first()
                     if person is None:
-                        last_person = Person.objects.all().order_by('-person_id').first()
-                        person_id = last_person.person_id + 1 if last_person else 1000
+                        from omop_core.services.pk import next_pk as _next_pk
                         person = Person.objects.create(
-                            person_id=person_id,
+                            person_id=_next_pk(Person, 'person_id'),
                             gender_concept=gender_concept,
                             year_of_birth=year_of_birth or datetime.now().year - 50,
                             month_of_birth=month_of_birth,
@@ -654,14 +719,6 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 'name': full_name,
                             },
                         )
-                    
-                    # Suppress signal-triggered PatientInfo refreshes for all OMOP
-                    # writes below. Use __enter__/__exit__ explicitly so the finally
-                    # block guarantees cleanup even on BaseException (e.g. KeyboardInterrupt),
-                    # without requiring 1000 lines of re-indentation.
-                    from omop_core.signals import suppress_patient_info_refresh as _suppress_cm_fn
-                    _suppress_cm = _suppress_cm_fn()
-                    _suppress_cm.__enter__()
 
                     # Extract disease, stage, and histologic type from Condition
                     disease = 'Breast Cancer'
@@ -1568,7 +1625,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             logger.warning(f"Could not write DrugExposure/Episode for LOT {lot_num}: {_e}")
 
                     # --- OMOP-first: refresh PatientInfo from OMOP tables ---
-                    # Release suppression before the single intentional refresh.
+                    # Release suppression so the single intentional refresh can run.
+                    # We stay inside the atomic block so that a refresh failure rolls
+                    # back all OMOP writes for this patient.
                     _suppress_cm.__exit__(None, None, None)
                     logger.debug("TIMING patient=%s phase=drug_exposures elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
                     patient_info = refresh_patient_info(person)
@@ -1763,7 +1822,12 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     patient_info.save()
                     if prov_source:
                         _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                    
+
+                    # Commit all writes for this patient. Mark _atomic_entered=False
+                    # so the finally block knows the transaction was cleanly committed.
+                    _atomic_cm.__exit__(None, None, None)
+                    _atomic_entered = False
+
                     patients_result.append({
                         'person_id': person.person_id,
                         'patient_info_id': patient_info.pk,
@@ -1786,15 +1850,29 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 _fhir_id_hash, _pt_total)
                     
                 except Exception as e:
+                    _last_exc = e
                     _err_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
-                    errors.append(f"Patient (id_hash={_err_hash}): {str(e)}")
+                    logger.exception("FHIR upload error for patient id_hash=%s", _err_hash)
+                    errors.append(f"Patient (id_hash={_err_hash}): processing failed")
                 finally:
+                    # Roll back if the transaction was opened but never committed
+                    # (i.e. an exception occurred during OMOP writes).
+                    if _atomic_entered:
+                        try:
+                            _atomic_cm.__exit__(
+                                type(_last_exc) if _last_exc else None,
+                                _last_exc,
+                                _last_exc.__traceback__ if _last_exc else None,
+                            )
+                        except Exception:
+                            pass
                     # Guarantee suppression is cleared even on BaseException.
-                    # Safe to call on an already-exited context manager (re-entrant safe).
+                    # Use bare except to handle NameError (assigned before entry) and
+                    # any error from calling __exit__ a second time on success path.
                     try:
                         _suppress_cm.__exit__(None, None, None)
-                    except NameError:
-                        pass  # exception raised before _suppress_cm was assigned
+                    except Exception:
+                        pass
             
             return Response({
                 'success': True,
@@ -1820,12 +1898,21 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             errors = []
             
             org = get_request_org(request)
+            _is_privileged = request.user and (
+                getattr(request.user, 'is_superuser', False) or
+                getattr(request.user, 'is_staff', False)
+            )
             for person_id in person_ids:
                 try:
                     person = Person.objects.get(person_id=person_id)
                     if org is not None and not PatientInfo.objects.filter(person=person, organization=org).exists():
                         errors.append("Person not found.")
                         continue
+                    elif org is None and not _is_privileged:
+                        from omop_core.authorization import can_access_patient
+                        if not can_access_patient(request.user, person_id):
+                            errors.append("Person not found.")
+                            continue
                     # Delete PatientInfo
                     PatientInfo.objects.filter(person=person).delete()
                     # Delete associated Identity if exists (via PatientUser)
@@ -2010,6 +2097,10 @@ class PersonViewSet(viewsets.GenericViewSet):
         if org is not None:
             if not PatientInfo.objects.filter(person=person, organization=org).exists():
                 return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        elif not (getattr(request.user, 'is_superuser', False) or getattr(request.user, 'is_staff', False)):
+            from omop_core.authorization import can_access_patient
+            if not can_access_patient(request.user, person.person_id):
+                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         changed = []
         for field, (kind, placeholders) in _PERSON_PATCHABLE_FIELDS.items():
@@ -2060,6 +2151,28 @@ class _OmopFilterMixin:
             from omop_core.models import PatientInfo
             allowed = PatientInfo.objects.filter(organization=org).values_list('person_id', flat=True)
             qs = qs.filter(person_id__in=allowed)
+        elif not (self.request.user and (
+            getattr(self.request.user, 'is_superuser', False) or
+            getattr(self.request.user, 'is_staff', False)
+        )):
+            # Session / partner-auth (Firebase, SAML): no org token.
+            # Enforce per-patient access using can_access_patient.
+            from omop_core.authorization import can_access_patient
+            from patient_portal.models import PatientUser
+            if person_id:
+                try:
+                    pid = int(person_id)
+                except (ValueError, TypeError):
+                    return qs.none()
+                if not can_access_patient(self.request.user, pid):
+                    return qs.none()
+            else:
+                # No explicit person_id — restrict to the user's own records only.
+                try:
+                    own_pid = PatientUser.objects.get(identity=self.request.user).person_id
+                    qs = qs.filter(person_id=own_pid)
+                except PatientUser.DoesNotExist:
+                    return qs.none()
         return qs
 
 
@@ -2088,6 +2201,14 @@ class _ProvenanceMixin:
                     raise NotFound('Person not found.')
                 if not PatientInfo.objects.filter(person=person, organization=org).exists():
                     raise PermissionDenied('Person does not belong to your organization.')
+        elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
+            from omop_core.authorization import can_access_patient
+            from rest_framework.exceptions import PermissionDenied
+            person = serializer.validated_data.get('person')
+            if not person:
+                raise PermissionDenied('person is required.')
+            if not can_access_patient(self.request.user, person.person_id):
+                raise PermissionDenied('Access denied.')
 
         obj = serializer.save()
         self._prov(obj)
@@ -2101,6 +2222,14 @@ class _ProvenanceMixin:
                 raise NotFound('Person not found.')
             if not PatientInfo.objects.filter(person=person, organization=org).exists():
                 raise PermissionDenied('Person does not belong to your organization.')
+        elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
+            from omop_core.authorization import can_access_patient
+            from rest_framework.exceptions import PermissionDenied
+            person = serializer.validated_data.get('person') or serializer.instance.person
+            if not person:
+                raise PermissionDenied('person is required.')
+            if not can_access_patient(self.request.user, person.person_id):
+                raise PermissionDenied('Access denied.')
         obj = serializer.save()
         self._prov(obj)
 

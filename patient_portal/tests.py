@@ -5482,3 +5482,212 @@ class PatientInfoIDORTest(TestCase):
             f'/api/patient-info/{self.person_b.person_id}/'
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+
+# ---------------------------------------------------------------------------
+# OMOP ViewSet row-level access (issue #135)
+# ---------------------------------------------------------------------------
+
+class OmopViewSetAccessTest(TestCase):
+    """
+    Verify that _OmopFilterMixin enforces per-patient access for session /
+    partner-auth users (org is None path) on the OMOP clinical ViewSets.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        # Patient A — the attacker
+        cls.person_a = Person.objects.create(person_id=88901, family_name='Attacker', given_name='Alice')
+        PatientInfo.objects.create(person=cls.person_a)
+        cls.identity_a = Identity.objects.create_user(email='attacker@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_a, person=cls.person_a)
+
+        # Patient B — the victim
+        cls.person_b = Person.objects.create(person_id=88902, family_name='Victim', given_name='Bob')
+        PatientInfo.objects.create(person=cls.person_b)
+        cls.identity_b = Identity.objects.create_user(email='victim@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_b, person=cls.person_b)
+
+        # A measurement belonging to patient B
+        cls.measurement = Measurement.objects.create(
+            measurement_id=998877,
+            person=cls.person_b,
+            measurement_concept_id=0,
+            measurement_type_concept_id=0,
+            measurement_date=date(2024, 1, 1),
+        )
+
+        # A condition belonging to patient B
+        cls.condition = ConditionOccurrence.objects.create(
+            condition_occurrence_id=998877,
+            person=cls.person_b,
+            condition_concept_id=0,
+            condition_type_concept_id=0,
+            condition_start_date=date(2024, 1, 1),
+        )
+
+        cls.superuser = Identity.objects.create_superuser(email='su2@test.com', password='pw')
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    # --- List filtered by person_id ---
+
+    def test_patient_cannot_list_other_measurements(self):
+        """GET /api/measurements/?person_id=B as patient A returns empty list."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/measurements/?person_id={self.person_b.person_id}'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len((resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))), 0)
+
+    def test_patient_can_list_own_measurements(self):
+        """GET /api/measurements/?person_id=A as patient A returns their records."""
+        Measurement.objects.create(
+            measurement_id=998878,
+            person=self.person_a,
+            measurement_concept_id=0,
+            measurement_type_concept_id=0,
+            measurement_date=date(2024, 1, 1),
+        )
+        resp = self._client_as(self.identity_a).get(
+            f'/api/measurements/?person_id={self.person_a.person_id}'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = (resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))
+        self.assertGreater(len(results), 0)
+
+    def test_patient_cannot_list_other_conditions(self):
+        """GET /api/conditions/?person_id=B as patient A returns empty list."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/conditions/?person_id={self.person_b.person_id}'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len((resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))), 0)
+
+    def test_list_without_person_id_returns_own_records_only(self):
+        """GET /api/measurements/ (no person_id) as patient A returns only their records."""
+        resp = self._client_as(self.identity_a).get('/api/measurements/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = (resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))
+        person_ids = {r['person'] for r in results}
+        self.assertNotIn(self.person_b.person_id, person_ids)
+
+    def test_superuser_can_list_any_patient_measurements(self):
+        """Superusers retain unrestricted access."""
+        resp = self._client_as(self.superuser).get(
+            f'/api/measurements/?person_id={self.person_b.person_id}'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = (resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))
+        self.assertGreater(len(results), 0)
+
+
+# ---------------------------------------------------------------------------
+# Mass-assignable organization field (issue #139)
+# ---------------------------------------------------------------------------
+
+class PatientInfoOrganizationReadOnlyTest(TestCase):
+    """
+    Verify that a client cannot PATCH organization or person onto a
+    PatientInfo record — these fields must be silently ignored (read-only).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Organization
+        from patient_portal.models import PatientUser
+
+        cls.org_a = Organization.objects.create(name='Org A', slug='org-a-139')
+        cls.org_b = Organization.objects.create(name='Org B', slug='org-b-139')
+
+        cls.person = Person.objects.create(person_id=89001, family_name='Test', given_name='User')
+        cls.patient = PatientInfo.objects.create(person=cls.person, organization=cls.org_a)
+        cls.identity = Identity.objects.create_user(email='orgtest@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity, person=cls.person)
+
+        cls.other_person = Person.objects.create(person_id=89002, family_name='Other', given_name='Person')
+        PatientInfo.objects.create(person=cls.other_person, organization=cls.org_b)
+
+    def _client(self):
+        c = APIClient()
+        c.force_authenticate(user=self.identity)
+        return c
+
+    def test_patch_cannot_change_organization(self):
+        """PATCH {organization: org_b} must not change the record's org."""
+        resp = self._client().patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'organization': self.org_b.id},
+            format='json',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST])
+        self.patient.refresh_from_db()
+        self.assertEqual(self.patient.organization_id, self.org_a.id)
+
+    def test_organization_field_is_read_only_in_response(self):
+        """organization appears in the GET response but cannot be changed via PATCH."""
+        resp = self._client().get(f'/api/patient-info/{self.person.person_id}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        # organization is present in the response (readable)
+        pi_data = resp.data.get('patient_info', resp.data)
+        self.assertIn('organization', pi_data)
+
+
+# ---------------------------------------------------------------------------
+# Per-patient transaction boundary in upload_fhir (issue #149)
+# ---------------------------------------------------------------------------
+
+class FhirUploadTransactionTest(FhirUploadBase):
+    """
+    Verify that a mid-patient failure rolls back all DB writes for that
+    patient so no orphaned Person / OMOP rows persist.
+    """
+
+    def test_failed_patient_leaves_no_orphaned_rows(self):
+        """
+        If refresh_patient_info raises mid-patient, the Person and all OMOP
+        rows written before the error must be rolled back.
+        """
+        from unittest.mock import patch
+        from omop_core.services.patient_info_service import refresh_patient_info
+
+        person_id_before = (
+            Person.objects.order_by('-person_id').values_list('person_id', flat=True).first() or 0
+        )
+
+        bundle = _make_fhir_bundle()
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'bundle.json'
+
+        with patch(
+            'patient_portal.api.views.refresh_patient_info',
+            side_effect=RuntimeError('simulated mid-patient failure'),
+        ):
+            resp = self.client.post(
+                '/api/patient-info/upload_fhir/',
+                {'file': fhir_file},
+                format='multipart',
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        # The error is recorded, not a 500
+        self.assertGreater(len(resp.data.get('errors', [])), 0)
+
+        # No new Person row should have been committed
+        new_persons = Person.objects.filter(person_id__gt=person_id_before).count()
+        self.assertEqual(new_persons, 0, "Partial patient rows were not rolled back")
+
+    def test_successful_patient_commits_rows(self):
+        """Successful uploads still persist rows after the transaction fix."""
+        resp = self._upload_bundle()
+        self.assertEqual(resp.status_code, 200)
+        self.assertGreater(resp.data.get('created_count', 0), 0)
+        self.assertIsNotNone(
+            Person.objects.filter(family_name='Smith', given_name='Jane').first()
+        )
