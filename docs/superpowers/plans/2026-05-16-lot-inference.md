@@ -12,7 +12,7 @@
 
 **Run all tests with:**
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.LotInferenceTest --no-input
 ```
 
@@ -240,7 +240,7 @@ REGIMEN_LOOKUP: dict[frozenset, str] = {
 - [ ] **Step 2: Verify imports cleanly**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python -c "from omop_core.services.lot_regimens import MYELOMA_REGIMEN_LOOKUP, REGIMEN_LOOKUP, DRUG_SUBTYPE_MAP; print('ok', len(MYELOMA_REGIMEN_LOOKUP), 'myeloma regimens,', len(REGIMEN_LOOKUP), 'cross-disease')"
 ```
 Expected: `ok 55 myeloma regimens, 29 cross-disease` (counts approximate)
@@ -732,7 +732,7 @@ def infer_lot_for_person(person, force: bool = False, dry_run: bool = False) -> 
 - [ ] **Step 2: Verify imports cleanly**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python -c "from omop_core.services.lot_inference_service import infer_lot_for_person; print('ok')"
 ```
 Expected: `ok`
@@ -1073,7 +1073,7 @@ class LotInferenceTest(_SmartBase):
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.LotInferenceTest --no-input 2>&1 | tail -10
 ```
 Expected: errors (modules not found)
@@ -1165,7 +1165,7 @@ The `infer_lot_for_person` call has no effect if the FHIR bundle already created
 - [ ] **Step 1: Run LotInferenceTest**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.LotInferenceTest --no-input --verbosity=2 2>&1 | tail -30
 ```
 Expected: `Ran 22 tests ... OK`
@@ -1173,7 +1173,7 @@ Expected: `Ran 22 tests ... OK`
 - [ ] **Step 2: Run regression suite**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test \
     patient_portal.tests.SmartServiceClientWriteTest \
     patient_portal.tests.PatientInfoOmopSyncTest \

@@ -14,7 +14,7 @@
 
 **Run all tests with:**
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test \
     patient_portal.tests.DrugClassificationTest \
     patient_portal.tests.ArtemisHemOncLotTest \
@@ -160,7 +160,7 @@ class DrugClassificationTest(TestCase):
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.DrugClassificationTest --no-input 2>&1 | tail -5
 ```
 Expected: `ImportError` or `AttributeError` (`_classify_drug` not yet defined)
@@ -319,7 +319,7 @@ def _build_drug_eras(exposures) -> list[_DrugEra]:
 - [ ] **Step 7: Run the DrugClassificationTest**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.DrugClassificationTest --no-input 2>&1 | tail -5
 ```
 Expected: `Ran 4 tests ... OK`
@@ -472,7 +472,7 @@ class ArtemisHemOncLotTest(TestCase):
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.ArtemisHemOncLotTest --no-input 2>&1 | tail -5
 ```
 Expected: `Ran 3 tests ... OK` (tests should pass after Task 1 is done; if they fail, debug `_classify_drug` first)
@@ -480,7 +480,7 @@ Expected: `Ran 3 tests ... OK` (tests should pass after Task 1 is done; if they 
 - [ ] **Step 3: Run the full existing LOT test suite for regressions**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.ArtemisLotTest --no-input 2>&1 | tail -10
 ```
 Expected: all existing LOT tests still pass (verify no regressions from changing `_drug_subtype` → `_classify_drug`)
@@ -488,7 +488,7 @@ Expected: all existing LOT tests still pass (verify no regressions from changing
 - [ ] **Step 4: Run both new test classes together**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test \
     patient_portal.tests.DrugClassificationTest \
     patient_portal.tests.ArtemisHemOncLotTest \

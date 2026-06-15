@@ -10,7 +10,7 @@
 
 **Run all tests with:**
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test \
     patient_portal.tests.VocabularyRelationshipModelTest \
     patient_portal.tests.AthenaVocabularyLoadTest \
@@ -140,7 +140,7 @@ class VocabularyRelationshipModelTest(TestCase):
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.VocabularyRelationshipModelTest --no-input 2>&1 | tail -5
 ```
 Expected: `ImportError` or `AttributeError` (models don't exist yet)
@@ -215,13 +215,13 @@ class ConceptAncestor(models.Model):
 - [ ] **Step 4: Generate and apply the migration**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py makemigrations omop_core --name add_vocabulary_relationship_tables
 ```
 Expected: creates `omop_core/migrations/0065_add_vocabulary_relationship_tables.py`
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py migrate
 ```
 Expected: `Applying omop_core.0065_add_vocabulary_relationship_tables... OK`
@@ -229,7 +229,7 @@ Expected: `Applying omop_core.0065_add_vocabulary_relationship_tables... OK`
 - [ ] **Step 5: Run tests to verify they pass**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.VocabularyRelationshipModelTest --no-input 2>&1 | tail -5
 ```
 Expected: `Ran 4 tests ... OK`
@@ -399,7 +399,7 @@ class AthenaVocabularyLoadTest(TestCase):
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.AthenaVocabularyLoadTest --no-input 2>&1 | tail -5
 ```
 Expected: errors (command doesn't exist yet)
@@ -662,7 +662,7 @@ class Command(BaseCommand):
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.AthenaVocabularyLoadTest --no-input 2>&1 | tail -5
 ```
 Expected: `Ran 6 tests ... OK`
@@ -782,7 +782,7 @@ class RxNavServiceTest(TestCase):
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.RxNavServiceTest --no-input 2>&1 | tail -5
 ```
 Expected: `ImportError` or `ModuleNotFoundError`
@@ -892,7 +892,7 @@ def _create_rxnorm_concept(rxcui: str, canonical_name: str):
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.RxNavServiceTest --no-input 2>&1 | tail -5
 ```
 Expected: `Ran 5 tests ... OK`
@@ -993,7 +993,7 @@ class FhirRxNavIntegrationTest(_SmartBase):
 - [ ] **Step 2: Run to verify it fails**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.FhirRxNavIntegrationTest --no-input 2>&1 | tail -5
 ```
 Expected: test_fhir_upload_uses_rxnav_for_unknown_drug fails (drug_concept_id is 0)
@@ -1043,7 +1043,7 @@ Replace it with:
 - [ ] **Step 5: Run all four test classes**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test \
     patient_portal.tests.VocabularyRelationshipModelTest \
     patient_portal.tests.AthenaVocabularyLoadTest \
