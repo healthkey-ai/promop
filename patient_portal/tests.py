@@ -5585,3 +5585,54 @@ class OmopViewSetAccessTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         results = (resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))
         self.assertGreater(len(results), 0)
+
+
+# ---------------------------------------------------------------------------
+# Mass-assignable organization field (issue #139)
+# ---------------------------------------------------------------------------
+
+class PatientInfoOrganizationReadOnlyTest(TestCase):
+    """
+    Verify that a client cannot PATCH organization or person onto a
+    PatientInfo record — these fields must be silently ignored (read-only).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Organization
+        from patient_portal.models import PatientUser
+
+        cls.org_a = Organization.objects.create(name='Org A', slug='org-a-139')
+        cls.org_b = Organization.objects.create(name='Org B', slug='org-b-139')
+
+        cls.person = Person.objects.create(person_id=89001, family_name='Test', given_name='User')
+        cls.patient = PatientInfo.objects.create(person=cls.person, organization=cls.org_a)
+        cls.identity = Identity.objects.create_user(email='orgtest@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity, person=cls.person)
+
+        cls.other_person = Person.objects.create(person_id=89002, family_name='Other', given_name='Person')
+        PatientInfo.objects.create(person=cls.other_person, organization=cls.org_b)
+
+    def _client(self):
+        c = APIClient()
+        c.force_authenticate(user=self.identity)
+        return c
+
+    def test_patch_cannot_change_organization(self):
+        """PATCH {organization: org_b} must not change the record's org."""
+        resp = self._client().patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'organization': self.org_b.id},
+            format='json',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST])
+        self.patient.refresh_from_db()
+        self.assertEqual(self.patient.organization_id, self.org_a.id)
+
+    def test_organization_field_is_read_only_in_response(self):
+        """organization appears in the GET response but cannot be changed via PATCH."""
+        resp = self._client().get(f'/api/patient-info/{self.person.person_id}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        # organization is present in the response (readable)
+        pi_data = resp.data.get('patient_info', resp.data)
+        self.assertIn('organization', pi_data)

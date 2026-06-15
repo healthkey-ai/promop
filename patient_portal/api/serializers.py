@@ -75,7 +75,11 @@ class PatientInfoSerializer(serializers.ModelSerializer):
     class Meta:
         model = PatientInfo
         fields = '__all__'
-        read_only_fields = []
+        # organization and person must never be client-writable: they are
+        # set server-side from the auth token / FHIR upload respectively.
+        # A client supplying either field in a PATCH would bypass tenant
+        # isolation (organization) or reassign the record to another patient.
+        read_only_fields = ('organization', 'person', 'created_at', 'updated_at')
 
     def get_patient_name(self, obj):
         if obj.person:

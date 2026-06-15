@@ -253,10 +253,16 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Capture previous values for fields being changed (exclude provenance meta-fields)
+        # Capture previous values for fields being changed (exclude provenance meta-fields).
+        # Use {field}_id for FK fields so we get a serializable PK, not a model object.
         _prov_meta = {'source', 'source_user_id', 'modification_reason'}
+        def _prev_val(obj, field):
+            fk_id = f'{field}_id'
+            if hasattr(obj, fk_id):
+                return getattr(obj, fk_id, None)
+            return getattr(obj, field, None)
         previous_values = {
-            field: getattr(patient_info, field, None)
+            field: _prev_val(patient_info, field)
             for field in request.data
             if field not in _prov_meta and hasattr(patient_info, field)
         }
