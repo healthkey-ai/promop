@@ -1559,6 +1559,26 @@ class _SmartBase(TestCase):
         cls.drug_concept = Concept.objects.get(concept_id=19136160)       # Drug (generic)
         cls.type_concept = Concept.objects.get(concept_id=32817)          # EHR
 
+        # Organization + ApplicationOrganization so get_request_org() returns an org
+        # (without this, access checks fall through to can_access_patient which rejects
+        # foundation_user because it has no PatientUser/ProfessionalGroupAccess).
+        from omop_core.models import Organization, ApplicationOrganization
+        cls.organization = Organization.objects.create(
+            name='SMART Test Org',
+            slug='smart-test-org',
+        )
+        ApplicationOrganization.objects.create(
+            application=cls.app,
+            organization=cls.organization,
+        )
+        # PatientInfo for cls.person, scoped to the test org.  Subclasses that
+        # create OMOP records for cls.person (conditions, measurements, etc.)
+        # need this to exist so _ProvenanceMixin.perform_create org-check passes.
+        cls.patient_info = PatientInfo.objects.create(
+            person=cls.person,
+            organization=cls.organization,
+        )
+
     def _bearer(self, token_str: str) -> APIClient:
         c = APIClient()
         c.credentials(HTTP_AUTHORIZATION=f'Bearer {token_str}')
@@ -1928,7 +1948,7 @@ class SmartPatientInfoReadOnlyTest(_SmartBase):
 
     def test_patient_info_patch_succeeds_with_write_token(self):
         """PATCH is now supported — write-through to OMOP was added in HKI-PDS-01."""
-        PatientInfo.objects.get_or_create(person=self.person)
+        PatientInfo.objects.get_or_create(person=self.person, defaults={'organization': self.organization})
         resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
             {'disease': 'Updated disease'},
@@ -2557,10 +2577,9 @@ class PatientInfoPatchWriteThroughTest(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
-        cls.patient_info = PatientInfo.objects.create(
-            person=cls.person,
-            disease='Breast Cancer',
-        )
+        # cls.patient_info already created by _SmartBase; just set disease.
+        PatientInfo.objects.filter(person=cls.person).update(disease='Breast Cancer')
+        cls.patient_info = PatientInfo.objects.get(person=cls.person)
 
     def test_patch_updates_patient_info(self):
         """PATCH updates the PatientInfo field value."""
@@ -2642,10 +2661,9 @@ class ProvenancePatchTest(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
-        cls.patient_info = PatientInfo.objects.create(
-            person=cls.person,
-            disease='Breast Cancer',
-        )
+        # cls.patient_info already created by _SmartBase; just set disease.
+        PatientInfo.objects.filter(person=cls.person).update(disease='Breast Cancer')
+        cls.patient_info = PatientInfo.objects.get(person=cls.person)
 
     def test_patch_with_source_creates_provenance_for_patient_info(self):
         resp = self.write_client.patch(
@@ -2816,7 +2834,7 @@ class AuditLogMiddlewareTest(_SmartBase):
 
     def _make_person_and_pi(self, person_id):
         person = Person.objects.create(person_id=person_id)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
         return person, pi
 
     # ------------------------------------------------------------------
@@ -3019,7 +3037,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         """PATCHing a lab field creates a Measurement row."""
         from omop_core.models import Measurement
         person = Person.objects.create(person_id=91001)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
         before = Measurement.objects.filter(person=person).count()
 
         self._patch(pi, {'hemoglobin_g_dl': 12.5})
@@ -3032,7 +3050,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         """Two PATCHes of the same lab on the same day → still 1 Measurement row."""
         from omop_core.models import Measurement
         person = Person.objects.create(person_id=91002)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
 
         self._patch(pi, {'hemoglobin_g_dl': 11.0})
         self._patch(pi, {'hemoglobin_g_dl': 11.5})
@@ -3050,7 +3068,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         from datetime import date
         from omop_core.models import Measurement
         person = Person.objects.create(person_id=91003)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
 
         with mock_patch('omop_core.services.omop_write_service._today', return_value=date(2024, 1, 1)):
             self._patch(pi, {'hemoglobin_g_dl': 10.0})
@@ -3064,7 +3082,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         """PATCHing 'disease' creates a new ConditionOccurrence row."""
         from omop_core.models import ConditionOccurrence
         person = Person.objects.create(person_id=91010)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
 
         self._patch(pi, {'disease': 'Breast cancer'})
 
@@ -3080,7 +3098,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         from unittest.mock import patch as mock_patch
         from datetime import date
         person = Person.objects.create(person_id=91011)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
 
         with mock_patch('omop_core.services.omop_write_service._today', return_value=date(2024, 1, 1)):
             self._patch(pi, {'stage': 'Stage II'})
@@ -3092,7 +3110,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
     def test_patch_demographics_updates_person(self):
         """PATCHing gender and date_of_birth updates the linked Person record."""
         person = Person.objects.create(person_id=91020)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
 
         self._patch(pi, {'gender': 'Female', 'date_of_birth': '1975-06-15'})
 
@@ -3107,7 +3125,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         """PATCHing first_line_therapy creates an Episode with episode_number=1."""
         from omop_oncology.models import Episode
         person = Person.objects.create(person_id=91030)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
 
         self._patch(pi, {
             'first_line_therapy': 'AC-T',
@@ -3127,7 +3145,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         from omop_oncology.models import Episode, EpisodeEvent
         from omop_core.models import DrugExposure, Concept
         person = Person.objects.create(person_id=91031)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
         drug_concept = Concept.objects.get(concept_id=19136160)
         type_concept = Concept.objects.get(concept_id=32817)
 
@@ -3158,7 +3176,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         from omop_oncology.models import Episode, EpisodeEvent
         from omop_core.models import DrugExposure, Concept
         person = Person.objects.create(person_id=91032)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
         drug_concept = Concept.objects.get(concept_id=19136160)
         type_concept = Concept.objects.get(concept_id=32817)
 
@@ -3189,7 +3207,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         """If sync_to_omop raises internally, the PATCH response is still 200."""
         from unittest.mock import patch as mock_patch
         person = Person.objects.create(person_id=91040)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
 
         with mock_patch(
             'patient_portal.api.views.sync_to_omop',
@@ -4077,7 +4095,10 @@ class DiseasePersistenceTest(_SmartBase):
             race_source_value='unknown',
             ethnicity_source_value='unknown',
         )
-        PatientInfo.objects.get_or_create(person=cls.dp_person)
+        PatientInfo.objects.get_or_create(
+            person=cls.dp_person,
+            defaults={'organization': cls.organization},
+        )
 
     # ------------------------------------------------------------------ #
     # Issue #110: disease persists across a PATCH + DB re-fetch cycle     #
@@ -4340,6 +4361,24 @@ class SurveyAPITest(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
+        from oauth2_provider.models import Application, AccessToken
+        from django.utils import timezone as tz
+        import datetime
+        # Internal app (no org) — survey template writes require no org-scoping.
+        cls._internal_app = Application.objects.create(
+            name='Internal Survey Service',
+            client_id='internal-survey-client-id',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=cls.foundation_user,
+        )
+        cls._internal_write_token = AccessToken.objects.create(
+            user=cls.foundation_user,
+            application=cls._internal_app,
+            token='internal-survey-write-token-s1',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='patient/*.read patient/*.write openid launch/patient',
+        )
         from omop_core.models import Survey, PatientSurveyResponse
         cls.survey = Survey.objects.create(
             name='cll-proms',
@@ -4356,6 +4395,11 @@ class SurveyAPITest(_SmartBase):
             values={'fatigue': 3},
             percent_complete=100,
         )
+
+    @property
+    def survey_write_client(self):
+        """Internal (no-org) client for mutating shared survey templates."""
+        return self._bearer(self._internal_write_token.token)
 
     # --- Survey CRUD ---
 
@@ -4400,7 +4444,7 @@ class SurveyAPITest(_SmartBase):
                                       {'value': 'poor', 'label': 'Poor'}]}}
             ]}],
         }
-        res = self.write_client.post('/api/surveys/', payload, format='json')
+        res = self.survey_write_client.post('/api/surveys/', payload, format='json')
         self.assertEqual(res.status_code, 201)
         self.assertEqual(res.data['name'], 'breast-cancer-proms')
         self.assertEqual(len(res.data['pages'][0]['inputs']), 1)
@@ -4417,7 +4461,7 @@ class SurveyAPITest(_SmartBase):
             name='to-archive', title='To Archive',
             status=Survey.STATUS_ACTIVE, pages=[],
         )
-        res = self.write_client.patch(f'/api/surveys/{s.id}/', {'status': 'ARCHIVED'}, format='json')
+        res = self.survey_write_client.patch(f'/api/surveys/{s.id}/', {'status': 'ARCHIVED'}, format='json')
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data['status'], 'ARCHIVED')
 
@@ -4556,6 +4600,24 @@ class SurveyAPIExtendedTest(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
+        from oauth2_provider.models import Application, AccessToken
+        from django.utils import timezone as tz
+        import datetime
+        # Internal app (no org) — survey template writes require no org-scoping.
+        cls._internal_app = Application.objects.create(
+            name='Internal Survey Service (Ext)',
+            client_id='internal-survey-client-id-ext',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=cls.foundation_user,
+        )
+        cls._internal_write_token = AccessToken.objects.create(
+            user=cls.foundation_user,
+            application=cls._internal_app,
+            token='internal-survey-write-token-s2',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='patient/*.read patient/*.write openid launch/patient',
+        )
         from omop_core.models import Survey, PatientSurveyResponse
         cls.survey = Survey.objects.create(
             name='mm-ext-test',
@@ -4577,6 +4639,11 @@ class SurveyAPIExtendedTest(_SmartBase):
             },
             percent_complete=50,
         )
+
+    @property
+    def survey_write_client(self):
+        """Internal (no-org) client for mutating shared survey templates."""
+        return self._bearer(self._internal_write_token.token)
 
     def test_retrieve_survey_404(self):
         res = self.read_client.get('/api/surveys/999999/')
@@ -4664,7 +4731,7 @@ class SurveyAPIExtendedTest(_SmartBase):
 
     def test_create_survey_missing_name_returns_400(self):
         payload = {'title': 'No Name Survey', 'status': 'ACTIVE', 'pages': []}
-        res = self.write_client.post('/api/surveys/', payload, format='json')
+        res = self.survey_write_client.post('/api/surveys/', payload, format='json')
         self.assertEqual(res.status_code, 400)
 
     def test_create_survey_with_external_id(self):
@@ -4675,7 +4742,7 @@ class SurveyAPIExtendedTest(_SmartBase):
             'pages': [],
             'external_id': 'firestore-doc-abc123',
         }
-        res = self.write_client.post('/api/surveys/', payload, format='json')
+        res = self.survey_write_client.post('/api/surveys/', payload, format='json')
         self.assertEqual(res.status_code, 201)
         self.assertEqual(res.data['external_id'], 'firestore-doc-abc123')
 
@@ -4698,7 +4765,7 @@ class SurveyAPIExtendedTest(_SmartBase):
             'status': 'DRAFT',
             'pages': [],
         }
-        res = self.write_client.post('/api/surveys/', payload, format='json')
+        res = self.survey_write_client.post('/api/surveys/', payload, format='json')
         self.assertEqual(res.status_code, 400)
 
 
@@ -5259,6 +5326,9 @@ class PersonDemographicPatchTest(_SmartBase):
             race_source_value=None,
             ethnicity_source_value=None,
         )
+        # PersonViewSet.partial_update org-check requires PatientInfo; create one
+        # scoped to the test org so the write token's org matches.
+        PatientInfo.objects.create(person=self.person, organization=self.organization)
 
     def _url(self):
         return f'/api/persons/{self.person.person_id}/'

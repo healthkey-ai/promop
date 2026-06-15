@@ -319,8 +319,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         changed_fields = {f for f in request.data if f not in _prov_meta}
         try:
             sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
-        except Exception:
-            pass
+        except Exception as _sync_exc:
+            logger.warning('sync_to_omop failed for patient %s: %s', patient_info.pk, type(_sync_exc).__name__)
 
         if prov_source:
             for field in changed_fields:
@@ -406,8 +406,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         changed_fields = set(patch_data.keys())
         try:
             sync_to_omop(patient_info, changed_fields, changed_data=dict(patch_data))
-        except Exception:
-            pass
+        except Exception as _sync_exc:
+            logger.warning('sync_to_omop failed for patient %s: %s', patient_info.pk, type(_sync_exc).__name__)
 
         return Response(serializer.data)
 
@@ -2149,7 +2149,7 @@ class _OmopFilterMixin:
         org = get_request_org(self.request)
         if org is not None:
             from omop_core.models import PatientInfo
-            allowed = PatientInfo.objects.filter(organization=org).values_list('person_id', flat=True)
+            allowed = PatientInfo.objects.filter(organization=org).values('person_id')
             qs = qs.filter(person_id__in=allowed)
         elif not (self.request.user and (
             getattr(self.request.user, 'is_superuser', False) or
@@ -2191,15 +2191,18 @@ class _ProvenanceMixin:
             if pk_field not in serializer.validated_data:
                 serializer.validated_data[pk_field] = next_pk(model_cls, pk_field)
 
-        # Org-scoping: reject unknown or cross-org persons
+        # Org-scoping: reject cross-org persons; allow new/bootstrap patients
         org = get_request_org(self.request)
         if org is not None:
             person = serializer.validated_data.get('person')
             if person:
-                from rest_framework.exceptions import NotFound, PermissionDenied
-                if not PatientInfo.objects.filter(person=person).exists():
-                    raise NotFound('Person not found.')
-                if not PatientInfo.objects.filter(person=person, organization=org).exists():
+                from rest_framework.exceptions import PermissionDenied
+                # Allow bootstrap (no PatientInfo yet) and unclaimed patients (org=NULL).
+                # Block only when a PatientInfo exists and is already claimed by a different org.
+                existing_pi = PatientInfo.objects.filter(person=person).first()
+                if (existing_pi is not None
+                        and existing_pi.organization is not None
+                        and existing_pi.organization != org):
                     raise PermissionDenied('Person does not belong to your organization.')
         elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
             from omop_core.authorization import can_access_patient
@@ -2218,9 +2221,12 @@ class _ProvenanceMixin:
         if org is not None:
             person = serializer.validated_data.get('person') or serializer.instance.person
             from rest_framework.exceptions import NotFound, PermissionDenied
-            if not PatientInfo.objects.filter(person=person).exists():
+            # On updates the patient must already have a PatientInfo; missing = not found.
+            # Unclaimed patients (org=NULL) are allowed; only reject explicit cross-org.
+            existing_pi = PatientInfo.objects.filter(person=person).first()
+            if existing_pi is None:
                 raise NotFound('Person not found.')
-            if not PatientInfo.objects.filter(person=person, organization=org).exists():
+            if existing_pi.organization is not None and existing_pi.organization != org:
                 raise PermissionDenied('Person does not belong to your organization.')
         elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
             from omop_core.authorization import can_access_patient
@@ -2310,12 +2316,82 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
     serializer_class = EpisodeEventSerializer
     permission_classes = [ScopedTokenPermission]
 
+    def list(self, request, *args, **kwargs):
+        if not request.query_params.get('episode_id'):
+            return Response(
+                {'detail': 'episode_id query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().list(request, *args, **kwargs)
+
     def get_queryset(self):
-        episode_id = self.request.query_params.get('episode_id')
         qs = EpisodeEvent.objects.all()
+        episode_id = self.request.query_params.get('episode_id')
         if episode_id:
             qs = qs.filter(episode_id=episode_id)
+        # Org / per-patient scoping: EpisodeEvent.episode_id is a bare integer FK to Episode.
+        # Resolve allowed episode_ids via the Episode → person → org chain.
+        # Bootstrap patients (organization=NULL) are included so that create-path
+        # and read-path are symmetric.
+        org = get_request_org(self.request)
+        if org is not None:
+            from django.db.models import Q
+            allowed_pids = PatientInfo.objects.filter(
+                Q(organization=org) | Q(organization__isnull=True)
+            ).values('person_id')
+            allowed_episodes = Episode.objects.filter(person_id__in=allowed_pids).values('episode_id')
+            qs = qs.filter(episode_id__in=allowed_episodes)
+        elif self.request.user and not (
+            getattr(self.request.user, 'is_superuser', False) or
+            getattr(self.request.user, 'is_staff', False)
+        ):
+            from omop_core.authorization import can_access_patient
+            from patient_portal.models import PatientUser
+            person_id = self.request.query_params.get('person_id')
+            if person_id:
+                try:
+                    pid = int(person_id)
+                except (ValueError, TypeError):
+                    return qs.none()
+                if not can_access_patient(self.request.user, pid):
+                    return qs.none()
+                allowed_episodes = Episode.objects.filter(person_id=pid).values('episode_id')
+                qs = qs.filter(episode_id__in=allowed_episodes)
+            else:
+                try:
+                    own_pid = PatientUser.objects.get(identity=self.request.user).person_id
+                    allowed_episodes = Episode.objects.filter(person_id=own_pid).values('episode_id')
+                    qs = qs.filter(episode_id__in=allowed_episodes)
+                except PatientUser.DoesNotExist:
+                    return qs.none()
         return qs
+
+    def perform_create(self, serializer):
+        from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+        episode_id = serializer.validated_data.get('episode_id')
+        org = get_request_org(self.request)
+        if org is not None:
+            # Fail closed: if episode_id is absent the org check cannot be performed.
+            if episode_id is None:
+                raise ValidationError({'episode_id': 'This field is required.'})
+            try:
+                episode = Episode.objects.get(episode_id=episode_id)
+            except Episode.DoesNotExist:
+                raise NotFound('Episode not found.')
+            pi = PatientInfo.objects.filter(person_id=episode.person_id).first()
+            if pi is not None and pi.organization is not None and pi.organization != org:
+                raise PermissionDenied('Episode does not belong to your organization.')
+        elif self.request.user and not (
+            getattr(self.request.user, 'is_superuser', False) or
+            getattr(self.request.user, 'is_staff', False)
+        ):
+            # Non-org path (partner-auth / session patients): enforce per-patient ownership.
+            from omop_core.authorization import can_access_patient
+            if episode_id is not None:
+                episode = Episode.objects.filter(episode_id=episode_id).first()
+                if episode is None or not can_access_patient(self.request.user, episode.person_id):
+                    raise PermissionDenied('Access denied.')
+        serializer.save()
 
 
 # =============================================================================
