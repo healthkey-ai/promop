@@ -84,6 +84,8 @@ class PartnerAuthentication(BaseAuthentication):
             identity = Identity.objects.get(pk=data["pk"])
         except Identity.DoesNotExist:
             return None
+        if not identity.is_active:
+            return None
         claims = TokenClaims(**data["claims"])
         return (identity, claims)
 
