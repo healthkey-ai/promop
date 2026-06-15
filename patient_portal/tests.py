@@ -5482,3 +5482,106 @@ class PatientInfoIDORTest(TestCase):
             f'/api/patient-info/{self.person_b.person_id}/'
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+
+# ---------------------------------------------------------------------------
+# OMOP ViewSet row-level access (issue #135)
+# ---------------------------------------------------------------------------
+
+class OmopViewSetAccessTest(TestCase):
+    """
+    Verify that _OmopFilterMixin enforces per-patient access for session /
+    partner-auth users (org is None path) on the OMOP clinical ViewSets.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        # Patient A — the attacker
+        cls.person_a = Person.objects.create(person_id=88901, family_name='Attacker', given_name='Alice')
+        PatientInfo.objects.create(person=cls.person_a)
+        cls.identity_a = Identity.objects.create_user(email='attacker@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_a, person=cls.person_a)
+
+        # Patient B — the victim
+        cls.person_b = Person.objects.create(person_id=88902, family_name='Victim', given_name='Bob')
+        PatientInfo.objects.create(person=cls.person_b)
+        cls.identity_b = Identity.objects.create_user(email='victim@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_b, person=cls.person_b)
+
+        # A measurement belonging to patient B
+        cls.measurement = Measurement.objects.create(
+            measurement_id=998877,
+            person=cls.person_b,
+            measurement_concept_id=0,
+            measurement_type_concept_id=0,
+            measurement_date=date(2024, 1, 1),
+        )
+
+        # A condition belonging to patient B
+        cls.condition = ConditionOccurrence.objects.create(
+            condition_occurrence_id=998877,
+            person=cls.person_b,
+            condition_concept_id=0,
+            condition_type_concept_id=0,
+            condition_start_date=date(2024, 1, 1),
+        )
+
+        cls.superuser = Identity.objects.create_superuser(email='su2@test.com', password='pw')
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    # --- List filtered by person_id ---
+
+    def test_patient_cannot_list_other_measurements(self):
+        """GET /api/measurements/?person_id=B as patient A returns empty list."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/measurements/?person_id={self.person_b.person_id}'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len((resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))), 0)
+
+    def test_patient_can_list_own_measurements(self):
+        """GET /api/measurements/?person_id=A as patient A returns their records."""
+        Measurement.objects.create(
+            measurement_id=998878,
+            person=self.person_a,
+            measurement_concept_id=0,
+            measurement_type_concept_id=0,
+            measurement_date=date(2024, 1, 1),
+        )
+        resp = self._client_as(self.identity_a).get(
+            f'/api/measurements/?person_id={self.person_a.person_id}'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = (resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))
+        self.assertGreater(len(results), 0)
+
+    def test_patient_cannot_list_other_conditions(self):
+        """GET /api/conditions/?person_id=B as patient A returns empty list."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/conditions/?person_id={self.person_b.person_id}'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len((resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))), 0)
+
+    def test_list_without_person_id_returns_own_records_only(self):
+        """GET /api/measurements/ (no person_id) as patient A returns only their records."""
+        resp = self._client_as(self.identity_a).get('/api/measurements/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = (resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))
+        person_ids = {r['person'] for r in results}
+        self.assertNotIn(self.person_b.person_id, person_ids)
+
+    def test_superuser_can_list_any_patient_measurements(self):
+        """Superusers retain unrestricted access."""
+        resp = self._client_as(self.superuser).get(
+            f'/api/measurements/?person_id={self.person_b.person_id}'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = (resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))
+        self.assertGreater(len(results), 0)

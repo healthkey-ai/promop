@@ -2060,6 +2060,28 @@ class _OmopFilterMixin:
             from omop_core.models import PatientInfo
             allowed = PatientInfo.objects.filter(organization=org).values_list('person_id', flat=True)
             qs = qs.filter(person_id__in=allowed)
+        elif not (self.request.user and (
+            getattr(self.request.user, 'is_superuser', False) or
+            getattr(self.request.user, 'is_staff', False)
+        )):
+            # Session / partner-auth (Firebase, SAML): no org token.
+            # Enforce per-patient access using can_access_patient.
+            from omop_core.authorization import can_access_patient
+            from patient_portal.models import PatientUser
+            if person_id:
+                try:
+                    pid = int(person_id)
+                except (ValueError, TypeError):
+                    return qs.none()
+                if not can_access_patient(self.request.user, pid):
+                    return qs.none()
+            else:
+                # No explicit person_id — restrict to the user's own records only.
+                try:
+                    own_pid = PatientUser.objects.get(identity=self.request.user).person_id
+                    qs = qs.filter(person_id=own_pid)
+                except PatientUser.DoesNotExist:
+                    return qs.none()
         return qs
 
 
@@ -2088,6 +2110,13 @@ class _ProvenanceMixin:
                     raise NotFound('Person not found.')
                 if not PatientInfo.objects.filter(person=person, organization=org).exists():
                     raise PermissionDenied('Person does not belong to your organization.')
+        elif not (self.request.user.is_superuser or getattr(self.request.user, 'is_staff', False)):
+            person = serializer.validated_data.get('person')
+            if person:
+                from omop_core.authorization import can_access_patient
+                from rest_framework.exceptions import PermissionDenied
+                if not can_access_patient(self.request.user, person.person_id):
+                    raise PermissionDenied('Access denied.')
 
         obj = serializer.save()
         self._prov(obj)
@@ -2101,6 +2130,13 @@ class _ProvenanceMixin:
                 raise NotFound('Person not found.')
             if not PatientInfo.objects.filter(person=person, organization=org).exists():
                 raise PermissionDenied('Person does not belong to your organization.')
+        elif not (self.request.user.is_superuser or getattr(self.request.user, 'is_staff', False)):
+            person = serializer.validated_data.get('person') or serializer.instance.person
+            if person:
+                from omop_core.authorization import can_access_patient
+                from rest_framework.exceptions import PermissionDenied
+                if not can_access_patient(self.request.user, person.person_id):
+                    raise PermissionDenied('Access denied.')
         obj = serializer.save()
         self._prov(obj)
 
