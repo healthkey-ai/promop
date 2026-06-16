@@ -192,14 +192,14 @@ MYELOMA_REGIMEN_CONCEPT_IDS: dict[frozenset, int | None] = {
     frozenset({'daratumumab', 'carfilzomib', 'lenalidomide', 'dexamethasone'}):  None,       # Dara-KRd — not in HemOnc
     frozenset({'isatuximab', 'carfilzomib', 'lenalidomide', 'dexamethasone'}):   None,       # Isa-KRd — not in HemOnc
     frozenset({'isatuximab', 'bortezomib', 'lenalidomide', 'dexamethasone'}):    None,       # Isa-VRd — not in HemOnc
-    frozenset({'ixazomib', 'lenalidomide', 'dexamethasone'}):                    None,       # IxaRd — not in HemOnc
+    frozenset({'ixazomib', 'lenalidomide', 'dexamethasone'}):                    35806283,   # IRd (HemOnc name for IxaRd)
     frozenset({'elotuzumab', 'lenalidomide', 'dexamethasone'}):                  35806314,   # Elo-Rd
     frozenset({'daratumumab', 'ixazomib', 'lenalidomide', 'dexamethasone'}):     None,       # Dara-IRd — not in HemOnc
     # ── Bortezomib doublets / triplets ───────────────────────────────────
     frozenset({'bortezomib', 'dexamethasone'}):                                  35806059,   # Vd (Bortezomib and Dexamethasone)
-    frozenset({'bortezomib', 'cyclophosphamide', 'dexamethasone'}):              None,       # VCd — triplet not in HemOnc
-    frozenset({'bortezomib', 'doxorubicin', 'dexamethasone'}):                   None,       # PAD
-    frozenset({'bortezomib', 'thalidomide', 'dexamethasone'}):                   None,       # VTd — not in HemOnc
+    frozenset({'bortezomib', 'cyclophosphamide', 'dexamethasone'}):              35806061,   # VDC (HemOnc name for VCd/CyBorD)
+    frozenset({'bortezomib', 'doxorubicin', 'dexamethasone'}):                   None,       # PAD — not in HemOnc
+    frozenset({'bortezomib', 'thalidomide', 'dexamethasone'}):                   35806259,   # VTD
     frozenset({'bortezomib', 'melphalan', 'prednisone'}):                        35806258,   # VMP
     frozenset({'daratumumab', 'bortezomib', 'dexamethasone'}):                   35806312,   # Dara-Vd
     # ── Carfilzomib ───────────────────────────────────────────────────────
