@@ -30,6 +30,12 @@ class ProvenanceRecord(models.Model):
     class Meta:
         db_table = 'provenance_record'
         indexes = [models.Index(fields=['content_type', 'object_id'])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['content_type', 'object_id', 'source_user_id', 'source'],
+                name='uq_provenance_object_actor_source',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.source} → {self.content_type} #{self.object_id}"

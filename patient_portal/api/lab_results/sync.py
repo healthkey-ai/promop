@@ -380,7 +380,7 @@ class SyncView(APIView):
             )
             for m_id in measurement_ids
         ]
-        ProvenanceRecord.objects.bulk_create(records)
+        ProvenanceRecord.objects.bulk_create(records, ignore_conflicts=True)
 
     def _resolve_person_from_identity(self, actor_iss, actor_sub):
         """Resolve (issuer, sub) → person_id, auto-provisioning if needed."""

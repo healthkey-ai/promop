@@ -11,8 +11,8 @@ from rest_framework.test import APIClient
 
 from omop_core.models import (
     CareSite, Concept, ConceptClass, Domain, LoincClass, LoincCodeClass,
-    Measurement, MeasurementOwnership, Person, PatientInfo, Vocabulary,
-    VisitOccurrence,
+    Measurement, MeasurementOwnership, Person, PatientInfo, ProvenanceRecord,
+    Vocabulary, VisitOccurrence,
 )
 
 
@@ -1483,3 +1483,55 @@ class SyncVisitIdempotencyTest(TestCase):
             resp1.data['visit_occurrence_id'],
             resp2.data['visit_occurrence_id'],
         )
+
+
+# Provenance dedup on re-commit
+# ---------------------------------------------------------------------------
+
+class SyncProvenanceDedupTest(TestCase):
+    """
+    Verify that re-committing the same report does not create duplicate
+    ProvenanceRecord rows for already-existing measurements.
+    """
+
+    def setUp(self):
+        _setup_vocab()
+        self.user = Identity.objects.create_user(email='prov@test.com', password='test')
+        self.user.is_superuser = True
+        self.user.save()
+        self.person = Person.objects.create(person_id=20001)
+        PatientInfo.objects.create(person=self.person)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _sync(self):
+        return self.client.post('/api/lab-results/sync/', {
+            'person_id': self.person.person_id,
+            'measurements': [
+                {
+                    'loinc_code': '718-7',
+                    'test_name': 'Hemoglobin',
+                    'value': '13.5',
+                    'unit': 'g/dL',
+                    'measured_at': '2026-01-15',
+                },
+            ],
+            'lab_name': 'Test Lab',
+            'lab_date': '2026-01-15',
+            'report_filename': 'cbc-2026-01.pdf',
+            'source_type': 'document_extraction',
+        }, format='json')
+
+    def test_resubmit_does_not_duplicate_provenance(self):
+        """Two commits of the same file must produce exactly one ProvenanceRecord per measurement."""
+        resp1 = self._sync()
+        self.assertEqual(resp1.status_code, status.HTTP_201_CREATED)
+        m_id = resp1.data['measurement_ids'][0]
+
+        resp2 = self._sync()
+        self.assertEqual(resp2.status_code, status.HTTP_201_CREATED)
+
+        prov_count = ProvenanceRecord.objects.filter(object_id=m_id).count()
+        self.assertEqual(prov_count, 1, (
+            f'Expected 1 ProvenanceRecord for measurement {m_id} after re-commit, got {prov_count}'
+        ))
