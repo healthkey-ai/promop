@@ -311,27 +311,33 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
 
         serializer = PatientInfoSerializer(patient_info, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
-
-        if prov_source:
-            _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
         changed_fields = {f for f in request.data if f not in _prov_meta}
         try:
-            sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
+            with transaction.atomic():
+                serializer.save()
+                if prov_source:
+                    _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
+                if prov_source:
+                    for field in changed_fields:
+                        if field in LAB_FIELD_TO_LOINC:
+                            loinc_code = LAB_FIELD_TO_LOINC[field][0]
+                            m = Measurement.objects.filter(
+                                person=patient_info.person,
+                                measurement_source_value=loinc_code,
+                            ).order_by('-measurement_id').first()
+                            if m:
+                                _record_provenance(m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
         except Exception as _sync_exc:
-            logger.warning('sync_to_omop failed for patient %s: %s', patient_info.pk, type(_sync_exc).__name__)
-
-        if prov_source:
-            for field in changed_fields:
-                if field in LAB_FIELD_TO_LOINC:
-                    loinc_code = LAB_FIELD_TO_LOINC[field][0]
-                    m = Measurement.objects.filter(
-                        person=patient_info.person,
-                        measurement_source_value=loinc_code,
-                    ).order_by('-measurement_id').first()
-                    if m:
-                        _record_provenance(m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+            logger.error(
+                'omop_write_through_failed patient=%s error=%s',
+                patient_info.pk, type(_sync_exc).__name__,
+            )
+            return Response(
+                {'error': 'Failed to persist changes to OMOP. Please try again.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
         return Response({**serializer.data, 'previous_values': previous_values})
 
@@ -401,13 +407,21 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
 
         serializer = PatientInfoSerializer(patient_info, data=patch_data, partial=True)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
 
         changed_fields = set(patch_data.keys())
         try:
-            sync_to_omop(patient_info, changed_fields, changed_data=dict(patch_data))
+            with transaction.atomic():
+                serializer.save()
+                sync_to_omop(patient_info, changed_fields, changed_data=dict(patch_data))
         except Exception as _sync_exc:
-            logger.warning('sync_to_omop failed for patient %s: %s', patient_info.pk, type(_sync_exc).__name__)
+            logger.error(
+                'omop_write_through_failed patient=%s error=%s',
+                patient_info.pk, type(_sync_exc).__name__,
+            )
+            return Response(
+                {'error': 'Failed to persist changes to OMOP. Please try again.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
         return Response(serializer.data)
 

@@ -3203,11 +3203,12 @@ class PatientInfoOmopSyncTest(_SmartBase):
             'EpisodeEvent was duplicated',
         )
 
-    def test_sync_failure_does_not_block_response(self):
-        """If sync_to_omop raises internally, the PATCH response is still 200."""
+    def test_sync_failure_returns_500(self):
+        """If sync_to_omop raises, the PATCH rolls back and returns 500."""
         from unittest.mock import patch as mock_patch
         person = Person.objects.create(person_id=91040)
         pi = PatientInfo.objects.create(person=person, organization=self.organization)
+        original_status = pi.ecog_performance_status
 
         with mock_patch(
             'patient_portal.api.views.sync_to_omop',
@@ -3215,7 +3216,10 @@ class PatientInfoOmopSyncTest(_SmartBase):
         ):
             response = self._patch(pi, {'ecog_performance_status': 1})
 
-        self.assertIn(response.status_code, [200, 404])
+        self.assertEqual(response.status_code, 500)
+        # PatientInfo must not have been updated — transaction was rolled back.
+        pi.refresh_from_db()
+        self.assertEqual(pi.ecog_performance_status, original_status)
 
     def test_lab_field_to_loinc_in_mappings_not_views(self):
         """LAB_FIELD_TO_LOINC must live in mappings, not be directly importable from views."""
