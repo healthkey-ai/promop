@@ -462,7 +462,7 @@ class SyncView(APIView):
             return CareSite.objects.filter(care_site_name=lab_name).first()
 
     def _create_visit_occurrence(self, person_id, care_site, lab_date, report_filename, visit_concept, type_concept):
-        source_value = (report_filename or '')[:50]
+        source_value = (report_filename or '')[:255]
         care_site_id = care_site.care_site_id if care_site else None
         if source_value:
             # Idempotent path: dedup by (person, date, care_site, report_filename) so that

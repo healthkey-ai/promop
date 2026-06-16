@@ -492,7 +492,7 @@ class VisitOccurrence(models.Model):
     visit_type_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='visit_type_occurrences', db_column='visit_type_concept_id')
     provider_id = models.IntegerField(null=True, blank=True)
     care_site_id = models.IntegerField(null=True, blank=True)
-    visit_source_value = models.CharField(max_length=50, null=True, blank=True)
+    visit_source_value = models.CharField(max_length=255, null=True, blank=True)
     visit_source_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='visit_source_occurrences', db_column='visit_source_concept_id', null=True, blank=True)
     admitted_from_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='visit_admitted_from', db_column='admitted_from_concept_id', null=True, blank=True)
     admitted_from_source_value = models.CharField(max_length=50, null=True, blank=True)
@@ -502,6 +502,13 @@ class VisitOccurrence(models.Model):
 
     class Meta:
         db_table = 'visit_occurrence'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['person', 'visit_start_date', 'care_site_id', 'visit_source_value'],
+                condition=models.Q(visit_source_value__isnull=False) & ~models.Q(visit_source_value=''),
+                name='uq_visit_person_date_site_source',
+            ),
+        ]
 
     def __str__(self):
         return f"Visit {self.visit_occurrence_id} for Person {self.person_id}"
