@@ -75,22 +75,34 @@ def _resolve_person_id(request):
                 {'detail': 'person_id must be an integer.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        # Verify caller has access to this patient
+        # Verify caller has access to this patient.
+        # Org-scoped tokens are checked FIRST, before can_access_patient.
+        # ProfessionalGroupAccess can span organisations, so allowing
+        # can_access_patient() to short-circuit the org check would let a
+        # cross-org group grant bypass tenant isolation.
         if request.user and request.user.is_authenticated:
-            own_pid = None
-            try:
-                own_pid = PatientUser.objects.get(identity=request.user).person_id
-            except PatientUser.DoesNotExist:
-                pass
-            if pid != own_pid and not can_access_patient(request.user, pid):
-                org = get_request_org(request)
-                if org is None or not PatientInfo.objects.filter(
+            org = get_request_org(request)
+            if org is not None:
+                # Org-scoped path: membership in the org is the only check.
+                if not PatientInfo.objects.filter(
                     person_id=pid, organization=org,
                 ).exists():
                     return None, Response(
                         {'detail': 'Access denied.'},
                         status=status.HTTP_403_FORBIDDEN,
                     )
+                return pid, None
+            # Non-org path: self-access or individual access grant.
+            own_pid = None
+            try:
+                own_pid = PatientUser.objects.get(identity=request.user).person_id
+            except PatientUser.DoesNotExist:
+                pass
+            if pid != own_pid and not can_access_patient(request.user, pid):
+                return None, Response(
+                    {'detail': 'Access denied.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
         return pid, None
 
     if not request.user or not request.user.is_authenticated:
@@ -220,14 +232,6 @@ class ResultsSummaryView(APIView):
         person_id, err = _resolve_person_id(request)
         if err:
             return err
-
-        org = get_request_org(request)
-        if org is not None:
-            if not PatientInfo.objects.filter(person_id=person_id, organization=org).exists():
-                return Response(
-                    {'detail': 'Person not found in your organization.'},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
 
         summaries = self._get_concept_summaries(person_id)
 
@@ -398,14 +402,6 @@ class ValuesView(APIView):
                 {'detail': 'concept_code query parameter is required.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        org = get_request_org(request)
-        if org is not None:
-            if not PatientInfo.objects.filter(person_id=person_id, organization=org).exists():
-                return Response(
-                    {'detail': 'Person not found in your organization.'},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
 
         concept = Concept.objects.filter(
             concept_code=concept_code,
