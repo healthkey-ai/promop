@@ -192,39 +192,39 @@ MYELOMA_REGIMEN_CONCEPT_IDS: dict[frozenset, int | None] = {
     frozenset({'daratumumab', 'carfilzomib', 'lenalidomide', 'dexamethasone'}):  None,       # Dara-KRd — not in HemOnc
     frozenset({'isatuximab', 'carfilzomib', 'lenalidomide', 'dexamethasone'}):   None,       # Isa-KRd — not in HemOnc
     frozenset({'isatuximab', 'bortezomib', 'lenalidomide', 'dexamethasone'}):    None,       # Isa-VRd — not in HemOnc
-    frozenset({'ixazomib', 'lenalidomide', 'dexamethasone'}):                    35806234,   # Ixazomib-Rd
-    frozenset({'elotuzumab', 'lenalidomide', 'dexamethasone'}):                  35806219,   # Elo-Rd
+    frozenset({'ixazomib', 'lenalidomide', 'dexamethasone'}):                    None,       # IxaRd — not in HemOnc
+    frozenset({'elotuzumab', 'lenalidomide', 'dexamethasone'}):                  35806314,   # Elo-Rd
     frozenset({'daratumumab', 'ixazomib', 'lenalidomide', 'dexamethasone'}):     None,       # Dara-IRd — not in HemOnc
     # ── Bortezomib doublets / triplets ───────────────────────────────────
-    frozenset({'bortezomib', 'dexamethasone'}):                                  35806204,   # Vd
-    frozenset({'bortezomib', 'cyclophosphamide', 'dexamethasone'}):              35806208,   # VCd
+    frozenset({'bortezomib', 'dexamethasone'}):                                  35806059,   # Vd (Bortezomib and Dexamethasone)
+    frozenset({'bortezomib', 'cyclophosphamide', 'dexamethasone'}):              None,       # VCd — triplet not in HemOnc
     frozenset({'bortezomib', 'doxorubicin', 'dexamethasone'}):                   None,       # PAD
-    frozenset({'bortezomib', 'thalidomide', 'dexamethasone'}):                   35806205,   # VTd
-    frozenset({'bortezomib', 'melphalan', 'prednisone'}):                        35806192,   # VMP
-    frozenset({'daratumumab', 'bortezomib', 'dexamethasone'}):                   35806303,   # Dara-Vd
+    frozenset({'bortezomib', 'thalidomide', 'dexamethasone'}):                   None,       # VTd — not in HemOnc
+    frozenset({'bortezomib', 'melphalan', 'prednisone'}):                        35806258,   # VMP
+    frozenset({'daratumumab', 'bortezomib', 'dexamethasone'}):                   35806312,   # Dara-Vd
     # ── Carfilzomib ───────────────────────────────────────────────────────
-    frozenset({'carfilzomib', 'dexamethasone'}):                                 35806241,   # Kd
+    frozenset({'carfilzomib', 'dexamethasone'}):                                 35806309,   # Kd (Carfilzomib and Dexamethasone)
     frozenset({'carfilzomib', 'pomalidomide', 'dexamethasone'}):                 35806324,   # KPd
     frozenset({'daratumumab', 'carfilzomib', 'dexamethasone'}):                  None,       # Dara-Kd — not in HemOnc
     # ── Pomalidomide ─────────────────────────────────────────────────────
     frozenset({'pomalidomide', 'dexamethasone'}):                                35806066,   # Pd
-    frozenset({'elotuzumab', 'pomalidomide', 'dexamethasone'}):                  35806221,   # Elo-Pd
+    frozenset({'elotuzumab', 'pomalidomide', 'dexamethasone'}):                  35806313,   # Elo-Pd
     frozenset({'isatuximab', 'pomalidomide', 'dexamethasone'}):                  None,       # Isa-Pd — not in HemOnc
     frozenset({'daratumumab', 'pomalidomide', 'dexamethasone'}):                 None,       # Dara-Pd — not in HemOnc
     # ── Selinexor ────────────────────────────────────────────────────────
-    frozenset({'selinexor', 'bortezomib', 'dexamethasone'}):                     905768,     # XVd (SVd)
+    frozenset({'selinexor', 'bortezomib', 'dexamethasone'}):                     905768,     # SVd
     frozenset({'selinexor', 'dexamethasone'}):                                   None,       # Xd — not in HemOnc
-    # ── Lenalidomide monotherapy / doublets ──────────────────────────────
-    frozenset({'lenalidomide', 'dexamethasone'}):                                35806172,   # Rd
-    frozenset({'melphalan', 'prednisone', 'lenalidomide'}):                      35806193,   # MPR
+    # ── Lenalidomide doublets ─────────────────────────────────────────────
+    frozenset({'lenalidomide', 'dexamethasone'}):                                35806053,   # Rd (Lenalidomide and Dexamethasone)
+    frozenset({'melphalan', 'prednisone', 'lenalidomide'}):                      35806273,   # MPR
     # ── Venetoclax ───────────────────────────────────────────────────────
     frozenset({'venetoclax', 'bortezomib', 'dexamethasone'}):                    None,       # VenVD — not in HemOnc
     # ── CAR-T products ───────────────────────────────────────────────────
     frozenset({'idecabtagene vicleucel'}):                                        None,       # Ide-cel — not in HemOnc
     frozenset({'ciltacabtagene autoleucel'}):                                     None,       # Cilta-cel — not in HemOnc
     # ── Conditioning / transplant ─────────────────────────────────────────
-    frozenset({'melphalan'}):                                                     35806017,   # Mel200
-    frozenset({'carmustine', 'etoposide', 'cytarabine', 'melphalan'}):           35806148,   # BEAM
+    frozenset({'melphalan'}):                                                     35804011,   # Melphalan monotherapy
+    frozenset({'carmustine', 'etoposide', 'cytarabine', 'melphalan'}):           35803616,   # BEAM
 }
 
 
