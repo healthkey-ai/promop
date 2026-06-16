@@ -27,6 +27,31 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-your-default-key-chan
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
+if not DEBUG:
+    import sys as _sys
+    # Skip the production guard for management commands that must run before the
+    # app server is fully initialised (migrate, test, collectstatic, check, etc.)
+    # so that Render deploys (which call `migrate` in start.sh) and CI test runs
+    # are not broken when DATABASE_URL is absent at import time.
+    _management_commands = {'migrate', 'test', 'collectstatic', 'check', 'makemigrations', 'shell'}
+    _running_mgmt = bool(set(_sys.argv) & _management_commands)
+    if not _running_mgmt:
+        from django.core.exceptions import ImproperlyConfigured
+        _config_errors = []
+        if SECRET_KEY.startswith('django-insecure-'):
+            _config_errors.append(
+                'SECRET_KEY must be set to a strong random value (current value is the insecure default)'
+            )
+        if not os.environ.get('DATABASE_URL'):
+            _config_errors.append(
+                'DATABASE_URL must be set (SQLite is not supported in production)'
+            )
+        if _config_errors:
+            raise ImproperlyConfigured(
+                'Missing required production settings:\n'
+                + '\n'.join(f'  - {e}' for e in _config_errors)
+            )
+
 if DEBUG:
     ALLOWED_HOSTS = ['*']
 else:
