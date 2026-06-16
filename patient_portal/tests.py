@@ -5765,3 +5765,113 @@ class FhirUploadTransactionTest(FhirUploadBase):
         self.assertIsNotNone(
             Person.objects.filter(family_name='Smith', given_name='Jane').first()
         )
+
+
+# ---------------------------------------------------------------------------
+# IDOR: EpisodeEventViewSet cross-org isolation (issue #136)
+# ---------------------------------------------------------------------------
+
+class EpisodeEventIDORTest(TestCase):
+    """
+    Verify that an org-A service token cannot read EpisodeEvent rows that
+    belong to an org-B patient, even when episode_id is known.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import Application, AccessToken
+        from omop_core.models import Organization, ApplicationOrganization
+        from django.utils import timezone
+        from datetime import timedelta
+        _make_vocab_fixtures()
+
+        cls.org_a = Organization.objects.create(name='EE Org A', slug='ee-org-a')
+        cls.org_b = Organization.objects.create(name='EE Org B', slug='ee-org-b')
+
+        cls.svc_user = Identity.objects.create_user(email='ee-svc@test.com', password='x')
+        cls.app = Application.objects.create(
+            name='EE App',
+            user=cls.svc_user,
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+        )
+        ApplicationOrganization.objects.create(application=cls.app, organization=cls.org_a)
+        cls.token = AccessToken.objects.create(
+            user=cls.svc_user,
+            application=cls.app,
+            token='ee-idor-test-token',
+            expires=timezone.now() + timedelta(hours=1),
+            scope='patient/*.read',
+        )
+
+        # Org-A patient with an episode + event
+        cls.person_a = Person.objects.create(person_id=19101)
+        PatientInfo.objects.create(person=cls.person_a, organization=cls.org_a)
+        cls.ep_a = Episode.objects.create(
+            episode_id=19101,
+            person=cls.person_a,
+            episode_concept=Concept.objects.get(concept_id=32531),   # treatment regimen
+            episode_object_concept=Concept.objects.get(concept_id=32817),
+            episode_type_concept=Concept.objects.get(concept_id=32817),
+            episode_start_date=date(2024, 1, 1),
+            episode_number=1,
+            episode_source_value='RCHOP',
+        )
+        cls.drug_a = DrugExposure.objects.create(
+            drug_exposure_id=19101,
+            person=cls.person_a,
+            drug_concept=Concept.objects.get(concept_id=19136160),
+            drug_exposure_start_date=date(2024, 1, 1),
+            drug_type_concept=Concept.objects.get(concept_id=32817),
+        )
+        cls.ee_a = EpisodeEvent.objects.create(
+            episode_id=cls.ep_a.episode_id,
+            event_id=cls.drug_a.drug_exposure_id,
+            episode_event_field_concept=Concept.objects.get(concept_id=1147094),
+        )
+
+        # Org-B patient with an episode + event (must NOT be visible via org-A token)
+        cls.person_b = Person.objects.create(person_id=19102)
+        PatientInfo.objects.create(person=cls.person_b, organization=cls.org_b)
+        cls.ep_b = Episode.objects.create(
+            episode_id=19102,
+            person=cls.person_b,
+            episode_concept=Concept.objects.get(concept_id=32531),   # treatment regimen
+            episode_object_concept=Concept.objects.get(concept_id=32817),
+            episode_type_concept=Concept.objects.get(concept_id=32817),
+            episode_start_date=date(2024, 2, 1),
+            episode_number=1,
+            episode_source_value='VRd',
+        )
+        cls.drug_b = DrugExposure.objects.create(
+            drug_exposure_id=19102,
+            person=cls.person_b,
+            drug_concept=Concept.objects.get(concept_id=19136160),
+            drug_exposure_start_date=date(2024, 2, 1),
+            drug_type_concept=Concept.objects.get(concept_id=32817),
+        )
+        cls.ee_b = EpisodeEvent.objects.create(
+            episode_id=cls.ep_b.episode_id,
+            event_id=cls.drug_b.drug_exposure_id,
+            episode_event_field_concept=Concept.objects.get(concept_id=1147094),
+        )
+
+    def _client(self):
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f'Bearer {self.token.token}')
+        return c
+
+    def test_list_scoped_to_own_org_episode(self):
+        """List with org-A episode_id returns events; org-B episode_id returns empty."""
+        c = self._client()
+        resp = c.get(f'/api/episode-events/?episode_id={self.ep_a.episode_id}')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = [e['event_id'] for e in resp.data]
+        self.assertIn(self.ee_a.event_id, ids)
+
+    def test_list_excludes_other_org_events(self):
+        """List with org-B episode_id (known via IDOR) must return empty for org-A token."""
+        c = self._client()
+        resp = c.get(f'/api/episode-events/?episode_id={self.ep_b.episode_id}')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data), 0, 'Org-B EpisodeEvent leaked to org-A token')

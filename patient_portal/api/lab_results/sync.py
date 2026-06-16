@@ -462,6 +462,25 @@ class SyncView(APIView):
             return CareSite.objects.filter(care_site_name=lab_name).first()
 
     def _create_visit_occurrence(self, person_id, care_site, lab_date, report_filename, visit_concept, type_concept):
+        source_value = (report_filename or '')[:50]
+        care_site_id = care_site.care_site_id if care_site else None
+        if source_value:
+            # Idempotent path: dedup by (person, date, care_site, report_filename) so that
+            # re-commits from hk-labs after a failed sync return the existing visit rather
+            # than creating an orphan.
+            visit, _ = VisitOccurrence.objects.get_or_create(
+                person_id=person_id,
+                visit_start_date=lab_date,
+                care_site_id=care_site_id,
+                visit_source_value=source_value,
+                defaults={
+                    'visit_occurrence_id': next_pk(VisitOccurrence, 'visit_occurrence_id'),
+                    'visit_concept': visit_concept,
+                    'visit_end_date': lab_date,
+                    'visit_type_concept': type_concept,
+                },
+            )
+            return visit
         visit_id = next_pk(VisitOccurrence, 'visit_occurrence_id')
         return VisitOccurrence.objects.create(
             visit_occurrence_id=visit_id,
@@ -470,8 +489,8 @@ class SyncView(APIView):
             visit_start_date=lab_date,
             visit_end_date=lab_date,
             visit_type_concept=type_concept,
-            care_site_id=care_site.care_site_id if care_site else None,
-            visit_source_value=(report_filename or '')[:50],
+            care_site_id=care_site_id,
+            visit_source_value=source_value,
         )
 
     def _build_measurement(self, measurement_id, person_id, item, visit, type_concept,
