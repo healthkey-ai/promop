@@ -145,6 +145,13 @@ def _migrate_therapy_fields(apps, schema_editor):
 
 
 def _noop(apps, schema_editor):
+    # Intentional no-op. The forward migration normalises therapy text values to
+    # canonical HemOnc concept_names (e.g. 'VRd' → 'RVD') and populates
+    # *_therapy_id / later_therapy_ids concept-id fields. Rolling back this
+    # migration restores the schema-level fields (via 0092 rollback), but the
+    # original free-text values are permanently overwritten and cannot be
+    # recovered. Manual correction against the source data is required if the
+    # original text must be restored.
     pass
 
 

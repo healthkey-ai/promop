@@ -71,6 +71,14 @@ class Command(BaseCommand):
                 else:
                     no_match += 1
 
+            if pi.later_therapy and not pi.later_therapy_ids:
+                cid = _text_to_concept_id(pi.later_therapy)
+                if cid and Concept.objects.filter(concept_id=cid).exists():
+                    updates['later_therapy_ids'] = [cid]
+                    changed = True
+                else:
+                    no_match += 1
+
             if changed:
                 if not dry_run:
                     PatientInfo.objects.filter(pk=pi.pk).update(**updates)

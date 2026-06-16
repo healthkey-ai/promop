@@ -179,7 +179,7 @@ def _clear_derived_fields(patient_info: PatientInfo) -> None:
     """Reset all OMOP-derived fields to None so deletions are reflected."""
     for field in _OMOP_DERIVED_FIELDS:
         if hasattr(patient_info, field):
-            default = [] if field in ('prior_procedures', 'later_therapies', 'genetic_mutations') else None
+            default = [] if field in ('prior_procedures', 'later_therapies', 'genetic_mutations', 'later_therapy_ids') else None
             setattr(patient_info, field, default)
 
 
@@ -397,7 +397,7 @@ def _get_treatment_data(person: Person) -> dict:
     # Try Episode-based therapy line grouping first
     try:
         from omop_oncology.models import Episode
-        episodes = Episode.objects.filter(person=person).order_by('episode_number')
+        episodes = Episode.objects.filter(person=person).select_related('episode_source_concept').order_by('episode_number')
         if episodes.exists():
             return _get_treatment_data_from_episodes(person, data, episodes, drug_exposures)
     except Exception:
