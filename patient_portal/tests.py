@@ -5875,3 +5875,20 @@ class EpisodeEventIDORTest(TestCase):
         resp = c.get(f'/api/episode-events/?episode_id={self.ep_b.episode_id}')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data), 0, 'Org-B EpisodeEvent leaked to org-A token')
+
+    def test_retrieve_other_org_event_returns_404(self):
+        """Direct retrieve of org-B EpisodeEvent PK via org-A token must return 404."""
+        c = self._client()
+        # ee_b PK is (episode_id, event_id) — DRF ModelViewSet uses the PK for retrieve
+        resp = c.get(f'/api/episode-events/{self.ee_b.pk}/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND,
+                         'Org-B EpisodeEvent accessible via direct retrieve with org-A token')
+
+    def test_destroy_other_org_event_denied(self):
+        """DELETE of org-B EpisodeEvent PK via org-A read token must be denied (403 scope or 404 isolation)."""
+        c = self._client()
+        resp = c.delete(f'/api/episode-events/{self.ee_b.pk}/')
+        # A read-only token gets 403 (scope check fires before the org filter).
+        # A write-scope org-A token would get 404 (org filter). Either is safe.
+        self.assertIn(resp.status_code, [status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND],
+                      'Org-B EpisodeEvent was deleted by org-A token')

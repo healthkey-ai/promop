@@ -468,19 +468,31 @@ class SyncView(APIView):
             # Idempotent path: dedup by (person, date, care_site, report_filename) so that
             # re-commits from hk-labs after a failed sync return the existing visit rather
             # than creating an orphan.
+            existing = VisitOccurrence.objects.filter(
+                person_id=person_id,
+                visit_start_date=lab_date,
+                care_site_id=care_site_id,
+                visit_source_value=source_value,
+            ).first()
+            if existing:
+                return existing
+            # Row absent — allocate PK only now, then create.
+            visit_id = next_pk(VisitOccurrence, 'visit_occurrence_id')
             visit, _ = VisitOccurrence.objects.get_or_create(
                 person_id=person_id,
                 visit_start_date=lab_date,
                 care_site_id=care_site_id,
                 visit_source_value=source_value,
                 defaults={
-                    'visit_occurrence_id': next_pk(VisitOccurrence, 'visit_occurrence_id'),
+                    'visit_occurrence_id': visit_id,
                     'visit_concept': visit_concept,
                     'visit_end_date': lab_date,
                     'visit_type_concept': type_concept,
                 },
             )
             return visit
+        # No report_filename: cannot dedup — each call produces a new VisitOccurrence.
+        # Callers that need idempotency must supply a stable report_filename.
         visit_id = next_pk(VisitOccurrence, 'visit_occurrence_id')
         return VisitOccurrence.objects.create(
             visit_occurrence_id=visit_id,
