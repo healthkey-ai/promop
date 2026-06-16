@@ -1319,3 +1319,97 @@ class ResolvePersonIdEmailFallbackTest(TestCase):
         resp = client.get('/api/lab-results/summary/')
         # Two patients with same email, no org scope, non-superuser → 404
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_person_id — org isolation cannot be bypassed via can_access_patient
+# ---------------------------------------------------------------------------
+
+class ResolvePersonIdOrgBypassTest(TestCase):
+    """
+    Verify that an org-scoped token cannot access a patient from a different
+    org even when can_access_patient() would return True (e.g. via
+    ProfessionalGroupAccess that spans organisations).
+
+    Before the fix, _resolve_person_id only ran the org check when
+    can_access_patient() returned False.  A cross-org group grant therefore
+    caused the org check to be skipped entirely, granting access.
+    """
+
+    def setUp(self):
+        from omop_core.models import Organization, ApplicationOrganization, PatientGroupMembership, ProfessionalGroupAccess
+        from oauth2_provider.models import Application, AccessToken
+        from django.utils import timezone
+        from datetime import timedelta
+        _setup_vocab()
+
+        # Two orgs
+        self.org_a = Organization.objects.create(name='Org A', slug='rp-org-a')
+        self.org_b = Organization.objects.create(name='Org B', slug='rp-org-b')
+
+        # Provider user whose token is scoped to org-A
+        self.provider = Identity.objects.create_user(email='provider@test.com', password='x')
+
+        self.app = Application.objects.create(
+            name='Org A App',
+            user=self.provider,
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+        )
+        ApplicationOrganization.objects.create(application=self.app, organization=self.org_a)
+
+        self.token = AccessToken.objects.create(
+            user=self.provider,
+            application=self.app,
+            token='rp-bypass-test-token',
+            expires=timezone.now() + timedelta(hours=1),
+            scope='patient/*.read',
+        )
+
+        # Patient in org-A (accessible)
+        self.person_in_a = Person.objects.create(person_id=18001)
+        PatientInfo.objects.create(person=self.person_in_a, organization=self.org_a)
+
+        # Patient in org-B (must NOT be accessible via org-A token)
+        self.person_in_b = Person.objects.create(person_id=18002)
+        PatientInfo.objects.create(person=self.person_in_b, organization=self.org_b)
+
+        # Give the provider a ProfessionalGroupAccess that covers the org-B patient.
+        # This simulates a cross-org group grant that must not bypass org isolation.
+        from omop_core.models import PatientGroup
+        self.group = PatientGroup.objects.create(
+            name='Cross-org group', slug='cross-org-group', organization=self.org_b,
+        )
+        PatientGroupMembership.objects.create(group=self.group, person_id=self.person_in_b.person_id)
+        ProfessionalGroupAccess.objects.create(
+            identity=self.provider,
+            group=self.group,
+            role='navigator',
+        )
+
+        self.client = APIClient()
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.token.token}')
+
+    def test_org_token_denied_for_patient_in_other_org_even_with_group_access(self):
+        """Org-A token cannot read org-B patient even if ProfessionalGroupAccess covers them."""
+        resp = self.client.get(f'/api/lab-results/summary/?person_id={self.person_in_b.person_id}')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_org_token_allowed_for_patient_in_own_org(self):
+        """Org-A token can read org-A patient normally."""
+        resp = self.client.get(f'/api/lab-results/summary/?person_id={self.person_in_a.person_id}')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_org_token_denied_on_trend_endpoint_for_other_org_patient(self):
+        """Same isolation applies to the trend endpoint."""
+        resp = self.client.get(
+            f'/api/lab-results/values/?person_id={self.person_in_b.person_id}&concept_code=718-7'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_org_token_allowed_on_trend_endpoint_for_own_org_patient(self):
+        """Org-A token can access the trend endpoint for an org-A patient."""
+        resp = self.client.get(
+            f'/api/lab-results/values/?person_id={self.person_in_a.person_id}&concept_code=718-7'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)

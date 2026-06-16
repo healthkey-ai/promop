@@ -216,7 +216,7 @@ class SyncView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        # Legacy org-scoped check (OAuth2 service clients)
+        # Org-scope enforcement for OAuth2 service clients
         org = get_request_org(request)
         if org is not None:
             from omop_core.models import PatientInfo
