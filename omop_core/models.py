@@ -1171,6 +1171,21 @@ class PatientInfo(models.Model):
     second_line_intent = models.CharField(max_length=50, blank=True, null=True, help_text="Second Line Therapy Intent (Adjuvant/Neoadjuvant/Metastatic)")
     second_line_discontinuation_reason = models.CharField(max_length=50, blank=True, null=True, help_text="Second Line Reason for Discontinuation (Progression/Toxicity/Completion)")
     later_therapy = models.TextField(blank=True, null=True)
+    # HemOnc concept_id references for therapy lines
+    first_line_therapy_id = models.BigIntegerField(
+        null=True, blank=True,
+        help_text="HemOnc concept_id for first-line regimen",
+        db_index=True,
+    )
+    second_line_therapy_id = models.BigIntegerField(
+        null=True, blank=True,
+        help_text="HemOnc concept_id for second-line regimen",
+        db_index=True,
+    )
+    later_therapy_ids = models.JSONField(
+        null=True, blank=True, default=list,
+        help_text="List of HemOnc concept_ids for later-line regimens (3L+)",
+    )
     later_date = models.DateField(blank=True, null=True)
     later_start_date = models.DateField(blank=True, null=True, help_text="Later Line Therapy Start Date")
     later_end_date = models.DateField(blank=True, null=True, help_text="Later Line Therapy End Date")

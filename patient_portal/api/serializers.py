@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from patient_portal.models import Identity
 from omop_core.models import (
-    PatientInfo,
+    PatientInfo, Concept,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
     Survey, PatientSurveyResponse,
@@ -71,6 +71,9 @@ class PatientInfoSerializer(serializers.ModelSerializer):
     age = serializers.SerializerMethodField()
     gender = GenderField(required=False, allow_blank=True, allow_null=True)
     refractory_status = serializers.CharField(source='treatment_refractory_status', read_only=True)
+    first_line_therapy_display = serializers.SerializerMethodField()
+    second_line_therapy_display = serializers.SerializerMethodField()
+    later_therapy_display = serializers.SerializerMethodField()
 
     class Meta:
         model = PatientInfo
@@ -93,6 +96,30 @@ class PatientInfoSerializer(serializers.ModelSerializer):
             age = today.year - obj.date_of_birth.year - ((today.month, today.day) < (obj.date_of_birth.month, obj.date_of_birth.day))
             return age
         return None
+
+    def get_first_line_therapy_display(self, obj):
+        if obj.first_line_therapy_id:
+            c = Concept.objects.filter(concept_id=obj.first_line_therapy_id).first()
+            if c:
+                return c.concept_name
+        return obj.first_line_therapy
+
+    def get_second_line_therapy_display(self, obj):
+        if obj.second_line_therapy_id:
+            c = Concept.objects.filter(concept_id=obj.second_line_therapy_id).first()
+            if c:
+                return c.concept_name
+        return obj.second_line_therapy
+
+    def get_later_therapy_display(self, obj):
+        ids = obj.later_therapy_ids or []
+        if not ids:
+            return None
+        names = []
+        for cid in ids:
+            c = Concept.objects.filter(concept_id=cid).first()
+            names.append(c.concept_name if c else str(cid))
+        return names
 
     def validate_sct_date(self, value):
         if value is not None and value > localdate():

@@ -26,8 +26,10 @@ _OMOP_DERIVED_FIELDS = [
     'disease', 'diagnosis_date', 'condition_clinical_status', 'disease_slug',
     # Therapy lines
     'first_line_therapy', 'first_line_date', 'first_line_start_date', 'first_line_end_date',
+    'first_line_therapy_id',
     'second_line_therapy', 'second_line_date', 'second_line_start_date', 'second_line_end_date',
-    'later_therapy', 'later_date', 'later_therapies',
+    'second_line_therapy_id',
+    'later_therapy', 'later_date', 'later_therapies', 'later_therapy_ids',
     'concomitant_medications',
     # Legacy labs (derived via name-based Measurement lookup)
     'hemoglobin_level', 'hemoglobin_level_units',
@@ -442,6 +444,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
     """Use Episode records for structured therapy line grouping."""
     try:
         from omop_oncology.models import EpisodeEvent
+        from omop_core.services.lot_regimens import get_regimen_concept_id
     except ImportError:
         return data
 
@@ -452,12 +455,20 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
 
         # Get drug names for this episode via EpisodeEvent
         event_drug_ids = EpisodeEvent.objects.filter(
-            episode=episode,
+            episode_id=episode.episode_id,
         ).values_list('event_id', flat=True)
 
-        drugs_in_episode = DrugExposure.objects.filter(
-            drug_exposure_id__in=event_drug_ids,
-        ).select_related('drug_concept')
+        drugs_in_episode = list(
+            DrugExposure.objects.filter(
+                drug_exposure_id__in=event_drug_ids,
+            ).select_related('drug_concept')
+        )
+
+        drug_name_set = {
+            de.drug_concept.concept_name.lower().strip()
+            for de in drugs_in_episode
+            if de.drug_concept
+        }
 
         drug_names = ' + '.join(
             de.drug_concept.concept_name
@@ -465,16 +476,38 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             if de.drug_concept
         ) or 'Unknown'
 
+        # Resolve HemOnc concept_id and canonical name
+        concept_id = None
+        if drug_name_set:
+            # Prefer concept_id stored on episode_source_concept if already set
+            if episode.episode_source_concept_id:
+                concept_id = episode.episode_source_concept_id
+                try:
+                    canonical = Concept.objects.get(concept_id=concept_id).concept_name
+                    drug_names = canonical
+                except Concept.DoesNotExist:
+                    concept_id = None
+            if concept_id is None:
+                concept_id = get_regimen_concept_id(drug_name_set)
+                if concept_id:
+                    try:
+                        canonical = Concept.objects.get(concept_id=concept_id).concept_name
+                        drug_names = canonical
+                    except Concept.DoesNotExist:
+                        concept_id = None
+
         start_date = str(episode.episode_start_date) if episode.episode_start_date else None
         end_date = str(episode.episode_end_date) if episode.episode_end_date else None
 
         if lot == 1:
             data['first_line_therapy'] = drug_names
+            data['first_line_therapy_id'] = concept_id
             data['first_line_date'] = start_date
             if end_date:
                 data['first_line_end_date'] = end_date
         elif lot == 2:
             data['second_line_therapy'] = drug_names
+            data['second_line_therapy_id'] = concept_id
             data['second_line_date'] = start_date
             if end_date:
                 data['second_line_end_date'] = end_date
@@ -482,6 +515,10 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             later = data.get('later_therapies', [])
             later.append({'therapy': drug_names, 'startDate': start_date, 'endDate': end_date})
             data['later_therapies'] = later
+            if concept_id:
+                ids = data.get('later_therapy_ids') or []
+                ids.append(concept_id)
+                data['later_therapy_ids'] = ids
             if not data.get('later_therapy'):
                 data['later_therapy'] = drug_names
             if not data.get('later_date'):

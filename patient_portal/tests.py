@@ -5892,3 +5892,191 @@ class EpisodeEventIDORTest(TestCase):
         # A write-scope org-A token would get 404 (org filter). Either is safe.
         self.assertIn(resp.status_code, [status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND],
                       'Org-B EpisodeEvent was deleted by org-A token')
+
+
+# ---------------------------------------------------------------------------
+# TherapyConceptIdTest — HemOnc concept_id fields on PatientInfo
+# ---------------------------------------------------------------------------
+
+class TherapyConceptIdTest(TestCase):
+    """
+    Verify that refresh_patient_info populates first_line_therapy_id /
+    second_line_therapy_id / later_therapy_ids via the HemOnc regimen lookup,
+    and that the PatientInfoSerializer display fields fall back correctly.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+
+        today = date.today()
+        far_future = date(2099, 12, 31)
+        vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        domain_drug = Domain.objects.get(domain_id='Drug')
+        cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
+
+        def _drug_concept(cid, name):
+            obj, _ = Concept.objects.get_or_create(
+                concept_id=cid,
+                defaults={
+                    'concept_name': name,
+                    'domain': domain_drug,
+                    'vocabulary': vocab,
+                    'concept_class': cc,
+                    'concept_code': str(cid),
+                    'valid_start_date': today,
+                    'valid_end_date': far_future,
+                },
+            )
+            return obj
+
+        # Drug concepts for KRd
+        cls.carfilzomib_c  = _drug_concept(1112807, 'carfilzomib')
+        cls.lenalidomide_c = _drug_concept(1110942, 'lenalidomide')
+        cls.dexamethasone_c = _drug_concept(1518254, 'dexamethasone')
+
+        # Drug concepts for VRd (bortezomib already exists or create it)
+        cls.bortezomib_c = _drug_concept(1110835, 'bortezomib')
+
+        # HemOnc concept for KRd (concept_id 35806284)
+        hemonc_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc', 'vocabulary_concept_id': 0},
+        )
+        hemonc_cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0},
+        )
+        domain_obs, _ = Domain.objects.get_or_create(
+            domain_id='Observation',
+            defaults={'domain_name': 'Observation', 'domain_concept_id': 27},
+        )
+        cls.krd_concept, _ = Concept.objects.get_or_create(
+            concept_id=35806284,
+            defaults={
+                'concept_name': 'KRd',
+                'domain': domain_obs,
+                'vocabulary': hemonc_vocab,
+                'concept_class': hemonc_cc,
+                'concept_code': 'KRd',
+                'valid_start_date': today,
+                'valid_end_date': far_future,
+            },
+        )
+
+        ep_concept = Concept.objects.get(concept_id=32531)
+        ehr_concept = Concept.objects.get(concept_id=32817)
+        field_concept = Concept.objects.get(concept_id=1147094)
+        type_concept = Concept.objects.get(concept_id=32817)
+
+        # ── Patient 1: KRd first-line ───────────────────────────────────────
+        cls.person_krd = Person.objects.create(person_id=92001)
+        cls.pi_krd = PatientInfo.objects.create(person=cls.person_krd)
+
+        last_ep = Episode.objects.order_by('-episode_id').first()
+        ep_id = (last_ep.episode_id + 1) if last_ep else 1
+        cls.ep_krd = Episode.objects.create(
+            episode_id=ep_id,
+            person=cls.person_krd,
+            episode_concept=ep_concept,
+            episode_object_concept=ehr_concept,
+            episode_type_concept=ehr_concept,
+            episode_number=1,
+            episode_start_date=date(2023, 1, 1),
+            episode_source_value='KRd (induction)',
+        )
+
+        def _drug_exp(person, concept, exp_id, start=date(2023, 1, 1)):
+            return DrugExposure.objects.create(
+                drug_exposure_id=exp_id,
+                person=person,
+                drug_concept=concept,
+                drug_exposure_start_date=start,
+                drug_type_concept=type_concept,
+            )
+
+        cls.de_carf = _drug_exp(cls.person_krd, cls.carfilzomib_c,  920011)
+        cls.de_lena = _drug_exp(cls.person_krd, cls.lenalidomide_c, 920012)
+        cls.de_dexa = _drug_exp(cls.person_krd, cls.dexamethasone_c, 920013)
+
+        for de in [cls.de_carf, cls.de_lena, cls.de_dexa]:
+            EpisodeEvent.objects.create(
+                episode_id=cls.ep_krd.episode_id,
+                event_id=de.drug_exposure_id,
+                episode_event_field_concept=field_concept,
+            )
+
+        # ── Patient 2: VRd first-line (no HemOnc concept_id) ───────────────
+        cls.person_vrd = Person.objects.create(person_id=92002)
+        cls.pi_vrd = PatientInfo.objects.create(person=cls.person_vrd)
+
+        last_ep = Episode.objects.order_by('-episode_id').first()
+        ep_id2 = last_ep.episode_id + 1
+        cls.ep_vrd = Episode.objects.create(
+            episode_id=ep_id2,
+            person=cls.person_vrd,
+            episode_concept=ep_concept,
+            episode_object_concept=ehr_concept,
+            episode_type_concept=ehr_concept,
+            episode_number=1,
+            episode_start_date=date(2023, 2, 1),
+            episode_source_value='VRd (induction)',
+        )
+
+        cls.de_bort = _drug_exp(cls.person_vrd, cls.bortezomib_c,  920021, date(2023, 2, 1))
+        cls.de_lena2 = _drug_exp(cls.person_vrd, cls.lenalidomide_c, 920022, date(2023, 2, 1))
+        cls.de_dexa2 = _drug_exp(cls.person_vrd, cls.dexamethasone_c, 920023, date(2023, 2, 1))
+
+        for de in [cls.de_bort, cls.de_lena2, cls.de_dexa2]:
+            EpisodeEvent.objects.create(
+                episode_id=cls.ep_vrd.episode_id,
+                event_id=de.drug_exposure_id,
+                episode_event_field_concept=field_concept,
+            )
+
+    def _refresh(self, person):
+        from omop_core.services.patient_info_service import refresh_patient_info
+        return refresh_patient_info(person)
+
+    def test_krd_first_line_therapy_id_is_populated(self):
+        """refresh_patient_info sets first_line_therapy_id=35806284 for KRd."""
+        pi = self._refresh(self.person_krd)
+        self.assertEqual(pi.first_line_therapy_id, 35806284)
+
+    def test_krd_first_line_therapy_text_uses_canonical_name(self):
+        """When HemOnc concept_id resolved, therapy text is set to canonical name."""
+        pi = self._refresh(self.person_krd)
+        self.assertEqual(pi.first_line_therapy, 'KRd')
+
+    def test_vrd_first_line_therapy_id_is_none(self):
+        """VRd has no HemOnc concept_id — field stays None."""
+        pi = self._refresh(self.person_vrd)
+        self.assertIsNone(pi.first_line_therapy_id)
+
+    def test_vrd_first_line_therapy_text_is_populated(self):
+        """VRd therapy text is still populated even without a concept_id."""
+        pi = self._refresh(self.person_vrd)
+        self.assertIsNotNone(pi.first_line_therapy)
+        self.assertNotEqual(pi.first_line_therapy, '')
+
+    def test_serializer_display_returns_hemonc_name_when_concept_id_set(self):
+        """first_line_therapy_display returns HemOnc concept_name when concept_id present."""
+        pi = self._refresh(self.person_krd)
+        from patient_portal.api.serializers import PatientInfoSerializer
+        data = PatientInfoSerializer(pi).data
+        self.assertEqual(data['first_line_therapy_display'], 'KRd')
+
+    def test_serializer_display_falls_back_to_text_when_no_concept_id(self):
+        """first_line_therapy_display falls back to first_line_therapy text when id is None."""
+        pi = self._refresh(self.person_vrd)
+        pi.first_line_therapy = 'VRd'
+        pi.first_line_therapy_id = None
+        pi.save(update_fields=['first_line_therapy', 'first_line_therapy_id'])
+        from patient_portal.api.serializers import PatientInfoSerializer
+        data = PatientInfoSerializer(pi).data
+        self.assertEqual(data['first_line_therapy_display'], 'VRd')
+
+    def test_later_therapy_ids_is_list_or_none(self):
+        """later_therapy_ids is either None or a list."""
+        pi = self._refresh(self.person_krd)
+        self.assertIn(pi.later_therapy_ids, [None, []])
