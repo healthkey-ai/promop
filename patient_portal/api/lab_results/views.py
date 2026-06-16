@@ -80,29 +80,35 @@ def _resolve_person_id(request):
         # ProfessionalGroupAccess can span organisations, so allowing
         # can_access_patient() to short-circuit the org check would let a
         # cross-org group grant bypass tenant isolation.
-        if request.user and request.user.is_authenticated:
-            org = get_request_org(request)
-            if org is not None:
-                # Org-scoped path: membership in the org is the only check.
-                if not PatientInfo.objects.filter(
-                    person_id=pid, organization=org,
-                ).exists():
-                    return None, Response(
-                        {'detail': 'Access denied.'},
-                        status=status.HTTP_403_FORBIDDEN,
-                    )
-                return pid, None
-            # Non-org path: self-access or individual access grant.
-            own_pid = None
-            try:
-                own_pid = PatientUser.objects.get(identity=request.user).person_id
-            except PatientUser.DoesNotExist:
-                pass
-            if pid != own_pid and not can_access_patient(request.user, pid):
+        if not (request.user and request.user.is_authenticated):
+            return None, Response(
+                {'detail': 'Authentication required.'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        org = get_request_org(request)
+        if org is not None:
+            # Org-scoped path: membership in the org is the only check.
+            # Note: patients with organization=NULL (bootstrap/unassigned) are
+            # intentionally unreachable via org-scoped tokens.
+            if not PatientInfo.objects.filter(
+                person_id=pid, organization=org,
+            ).exists():
                 return None, Response(
                     {'detail': 'Access denied.'},
                     status=status.HTTP_403_FORBIDDEN,
                 )
+            return pid, None
+        # Non-org path: self-access or individual access grant.
+        own_pid = None
+        try:
+            own_pid = PatientUser.objects.get(identity=request.user).person_id
+        except PatientUser.DoesNotExist:
+            pass
+        if pid != own_pid and not can_access_patient(request.user, pid):
+            return None, Response(
+                {'detail': 'Access denied.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         return pid, None
 
     if not request.user or not request.user.is_authenticated:

@@ -1406,3 +1406,10 @@ class ResolvePersonIdOrgBypassTest(TestCase):
             f'/api/lab-results/values/?person_id={self.person_in_b.person_id}&concept_code=718-7'
         )
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_org_token_allowed_on_trend_endpoint_for_own_org_patient(self):
+        """Org-A token can access the trend endpoint for an org-A patient."""
+        resp = self.client.get(
+            f'/api/lab-results/values/?person_id={self.person_in_a.person_id}&concept_code=718-7'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
