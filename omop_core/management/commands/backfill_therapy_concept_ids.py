@@ -9,7 +9,7 @@ Usage:
 """
 from django.core.management.base import BaseCommand
 from omop_core.models import PatientInfo, Concept
-from omop_core.services.lot_regimens import MYELOMA_REGIMEN_LOOKUP, REGIMEN_LOOKUP, MYELOMA_REGIMEN_CONCEPT_IDS
+from omop_core.services.lot_regimens import MYELOMA_REGIMEN_LOOKUP, MYELOMA_REGIMEN_CONCEPT_IDS
 
 
 def _text_to_concept_id(therapy_text: str) -> int | None:

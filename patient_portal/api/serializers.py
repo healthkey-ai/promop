@@ -82,13 +82,31 @@ class PatientInfoSerializer(serializers.ModelSerializer):
         # set server-side from the auth token / FHIR upload respectively.
         # A client supplying either field in a PATCH would bypass tenant
         # isolation (organization) or reassign the record to another patient.
-        read_only_fields = ('organization', 'person', 'created_at', 'updated_at')
+        read_only_fields = (
+            'organization', 'person', 'created_at', 'updated_at',
+            'first_line_therapy_display', 'second_line_therapy_display', 'later_therapy_display',
+        )
 
     def get_patient_name(self, obj):
         if obj.person:
             full_name = f"{obj.person.given_name or ''} {obj.person.family_name or ''}".strip()
             return full_name if full_name else f"Patient {obj.person.person_id}"
         return f"Patient {obj.person.person_id}"
+
+    def to_representation(self, instance):
+        # Bulk-fetch all Concept rows referenced by therapy_id fields in one query,
+        # replacing the per-field Concept.objects.filter() calls in the display methods.
+        concept_ids = set()
+        if instance.first_line_therapy_id:
+            concept_ids.add(instance.first_line_therapy_id)
+        if instance.second_line_therapy_id:
+            concept_ids.add(instance.second_line_therapy_id)
+        concept_ids.update(instance.later_therapy_ids or [])
+        self._therapy_concept_cache = (
+            {c.concept_id: c for c in Concept.objects.filter(concept_id__in=concept_ids).only('concept_id', 'concept_name')}
+            if concept_ids else {}
+        )
+        return super().to_representation(instance)
 
     def get_age(self, obj):
         if obj.date_of_birth:
@@ -99,25 +117,26 @@ class PatientInfoSerializer(serializers.ModelSerializer):
 
     def get_first_line_therapy_display(self, obj):
         if obj.first_line_therapy_id:
-            c = Concept.objects.filter(concept_id=obj.first_line_therapy_id).first()
-            if c:
-                return c.concept_name
+            cache = getattr(self, '_therapy_concept_cache', {})
+            c = cache.get(obj.first_line_therapy_id)
+            return c.concept_name if c else obj.first_line_therapy
         return obj.first_line_therapy
 
     def get_second_line_therapy_display(self, obj):
         if obj.second_line_therapy_id:
-            c = Concept.objects.filter(concept_id=obj.second_line_therapy_id).first()
-            if c:
-                return c.concept_name
+            cache = getattr(self, '_therapy_concept_cache', {})
+            c = cache.get(obj.second_line_therapy_id)
+            return c.concept_name if c else obj.second_line_therapy
         return obj.second_line_therapy
 
     def get_later_therapy_display(self, obj):
         ids = obj.later_therapy_ids or []
         if not ids:
             return None
+        cache = getattr(self, '_therapy_concept_cache', {})
         names = []
         for cid in ids:
-            c = Concept.objects.filter(concept_id=cid).first()
+            c = cache.get(cid)
             names.append(c.concept_name if c else str(cid))
         return names
 

@@ -448,21 +448,28 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
     except ImportError:
         return data
 
+    # ── Bulk-fetch EpisodeEvents and DrugExposures for all episodes ────────
+    # Replaces per-episode queries with 2 total queries.
+    all_episode_ids = [e.episode_id for e in episodes]
+
+    ee_by_episode: dict = {}
+    for ee in EpisodeEvent.objects.filter(episode_id__in=all_episode_ids).values('episode_id', 'event_id'):
+        ee_by_episode.setdefault(ee['episode_id'], []).append(ee['event_id'])
+
+    all_event_ids = [eid for ids in ee_by_episode.values() for eid in ids]
+    de_by_id: dict = {
+        de.drug_exposure_id: de
+        for de in DrugExposure.objects.filter(drug_exposure_id__in=all_event_ids).select_related('drug_concept')
+    } if all_event_ids else {}
+
+    # ── First pass: compute drug name sets and regimen concept_ids ─────────
+    # No additional DB queries here — episode_source_concept already loaded via select_related.
+    episode_rows: list = []  # (episode, drugs_in_episode, concept_id)
+    needed_concept_ids: set = set()
+
     for episode in episodes:
-        lot = episode.episode_number
-        if lot is None:
-            continue
-
-        # Get drug names for this episode via EpisodeEvent
-        event_drug_ids = EpisodeEvent.objects.filter(
-            episode_id=episode.episode_id,
-        ).values_list('event_id', flat=True)
-
-        drugs_in_episode = list(
-            DrugExposure.objects.filter(
-                drug_exposure_id__in=event_drug_ids,
-            ).select_related('drug_concept')
-        )
+        event_ids = ee_by_episode.get(episode.episode_id, [])
+        drugs_in_episode = [de_by_id[eid] for eid in event_ids if eid in de_by_id]
 
         drug_name_set = {
             de.drug_concept.concept_name.lower().strip()
@@ -470,31 +477,52 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             if de.drug_concept
         }
 
-        drug_names = ' + '.join(
-            de.drug_concept.concept_name
-            for de in drugs_in_episode
-            if de.drug_concept
-        ) or 'Unknown'
-
-        # Resolve HemOnc concept_id and canonical name
+        # Prefer concept already joined via select_related('episode_source_concept')
         concept_id = None
-        if drug_name_set:
-            # Prefer concept_id stored on episode_source_concept if already set
-            if episode.episode_source_concept_id:
-                concept_id = episode.episode_source_concept_id
-                try:
-                    canonical = Concept.objects.get(concept_id=concept_id).concept_name
-                    drug_names = canonical
-                except Concept.DoesNotExist:
-                    concept_id = None
-            if concept_id is None:
-                concept_id = get_regimen_concept_id(drug_name_set)
-                if concept_id:
-                    try:
-                        canonical = Concept.objects.get(concept_id=concept_id).concept_name
-                        drug_names = canonical
-                    except Concept.DoesNotExist:
-                        concept_id = None
+        if episode.episode_source_concept_id and episode.episode_source_concept:
+            concept_id = episode.episode_source_concept_id
+        elif drug_name_set:
+            concept_id = get_regimen_concept_id(drug_name_set)
+
+        if concept_id:
+            needed_concept_ids.add(concept_id)
+        episode_rows.append((episode, drugs_in_episode, concept_id))
+
+    # ── Bulk-fetch Concept names in one query ──────────────────────────────
+    # Concept rows already loaded via select_related are re-used directly.
+    concept_name_map: dict = {
+        ep.episode_source_concept_id: ep.episode_source_concept.concept_name
+        for ep in episodes
+        if ep.episode_source_concept_id and ep.episode_source_concept
+    }
+    to_fetch = needed_concept_ids - set(concept_name_map)
+    if to_fetch:
+        concept_name_map.update(
+            (c.concept_id, c.concept_name)
+            for c in Concept.objects.filter(concept_id__in=to_fetch).only('concept_id', 'concept_name')
+        )
+
+    # ── Second pass: populate data dict ───────────────────────────────────
+    for episode, drugs_in_episode, concept_id in episode_rows:
+        lot = episode.episode_number
+        if lot is None:
+            continue
+
+        # Nullify dangling FK concept_ids (not in Concept table)
+        if concept_id and concept_id not in concept_name_map:
+            concept_id = None
+
+        drug_names = (
+            concept_name_map[concept_id]
+            if concept_id
+            else (
+                ' + '.join(
+                    de.drug_concept.concept_name
+                    for de in drugs_in_episode
+                    if de.drug_concept
+                ) or 'Unknown'
+            )
+        )
 
         start_date = str(episode.episode_start_date) if episode.episode_start_date else None
         end_date = str(episode.episode_end_date) if episode.episode_end_date else None

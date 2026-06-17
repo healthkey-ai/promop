@@ -185,11 +185,11 @@ MYELOMA_REGIMEN_LOOKUP: dict[frozenset, str] = {
 
 MYELOMA_REGIMEN_CONCEPT_IDS: dict[frozenset, int | None] = {
     # ── Core VRD family ──────────────────────────────────────────────────
-    frozenset({'bortezomib', 'lenalidomide', 'dexamethasone'}):                  None,       # VRd — not in HemOnc
-    frozenset({'daratumumab', 'bortezomib', 'lenalidomide', 'dexamethasone'}):   None,       # DaraVRd — not in HemOnc
+    frozenset({'bortezomib', 'lenalidomide', 'dexamethasone'}):                  35806260,   # RVD (HemOnc name for VRd; verified in staging DB)
+    frozenset({'daratumumab', 'bortezomib', 'lenalidomide', 'dexamethasone'}):   911993,     # Dara-RVd (verified in staging DB)
     frozenset({'daratumumab', 'lenalidomide', 'dexamethasone'}):                 35806311,   # Dara-Rd
     frozenset({'carfilzomib', 'lenalidomide', 'dexamethasone'}):                 35806284,   # KRd
-    frozenset({'daratumumab', 'carfilzomib', 'lenalidomide', 'dexamethasone'}):  None,       # Dara-KRd — not in HemOnc
+    frozenset({'daratumumab', 'carfilzomib', 'lenalidomide', 'dexamethasone'}):  905602,     # Dara-KRd (verified in staging DB)
     frozenset({'isatuximab', 'carfilzomib', 'lenalidomide', 'dexamethasone'}):   None,       # Isa-KRd — not in HemOnc
     frozenset({'isatuximab', 'bortezomib', 'lenalidomide', 'dexamethasone'}):    None,       # Isa-VRd — not in HemOnc
     frozenset({'ixazomib', 'lenalidomide', 'dexamethasone'}):                    35806283,   # IRd (HemOnc name for IxaRd)
@@ -209,7 +209,7 @@ MYELOMA_REGIMEN_CONCEPT_IDS: dict[frozenset, int | None] = {
     # ── Pomalidomide ─────────────────────────────────────────────────────
     frozenset({'pomalidomide', 'dexamethasone'}):                                35806066,   # Pd
     frozenset({'elotuzumab', 'pomalidomide', 'dexamethasone'}):                  35806313,   # Elo-Pd
-    frozenset({'isatuximab', 'pomalidomide', 'dexamethasone'}):                  None,       # Isa-Pd — not in HemOnc
+    frozenset({'isatuximab', 'pomalidomide', 'dexamethasone'}):                  911941,     # Isa-Pd (verified in staging DB)
     frozenset({'daratumumab', 'pomalidomide', 'dexamethasone'}):                 None,       # Dara-Pd — not in HemOnc
     # ── Selinexor ────────────────────────────────────────────────────────
     frozenset({'selinexor', 'bortezomib', 'dexamethasone'}):                     905768,     # SVd

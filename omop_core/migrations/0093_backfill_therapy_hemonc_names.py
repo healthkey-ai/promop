@@ -14,7 +14,11 @@ on the dev DB (2026-06-16), cross-referenced against the distinct therapy
 values observed in patient_info.
 """
 
+import logging
+
 from django.db import migrations
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Mapping: existing free-text value  →  (canonical HemOnc name, concept_id)
@@ -95,13 +99,11 @@ def _migrate_therapy_fields(apps, schema_editor):
     PatientInfo = apps.get_model('omop_core', 'PatientInfo')
     updated = 0
 
-    for pi in PatientInfo.objects.filter(
-        first_line_therapy__isnull=False
-    ) | PatientInfo.objects.filter(
-        second_line_therapy__isnull=False
-    ) | PatientInfo.objects.filter(
-        later_therapy__isnull=False
-    ):
+    for pi in (
+        PatientInfo.objects.filter(first_line_therapy__isnull=False)
+        | PatientInfo.objects.filter(second_line_therapy__isnull=False)
+        | PatientInfo.objects.filter(later_therapy__isnull=False)
+    ).distinct():
         changes = {}
         changed = False
 
@@ -141,7 +143,7 @@ def _migrate_therapy_fields(apps, schema_editor):
             PatientInfo.objects.filter(pk=pi.pk).update(**changes)
             updated += 1
 
-    print(f'  [0093] therapy backfill: updated {updated} PatientInfo rows')
+    logger.info('[0093] therapy backfill: updated %d PatientInfo rows', updated)
 
 
 def _noop(apps, schema_editor):
