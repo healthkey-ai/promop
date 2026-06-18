@@ -10,6 +10,7 @@ Examples:
 """
 import io
 import json
+from unittest.mock import PropertyMock, patch
 
 from django.core.files.uploadedfile import InMemoryUploadedFile
 from django.core.management.base import BaseCommand, CommandError
@@ -109,12 +110,14 @@ class Command(BaseCommand):
                 raw_request.user = identity
                 drf_req = Request(raw_request, parsers=parsers)
                 drf_req.user = identity
-                # Set _files and _data directly so DRF doesn't attempt multipart parsing
-                drf_req._files = {"file": fake_file}
-                drf_req._data = {}
 
                 viewset = PatientInfoViewSet()
-                response = viewset.upload_fhir(drf_req)
+                # Patch FILES and data on the Request class so DRF skips multipart parsing
+                with patch.object(type(drf_req), "FILES", new_callable=PropertyMock,
+                                  return_value={"file": fake_file}), \
+                     patch.object(type(drf_req), "data", new_callable=PropertyMock,
+                                  return_value={}):
+                    response = viewset.upload_fhir(drf_req)
 
                 data = response.data if hasattr(response, "data") else {}
                 created = data.get("created_count", 0)
