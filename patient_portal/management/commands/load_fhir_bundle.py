@@ -43,10 +43,12 @@ class Command(BaseCommand):
         org_slug = options["org"]
         batch_size = options["batch_size"]
 
-        try:
-            org = Organization.objects.get(slug=org_slug)
-        except Organization.DoesNotExist:
-            raise CommandError(f"Organization with slug '{org_slug}' does not exist.")
+        org, created = Organization.objects.get_or_create(
+            slug=org_slug,
+            defaults={"name": org_slug.replace("-", " ").title()},
+        )
+        if created:
+            self.stdout.write(f"Created organization '{org.name}' (slug={org_slug})")
 
         identity = Identity.objects.filter(is_superuser=True).first()
         if not identity:
