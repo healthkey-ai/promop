@@ -31,6 +31,8 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand
 
+from omop_core.services.lot_regimens import MYELOMA_REGIMEN_CONCEPT_IDS
+
 # ---------------------------------------------------------------------------
 # LOINC codes used for lab observations
 # ---------------------------------------------------------------------------
@@ -815,13 +817,24 @@ class Command(BaseCommand):
 
             regimen_id = f"med-{p['id']}-line{line_num}-regimen"
 
+            # Look up HemOnc concept_id for this drug combination
+            _drug_key = frozenset(drugs)
+            _hemonc_id = MYELOMA_REGIMEN_CONCEPT_IDS.get(_drug_key)
+            _regimen_coding = [{'system': 'http://ctomop.io/fhir/mm-regimen', 'code': name}]
+            if _hemonc_id:
+                _regimen_coding.append({
+                    'system': 'http://ohdsi.org/omop/HemOnc',
+                    'code': str(_hemonc_id),
+                    'display': name,
+                })
+
             # Regimen-level entry — no partOf, regimen name as text
             meds.append({
                 'resourceType': 'MedicationStatement',
                 'id': regimen_id,
                 'status': 'completed' if not is_last else 'active',
                 'medicationCodeableConcept': {
-                    'coding': [{'system': 'http://ctomop.io/fhir/mm-regimen', 'code': name}],
+                    'coding': _regimen_coding,
                     'text': name,
                 },
                 'subject': {'reference': f"Patient/{p['id']}"},

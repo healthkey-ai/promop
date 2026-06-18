@@ -1407,13 +1407,22 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             # Also support effectiveDateTime for backwards compatibility
                             if not start_date:
                                 start_date = medication.get('effectiveDateTime')
-                            
+                            # Extract HemOnc concept_id from coding if present
+                            hemonc_concept_id = None
+                            for _coding in medication.get('medicationCodeableConcept', {}).get('coding', []):
+                                if _coding.get('system') == 'http://ohdsi.org/omop/HemOnc':
+                                    try:
+                                        hemonc_concept_id = int(_coding.get('code', ''))
+                                    except (ValueError, TypeError):
+                                        pass
+
                             if therapy_line not in therapy_lines:
                                 therapy_lines[therapy_line] = {
                                     'regimen': regimen_name,
                                     'start_date': start_date,
                                     'end_date': end_date,
-                                    'outcome': therapy_outcome
+                                    'outcome': therapy_outcome,
+                                    'hemonc_concept_id': hemonc_concept_id,
                                 }
                             else:
                                 therapy_lines[therapy_line]['regimen'] = regimen_name
@@ -1422,6 +1431,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 if end_date:
                                     therapy_lines[therapy_line]['end_date'] = end_date
                                 therapy_lines[therapy_line]['outcome'] = therapy_outcome
+                                if hemonc_concept_id:
+                                    therapy_lines[therapy_line]['hemonc_concept_id'] = hemonc_concept_id
                     
                     # Map therapy lines to first/second/later fields
                     first_line_therapy = None
@@ -1542,99 +1553,107 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
 
                     for lot_num, lot_data in sorted(therapy_lines.items()):
                         try:
-                            lot_start = None
-                            lot_end = None
-                            if lot_data.get('start_date'):
-                                lot_start = datetime.strptime(lot_data['start_date'][:10], '%Y-%m-%d').date()
-                            if lot_data.get('end_date'):
-                                lot_end = datetime.strptime(lot_data['end_date'][:10], '%Y-%m-%d').date()
+                            with transaction.atomic():
+                                lot_start = None
+                                lot_end = None
+                                if lot_data.get('start_date'):
+                                    lot_start = datetime.strptime(lot_data['start_date'][:10], '%Y-%m-%d').date()
+                                if lot_data.get('end_date'):
+                                    lot_end = datetime.strptime(lot_data['end_date'][:10], '%Y-%m-%d').date()
 
-                            regimen_name = lot_data.get('regimen', '')
-                            regimen_concept = Concept.objects.filter(
-                                concept_name__icontains=regimen_name,
-                                domain__domain_id='Drug',
-                            ).first() if regimen_name else None
-                            # Try RxNav for drugs not in local vocabulary
-                            if regimen_concept is None and regimen_name:
-                                try:
-                                    regimen_concept = _rxnav_resolve_drug(regimen_name)
-                                except Exception as rxnav_exc:
-                                    logger.warning(
-                                        '{"event": "rxnav_resolve_failed", "drug": "%s", "error": "%s"}',
-                                        regimen_name, rxnav_exc,
-                                    )
-                            # Final fallback to any Drug domain concept
-                            if regimen_concept is None:
+                                regimen_name = lot_data.get('regimen', '')
                                 regimen_concept = Concept.objects.filter(
-                                    domain__domain_id='Drug'
-                                ).first()
-                            drug_type_concept = Concept.objects.filter(concept_id=32869).first()  # EHR prescription
-                            # Fall back to regimen_concept if type concept not found
-                            if drug_type_concept is None and regimen_concept is not None:
-                                drug_type_concept = regimen_concept
+                                    concept_name__icontains=regimen_name,
+                                    domain__domain_id='Drug',
+                                ).first() if regimen_name else None
+                                # Try RxNav for drugs not in local vocabulary
+                                if regimen_concept is None and regimen_name:
+                                    try:
+                                        regimen_concept = _rxnav_resolve_drug(regimen_name)
+                                    except Exception as rxnav_exc:
+                                        logger.warning(
+                                            '{"event": "rxnav_resolve_failed", "drug": "%s", "error": "%s"}',
+                                            regimen_name, rxnav_exc,
+                                        )
+                                # Final fallback to any Drug domain concept
+                                if regimen_concept is None:
+                                    regimen_concept = Concept.objects.filter(
+                                        domain__domain_id='Drug'
+                                    ).first()
+                                drug_type_concept = Concept.objects.filter(concept_id=32869).first()  # EHR prescription
+                                # Fall back to regimen_concept if type concept not found
+                                if drug_type_concept is None and regimen_concept is not None:
+                                    drug_type_concept = regimen_concept
 
-                            # Upsert DrugExposure: skip if same person+regimen+start already exists
-                            _de = DrugExposure.objects.filter(
-                                person=person,
-                                drug_source_value=(lot_data.get('regimen') or '')[:50],
-                                drug_exposure_start_date=lot_start,
-                            ).first()
-                            if _de is None:
-                                _de = DrugExposure(
-                                    drug_exposure_id=drug_exposure_id,
+                                # Upsert DrugExposure: skip if same person+regimen+start already exists
+                                _de = DrugExposure.objects.filter(
                                     person=person,
-                                    drug_concept=regimen_concept,
-                                    drug_exposure_start_date=lot_start,
-                                    drug_exposure_end_date=lot_end,
-                                    drug_type_concept=drug_type_concept,
                                     drug_source_value=(lot_data.get('regimen') or '')[:50],
-                                )
-                                _de._skip_patient_info_refresh = True
-                                _de.save()
-                                _pt_drug_exposure_ids.append(_de.drug_exposure_id)
-                                if prov_source:
-                                    _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                                drug_exposure_id += 1
+                                    drug_exposure_start_date=lot_start,
+                                ).first()
+                                if _de is None:
+                                    _de = DrugExposure(
+                                        drug_exposure_id=drug_exposure_id,
+                                        person=person,
+                                        drug_concept=regimen_concept,
+                                        drug_exposure_start_date=lot_start,
+                                        drug_exposure_end_date=lot_end,
+                                        drug_type_concept=drug_type_concept,
+                                        drug_source_value=(lot_data.get('regimen') or '')[:50],
+                                    )
+                                    _de._skip_patient_info_refresh = True
+                                    _de.save()
+                                    _pt_drug_exposure_ids.append(_de.drug_exposure_id)
+                                    if prov_source:
+                                        _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                    drug_exposure_id += 1
 
-                            # Upsert Episode for this LOT
-                            ep_concept = Concept.objects.filter(concept_id=32531).first()  # Treatment Regimen
-                            if ep_concept is None:
-                                ep_concept = regimen_concept
-                            ep_obj_concept = regimen_concept
-                            ep_type_concept = Concept.objects.filter(concept_id=32817).first()  # EHR
-                            if ep_type_concept is None:
-                                ep_type_concept = regimen_concept
+                                # Resolve HemOnc source concept if concept_id provided in FHIR
+                                ep_source_concept = None
+                                _hemonc_cid = lot_data.get('hemonc_concept_id')
+                                if _hemonc_cid:
+                                    ep_source_concept = Concept.objects.filter(concept_id=_hemonc_cid).first()
 
-                            _ep = Episode.objects.filter(
-                                person=person,
-                                episode_source_value=f'LOT-{lot_num}',
-                            ).first()
-                            if _ep is None:
-                                _ep = Episode(
-                                    episode_id=episode_id_counter,
+                                # Upsert Episode for this LOT
+                                ep_concept = Concept.objects.filter(concept_id=32531).first()  # Treatment Regimen
+                                if ep_concept is None:
+                                    ep_concept = regimen_concept
+                                ep_obj_concept = regimen_concept
+                                ep_type_concept = Concept.objects.filter(concept_id=32817).first()  # EHR
+                                if ep_type_concept is None:
+                                    ep_type_concept = regimen_concept
+
+                                _ep = Episode.objects.filter(
                                     person=person,
-                                    episode_concept=ep_concept,
-                                    episode_object_concept=ep_obj_concept,
-                                    episode_type_concept=ep_type_concept,
-                                    episode_start_date=lot_start or datetime.now().date(),
-                                    episode_end_date=lot_end,
-                                    episode_number=lot_num,
                                     episode_source_value=f'LOT-{lot_num}',
-                                )
-                                _ep.save()
-                                _pt_episode_ids.append(_ep.episode_id)
-                                episode_id_counter += 1
+                                ).first()
+                                if _ep is None:
+                                    _ep = Episode(
+                                        episode_id=episode_id_counter,
+                                        person=person,
+                                        episode_concept=ep_concept,
+                                        episode_object_concept=ep_obj_concept,
+                                        episode_type_concept=ep_type_concept,
+                                        episode_start_date=lot_start or datetime.now().date(),
+                                        episode_end_date=lot_end,
+                                        episode_number=lot_num,
+                                        episode_source_value=f'LOT-{lot_num}',
+                                        episode_source_concept=ep_source_concept,
+                                    )
+                                    _ep.save()
+                                    _pt_episode_ids.append(_ep.episode_id)
+                                    episode_id_counter += 1
 
-                            # Link drug exposure to episode (idempotent)
-                            ee_field_concept = Concept.objects.filter(concept_id=1147094).first()
-                            if ee_field_concept is None:
-                                ee_field_concept = regimen_concept
-                            _ee, _ = EpisodeEvent.objects.get_or_create(
-                                episode_id=_ep.episode_id,
-                                event_id=_de.drug_exposure_id,
-                                defaults={'episode_event_field_concept': ee_field_concept},
-                            )
-                            _pt_episode_event_ids.append(_ee.pk)
+                                # Link drug exposure to episode (idempotent)
+                                ee_field_concept = Concept.objects.filter(concept_id=1147094).first()
+                                if ee_field_concept is None:
+                                    ee_field_concept = regimen_concept
+                                _ee, _ = EpisodeEvent.objects.get_or_create(
+                                    episode_id=_ep.episode_id,
+                                    event_id=_de.drug_exposure_id,
+                                    defaults={'episode_event_field_concept': ee_field_concept},
+                                )
+                                _pt_episode_event_ids.append(_ee.pk)
                         except Exception as _e:
                             logger.warning(f"Could not write DrugExposure/Episode for LOT {lot_num}: {_e}")
 
