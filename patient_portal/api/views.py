@@ -564,6 +564,19 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             _allowed_sct_titles = set(StemCellTransplant.objects.values_list('title', flat=True))
             _allowed_elig_titles = set(SctEligibility.objects.values_list('title', flat=True))
 
+            # Hoist constant Concept lookups — these are the same for every patient and every
+            # observation. Looking them up once here avoids dozens of repeated PK queries per
+            # patient and avoids repeated ILIKE full-scans for well-known concepts.
+            _concept_breast_cancer = Concept.objects.filter(
+                concept_name__icontains='breast cancer'
+            ).first()
+            _concept_ehr_type      = Concept.objects.filter(concept_id=32817).first()  # EHR
+            _concept_lab_type      = Concept.objects.filter(concept_id=32856).first()  # Lab
+            _concept_drug_type     = Concept.objects.filter(concept_id=32869).first()  # EHR prescription
+            _concept_tx_regimen    = Concept.objects.filter(concept_id=32531).first()  # Treatment Regimen
+            _concept_de_field      = Concept.objects.filter(concept_id=1147094).first() # DrugExposure field
+            _concept_generic_lab   = Concept.objects.filter(concept_id=3000963).first() # Generic lab
+
             # Process each patient
             import time as _time
             for fhir_patient_id, data in patients_data.items():
@@ -771,20 +784,11 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     if condition_date:
                         from omop_core.models import ConditionOccurrence
 
-                        # Get breast cancer concept (using a standard concept ID)
-                        breast_cancer_concept = None
-                        try:
-                            breast_cancer_concept = Concept.objects.filter(
-                                concept_name__icontains='breast cancer'
-                            ).first()
-                        except:
-                            pass
-                        
+                        # Use pre-hoisted concept lookups (computed once before the patient loop)
+                        breast_cancer_concept = _concept_breast_cancer
+
                         if breast_cancer_concept:
-                            # Get EHR type concept (32817 = EHR)
-                            type_concept = Concept.objects.filter(concept_id=32817).first()
-                            if not type_concept:
-                                type_concept = breast_cancer_concept
+                            type_concept = _concept_ehr_type or breast_cancer_concept
 
                             if not ConditionOccurrence.objects.filter(
                                 person=person,
@@ -1344,14 +1348,12 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             except Exception:
                                 pass
                         if not measurement_concept:
-                            # Use a generic lab test concept if not found
-                            measurement_concept = Concept.objects.filter(concept_id=3000963).first()
-                        
+                            # Use pre-hoisted generic lab test concept if not found
+                            measurement_concept = _concept_generic_lab
+
                         if measurement_concept:
-                            # Get Lab type concept (32856 = Lab)
-                            type_concept = Concept.objects.filter(concept_id=32856).first()
-                            if not type_concept:
-                                type_concept = measurement_concept
+                            # Use pre-hoisted Lab type concept (32856 = Lab)
+                            type_concept = _concept_lab_type or measurement_concept
 
                             # Use LOINC code as source_value when available — it's short,
                             # unique, and avoids collisions from truncating long display names.
@@ -1594,10 +1596,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     regimen_concept = Concept.objects.filter(
                                         domain__domain_id='Drug'
                                     ).first()
-                                drug_type_concept = Concept.objects.filter(concept_id=32869).first()  # EHR prescription
-                                # Fall back to regimen_concept if type concept not found
-                                if drug_type_concept is None and regimen_concept is not None:
-                                    drug_type_concept = regimen_concept
+                                drug_type_concept = _concept_drug_type or regimen_concept
 
                                 # Upsert DrugExposure: skip if same person+regimen+start already exists
                                 _de = DrugExposure.objects.filter(
@@ -1629,13 +1628,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     ep_source_concept = Concept.objects.filter(concept_id=_hemonc_cid).first()
 
                                 # Upsert Episode for this LOT
-                                ep_concept = Concept.objects.filter(concept_id=32531).first()  # Treatment Regimen
-                                if ep_concept is None:
-                                    ep_concept = regimen_concept
+                                ep_concept = _concept_tx_regimen or regimen_concept
                                 ep_obj_concept = regimen_concept
-                                ep_type_concept = Concept.objects.filter(concept_id=32817).first()  # EHR
-                                if ep_type_concept is None:
-                                    ep_type_concept = regimen_concept
+                                ep_type_concept = _concept_ehr_type or regimen_concept
 
                                 _ep = Episode.objects.filter(
                                     person=person,
@@ -1659,9 +1654,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     episode_id_counter += 1
 
                                 # Link drug exposure to episode (idempotent)
-                                ee_field_concept = Concept.objects.filter(concept_id=1147094).first()
-                                if ee_field_concept is None:
-                                    ee_field_concept = regimen_concept
+                                ee_field_concept = _concept_de_field or regimen_concept
                                 _ee, _ = EpisodeEvent.objects.get_or_create(
                                     episode_id=_ep.episode_id,
                                     event_id=_de.drug_exposure_id,

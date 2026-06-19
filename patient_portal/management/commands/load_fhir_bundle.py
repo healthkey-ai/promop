@@ -42,6 +42,7 @@ class Command(BaseCommand):
         file_path = options["file"]
         org_slug = options["org"]
         batch_size = options["batch_size"]
+        verbosity = options["verbosity"]  # 0=quiet 1=normal(default) 2=verbose 3=very verbose
 
         org, created = Organization.objects.get_or_create(
             slug=org_slug,
@@ -130,6 +131,7 @@ class Command(BaseCommand):
                 created = data.get("created_count", 0)
                 updated = data.get("updated_count", 0)
                 errors = data.get("errors", [])
+                patients = data.get("patients", [])
                 total_created += created
                 total_updated += updated
                 total_errors += len(errors)
@@ -142,8 +144,23 @@ class Command(BaseCommand):
                     self.stderr.write(
                         f"    RESPONSE {response.status_code}: {json.dumps(data, default=str)[:400]}"
                     )
-                for err in errors[:3]:
+
+                # -v 2: show per-patient summary
+                if verbosity >= 2:
+                    for pt in patients:
+                        self.stdout.write(
+                            f"    ✓ person_id={pt.get('person_id')} "
+                            f"measurements={len(pt.get('measurement_ids', []))} "
+                            f"drugs={len(pt.get('drug_exposure_ids', []))} "
+                            f"episodes={len(pt.get('episode_ids', []))}"
+                        )
+
+                # -v 2: show all errors; default shows first 3
+                max_errors = None if verbosity >= 2 else 3
+                for err in (errors if max_errors is None else errors[:max_errors]):
                     self.stderr.write(f"    ERR: {err}")
+                if max_errors is not None and len(errors) > max_errors:
+                    self.stderr.write(f"    … and {len(errors) - max_errors} more errors (use -v 2 to see all)")
         finally:
             views_module.get_request_org = original_gro
 

@@ -3,6 +3,7 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
+from django.contrib.postgres.indexes import GinIndex
 
 
 class ProvenanceRecord(models.Model):
@@ -271,6 +272,13 @@ class Concept(models.Model):
             models.Index(
                 fields=['vocabulary_id', 'concept_code'],
                 name='ix_concept_vocab_code',
+            ),
+            # GIN trigram index — makes concept_name__icontains fast on large vocab tables.
+            # Requires pg_trgm extension (added via TrigramExtension() in migration).
+            GinIndex(
+                fields=['concept_name'],
+                name='ix_concept_name_trgm',
+                opclasses=['gin_trgm_ops'],
             ),
         ]
 
