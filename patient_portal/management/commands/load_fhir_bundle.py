@@ -10,6 +10,7 @@ Examples:
 """
 import io
 import json
+import time
 from unittest.mock import PropertyMock, patch
 
 from django.core.files.uploadedfile import InMemoryUploadedFile
@@ -88,6 +89,7 @@ class Command(BaseCommand):
         factory = APIRequestFactory()
         parsers = [JSONParser(), MultiPartParser(), FormParser()]
         total_created = total_updated = total_errors = 0
+        all_person_ids: list[int] = []
 
         original_gro = views_module.get_request_org
         views_module.get_request_org = lambda req: org
@@ -108,8 +110,11 @@ class Command(BaseCommand):
                     "application/json", len(content), None,
                 )
 
+                # skip_refresh=true defers refresh_patient_info to the post-upload
+                # phase below, which runs it once for all patients after all OMOP
+                # writes are committed — much faster than per-patient inline refresh.
                 raw_request = factory.post(
-                    "/api/patient-info/upload_fhir/", {}, format="json"
+                    "/api/patient-info/upload_fhir/?skip_refresh=true", {}, format="json"
                 )
                 raw_request.user = identity
                 drf_req = Request(raw_request, parsers=parsers)
@@ -135,6 +140,12 @@ class Command(BaseCommand):
                 total_created += created
                 total_updated += updated
                 total_errors += len(errors)
+
+                # Collect person_ids for the deferred refresh pass
+                for pt in patients:
+                    pid = pt.get("person_id")
+                    if pid is not None:
+                        all_person_ids.append(pid)
 
                 batch_num = i // batch_size + 1
                 self.stdout.write(
@@ -163,6 +174,41 @@ class Command(BaseCommand):
                     self.stderr.write(f"    … and {len(errors) - max_errors} more errors (use -v 2 to see all)")
         finally:
             views_module.get_request_org = original_gro
+
+        # ── Deferred refresh pass ──────────────────────────────────────────────
+        # Now that all OMOP writes are committed, rebuild PatientInfo from OMOP
+        # data for every patient in one go.  This is far faster than the
+        # per-patient inline refresh because:
+        #   • The concept cache is warm (all LOINC/HemOnc concepts already loaded)
+        #   • No transaction overhead — each refresh is a simple read + write
+        #   • LOT inference skips immediately for patients whose Episodes already exist
+        if all_person_ids:
+            from omop_core.models import Person
+            from omop_core.services.patient_info_service import refresh_patient_info
+            from omop_core.services.lot_inference_service import infer_lot_for_person
+
+            self.stdout.write(f"\nRefreshing PatientInfo for {len(all_person_ids)} patients...")
+            refresh_start = time.monotonic()
+            refresh_errors = 0
+
+            for idx, person_id in enumerate(all_person_ids, 1):
+                try:
+                    connection.close()  # fresh connection per patient
+                    person = Person.objects.get(person_id=person_id)
+                    refresh_patient_info(person)
+                    infer_lot_for_person(person)
+                    if verbosity >= 2:
+                        self.stdout.write(f"  refreshed {idx}/{len(all_person_ids)} person_id={person_id}")
+                except Exception as exc:
+                    refresh_errors += 1
+                    self.stderr.write(f"  Refresh error person_id={person_id}: {exc}")
+
+            elapsed = time.monotonic() - refresh_start
+            self.stdout.write(
+                f"Refresh complete: {len(all_person_ids) - refresh_errors} ok, "
+                f"{refresh_errors} errors, {elapsed:.1f}s total "
+                f"({elapsed / len(all_person_ids):.1f}s/patient)"
+            )
 
         self.stdout.write(
             self.style.SUCCESS(

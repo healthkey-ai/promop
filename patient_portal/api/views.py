@@ -578,6 +578,11 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             _concept_de_field      = _cc_by_id(1147094)  # DrugExposure field
             _concept_generic_lab   = _cc_by_id(3000963)  # Generic lab
 
+            # When skip_refresh=true the caller (e.g. load_fhir_bundle) will run
+            # refresh_patient_info for all patients after the upload completes.
+            # This eliminates the per-patient refresh cost during the tight write loop.
+            _skip_refresh = request.query_params.get('skip_refresh', 'false').lower() in ('1', 'true')
+
             # Process each patient
             import time as _time
             for fhir_patient_id, data in patients_data.items():
@@ -1675,8 +1680,14 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     # back all OMOP writes for this patient.
                     _suppress_cm.__exit__(None, None, None)
                     logger.info("TIMING patient=%s phase=drug_exposures elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
-                    patient_info = refresh_patient_info(person)
-                    infer_lot_for_person(person)
+                    if _skip_refresh:
+                        # Bulk mode — just ensure the PatientInfo row exists so the
+                        # patch block below has an object to write FHIR-specific fields
+                        # into.  The full OMOP-derived refresh is deferred to the caller.
+                        patient_info, _ = PatientInfo.objects.get_or_create(person=person)
+                    else:
+                        patient_info = refresh_patient_info(person)
+                        infer_lot_for_person(person)
 
                     # --- Patch fields from FHIR that aren't yet in OMOP tables ---
                     # These fields come from FHIR parsing but are not (yet) stored in OMOP.
