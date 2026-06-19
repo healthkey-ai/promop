@@ -1299,6 +1299,14 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             if mutation_data['gene'] and mutation_data['mutation']:
                                 genetic_mutations.append(mutation_data)
                     
+                    # Pre-fetch all existing Measurements for this person so the
+                    # upsert check below is a dict lookup instead of one SELECT
+                    # per observation (48 round-trips → 1 round-trip).
+                    _existing_measurements: dict[tuple, object] = {
+                        (m.measurement_concept_id, m.measurement_date, m.measurement_source_value): m
+                        for m in Measurement.objects.filter(person=person)
+                    }
+
                     for observation in data['observations']:
                         obs_date = None
                         if observation.get('effectiveDateTime'):
@@ -1363,14 +1371,14 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             source_value = obs_loinc if obs_loinc else obs_name[:50]
                             try:
                                 with transaction.atomic():
-                                    existing_m = Measurement.objects.filter(
-                                        person=person,
-                                        measurement_concept=measurement_concept,
-                                        measurement_date=obs_date.date(),
-                                        measurement_source_value=source_value,
-                                    ).first()
+                                    _mkey = (
+                                        measurement_concept.pk if measurement_concept else None,
+                                        obs_date.date(),
+                                        source_value,
+                                    )
+                                    existing_m = _existing_measurements.get(_mkey)
                                     if existing_m:
-                                        # Only UPDATE if value actually changed — avoids 48
+                                        # Only UPDATE if value actually changed — avoids
                                         # pointless writes on every re-import of the same bundle.
                                         if (existing_m.value_as_number != value_number
                                                 or existing_m.value_as_string != value_string):
@@ -1394,6 +1402,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                         _m._skip_patient_info_refresh = True
                                         _m.save()
                                         _pt_measurement_ids.append(_m.measurement_id)
+                                        # Keep the dict current so duplicate observations
+                                        # in the same patient don't re-insert the same row.
+                                        _existing_measurements[_mkey] = _m
                                         if prov_source:
                                             _record_provenance(_m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
                                         measurement_id += 1
