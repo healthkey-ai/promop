@@ -803,10 +803,17 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     condition_source_value=disease,
                                 )
                                 _co._skip_patient_info_refresh = True
-                                _co.save()
-                                _pt_condition_ids.append(_co.condition_occurrence_id)
-                                if prov_source:
-                                    _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                try:
+                                    with transaction.atomic():
+                                        _co.save()
+                                        _pt_condition_ids.append(_co.condition_occurrence_id)
+                                        if prov_source:
+                                            _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                except Exception as _coex:
+                                    logger.warning(
+                                        '{"event": "condition_occurrence_save_failed", "person_id": %s, "error": "%s"}',
+                                        person.person_id, _coex,
+                                    )
 
                     # Process observations and create Measurement records
                     _timing_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
@@ -1349,36 +1356,43 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             # Use LOINC code as source_value when available — it's short,
                             # unique, and avoids collisions from truncating long display names.
                             source_value = obs_loinc if obs_loinc else obs_name[:50]
-                            existing_m = Measurement.objects.filter(
-                                person=person,
-                                measurement_concept=measurement_concept,
-                                measurement_date=obs_date.date(),
-                                measurement_source_value=source_value,
-                            ).first()
-                            if existing_m:
-                                existing_m.value_as_number = value_number
-                                existing_m.value_as_string = value_string
-                                existing_m._skip_patient_info_refresh = True
-                                existing_m.save()
-                            else:
-                                _m = Measurement(
-                                    measurement_id=measurement_id,
-                                    person=person,
-                                    measurement_concept=measurement_concept,
-                                    measurement_date=obs_date.date(),
-                                    measurement_datetime=obs_date,
-                                    measurement_type_concept=type_concept,
-                                    value_as_number=value_number,
-                                    value_as_string=value_string,
-                                    measurement_source_value=source_value,
-                                    unit_source_value=unit[:50] if unit else None,
+                            try:
+                                with transaction.atomic():
+                                    existing_m = Measurement.objects.filter(
+                                        person=person,
+                                        measurement_concept=measurement_concept,
+                                        measurement_date=obs_date.date(),
+                                        measurement_source_value=source_value,
+                                    ).first()
+                                    if existing_m:
+                                        existing_m.value_as_number = value_number
+                                        existing_m.value_as_string = value_string
+                                        existing_m._skip_patient_info_refresh = True
+                                        existing_m.save()
+                                    else:
+                                        _m = Measurement(
+                                            measurement_id=measurement_id,
+                                            person=person,
+                                            measurement_concept=measurement_concept,
+                                            measurement_date=obs_date.date(),
+                                            measurement_datetime=obs_date,
+                                            measurement_type_concept=type_concept,
+                                            value_as_number=value_number,
+                                            value_as_string=value_string,
+                                            measurement_source_value=source_value,
+                                            unit_source_value=unit[:50] if unit else None,
+                                        )
+                                        _m._skip_patient_info_refresh = True
+                                        _m.save()
+                                        _pt_measurement_ids.append(_m.measurement_id)
+                                        if prov_source:
+                                            _record_provenance(_m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                        measurement_id += 1
+                            except Exception as _mex:
+                                logger.warning(
+                                    '{"event": "measurement_save_failed", "obs": "%s", "error": "%s"}',
+                                    obs_name[:50], _mex,
                                 )
-                                _m._skip_patient_info_refresh = True
-                                _m.save()
-                                _pt_measurement_ids.append(_m.measurement_id)
-                                if prov_source:
-                                    _record_provenance(_m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                                measurement_id += 1
                     
                     # Extract therapy information from MedicationStatement resources
                     therapy_lines = {}  # {line_number: {'regimen': name, 'start_date': date, 'end_date': date, 'outcome': outcome}}
@@ -1897,6 +1911,15 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 _last_exc,
                                 _last_exc.__traceback__ if _last_exc else None,
                             )
+                        except Exception:
+                            pass
+                    # If this patient failed, force-rollback at the connection level
+                    # so a poisoned transaction doesn't cascade to subsequent patients
+                    # in the same batch.
+                    if _last_exc is not None:
+                        try:
+                            from django.db import connection as _db_conn
+                            _db_conn.rollback()
                         except Exception:
                             pass
                     # Guarantee suppression is cleared even on BaseException.

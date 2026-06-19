@@ -41,7 +41,11 @@ def next_pk(model, pk_field):
         cur.execute("SET LOCAL statement_timeout = '5s'")
         _reseed_to_max(cur, model, pk_field, seq)
         cur.execute("SELECT nextval(%s)", [seq])
-        return cur.fetchone()[0]
+        val = cur.fetchone()[0]
+        # Reset the timeout so subsequent queries in the same transaction
+        # are not subject to the 5-second limit imposed above.
+        cur.execute("SET LOCAL statement_timeout = '0'")
+        return val
 
 
 def next_pk_batch(model, pk_field, count):
@@ -56,4 +60,6 @@ def next_pk_batch(model, pk_field, count):
             "SELECT nextval(%s) FROM generate_series(1, %s)",
             [seq, count],
         )
-        return [row[0] for row in cur.fetchall()]
+        rows = cur.fetchall()
+        cur.execute("SET LOCAL statement_timeout = '0'")
+        return [row[0] for row in rows]
