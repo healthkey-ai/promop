@@ -1302,10 +1302,20 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     # Pre-fetch all existing Measurements for this person so the
                     # upsert check below is a dict lookup instead of one SELECT
                     # per observation (48 round-trips → 1 round-trip).
+                    _t_mfetch = _time.monotonic()
                     _existing_measurements: dict[tuple, object] = {
                         (m.measurement_concept_id, m.measurement_date, m.measurement_source_value): m
                         for m in Measurement.objects.filter(person=person)
                     }
+                    logger.info(
+                        "TIMING patient=%s phase=measurements_bulk_fetch elapsed=%.3fs existing=%d",
+                        _timing_hash, _time.monotonic() - _t_mfetch, len(_existing_measurements),
+                    )
+
+                    # Accumulate new Measurement objects for bulk_create after the loop
+                    # (one INSERT instead of one per observation = eliminates ~48 round-trips).
+                    _pending_measurements: list = []
+                    _pending_provenances: list = []  # (measurement, prov_source, prov_user_id, prov_reason)
 
                     for observation in data['observations']:
                         obs_date = None
@@ -1369,51 +1379,63 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             # Use LOINC code as source_value when available — it's short,
                             # unique, and avoids collisions from truncating long display names.
                             source_value = obs_loinc if obs_loinc else obs_name[:50]
-                            try:
-                                with transaction.atomic():
-                                    _mkey = (
-                                        measurement_concept.pk if measurement_concept else None,
-                                        obs_date.date(),
-                                        source_value,
-                                    )
-                                    existing_m = _existing_measurements.get(_mkey)
-                                    if existing_m:
-                                        # Only UPDATE if value actually changed — avoids
-                                        # pointless writes on every re-import of the same bundle.
-                                        if (existing_m.value_as_number != value_number
-                                                or existing_m.value_as_string != value_string):
-                                            existing_m.value_as_number = value_number
-                                            existing_m.value_as_string = value_string
-                                            existing_m._skip_patient_info_refresh = True
-                                            existing_m.save()
-                                    else:
-                                        _m = Measurement(
-                                            measurement_id=measurement_id,
-                                            person=person,
-                                            measurement_concept=measurement_concept,
-                                            measurement_date=obs_date.date(),
-                                            measurement_datetime=obs_date,
-                                            measurement_type_concept=type_concept,
-                                            value_as_number=value_number,
-                                            value_as_string=value_string,
-                                            measurement_source_value=source_value,
-                                            unit_source_value=unit[:50] if unit else None,
-                                        )
-                                        _m._skip_patient_info_refresh = True
-                                        _m.save()
-                                        _pt_measurement_ids.append(_m.measurement_id)
-                                        # Keep the dict current so duplicate observations
-                                        # in the same patient don't re-insert the same row.
-                                        _existing_measurements[_mkey] = _m
-                                        if prov_source:
-                                            _record_provenance(_m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                                        measurement_id += 1
-                            except Exception as _mex:
-                                logger.warning(
-                                    '{"event": "measurement_save_failed", "obs": "%s", "error": "%s"}',
-                                    obs_name[:50], _mex,
+                            _mkey = (
+                                measurement_concept.pk if measurement_concept else None,
+                                obs_date.date(),
+                                source_value,
+                            )
+                            existing_m = _existing_measurements.get(_mkey)
+                            if existing_m:
+                                # Only UPDATE if value actually changed — avoids
+                                # pointless writes on every re-import of the same bundle.
+                                if (existing_m.value_as_number != value_number
+                                        or existing_m.value_as_string != value_string):
+                                    existing_m.value_as_number = value_number
+                                    existing_m.value_as_string = value_string
+                                    existing_m._skip_patient_info_refresh = True
+                                    existing_m.save()
+                            else:
+                                _m = Measurement(
+                                    measurement_id=measurement_id,
+                                    person=person,
+                                    measurement_concept=measurement_concept,
+                                    measurement_date=obs_date.date(),
+                                    measurement_datetime=obs_date,
+                                    measurement_type_concept=type_concept,
+                                    value_as_number=value_number,
+                                    value_as_string=value_string,
+                                    measurement_source_value=source_value,
+                                    unit_source_value=unit[:50] if unit else None,
                                 )
+                                _m._skip_patient_info_refresh = True
+                                # Keep the dict current so duplicate observations
+                                # in the same patient don't re-insert the same row.
+                                _existing_measurements[_mkey] = _m
+                                _pending_measurements.append(_m)
+                                if prov_source:
+                                    _pending_provenances.append((_m, prov_source, prov_user_id, prov_reason))
+                                measurement_id += 1
                     
+                    # Bulk-insert all new Measurements in one round-trip instead of
+                    # one INSERT per observation (~48 round-trips → 1 round-trip).
+                    if _pending_measurements:
+                        _t_bulk_insert = _time.monotonic()
+                        try:
+                            Measurement.objects.bulk_create(_pending_measurements)
+                            for _bm in _pending_measurements:
+                                _pt_measurement_ids.append(_bm.measurement_id)
+                            for (_bm, _psrc, _puid, _preason) in _pending_provenances:
+                                _record_provenance(_bm, _psrc, _puid, modification_reason=_preason, organization=get_request_org(request))
+                        except Exception as _bcex:
+                            logger.warning(
+                                '{"event": "measurement_bulk_create_failed", "count": %d, "error": "%s"}',
+                                len(_pending_measurements), _bcex,
+                            )
+                        logger.info(
+                            "TIMING patient=%s phase=measurements_bulk_insert elapsed=%.3fs count=%d",
+                            _timing_hash, _time.monotonic() - _t_bulk_insert, len(_pending_measurements),
+                        )
+
                     # Extract therapy information from MedicationStatement resources
                     therapy_lines = {}  # {line_number: {'regimen': name, 'start_date': date, 'end_date': date, 'outcome': outcome}}
                     
