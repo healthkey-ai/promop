@@ -46,6 +46,15 @@ def concept_by_vocab(vocabulary_id: str, concept_code: str):
     return _cache[key]
 
 
+def concept_by_name_ilike(name: str):
+    """Return the first Concept whose concept_name icontains name, or None.  Result is cached."""
+    key = ('_ilike', name)
+    if key not in _cache:
+        from omop_core.models import Concept
+        _cache[key] = Concept.objects.filter(concept_name__icontains=name).first()
+    return _cache[key]
+
+
 def concept_cache_clear() -> None:
     """Flush the entire cache.  Call in test setUp/tearDown for isolation."""
     _cache.clear()

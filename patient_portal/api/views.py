@@ -35,7 +35,7 @@ from omop_core.services.omop_write_service import sync_to_omop
 from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
-from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
+from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name
 from datetime import datetime
 from django.utils.timezone import localdate
 import csv
@@ -1316,8 +1316,12 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     # (one INSERT instead of one per observation = eliminates ~48 round-trips).
                     _pending_measurements: list = []
                     _pending_provenances: list = []  # (measurement, prov_source, prov_user_id, prov_reason)
+                    _t_loop_start = _time.monotonic()
+                    _obs_idx = 0
 
                     for observation in data['observations']:
+                        _obs_idx += 1
+                        _t_obs = _time.monotonic()
                         obs_date = None
                         if observation.get('effectiveDateTime'):
                             try:
@@ -1361,13 +1365,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 break
                         if obs_loinc:
                             measurement_concept = _cc_by_loinc(obs_loinc)
-                        if not measurement_concept:
-                            try:
-                                measurement_concept = Concept.objects.filter(
-                                    concept_name__icontains=obs_name[:50]
-                                ).first()
-                            except Exception:
-                                pass
+                        if not measurement_concept and obs_name:
+                            measurement_concept = _cc_by_name(obs_name[:50])
                         if not measurement_concept:
                             # Use pre-hoisted generic lab test concept if not found
                             measurement_concept = _concept_generic_lab
@@ -1415,7 +1414,15 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 if prov_source:
                                     _pending_provenances.append((_m, prov_source, prov_user_id, prov_reason))
                                 measurement_id += 1
-                    
+                        # Log slow observations (>0.5s) to catch future bottlenecks
+                        _t_obs_elapsed = _time.monotonic() - _t_obs
+                        if _t_obs_elapsed > 0.5:
+                            logger.info(
+                                "TIMING patient=%s obs=%d/%d name=%.30s elapsed=%.3fs",
+                                _timing_hash, _obs_idx, len(data['observations']),
+                                obs_name, _t_obs_elapsed,
+                            )
+
                     # Bulk-insert all new Measurements in one round-trip instead of
                     # one INSERT per observation (~48 round-trips → 1 round-trip).
                     if _pending_measurements:
