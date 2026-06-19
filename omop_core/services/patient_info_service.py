@@ -13,6 +13,7 @@ from omop_core.models import (
     Person, PatientInfo, ConditionOccurrence, Concept,
     Measurement, Observation, DrugExposure, Location, ProcedureOccurrence,
 )
+from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
 
 
 # ---------------------------------------------------------------------------
@@ -569,10 +570,7 @@ def _get_vitals_data(person: Person) -> dict:
 
     for vital_type, loinc_code in vital_sign_concepts.items():
         try:
-            concept = Concept.objects.filter(
-                concept_code=loinc_code,
-                vocabulary__vocabulary_id='LOINC'
-            ).first()
+            concept = _cc_by_loinc(loinc_code)
             if concept:
                 measurement = Measurement.objects.filter(
                     person=person,
@@ -618,7 +616,7 @@ def _get_biomarker_data(person: Person) -> dict:
     if er_measurements.exists():
         er_test = er_measurements.first()
         if er_test.value_as_concept_id:
-            concept = Concept.objects.get(pk=er_test.value_as_concept_id)
+            concept = _cc_by_id(er_test.value_as_concept_id)
             if 'positive' in concept.concept_name.lower():
                 data['estrogen_receptor_status'] = 'POSITIVE'
             elif 'negative' in concept.concept_name.lower():
@@ -628,7 +626,7 @@ def _get_biomarker_data(person: Person) -> dict:
     if pr_measurements.exists():
         pr_test = pr_measurements.first()
         if pr_test.value_as_concept_id:
-            concept = Concept.objects.get(pk=pr_test.value_as_concept_id)
+            concept = _cc_by_id(pr_test.value_as_concept_id)
             if 'positive' in concept.concept_name.lower():
                 data['progesterone_receptor_status'] = 'POSITIVE'
             elif 'negative' in concept.concept_name.lower():
@@ -638,7 +636,7 @@ def _get_biomarker_data(person: Person) -> dict:
     if her2_measurements.exists():
         her2_test = her2_measurements.first()
         if her2_test.value_as_concept_id:
-            concept = Concept.objects.get(pk=her2_test.value_as_concept_id)
+            concept = _cc_by_id(her2_test.value_as_concept_id)
             if 'positive' in concept.concept_name.lower():
                 data['her2_status'] = 'POSITIVE'
             elif 'negative' in concept.concept_name.lower():
@@ -708,7 +706,7 @@ def _get_infection_data(person: Person) -> dict:
     )
     for m in hiv_measurements:
         if m.value_as_concept_id:
-            concept = Concept.objects.get(pk=m.value_as_concept_id)
+            concept = _cc_by_id(m.value_as_concept_id)
             if 'negative' in concept.concept_name.lower():
                 data['no_hiv_status'] = True
                 data['hiv_status'] = False
@@ -721,7 +719,7 @@ def _get_infection_data(person: Person) -> dict:
     )
     for m in hepb_measurements:
         if m.value_as_concept_id:
-            concept = Concept.objects.get(pk=m.value_as_concept_id)
+            concept = _cc_by_id(m.value_as_concept_id)
             if 'negative' in concept.concept_name.lower():
                 data['no_hepatitis_b_status'] = True
                 data['hepatitis_b_status'] = False
@@ -734,7 +732,7 @@ def _get_infection_data(person: Person) -> dict:
     )
     for m in hepc_measurements:
         if m.value_as_concept_id:
-            concept = Concept.objects.get(pk=m.value_as_concept_id)
+            concept = _cc_by_id(m.value_as_concept_id)
             if 'negative' in concept.concept_name.lower():
                 data['no_hepatitis_c_status'] = True
                 data['hepatitis_c_status'] = False

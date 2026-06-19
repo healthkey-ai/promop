@@ -35,6 +35,7 @@ from omop_core.services.omop_write_service import sync_to_omop
 from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
+from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
 from datetime import datetime
 from django.utils.timezone import localdate
 import csv
@@ -565,17 +566,17 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             _allowed_elig_titles = set(SctEligibility.objects.values_list('title', flat=True))
 
             # Hoist constant Concept lookups — these are the same for every patient and every
-            # observation. Looking them up once here avoids dozens of repeated PK queries per
-            # patient and avoids repeated ILIKE full-scans for well-known concepts.
+            # observation. Using the process-level concept_cache means each of these is a
+            # zero-cost memory hit on all subsequent calls (across batches and requests).
             _concept_breast_cancer = Concept.objects.filter(
                 concept_name__icontains='breast cancer'
             ).first()
-            _concept_ehr_type      = Concept.objects.filter(concept_id=32817).first()  # EHR
-            _concept_lab_type      = Concept.objects.filter(concept_id=32856).first()  # Lab
-            _concept_drug_type     = Concept.objects.filter(concept_id=32869).first()  # EHR prescription
-            _concept_tx_regimen    = Concept.objects.filter(concept_id=32531).first()  # Treatment Regimen
-            _concept_de_field      = Concept.objects.filter(concept_id=1147094).first() # DrugExposure field
-            _concept_generic_lab   = Concept.objects.filter(concept_id=3000963).first() # Generic lab
+            _concept_ehr_type      = _cc_by_id(32817)    # EHR
+            _concept_lab_type      = _cc_by_id(32856)    # Lab
+            _concept_drug_type     = _cc_by_id(32869)    # EHR prescription
+            _concept_tx_regimen    = _cc_by_id(32531)    # Treatment Regimen
+            _concept_de_field      = _cc_by_id(1147094)  # DrugExposure field
+            _concept_generic_lab   = _cc_by_id(3000963)  # Generic lab
 
             # Process each patient
             import time as _time
@@ -821,7 +822,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
 
                     # Process observations and create Measurement records
                     _timing_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
-                    logger.debug("TIMING patient=%s phase=person_setup elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
+                    logger.info("TIMING patient=%s phase=person_setup elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
                     from omop_core.models import Measurement
                     last_measurement = Measurement.objects.all().order_by('-measurement_id').first()
                     measurement_id = last_measurement.measurement_id + 1 if last_measurement else 1
@@ -1336,10 +1337,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 obs_loinc = _c.get('code')
                                 break
                         if obs_loinc:
-                            measurement_concept = Concept.objects.filter(
-                                concept_code=obs_loinc,
-                                vocabulary_id='LOINC',
-                            ).first()
+                            measurement_concept = _cc_by_loinc(obs_loinc)
                         if not measurement_concept:
                             try:
                                 measurement_concept = Concept.objects.filter(
@@ -1561,7 +1559,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 later_discontinuation_reason = disc_obs['value']
                     
                     # --- Write DrugExposure records for each therapy line ---
-                    logger.debug("TIMING patient=%s phase=measurements elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
+                    logger.info("TIMING patient=%s phase=measurements elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
                     last_drug = DrugExposure.objects.all().order_by('-drug_exposure_id').first()
                     drug_exposure_id = last_drug.drug_exposure_id + 1 if last_drug else 1
                     last_episode = Episode.objects.all().order_by('-episode_id').first()
@@ -1582,7 +1580,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 # only fall back to ILIKE + RxNav when it is absent.
                                 _hemonc_cid = lot_data.get('hemonc_concept_id')
                                 if _hemonc_cid:
-                                    regimen_concept = Concept.objects.filter(concept_id=_hemonc_cid).first()
+                                    regimen_concept = _cc_by_id(_hemonc_cid)
                                 else:
                                     regimen_concept = Concept.objects.filter(
                                         concept_name__icontains=regimen_name,
@@ -1672,7 +1670,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     # We stay inside the atomic block so that a refresh failure rolls
                     # back all OMOP writes for this patient.
                     _suppress_cm.__exit__(None, None, None)
-                    logger.debug("TIMING patient=%s phase=drug_exposures elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
+                    logger.info("TIMING patient=%s phase=drug_exposures elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
                     patient_info = refresh_patient_info(person)
                     infer_lot_for_person(person)
 
