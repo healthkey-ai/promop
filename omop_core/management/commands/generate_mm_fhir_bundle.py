@@ -207,8 +207,8 @@ class Command(BaseCommand):
                             help='Number of patients to generate (default: 100)')
         parser.add_argument('--output', type=str, default='data/mm_patients_fhir.json',
                             help='Output file path')
-        parser.add_argument('--seed', type=int, default=42,
-                            help='Random seed for reproducibility')
+        parser.add_argument('--seed', type=int, default=None,
+                            help='Random seed for reproducibility (default: random each run)')
         parser.add_argument('--rrmm-ratio', type=float, default=0.80, dest='rrmm_ratio',
                             help='Fraction of patients with ≥1 prior line (RRMM; default 0.80)')
 
