@@ -1578,19 +1578,25 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     lot_end = datetime.strptime(lot_data['end_date'][:10], '%Y-%m-%d').date()
 
                                 regimen_name = lot_data.get('regimen', '')
-                                regimen_concept = Concept.objects.filter(
-                                    concept_name__icontains=regimen_name,
-                                    domain__domain_id='Drug',
-                                ).first() if regimen_name else None
-                                # Try RxNav for drugs not in local vocabulary
-                                if regimen_concept is None and regimen_name:
-                                    try:
-                                        regimen_concept = _rxnav_resolve_drug(regimen_name)
-                                    except Exception as rxnav_exc:
-                                        logger.warning(
-                                            '{"event": "rxnav_resolve_failed", "drug": "%s", "error": "%s"}',
-                                            regimen_name, rxnav_exc,
-                                        )
+                                # Prefer HemOnc concept_id already embedded in the FHIR bundle;
+                                # only fall back to ILIKE + RxNav when it is absent.
+                                _hemonc_cid = lot_data.get('hemonc_concept_id')
+                                if _hemonc_cid:
+                                    regimen_concept = Concept.objects.filter(concept_id=_hemonc_cid).first()
+                                else:
+                                    regimen_concept = Concept.objects.filter(
+                                        concept_name__icontains=regimen_name,
+                                        domain__domain_id='Drug',
+                                    ).first() if regimen_name else None
+                                    # RxNav fallback only when no HemOnc concept_id and ILIKE found nothing
+                                    if regimen_concept is None and regimen_name:
+                                        try:
+                                            regimen_concept = _rxnav_resolve_drug(regimen_name)
+                                        except Exception as rxnav_exc:
+                                            logger.warning(
+                                                '{"event": "rxnav_resolve_failed", "drug": "%s", "error": "%s"}',
+                                                regimen_name, rxnav_exc,
+                                            )
                                 # Final fallback to any Drug domain concept
                                 if regimen_concept is None:
                                     regimen_concept = Concept.objects.filter(
@@ -1621,11 +1627,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                         _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
                                     drug_exposure_id += 1
 
-                                # Resolve HemOnc source concept if concept_id provided in FHIR
-                                ep_source_concept = None
-                                _hemonc_cid = lot_data.get('hemonc_concept_id')
-                                if _hemonc_cid:
-                                    ep_source_concept = Concept.objects.filter(concept_id=_hemonc_cid).first()
+                                # ep_source_concept reuses the same HemOnc lookup already resolved above
+                                ep_source_concept = regimen_concept if _hemonc_cid else None
 
                                 # Upsert Episode for this LOT
                                 ep_concept = _concept_tx_regimen or regimen_concept
