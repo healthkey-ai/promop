@@ -790,7 +790,11 @@ def _get_assessment_data(person: Person) -> dict:
 def _get_laboratory_data(person: Person) -> dict:
     data = {}
 
-    measurements = Measurement.objects.filter(person=person).order_by('-measurement_date')
+    measurements = (
+        Measurement.objects.filter(person=person)
+        .select_related('measurement_concept')
+        .order_by('-measurement_date')
+    )
 
     # --- Legacy fields via concept-name matching ---
     legacy_lab_mappings = {
@@ -855,7 +859,11 @@ def _get_laboratory_data(person: Person) -> dict:
 def _get_performance_data(person: Person) -> dict:
     data = {}
 
-    observations = Observation.objects.filter(person=person).order_by('-observation_date')
+    observations = (
+        Observation.objects.filter(person=person)
+        .select_related('observation_concept')
+        .order_by('-observation_date')
+    )
 
     for obs in observations:
         if not obs.observation_concept:

@@ -1365,10 +1365,14 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                         measurement_source_value=source_value,
                                     ).first()
                                     if existing_m:
-                                        existing_m.value_as_number = value_number
-                                        existing_m.value_as_string = value_string
-                                        existing_m._skip_patient_info_refresh = True
-                                        existing_m.save()
+                                        # Only UPDATE if value actually changed — avoids 48
+                                        # pointless writes on every re-import of the same bundle.
+                                        if (existing_m.value_as_number != value_number
+                                                or existing_m.value_as_string != value_string):
+                                            existing_m.value_as_number = value_number
+                                            existing_m.value_as_string = value_string
+                                            existing_m._skip_patient_info_refresh = True
+                                            existing_m.save()
                                     else:
                                         _m = Measurement(
                                             measurement_id=measurement_id,
