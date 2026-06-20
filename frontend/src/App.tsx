@@ -11,6 +11,7 @@ import PatientList from "@/components/Patient/PatientList";
 import PatientDetail from "@/components/Patient/PatientDetail";
 import UploadFHIR from "@/components/Patient/UploadFHIR";
 import UploadCSV from "@/components/Patient/UploadCSV";
+import StatsPage from "@/components/Stats/StatsPage";
 import { useAuth } from "@/hooks/useAuth";
 
 function AppRoutes() {
@@ -60,6 +61,12 @@ function AppRoutes() {
         path="/upload-csv"
         element={
           currentUser ? <UploadCSV /> : <Navigate to="/login" replace />
+        }
+      />
+      <Route
+        path="/stats"
+        element={
+          currentUser ? <StatsPage /> : <Navigate to="/login" replace />
         }
       />
 
