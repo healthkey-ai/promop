@@ -15,7 +15,7 @@ from django.utils.timezone import localdate
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = Identity
-        fields = ['id', 'sub', 'email', 'name']
+        fields = ['id', 'sub', 'email', 'name', 'is_staff']
 
 
 class PatientListSerializer(serializers.ModelSerializer):

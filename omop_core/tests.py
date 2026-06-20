@@ -484,3 +484,86 @@ class ConditionSignalTest(_OmopBase):
         co.delete()
         pi.refresh_from_db()
         self.assertIsNone(pi.disease)
+
+
+# ---------------------------------------------------------------------------
+# TEST-04: get_visible_orgs access helper
+# ---------------------------------------------------------------------------
+
+from django.utils import timezone
+from datetime import timedelta
+from omop_core.models import Organization, PatientGroup, GroupAccess
+from omop_core.services.access import get_visible_orgs
+from patient_portal.models import Identity
+
+
+class GetVisibleOrgsTest(TestCase):
+    def setUp(self):
+        self.org_a = Organization.objects.create(name='Org A', slug='org-a')
+        self.org_b = Organization.objects.create(name='Org B', slug='org-b')
+        self.group_a = PatientGroup.objects.create(
+            organization=self.org_a, name='Group A', slug='group-a'
+        )
+        self.staff_user = Identity.objects.create_user(
+            email='staff@test.com', password='x', is_staff=True
+        )
+        self.org_admin = Identity.objects.create_user(
+            email='orgadmin@test.com', password='x'
+        )
+        self.doctor = Identity.objects.create_user(
+            email='doctor@test.com', password='x'
+        )
+        self.nobody = Identity.objects.create_user(
+            email='nobody@test.com', password='x'
+        )
+        GroupAccess.objects.create(
+            identity=self.org_admin, org=self.org_a, role='org_admin'
+        )
+        GroupAccess.objects.create(
+            identity=self.doctor, group=self.group_a, role='doctor'
+        )
+
+    def test_staff_sees_all_orgs(self):
+        orgs = get_visible_orgs(self.staff_user)
+        self.assertIn(self.org_a, orgs)
+        self.assertIn(self.org_b, orgs)
+
+    def test_org_admin_sees_their_org_only(self):
+        orgs = list(get_visible_orgs(self.org_admin))
+        self.assertIn(self.org_a, orgs)
+        self.assertNotIn(self.org_b, orgs)
+
+    def test_doctor_sees_org_of_their_group(self):
+        orgs = list(get_visible_orgs(self.doctor))
+        self.assertIn(self.org_a, orgs)
+        self.assertNotIn(self.org_b, orgs)
+
+    def test_user_with_no_grants_sees_nothing(self):
+        orgs = list(get_visible_orgs(self.nobody))
+        self.assertEqual(orgs, [])
+
+    def test_expired_grant_excluded(self):
+        expired = Identity.objects.create_user(email='expired@test.com', password='x')
+        GroupAccess.objects.create(
+            identity=expired, org=self.org_a, role='org_admin',
+            expires_at=timezone.now() - timedelta(hours=1),
+        )
+        orgs = list(get_visible_orgs(expired))
+        self.assertEqual(orgs, [])
+
+    def test_active_grant_with_future_expiry_included(self):
+        future = Identity.objects.create_user(email='future@test.com', password='x')
+        GroupAccess.objects.create(
+            identity=future, org=self.org_b, role='org_admin',
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        orgs = list(get_visible_orgs(future))
+        self.assertIn(self.org_b, orgs)
+
+    def test_xor_constraint_prevents_both_org_and_group_set(self):
+        from django.db import IntegrityError, transaction
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                GroupAccess.objects.create(
+                    identity=self.nobody, org=self.org_a, group=self.group_a, role='org_admin'
+                )

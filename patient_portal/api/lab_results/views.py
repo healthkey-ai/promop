@@ -77,7 +77,7 @@ def _resolve_person_id(request):
             )
         # Verify caller has access to this patient.
         # Org-scoped tokens are checked FIRST, before can_access_patient.
-        # ProfessionalGroupAccess can span organisations, so allowing
+        # GroupAccess can span organisations, so allowing
         # can_access_patient() to short-circuit the org check would let a
         # cross-org group grant bypass tenant isolation.
         if not (request.user and request.user.is_authenticated):

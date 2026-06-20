@@ -739,13 +739,13 @@ class PersonalRepresentativeAccessTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
 
-class ProfessionalGroupAccessTest(TestCase):
-    """Tests for ProfessionalGroupAccess expires_at enforcement."""
+class GroupAccessTest(TestCase):
+    """Tests for GroupAccess expires_at enforcement."""
 
     def setUp(self):
         from omop_core.models import (
             Organization, PatientGroup, PatientGroupMembership,
-            ProfessionalGroupAccess,
+            GroupAccess,
         )
         from django.utils import timezone
         from datetime import timedelta
@@ -772,7 +772,7 @@ class ProfessionalGroupAccessTest(TestCase):
             value_as_number=11.0,
         )
 
-        self.grant = ProfessionalGroupAccess.objects.create(
+        self.grant = GroupAccess.objects.create(
             identity=self.doctor,
             group=self.group,
             role='doctor',
@@ -1329,7 +1329,7 @@ class ResolvePersonIdOrgBypassTest(TestCase):
     """
     Verify that an org-scoped token cannot access a patient from a different
     org even when can_access_patient() would return True (e.g. via
-    ProfessionalGroupAccess that spans organisations).
+    GroupAccess that spans organisations).
 
     Before the fix, _resolve_person_id only ran the org check when
     can_access_patient() returned False.  A cross-org group grant therefore
@@ -1337,7 +1337,7 @@ class ResolvePersonIdOrgBypassTest(TestCase):
     """
 
     def setUp(self):
-        from omop_core.models import Organization, ApplicationOrganization, PatientGroupMembership, ProfessionalGroupAccess
+        from omop_core.models import Organization, ApplicationOrganization, PatientGroupMembership, GroupAccess
         from oauth2_provider.models import Application, AccessToken
         from django.utils import timezone
         from datetime import timedelta
@@ -1374,14 +1374,14 @@ class ResolvePersonIdOrgBypassTest(TestCase):
         self.person_in_b = Person.objects.create(person_id=18002)
         PatientInfo.objects.create(person=self.person_in_b, organization=self.org_b)
 
-        # Give the provider a ProfessionalGroupAccess that covers the org-B patient.
+        # Give the provider a GroupAccess that covers the org-B patient.
         # This simulates a cross-org group grant that must not bypass org isolation.
         from omop_core.models import PatientGroup
         self.group = PatientGroup.objects.create(
             name='Cross-org group', slug='cross-org-group', organization=self.org_b,
         )
         PatientGroupMembership.objects.create(group=self.group, person_id=self.person_in_b.person_id)
-        ProfessionalGroupAccess.objects.create(
+        GroupAccess.objects.create(
             identity=self.provider,
             group=self.group,
             role='navigator',
@@ -1391,7 +1391,7 @@ class ResolvePersonIdOrgBypassTest(TestCase):
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.token.token}')
 
     def test_org_token_denied_for_patient_in_other_org_even_with_group_access(self):
-        """Org-A token cannot read org-B patient even if ProfessionalGroupAccess covers them."""
+        """Org-A token cannot read org-B patient even if GroupAccess covers them."""
         resp = self.client.get(f'/api/lab-results/summary/?person_id={self.person_in_b.person_id}')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
