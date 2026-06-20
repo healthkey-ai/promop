@@ -20,7 +20,6 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.request import Request
 from rest_framework.test import APIRequestFactory
 
-import patient_portal.api.views as views_module
 from omop_core.models import Organization
 from patient_portal.api.views import PatientInfoViewSet
 from patient_portal.models import Identity
@@ -90,9 +89,6 @@ class Command(BaseCommand):
         parsers = [JSONParser(), MultiPartParser(), FormParser()]
         total_created = total_updated = total_errors = 0
         all_person_ids: list[int] = []
-
-        original_gro = views_module.get_request_org
-        views_module.get_request_org = lambda req: org
 
         try:
             for i in range(0, len(patient_ids), batch_size):
@@ -173,7 +169,7 @@ class Command(BaseCommand):
                 if max_errors is not None and len(errors) > max_errors:
                     self.stderr.write(f"    … and {len(errors) - max_errors} more errors (use -v 2 to see all)")
         finally:
-            views_module.get_request_org = original_gro
+            pass
 
         # ── Deferred refresh pass ──────────────────────────────────────────────
         # Now that all OMOP writes are committed, rebuild PatientInfo from OMOP
@@ -209,6 +205,18 @@ class Command(BaseCommand):
                 f"{refresh_errors} errors, {elapsed:.1f}s total "
                 f"({elapsed / len(all_person_ids):.1f}s/patient)"
             )
+
+        # ── Org stamp ─────────────────────────────────────────────────────────
+        # Explicitly set organization on every PatientInfo we touched.
+        # This is the authoritative stamp — it does not rely on get_request_org
+        # being callable from inside upload_fhir (which returns None for
+        # superusers, the identity used by this command).
+        if all_person_ids:
+            from omop_core.models import PatientInfo
+            stamped = PatientInfo.objects.filter(
+                person_id__in=all_person_ids,
+            ).update(organization=org)
+            self.stdout.write(f"Stamped org='{org.name}' on {stamped} PatientInfo records")
 
         self.stdout.write(
             self.style.SUCCESS(
