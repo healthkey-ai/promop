@@ -6080,3 +6080,86 @@ class TherapyConceptIdTest(TestCase):
         """later_therapy_ids is either None or a list."""
         pi = self._refresh(self.person_krd)
         self.assertIn(pi.later_therapy_ids, [None, []])
+
+
+class OrgDiseaseStatsTest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        from omop_core.models import Organization, PatientGroup, GroupAccess
+        self.org_a = Organization.objects.create(name='Org A', slug='org-a')
+        self.org_b = Organization.objects.create(name='Org B', slug='org-b')
+        self.group_a = PatientGroup.objects.create(
+            organization=self.org_a, name='Group A', slug='group-a'
+        )
+
+        # Create patients in org_a
+        for i, slug in enumerate(['mm', 'mm', 'breast-cancer'], start=1):
+            p = Person.objects.create(person_id=9000 + i)
+            PatientInfo.objects.create(person=p, organization=self.org_a, disease_slug=slug)
+
+        # Create patient in org_b
+        p4 = Person.objects.create(person_id=9004)
+        PatientInfo.objects.create(person=p4, organization=self.org_b, disease_slug='cll')
+
+        self.staff = Identity.objects.create_user(email='staff@t.com', password='x', is_staff=True)
+        self.org_admin = Identity.objects.create_user(email='admin@t.com', password='x')
+        self.doctor = Identity.objects.create_user(email='doc@t.com', password='x')
+        self.nobody = Identity.objects.create_user(email='none@t.com', password='x')
+
+        GroupAccess.objects.create(identity=self.org_admin, org=self.org_a, role='org_admin')
+        GroupAccess.objects.create(identity=self.doctor, group=self.group_a, role='doctor')
+
+    def _get(self, user):
+        self.client.force_authenticate(user=user)
+        return self.client.get('/api/stats/org-disease/')
+
+    def test_staff_sees_all_orgs(self):
+        resp = self._get(self.staff)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        slugs = {o['org_slug'] for o in resp.data}
+        self.assertIn('org-a', slugs)
+        self.assertIn('org-b', slugs)
+
+    def test_staff_disease_counts_correct(self):
+        resp = self._get(self.staff)
+        org_a_data = next(o for o in resp.data if o['org_slug'] == 'org-a')
+        self.assertEqual(org_a_data['total'], 3)
+        counts = {d['disease_slug']: d['count'] for d in org_a_data['disease_counts']}
+        self.assertEqual(counts['mm'], 2)
+        self.assertEqual(counts['breast-cancer'], 1)
+
+    def test_org_admin_sees_only_their_org(self):
+        resp = self._get(self.org_admin)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        slugs = {o['org_slug'] for o in resp.data}
+        self.assertIn('org-a', slugs)
+        self.assertNotIn('org-b', slugs)
+
+    def test_doctor_sees_their_group_org(self):
+        resp = self._get(self.doctor)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        slugs = {o['org_slug'] for o in resp.data}
+        self.assertIn('org-a', slugs)
+
+    def test_no_grants_returns_empty_list(self):
+        resp = self._get(self.nobody)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data, [])
+
+    def test_unauthenticated_returns_401(self):
+        self.client.logout()
+        resp = self.client.get('/api/stats/org-disease/')
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_response_shape(self):
+        resp = self._get(self.org_admin)
+        org = resp.data[0]
+        self.assertIn('org_slug', org)
+        self.assertIn('org_name', org)
+        self.assertIn('total', org)
+        self.assertIn('disease_counts', org)
+        if org['disease_counts']:
+            dc = org['disease_counts'][0]
+            self.assertIn('disease_slug', dc)
+            self.assertIn('label', dc)
+            self.assertIn('count', dc)

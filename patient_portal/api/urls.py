@@ -15,6 +15,8 @@ from .views import (
     SurveyViewSet, PatientSurveyResponseViewSet,
     # Controlled vocabulary + OMOP concept lookup
     vocabulary_list, concept_lookup,
+    # Stats
+    org_disease_stats,
 )
 
 router = DefaultRouter()
@@ -53,4 +55,5 @@ urlpatterns = [
     path('auth/test/', auth_test, name='auth_test'),
     path('vocabularies/<str:model_name>/', vocabulary_list, name='vocabulary-list'),
     path('concepts/lookup/', concept_lookup, name='concept-lookup'),
+    path('stats/org-disease/', org_disease_stats, name='stats-org-disease'),
 ]

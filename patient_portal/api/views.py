@@ -36,6 +36,7 @@ from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name
+from omop_core.services.access import get_visible_orgs
 from datetime import datetime
 from django.utils.timezone import localdate
 import csv
@@ -2105,6 +2106,52 @@ def health_check(request):
         'service': 'ctomop',
         'database': db_status,
     }, status=http_status)
+
+
+# Disease label lookup — human-readable names for known disease slugs.
+_DISEASE_LABELS = {
+    'mm':                     'Multiple Myeloma',
+    'MM':                     'Multiple Myeloma',
+    'er-erbb2-breast-cancer': 'ER+/HER2+ Breast Cancer',
+    'breast-cancer':           'Breast Cancer',
+    'follicular-lymphoma':     'Follicular Lymphoma',
+    'cll':                    'Chronic Lymphocytic Leukemia',
+    'lung-cancer':             'Lung Cancer',
+    'colon-cancer':            'Colon Cancer',
+}
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def org_disease_stats(request):
+    """GET /api/stats/org-disease/ — per-org disease patient counts for the requesting user."""
+    from django.db.models import Count
+
+    orgs = get_visible_orgs(request.user)
+    result = []
+    for org in orgs.order_by('name'):
+        rows = (
+            PatientInfo.objects
+            .filter(organization=org)
+            .values('disease_slug')
+            .annotate(count=Count('id'))
+            .order_by('-count')
+        )
+        disease_counts = [
+            {
+                'disease_slug': r['disease_slug'] or '',
+                'label': _DISEASE_LABELS.get(r['disease_slug'] or '', r['disease_slug'] or 'Unknown'),
+                'count': r['count'],
+            }
+            for r in rows
+        ]
+        result.append({
+            'org_slug': org.slug,
+            'org_name': org.name,
+            'total': sum(d['count'] for d in disease_counts),
+            'disease_counts': disease_counts,
+        })
+    return Response(result)
 
 
 @csrf_exempt
