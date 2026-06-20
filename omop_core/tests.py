@@ -559,3 +559,11 @@ class GetVisibleOrgsTest(TestCase):
         )
         orgs = list(get_visible_orgs(future))
         self.assertIn(self.org_b, orgs)
+
+    def test_xor_constraint_prevents_both_org_and_group_set(self):
+        from django.db import IntegrityError, transaction
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                GroupAccess.objects.create(
+                    identity=self.nobody, org=self.org_a, group=self.group_a, role='org_admin'
+                )

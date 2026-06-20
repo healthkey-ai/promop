@@ -16,10 +16,19 @@ interface OrgStats {
 
 export default function StatsPage() {
   const [data, setData] = useState<OrgStats[] | null>(null);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
-    api.get<OrgStats[]>('/api/stats/org-disease/').then(r => setData(r.data));
+    api.get<OrgStats[]>('/api/stats/org-disease/')
+      .then(r => setData(r.data))
+      .catch(() => setError(true));
   }, []);
+
+  if (error) {
+    return (
+      <div className="p-8 text-center text-red-500">Failed to load stats. Please try again.</div>
+    );
+  }
 
   if (data === null) {
     return (
