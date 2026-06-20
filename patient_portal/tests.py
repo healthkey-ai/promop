@@ -1561,7 +1561,7 @@ class _SmartBase(TestCase):
 
         # Organization + ApplicationOrganization so get_request_org() returns an org
         # (without this, access checks fall through to can_access_patient which rejects
-        # foundation_user because it has no PatientUser/ProfessionalGroupAccess).
+        # foundation_user because it has no PatientUser/GroupAccess).
         from omop_core.models import Organization, ApplicationOrganization
         cls.organization = Organization.objects.create(
             name='SMART Test Org',

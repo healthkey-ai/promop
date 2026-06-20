@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.db.models import Q
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.postgres.indexes import GinIndex
@@ -133,19 +134,24 @@ class PatientGroupMembership(models.Model):
         return f"Person {self.person_id} in {self.group.name}"
 
 
-class ProfessionalGroupAccess(models.Model):
-    """Grants a professional (Identity) access to a patient group."""
+class GroupAccess(models.Model):
+    """Grants a professional (Identity) access to an org or a patient group."""
     ROLE_CHOICES = [
-        ('admin', 'Admin'),
+        ('org_admin', 'Org Admin'),
+        ('doctor',    'Doctor'),
         ('navigator', 'Navigator'),
-        ('doctor', 'Doctor'),
     ]
     identity = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
         related_name='group_access_grants',
     )
+    org = models.ForeignKey(
+        'Organization', on_delete=models.CASCADE,
+        null=True, blank=True, related_name='access_grants',
+    )
     group = models.ForeignKey(
-        PatientGroup, on_delete=models.CASCADE, related_name='access_grants',
+        PatientGroup, on_delete=models.CASCADE,
+        null=True, blank=True, related_name='access_grants',
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
     expires_at = models.DateTimeField(null=True, blank=True)
@@ -156,16 +162,30 @@ class ProfessionalGroupAccess(models.Model):
     )
 
     class Meta:
-        db_table = 'professional_group_access'
+        db_table = 'group_access'
         constraints = [
+            models.CheckConstraint(
+                check=(
+                    Q(org__isnull=False, group__isnull=True) |
+                    Q(org__isnull=True, group__isnull=False)
+                ),
+                name='group_access_org_xor_group',
+            ),
             models.UniqueConstraint(
                 fields=['identity', 'group'],
+                condition=Q(group__isnull=False),
                 name='uq_identity_group',
+            ),
+            models.UniqueConstraint(
+                fields=['identity', 'org'],
+                condition=Q(org__isnull=False),
+                name='uq_identity_org',
             ),
         ]
 
     def __str__(self):
-        return f"{self.identity} → {self.group.name} ({self.role})"
+        scope = f"org={self.org_id}" if self.org_id else f"group={self.group_id}"
+        return f"{self.identity} → {scope} ({self.role})"
 
 
 class PersonalRepresentative(models.Model):

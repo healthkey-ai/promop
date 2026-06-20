@@ -152,10 +152,10 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         )):
             # Session / partner-auth users: scope to only the patients they can
             # access — their own record (PatientUser) and any patients in their
-            # professional groups (ProfessionalGroupAccess). Doctors/admins with
+            # professional groups (GroupAccess). Doctors/admins with
             # group access see their whole panel; is_staff bypasses this entirely.
             from patient_portal.models import PatientUser
-            from omop_core.models import PatientGroupMembership, ProfessionalGroupAccess
+            from omop_core.models import PatientGroupMembership, GroupAccess
             from django.utils import timezone
             from django.db.models import Q
 
@@ -171,7 +171,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
 
             # Professional group access (non-expired grants)
             now = timezone.now()
-            actor_group_ids = ProfessionalGroupAccess.objects.filter(
+            actor_group_ids = GroupAccess.objects.filter(
                 identity=self.request.user,
             ).filter(
                 Q(expires_at__isnull=True) | Q(expires_at__gt=now),
