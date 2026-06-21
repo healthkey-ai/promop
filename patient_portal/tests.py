@@ -6163,3 +6163,64 @@ class OrgDiseaseStatsTest(TestCase):
             self.assertIn('disease_slug', dc)
             self.assertIn('label', dc)
             self.assertIn('count', dc)
+
+
+class OrgAdminPatientListScopingTest(TestCase):
+    """Verify that org_admin GroupAccess grants scope the patient list correctly."""
+
+    def setUp(self):
+        from omop_core.models import Organization, PatientGroup, GroupAccess
+        self.client = APIClient()
+
+        self.org_a = Organization.objects.create(name='Org A', slug='org-a-scope')
+        self.org_b = Organization.objects.create(name='Org B', slug='org-b-scope')
+        self.group_a = PatientGroup.objects.create(
+            organization=self.org_a, name='Group A', slug='group-a-scope'
+        )
+
+        # Two patients in org_a, one in org_b, one with no org
+        p1 = Person.objects.create(person_id=8001)
+        p2 = Person.objects.create(person_id=8002)
+        p3 = Person.objects.create(person_id=8003)
+        p4 = Person.objects.create(person_id=8004)
+        self.pi_a1 = PatientInfo.objects.create(person=p1, organization=self.org_a)
+        self.pi_a2 = PatientInfo.objects.create(person=p2, organization=self.org_a)
+        self.pi_b = PatientInfo.objects.create(person=p3, organization=self.org_b)
+        self.pi_none = PatientInfo.objects.create(person=p4)
+
+        self.org_admin = Identity.objects.create_user(email='orgadmin@t.com', password='x')
+        self.no_grant = Identity.objects.create_user(email='nogrant@t.com', password='x')
+        self.staff = Identity.objects.create_user(email='staff2@t.com', password='x', is_staff=True)
+
+        from django.utils import timezone
+        GroupAccess.objects.create(
+            identity=self.org_admin,
+            org=self.org_a,
+            role='org_admin',
+        )
+
+    def _get(self, user):
+        self.client.force_authenticate(user=user)
+        return self.client.get('/api/patient-info/')
+
+    def test_org_admin_sees_only_their_org_patients(self):
+        resp = self._get(self.org_admin)
+        self.assertEqual(resp.status_code, 200)
+        ids = {p['id'] for p in resp.data}
+        self.assertIn(self.pi_a1.id, ids)
+        self.assertIn(self.pi_a2.id, ids)
+        self.assertNotIn(self.pi_b.id, ids)
+        self.assertNotIn(self.pi_none.id, ids)
+
+    def test_no_grant_user_sees_nothing(self):
+        resp = self._get(self.no_grant)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data), 0)
+
+    def test_staff_sees_all_patients(self):
+        resp = self._get(self.staff)
+        self.assertEqual(resp.status_code, 200)
+        ids = {p['id'] for p in resp.data}
+        self.assertIn(self.pi_a1.id, ids)
+        self.assertIn(self.pi_b.id, ids)
+        self.assertIn(self.pi_none.id, ids)

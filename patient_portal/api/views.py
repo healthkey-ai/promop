@@ -170,24 +170,39 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             except PatientUser.DoesNotExist:
                 pass
 
-            # Professional group access (non-expired grants)
             now = timezone.now()
-            actor_group_ids = GroupAccess.objects.filter(
+            active_grants = GroupAccess.objects.filter(
                 identity=self.request.user,
             ).filter(
                 Q(expires_at__isnull=True) | Q(expires_at__gt=now),
-            ).values_list('group_id', flat=True)
+            )
 
+            # Org-admin grants: see all patients belonging to those orgs
+            admin_org_ids = list(
+                active_grants.filter(role='org_admin').values_list('org_id', flat=True)
+            )
+
+            # Group grants: see patients in those groups
+            actor_group_ids = list(
+                active_grants.filter(group__isnull=False).values_list('group_id', flat=True)
+            )
             if actor_group_ids:
                 group_pids = PatientGroupMembership.objects.filter(
                     group_id__in=actor_group_ids
                 ).values_list('person_id', flat=True)
                 accessible_pids.update(group_pids)
 
-            if not accessible_pids:
+            if not accessible_pids and not admin_org_ids:
                 return qs.none()
 
-            qs = qs.filter(person_id__in=accessible_pids)
+            if admin_org_ids and accessible_pids:
+                qs = qs.filter(
+                    Q(organization_id__in=admin_org_ids) | Q(person_id__in=accessible_pids)
+                )
+            elif admin_org_ids:
+                qs = qs.filter(organization_id__in=admin_org_ids)
+            else:
+                qs = qs.filter(person_id__in=accessible_pids)
         return qs
 
     def get_serializer_class(self):
