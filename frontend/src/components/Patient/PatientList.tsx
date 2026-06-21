@@ -107,7 +107,7 @@ export default function PatientList() {
   return (
     <div className="p-6">
       <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-foreground">Patient Records</h1>
+        <h1 className="text-2xl font-bold text-foreground">PROMOP Admin</h1>
         <div className="flex gap-2">
           {selectedIds.size > 0 && (
             <button
