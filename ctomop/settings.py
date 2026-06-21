@@ -251,11 +251,11 @@ _auth_classes = [
     'patient_portal.api.authentication.ServiceTokenAuthentication',
     'patient_portal.api.authentication.PartnerAuthentication',
     'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
+    'patient_portal.api.authentication.CsrfExemptSessionAuthentication',
 ]
 if DEBUG:
     _auth_classes += [
         'rest_framework.authentication.BasicAuthentication',
-        'patient_portal.api.authentication.CsrfExemptSessionAuthentication',
     ]
 
 REST_FRAMEWORK = {
