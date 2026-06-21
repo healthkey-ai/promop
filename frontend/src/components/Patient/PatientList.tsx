@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, FileText, Trash2 } from "lucide-react";
+import { Upload, FileText, Trash2, LogOut } from "lucide-react";
 import api from "@/api/axios";
+import { clearTokens } from "@/utils/oauth";
 
 interface Patient {
   person_id: number;
@@ -98,6 +99,11 @@ export default function PatientList() {
 
   const isAllSelected = patients.length > 0 && selectedIds.size === patients.length;
 
+  const handleLogout = () => {
+    clearTokens();
+    navigate("/login");
+  };
+
   return (
     <div className="p-6">
       <div className="mb-6 flex items-center justify-between">
@@ -131,6 +137,13 @@ export default function PatientList() {
           >
             <FileText size={16} />
             Upload FHIR
+          </button>
+          <button
+            onClick={handleLogout}
+            className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-accent"
+          >
+            <LogOut size={16} />
+            Logout
           </button>
         </div>
       </div>
