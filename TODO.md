@@ -117,26 +117,4 @@
 - `patient_portal/api/lab_results/sync.py:49-56`
 - Superseded by findings #6 and #7 in the backend review above.
 
----
-
-## Wearable support
-
-Backend items for the `phr-mobile-bridge` HealthKit → OMOP sync app. Item IDs (B0–B6)
-match `phr-mobile-bridge/docs/wearable-sync-plan.md §13`.
-
-> **Done** (PR #172): **B0** patient self-service endpoint (`POST /api/fhir/patient-sync/`)
-> + provenance `PATIENT_SELF` · **B3** extended Clinical Record ingest (Procedure →
-> procedure_occurrence, Immunization → drug_exposure, Allergy/DiagnosticReport →
-> observation) · **B4** patient delete endpoint (`POST /api/fhir/patient-delete/`)
-> · **B6** consent endpoint (`GET/POST /api/fhir/patient-consent/`) · throttle
-> tuning. Earlier (PR #171): **B1** identity resolution · **B2** `measurement_datetime`
-> + daily-rollup upsert.
-
-### B5 — Per-environment config (ops, not promop code)
-- **Status:** done as far as code goes. Throttle rates are env-tunable
-  (`SYNC_THROTTLE_RATE`, `PATIENT_SYNC_THROTTLE_RATE`); the prod patient path uses
-  the patient's own Firebase token (no service token).
-- **Remaining (deployment, not this repo):** stable HTTPS base URLs for
-  dev/staging/prod; confirm Firebase project reuse (same `iss` as ht-phr); then
-  the app flips its default auth mode to `.firebase`.
 
