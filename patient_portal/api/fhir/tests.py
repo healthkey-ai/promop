@@ -160,6 +160,46 @@ class FhirSyncTests(TestCase):
         resp = APIClient().post('/api/fhir/patient-sync/', {'bundle': SAMPLE_BUNDLE}, format='json')
         self.assertIn(resp.status_code, (401, 403))
 
+    def test_patient_delete_removes_only_targeted_own_measurements(self):
+        """B4: a patient deletes their own measurement by source_value + datetime
+        + value; other rows and provenance are untouched."""
+        patient = Identity.objects.create(
+            issuer='https://securetoken.google.com/healthtree-test', sub='del-patient',
+            email='del@test.com')
+        patient.set_unusable_password()
+        patient.save()
+        client = APIClient()
+        client.force_authenticate(user=patient)
+
+        def hr(time, value):
+            return {"resource": {
+                "resourceType": "Observation",
+                "code": {"coding": [{"system": "http://loinc.org", "code": "8867-4",
+                                     "display": "Heart rate"}]},
+                "effectiveDateTime": time, "valueQuantity": {"value": value, "unit": "/min"}}}
+        bundle = {"resourceType": "Bundle", "type": "collection",
+                  "entry": [hr("2026-05-01T08:00:00Z", 61), hr("2026-05-01T12:00:00Z", 88)]}
+        pid = client.post('/api/fhir/patient-sync/', {'bundle': bundle}, format='json').json()['person_id']
+        self.assertEqual(Measurement.objects.filter(person_id=pid).count(), 2)
+
+        resp = client.post('/api/fhir/patient-delete/', {'targets': [
+            {"source_value": "Heart rate", "date": "2026-05-01",
+             "datetime": "2026-05-01T08:00:00Z", "value": 61},
+        ]}, format='json')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()['deleted'], 1)
+
+        remaining = Measurement.objects.filter(person_id=pid)
+        self.assertEqual(remaining.count(), 1)
+        self.assertEqual(float(remaining.first().value_as_number), 88.0)
+        # provenance for the deleted row is gone; the surviving one remains.
+        self.assertEqual(ProvenanceRecord.objects.filter(
+            source='PATIENT_SELF', target_patient_id=str(pid)).count(), 1)
+
+    def test_patient_delete_requires_authentication(self):
+        resp = APIClient().post('/api/fhir/patient-delete/', {'targets': []}, format='json')
+        self.assertIn(resp.status_code, (401, 403))
+
     def test_ingests_bundle_bound_to_resolved_person(self):
         resp = self._sync()
         self.assertEqual(resp.status_code, 201, resp.content)

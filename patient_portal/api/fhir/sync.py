@@ -725,3 +725,55 @@ class FhirPatientSyncView(FhirSyncView):
     throttle_scope = 'patient_sync'
     provenance_source = 'PATIENT_SELF'
     self_service_only = True
+
+
+class FhirPatientDeleteView(APIView):
+    """POST /api/fhir/patient-delete/ — propagate HealthKit deletions (plan item
+    B4). HealthKit reports deletions as opaque UUIDs, and OMOP has no per-sample
+    external id, so the app identifies rows by what it synced. Each target removes
+    the patient's own Measurement rows matching ``source_value`` + ``date``
+    (optionally narrowed by ``datetime`` and ``value``), plus their provenance.
+    Scoped to the authenticated patient — a patient can only delete their own.
+
+    Body: ``{"targets": [{"source_value": "Heart rate", "date": "2026-05-01",
+    "datetime": "2026-05-01T08:00:00Z", "value": 61}, ...]}``
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_scope = 'patient_sync'
+
+    @transaction.atomic
+    def post(self, request):
+        if not (hasattr(request.user, 'issuer') and request.user.issuer != 'urn:service'):
+            return Response({'detail': 'Patient identity required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        from patient_portal.services import resolve_or_create_person
+        person = resolve_or_create_person(request.user)
+
+        targets = request.data.get('targets')
+        if not isinstance(targets, list):
+            return Response({'detail': 'targets must be a list.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        meas_ct = ContentType.objects.get_for_model(Measurement)
+        deleted = 0
+        with suppress_patient_info_refresh():
+            for target in targets:
+                sv = (target.get('source_value') or '')[:50]
+                obs_date = _parse_date(target.get('date') or target.get('datetime'))
+                if not sv or obs_date is None:
+                    continue
+                qs = Measurement.objects.filter(
+                    person=person, measurement_source_value=sv, measurement_date=obs_date)
+                obs_dt = _parse_datetime(target.get('datetime'))
+                if obs_dt is not None:
+                    qs = qs.filter(measurement_datetime=obs_dt)
+                if target.get('value') is not None:
+                    qs = qs.filter(value_as_number=target['value'])
+                ids = list(qs.values_list('measurement_id', flat=True))
+                if ids:
+                    ProvenanceRecord.objects.filter(
+                        content_type=meas_ct, object_id__in=ids).delete()
+                    qs.delete()
+                    deleted += len(ids)
+        return Response({'person_id': person.person_id, 'deleted': deleted},
+                        status=status.HTTP_200_OK)
