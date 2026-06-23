@@ -121,6 +121,45 @@ class FhirSyncTests(TestCase):
         resp = anon.post('/api/fhir/sync/', {'bundle': SAMPLE_BUNDLE}, format='json')
         self.assertIn(resp.status_code, (401, 403))
 
+    # ---- B0 connector: patient self-service ingest ---------------------- #
+
+    def test_patient_sync_self_writes_with_patient_self_provenance(self):
+        """A patient ingests their OWN data with a (non-staff) identity: the
+        Person is resolved from that identity, any supplied person_id is ignored,
+        and provenance is PATIENT_SELF (not EHR_SYNC)."""
+        patient = Identity.objects.create(
+            issuer='https://securetoken.google.com/healthtree-test', sub='patient-abc',
+            email='patient@test.com')
+        patient.set_unusable_password()
+        patient.save()
+        client = APIClient()
+        client.force_authenticate(user=patient)
+
+        bundle = {"resourceType": "Bundle", "type": "collection", "entry": [{"resource": {
+            "resourceType": "Observation",
+            "code": {"coding": [{"system": "http://loinc.org", "code": "8867-4",
+                                 "display": "Heart rate"}]},
+            "effectiveDateTime": "2026-05-01T08:00:00Z",
+            "valueQuantity": {"value": 61, "unit": "/min"},
+        }}]}
+        # A malicious person_id must be ignored — a patient can only write self.
+        resp = client.post('/api/fhir/patient-sync/',
+                           {'bundle': bundle, 'person_id': 999999}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+        pid = resp.json()['person_id']
+
+        self.assertEqual(PatientUser.objects.get(identity=patient).person_id, pid)
+        self.assertNotEqual(pid, 999999, "supplied person_id ignored; resolved from identity")
+        self.assertEqual(Measurement.objects.filter(person_id=pid).count(), 1)
+        self.assertTrue(ProvenanceRecord.objects.filter(
+            source='PATIENT_SELF', target_patient_id=str(pid)).exists())
+        self.assertFalse(ProvenanceRecord.objects.filter(
+            source='EHR_SYNC', target_patient_id=str(pid)).exists())
+
+    def test_patient_sync_requires_authentication(self):
+        resp = APIClient().post('/api/fhir/patient-sync/', {'bundle': SAMPLE_BUNDLE}, format='json')
+        self.assertIn(resp.status_code, (401, 403))
+
     def test_ingests_bundle_bound_to_resolved_person(self):
         resp = self._sync()
         self.assertEqual(resp.status_code, 201, resp.content)

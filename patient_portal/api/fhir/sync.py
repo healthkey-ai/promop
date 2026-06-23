@@ -25,6 +25,7 @@ from datetime import date, datetime
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 from rest_framework import serializers, status
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -172,6 +173,11 @@ class FhirSyncView(APIView):
 
     permission_classes = [ScopedTokenPermission]
     throttle_scope = 'sync'
+    # Provenance recorded for every row this view writes.
+    provenance_source = 'EHR_SYNC'
+    # When True (patient self-service), ignore person_id/actor_* and resolve the
+    # Person from the authenticated identity — a patient can only write their own.
+    self_service_only = False
 
     @transaction.atomic
     def post(self, request):
@@ -179,15 +185,21 @@ class FhirSyncView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        actor_iss = data.get('actor_iss', '')
-        actor_sub = data.get('actor_sub', '')
+        if self.self_service_only:
+            actor_iss = actor_sub = ''
+            person_id = None
+            source_user_id = f"{getattr(request.user, 'issuer', '')}|{getattr(request.user, 'sub', '')}"
+        else:
+            actor_iss = data.get('actor_iss', '')
+            actor_sub = data.get('actor_sub', '')
+            person_id = data.get('person_id')
+            source_user_id = f"{actor_iss}|{actor_sub}" if actor_iss and actor_sub else ''
         bundle = data['bundle']
 
-        resolution = self._resolve_person(request, actor_iss, actor_sub, data.get('person_id'))
+        resolution = self._resolve_person(request, actor_iss, actor_sub, person_id)
         if isinstance(resolution, Response):
             return resolution
         person, org = resolution
-        source_user_id = f"{actor_iss}|{actor_sub}" if actor_iss and actor_sub else ''
 
         ehr_type = _ensure_concept(EHR_TYPE_CONCEPT_ID)
         no_match = _ensure_concept(NO_MATCHING_CONCEPT_ID)
@@ -481,7 +493,7 @@ class FhirSyncView(APIView):
         ct = ContentType.objects.get_for_model(model)
         ProvenanceRecord.objects.bulk_create([
             ProvenanceRecord(
-                source='EHR_SYNC',
+                source=self.provenance_source,
                 source_user_id=source_user_id,
                 target_patient_id=str(person.person_id),
                 organization=org,
@@ -583,3 +595,17 @@ class FhirSyncView(APIView):
             identity.set_unusable_password()
             identity.save(update_fields=['password'])
         return resolve_or_create_person(identity).person_id
+
+
+class FhirPatientSyncView(FhirSyncView):
+    """POST /api/fhir/patient-sync/ — the **connector** path (plan item B0): a
+    patient ingests their OWN HealthKit data with their Firebase token, no service
+    token. Unlike /api/fhir/sync/ (service-token, on-behalf-of), this permits a
+    regular authenticated patient identity, resolves the Person from that identity
+    (any person_id / actor_* in the body is ignored, so a patient can never write
+    to someone else's record), and records provenance PATIENT_SELF.
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_scope = 'sync'
+    provenance_source = 'PATIENT_SELF'
+    self_service_only = True
