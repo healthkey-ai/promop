@@ -606,6 +606,6 @@ class FhirPatientSyncView(FhirSyncView):
     to someone else's record), and records provenance PATIENT_SELF.
     """
     permission_classes = [IsAuthenticated]
-    throttle_scope = 'sync'
+    throttle_scope = 'patient_sync'
     provenance_source = 'PATIENT_SELF'
     self_service_only = True
