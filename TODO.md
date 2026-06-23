@@ -124,36 +124,19 @@
 Backend items for the `phr-mobile-bridge` HealthKit → OMOP sync app. Item IDs (B0–B6)
 match `phr-mobile-bridge/docs/wearable-sync-plan.md §13`.
 
-> **Done** (removed): **B1** identity resolution · **B2** `measurement_datetime` +
-> daily-rollup upsert (PR #171) · **B0** patient self-service endpoint
-> `POST /api/fhir/patient-sync/` (Firebase-authed patient, Person resolved from
-> the token, provenance `PATIENT_SELF`; PR #172) · the **provenance** fix
-> (`PATIENT_SELF` on the patient path) · sync-endpoint throttle tuning.
+> **Done** (PR #172): **B0** patient self-service endpoint (`POST /api/fhir/patient-sync/`)
+> + provenance `PATIENT_SELF` · **B3** extended Clinical Record ingest (Procedure →
+> procedure_occurrence, Immunization → drug_exposure, Allergy/DiagnosticReport →
+> observation) · **B4** patient delete endpoint (`POST /api/fhir/patient-delete/`)
+> · **B6** consent endpoint (`GET/POST /api/fhir/patient-consent/`) · throttle
+> tuning. Earlier (PR #171): **B1** identity resolution · **B2** `measurement_datetime`
+> + daily-rollup upsert.
 
-### B3 — Clinical Record types beyond the first-cut scope
-- **Status:** not started. `/api/fhir/sync/` ingests Patient / Observation /
-  Condition / MedicationStatement|MedicationRequest only.
-- **Action:** Add (or define app-side downconversion for) AllergyIntolerance,
-  Immunization, Procedure, and DiagnosticReport wrappers from HealthKit Clinical
-  Records. Gates `wearable-sync-plan.md §5.4`.
-
-### B4 — HealthKit deletions → delete path
-- **Status:** not started. The sync ingest has no delete semantics; the app
-  currently only logs deletions.
-- **Action:** Define a granular delete path (likely connector + scoped OMOP
-  delete by identity + concept/date) so removing a HealthKit sample propagates.
-
-### B5 — Per-environment config
-- **Status:** dev only. The production patient path uses the patient's own
-  Firebase token (no service token); the dev/connector path still uses a local
-  `SERVICE_AUTH_TOKEN`.
-- **Action:** Stable HTTPS base URLs for dev/staging/prod; confirm Firebase
-  project reuse (same `iss` as ht-phr). Then the app flips its default to
-  `.firebase` (patient-sync) for production.
-
-### B6 — Consent representation
-- **Status:** not started. App has no per-category consent yet; nothing recorded
-  server-side.
-- **Action:** Decide whether per-category consent is local-only or recorded in a
-  promop `PatientConsent` model, and wire it if server-side.
+### B5 — Per-environment config (ops, not promop code)
+- **Status:** done as far as code goes. Throttle rates are env-tunable
+  (`SYNC_THROTTLE_RATE`, `PATIENT_SYNC_THROTTLE_RATE`); the prod patient path uses
+  the patient's own Firebase token (no service token).
+- **Remaining (deployment, not this repo):** stable HTTPS base URLs for
+  dev/staging/prod; confirm Firebase project reuse (same `iss` as ht-phr); then
+  the app flips its default auth mode to `.firebase`.
 
