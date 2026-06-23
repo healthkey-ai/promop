@@ -122,32 +122,13 @@
 ## Wearable support
 
 Backend items for the `phr-mobile-bridge` HealthKit → OMOP sync app. Item IDs (B0–B6)
-match `phr-mobile-bridge/docs/wearable-sync-plan.md §13`. `POST /api/fhir/sync/`
-already handles identity resolution, per-reading `measurement_datetime`, and
-daily-aggregate upsert (B1 resolved, B2 done — see PR #171).
+match `phr-mobile-bridge/docs/wearable-sync-plan.md §13`.
 
-### B0 — Build the connector service
-- **Status:** not built (blocks the production write path). App side is done.
-- **Why:** `ScopedTokenPermission` rejects a patient's own token on POST to
-  `/api/fhir/sync/` (403). A native app can't safely hold a service token, so a
-  trusted server must verify the patient's Firebase token and forward to promop
-  with the service token + the patient's `actor_iss`/`actor_sub`. Mirrors hk-labs.
-- **Contract:** `phr-mobile-bridge/docs/connector-contract.md` (bundle passthrough).
-- **Action:** Stand up a thin Firebase-authed ingress (or extend hk-labs) that
-  relays to `/api/fhir/sync/`; **must verify the Firebase token and bind body
-  `actor_iss`/`actor_sub` to the verified `(iss, sub)`** (reject mismatch). Provision
-  the connector↔promop service token; set per-env base URLs.
-- **Alternative:** grant patients an OAuth2 `patient/*.write` scope on
-  `/api/fhir/sync/` so the app posts directly — removes the connector but widens
-  promop's write surface. Decide vs B0 (`connector-contract.md §5`).
-
-### Provenance — `/api/fhir/sync/` records EHR_SYNC, plan expects PATIENT_SELF
-- **Status:** discrepancy. `_bulk_insert` hardcodes `source='EHR_SYNC'`
-  (`patient_portal/api/fhir/sync.py`). The wearable plan tags self-entered data
-  `PATIENT_SELF` (and `DOCUMENT_EXTRACTION` for Clinical Records).
-- **Action:** Let the caller signal provenance (e.g. a `source`/`source_type`
-  field or per-resource mapping) and record it instead of a hardcoded value;
-  decide whether the connector or the app sets it.
+> **Done** (removed): **B1** identity resolution · **B2** `measurement_datetime` +
+> daily-rollup upsert (PR #171) · **B0** patient self-service endpoint
+> `POST /api/fhir/patient-sync/` (Firebase-authed patient, Person resolved from
+> the token, provenance `PATIENT_SELF`; PR #172) · the **provenance** fix
+> (`PATIENT_SELF` on the patient path) · sync-endpoint throttle tuning.
 
 ### B3 — Clinical Record types beyond the first-cut scope
 - **Status:** not started. `/api/fhir/sync/` ingests Patient / Observation /
@@ -162,10 +143,13 @@ daily-aggregate upsert (B1 resolved, B2 done — see PR #171).
 - **Action:** Define a granular delete path (likely connector + scoped OMOP
   delete by identity + concept/date) so removing a HealthKit sample propagates.
 
-### B5 — Per-environment config & service-token provisioning
-- **Status:** dev only (local `SERVICE_AUTH_TOKEN`). 
-- **Action:** Provision connector↔promop service tokens and stable HTTPS base
-  URLs for dev/staging/prod; confirm Firebase project reuse (same `iss` as ht-phr).
+### B5 — Per-environment config
+- **Status:** dev only. The production patient path uses the patient's own
+  Firebase token (no service token); the dev/connector path still uses a local
+  `SERVICE_AUTH_TOKEN`.
+- **Action:** Stable HTTPS base URLs for dev/staging/prod; confirm Firebase
+  project reuse (same `iss` as ht-phr). Then the app flips its default to
+  `.firebase` (patient-sync) for production.
 
 ### B6 — Consent representation
 - **Status:** not started. App has no per-category consent yet; nothing recorded
