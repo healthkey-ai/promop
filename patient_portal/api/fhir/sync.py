@@ -33,6 +33,7 @@ from omop_core.models import (
     Concept, ConditionOccurrence, DrugExposure, Measurement, Person, ProvenanceRecord,
 )
 from omop_core.services.pk import next_pk_batch
+from omop_core.signals import suppress_patient_info_refresh
 from patient_portal.api.permissions import ScopedTokenPermission, get_request_org
 # Reuse the proven HK-Labs concept-fallback machinery.
 from patient_portal.api.lab_results.sync import HK_LABS_VOCAB_ID, _ensure_hk_deps
@@ -87,6 +88,24 @@ def _parse_date(value):
         return None
 
 
+def _parse_datetime(value):
+    """FHIR dateTime → aware datetime, or None for date-only values.
+
+    Preserves sub-daily timestamps (e.g. per-reading heart rate) so they land in
+    Measurement.measurement_datetime instead of being truncated to a date.
+    """
+    if not isinstance(value, str) or len(value) <= 10:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        from django.utils import timezone as _tz
+        dt = _tz.make_aware(dt, _tz.utc)
+    return dt
+
+
 def _codings(codeable):
     return (codeable or {}).get('coding', []) or []
 
@@ -108,6 +127,20 @@ def _source_text(codeable):
 def _norm_num(value):
     """Normalize a measurement value to a comparable form for dedup (float | None)."""
     return float(value) if value is not None else None
+
+
+# Observation.extension marker the phr-mobile-bridge sets on daily aggregates
+# (steps, active energy, daily HR avg, …). Such rows are upserted by
+# (person, concept, date) so a changed daily value replaces the prior row
+# instead of stacking — while unmarked clinical readings keep value-level dedup.
+AGGREGATION_EXT_URL = 'https://healthkey.ai/fhir/aggregation'
+
+
+def _is_daily_rollup(obs):
+    for ext in obs.get('extension') or []:
+        if ext.get('url') == AGGREGATION_EXT_URL and ext.get('valueCode') == 'daily':
+            return True
+    return False
 
 
 class FhirSyncRequestSerializer(serializers.Serializer):
@@ -257,42 +290,123 @@ class FhirSyncView(APIView):
     # Batched ingestion
     # ------------------------------------------------------------------ #
     def _ingest_observations(self, person, observations, ehr_type, cache, source_user_id, org):
+        # Daily rollups (steps/energy/daily-avg) upsert by (person, concept, date);
+        # everything else dedups on (date, datetime, concept, source, value).
+        rollups = [o for o in observations if _is_daily_rollup(o)]
+        discrete = [o for o in observations if not _is_daily_rollup(o)]
+        ids = self._insert_discrete_observations(
+            person, discrete, ehr_type, cache, source_user_id, org)
+        if rollups:
+            ids += self._upsert_rollup_observations(
+                person, rollups, ehr_type, cache, source_user_id, org)
+        return ids
+
+    def _parse_obs(self, obs, cache):
+        """Pull the fields one Observation maps onto a Measurement."""
+        effective = obs.get('effectiveDateTime') or (obs.get('effectivePeriod') or {}).get('start')
+        concept = self._lookup(obs.get('code'), cache)
+        qty = obs.get('valueQuantity') or {}
+        return {
+            'date': _parse_date(effective),
+            'dt': _parse_datetime(effective),
+            'cid': concept.concept_id if concept else 0,
+            'sv': _source_text(obs.get('code'))[:50],
+            'value': qty.get('value'),
+            'unit': (qty.get('unit') or qty.get('code') or '')[:50],
+            'vstr': (obs.get('valueString') or _source_text(obs.get('valueCodeableConcept')) or '')[:60],
+        }
+
+    def _insert_discrete_observations(self, person, observations, ehr_type, cache, source_user_id, org):
+        # Dedup includes measurement_datetime so distinct sub-daily readings
+        # (e.g. per-reading heart rate) coexist while exact re-syncs collapse.
         existing = {
-            (d, cid, sv, _norm_num(v))
-            for d, cid, sv, v in Measurement.objects.filter(person=person).values_list(
-                'measurement_date', 'measurement_concept_id', 'measurement_source_value',
-                'value_as_number')
+            (d, dt, cid, sv, _norm_num(v))
+            for d, dt, cid, sv, v in Measurement.objects.filter(person=person).values_list(
+                'measurement_date', 'measurement_datetime', 'measurement_concept_id',
+                'measurement_source_value', 'value_as_number')
         }
         seen = set(existing)
         rows = []
         for obs in observations:
-            obs_date = _parse_date(obs.get('effectiveDateTime')) or _parse_date(
-                (obs.get('effectivePeriod') or {}).get('start'))
-            if obs_date is None:
+            o = self._parse_obs(obs, cache)
+            if o['date'] is None:
                 continue
-            concept = self._lookup(obs.get('code'), cache)
-            cid = concept.concept_id if concept else 0
-            sv = _source_text(obs.get('code'))[:50]
-            qty = obs.get('valueQuantity') or {}
-            value_number = qty.get('value')
-            unit = qty.get('unit') or qty.get('code')
-            value_string = obs.get('valueString') or _source_text(obs.get('valueCodeableConcept'))
-
-            key = (obs_date, cid, sv, _norm_num(value_number))
+            key = (o['date'], o['dt'], o['cid'], o['sv'], _norm_num(o['value']))
             if key in seen:
                 continue
             seen.add(key)
             rows.append(Measurement(
                 person=person,
-                measurement_concept_id=cid,
-                measurement_date=obs_date,
+                measurement_concept_id=o['cid'],
+                measurement_date=o['date'],
+                measurement_datetime=o['dt'],
                 measurement_type_concept=ehr_type,
-                value_as_number=value_number,
-                value_as_string=(value_string or '')[:60],
-                measurement_source_value=sv,
-                unit_source_value=(unit or '')[:50],
+                value_as_number=o['value'],
+                value_as_string=o['vstr'],
+                measurement_source_value=o['sv'],
+                unit_source_value=o['unit'],
             ))
         return self._bulk_insert(Measurement, 'measurement_id', rows, source_user_id, person, org)
+
+    def _upsert_rollup_observations(self, person, observations, ehr_type, cache, source_user_id, org):
+        """Replace any prior row for (person, concept, date) with the new daily
+        value, collapsing stale stacked rows — so a changed daily aggregate
+        updates in place instead of accumulating duplicates."""
+        desired = {}  # (cid, date) -> parsed obs; last in the bundle wins
+        for obs in observations:
+            o = self._parse_obs(obs, cache)
+            if o['date'] is not None:
+                desired[(o['cid'], o['date'])] = o
+        if not desired:
+            return []
+
+        meas_ct = ContentType.objects.get_for_model(Measurement)
+        touched, new_rows = [], []
+        with suppress_patient_info_refresh():
+            for (cid, obs_date), o in desired.items():
+                existing = list(Measurement.objects.filter(
+                    person=person, measurement_concept_id=cid, measurement_date=obs_date,
+                ).order_by('measurement_id'))
+                if not existing:
+                    new_rows.append(Measurement(
+                        person=person,
+                        measurement_concept_id=cid,
+                        measurement_date=obs_date,
+                        measurement_datetime=o['dt'],
+                        measurement_type_concept=ehr_type,
+                        value_as_number=o['value'],
+                        value_as_string=o['vstr'],
+                        measurement_source_value=o['sv'],
+                        unit_source_value=o['unit'],
+                    ))
+                    continue
+
+                keep, extras = existing[0], existing[1:]
+                if extras:  # collapse historical stacked rows for this concept/day
+                    extra_ids = [m.measurement_id for m in extras]
+                    ProvenanceRecord.objects.filter(
+                        content_type=meas_ct, object_id__in=extra_ids).delete()
+                    Measurement.objects.filter(measurement_id__in=extra_ids).delete()
+
+                changed = (
+                    _norm_num(keep.value_as_number) != _norm_num(o['value'])
+                    or keep.measurement_datetime != o['dt']
+                    or keep.value_as_string != o['vstr']
+                    or keep.unit_source_value != o['unit']
+                )
+                if changed:
+                    keep.value_as_number = o['value']
+                    keep.measurement_datetime = o['dt']
+                    keep.value_as_string = o['vstr']
+                    keep.unit_source_value = o['unit']
+                    keep._skip_patient_info_refresh = True
+                    keep.save(update_fields=['value_as_number', 'measurement_datetime',
+                                             'value_as_string', 'unit_source_value'])
+                if changed or extras:
+                    touched.append(keep.measurement_id)
+            inserted = self._bulk_insert(
+                Measurement, 'measurement_id', new_rows, source_user_id, person, org)
+        return touched + inserted
 
     def _ingest_conditions(self, person, conditions, ehr_type, no_match, cache, source_user_id, org):
         existing = set(ConditionOccurrence.objects.filter(person=person).values_list(
