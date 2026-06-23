@@ -17,6 +17,11 @@ from omop_core.models import (
 VOCAB_SCOPE = frozenset({
     'HemOnc', 'RxNorm', 'RxNorm Extension', 'ATC', 'LOINC', 'UCUM',
     'Visit', 'Type Concept',
+    # Clinical-record vocabularies (FHIR sync B3): SNOMED covers conditions,
+    # procedures, and allergies; ICD10CM covers EHR-sourced diagnoses. CVX
+    # (immunizations) is mapped in the ingest but isn't in the current Athena
+    # export, so it loads once a CVX-inclusive bundle is fetched.
+    'SNOMED', 'ICD10CM', 'CVX',
 })
 RXNORM_CLASS_SCOPE = frozenset({'Ingredient', 'Clinical Drug', 'Branded Drug', 'Clinical Drug Comp'})
 LOINC_DOMAIN_SCOPE = frozenset({'Measurement', 'Observation'})

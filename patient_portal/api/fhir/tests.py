@@ -276,6 +276,47 @@ class FhirSyncTests(TestCase):
         self.assertEqual(second['drug_exposure_ids'], [])
         self.assertEqual(Measurement.objects.filter(person_id=first['person_id']).count(), 1)
 
+    def test_clinical_concept_upgrade_updates_in_place(self):
+        """Re-syncing a clinical record after its code becomes resolvable (e.g. a
+        vocabulary load) updates the existing row's concept in place keyed on
+        (source_value, date) — instead of leaving the old 'No matching concept'
+        row stranded next to a new resolved duplicate."""
+        from datetime import date
+        from omop_core.models import Vocabulary, Domain, ConceptClass, Concept
+        bundle = {"resourceType": "Bundle", "type": "collection", "entry": [
+            {"resource": {"resourceType": "Condition",
+                "subject": {"reference": "Patient/p1"},
+                "code": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003"}],
+                         "text": "Hypertension"},
+                "onsetDateTime": "2024-11-01"}},
+        ]}
+
+        # First sync: SNOMED 38341003 isn't loaded → "No matching concept" (0).
+        pid = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json').json()['person_id']
+        row = ConditionOccurrence.objects.get(person_id=pid)
+        self.assertEqual(row.condition_concept_id, 0)
+
+        # Load the concept (simulating the Athena vocabulary load).
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0})
+        domain, _ = Domain.objects.get_or_create(
+            domain_id='Condition',
+            defaults={'domain_name': 'Condition', 'domain_concept_id': 19})
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Clinical Finding',
+            defaults={'concept_class_name': 'Clinical Finding', 'concept_class_concept_id': 0})
+        Concept.objects.create(
+            concept_id=316866, concept_name='Hypertensive disorder', domain=domain,
+            vocabulary=vocab, concept_class=cc, standard_concept='S', concept_code='38341003',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+
+        # Re-sync the identical record → in-place concept upgrade, no duplicate.
+        self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        rows = ConditionOccurrence.objects.filter(person_id=pid)
+        self.assertEqual(rows.count(), 1, "no duplicate row after concept upgrade")
+        self.assertEqual(rows.first().condition_concept_id, 316866, "concept updated in place")
+
     def test_ingests_extended_clinical_record_types(self):
         """Procedure → procedure_occurrence, Immunization → drug_exposure,
         AllergyIntolerance + DiagnosticReport → observation (B3)."""

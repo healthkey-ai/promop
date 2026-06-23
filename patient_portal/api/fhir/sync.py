@@ -53,6 +53,7 @@ _SYSTEM_VOCAB = {
     'http://www.nlm.nih.gov/research/umls/rxnorm': 'RxNorm',
     'http://hl7.org/fhir/sid/icd-10-cm': 'ICD10CM',
     'http://hl7.org/fhir/sid/icd-10': 'ICD10CM',
+    'http://hl7.org/fhir/sid/cvx': 'CVX',
 }
 
 _FALLBACK_CONCEPTS = {
@@ -443,9 +444,6 @@ class FhirSyncView(APIView):
         return touched + inserted
 
     def _ingest_conditions(self, person, conditions, ehr_type, no_match, cache, source_user_id, org):
-        existing = set(ConditionOccurrence.objects.filter(person=person).values_list(
-            'condition_concept_id', 'condition_start_date', 'condition_source_value'))
-        seen = set(existing)
         rows = []
         for cond in conditions:
             start = _parse_date(cond.get('onsetDateTime')) or _parse_date(
@@ -453,26 +451,18 @@ class FhirSyncView(APIView):
             if start is None:
                 continue
             concept = self._lookup(cond.get('code'), cache)
-            cid = concept.concept_id if concept else NO_MATCHING_CONCEPT_ID
-            sv = _source_text(cond.get('code'))[:50]
-            key = (cid, start, sv)
-            if key in seen:
-                continue
-            seen.add(key)
             rows.append(ConditionOccurrence(
                 person=person,
                 condition_concept=concept or no_match,
                 condition_start_date=start,
                 condition_type_concept=ehr_type,
-                condition_source_value=sv,
+                condition_source_value=_source_text(cond.get('code'))[:50],
             ))
-        return self._bulk_insert(
-            ConditionOccurrence, 'condition_occurrence_id', rows, source_user_id, person, org)
+        return self._upsert_clinical(
+            ConditionOccurrence, 'condition_occurrence_id', 'condition_concept_id',
+            'condition_start_date', 'condition_source_value', person, rows, source_user_id, org)
 
     def _ingest_medications(self, person, medications, ehr_type, no_match, cache, source_user_id, org):
-        existing = set(DrugExposure.objects.filter(person=person).values_list(
-            'drug_concept_id', 'drug_exposure_start_date', 'drug_source_value'))
-        seen = set(existing)
         rows = []
         for med in medications:
             # MedicationStatement: effectivePeriod/effectiveDateTime.
@@ -486,27 +476,19 @@ class FhirSyncView(APIView):
                 continue
             codeable = med.get('medicationCodeableConcept')
             concept = self._lookup(codeable, cache)
-            cid = concept.concept_id if concept else NO_MATCHING_CONCEPT_ID
-            sv = _source_text(codeable)[:50]
-            key = (cid, start, sv)
-            if key in seen:
-                continue
-            seen.add(key)
             rows.append(DrugExposure(
                 person=person,
                 drug_concept=concept or no_match,
                 drug_exposure_start_date=start,
                 drug_exposure_end_date=_parse_date((med.get('effectivePeriod') or {}).get('end')),
                 drug_type_concept=ehr_type,
-                drug_source_value=sv,
+                drug_source_value=_source_text(codeable)[:50],
             ))
-        return self._bulk_insert(
-            DrugExposure, 'drug_exposure_id', rows, source_user_id, person, org)
+        return self._upsert_clinical(
+            DrugExposure, 'drug_exposure_id', 'drug_concept_id',
+            'drug_exposure_start_date', 'drug_source_value', person, rows, source_user_id, org)
 
     def _ingest_procedures(self, person, procedures, ehr_type, no_match, cache, source_user_id, org):
-        existing = set(ProcedureOccurrence.objects.filter(person=person).values_list(
-            'procedure_concept_id', 'procedure_date', 'procedure_source_value'))
-        seen = set(existing)
         rows = []
         for proc in procedures:
             date = _parse_date(proc.get('performedDateTime')) or _parse_date(
@@ -514,49 +496,36 @@ class FhirSyncView(APIView):
             if date is None:
                 continue
             concept = self._lookup(proc.get('code'), cache)
-            cid = concept.concept_id if concept else NO_MATCHING_CONCEPT_ID
-            sv = _source_text(proc.get('code'))[:50]
-            key = (cid, date, sv)
-            if key in seen:
-                continue
-            seen.add(key)
             rows.append(ProcedureOccurrence(
                 person=person,
                 procedure_concept=concept or no_match,
                 procedure_date=date,
                 procedure_datetime=_parse_datetime(proc.get('performedDateTime')),
                 procedure_type_concept=ehr_type,
-                procedure_source_value=sv,
+                procedure_source_value=_source_text(proc.get('code'))[:50],
             ))
-        return self._bulk_insert(
-            ProcedureOccurrence, 'procedure_occurrence_id', rows, source_user_id, person, org)
+        return self._upsert_clinical(
+            ProcedureOccurrence, 'procedure_occurrence_id', 'procedure_concept_id',
+            'procedure_date', 'procedure_source_value', person, rows, source_user_id, org)
 
     def _ingest_immunizations(self, person, immunizations, ehr_type, no_match, cache, source_user_id, org):
         # OMOP models immunizations as drug exposures (shares the DrugExposure table).
-        existing = set(DrugExposure.objects.filter(person=person).values_list(
-            'drug_concept_id', 'drug_exposure_start_date', 'drug_source_value'))
-        seen = set(existing)
         rows = []
         for imm in immunizations:
             date = _parse_date(imm.get('occurrenceDateTime'))
             if date is None:
                 continue
             concept = self._lookup(imm.get('vaccineCode'), cache)
-            cid = concept.concept_id if concept else NO_MATCHING_CONCEPT_ID
-            sv = _source_text(imm.get('vaccineCode'))[:50]
-            key = (cid, date, sv)
-            if key in seen:
-                continue
-            seen.add(key)
             rows.append(DrugExposure(
                 person=person,
                 drug_concept=concept or no_match,
                 drug_exposure_start_date=date,
                 drug_type_concept=ehr_type,
-                drug_source_value=sv,
+                drug_source_value=_source_text(imm.get('vaccineCode'))[:50],
             ))
-        return self._bulk_insert(
-            DrugExposure, 'drug_exposure_id', rows, source_user_id, person, org)
+        return self._upsert_clinical(
+            DrugExposure, 'drug_exposure_id', 'drug_concept_id',
+            'drug_exposure_start_date', 'drug_source_value', person, rows, source_user_id, org)
 
     def _ingest_clinical_observations(self, person, allergies, reports, ehr_type, no_match, cache, source_user_id, org):
         # AllergyIntolerance + DiagnosticReport land in the OMOP observation table.
@@ -571,21 +540,12 @@ class FhirSyncView(APIView):
              'value': r.get('conclusion') or ''}
             for r in reports
         ]
-        existing = set(Observation.objects.filter(person=person).values_list(
-            'observation_concept_id', 'observation_date', 'observation_source_value'))
-        seen = set(existing)
         rows = []
         for item in items:
             date = _parse_date(item['effective'])
             if date is None:
                 continue
             concept = self._lookup(item['code'], cache)
-            cid = concept.concept_id if concept else NO_MATCHING_CONCEPT_ID
-            sv = _source_text(item['code'])[:50]
-            key = (cid, date, sv)
-            if key in seen:
-                continue
-            seen.add(key)
             rows.append(Observation(
                 person=person,
                 observation_concept=concept or no_match,
@@ -593,10 +553,49 @@ class FhirSyncView(APIView):
                 observation_datetime=_parse_datetime(item['effective']),
                 observation_type_concept=ehr_type,
                 value_as_string=(item['value'] or '')[:60],
-                observation_source_value=sv,
+                observation_source_value=_source_text(item['code'])[:50],
             ))
-        return self._bulk_insert(
-            Observation, 'observation_id', rows, source_user_id, person, org)
+        return self._upsert_clinical(
+            Observation, 'observation_id', 'observation_concept_id',
+            'observation_date', 'observation_source_value', person, rows, source_user_id, org)
+
+    def _upsert_clinical(self, model, pk_field, cid_field, date_field, sv_field,
+                         person, rows, source_user_id, org):
+        """Idempotent upsert for clinical rows, keyed by (source_value, date) —
+        the stable identity of a clinical event, independent of how its code
+        resolves. If a row already exists for that key, its concept is updated in
+        place when it changed (so a vocabulary load upgrading 'No matching
+        concept' to a real concept doesn't strand a duplicate) and any stacked
+        duplicates are collapsed onto the earliest row; otherwise the row is
+        inserted. `rows` is a list of unsaved model instances (person already
+        set). Returns touched + inserted pk ids."""
+        if not rows:
+            return []
+        desired = {(getattr(r, sv_field), getattr(r, date_field)): r for r in rows}  # last wins
+        ct = ContentType.objects.get_for_model(model)
+        touched, new_rows = [], []
+        with suppress_patient_info_refresh():
+            for (sv, date), inst in desired.items():
+                existing = list(model.objects.filter(**{
+                    'person': person, sv_field: sv, date_field: date}).order_by(pk_field))
+                if not existing:
+                    new_rows.append(inst)
+                    continue
+                keep, extras = existing[0], existing[1:]
+                if extras:  # collapse historical stacked rows for this event
+                    extra_ids = [getattr(m, pk_field) for m in extras]
+                    ProvenanceRecord.objects.filter(
+                        content_type=ct, object_id__in=extra_ids).delete()
+                    model.objects.filter(**{f'{pk_field}__in': extra_ids}).delete()
+                if getattr(keep, cid_field) != getattr(inst, cid_field):
+                    setattr(keep, cid_field, getattr(inst, cid_field))
+                    keep._skip_patient_info_refresh = True
+                    keep.save(update_fields=[cid_field])
+                    touched.append(getattr(keep, pk_field))
+                elif extras:
+                    touched.append(getattr(keep, pk_field))
+            inserted = self._bulk_insert(model, pk_field, new_rows, source_user_id, person, org)
+        return touched + inserted
 
     def _bulk_insert(self, model, pk_field, rows, source_user_id, person, org):
         """Assign batched PKs, bulk_create, and record EHR_SYNC provenance."""
