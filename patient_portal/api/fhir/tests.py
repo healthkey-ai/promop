@@ -164,6 +164,41 @@ class FhirSyncTests(TestCase):
         self.assertEqual(second['drug_exposure_ids'], [])
         self.assertEqual(Measurement.objects.filter(person_id=first['person_id']).count(), 1)
 
+    def test_per_reading_timestamps_coexist_and_resync_is_idempotent(self):
+        """Multiple same-day Observations with distinct effectiveDateTime times
+        (e.g. per-reading heart rate) land as separate rows with
+        measurement_datetime set; re-syncing the identical bundle adds nothing."""
+        def hr(time, value):
+            return {"resource": {
+                "resourceType": "Observation",
+                "subject": {"reference": "Patient/p1"},
+                "code": {"coding": [{"system": "http://loinc.org", "code": "8867-4",
+                                     "display": "Heart rate"}]},
+                "effectiveDateTime": time,
+                "valueQuantity": {"value": value, "unit": "/min"},
+            }}
+        bundle = {"resourceType": "Bundle", "type": "collection", "entry": [
+            hr("2026-03-01T08:00:00Z", 62),
+            hr("2026-03-01T12:30:00Z", 88),
+            hr("2026-03-01T20:15:00Z", 71),
+        ]}
+
+        first = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        self.assertEqual(first.status_code, 201, first.content)
+        pid = first.json()['person_id']
+
+        rows = Measurement.objects.filter(person_id=pid).order_by('measurement_datetime')
+        self.assertEqual(rows.count(), 3, "distinct same-day times kept as separate rows")
+        self.assertTrue(all(r.measurement_datetime is not None for r in rows),
+                        "effectiveDateTime persisted to measurement_datetime")
+        self.assertEqual([r.measurement_datetime.hour for r in rows], [8, 12, 20])
+        self.assertTrue(all(r.measurement_date.isoformat() == '2026-03-01' for r in rows))
+
+        # Re-sync the identical bundle → idempotent (dedup includes datetime).
+        second = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        self.assertEqual(second.json()['measurement_ids'], [])
+        self.assertEqual(Measurement.objects.filter(person_id=pid).count(), 3)
+
     def test_medication_request_maps_to_drug_exposure(self):
         # Epic R4 returns MedicationRequest (authoredOn), not MedicationStatement.
         bundle = {

@@ -87,6 +87,24 @@ def _parse_date(value):
         return None
 
 
+def _parse_datetime(value):
+    """FHIR dateTime → aware datetime, or None for date-only values.
+
+    Preserves sub-daily timestamps (e.g. per-reading heart rate) so they land in
+    Measurement.measurement_datetime instead of being truncated to a date.
+    """
+    if not isinstance(value, str) or len(value) <= 10:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        from django.utils import timezone as _tz
+        dt = _tz.make_aware(dt, _tz.utc)
+    return dt
+
+
 def _codings(codeable):
     return (codeable or {}).get('coding', []) or []
 
@@ -257,19 +275,22 @@ class FhirSyncView(APIView):
     # Batched ingestion
     # ------------------------------------------------------------------ #
     def _ingest_observations(self, person, observations, ehr_type, cache, source_user_id, org):
+        # Dedup includes measurement_datetime so distinct sub-daily readings
+        # (e.g. per-reading heart rate) coexist while exact re-syncs collapse.
         existing = {
-            (d, cid, sv, _norm_num(v))
-            for d, cid, sv, v in Measurement.objects.filter(person=person).values_list(
-                'measurement_date', 'measurement_concept_id', 'measurement_source_value',
-                'value_as_number')
+            (d, dt, cid, sv, _norm_num(v))
+            for d, dt, cid, sv, v in Measurement.objects.filter(person=person).values_list(
+                'measurement_date', 'measurement_datetime', 'measurement_concept_id',
+                'measurement_source_value', 'value_as_number')
         }
         seen = set(existing)
         rows = []
         for obs in observations:
-            obs_date = _parse_date(obs.get('effectiveDateTime')) or _parse_date(
-                (obs.get('effectivePeriod') or {}).get('start'))
+            effective = obs.get('effectiveDateTime') or (obs.get('effectivePeriod') or {}).get('start')
+            obs_date = _parse_date(effective)
             if obs_date is None:
                 continue
+            obs_dt = _parse_datetime(effective)
             concept = self._lookup(obs.get('code'), cache)
             cid = concept.concept_id if concept else 0
             sv = _source_text(obs.get('code'))[:50]
@@ -278,7 +299,7 @@ class FhirSyncView(APIView):
             unit = qty.get('unit') or qty.get('code')
             value_string = obs.get('valueString') or _source_text(obs.get('valueCodeableConcept'))
 
-            key = (obs_date, cid, sv, _norm_num(value_number))
+            key = (obs_date, obs_dt, cid, sv, _norm_num(value_number))
             if key in seen:
                 continue
             seen.add(key)
@@ -286,6 +307,7 @@ class FhirSyncView(APIView):
                 person=person,
                 measurement_concept_id=cid,
                 measurement_date=obs_date,
+                measurement_datetime=obs_dt,
                 measurement_type_concept=ehr_type,
                 value_as_number=value_number,
                 value_as_string=(value_string or '')[:60],
