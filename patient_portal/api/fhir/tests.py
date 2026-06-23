@@ -185,7 +185,8 @@ class FhirSyncTests(TestCase):
 
         # Current "records on file" totals returned for the connector to display.
         self.assertEqual(body['totals'],
-                         {'measurements': 1, 'conditions': 1, 'medications': 1})
+                         {'measurements': 1, 'conditions': 1, 'medications': 1,
+                          'procedures': 0, 'observations': 0})
 
         # Demographics filled onto the resolved Person.
         from omop_core.models import Person
@@ -202,6 +203,43 @@ class FhirSyncTests(TestCase):
         self.assertEqual(second['condition_ids'], [])
         self.assertEqual(second['drug_exposure_ids'], [])
         self.assertEqual(Measurement.objects.filter(person_id=first['person_id']).count(), 1)
+
+    def test_ingests_extended_clinical_record_types(self):
+        """Procedure → procedure_occurrence, Immunization → drug_exposure,
+        AllergyIntolerance + DiagnosticReport → observation (B3)."""
+        bundle = {"resourceType": "Bundle", "type": "collection", "entry": [
+            {"resource": {"resourceType": "Procedure",
+                "code": {"coding": [{"system": "http://snomed.info/sct", "code": "80146002",
+                                     "display": "Appendectomy"}]},
+                "performedDateTime": "2025-03-10"}},
+            {"resource": {"resourceType": "Immunization",
+                "vaccineCode": {"coding": [{"system": "http://hl7.org/fhir/sid/cvx", "code": "208",
+                                            "display": "COVID-19"}]},
+                "occurrenceDateTime": "2025-09-01"}},
+            {"resource": {"resourceType": "AllergyIntolerance",
+                "code": {"coding": [{"system": "http://snomed.info/sct", "code": "227493005",
+                                     "display": "Cashew nuts"}]},
+                "recordedDate": "2024-01-15", "criticality": "high"}},
+            {"resource": {"resourceType": "DiagnosticReport",
+                "code": {"coding": [{"system": "http://loinc.org", "code": "58410-2",
+                                     "display": "CBC panel"}]},
+                "effectiveDateTime": "2025-06-01", "conclusion": "Within normal limits"}},
+        ]}
+        resp = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+        body = resp.json()
+        pid = body['person_id']
+
+        self.assertEqual(len(body['procedure_ids']), 1)
+        self.assertEqual(len(body['immunization_ids']), 1)
+        self.assertEqual(len(body['observation_ids']), 2)  # allergy + diagnostic report
+
+        from omop_core.models import ProcedureOccurrence, Observation
+        self.assertEqual(ProcedureOccurrence.objects.filter(person_id=pid).count(), 1)
+        self.assertEqual(DrugExposure.objects.filter(person_id=pid).count(), 1)  # immunization
+        self.assertEqual(Observation.objects.filter(person_id=pid).count(), 2)
+        self.assertEqual(body['totals']['procedures'], 1)
+        self.assertEqual(body['totals']['observations'], 2)
 
     def test_daily_rollup_upserts_by_person_concept_date(self):
         """An Observation flagged as a daily rollup replaces the prior

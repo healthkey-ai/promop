@@ -31,7 +31,8 @@ from rest_framework.views import APIView
 
 from omop_core.authorization import can_access_patient
 from omop_core.models import (
-    Concept, ConditionOccurrence, DrugExposure, Measurement, Person, ProvenanceRecord,
+    Concept, ConditionOccurrence, DrugExposure, Measurement, Observation, Person,
+    ProcedureOccurrence, ProvenanceRecord,
 )
 from omop_core.services.pk import next_pk_batch
 from omop_core.signals import suppress_patient_info_refresh
@@ -204,9 +205,10 @@ class FhirSyncView(APIView):
         ehr_type = _ensure_concept(EHR_TYPE_CONCEPT_ID)
         no_match = _ensure_concept(NO_MATCHING_CONCEPT_ID)
 
-        # Group bundle resources (first-cut scope).
+        # Group bundle resources.
         patient_res = None
         observations, conditions, medications = [], [], []
+        allergies, immunizations, procedures, diagnostic_reports = [], [], [], []
         for entry in bundle.get('entry', []) or []:
             res = (entry or {}).get('resource', {}) or {}
             rtype = res.get('resourceType')
@@ -220,8 +222,18 @@ class FhirSyncView(APIView):
                 # Epic R4 exposes meds as MedicationRequest; both carry
                 # medicationCodeableConcept. Handled uniformly below.
                 medications.append(res)
+            elif rtype == 'AllergyIntolerance':
+                allergies.append(res)
+            elif rtype == 'Immunization':
+                immunizations.append(res)
+            elif rtype == 'Procedure':
+                procedures.append(res)
+            elif rtype == 'DiagnosticReport':
+                diagnostic_reports.append(res)
 
-        concept_cache = self._preload_concepts(observations, conditions, medications)
+        concept_cache = self._preload_concepts(
+            observations, conditions, medications, allergies, immunizations,
+            procedures, diagnostic_reports)
 
         result = {
             'person_id': person.person_id,
@@ -232,6 +244,12 @@ class FhirSyncView(APIView):
                 person, conditions, ehr_type, no_match, concept_cache, source_user_id, org),
             'drug_exposure_ids': self._ingest_medications(
                 person, medications, ehr_type, no_match, concept_cache, source_user_id, org),
+            'procedure_ids': self._ingest_procedures(
+                person, procedures, ehr_type, no_match, concept_cache, source_user_id, org),
+            'immunization_ids': self._ingest_immunizations(
+                person, immunizations, ehr_type, no_match, concept_cache, source_user_id, org),
+            'observation_ids': self._ingest_clinical_observations(
+                person, allergies, diagnostic_reports, ehr_type, no_match, concept_cache, source_user_id, org),
         }
 
         # The person's CURRENT record totals after this ingest — the accurate
@@ -241,6 +259,8 @@ class FhirSyncView(APIView):
             'measurements': Measurement.objects.filter(person=person).count(),
             'conditions': ConditionOccurrence.objects.filter(person=person).count(),
             'medications': DrugExposure.objects.filter(person=person).count(),
+            'procedures': ProcedureOccurrence.objects.filter(person=person).count(),
+            'observations': Observation.objects.filter(person=person).count(),
         }
 
         # NOTE: the denormalized PatientInfo is intentionally NOT rebuilt here.
@@ -277,6 +297,7 @@ class FhirSyncView(APIView):
             for res in resources:
                 collect(res.get('code'))
                 collect(res.get('medicationCodeableConcept'))
+                collect(res.get('vaccineCode'))
 
         cache: dict = {}
         for vocab, codes in by_vocab.items():
@@ -480,6 +501,101 @@ class FhirSyncView(APIView):
             ))
         return self._bulk_insert(
             DrugExposure, 'drug_exposure_id', rows, source_user_id, person, org)
+
+    def _ingest_procedures(self, person, procedures, ehr_type, no_match, cache, source_user_id, org):
+        existing = set(ProcedureOccurrence.objects.filter(person=person).values_list(
+            'procedure_concept_id', 'procedure_date', 'procedure_source_value'))
+        seen = set(existing)
+        rows = []
+        for proc in procedures:
+            date = _parse_date(proc.get('performedDateTime')) or _parse_date(
+                (proc.get('performedPeriod') or {}).get('start'))
+            if date is None:
+                continue
+            concept = self._lookup(proc.get('code'), cache)
+            cid = concept.concept_id if concept else NO_MATCHING_CONCEPT_ID
+            sv = _source_text(proc.get('code'))[:50]
+            key = (cid, date, sv)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(ProcedureOccurrence(
+                person=person,
+                procedure_concept=concept or no_match,
+                procedure_date=date,
+                procedure_datetime=_parse_datetime(proc.get('performedDateTime')),
+                procedure_type_concept=ehr_type,
+                procedure_source_value=sv,
+            ))
+        return self._bulk_insert(
+            ProcedureOccurrence, 'procedure_occurrence_id', rows, source_user_id, person, org)
+
+    def _ingest_immunizations(self, person, immunizations, ehr_type, no_match, cache, source_user_id, org):
+        # OMOP models immunizations as drug exposures (shares the DrugExposure table).
+        existing = set(DrugExposure.objects.filter(person=person).values_list(
+            'drug_concept_id', 'drug_exposure_start_date', 'drug_source_value'))
+        seen = set(existing)
+        rows = []
+        for imm in immunizations:
+            date = _parse_date(imm.get('occurrenceDateTime'))
+            if date is None:
+                continue
+            concept = self._lookup(imm.get('vaccineCode'), cache)
+            cid = concept.concept_id if concept else NO_MATCHING_CONCEPT_ID
+            sv = _source_text(imm.get('vaccineCode'))[:50]
+            key = (cid, date, sv)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(DrugExposure(
+                person=person,
+                drug_concept=concept or no_match,
+                drug_exposure_start_date=date,
+                drug_type_concept=ehr_type,
+                drug_source_value=sv,
+            ))
+        return self._bulk_insert(
+            DrugExposure, 'drug_exposure_id', rows, source_user_id, person, org)
+
+    def _ingest_clinical_observations(self, person, allergies, reports, ehr_type, no_match, cache, source_user_id, org):
+        # AllergyIntolerance + DiagnosticReport land in the OMOP observation table.
+        items = [
+            {'code': a.get('code'),
+             'effective': a.get('recordedDate') or a.get('onsetDateTime'),
+             'value': a.get('criticality') or _source_text(a.get('clinicalStatus'))}
+            for a in allergies
+        ] + [
+            {'code': r.get('code'),
+             'effective': r.get('effectiveDateTime') or r.get('issued'),
+             'value': r.get('conclusion') or ''}
+            for r in reports
+        ]
+        existing = set(Observation.objects.filter(person=person).values_list(
+            'observation_concept_id', 'observation_date', 'observation_source_value'))
+        seen = set(existing)
+        rows = []
+        for item in items:
+            date = _parse_date(item['effective'])
+            if date is None:
+                continue
+            concept = self._lookup(item['code'], cache)
+            cid = concept.concept_id if concept else NO_MATCHING_CONCEPT_ID
+            sv = _source_text(item['code'])[:50]
+            key = (cid, date, sv)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(Observation(
+                person=person,
+                observation_concept=concept or no_match,
+                observation_date=date,
+                observation_datetime=_parse_datetime(item['effective']),
+                observation_type_concept=ehr_type,
+                value_as_string=(item['value'] or '')[:60],
+                observation_source_value=sv,
+            ))
+        return self._bulk_insert(
+            Observation, 'observation_id', rows, source_user_id, person, org)
 
     def _bulk_insert(self, model, pk_field, rows, source_user_id, person, org):
         """Assign batched PKs, bulk_create, and record EHR_SYNC provenance."""
