@@ -271,7 +271,12 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'anon': '60/minute',
         'user': '300/minute',
-        'sync': '10/minute',
+        # Wearable sync re-uploads daily rollups and fires on each HealthKit
+        # change; 10/min was too tight. Env-tunable (set higher in dev).
+        'sync': os.environ.get('SYNC_THROTTLE_RATE', '60/minute'),
+        # Patient self-service ingest (/api/fhir/patient-sync/) — per-patient, so
+        # a more generous bucket than the shared service-token /sync/ endpoint.
+        'patient_sync': os.environ.get('PATIENT_SYNC_THROTTLE_RATE', '120/minute'),
     },
 }
 
