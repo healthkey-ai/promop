@@ -200,6 +200,38 @@ class FhirSyncTests(TestCase):
         resp = APIClient().post('/api/fhir/patient-delete/', {'targets': []}, format='json')
         self.assertIn(resp.status_code, (401, 403))
 
+    def test_patient_consent_records_reads_and_updates(self):
+        """B6: per-category data-sharing consent persists in PatientConsent."""
+        patient = Identity.objects.create(
+            issuer='https://securetoken.google.com/healthtree-test', sub='consent-patient',
+            email='consent@test.com')
+        patient.set_unusable_password()
+        patient.save()
+        client = APIClient()
+        client.force_authenticate(user=patient)
+
+        resp = client.post('/api/fhir/patient-consent/',
+                           {'granted': True, 'categories': ['vitals', 'activity']}, format='json')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.json()['granted'])
+        self.assertEqual(resp.json()['categories'], ['vitals', 'activity'])
+
+        got = client.get('/api/fhir/patient-consent/')
+        self.assertTrue(got.json()['granted'])
+        self.assertEqual(got.json()['categories'], ['vitals', 'activity'])
+
+        # Revoke updates the same record (no duplicate).
+        client.post('/api/fhir/patient-consent/', {'granted': False, 'categories': []}, format='json')
+        self.assertFalse(client.get('/api/fhir/patient-consent/').json()['granted'])
+
+        from patient_portal.models import PatientConsent, PatientUser
+        pu = PatientUser.objects.get(identity=patient)
+        self.assertEqual(PatientConsent.objects.filter(
+            patient_user=pu, consent_type='data_sharing').count(), 1)
+
+    def test_patient_consent_requires_authentication(self):
+        self.assertIn(APIClient().get('/api/fhir/patient-consent/').status_code, (401, 403))
+
     def test_ingests_bundle_bound_to_resolved_person(self):
         resp = self._sync()
         self.assertEqual(resp.status_code, 201, resp.content)

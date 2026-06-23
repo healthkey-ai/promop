@@ -18,6 +18,7 @@ patient compartment ingests in a couple of seconds, not a long-held request.
 Person is resolved from identity, never demographic upsert. Oncology-specific
 enrichment is deferred — see fhir_importers issue #10.
 """
+import json
 import logging
 from collections import defaultdict
 from datetime import date, datetime
@@ -777,3 +778,55 @@ class FhirPatientDeleteView(APIView):
                     deleted += len(ids)
         return Response({'person_id': person.person_id, 'deleted': deleted},
                         status=status.HTTP_200_OK)
+
+
+class FhirPatientConsentView(APIView):
+    """GET/POST /api/fhir/patient-consent/ — record the patient's HealthKit
+    data-sharing consent server-side (plan item B6). Upserts a single
+    ``data_sharing`` PatientConsent for the authenticated patient; the per-category
+    scope (vitals / activity / sleep / clinical) is stored in ``consent_document``.
+
+    POST body: ``{"granted": true, "categories": ["vitals", "activity"]}``
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_scope = 'patient_sync'
+
+    def _patient_user(self, request):
+        if not (hasattr(request.user, 'issuer') and request.user.issuer != 'urn:service'):
+            return None
+        from patient_portal.services import resolve_or_create_person
+        from patient_portal.models import PatientUser
+        resolve_or_create_person(request.user)   # ensure the PatientUser link exists
+        return PatientUser.objects.filter(identity=request.user).first()
+
+    def post(self, request):
+        patient_user = self._patient_user(request)
+        if patient_user is None:
+            return Response({'detail': 'Patient identity required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        from patient_portal.models import PatientConsent
+        granted = bool(request.data.get('granted', False))
+        categories = request.data.get('categories') or []
+        PatientConsent.objects.update_or_create(
+            patient_user=patient_user, consent_type='data_sharing',
+            defaults={'consent_granted': granted,
+                      'consent_document': json.dumps({'healthkit_categories': categories})})
+        return Response({'granted': granted, 'categories': categories},
+                        status=status.HTTP_200_OK)
+
+    def get(self, request):
+        patient_user = self._patient_user(request)
+        if patient_user is None:
+            return Response({'detail': 'Patient identity required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        from patient_portal.models import PatientConsent
+        consent = PatientConsent.objects.filter(
+            patient_user=patient_user, consent_type='data_sharing').first()
+        categories = []
+        if consent and consent.consent_document:
+            try:
+                categories = json.loads(consent.consent_document).get('healthkit_categories', [])
+            except (ValueError, TypeError):
+                categories = []
+        return Response({'granted': bool(consent and consent.consent_granted),
+                         'categories': categories}, status=status.HTTP_200_OK)
