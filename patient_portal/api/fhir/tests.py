@@ -164,6 +164,44 @@ class FhirSyncTests(TestCase):
         self.assertEqual(second['drug_exposure_ids'], [])
         self.assertEqual(Measurement.objects.filter(person_id=first['person_id']).count(), 1)
 
+    def test_daily_rollup_upserts_by_person_concept_date(self):
+        """An Observation flagged as a daily rollup replaces the prior
+        (person, concept, date) row when its value changes, and collapses any
+        stale stacked rows — instead of accumulating a row per changed value."""
+        AGG_EXT = [{"url": "https://healthkey.ai/fhir/aggregation", "valueCode": "daily"}]
+
+        def steps(value, ext):
+            entry = {"resource": {
+                "resourceType": "Observation",
+                "subject": {"reference": "Patient/p1"},
+                "code": {"coding": [{"system": "http://loinc.org", "code": "41950-7",
+                                     "display": "Steps 24h"}]},
+                "effectiveDateTime": "2026-04-01T00:00:00Z",
+                "valueQuantity": {"value": value, "unit": "{steps}"},
+            }}
+            if ext:
+                entry["resource"]["extension"] = AGG_EXT
+            return {"resourceType": "Bundle", "type": "collection", "entry": [entry]}
+
+        # Seed two stale stacked rows the old value-dedup behaviour would have left.
+        self.assertEqual(self.client.post('/api/fhir/sync/', {'bundle': steps(5000, False)},
+                                          format='json').status_code, 201)
+        pid = self.client.post('/api/fhir/sync/', {'bundle': steps(8000, False)},
+                               format='json').json()['person_id']
+        self.assertEqual(Measurement.objects.filter(
+            person_id=pid, measurement_source_value='Steps 24h').count(), 2)
+
+        # Rollup sync with a new value → collapses to a single row at that value.
+        self.client.post('/api/fhir/sync/', {'bundle': steps(9500, True)}, format='json')
+        rows = Measurement.objects.filter(person_id=pid, measurement_source_value='Steps 24h')
+        self.assertEqual(rows.count(), 1, "stacked rows collapsed to one")
+        self.assertEqual(float(rows.first().value_as_number), 9500.0)
+
+        # Re-sync identical rollup → idempotent (no new rows, nothing reported).
+        again = self.client.post('/api/fhir/sync/', {'bundle': steps(9500, True)}, format='json')
+        self.assertEqual(again.json()['measurement_ids'], [])
+        self.assertEqual(rows.count(), 1)
+
     def test_per_reading_timestamps_coexist_and_resync_is_idempotent(self):
         """Multiple same-day Observations with distinct effectiveDateTime times
         (e.g. per-reading heart rate) land as separate rows with
