@@ -3345,7 +3345,7 @@ class AthenaVocabularyLoadTest(TestCase):
              'vocabulary_version', 'vocabulary_concept_id'],
             [['HemOnc', 'HemOnc Oncology', '', 'v2024', '0'],
              ['RxNorm', 'RxNorm', '', '2024AA', '0'],
-             ['SNOMED', 'SNOMED CT', '', '2024', '0']],  # should be skipped
+             ['CPT4', 'CPT-4', '', '2024', '0']],  # out of scope — should be skipped
         )
         self._write_tsv(directory, 'DOMAIN.csv',
             ['domain_id', 'domain_name', 'domain_concept_id'],
@@ -3369,15 +3369,15 @@ class AthenaVocabularyLoadTest(TestCase):
              ['5000003', 'bortezomib',           'Drug', 'RxNorm', 'Ingredient', 'S', '1421', '19700101', '20991231', ''],
              # RxNorm Branded — should be loaded
              ['5000004', 'Velcade',              'Drug', 'RxNorm', 'Branded Drug', 'S', '213269', '19700101', '20991231', ''],
-             # SNOMED concept — should be SKIPPED (not in vocabulary scope)
-             ['5000099', 'Some SNOMED concept',  'Condition', 'SNOMED', 'Clinical Finding', 'S', '123456', '19700101', '20991231', '']],
+             # CPT4 concept — should be SKIPPED (not in vocabulary scope)
+             ['5000099', 'Out-of-scope concept', 'Drug', 'CPT4', 'Clinical Finding', 'S', '123456', '19700101', '20991231', '']],
         )
         self._write_tsv(directory, 'CONCEPT_RELATIONSHIP.csv',
             ['concept_id_1', 'concept_id_2', 'relationship_id',
              'valid_start_date', 'valid_end_date', 'invalid_reason'],
             # RxNorm bortezomib → HemOnc bortezomib (both in scope)
             [['5000003', '5000002', 'Maps to', '19700101', '20991231', ''],
-             # Edge to out-of-scope SNOMED concept — should be SKIPPED
+             # Edge to out-of-scope CPT4 concept — should be SKIPPED
              ['5000003', '5000099', 'Maps to', '19700101', '20991231', '']],
         )
         self._write_tsv(directory, 'CONCEPT_ANCESTOR.csv',
@@ -3407,7 +3407,7 @@ class AthenaVocabularyLoadTest(TestCase):
         self.assertTrue(Concept.objects.filter(concept_id=5000001).exists())  # HemOnc
         self.assertTrue(Concept.objects.filter(concept_id=5000003).exists())  # RxNorm Ingredient
         self.assertTrue(Concept.objects.filter(concept_id=5000004).exists())  # RxNorm Branded
-        self.assertFalse(Concept.objects.filter(concept_id=5000099).exists())  # SNOMED — excluded
+        self.assertFalse(Concept.objects.filter(concept_id=5000099).exists())  # CPT4 — excluded
 
     def test_load_filters_concept_relationships(self):
         from omop_core.models import ConceptRelationship
