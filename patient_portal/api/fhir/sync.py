@@ -387,21 +387,29 @@ class FhirSyncView(APIView):
         """Replace any prior row for (person, concept, date) with the new daily
         value, collapsing stale stacked rows — so a changed daily aggregate
         updates in place instead of accumulating duplicates."""
-        desired = {}  # (cid, date) -> parsed obs; last in the bundle wins
+        desired = {}  # key -> parsed obs; last in the bundle wins
         for obs in observations:
             o = self._parse_obs(obs, cache)
             if o['date'] is not None:
-                desired[(o['cid'], o['date'])] = o
+                # Unmapped rows all share concept_id 0, so a plain (cid, date) key
+                # collapses every distinct unmapped metric into one slot per day.
+                # Add source_value to the key for cid == 0 so they coexist; mapped
+                # rows keep the natural (concept, date) grain.
+                sv_key = o['sv'] if not o['cid'] else None
+                desired[(o['cid'], o['date'], sv_key)] = o
         if not desired:
             return []
 
         meas_ct = ContentType.objects.get_for_model(Measurement)
         touched, new_rows = [], []
         with suppress_patient_info_refresh():
-            for (cid, obs_date), o in desired.items():
-                existing = list(Measurement.objects.filter(
+            for (cid, obs_date, sv_key), o in desired.items():
+                existing_qs = Measurement.objects.filter(
                     person=person, measurement_concept_id=cid, measurement_date=obs_date,
-                ).order_by('measurement_id'))
+                )
+                if sv_key is not None:
+                    existing_qs = existing_qs.filter(measurement_source_value=sv_key)
+                existing = list(existing_qs.order_by('measurement_id'))
                 if not existing:
                     new_rows.append(Measurement(
                         person=person,
