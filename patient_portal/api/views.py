@@ -5,7 +5,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -35,6 +35,8 @@ from omop_core.services.omop_write_service import sync_to_omop
 from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
+from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name
+from omop_core.services.access import get_visible_orgs
 from datetime import datetime
 from django.utils.timezone import localdate
 import csv
@@ -145,6 +147,62 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         org = get_request_org(self.request)
         if org is not None:
             qs = qs.filter(organization=org)
+        elif not (self.request.user and (
+            getattr(self.request.user, 'is_superuser', False) or
+            getattr(self.request.user, 'is_staff', False)
+        )):
+            # Session / partner-auth users: scope to only the patients they can
+            # access — their own record (PatientUser) and any patients in their
+            # professional groups (GroupAccess). Doctors/admins with
+            # group access see their whole panel; is_staff bypasses this entirely.
+            from patient_portal.models import PatientUser
+            from omop_core.models import PatientGroupMembership, GroupAccess
+            from django.utils import timezone
+            from django.db.models import Q
+
+            accessible_pids = set()
+
+            # Self-access
+            try:
+                accessible_pids.add(
+                    PatientUser.objects.get(identity=self.request.user).person_id
+                )
+            except PatientUser.DoesNotExist:
+                pass
+
+            now = timezone.now()
+            active_grants = GroupAccess.objects.filter(
+                identity=self.request.user,
+            ).filter(
+                Q(expires_at__isnull=True) | Q(expires_at__gt=now),
+            )
+
+            # Org-admin grants: see all patients belonging to those orgs
+            admin_org_ids = list(
+                active_grants.filter(role='org_admin').values_list('org_id', flat=True)
+            )
+
+            # Group grants: see patients in those groups
+            actor_group_ids = list(
+                active_grants.filter(group__isnull=False).values_list('group_id', flat=True)
+            )
+            if actor_group_ids:
+                group_pids = PatientGroupMembership.objects.filter(
+                    group_id__in=actor_group_ids
+                ).values_list('person_id', flat=True)
+                accessible_pids.update(group_pids)
+
+            if not accessible_pids and not admin_org_ids:
+                return qs.none()
+
+            if admin_org_ids and accessible_pids:
+                qs = qs.filter(
+                    Q(organization_id__in=admin_org_ids) | Q(person_id__in=accessible_pids)
+                )
+            elif admin_org_ids:
+                qs = qs.filter(organization_id__in=admin_org_ids)
+            else:
+                qs = qs.filter(person_id__in=accessible_pids)
         return qs
 
     def get_serializer_class(self):
@@ -201,10 +259,15 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         except PatientInfo.DoesNotExist:
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # AUTH-04: enforce per-patient row-level org scoping
+        # AUTH-04: enforce per-patient row-level access
         org = get_request_org(request)
-        if org is not None and patient_info.organization != org:
-            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        if org is not None:
+            if patient_info.organization != org:
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        elif not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+            from omop_core.authorization import can_access_patient
+            if not can_access_patient(request.user, person.person_id):
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
         # Get the Identity associated with this person (not the logged-in user)
         from patient_portal.models import PatientUser
@@ -233,8 +296,13 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
 
         org = get_request_org(request)
-        if org is not None and patient_info.organization != org:
-            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        if org is not None:
+            if patient_info.organization != org:
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        elif not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+            from omop_core.authorization import can_access_patient
+            if not can_access_patient(request.user, person.person_id):
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
         prov_source, prov_user_id, prov_reason = _extract_provenance(request)
         if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
@@ -243,37 +311,50 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Capture previous values for fields being changed (exclude provenance meta-fields)
+        # Capture previous values for fields being changed (exclude provenance meta-fields).
+        # Use {field}_id for FK fields so we get a serializable PK, not a model object.
         _prov_meta = {'source', 'source_user_id', 'modification_reason'}
+        _read_only = set(PatientInfoSerializer.Meta.read_only_fields)
+        def _prev_val(obj, field):
+            fk_id = f'{field}_id'
+            if hasattr(obj, fk_id):
+                return getattr(obj, fk_id, None)
+            return getattr(obj, field, None)
         previous_values = {
-            field: getattr(patient_info, field, None)
+            field: _prev_val(patient_info, field)
             for field in request.data
-            if field not in _prov_meta and hasattr(patient_info, field)
+            if field not in _prov_meta and field not in _read_only and hasattr(patient_info, field)
         }
 
         serializer = PatientInfoSerializer(patient_info, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
-
-        if prov_source:
-            _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
         changed_fields = {f for f in request.data if f not in _prov_meta}
         try:
-            sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
-        except Exception:
-            pass
-
-        if prov_source:
-            for field in changed_fields:
-                if field in LAB_FIELD_TO_LOINC:
-                    loinc_code = LAB_FIELD_TO_LOINC[field][0]
-                    m = Measurement.objects.filter(
-                        person=patient_info.person,
-                        measurement_source_value=loinc_code,
-                    ).order_by('-measurement_id').first()
-                    if m:
-                        _record_provenance(m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+            with transaction.atomic():
+                serializer.save()
+                if prov_source:
+                    _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
+                if prov_source:
+                    for field in changed_fields:
+                        if field in LAB_FIELD_TO_LOINC:
+                            loinc_code = LAB_FIELD_TO_LOINC[field][0]
+                            m = Measurement.objects.filter(
+                                person=patient_info.person,
+                                measurement_source_value=loinc_code,
+                            ).order_by('-measurement_id').first()
+                            if m:
+                                _record_provenance(m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+        except Exception as _sync_exc:
+            logger.error(
+                'omop_write_through_failed patient=%s error=%s',
+                patient_info.pk, type(_sync_exc).__name__,
+            )
+            return Response(
+                {'error': 'Failed to persist changes to OMOP. Please try again.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
         return Response({**serializer.data, 'previous_values': previous_values})
 
@@ -289,8 +370,13 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
 
         org = get_request_org(request)
-        if org is not None and patient_info.organization != org:
-            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        if org is not None:
+            if patient_info.organization != org:
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        elif not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+            from omop_core.authorization import can_access_patient
+            if not can_access_patient(request.user, person.person_id):
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
         from django.db.models import Q
         # Build a single query for all provenance records across PatientInfo + OMOP tables
@@ -338,13 +424,21 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
 
         serializer = PatientInfoSerializer(patient_info, data=patch_data, partial=True)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
 
         changed_fields = set(patch_data.keys())
         try:
-            sync_to_omop(patient_info, changed_fields, changed_data=dict(patch_data))
-        except Exception:
-            pass
+            with transaction.atomic():
+                serializer.save()
+                sync_to_omop(patient_info, changed_fields, changed_data=dict(patch_data))
+        except Exception as _sync_exc:
+            logger.error(
+                'omop_write_through_failed patient=%s error=%s',
+                patient_info.pk, type(_sync_exc).__name__,
+            )
+            return Response(
+                {'error': 'Failed to persist changes to OMOP. Please try again.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
         return Response(serializer.data)
 
@@ -487,6 +581,24 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             _allowed_sct_titles = set(StemCellTransplant.objects.values_list('title', flat=True))
             _allowed_elig_titles = set(SctEligibility.objects.values_list('title', flat=True))
 
+            # Hoist constant Concept lookups — these are the same for every patient and every
+            # observation. Using the process-level concept_cache means each of these is a
+            # zero-cost memory hit on all subsequent calls (across batches and requests).
+            _concept_breast_cancer = Concept.objects.filter(
+                concept_name__icontains='breast cancer'
+            ).first()
+            _concept_ehr_type      = _cc_by_id(32817)    # EHR
+            _concept_lab_type      = _cc_by_id(32856)    # Lab
+            _concept_drug_type     = _cc_by_id(32869)    # EHR prescription
+            _concept_tx_regimen    = _cc_by_id(32531)    # Treatment Regimen
+            _concept_de_field      = _cc_by_id(1147094)  # DrugExposure field
+            _concept_generic_lab   = _cc_by_id(3000963)  # Generic lab
+
+            # When skip_refresh=true the caller (e.g. load_fhir_bundle) will run
+            # refresh_patient_info for all patients after the upload completes.
+            # This eliminates the per-patient refresh cost during the tight write loop.
+            _skip_refresh = request.query_params.get('skip_refresh', 'false').lower() in ('1', 'true')
+
             # Process each patient
             import time as _time
             for fhir_patient_id, data in patients_data.items():
@@ -605,6 +717,24 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     given_name = ' '.join(name.get('given', [])) if name.get('given') else ''
                     family_name = name.get('family', '')
                     
+                    # Suppress signal-triggered PatientInfo refreshes for all OMOP
+                    # writes below. Use __enter__/__exit__ explicitly so the finally
+                    # block guarantees cleanup even on BaseException (e.g. KeyboardInterrupt),
+                    # without requiring 1000 lines of re-indentation.
+                    from omop_core.signals import suppress_patient_info_refresh as _suppress_cm_fn
+                    _suppress_cm = _suppress_cm_fn()
+                    _suppress_cm.__enter__()
+
+                    # Wrap all per-patient DB writes — including Person creation — in a
+                    # savepoint so a failure mid-patient rolls back fully rather than
+                    # leaving orphaned rows. _atomic_entered tracks whether __enter__
+                    # was called so the finally block can roll back exactly once.
+                    _atomic_cm = transaction.atomic()
+                    _atomic_entered = False
+                    _last_exc = None
+                    _atomic_cm.__enter__()
+                    _atomic_entered = True
+
                     # Upsert Person: match on name + birth year to avoid duplicates on re-upload
                     person = None
                     person_is_new = False
@@ -615,10 +745,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             year_of_birth=year_of_birth,
                         ).first()
                     if person is None:
-                        last_person = Person.objects.all().order_by('-person_id').first()
-                        person_id = last_person.person_id + 1 if last_person else 1000
+                        from omop_core.services.pk import next_pk as _next_pk
                         person = Person.objects.create(
-                            person_id=person_id,
+                            person_id=_next_pk(Person, 'person_id'),
                             gender_concept=gender_concept,
                             year_of_birth=year_of_birth or datetime.now().year - 50,
                             month_of_birth=month_of_birth,
@@ -639,14 +768,6 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 'name': full_name,
                             },
                         )
-                    
-                    # Suppress signal-triggered PatientInfo refreshes for all OMOP
-                    # writes below. Use __enter__/__exit__ explicitly so the finally
-                    # block guarantees cleanup even on BaseException (e.g. KeyboardInterrupt),
-                    # without requiring 1000 lines of re-indentation.
-                    from omop_core.signals import suppress_patient_info_refresh as _suppress_cm_fn
-                    _suppress_cm = _suppress_cm_fn()
-                    _suppress_cm.__enter__()
 
                     # Extract disease, stage, and histologic type from Condition
                     disease = 'Breast Cancer'
@@ -685,20 +806,11 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     if condition_date:
                         from omop_core.models import ConditionOccurrence
 
-                        # Get breast cancer concept (using a standard concept ID)
-                        breast_cancer_concept = None
-                        try:
-                            breast_cancer_concept = Concept.objects.filter(
-                                concept_name__icontains='breast cancer'
-                            ).first()
-                        except:
-                            pass
-                        
+                        # Use pre-hoisted concept lookups (computed once before the patient loop)
+                        breast_cancer_concept = _concept_breast_cancer
+
                         if breast_cancer_concept:
-                            # Get EHR type concept (32817 = EHR)
-                            type_concept = Concept.objects.filter(concept_id=32817).first()
-                            if not type_concept:
-                                type_concept = breast_cancer_concept
+                            type_concept = _concept_ehr_type or breast_cancer_concept
 
                             if not ConditionOccurrence.objects.filter(
                                 person=person,
@@ -717,14 +829,21 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     condition_source_value=disease,
                                 )
                                 _co._skip_patient_info_refresh = True
-                                _co.save()
-                                _pt_condition_ids.append(_co.condition_occurrence_id)
-                                if prov_source:
-                                    _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                try:
+                                    with transaction.atomic():
+                                        _co.save()
+                                        _pt_condition_ids.append(_co.condition_occurrence_id)
+                                        if prov_source:
+                                            _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                except Exception as _coex:
+                                    logger.warning(
+                                        '{"event": "condition_occurrence_save_failed", "person_id": %s, "error": "%s"}',
+                                        person.person_id, _coex,
+                                    )
 
                     # Process observations and create Measurement records
                     _timing_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
-                    logger.debug("TIMING patient=%s phase=person_setup elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
+                    logger.info("TIMING patient=%s phase=person_setup elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
                     from omop_core.models import Measurement
                     last_measurement = Measurement.objects.all().order_by('-measurement_id').first()
                     measurement_id = last_measurement.measurement_id + 1 if last_measurement else 1
@@ -1196,7 +1315,29 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             if mutation_data['gene'] and mutation_data['mutation']:
                                 genetic_mutations.append(mutation_data)
                     
+                    # Pre-fetch all existing Measurements for this person so the
+                    # upsert check below is a dict lookup instead of one SELECT
+                    # per observation (48 round-trips → 1 round-trip).
+                    _t_mfetch = _time.monotonic()
+                    _existing_measurements: dict[tuple, object] = {
+                        (m.measurement_concept_id, m.measurement_date, m.measurement_source_value): m
+                        for m in Measurement.objects.filter(person=person)
+                    }
+                    logger.info(
+                        "TIMING patient=%s phase=measurements_bulk_fetch elapsed=%.3fs existing=%d",
+                        _timing_hash, _time.monotonic() - _t_mfetch, len(_existing_measurements),
+                    )
+
+                    # Accumulate new Measurement objects for bulk_create after the loop
+                    # (one INSERT instead of one per observation = eliminates ~48 round-trips).
+                    _pending_measurements: list = []
+                    _pending_provenances: list = []  # (measurement, prov_source, prov_user_id, prov_reason)
+                    _t_loop_start = _time.monotonic()
+                    _obs_idx = 0
+
                     for observation in data['observations']:
+                        _obs_idx += 1
+                        _t_obs = _time.monotonic()
                         obs_date = None
                         if observation.get('effectiveDateTime'):
                             try:
@@ -1239,41 +1380,35 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 obs_loinc = _c.get('code')
                                 break
                         if obs_loinc:
-                            measurement_concept = Concept.objects.filter(
-                                concept_code=obs_loinc,
-                                vocabulary_id='LOINC',
-                            ).first()
+                            measurement_concept = _cc_by_loinc(obs_loinc)
+                        if not measurement_concept and obs_name:
+                            measurement_concept = _cc_by_name(obs_name[:50])
                         if not measurement_concept:
-                            try:
-                                measurement_concept = Concept.objects.filter(
-                                    concept_name__icontains=obs_name[:50]
-                                ).first()
-                            except Exception:
-                                pass
-                        if not measurement_concept:
-                            # Use a generic lab test concept if not found
-                            measurement_concept = Concept.objects.filter(concept_id=3000963).first()
-                        
+                            # Use pre-hoisted generic lab test concept if not found
+                            measurement_concept = _concept_generic_lab
+
                         if measurement_concept:
-                            # Get Lab type concept (32856 = Lab)
-                            type_concept = Concept.objects.filter(concept_id=32856).first()
-                            if not type_concept:
-                                type_concept = measurement_concept
+                            # Use pre-hoisted Lab type concept (32856 = Lab)
+                            type_concept = _concept_lab_type or measurement_concept
 
                             # Use LOINC code as source_value when available — it's short,
                             # unique, and avoids collisions from truncating long display names.
                             source_value = obs_loinc if obs_loinc else obs_name[:50]
-                            existing_m = Measurement.objects.filter(
-                                person=person,
-                                measurement_concept=measurement_concept,
-                                measurement_date=obs_date.date(),
-                                measurement_source_value=source_value,
-                            ).first()
+                            _mkey = (
+                                measurement_concept.pk if measurement_concept else None,
+                                obs_date.date(),
+                                source_value,
+                            )
+                            existing_m = _existing_measurements.get(_mkey)
                             if existing_m:
-                                existing_m.value_as_number = value_number
-                                existing_m.value_as_string = value_string
-                                existing_m._skip_patient_info_refresh = True
-                                existing_m.save()
+                                # Only UPDATE if value actually changed — avoids
+                                # pointless writes on every re-import of the same bundle.
+                                if (existing_m.value_as_number != value_number
+                                        or existing_m.value_as_string != value_string):
+                                    existing_m.value_as_number = value_number
+                                    existing_m.value_as_string = value_string
+                                    existing_m._skip_patient_info_refresh = True
+                                    existing_m.save()
                             else:
                                 _m = Measurement(
                                     measurement_id=measurement_id,
@@ -1288,12 +1423,42 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     unit_source_value=unit[:50] if unit else None,
                                 )
                                 _m._skip_patient_info_refresh = True
-                                _m.save()
-                                _pt_measurement_ids.append(_m.measurement_id)
+                                # Keep the dict current so duplicate observations
+                                # in the same patient don't re-insert the same row.
+                                _existing_measurements[_mkey] = _m
+                                _pending_measurements.append(_m)
                                 if prov_source:
-                                    _record_provenance(_m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                    _pending_provenances.append((_m, prov_source, prov_user_id, prov_reason))
                                 measurement_id += 1
-                    
+                        # Log slow observations (>0.5s) to catch future bottlenecks
+                        _t_obs_elapsed = _time.monotonic() - _t_obs
+                        if _t_obs_elapsed > 0.5:
+                            logger.info(
+                                "TIMING patient=%s obs=%d/%d name=%.30s elapsed=%.3fs",
+                                _timing_hash, _obs_idx, len(data['observations']),
+                                obs_name, _t_obs_elapsed,
+                            )
+
+                    # Bulk-insert all new Measurements in one round-trip instead of
+                    # one INSERT per observation (~48 round-trips → 1 round-trip).
+                    if _pending_measurements:
+                        _t_bulk_insert = _time.monotonic()
+                        try:
+                            Measurement.objects.bulk_create(_pending_measurements)
+                            for _bm in _pending_measurements:
+                                _pt_measurement_ids.append(_bm.measurement_id)
+                            for (_bm, _psrc, _puid, _preason) in _pending_provenances:
+                                _record_provenance(_bm, _psrc, _puid, modification_reason=_preason, organization=get_request_org(request))
+                        except Exception as _bcex:
+                            logger.warning(
+                                '{"event": "measurement_bulk_create_failed", "count": %d, "error": "%s"}',
+                                len(_pending_measurements), _bcex,
+                            )
+                        logger.info(
+                            "TIMING patient=%s phase=measurements_bulk_insert elapsed=%.3fs count=%d",
+                            _timing_hash, _time.monotonic() - _t_bulk_insert, len(_pending_measurements),
+                        )
+
                     # Extract therapy information from MedicationStatement resources
                     therapy_lines = {}  # {line_number: {'regimen': name, 'start_date': date, 'end_date': date, 'outcome': outcome}}
                     
@@ -1321,13 +1486,22 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             # Also support effectiveDateTime for backwards compatibility
                             if not start_date:
                                 start_date = medication.get('effectiveDateTime')
-                            
+                            # Extract HemOnc concept_id from coding if present
+                            hemonc_concept_id = None
+                            for _coding in medication.get('medicationCodeableConcept', {}).get('coding', []):
+                                if _coding.get('system') == 'http://ohdsi.org/omop/HemOnc':
+                                    try:
+                                        hemonc_concept_id = int(_coding.get('code', ''))
+                                    except (ValueError, TypeError):
+                                        pass
+
                             if therapy_line not in therapy_lines:
                                 therapy_lines[therapy_line] = {
                                     'regimen': regimen_name,
                                     'start_date': start_date,
                                     'end_date': end_date,
-                                    'outcome': therapy_outcome
+                                    'outcome': therapy_outcome,
+                                    'hemonc_concept_id': hemonc_concept_id,
                                 }
                             else:
                                 therapy_lines[therapy_line]['regimen'] = regimen_name
@@ -1336,6 +1510,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 if end_date:
                                     therapy_lines[therapy_line]['end_date'] = end_date
                                 therapy_lines[therapy_line]['outcome'] = therapy_outcome
+                                if hemonc_concept_id:
+                                    therapy_lines[therapy_line]['hemonc_concept_id'] = hemonc_concept_id
                     
                     # Map therapy lines to first/second/later fields
                     first_line_therapy = None
@@ -1448,7 +1624,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 later_discontinuation_reason = disc_obs['value']
                     
                     # --- Write DrugExposure records for each therapy line ---
-                    logger.debug("TIMING patient=%s phase=measurements elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
+                    logger.info("TIMING patient=%s phase=measurements elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
                     last_drug = DrugExposure.objects.all().order_by('-drug_exposure_id').first()
                     drug_exposure_id = last_drug.drug_exposure_id + 1 if last_drug else 1
                     last_episode = Episode.objects.all().order_by('-episode_id').first()
@@ -1456,108 +1632,118 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
 
                     for lot_num, lot_data in sorted(therapy_lines.items()):
                         try:
-                            lot_start = None
-                            lot_end = None
-                            if lot_data.get('start_date'):
-                                lot_start = datetime.strptime(lot_data['start_date'][:10], '%Y-%m-%d').date()
-                            if lot_data.get('end_date'):
-                                lot_end = datetime.strptime(lot_data['end_date'][:10], '%Y-%m-%d').date()
+                            with transaction.atomic():
+                                lot_start = None
+                                lot_end = None
+                                if lot_data.get('start_date'):
+                                    lot_start = datetime.strptime(lot_data['start_date'][:10], '%Y-%m-%d').date()
+                                if lot_data.get('end_date'):
+                                    lot_end = datetime.strptime(lot_data['end_date'][:10], '%Y-%m-%d').date()
 
-                            regimen_name = lot_data.get('regimen', '')
-                            regimen_concept = Concept.objects.filter(
-                                concept_name__icontains=regimen_name,
-                                domain__domain_id='Drug',
-                            ).first() if regimen_name else None
-                            # Try RxNav for drugs not in local vocabulary
-                            if regimen_concept is None and regimen_name:
-                                try:
-                                    regimen_concept = _rxnav_resolve_drug(regimen_name)
-                                except Exception as rxnav_exc:
-                                    logger.warning(
-                                        '{"event": "rxnav_resolve_failed", "drug": "%s", "error": "%s"}',
-                                        regimen_name, rxnav_exc,
-                                    )
-                            # Final fallback to any Drug domain concept
-                            if regimen_concept is None:
-                                regimen_concept = Concept.objects.filter(
-                                    domain__domain_id='Drug'
-                                ).first()
-                            drug_type_concept = Concept.objects.filter(concept_id=32869).first()  # EHR prescription
-                            # Fall back to regimen_concept if type concept not found
-                            if drug_type_concept is None and regimen_concept is not None:
-                                drug_type_concept = regimen_concept
+                                regimen_name = lot_data.get('regimen', '')
+                                # Prefer HemOnc concept_id already embedded in the FHIR bundle;
+                                # only fall back to ILIKE + RxNav when it is absent.
+                                _hemonc_cid = lot_data.get('hemonc_concept_id')
+                                if _hemonc_cid:
+                                    regimen_concept = _cc_by_id(_hemonc_cid)
+                                else:
+                                    regimen_concept = Concept.objects.filter(
+                                        concept_name__icontains=regimen_name,
+                                        domain__domain_id='Drug',
+                                    ).first() if regimen_name else None
+                                    # RxNav fallback only when no HemOnc concept_id and ILIKE found nothing
+                                    if regimen_concept is None and regimen_name:
+                                        try:
+                                            regimen_concept = _rxnav_resolve_drug(regimen_name)
+                                        except Exception as rxnav_exc:
+                                            logger.warning(
+                                                '{"event": "rxnav_resolve_failed", "drug": "%s", "error": "%s"}',
+                                                regimen_name, rxnav_exc,
+                                            )
+                                # Final fallback to any Drug domain concept
+                                if regimen_concept is None:
+                                    regimen_concept = Concept.objects.filter(
+                                        domain__domain_id='Drug'
+                                    ).first()
+                                drug_type_concept = _concept_drug_type or regimen_concept
 
-                            # Upsert DrugExposure: skip if same person+regimen+start already exists
-                            _de = DrugExposure.objects.filter(
-                                person=person,
-                                drug_source_value=(lot_data.get('regimen') or '')[:50],
-                                drug_exposure_start_date=lot_start,
-                            ).first()
-                            if _de is None:
-                                _de = DrugExposure(
-                                    drug_exposure_id=drug_exposure_id,
+                                # Upsert DrugExposure: skip if same person+regimen+start already exists
+                                _de = DrugExposure.objects.filter(
                                     person=person,
-                                    drug_concept=regimen_concept,
-                                    drug_exposure_start_date=lot_start,
-                                    drug_exposure_end_date=lot_end,
-                                    drug_type_concept=drug_type_concept,
                                     drug_source_value=(lot_data.get('regimen') or '')[:50],
-                                )
-                                _de._skip_patient_info_refresh = True
-                                _de.save()
-                                _pt_drug_exposure_ids.append(_de.drug_exposure_id)
-                                if prov_source:
-                                    _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                                drug_exposure_id += 1
+                                    drug_exposure_start_date=lot_start,
+                                ).first()
+                                if _de is None:
+                                    _de = DrugExposure(
+                                        drug_exposure_id=drug_exposure_id,
+                                        person=person,
+                                        drug_concept=regimen_concept,
+                                        drug_exposure_start_date=lot_start,
+                                        drug_exposure_end_date=lot_end,
+                                        drug_type_concept=drug_type_concept,
+                                        drug_source_value=(lot_data.get('regimen') or '')[:50],
+                                    )
+                                    _de._skip_patient_info_refresh = True
+                                    _de.save()
+                                    _pt_drug_exposure_ids.append(_de.drug_exposure_id)
+                                    if prov_source:
+                                        _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                    drug_exposure_id += 1
 
-                            # Upsert Episode for this LOT
-                            ep_concept = Concept.objects.filter(concept_id=32531).first()  # Treatment Regimen
-                            if ep_concept is None:
-                                ep_concept = regimen_concept
-                            ep_obj_concept = regimen_concept
-                            ep_type_concept = Concept.objects.filter(concept_id=32817).first()  # EHR
-                            if ep_type_concept is None:
-                                ep_type_concept = regimen_concept
+                                # ep_source_concept reuses the same HemOnc lookup already resolved above
+                                ep_source_concept = regimen_concept if _hemonc_cid else None
 
-                            _ep = Episode.objects.filter(
-                                person=person,
-                                episode_source_value=f'LOT-{lot_num}',
-                            ).first()
-                            if _ep is None:
-                                _ep = Episode(
-                                    episode_id=episode_id_counter,
+                                # Upsert Episode for this LOT
+                                ep_concept = _concept_tx_regimen or regimen_concept
+                                ep_obj_concept = regimen_concept
+                                ep_type_concept = _concept_ehr_type or regimen_concept
+
+                                _ep = Episode.objects.filter(
                                     person=person,
-                                    episode_concept=ep_concept,
-                                    episode_object_concept=ep_obj_concept,
-                                    episode_type_concept=ep_type_concept,
-                                    episode_start_date=lot_start or datetime.now().date(),
-                                    episode_end_date=lot_end,
-                                    episode_number=lot_num,
                                     episode_source_value=f'LOT-{lot_num}',
-                                )
-                                _ep.save()
-                                _pt_episode_ids.append(_ep.episode_id)
-                                episode_id_counter += 1
+                                ).first()
+                                if _ep is None:
+                                    _ep = Episode(
+                                        episode_id=episode_id_counter,
+                                        person=person,
+                                        episode_concept=ep_concept,
+                                        episode_object_concept=ep_obj_concept,
+                                        episode_type_concept=ep_type_concept,
+                                        episode_start_date=lot_start or datetime.now().date(),
+                                        episode_end_date=lot_end,
+                                        episode_number=lot_num,
+                                        episode_source_value=f'LOT-{lot_num}',
+                                        episode_source_concept=ep_source_concept,
+                                    )
+                                    _ep.save()
+                                    _pt_episode_ids.append(_ep.episode_id)
+                                    episode_id_counter += 1
 
-                            # Link drug exposure to episode (idempotent)
-                            ee_field_concept = Concept.objects.filter(concept_id=1147094).first()
-                            if ee_field_concept is None:
-                                ee_field_concept = regimen_concept
-                            _ee, _ = EpisodeEvent.objects.get_or_create(
-                                episode_id=_ep.episode_id,
-                                event_id=_de.drug_exposure_id,
-                                defaults={'episode_event_field_concept': ee_field_concept},
-                            )
-                            _pt_episode_event_ids.append(_ee.pk)
+                                # Link drug exposure to episode (idempotent)
+                                ee_field_concept = _concept_de_field or regimen_concept
+                                _ee, _ = EpisodeEvent.objects.get_or_create(
+                                    episode_id=_ep.episode_id,
+                                    event_id=_de.drug_exposure_id,
+                                    defaults={'episode_event_field_concept': ee_field_concept},
+                                )
+                                _pt_episode_event_ids.append(_ee.pk)
                         except Exception as _e:
                             logger.warning(f"Could not write DrugExposure/Episode for LOT {lot_num}: {_e}")
 
                     # --- OMOP-first: refresh PatientInfo from OMOP tables ---
-                    # Release suppression before the single intentional refresh.
+                    # Release suppression so the single intentional refresh can run.
+                    # We stay inside the atomic block so that a refresh failure rolls
+                    # back all OMOP writes for this patient.
                     _suppress_cm.__exit__(None, None, None)
-                    logger.debug("TIMING patient=%s phase=drug_exposures elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
-                    patient_info = refresh_patient_info(person)
-                    infer_lot_for_person(person)
+                    logger.info("TIMING patient=%s phase=drug_exposures elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
+                    if _skip_refresh:
+                        # Bulk mode — just ensure the PatientInfo row exists so the
+                        # patch block below has an object to write FHIR-specific fields
+                        # into.  The full OMOP-derived refresh is deferred to the caller.
+                        patient_info, _ = PatientInfo.objects.get_or_create(person=person)
+                    else:
+                        patient_info = refresh_patient_info(person)
+                        infer_lot_for_person(person)
 
                     # --- Patch fields from FHIR that aren't yet in OMOP tables ---
                     # These fields come from FHIR parsing but are not (yet) stored in OMOP.
@@ -1748,7 +1934,12 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     patient_info.save()
                     if prov_source:
                         _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                    
+
+                    # Commit all writes for this patient. Mark _atomic_entered=False
+                    # so the finally block knows the transaction was cleanly committed.
+                    _atomic_cm.__exit__(None, None, None)
+                    _atomic_entered = False
+
                     patients_result.append({
                         'person_id': person.person_id,
                         'patient_info_id': patient_info.pk,
@@ -1771,15 +1962,38 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 _fhir_id_hash, _pt_total)
                     
                 except Exception as e:
+                    _last_exc = e
                     _err_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
-                    errors.append(f"Patient (id_hash={_err_hash}): {str(e)}")
+                    logger.exception("FHIR upload error for patient id_hash=%s", _err_hash)
+                    errors.append(f"Patient (id_hash={_err_hash}): processing failed")
                 finally:
+                    # Roll back if the transaction was opened but never committed
+                    # (i.e. an exception occurred during OMOP writes).
+                    if _atomic_entered:
+                        try:
+                            _atomic_cm.__exit__(
+                                type(_last_exc) if _last_exc else None,
+                                _last_exc,
+                                _last_exc.__traceback__ if _last_exc else None,
+                            )
+                        except Exception:
+                            pass
+                    # If this patient failed, force-rollback at the connection level
+                    # so a poisoned transaction doesn't cascade to subsequent patients
+                    # in the same batch.
+                    if _last_exc is not None:
+                        try:
+                            from django.db import connection as _db_conn
+                            _db_conn.rollback()
+                        except Exception:
+                            pass
                     # Guarantee suppression is cleared even on BaseException.
-                    # Safe to call on an already-exited context manager (re-entrant safe).
+                    # Use bare except to handle NameError (assigned before entry) and
+                    # any error from calling __exit__ a second time on success path.
                     try:
                         _suppress_cm.__exit__(None, None, None)
-                    except NameError:
-                        pass  # exception raised before _suppress_cm was assigned
+                    except Exception:
+                        pass
             
             return Response({
                 'success': True,
@@ -1805,12 +2019,21 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             errors = []
             
             org = get_request_org(request)
+            _is_privileged = request.user and (
+                getattr(request.user, 'is_superuser', False) or
+                getattr(request.user, 'is_staff', False)
+            )
             for person_id in person_ids:
                 try:
                     person = Person.objects.get(person_id=person_id)
                     if org is not None and not PatientInfo.objects.filter(person=person, organization=org).exists():
                         errors.append("Person not found.")
                         continue
+                    elif org is None and not _is_privileged:
+                        from omop_core.authorization import can_access_patient
+                        if not can_access_patient(request.user, person_id):
+                            errors.append("Person not found.")
+                            continue
                     # Delete PatientInfo
                     PatientInfo.objects.filter(person=person).delete()
                     # Delete associated Identity if exists (via PatientUser)
@@ -1898,6 +2121,52 @@ def health_check(request):
         'service': 'ctomop',
         'database': db_status,
     }, status=http_status)
+
+
+# Disease label lookup — human-readable names for known disease slugs.
+_DISEASE_LABELS = {
+    'mm':                     'Multiple Myeloma',
+    'MM':                     'Multiple Myeloma',
+    'er-erbb2-breast-cancer': 'ER+/HER2+ Breast Cancer',
+    'breast-cancer':           'Breast Cancer',
+    'follicular-lymphoma':     'Follicular Lymphoma',
+    'cll':                    'Chronic Lymphocytic Leukemia',
+    'lung-cancer':             'Lung Cancer',
+    'colon-cancer':            'Colon Cancer',
+}
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def org_disease_stats(request):
+    """GET /api/stats/org-disease/ — per-org disease patient counts for the requesting user."""
+    from django.db.models import Count
+
+    orgs = get_visible_orgs(request.user)
+    result = []
+    for org in orgs.order_by('name'):
+        rows = (
+            PatientInfo.objects
+            .filter(organization=org)
+            .values('disease_slug')
+            .annotate(count=Count('id'))
+            .order_by('-count')
+        )
+        disease_counts = [
+            {
+                'disease_slug': r['disease_slug'] or '',
+                'label': _DISEASE_LABELS.get(r['disease_slug'] or '', r['disease_slug'] or 'Unknown'),
+                'count': r['count'],
+            }
+            for r in rows
+        ]
+        result.append({
+            'org_slug': org.slug,
+            'org_name': org.name,
+            'total': sum(d['count'] for d in disease_counts),
+            'disease_counts': disease_counts,
+        })
+    return Response(result)
 
 
 @csrf_exempt
@@ -1995,6 +2264,10 @@ class PersonViewSet(viewsets.GenericViewSet):
         if org is not None:
             if not PatientInfo.objects.filter(person=person, organization=org).exists():
                 return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        elif not (getattr(request.user, 'is_superuser', False) or getattr(request.user, 'is_staff', False)):
+            from omop_core.authorization import can_access_patient
+            if not can_access_patient(request.user, person.person_id):
+                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         changed = []
         for field, (kind, placeholders) in _PERSON_PATCHABLE_FIELDS.items():
@@ -2043,8 +2316,30 @@ class _OmopFilterMixin:
         org = get_request_org(self.request)
         if org is not None:
             from omop_core.models import PatientInfo
-            allowed = PatientInfo.objects.filter(organization=org).values_list('person_id', flat=True)
+            allowed = PatientInfo.objects.filter(organization=org).values('person_id')
             qs = qs.filter(person_id__in=allowed)
+        elif not (self.request.user and (
+            getattr(self.request.user, 'is_superuser', False) or
+            getattr(self.request.user, 'is_staff', False)
+        )):
+            # Session / partner-auth (Firebase, SAML): no org token.
+            # Enforce per-patient access using can_access_patient.
+            from omop_core.authorization import can_access_patient
+            from patient_portal.models import PatientUser
+            if person_id:
+                try:
+                    pid = int(person_id)
+                except (ValueError, TypeError):
+                    return qs.none()
+                if not can_access_patient(self.request.user, pid):
+                    return qs.none()
+            else:
+                # No explicit person_id — restrict to the user's own records only.
+                try:
+                    own_pid = PatientUser.objects.get(identity=self.request.user).person_id
+                    qs = qs.filter(person_id=own_pid)
+                except PatientUser.DoesNotExist:
+                    return qs.none()
         return qs
 
 
@@ -2063,16 +2358,27 @@ class _ProvenanceMixin:
             if pk_field not in serializer.validated_data:
                 serializer.validated_data[pk_field] = next_pk(model_cls, pk_field)
 
-        # Org-scoping: reject unknown or cross-org persons
+        # Org-scoping: reject cross-org persons; allow new/bootstrap patients
         org = get_request_org(self.request)
         if org is not None:
             person = serializer.validated_data.get('person')
             if person:
-                from rest_framework.exceptions import NotFound, PermissionDenied
-                if not PatientInfo.objects.filter(person=person).exists():
-                    raise NotFound('Person not found.')
-                if not PatientInfo.objects.filter(person=person, organization=org).exists():
+                from rest_framework.exceptions import PermissionDenied
+                # Allow bootstrap (no PatientInfo yet) and unclaimed patients (org=NULL).
+                # Block only when a PatientInfo exists and is already claimed by a different org.
+                existing_pi = PatientInfo.objects.filter(person=person).first()
+                if (existing_pi is not None
+                        and existing_pi.organization is not None
+                        and existing_pi.organization != org):
                     raise PermissionDenied('Person does not belong to your organization.')
+        elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
+            from omop_core.authorization import can_access_patient
+            from rest_framework.exceptions import PermissionDenied
+            person = serializer.validated_data.get('person')
+            if not person:
+                raise PermissionDenied('person is required.')
+            if not can_access_patient(self.request.user, person.person_id):
+                raise PermissionDenied('Access denied.')
 
         obj = serializer.save()
         self._prov(obj)
@@ -2082,10 +2388,21 @@ class _ProvenanceMixin:
         if org is not None:
             person = serializer.validated_data.get('person') or serializer.instance.person
             from rest_framework.exceptions import NotFound, PermissionDenied
-            if not PatientInfo.objects.filter(person=person).exists():
+            # On updates the patient must already have a PatientInfo; missing = not found.
+            # Unclaimed patients (org=NULL) are allowed; only reject explicit cross-org.
+            existing_pi = PatientInfo.objects.filter(person=person).first()
+            if existing_pi is None:
                 raise NotFound('Person not found.')
-            if not PatientInfo.objects.filter(person=person, organization=org).exists():
+            if existing_pi.organization is not None and existing_pi.organization != org:
                 raise PermissionDenied('Person does not belong to your organization.')
+        elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
+            from omop_core.authorization import can_access_patient
+            from rest_framework.exceptions import PermissionDenied
+            person = serializer.validated_data.get('person') or serializer.instance.person
+            if not person:
+                raise PermissionDenied('person is required.')
+            if not can_access_patient(self.request.user, person.person_id):
+                raise PermissionDenied('Access denied.')
         obj = serializer.save()
         self._prov(obj)
 
@@ -2166,12 +2483,82 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
     serializer_class = EpisodeEventSerializer
     permission_classes = [ScopedTokenPermission]
 
+    def list(self, request, *args, **kwargs):
+        if not request.query_params.get('episode_id'):
+            return Response(
+                {'detail': 'episode_id query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().list(request, *args, **kwargs)
+
     def get_queryset(self):
-        episode_id = self.request.query_params.get('episode_id')
         qs = EpisodeEvent.objects.all()
+        episode_id = self.request.query_params.get('episode_id')
         if episode_id:
             qs = qs.filter(episode_id=episode_id)
+        # Org / per-patient scoping: EpisodeEvent.episode_id is a bare integer FK to Episode.
+        # Resolve allowed episode_ids via the Episode → person → org chain.
+        # Bootstrap patients (organization=NULL) are included so that create-path
+        # and read-path are symmetric.
+        org = get_request_org(self.request)
+        if org is not None:
+            from django.db.models import Q
+            allowed_pids = PatientInfo.objects.filter(
+                Q(organization=org) | Q(organization__isnull=True)
+            ).values('person_id')
+            allowed_episodes = Episode.objects.filter(person_id__in=allowed_pids).values('episode_id')
+            qs = qs.filter(episode_id__in=allowed_episodes)
+        elif self.request.user and not (
+            getattr(self.request.user, 'is_superuser', False) or
+            getattr(self.request.user, 'is_staff', False)
+        ):
+            from omop_core.authorization import can_access_patient
+            from patient_portal.models import PatientUser
+            person_id = self.request.query_params.get('person_id')
+            if person_id:
+                try:
+                    pid = int(person_id)
+                except (ValueError, TypeError):
+                    return qs.none()
+                if not can_access_patient(self.request.user, pid):
+                    return qs.none()
+                allowed_episodes = Episode.objects.filter(person_id=pid).values('episode_id')
+                qs = qs.filter(episode_id__in=allowed_episodes)
+            else:
+                try:
+                    own_pid = PatientUser.objects.get(identity=self.request.user).person_id
+                    allowed_episodes = Episode.objects.filter(person_id=own_pid).values('episode_id')
+                    qs = qs.filter(episode_id__in=allowed_episodes)
+                except PatientUser.DoesNotExist:
+                    return qs.none()
         return qs
+
+    def perform_create(self, serializer):
+        from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+        episode_id = serializer.validated_data.get('episode_id')
+        org = get_request_org(self.request)
+        if org is not None:
+            # Fail closed: if episode_id is absent the org check cannot be performed.
+            if episode_id is None:
+                raise ValidationError({'episode_id': 'This field is required.'})
+            try:
+                episode = Episode.objects.get(episode_id=episode_id)
+            except Episode.DoesNotExist:
+                raise NotFound('Episode not found.')
+            pi = PatientInfo.objects.filter(person_id=episode.person_id).first()
+            if pi is not None and pi.organization is not None and pi.organization != org:
+                raise PermissionDenied('Episode does not belong to your organization.')
+        elif self.request.user and not (
+            getattr(self.request.user, 'is_superuser', False) or
+            getattr(self.request.user, 'is_staff', False)
+        ):
+            # Non-org path (partner-auth / session patients): enforce per-patient ownership.
+            from omop_core.authorization import can_access_patient
+            if episode_id is not None:
+                episode = Episode.objects.filter(episode_id=episode_id).first()
+                if episode is None or not can_access_patient(self.request.user, episode.person_id):
+                    raise PermissionDenied('Access denied.')
+        serializer.save()
 
 
 # =============================================================================

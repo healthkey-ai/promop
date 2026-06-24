@@ -31,6 +31,8 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand
 
+from omop_core.services.lot_regimens import MYELOMA_REGIMEN_CONCEPT_IDS
+
 # ---------------------------------------------------------------------------
 # LOINC codes used for lab observations
 # ---------------------------------------------------------------------------
@@ -76,19 +78,17 @@ _EARLY_REGIMENS = [
     ('DRd',  ['daratumumab', 'lenalidomide', 'dexamethasone'],  15),
     ('DKRd', ['daratumumab', 'carfilzomib', 'lenalidomide', 'dexamethasone'], 8),
     ('DVd',  ['daratumumab', 'bortezomib', 'dexamethasone'],    8),
-    ('IsaKRd', ['isatuximab', 'carfilzomib', 'lenalidomide', 'dexamethasone'], 4),
+    ('IsaVRd', ['isatuximab', 'bortezomib', 'lenalidomide', 'dexamethasone'], 4),  # Isa-RVd (HemOnc 37557069)
     ('Td',   ['thalidomide', 'dexamethasone'],                  3),
 ]
 
 _LATER_REGIMENS = [
     ('Pd',         ['pomalidomide', 'dexamethasone'],                         18),
     ('KPd',        ['carfilzomib', 'pomalidomide', 'dexamethasone'],           10),
-    ('VPd',        ['bortezomib', 'pomalidomide', 'dexamethasone'],             7),
     ('DPd',        ['daratumumab', 'pomalidomide', 'dexamethasone'],           10),
     ('IsaPd',      ['isatuximab', 'pomalidomide', 'dexamethasone'],             5),
     ('EloPd',      ['elotuzumab', 'pomalidomide', 'dexamethasone'],             4),
-    ('Sd',         ['selinexor', 'dexamethasone'],                              4),
-    ('SVd',        ['selinexor', 'bortezomib', 'dexamethasone'],                4),
+    ('SVd',        ['selinexor', 'bortezomib', 'dexamethasone'],                8),  # SVd absorbs removed Sd weight
     ('Teclistamab',['teclistamab'],                                             4),
     ('Belantamab', ['belantamab'],                                              3),
     ('Ciltacabtagene', ['ciltacabtagene'],                                      3),
@@ -96,8 +96,7 @@ _LATER_REGIMENS = [
     ('DKRd',       ['daratumumab', 'carfilzomib', 'lenalidomide', 'dexamethasone'], 6),
     ('KRd',        ['carfilzomib', 'lenalidomide', 'dexamethasone'],            5),
     ('DVd',        ['daratumumab', 'bortezomib', 'dexamethasone'],              5),
-    ('VenetoBd',   ['venetoclax', 'bortezomib', 'dexamethasone'],               2),  # t(11;14) indication
-    ('Melphalan+pred', ['melphalan', 'prednisone'],                             2),
+    ('Melphalan+pred', ['melphalan', 'prednisone'],                             4),  # absorbed VPd + VenetoBd weight
     ('IxaRd',      ['ixazomib', 'lenalidomide', 'dexamethasone'],               6),
 ]
 
@@ -208,8 +207,8 @@ class Command(BaseCommand):
                             help='Number of patients to generate (default: 100)')
         parser.add_argument('--output', type=str, default='data/mm_patients_fhir.json',
                             help='Output file path')
-        parser.add_argument('--seed', type=int, default=42,
-                            help='Random seed for reproducibility')
+        parser.add_argument('--seed', type=int, default=None,
+                            help='Random seed for reproducibility (default: random each run)')
         parser.add_argument('--rrmm-ratio', type=float, default=0.80, dest='rrmm_ratio',
                             help='Fraction of patients with ≥1 prior line (RRMM; default 0.80)')
 
@@ -361,17 +360,12 @@ class Command(BaseCommand):
         # Disease progression status
         p['progression'] = _weighted_choice(['active', 'smoldering'], [93, 7])
 
-        # Prior lines of therapy
-        if random.random() < self.rrmm_ratio:
-            p['prior_lines'] = _weighted_choice([1, 2, 3, 4, 5], [30, 30, 20, 12, 8])
-        else:
-            p['prior_lines'] = 0
+        # Prior lines of therapy — always ≥1 so every patient has therapy data
+        p['prior_lines'] = _weighted_choice([1, 2, 3, 4, 5], [30, 30, 20, 12, 8])
 
         # SCT history correlated with prior lines
         nl = p['prior_lines']
-        if nl == 0:
-            sct = _weighted_choice(['neverReceivedSCT', 'preASCT', 'eligibleForASCT'], [40, 35, 25])
-        elif nl == 1:
+        if nl == 1:
             sct = _weighted_choice(['completedASCT', 'eligibleForASCT', 'ineligibleForASCT', 'neverReceivedSCT'],
                                    [55, 15, 20, 10])
         elif nl == 2:
@@ -815,13 +809,24 @@ class Command(BaseCommand):
 
             regimen_id = f"med-{p['id']}-line{line_num}-regimen"
 
+            # Look up HemOnc concept_id for this drug combination
+            _drug_key = frozenset(drugs)
+            _hemonc_id = MYELOMA_REGIMEN_CONCEPT_IDS.get(_drug_key)
+            _regimen_coding = [{'system': 'http://ctomop.io/fhir/mm-regimen', 'code': name}]
+            if _hemonc_id:
+                _regimen_coding.append({
+                    'system': 'http://ohdsi.org/omop/HemOnc',
+                    'code': str(_hemonc_id),
+                    'display': name,
+                })
+
             # Regimen-level entry — no partOf, regimen name as text
             meds.append({
                 'resourceType': 'MedicationStatement',
                 'id': regimen_id,
                 'status': 'completed' if not is_last else 'active',
                 'medicationCodeableConcept': {
-                    'coding': [{'system': 'http://ctomop.io/fhir/mm-regimen', 'code': name}],
+                    'coding': _regimen_coding,
                     'text': name,
                 },
                 'subject': {'reference': f"Patient/{p['id']}"},

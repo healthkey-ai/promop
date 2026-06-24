@@ -121,6 +121,117 @@ class FhirSyncTests(TestCase):
         resp = anon.post('/api/fhir/sync/', {'bundle': SAMPLE_BUNDLE}, format='json')
         self.assertIn(resp.status_code, (401, 403))
 
+    # ---- B0 connector: patient self-service ingest ---------------------- #
+
+    def test_patient_sync_self_writes_with_patient_self_provenance(self):
+        """A patient ingests their OWN data with a (non-staff) identity: the
+        Person is resolved from that identity, any supplied person_id is ignored,
+        and provenance is PATIENT_SELF (not EHR_SYNC)."""
+        patient = Identity.objects.create(
+            issuer='https://securetoken.google.com/healthtree-test', sub='patient-abc',
+            email='patient@test.com')
+        patient.set_unusable_password()
+        patient.save()
+        client = APIClient()
+        client.force_authenticate(user=patient)
+
+        bundle = {"resourceType": "Bundle", "type": "collection", "entry": [{"resource": {
+            "resourceType": "Observation",
+            "code": {"coding": [{"system": "http://loinc.org", "code": "8867-4",
+                                 "display": "Heart rate"}]},
+            "effectiveDateTime": "2026-05-01T08:00:00Z",
+            "valueQuantity": {"value": 61, "unit": "/min"},
+        }}]}
+        # A malicious person_id must be ignored — a patient can only write self.
+        resp = client.post('/api/fhir/patient-sync/',
+                           {'bundle': bundle, 'person_id': 999999}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+        pid = resp.json()['person_id']
+
+        self.assertEqual(PatientUser.objects.get(identity=patient).person_id, pid)
+        self.assertNotEqual(pid, 999999, "supplied person_id ignored; resolved from identity")
+        self.assertEqual(Measurement.objects.filter(person_id=pid).count(), 1)
+        self.assertTrue(ProvenanceRecord.objects.filter(
+            source='PATIENT_SELF', target_patient_id=str(pid)).exists())
+        self.assertFalse(ProvenanceRecord.objects.filter(
+            source='EHR_SYNC', target_patient_id=str(pid)).exists())
+
+    def test_patient_sync_requires_authentication(self):
+        resp = APIClient().post('/api/fhir/patient-sync/', {'bundle': SAMPLE_BUNDLE}, format='json')
+        self.assertIn(resp.status_code, (401, 403))
+
+    def test_patient_delete_removes_only_targeted_own_measurements(self):
+        """B4: a patient deletes their own measurement by source_value + datetime
+        + value; other rows and provenance are untouched."""
+        patient = Identity.objects.create(
+            issuer='https://securetoken.google.com/healthtree-test', sub='del-patient',
+            email='del@test.com')
+        patient.set_unusable_password()
+        patient.save()
+        client = APIClient()
+        client.force_authenticate(user=patient)
+
+        def hr(time, value):
+            return {"resource": {
+                "resourceType": "Observation",
+                "code": {"coding": [{"system": "http://loinc.org", "code": "8867-4",
+                                     "display": "Heart rate"}]},
+                "effectiveDateTime": time, "valueQuantity": {"value": value, "unit": "/min"}}}
+        bundle = {"resourceType": "Bundle", "type": "collection",
+                  "entry": [hr("2026-05-01T08:00:00Z", 61), hr("2026-05-01T12:00:00Z", 88)]}
+        pid = client.post('/api/fhir/patient-sync/', {'bundle': bundle}, format='json').json()['person_id']
+        self.assertEqual(Measurement.objects.filter(person_id=pid).count(), 2)
+
+        resp = client.post('/api/fhir/patient-delete/', {'targets': [
+            {"source_value": "Heart rate", "date": "2026-05-01",
+             "datetime": "2026-05-01T08:00:00Z", "value": 61},
+        ]}, format='json')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()['deleted'], 1)
+
+        remaining = Measurement.objects.filter(person_id=pid)
+        self.assertEqual(remaining.count(), 1)
+        self.assertEqual(float(remaining.first().value_as_number), 88.0)
+        # provenance for the deleted row is gone; the surviving one remains.
+        self.assertEqual(ProvenanceRecord.objects.filter(
+            source='PATIENT_SELF', target_patient_id=str(pid)).count(), 1)
+
+    def test_patient_delete_requires_authentication(self):
+        resp = APIClient().post('/api/fhir/patient-delete/', {'targets': []}, format='json')
+        self.assertIn(resp.status_code, (401, 403))
+
+    def test_patient_consent_records_reads_and_updates(self):
+        """B6: per-category data-sharing consent persists in PatientConsent."""
+        patient = Identity.objects.create(
+            issuer='https://securetoken.google.com/healthtree-test', sub='consent-patient',
+            email='consent@test.com')
+        patient.set_unusable_password()
+        patient.save()
+        client = APIClient()
+        client.force_authenticate(user=patient)
+
+        resp = client.post('/api/fhir/patient-consent/',
+                           {'granted': True, 'categories': ['vitals', 'activity']}, format='json')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.json()['granted'])
+        self.assertEqual(resp.json()['categories'], ['vitals', 'activity'])
+
+        got = client.get('/api/fhir/patient-consent/')
+        self.assertTrue(got.json()['granted'])
+        self.assertEqual(got.json()['categories'], ['vitals', 'activity'])
+
+        # Revoke updates the same record (no duplicate).
+        client.post('/api/fhir/patient-consent/', {'granted': False, 'categories': []}, format='json')
+        self.assertFalse(client.get('/api/fhir/patient-consent/').json()['granted'])
+
+        from patient_portal.models import PatientConsent, PatientUser
+        pu = PatientUser.objects.get(identity=patient)
+        self.assertEqual(PatientConsent.objects.filter(
+            patient_user=pu, consent_type='data_sharing').count(), 1)
+
+    def test_patient_consent_requires_authentication(self):
+        self.assertIn(APIClient().get('/api/fhir/patient-consent/').status_code, (401, 403))
+
     def test_ingests_bundle_bound_to_resolved_person(self):
         resp = self._sync()
         self.assertEqual(resp.status_code, 201, resp.content)
@@ -146,7 +257,8 @@ class FhirSyncTests(TestCase):
 
         # Current "records on file" totals returned for the connector to display.
         self.assertEqual(body['totals'],
-                         {'measurements': 1, 'conditions': 1, 'medications': 1})
+                         {'measurements': 1, 'conditions': 1, 'medications': 1,
+                          'procedures': 0, 'observations': 0})
 
         # Demographics filled onto the resolved Person.
         from omop_core.models import Person
@@ -163,6 +275,205 @@ class FhirSyncTests(TestCase):
         self.assertEqual(second['condition_ids'], [])
         self.assertEqual(second['drug_exposure_ids'], [])
         self.assertEqual(Measurement.objects.filter(person_id=first['person_id']).count(), 1)
+
+    def test_clinical_concept_upgrade_updates_in_place(self):
+        """Re-syncing a clinical record after its code becomes resolvable (e.g. a
+        vocabulary load) updates the existing row's concept in place keyed on
+        (source_value, date) — instead of leaving the old 'No matching concept'
+        row stranded next to a new resolved duplicate."""
+        from datetime import date
+        from omop_core.models import Vocabulary, Domain, ConceptClass, Concept
+        bundle = {"resourceType": "Bundle", "type": "collection", "entry": [
+            {"resource": {"resourceType": "Condition",
+                "subject": {"reference": "Patient/p1"},
+                "code": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003"}],
+                         "text": "Hypertension"},
+                "onsetDateTime": "2024-11-01"}},
+        ]}
+
+        # First sync: SNOMED 38341003 isn't loaded → "No matching concept" (0).
+        pid = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json').json()['person_id']
+        row = ConditionOccurrence.objects.get(person_id=pid)
+        self.assertEqual(row.condition_concept_id, 0)
+
+        # Load the concept (simulating the Athena vocabulary load).
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0})
+        domain, _ = Domain.objects.get_or_create(
+            domain_id='Condition',
+            defaults={'domain_name': 'Condition', 'domain_concept_id': 19})
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Clinical Finding',
+            defaults={'concept_class_name': 'Clinical Finding', 'concept_class_concept_id': 0})
+        Concept.objects.create(
+            concept_id=316866, concept_name='Hypertensive disorder', domain=domain,
+            vocabulary=vocab, concept_class=cc, standard_concept='S', concept_code='38341003',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+
+        # Re-sync the identical record → in-place concept upgrade, no duplicate.
+        self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        rows = ConditionOccurrence.objects.filter(person_id=pid)
+        self.assertEqual(rows.count(), 1, "no duplicate row after concept upgrade")
+        self.assertEqual(rows.first().condition_concept_id, 316866, "concept updated in place")
+
+    def test_ingests_extended_clinical_record_types(self):
+        """Procedure → procedure_occurrence, Immunization → drug_exposure,
+        AllergyIntolerance + DiagnosticReport → observation (B3)."""
+        bundle = {"resourceType": "Bundle", "type": "collection", "entry": [
+            {"resource": {"resourceType": "Procedure",
+                "code": {"coding": [{"system": "http://snomed.info/sct", "code": "80146002",
+                                     "display": "Appendectomy"}]},
+                "performedDateTime": "2025-03-10"}},
+            {"resource": {"resourceType": "Immunization",
+                "vaccineCode": {"coding": [{"system": "http://hl7.org/fhir/sid/cvx", "code": "208",
+                                            "display": "COVID-19"}]},
+                "occurrenceDateTime": "2025-09-01"}},
+            {"resource": {"resourceType": "AllergyIntolerance",
+                "code": {"coding": [{"system": "http://snomed.info/sct", "code": "227493005",
+                                     "display": "Cashew nuts"}]},
+                "recordedDate": "2024-01-15", "criticality": "high"}},
+            {"resource": {"resourceType": "DiagnosticReport",
+                "code": {"coding": [{"system": "http://loinc.org", "code": "58410-2",
+                                     "display": "CBC panel"}]},
+                "effectiveDateTime": "2025-06-01", "conclusion": "Within normal limits"}},
+        ]}
+        resp = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+        body = resp.json()
+        pid = body['person_id']
+
+        self.assertEqual(len(body['procedure_ids']), 1)
+        self.assertEqual(len(body['immunization_ids']), 1)
+        self.assertEqual(len(body['observation_ids']), 2)  # allergy + diagnostic report
+
+        from omop_core.models import ProcedureOccurrence, Observation
+        self.assertEqual(ProcedureOccurrence.objects.filter(person_id=pid).count(), 1)
+        self.assertEqual(DrugExposure.objects.filter(person_id=pid).count(), 1)  # immunization
+        self.assertEqual(Observation.objects.filter(person_id=pid).count(), 2)
+        self.assertEqual(body['totals']['procedures'], 1)
+        self.assertEqual(body['totals']['observations'], 2)
+
+    def test_daily_rollup_upserts_by_person_concept_date(self):
+        """An Observation flagged as a daily rollup replaces the prior
+        (person, concept, date) row when its value changes, and collapses any
+        stale stacked rows — instead of accumulating a row per changed value."""
+        AGG_EXT = [{"url": "https://healthkey.ai/fhir/aggregation", "valueCode": "daily"}]
+
+        def steps(value, ext):
+            entry = {"resource": {
+                "resourceType": "Observation",
+                "subject": {"reference": "Patient/p1"},
+                "code": {"coding": [{"system": "http://loinc.org", "code": "41950-7",
+                                     "display": "Steps 24h"}]},
+                "effectiveDateTime": "2026-04-01T00:00:00Z",
+                "valueQuantity": {"value": value, "unit": "{steps}"},
+            }}
+            if ext:
+                entry["resource"]["extension"] = AGG_EXT
+            return {"resourceType": "Bundle", "type": "collection", "entry": [entry]}
+
+        # Seed two stale stacked rows the old value-dedup behaviour would have left.
+        self.assertEqual(self.client.post('/api/fhir/sync/', {'bundle': steps(5000, False)},
+                                          format='json').status_code, 201)
+        pid = self.client.post('/api/fhir/sync/', {'bundle': steps(8000, False)},
+                               format='json').json()['person_id']
+        self.assertEqual(Measurement.objects.filter(
+            person_id=pid, measurement_source_value='Steps 24h').count(), 2)
+
+        # Rollup sync with a new value → collapses to a single row at that value.
+        self.client.post('/api/fhir/sync/', {'bundle': steps(9500, True)}, format='json')
+        rows = Measurement.objects.filter(person_id=pid, measurement_source_value='Steps 24h')
+        self.assertEqual(rows.count(), 1, "stacked rows collapsed to one")
+        self.assertEqual(float(rows.first().value_as_number), 9500.0)
+
+        # Re-sync identical rollup → idempotent (no new rows, nothing reported).
+        again = self.client.post('/api/fhir/sync/', {'bundle': steps(9500, True)}, format='json')
+        self.assertEqual(again.json()['measurement_ids'], [])
+        self.assertEqual(rows.count(), 1)
+
+    def test_unmapped_daily_rollups_coexist_by_source_value(self):
+        """Two daily rollups with no resolvable concept (both concept_id 0) but
+        distinct source_values must NOT collide on the (concept, date) key — for
+        cid 0 the key also includes source_value, so e.g. basal-energy and
+        mindful-minutes coexist as separate rows instead of overwriting per day."""
+        AGG_EXT = [{"url": "https://healthkey.ai/fhir/aggregation", "valueCode": "daily"}]
+
+        def rollup(code, display, unit, value):
+            return {"resource": {
+                "resourceType": "Observation",
+                "subject": {"reference": "Patient/p1"},
+                "code": {"coding": [{"system": "http://loinc.org", "code": code,
+                                     "display": display}]},
+                "effectiveDateTime": "2026-05-01T00:00:00Z",
+                "valueQuantity": {"value": value, "unit": unit},
+                "extension": AGG_EXT,
+            }}
+
+        # Unresolvable codes → concept_id 0 regardless of loaded vocabulary.
+        bundle = {"resourceType": "Bundle", "type": "collection", "entry": [
+            rollup("hk-basal", "Basal energy burned", "kcal", 1500),
+            rollup("hk-mind", "Mindful minutes", "min", 10),
+        ]}
+        resp = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+        pid = resp.json()['person_id']
+
+        rows = Measurement.objects.filter(person_id=pid, measurement_concept_id=0)
+        self.assertEqual(rows.count(), 2, "distinct unmapped rollups coexist (not collapsed)")
+        self.assertEqual(
+            set(rows.values_list('measurement_source_value', flat=True)),
+            {"Basal energy burned", "Mindful minutes"})
+
+        # Re-sync identical bundle → idempotent per source_value.
+        again = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        self.assertEqual(again.json()['measurement_ids'], [])
+        self.assertEqual(rows.count(), 2)
+
+        # Changing one unmapped metric updates only its row, still two rows.
+        bump = {"resourceType": "Bundle", "type": "collection", "entry": [
+            rollup("hk-basal", "Basal energy burned", "kcal", 1800)]}
+        self.client.post('/api/fhir/sync/', {'bundle': bump}, format='json')
+        self.assertEqual(rows.count(), 2)
+        self.assertEqual(
+            float(rows.get(measurement_source_value="Basal energy burned").value_as_number), 1800.0)
+        self.assertEqual(
+            float(rows.get(measurement_source_value="Mindful minutes").value_as_number), 10.0)
+
+    def test_per_reading_timestamps_coexist_and_resync_is_idempotent(self):
+        """Multiple same-day Observations with distinct effectiveDateTime times
+        (e.g. per-reading heart rate) land as separate rows with
+        measurement_datetime set; re-syncing the identical bundle adds nothing."""
+        def hr(time, value):
+            return {"resource": {
+                "resourceType": "Observation",
+                "subject": {"reference": "Patient/p1"},
+                "code": {"coding": [{"system": "http://loinc.org", "code": "8867-4",
+                                     "display": "Heart rate"}]},
+                "effectiveDateTime": time,
+                "valueQuantity": {"value": value, "unit": "/min"},
+            }}
+        bundle = {"resourceType": "Bundle", "type": "collection", "entry": [
+            hr("2026-03-01T08:00:00Z", 62),
+            hr("2026-03-01T12:30:00Z", 88),
+            hr("2026-03-01T20:15:00Z", 71),
+        ]}
+
+        first = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        self.assertEqual(first.status_code, 201, first.content)
+        pid = first.json()['person_id']
+
+        rows = Measurement.objects.filter(person_id=pid).order_by('measurement_datetime')
+        self.assertEqual(rows.count(), 3, "distinct same-day times kept as separate rows")
+        self.assertTrue(all(r.measurement_datetime is not None for r in rows),
+                        "effectiveDateTime persisted to measurement_datetime")
+        self.assertEqual([r.measurement_datetime.hour for r in rows], [8, 12, 20])
+        self.assertTrue(all(r.measurement_date.isoformat() == '2026-03-01' for r in rows))
+
+        # Re-sync the identical bundle → idempotent (dedup includes datetime).
+        second = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        self.assertEqual(second.json()['measurement_ids'], [])
+        self.assertEqual(Measurement.objects.filter(person_id=pid).count(), 3)
 
     def test_medication_request_maps_to_drug_exposure(self):
         # Epic R4 returns MedicationRequest (authoredOn), not MedicationStatement.

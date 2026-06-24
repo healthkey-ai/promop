@@ -117,3 +117,4 @@
 - `patient_portal/api/lab_results/sync.py:49-56`
 - Superseded by findings #6 and #7 in the backend review above.
 
+

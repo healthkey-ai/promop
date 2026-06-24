@@ -178,6 +178,71 @@ MYELOMA_REGIMEN_LOOKUP: dict[frozenset, str] = {
 }
 
 # ---------------------------------------------------------------------------
+# HemOnc concept_id lookup — maps same keys as MYELOMA_REGIMEN_LOOKUP
+# Values: HemOnc concept_id from the Concept table (vocabulary_id='HemOnc',
+#   concept_class_id='Regimen'), or None where no HemOnc regimen concept exists.
+# ---------------------------------------------------------------------------
+
+MYELOMA_REGIMEN_CONCEPT_IDS: dict[frozenset, int | None] = {
+    # ── Core VRD family ──────────────────────────────────────────────────
+    frozenset({'bortezomib', 'lenalidomide', 'dexamethasone'}):                  35806260,   # RVD (HemOnc name for VRd; verified in staging DB)
+    frozenset({'daratumumab', 'bortezomib', 'lenalidomide', 'dexamethasone'}):   911993,     # Dara-RVd (verified in staging DB)
+    frozenset({'daratumumab', 'lenalidomide', 'dexamethasone'}):                 35806311,   # Dara-Rd
+    frozenset({'carfilzomib', 'lenalidomide', 'dexamethasone'}):                 35806284,   # KRd
+    frozenset({'daratumumab', 'carfilzomib', 'lenalidomide', 'dexamethasone'}):  905602,     # Dara-KRd (verified in staging DB)
+    frozenset({'isatuximab', 'carfilzomib', 'lenalidomide', 'dexamethasone'}):   None,       # Isa-KRd — not in HemOnc
+    frozenset({'isatuximab', 'bortezomib', 'lenalidomide', 'dexamethasone'}):    37557069,   # Isa-RVd (verified in staging DB)
+    frozenset({'ixazomib', 'lenalidomide', 'dexamethasone'}):                    35806283,   # IRd (HemOnc name for IxaRd)
+    frozenset({'elotuzumab', 'lenalidomide', 'dexamethasone'}):                  35806314,   # Elo-Rd
+    frozenset({'daratumumab', 'ixazomib', 'lenalidomide', 'dexamethasone'}):     None,       # Dara-IRd — not in HemOnc
+    # ── Bortezomib doublets / triplets ───────────────────────────────────
+    frozenset({'bortezomib', 'dexamethasone'}):                                  35806059,   # Vd (Bortezomib and Dexamethasone)
+    frozenset({'bortezomib', 'cyclophosphamide', 'dexamethasone'}):              35806061,   # VDC (HemOnc name for VCd/CyBorD)
+    frozenset({'bortezomib', 'doxorubicin', 'dexamethasone'}):                   None,       # PAD — not in HemOnc
+    frozenset({'bortezomib', 'thalidomide', 'dexamethasone'}):                   35806259,   # VTD
+    frozenset({'bortezomib', 'melphalan', 'prednisone'}):                        35806258,   # VMP
+    frozenset({'daratumumab', 'bortezomib', 'dexamethasone'}):                   35806312,   # Dara-Vd
+    # ── Carfilzomib ───────────────────────────────────────────────────────
+    frozenset({'carfilzomib', 'dexamethasone'}):                                 35806309,   # Kd (Carfilzomib and Dexamethasone)
+    frozenset({'carfilzomib', 'pomalidomide', 'dexamethasone'}):                 35806324,   # KPd
+    frozenset({'daratumumab', 'carfilzomib', 'dexamethasone'}):                  None,       # Dara-Kd — not in HemOnc
+    # ── Pomalidomide ─────────────────────────────────────────────────────
+    frozenset({'pomalidomide', 'dexamethasone'}):                                35806066,   # Pd
+    frozenset({'elotuzumab', 'pomalidomide', 'dexamethasone'}):                  35806313,   # Elo-Pd
+    frozenset({'isatuximab', 'pomalidomide', 'dexamethasone'}):                  911941,     # Isa-Pd (verified in staging DB)
+    frozenset({'daratumumab', 'pomalidomide', 'dexamethasone'}):                 35806326,   # Dara-Pd (verified in staging DB)
+    # ── Selinexor ────────────────────────────────────────────────────────
+    frozenset({'selinexor', 'bortezomib', 'dexamethasone'}):                     905768,     # SVd
+    frozenset({'selinexor', 'dexamethasone'}):                                   None,       # Xd — not in HemOnc
+    # ── Thalidomide ──────────────────────────────────────────────────────
+    frozenset({'thalidomide', 'dexamethasone'}):                                 35806268,   # TD (verified in staging DB)
+    # ── Lenalidomide doublets ─────────────────────────────────────────────
+    frozenset({'lenalidomide', 'dexamethasone'}):                                35806053,   # Rd (Lenalidomide and Dexamethasone)
+    frozenset({'melphalan', 'prednisone', 'lenalidomide'}):                      35806273,   # MPR
+    frozenset({'melphalan', 'prednisone'}):                                      35806056,   # MP (verified in staging DB)
+    # ── Venetoclax ───────────────────────────────────────────────────────
+    frozenset({'venetoclax', 'bortezomib', 'dexamethasone'}):                    None,       # VenVD — not in HemOnc
+    # ── CAR-T / bispecifics (short generator names) ───────────────────────
+    frozenset({'belantamab'}):                                                    911956,     # Belantamab mafodotin monotherapy (verified in staging DB)
+    frozenset({'teclistamab'}):                                                   37557075,   # Teclistamab monotherapy (verified in staging DB)
+    frozenset({'ciltacabtagene'}):                                                1525038,    # Ciltacabtagene autoleucel monotherapy (verified in staging DB)
+    frozenset({'idecabtagene'}):                                                  905696,     # Idecabtagene vicleucel monotherapy (verified in staging DB)
+    # ── CAR-T products (full names) ───────────────────────────────────────
+    frozenset({'idecabtagene vicleucel'}):                                        905696,     # Ide-cel (verified in staging DB)
+    frozenset({'ciltacabtagene autoleucel'}):                                     1525038,    # Cilta-cel (verified in staging DB)
+    # ── Conditioning / transplant ─────────────────────────────────────────
+    frozenset({'melphalan'}):                                                     35804011,   # Melphalan monotherapy
+    frozenset({'carmustine', 'etoposide', 'cytarabine', 'melphalan'}):           35803616,   # BEAM
+}
+
+
+def get_regimen_concept_id(drug_names: frozenset) -> int | None:
+    """Return HemOnc concept_id for a frozenset of lowercased drug names, or None."""
+    key = frozenset(d.lower().strip() for d in drug_names)
+    return MYELOMA_REGIMEN_CONCEPT_IDS.get(key)
+
+
+# ---------------------------------------------------------------------------
 # Cross-disease regimen lookup (lymphoma, CLL, breast cancer)
 # ---------------------------------------------------------------------------
 

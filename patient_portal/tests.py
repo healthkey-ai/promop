@@ -1559,6 +1559,26 @@ class _SmartBase(TestCase):
         cls.drug_concept = Concept.objects.get(concept_id=19136160)       # Drug (generic)
         cls.type_concept = Concept.objects.get(concept_id=32817)          # EHR
 
+        # Organization + ApplicationOrganization so get_request_org() returns an org
+        # (without this, access checks fall through to can_access_patient which rejects
+        # foundation_user because it has no PatientUser/GroupAccess).
+        from omop_core.models import Organization, ApplicationOrganization
+        cls.organization = Organization.objects.create(
+            name='SMART Test Org',
+            slug='smart-test-org',
+        )
+        ApplicationOrganization.objects.create(
+            application=cls.app,
+            organization=cls.organization,
+        )
+        # PatientInfo for cls.person, scoped to the test org.  Subclasses that
+        # create OMOP records for cls.person (conditions, measurements, etc.)
+        # need this to exist so _ProvenanceMixin.perform_create org-check passes.
+        cls.patient_info = PatientInfo.objects.create(
+            person=cls.person,
+            organization=cls.organization,
+        )
+
     def _bearer(self, token_str: str) -> APIClient:
         c = APIClient()
         c.credentials(HTTP_AUTHORIZATION=f'Bearer {token_str}')
@@ -1928,7 +1948,7 @@ class SmartPatientInfoReadOnlyTest(_SmartBase):
 
     def test_patient_info_patch_succeeds_with_write_token(self):
         """PATCH is now supported — write-through to OMOP was added in HKI-PDS-01."""
-        PatientInfo.objects.get_or_create(person=self.person)
+        PatientInfo.objects.get_or_create(person=self.person, defaults={'organization': self.organization})
         resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
             {'disease': 'Updated disease'},
@@ -2557,10 +2577,9 @@ class PatientInfoPatchWriteThroughTest(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
-        cls.patient_info = PatientInfo.objects.create(
-            person=cls.person,
-            disease='Breast Cancer',
-        )
+        # cls.patient_info already created by _SmartBase; just set disease.
+        PatientInfo.objects.filter(person=cls.person).update(disease='Breast Cancer')
+        cls.patient_info = PatientInfo.objects.get(person=cls.person)
 
     def test_patch_updates_patient_info(self):
         """PATCH updates the PatientInfo field value."""
@@ -2642,10 +2661,9 @@ class ProvenancePatchTest(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
-        cls.patient_info = PatientInfo.objects.create(
-            person=cls.person,
-            disease='Breast Cancer',
-        )
+        # cls.patient_info already created by _SmartBase; just set disease.
+        PatientInfo.objects.filter(person=cls.person).update(disease='Breast Cancer')
+        cls.patient_info = PatientInfo.objects.get(person=cls.person)
 
     def test_patch_with_source_creates_provenance_for_patient_info(self):
         resp = self.write_client.patch(
@@ -2816,7 +2834,7 @@ class AuditLogMiddlewareTest(_SmartBase):
 
     def _make_person_and_pi(self, person_id):
         person = Person.objects.create(person_id=person_id)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
         return person, pi
 
     # ------------------------------------------------------------------
@@ -3019,7 +3037,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         """PATCHing a lab field creates a Measurement row."""
         from omop_core.models import Measurement
         person = Person.objects.create(person_id=91001)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
         before = Measurement.objects.filter(person=person).count()
 
         self._patch(pi, {'hemoglobin_g_dl': 12.5})
@@ -3032,7 +3050,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         """Two PATCHes of the same lab on the same day → still 1 Measurement row."""
         from omop_core.models import Measurement
         person = Person.objects.create(person_id=91002)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
 
         self._patch(pi, {'hemoglobin_g_dl': 11.0})
         self._patch(pi, {'hemoglobin_g_dl': 11.5})
@@ -3050,7 +3068,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         from datetime import date
         from omop_core.models import Measurement
         person = Person.objects.create(person_id=91003)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
 
         with mock_patch('omop_core.services.omop_write_service._today', return_value=date(2024, 1, 1)):
             self._patch(pi, {'hemoglobin_g_dl': 10.0})
@@ -3064,7 +3082,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         """PATCHing 'disease' creates a new ConditionOccurrence row."""
         from omop_core.models import ConditionOccurrence
         person = Person.objects.create(person_id=91010)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
 
         self._patch(pi, {'disease': 'Breast cancer'})
 
@@ -3080,7 +3098,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         from unittest.mock import patch as mock_patch
         from datetime import date
         person = Person.objects.create(person_id=91011)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
 
         with mock_patch('omop_core.services.omop_write_service._today', return_value=date(2024, 1, 1)):
             self._patch(pi, {'stage': 'Stage II'})
@@ -3092,7 +3110,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
     def test_patch_demographics_updates_person(self):
         """PATCHing gender and date_of_birth updates the linked Person record."""
         person = Person.objects.create(person_id=91020)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
 
         self._patch(pi, {'gender': 'Female', 'date_of_birth': '1975-06-15'})
 
@@ -3107,7 +3125,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         """PATCHing first_line_therapy creates an Episode with episode_number=1."""
         from omop_oncology.models import Episode
         person = Person.objects.create(person_id=91030)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
 
         self._patch(pi, {
             'first_line_therapy': 'AC-T',
@@ -3127,7 +3145,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         from omop_oncology.models import Episode, EpisodeEvent
         from omop_core.models import DrugExposure, Concept
         person = Person.objects.create(person_id=91031)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
         drug_concept = Concept.objects.get(concept_id=19136160)
         type_concept = Concept.objects.get(concept_id=32817)
 
@@ -3158,7 +3176,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         from omop_oncology.models import Episode, EpisodeEvent
         from omop_core.models import DrugExposure, Concept
         person = Person.objects.create(person_id=91032)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
         drug_concept = Concept.objects.get(concept_id=19136160)
         type_concept = Concept.objects.get(concept_id=32817)
 
@@ -3185,11 +3203,12 @@ class PatientInfoOmopSyncTest(_SmartBase):
             'EpisodeEvent was duplicated',
         )
 
-    def test_sync_failure_does_not_block_response(self):
-        """If sync_to_omop raises internally, the PATCH response is still 200."""
+    def test_sync_failure_returns_500(self):
+        """If sync_to_omop raises, the PATCH rolls back and returns 500."""
         from unittest.mock import patch as mock_patch
         person = Person.objects.create(person_id=91040)
-        pi = PatientInfo.objects.create(person=person)
+        pi = PatientInfo.objects.create(person=person, organization=self.organization)
+        original_status = pi.ecog_performance_status
 
         with mock_patch(
             'patient_portal.api.views.sync_to_omop',
@@ -3197,7 +3216,10 @@ class PatientInfoOmopSyncTest(_SmartBase):
         ):
             response = self._patch(pi, {'ecog_performance_status': 1})
 
-        self.assertIn(response.status_code, [200, 404])
+        self.assertEqual(response.status_code, 500)
+        # PatientInfo must not have been updated — transaction was rolled back.
+        pi.refresh_from_db()
+        self.assertEqual(pi.ecog_performance_status, original_status)
 
     def test_lab_field_to_loinc_in_mappings_not_views(self):
         """LAB_FIELD_TO_LOINC must live in mappings, not be directly importable from views."""
@@ -3323,7 +3345,7 @@ class AthenaVocabularyLoadTest(TestCase):
              'vocabulary_version', 'vocabulary_concept_id'],
             [['HemOnc', 'HemOnc Oncology', '', 'v2024', '0'],
              ['RxNorm', 'RxNorm', '', '2024AA', '0'],
-             ['SNOMED', 'SNOMED CT', '', '2024', '0']],  # should be skipped
+             ['CPT4', 'CPT-4', '', '2024', '0']],  # out of scope — should be skipped
         )
         self._write_tsv(directory, 'DOMAIN.csv',
             ['domain_id', 'domain_name', 'domain_concept_id'],
@@ -3347,15 +3369,15 @@ class AthenaVocabularyLoadTest(TestCase):
              ['5000003', 'bortezomib',           'Drug', 'RxNorm', 'Ingredient', 'S', '1421', '19700101', '20991231', ''],
              # RxNorm Branded — should be loaded
              ['5000004', 'Velcade',              'Drug', 'RxNorm', 'Branded Drug', 'S', '213269', '19700101', '20991231', ''],
-             # SNOMED concept — should be SKIPPED (not in vocabulary scope)
-             ['5000099', 'Some SNOMED concept',  'Condition', 'SNOMED', 'Clinical Finding', 'S', '123456', '19700101', '20991231', '']],
+             # CPT4 concept — should be SKIPPED (not in vocabulary scope)
+             ['5000099', 'Out-of-scope concept', 'Drug', 'CPT4', 'Clinical Finding', 'S', '123456', '19700101', '20991231', '']],
         )
         self._write_tsv(directory, 'CONCEPT_RELATIONSHIP.csv',
             ['concept_id_1', 'concept_id_2', 'relationship_id',
              'valid_start_date', 'valid_end_date', 'invalid_reason'],
             # RxNorm bortezomib → HemOnc bortezomib (both in scope)
             [['5000003', '5000002', 'Maps to', '19700101', '20991231', ''],
-             # Edge to out-of-scope SNOMED concept — should be SKIPPED
+             # Edge to out-of-scope CPT4 concept — should be SKIPPED
              ['5000003', '5000099', 'Maps to', '19700101', '20991231', '']],
         )
         self._write_tsv(directory, 'CONCEPT_ANCESTOR.csv',
@@ -3385,7 +3407,7 @@ class AthenaVocabularyLoadTest(TestCase):
         self.assertTrue(Concept.objects.filter(concept_id=5000001).exists())  # HemOnc
         self.assertTrue(Concept.objects.filter(concept_id=5000003).exists())  # RxNorm Ingredient
         self.assertTrue(Concept.objects.filter(concept_id=5000004).exists())  # RxNorm Branded
-        self.assertFalse(Concept.objects.filter(concept_id=5000099).exists())  # SNOMED — excluded
+        self.assertFalse(Concept.objects.filter(concept_id=5000099).exists())  # CPT4 — excluded
 
     def test_load_filters_concept_relationships(self):
         from omop_core.models import ConceptRelationship
@@ -4077,7 +4099,10 @@ class DiseasePersistenceTest(_SmartBase):
             race_source_value='unknown',
             ethnicity_source_value='unknown',
         )
-        PatientInfo.objects.get_or_create(person=cls.dp_person)
+        PatientInfo.objects.get_or_create(
+            person=cls.dp_person,
+            defaults={'organization': cls.organization},
+        )
 
     # ------------------------------------------------------------------ #
     # Issue #110: disease persists across a PATCH + DB re-fetch cycle     #
@@ -4340,6 +4365,24 @@ class SurveyAPITest(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
+        from oauth2_provider.models import Application, AccessToken
+        from django.utils import timezone as tz
+        import datetime
+        # Internal app (no org) — survey template writes require no org-scoping.
+        cls._internal_app = Application.objects.create(
+            name='Internal Survey Service',
+            client_id='internal-survey-client-id',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=cls.foundation_user,
+        )
+        cls._internal_write_token = AccessToken.objects.create(
+            user=cls.foundation_user,
+            application=cls._internal_app,
+            token='internal-survey-write-token-s1',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='patient/*.read patient/*.write openid launch/patient',
+        )
         from omop_core.models import Survey, PatientSurveyResponse
         cls.survey = Survey.objects.create(
             name='cll-proms',
@@ -4356,6 +4399,11 @@ class SurveyAPITest(_SmartBase):
             values={'fatigue': 3},
             percent_complete=100,
         )
+
+    @property
+    def survey_write_client(self):
+        """Internal (no-org) client for mutating shared survey templates."""
+        return self._bearer(self._internal_write_token.token)
 
     # --- Survey CRUD ---
 
@@ -4400,7 +4448,7 @@ class SurveyAPITest(_SmartBase):
                                       {'value': 'poor', 'label': 'Poor'}]}}
             ]}],
         }
-        res = self.write_client.post('/api/surveys/', payload, format='json')
+        res = self.survey_write_client.post('/api/surveys/', payload, format='json')
         self.assertEqual(res.status_code, 201)
         self.assertEqual(res.data['name'], 'breast-cancer-proms')
         self.assertEqual(len(res.data['pages'][0]['inputs']), 1)
@@ -4417,7 +4465,7 @@ class SurveyAPITest(_SmartBase):
             name='to-archive', title='To Archive',
             status=Survey.STATUS_ACTIVE, pages=[],
         )
-        res = self.write_client.patch(f'/api/surveys/{s.id}/', {'status': 'ARCHIVED'}, format='json')
+        res = self.survey_write_client.patch(f'/api/surveys/{s.id}/', {'status': 'ARCHIVED'}, format='json')
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data['status'], 'ARCHIVED')
 
@@ -4556,6 +4604,24 @@ class SurveyAPIExtendedTest(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
+        from oauth2_provider.models import Application, AccessToken
+        from django.utils import timezone as tz
+        import datetime
+        # Internal app (no org) — survey template writes require no org-scoping.
+        cls._internal_app = Application.objects.create(
+            name='Internal Survey Service (Ext)',
+            client_id='internal-survey-client-id-ext',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=cls.foundation_user,
+        )
+        cls._internal_write_token = AccessToken.objects.create(
+            user=cls.foundation_user,
+            application=cls._internal_app,
+            token='internal-survey-write-token-s2',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='patient/*.read patient/*.write openid launch/patient',
+        )
         from omop_core.models import Survey, PatientSurveyResponse
         cls.survey = Survey.objects.create(
             name='mm-ext-test',
@@ -4577,6 +4643,11 @@ class SurveyAPIExtendedTest(_SmartBase):
             },
             percent_complete=50,
         )
+
+    @property
+    def survey_write_client(self):
+        """Internal (no-org) client for mutating shared survey templates."""
+        return self._bearer(self._internal_write_token.token)
 
     def test_retrieve_survey_404(self):
         res = self.read_client.get('/api/surveys/999999/')
@@ -4664,7 +4735,7 @@ class SurveyAPIExtendedTest(_SmartBase):
 
     def test_create_survey_missing_name_returns_400(self):
         payload = {'title': 'No Name Survey', 'status': 'ACTIVE', 'pages': []}
-        res = self.write_client.post('/api/surveys/', payload, format='json')
+        res = self.survey_write_client.post('/api/surveys/', payload, format='json')
         self.assertEqual(res.status_code, 400)
 
     def test_create_survey_with_external_id(self):
@@ -4675,7 +4746,7 @@ class SurveyAPIExtendedTest(_SmartBase):
             'pages': [],
             'external_id': 'firestore-doc-abc123',
         }
-        res = self.write_client.post('/api/surveys/', payload, format='json')
+        res = self.survey_write_client.post('/api/surveys/', payload, format='json')
         self.assertEqual(res.status_code, 201)
         self.assertEqual(res.data['external_id'], 'firestore-doc-abc123')
 
@@ -4698,7 +4769,7 @@ class SurveyAPIExtendedTest(_SmartBase):
             'status': 'DRAFT',
             'pages': [],
         }
-        res = self.write_client.post('/api/surveys/', payload, format='json')
+        res = self.survey_write_client.post('/api/surveys/', payload, format='json')
         self.assertEqual(res.status_code, 400)
 
 
@@ -5259,6 +5330,9 @@ class PersonDemographicPatchTest(_SmartBase):
             race_source_value=None,
             ethnicity_source_value=None,
         )
+        # PersonViewSet.partial_update org-check requires PatientInfo; create one
+        # scoped to the test org so the write token's org matches.
+        PatientInfo.objects.create(person=self.person, organization=self.organization)
 
     def _url(self):
         return f'/api/persons/{self.person.person_id}/'
@@ -5409,3 +5483,744 @@ class ConceptLookupTest(_SmartBase):
     def test_unauthenticated_returns_401(self):
         resp = self.client.get(f'{self.URL}?lookup=LOINC:2160-0')
         self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
+# ---------------------------------------------------------------------------
+# IDOR: PatientInfoViewSet row-level access (issue #134)
+# ---------------------------------------------------------------------------
+
+class PatientInfoIDORTest(TestCase):
+    """
+    Verify that a patient user cannot read or modify another patient's record
+    via retrieve, partial_update, or provenance when org scoping is absent
+    (partner-auth / session-auth path).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        # Patient A
+        cls.person_a = Person.objects.create(person_id=88801, family_name='Alpha', given_name='Alice')
+        cls.patient_a = PatientInfo.objects.create(person=cls.person_a)
+        cls.identity_a = Identity.objects.create_user(email='alice@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_a, person=cls.person_a)
+
+        # Patient B — the victim
+        cls.person_b = Person.objects.create(person_id=88802, family_name='Beta', given_name='Bob')
+        cls.patient_b = PatientInfo.objects.create(person=cls.person_b)
+        cls.identity_b = Identity.objects.create_user(email='bob@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_b, person=cls.person_b)
+
+        # Superuser
+        cls.superuser = Identity.objects.create_superuser(email='su@test.com', password='pw')
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def test_patient_cannot_retrieve_other_patient(self):
+        """GET /api/patient-info/{B}/ as patient A must return 404."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/patient-info/{self.person_b.person_id}/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_patient_can_retrieve_own_record(self):
+        """GET /api/patient-info/{A}/ as patient A must succeed."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/patient-info/{self.person_a.person_id}/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_patient_cannot_patch_other_patient(self):
+        """PATCH /api/patient-info/{B}/ as patient A must return 404."""
+        resp = self._client_as(self.identity_a).patch(
+            f'/api/patient-info/{self.person_b.person_id}/',
+            {'ecog_performance_status': 1},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_patient_cannot_access_other_provenance(self):
+        """GET /api/patient-info/{B}/provenance/ as patient A must return 404."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/patient-info/{self.person_b.person_id}/provenance/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_superuser_can_retrieve_any_patient(self):
+        """Superusers retain unrestricted read access."""
+        resp = self._client_as(self.superuser).get(
+            f'/api/patient-info/{self.person_b.person_id}/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+
+# ---------------------------------------------------------------------------
+# OMOP ViewSet row-level access (issue #135)
+# ---------------------------------------------------------------------------
+
+class OmopViewSetAccessTest(TestCase):
+    """
+    Verify that _OmopFilterMixin enforces per-patient access for session /
+    partner-auth users (org is None path) on the OMOP clinical ViewSets.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        # Patient A — the attacker
+        cls.person_a = Person.objects.create(person_id=88901, family_name='Attacker', given_name='Alice')
+        PatientInfo.objects.create(person=cls.person_a)
+        cls.identity_a = Identity.objects.create_user(email='attacker@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_a, person=cls.person_a)
+
+        # Patient B — the victim
+        cls.person_b = Person.objects.create(person_id=88902, family_name='Victim', given_name='Bob')
+        PatientInfo.objects.create(person=cls.person_b)
+        cls.identity_b = Identity.objects.create_user(email='victim@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_b, person=cls.person_b)
+
+        # A measurement belonging to patient B
+        cls.measurement = Measurement.objects.create(
+            measurement_id=998877,
+            person=cls.person_b,
+            measurement_concept_id=0,
+            measurement_type_concept_id=0,
+            measurement_date=date(2024, 1, 1),
+        )
+
+        # A condition belonging to patient B
+        cls.condition = ConditionOccurrence.objects.create(
+            condition_occurrence_id=998877,
+            person=cls.person_b,
+            condition_concept_id=0,
+            condition_type_concept_id=0,
+            condition_start_date=date(2024, 1, 1),
+        )
+
+        cls.superuser = Identity.objects.create_superuser(email='su2@test.com', password='pw')
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    # --- List filtered by person_id ---
+
+    def test_patient_cannot_list_other_measurements(self):
+        """GET /api/measurements/?person_id=B as patient A returns empty list."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/measurements/?person_id={self.person_b.person_id}'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len((resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))), 0)
+
+    def test_patient_can_list_own_measurements(self):
+        """GET /api/measurements/?person_id=A as patient A returns their records."""
+        Measurement.objects.create(
+            measurement_id=998878,
+            person=self.person_a,
+            measurement_concept_id=0,
+            measurement_type_concept_id=0,
+            measurement_date=date(2024, 1, 1),
+        )
+        resp = self._client_as(self.identity_a).get(
+            f'/api/measurements/?person_id={self.person_a.person_id}'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = (resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))
+        self.assertGreater(len(results), 0)
+
+    def test_patient_cannot_list_other_conditions(self):
+        """GET /api/conditions/?person_id=B as patient A returns empty list."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/conditions/?person_id={self.person_b.person_id}'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len((resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))), 0)
+
+    def test_list_without_person_id_returns_own_records_only(self):
+        """GET /api/measurements/ (no person_id) as patient A returns only their records."""
+        resp = self._client_as(self.identity_a).get('/api/measurements/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = (resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))
+        person_ids = {r['person'] for r in results}
+        self.assertNotIn(self.person_b.person_id, person_ids)
+
+    def test_superuser_can_list_any_patient_measurements(self):
+        """Superusers retain unrestricted access."""
+        resp = self._client_as(self.superuser).get(
+            f'/api/measurements/?person_id={self.person_b.person_id}'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = (resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))
+        self.assertGreater(len(results), 0)
+
+
+# ---------------------------------------------------------------------------
+# Mass-assignable organization field (issue #139)
+# ---------------------------------------------------------------------------
+
+class PatientInfoOrganizationReadOnlyTest(TestCase):
+    """
+    Verify that a client cannot PATCH organization or person onto a
+    PatientInfo record — these fields must be silently ignored (read-only).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Organization
+        from patient_portal.models import PatientUser
+
+        cls.org_a = Organization.objects.create(name='Org A', slug='org-a-139')
+        cls.org_b = Organization.objects.create(name='Org B', slug='org-b-139')
+
+        cls.person = Person.objects.create(person_id=89001, family_name='Test', given_name='User')
+        cls.patient = PatientInfo.objects.create(person=cls.person, organization=cls.org_a)
+        cls.identity = Identity.objects.create_user(email='orgtest@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity, person=cls.person)
+
+        cls.other_person = Person.objects.create(person_id=89002, family_name='Other', given_name='Person')
+        PatientInfo.objects.create(person=cls.other_person, organization=cls.org_b)
+
+    def _client(self):
+        c = APIClient()
+        c.force_authenticate(user=self.identity)
+        return c
+
+    def test_patch_cannot_change_organization(self):
+        """PATCH {organization: org_b} must not change the record's org."""
+        resp = self._client().patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'organization': self.org_b.id},
+            format='json',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST])
+        self.patient.refresh_from_db()
+        self.assertEqual(self.patient.organization_id, self.org_a.id)
+
+    def test_organization_field_is_read_only_in_response(self):
+        """organization appears in the GET response but cannot be changed via PATCH."""
+        resp = self._client().get(f'/api/patient-info/{self.person.person_id}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        # organization is present in the response (readable)
+        pi_data = resp.data.get('patient_info', resp.data)
+        self.assertIn('organization', pi_data)
+
+
+# ---------------------------------------------------------------------------
+# Per-patient transaction boundary in upload_fhir (issue #149)
+# ---------------------------------------------------------------------------
+
+class FhirUploadTransactionTest(FhirUploadBase):
+    """
+    Verify that a mid-patient failure rolls back all DB writes for that
+    patient so no orphaned Person / OMOP rows persist.
+    """
+
+    def test_failed_patient_leaves_no_orphaned_rows(self):
+        """
+        If refresh_patient_info raises mid-patient, the Person and all OMOP
+        rows written before the error must be rolled back.
+        """
+        from unittest.mock import patch
+        from omop_core.services.patient_info_service import refresh_patient_info
+
+        person_id_before = (
+            Person.objects.order_by('-person_id').values_list('person_id', flat=True).first() or 0
+        )
+
+        bundle = _make_fhir_bundle()
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'bundle.json'
+
+        with patch(
+            'patient_portal.api.views.refresh_patient_info',
+            side_effect=RuntimeError('simulated mid-patient failure'),
+        ):
+            resp = self.client.post(
+                '/api/patient-info/upload_fhir/',
+                {'file': fhir_file},
+                format='multipart',
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        # The error is recorded, not a 500
+        self.assertGreater(len(resp.data.get('errors', [])), 0)
+
+        # No new Person row should have been committed
+        new_persons = Person.objects.filter(person_id__gt=person_id_before).count()
+        self.assertEqual(new_persons, 0, "Partial patient rows were not rolled back")
+
+    def test_successful_patient_commits_rows(self):
+        """Successful uploads still persist rows after the transaction fix."""
+        resp = self._upload_bundle()
+        self.assertEqual(resp.status_code, 200)
+        self.assertGreater(resp.data.get('created_count', 0), 0)
+        self.assertIsNotNone(
+            Person.objects.filter(family_name='Smith', given_name='Jane').first()
+        )
+
+
+# ---------------------------------------------------------------------------
+# IDOR: EpisodeEventViewSet cross-org isolation (issue #136)
+# ---------------------------------------------------------------------------
+
+class EpisodeEventIDORTest(TestCase):
+    """
+    Verify that an org-A service token cannot read EpisodeEvent rows that
+    belong to an org-B patient, even when episode_id is known.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import Application, AccessToken
+        from omop_core.models import Organization, ApplicationOrganization
+        from django.utils import timezone
+        from datetime import timedelta
+        _make_vocab_fixtures()
+
+        cls.org_a = Organization.objects.create(name='EE Org A', slug='ee-org-a')
+        cls.org_b = Organization.objects.create(name='EE Org B', slug='ee-org-b')
+
+        cls.svc_user = Identity.objects.create_user(email='ee-svc@test.com', password='x')
+        cls.app = Application.objects.create(
+            name='EE App',
+            user=cls.svc_user,
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+        )
+        ApplicationOrganization.objects.create(application=cls.app, organization=cls.org_a)
+        cls.token = AccessToken.objects.create(
+            user=cls.svc_user,
+            application=cls.app,
+            token='ee-idor-test-token',
+            expires=timezone.now() + timedelta(hours=1),
+            scope='patient/*.read',
+        )
+
+        # Org-A patient with an episode + event
+        cls.person_a = Person.objects.create(person_id=19101)
+        PatientInfo.objects.create(person=cls.person_a, organization=cls.org_a)
+        cls.ep_a = Episode.objects.create(
+            episode_id=19101,
+            person=cls.person_a,
+            episode_concept=Concept.objects.get(concept_id=32531),   # treatment regimen
+            episode_object_concept=Concept.objects.get(concept_id=32817),
+            episode_type_concept=Concept.objects.get(concept_id=32817),
+            episode_start_date=date(2024, 1, 1),
+            episode_number=1,
+            episode_source_value='RCHOP',
+        )
+        cls.drug_a = DrugExposure.objects.create(
+            drug_exposure_id=19101,
+            person=cls.person_a,
+            drug_concept=Concept.objects.get(concept_id=19136160),
+            drug_exposure_start_date=date(2024, 1, 1),
+            drug_type_concept=Concept.objects.get(concept_id=32817),
+        )
+        cls.ee_a = EpisodeEvent.objects.create(
+            episode_id=cls.ep_a.episode_id,
+            event_id=cls.drug_a.drug_exposure_id,
+            episode_event_field_concept=Concept.objects.get(concept_id=1147094),
+        )
+
+        # Org-B patient with an episode + event (must NOT be visible via org-A token)
+        cls.person_b = Person.objects.create(person_id=19102)
+        PatientInfo.objects.create(person=cls.person_b, organization=cls.org_b)
+        cls.ep_b = Episode.objects.create(
+            episode_id=19102,
+            person=cls.person_b,
+            episode_concept=Concept.objects.get(concept_id=32531),   # treatment regimen
+            episode_object_concept=Concept.objects.get(concept_id=32817),
+            episode_type_concept=Concept.objects.get(concept_id=32817),
+            episode_start_date=date(2024, 2, 1),
+            episode_number=1,
+            episode_source_value='VRd',
+        )
+        cls.drug_b = DrugExposure.objects.create(
+            drug_exposure_id=19102,
+            person=cls.person_b,
+            drug_concept=Concept.objects.get(concept_id=19136160),
+            drug_exposure_start_date=date(2024, 2, 1),
+            drug_type_concept=Concept.objects.get(concept_id=32817),
+        )
+        cls.ee_b = EpisodeEvent.objects.create(
+            episode_id=cls.ep_b.episode_id,
+            event_id=cls.drug_b.drug_exposure_id,
+            episode_event_field_concept=Concept.objects.get(concept_id=1147094),
+        )
+
+    def _client(self):
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f'Bearer {self.token.token}')
+        return c
+
+    def test_list_scoped_to_own_org_episode(self):
+        """List with org-A episode_id returns events; org-B episode_id returns empty."""
+        c = self._client()
+        resp = c.get(f'/api/episode-events/?episode_id={self.ep_a.episode_id}')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = [e['event_id'] for e in resp.data]
+        self.assertIn(self.ee_a.event_id, ids)
+
+    def test_list_excludes_other_org_events(self):
+        """List with org-B episode_id (known via IDOR) must return empty for org-A token."""
+        c = self._client()
+        resp = c.get(f'/api/episode-events/?episode_id={self.ep_b.episode_id}')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data), 0, 'Org-B EpisodeEvent leaked to org-A token')
+
+    def test_retrieve_other_org_event_returns_404(self):
+        """Direct retrieve of org-B EpisodeEvent PK via org-A token must return 404."""
+        c = self._client()
+        # ee_b PK is (episode_id, event_id) — DRF ModelViewSet uses the PK for retrieve
+        resp = c.get(f'/api/episode-events/{self.ee_b.pk}/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND,
+                         'Org-B EpisodeEvent accessible via direct retrieve with org-A token')
+
+    def test_destroy_other_org_event_denied(self):
+        """DELETE of org-B EpisodeEvent PK via org-A read token must be denied (403 scope or 404 isolation)."""
+        c = self._client()
+        resp = c.delete(f'/api/episode-events/{self.ee_b.pk}/')
+        # A read-only token gets 403 (scope check fires before the org filter).
+        # A write-scope org-A token would get 404 (org filter). Either is safe.
+        self.assertIn(resp.status_code, [status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND],
+                      'Org-B EpisodeEvent was deleted by org-A token')
+
+
+# ---------------------------------------------------------------------------
+# TherapyConceptIdTest — HemOnc concept_id fields on PatientInfo
+# ---------------------------------------------------------------------------
+
+class TherapyConceptIdTest(TestCase):
+    """
+    Verify that refresh_patient_info populates first_line_therapy_id /
+    second_line_therapy_id / later_therapy_ids via the HemOnc regimen lookup,
+    and that the PatientInfoSerializer display fields fall back correctly.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+
+        today = date.today()
+        far_future = date(2099, 12, 31)
+        vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        domain_drug = Domain.objects.get(domain_id='Drug')
+        cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
+
+        def _drug_concept(cid, name):
+            obj, _ = Concept.objects.get_or_create(
+                concept_id=cid,
+                defaults={
+                    'concept_name': name,
+                    'domain': domain_drug,
+                    'vocabulary': vocab,
+                    'concept_class': cc,
+                    'concept_code': str(cid),
+                    'valid_start_date': today,
+                    'valid_end_date': far_future,
+                },
+            )
+            return obj
+
+        # Drug concepts for KRd
+        cls.carfilzomib_c  = _drug_concept(1112807, 'carfilzomib')
+        cls.lenalidomide_c = _drug_concept(1110942, 'lenalidomide')
+        cls.dexamethasone_c = _drug_concept(1518254, 'dexamethasone')
+
+        # Drug concepts for VRd (bortezomib already exists or create it)
+        cls.bortezomib_c = _drug_concept(1110835, 'bortezomib')
+
+        # HemOnc concept for KRd (concept_id 35806284)
+        hemonc_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc', 'vocabulary_concept_id': 0},
+        )
+        hemonc_cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0},
+        )
+        domain_obs, _ = Domain.objects.get_or_create(
+            domain_id='Observation',
+            defaults={'domain_name': 'Observation', 'domain_concept_id': 27},
+        )
+        cls.krd_concept, _ = Concept.objects.get_or_create(
+            concept_id=35806284,
+            defaults={
+                'concept_name': 'KRd',
+                'domain': domain_obs,
+                'vocabulary': hemonc_vocab,
+                'concept_class': hemonc_cc,
+                'concept_code': 'KRd',
+                'valid_start_date': today,
+                'valid_end_date': far_future,
+            },
+        )
+
+        ep_concept = Concept.objects.get(concept_id=32531)
+        ehr_concept = Concept.objects.get(concept_id=32817)
+        field_concept = Concept.objects.get(concept_id=1147094)
+        type_concept = Concept.objects.get(concept_id=32817)
+
+        # ── Patient 1: KRd first-line ───────────────────────────────────────
+        cls.person_krd = Person.objects.create(person_id=92001)
+        cls.pi_krd = PatientInfo.objects.create(person=cls.person_krd)
+
+        last_ep = Episode.objects.order_by('-episode_id').first()
+        ep_id = (last_ep.episode_id + 1) if last_ep else 1
+        cls.ep_krd = Episode.objects.create(
+            episode_id=ep_id,
+            person=cls.person_krd,
+            episode_concept=ep_concept,
+            episode_object_concept=ehr_concept,
+            episode_type_concept=ehr_concept,
+            episode_number=1,
+            episode_start_date=date(2023, 1, 1),
+            episode_source_value='KRd (induction)',
+        )
+
+        def _drug_exp(person, concept, exp_id, start=date(2023, 1, 1)):
+            return DrugExposure.objects.create(
+                drug_exposure_id=exp_id,
+                person=person,
+                drug_concept=concept,
+                drug_exposure_start_date=start,
+                drug_type_concept=type_concept,
+            )
+
+        cls.de_carf = _drug_exp(cls.person_krd, cls.carfilzomib_c,  920011)
+        cls.de_lena = _drug_exp(cls.person_krd, cls.lenalidomide_c, 920012)
+        cls.de_dexa = _drug_exp(cls.person_krd, cls.dexamethasone_c, 920013)
+
+        for de in [cls.de_carf, cls.de_lena, cls.de_dexa]:
+            EpisodeEvent.objects.create(
+                episode_id=cls.ep_krd.episode_id,
+                event_id=de.drug_exposure_id,
+                episode_event_field_concept=field_concept,
+            )
+
+        # ── Patient 2: VRd first-line (no HemOnc concept_id) ───────────────
+        cls.person_vrd = Person.objects.create(person_id=92002)
+        cls.pi_vrd = PatientInfo.objects.create(person=cls.person_vrd)
+
+        last_ep = Episode.objects.order_by('-episode_id').first()
+        ep_id2 = last_ep.episode_id + 1
+        cls.ep_vrd = Episode.objects.create(
+            episode_id=ep_id2,
+            person=cls.person_vrd,
+            episode_concept=ep_concept,
+            episode_object_concept=ehr_concept,
+            episode_type_concept=ehr_concept,
+            episode_number=1,
+            episode_start_date=date(2023, 2, 1),
+            episode_source_value='VRd (induction)',
+        )
+
+        cls.de_bort = _drug_exp(cls.person_vrd, cls.bortezomib_c,  920021, date(2023, 2, 1))
+        cls.de_lena2 = _drug_exp(cls.person_vrd, cls.lenalidomide_c, 920022, date(2023, 2, 1))
+        cls.de_dexa2 = _drug_exp(cls.person_vrd, cls.dexamethasone_c, 920023, date(2023, 2, 1))
+
+        for de in [cls.de_bort, cls.de_lena2, cls.de_dexa2]:
+            EpisodeEvent.objects.create(
+                episode_id=cls.ep_vrd.episode_id,
+                event_id=de.drug_exposure_id,
+                episode_event_field_concept=field_concept,
+            )
+
+    def _refresh(self, person):
+        from omop_core.services.patient_info_service import refresh_patient_info
+        return refresh_patient_info(person)
+
+    def test_krd_first_line_therapy_id_is_populated(self):
+        """refresh_patient_info sets first_line_therapy_id=35806284 for KRd."""
+        pi = self._refresh(self.person_krd)
+        self.assertEqual(pi.first_line_therapy_id, 35806284)
+
+    def test_krd_first_line_therapy_text_uses_canonical_name(self):
+        """When HemOnc concept_id resolved, therapy text is set to canonical name."""
+        pi = self._refresh(self.person_krd)
+        self.assertEqual(pi.first_line_therapy, 'KRd')
+
+    def test_vrd_first_line_therapy_id_is_none(self):
+        """VRd has no HemOnc concept_id — field stays None."""
+        pi = self._refresh(self.person_vrd)
+        self.assertIsNone(pi.first_line_therapy_id)
+
+    def test_vrd_first_line_therapy_text_is_populated(self):
+        """VRd therapy text is still populated even without a concept_id."""
+        pi = self._refresh(self.person_vrd)
+        self.assertIsNotNone(pi.first_line_therapy)
+        self.assertNotEqual(pi.first_line_therapy, '')
+
+    def test_serializer_display_returns_hemonc_name_when_concept_id_set(self):
+        """first_line_therapy_display returns HemOnc concept_name when concept_id present."""
+        pi = self._refresh(self.person_krd)
+        from patient_portal.api.serializers import PatientInfoSerializer
+        data = PatientInfoSerializer(pi).data
+        self.assertEqual(data['first_line_therapy_display'], 'KRd')
+
+    def test_serializer_display_falls_back_to_text_when_no_concept_id(self):
+        """first_line_therapy_display falls back to first_line_therapy text when id is None."""
+        pi = self._refresh(self.person_vrd)
+        pi.first_line_therapy = 'VRd'
+        pi.first_line_therapy_id = None
+        pi.save(update_fields=['first_line_therapy', 'first_line_therapy_id'])
+        from patient_portal.api.serializers import PatientInfoSerializer
+        data = PatientInfoSerializer(pi).data
+        self.assertEqual(data['first_line_therapy_display'], 'VRd')
+
+    def test_later_therapy_ids_is_list_or_none(self):
+        """later_therapy_ids is either None or a list."""
+        pi = self._refresh(self.person_krd)
+        self.assertIn(pi.later_therapy_ids, [None, []])
+
+
+class OrgDiseaseStatsTest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        from omop_core.models import Organization, PatientGroup, GroupAccess
+        self.org_a = Organization.objects.create(name='Org A', slug='org-a')
+        self.org_b = Organization.objects.create(name='Org B', slug='org-b')
+        self.group_a = PatientGroup.objects.create(
+            organization=self.org_a, name='Group A', slug='group-a'
+        )
+
+        # Create patients in org_a
+        for i, slug in enumerate(['mm', 'mm', 'breast-cancer'], start=1):
+            p = Person.objects.create(person_id=9000 + i)
+            PatientInfo.objects.create(person=p, organization=self.org_a, disease_slug=slug)
+
+        # Create patient in org_b
+        p4 = Person.objects.create(person_id=9004)
+        PatientInfo.objects.create(person=p4, organization=self.org_b, disease_slug='cll')
+
+        self.staff = Identity.objects.create_user(email='staff@t.com', password='x', is_staff=True)
+        self.org_admin = Identity.objects.create_user(email='admin@t.com', password='x')
+        self.doctor = Identity.objects.create_user(email='doc@t.com', password='x')
+        self.nobody = Identity.objects.create_user(email='none@t.com', password='x')
+
+        GroupAccess.objects.create(identity=self.org_admin, org=self.org_a, role='org_admin')
+        GroupAccess.objects.create(identity=self.doctor, group=self.group_a, role='doctor')
+
+    def _get(self, user):
+        self.client.force_authenticate(user=user)
+        return self.client.get('/api/stats/org-disease/')
+
+    def test_staff_sees_all_orgs(self):
+        resp = self._get(self.staff)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        slugs = {o['org_slug'] for o in resp.data}
+        self.assertIn('org-a', slugs)
+        self.assertIn('org-b', slugs)
+
+    def test_staff_disease_counts_correct(self):
+        resp = self._get(self.staff)
+        org_a_data = next(o for o in resp.data if o['org_slug'] == 'org-a')
+        self.assertEqual(org_a_data['total'], 3)
+        counts = {d['disease_slug']: d['count'] for d in org_a_data['disease_counts']}
+        self.assertEqual(counts['mm'], 2)
+        self.assertEqual(counts['breast-cancer'], 1)
+
+    def test_org_admin_sees_only_their_org(self):
+        resp = self._get(self.org_admin)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        slugs = {o['org_slug'] for o in resp.data}
+        self.assertIn('org-a', slugs)
+        self.assertNotIn('org-b', slugs)
+
+    def test_doctor_sees_their_group_org(self):
+        resp = self._get(self.doctor)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        slugs = {o['org_slug'] for o in resp.data}
+        self.assertIn('org-a', slugs)
+
+    def test_no_grants_returns_empty_list(self):
+        resp = self._get(self.nobody)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data, [])
+
+    def test_unauthenticated_returns_401(self):
+        self.client.logout()
+        resp = self.client.get('/api/stats/org-disease/')
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_response_shape(self):
+        resp = self._get(self.org_admin)
+        org = resp.data[0]
+        self.assertIn('org_slug', org)
+        self.assertIn('org_name', org)
+        self.assertIn('total', org)
+        self.assertIn('disease_counts', org)
+        if org['disease_counts']:
+            dc = org['disease_counts'][0]
+            self.assertIn('disease_slug', dc)
+            self.assertIn('label', dc)
+            self.assertIn('count', dc)
+
+
+class OrgAdminPatientListScopingTest(TestCase):
+    """Verify that org_admin GroupAccess grants scope the patient list correctly."""
+
+    def setUp(self):
+        from omop_core.models import Organization, PatientGroup, GroupAccess
+        self.client = APIClient()
+
+        self.org_a = Organization.objects.create(name='Org A', slug='org-a-scope')
+        self.org_b = Organization.objects.create(name='Org B', slug='org-b-scope')
+        self.group_a = PatientGroup.objects.create(
+            organization=self.org_a, name='Group A', slug='group-a-scope'
+        )
+
+        # Two patients in org_a, one in org_b, one with no org
+        p1 = Person.objects.create(person_id=8001)
+        p2 = Person.objects.create(person_id=8002)
+        p3 = Person.objects.create(person_id=8003)
+        p4 = Person.objects.create(person_id=8004)
+        self.pi_a1 = PatientInfo.objects.create(person=p1, organization=self.org_a)
+        self.pi_a2 = PatientInfo.objects.create(person=p2, organization=self.org_a)
+        self.pi_b = PatientInfo.objects.create(person=p3, organization=self.org_b)
+        self.pi_none = PatientInfo.objects.create(person=p4)
+
+        self.org_admin = Identity.objects.create_user(email='orgadmin@t.com', password='x')
+        self.no_grant = Identity.objects.create_user(email='nogrant@t.com', password='x')
+        self.staff = Identity.objects.create_user(email='staff2@t.com', password='x', is_staff=True)
+
+        from django.utils import timezone
+        GroupAccess.objects.create(
+            identity=self.org_admin,
+            org=self.org_a,
+            role='org_admin',
+        )
+
+    def _get(self, user):
+        self.client.force_authenticate(user=user)
+        return self.client.get('/api/patient-info/')
+
+    def test_org_admin_sees_only_their_org_patients(self):
+        resp = self._get(self.org_admin)
+        self.assertEqual(resp.status_code, 200)
+        ids = {p['id'] for p in resp.data}
+        self.assertIn(self.pi_a1.id, ids)
+        self.assertIn(self.pi_a2.id, ids)
+        self.assertNotIn(self.pi_b.id, ids)
+        self.assertNotIn(self.pi_none.id, ids)
+
+    def test_no_grant_user_sees_nothing(self):
+        resp = self._get(self.no_grant)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data), 0)
+
+    def test_staff_sees_all_patients(self):
+        resp = self._get(self.staff)
+        self.assertEqual(resp.status_code, 200)
+        ids = {p['id'] for p in resp.data}
+        self.assertIn(self.pi_a1.id, ids)
+        self.assertIn(self.pi_b.id, ids)
+        self.assertIn(self.pi_none.id, ids)

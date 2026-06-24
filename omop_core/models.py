@@ -1,8 +1,10 @@
 from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.db.models import Q
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
+from django.contrib.postgres.indexes import GinIndex
 
 
 class ProvenanceRecord(models.Model):
@@ -30,6 +32,12 @@ class ProvenanceRecord(models.Model):
     class Meta:
         db_table = 'provenance_record'
         indexes = [models.Index(fields=['content_type', 'object_id'])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['content_type', 'object_id', 'source_user_id', 'source'],
+                name='uq_provenance_object_actor_source',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.source} → {self.content_type} #{self.object_id}"
@@ -126,19 +134,24 @@ class PatientGroupMembership(models.Model):
         return f"Person {self.person_id} in {self.group.name}"
 
 
-class ProfessionalGroupAccess(models.Model):
-    """Grants a professional (Identity) access to a patient group."""
+class GroupAccess(models.Model):
+    """Grants a professional (Identity) access to an org or a patient group."""
     ROLE_CHOICES = [
-        ('admin', 'Admin'),
+        ('org_admin', 'Org Admin'),
+        ('doctor',    'Doctor'),
         ('navigator', 'Navigator'),
-        ('doctor', 'Doctor'),
     ]
     identity = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
         related_name='group_access_grants',
     )
+    org = models.ForeignKey(
+        'Organization', on_delete=models.CASCADE,
+        null=True, blank=True, related_name='access_grants',
+    )
     group = models.ForeignKey(
-        PatientGroup, on_delete=models.CASCADE, related_name='access_grants',
+        PatientGroup, on_delete=models.CASCADE,
+        null=True, blank=True, related_name='access_grants',
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
     expires_at = models.DateTimeField(null=True, blank=True)
@@ -149,16 +162,30 @@ class ProfessionalGroupAccess(models.Model):
     )
 
     class Meta:
-        db_table = 'professional_group_access'
+        db_table = 'group_access'
         constraints = [
+            models.CheckConstraint(
+                check=(
+                    Q(org__isnull=False, group__isnull=True) |
+                    Q(org__isnull=True, group__isnull=False)
+                ),
+                name='group_access_org_xor_group',
+            ),
             models.UniqueConstraint(
                 fields=['identity', 'group'],
+                condition=Q(group__isnull=False),
                 name='uq_identity_group',
+            ),
+            models.UniqueConstraint(
+                fields=['identity', 'org'],
+                condition=Q(org__isnull=False),
+                name='uq_identity_org',
             ),
         ]
 
     def __str__(self):
-        return f"{self.identity} → {self.group.name} ({self.role})"
+        scope = f"org={self.org_id}" if self.org_id else f"group={self.group_id}"
+        return f"{self.identity} → {scope} ({self.role})"
 
 
 class PersonalRepresentative(models.Model):
@@ -265,6 +292,13 @@ class Concept(models.Model):
             models.Index(
                 fields=['vocabulary_id', 'concept_code'],
                 name='ix_concept_vocab_code',
+            ),
+            # GIN trigram index — makes concept_name__icontains fast on large vocab tables.
+            # Requires pg_trgm extension (added via TrigramExtension() in migration).
+            GinIndex(
+                fields=['concept_name'],
+                name='ix_concept_name_trgm',
+                opclasses=['gin_trgm_ops'],
             ),
         ]
 
@@ -492,7 +526,7 @@ class VisitOccurrence(models.Model):
     visit_type_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='visit_type_occurrences', db_column='visit_type_concept_id')
     provider_id = models.IntegerField(null=True, blank=True)
     care_site_id = models.IntegerField(null=True, blank=True)
-    visit_source_value = models.CharField(max_length=50, null=True, blank=True)
+    visit_source_value = models.CharField(max_length=255, null=True, blank=True)
     visit_source_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='visit_source_occurrences', db_column='visit_source_concept_id', null=True, blank=True)
     admitted_from_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='visit_admitted_from', db_column='admitted_from_concept_id', null=True, blank=True)
     admitted_from_source_value = models.CharField(max_length=50, null=True, blank=True)
@@ -502,6 +536,13 @@ class VisitOccurrence(models.Model):
 
     class Meta:
         db_table = 'visit_occurrence'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['person', 'visit_start_date', 'care_site_id', 'visit_source_value'],
+                condition=models.Q(visit_source_value__isnull=False) & ~models.Q(visit_source_value=''),
+                name='uq_visit_person_date_site_source',
+            ),
+        ]
 
     def __str__(self):
         return f"Visit {self.visit_occurrence_id} for Person {self.person_id}"
@@ -1158,6 +1199,21 @@ class PatientInfo(models.Model):
     second_line_intent = models.CharField(max_length=50, blank=True, null=True, help_text="Second Line Therapy Intent (Adjuvant/Neoadjuvant/Metastatic)")
     second_line_discontinuation_reason = models.CharField(max_length=50, blank=True, null=True, help_text="Second Line Reason for Discontinuation (Progression/Toxicity/Completion)")
     later_therapy = models.TextField(blank=True, null=True)
+    # HemOnc concept_id references for therapy lines
+    first_line_therapy_id = models.BigIntegerField(
+        null=True, blank=True,
+        help_text="HemOnc concept_id for first-line regimen",
+        db_index=True,
+    )
+    second_line_therapy_id = models.BigIntegerField(
+        null=True, blank=True,
+        help_text="HemOnc concept_id for second-line regimen",
+        db_index=True,
+    )
+    later_therapy_ids = models.JSONField(
+        null=True, blank=True, default=list,
+        help_text="List of HemOnc concept_ids for later-line regimens (3L+)",
+    )
     later_date = models.DateField(blank=True, null=True)
     later_start_date = models.DateField(blank=True, null=True, help_text="Later Line Therapy Start Date")
     later_end_date = models.DateField(blank=True, null=True, help_text="Later Line Therapy End Date")

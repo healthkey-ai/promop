@@ -13,6 +13,7 @@ from omop_core.models import (
     Person, PatientInfo, ConditionOccurrence, Concept,
     Measurement, Observation, DrugExposure, Location, ProcedureOccurrence,
 )
+from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
 
 
 # ---------------------------------------------------------------------------
@@ -26,8 +27,10 @@ _OMOP_DERIVED_FIELDS = [
     'disease', 'diagnosis_date', 'condition_clinical_status', 'disease_slug',
     # Therapy lines
     'first_line_therapy', 'first_line_date', 'first_line_start_date', 'first_line_end_date',
+    'first_line_therapy_id',
     'second_line_therapy', 'second_line_date', 'second_line_start_date', 'second_line_end_date',
-    'later_therapy', 'later_date', 'later_therapies',
+    'second_line_therapy_id',
+    'later_therapy', 'later_date', 'later_therapies', 'later_therapy_ids',
     'concomitant_medications',
     # Legacy labs (derived via name-based Measurement lookup)
     'hemoglobin_level', 'hemoglobin_level_units',
@@ -177,7 +180,7 @@ def _clear_derived_fields(patient_info: PatientInfo) -> None:
     """Reset all OMOP-derived fields to None so deletions are reflected."""
     for field in _OMOP_DERIVED_FIELDS:
         if hasattr(patient_info, field):
-            default = [] if field in ('prior_procedures', 'later_therapies', 'genetic_mutations') else None
+            default = [] if field in ('prior_procedures', 'later_therapies', 'genetic_mutations', 'later_therapy_ids') else None
             setattr(patient_info, field, default)
 
 
@@ -286,6 +289,26 @@ def _get_location_data(person: Person) -> dict:
     return data
 
 
+# Clinical-interpretation aliases: raw OMOP condition concept names that EXACT's
+# matcher does not recognise, mapped to the canonical disease titles it gates on
+# (ADR 0001 — CTOMOP owns the canonical disease title that SoC / ht-phr / EXACT all
+# read). Keyed by lowercased concept name; only exact matches are remapped, so
+# unrelated conditions pass through untouched.
+_DISEASE_ALIASES = {
+    'myeloma': 'multiple myeloma',
+}
+
+
+def _canonicalize_disease(name: str) -> str:
+    """Map a raw OMOP condition concept name to EXACT's canonical disease title.
+
+    Unrecognised names are returned unchanged (preserve, don't drop).
+    """
+    if not name:
+        return name
+    return _DISEASE_ALIASES.get(name.strip().lower(), name)
+
+
 def _get_disease_data(person: Person) -> dict:
     data = {}
 
@@ -306,7 +329,7 @@ def _get_disease_data(person: Person) -> dict:
     ).order_by('-condition_start_date').first()
 
     if cancer_condition:
-        data['disease'] = cancer_condition.condition_concept.concept_name
+        data['disease'] = _canonicalize_disease(cancer_condition.condition_concept.concept_name)
         if cancer_condition.condition_start_date:
             data['diagnosis_date'] = cancer_condition.condition_start_date
 
@@ -375,7 +398,7 @@ def _get_treatment_data(person: Person) -> dict:
     # Try Episode-based therapy line grouping first
     try:
         from omop_oncology.models import Episode
-        episodes = Episode.objects.filter(person=person).order_by('episode_number')
+        episodes = Episode.objects.filter(person=person).select_related('episode_source_concept').order_by('episode_number')
         if episodes.exists():
             return _get_treatment_data_from_episodes(person, data, episodes, drug_exposures)
     except Exception:
@@ -422,39 +445,98 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
     """Use Episode records for structured therapy line grouping."""
     try:
         from omop_oncology.models import EpisodeEvent
+        from omop_core.services.lot_regimens import get_regimen_concept_id
     except ImportError:
         return data
 
+    # ── Bulk-fetch EpisodeEvents and DrugExposures for all episodes ────────
+    # Replaces per-episode queries with 2 total queries.
+    all_episode_ids = [e.episode_id for e in episodes]
+
+    ee_by_episode: dict = {}
+    for ee in EpisodeEvent.objects.filter(episode_id__in=all_episode_ids).values('episode_id', 'event_id'):
+        ee_by_episode.setdefault(ee['episode_id'], []).append(ee['event_id'])
+
+    all_event_ids = [eid for ids in ee_by_episode.values() for eid in ids]
+    de_by_id: dict = {
+        de.drug_exposure_id: de
+        for de in DrugExposure.objects.filter(drug_exposure_id__in=all_event_ids).select_related('drug_concept')
+    } if all_event_ids else {}
+
+    # ── First pass: compute drug name sets and regimen concept_ids ─────────
+    # No additional DB queries here — episode_source_concept already loaded via select_related.
+    episode_rows: list = []  # (episode, drugs_in_episode, concept_id)
+    needed_concept_ids: set = set()
+
     for episode in episodes:
+        event_ids = ee_by_episode.get(episode.episode_id, [])
+        drugs_in_episode = [de_by_id[eid] for eid in event_ids if eid in de_by_id]
+
+        drug_name_set = {
+            de.drug_concept.concept_name.lower().strip()
+            for de in drugs_in_episode
+            if de.drug_concept
+        }
+
+        # Prefer concept already joined via select_related('episode_source_concept')
+        concept_id = None
+        if episode.episode_source_concept_id and episode.episode_source_concept:
+            concept_id = episode.episode_source_concept_id
+        elif drug_name_set:
+            concept_id = get_regimen_concept_id(drug_name_set)
+
+        if concept_id:
+            needed_concept_ids.add(concept_id)
+        episode_rows.append((episode, drugs_in_episode, concept_id))
+
+    # ── Bulk-fetch Concept names in one query ──────────────────────────────
+    # Concept rows already loaded via select_related are re-used directly.
+    concept_name_map: dict = {
+        ep.episode_source_concept_id: ep.episode_source_concept.concept_name
+        for ep in episodes
+        if ep.episode_source_concept_id and ep.episode_source_concept
+    }
+    to_fetch = needed_concept_ids - set(concept_name_map)
+    if to_fetch:
+        concept_name_map.update(
+            (c.concept_id, c.concept_name)
+            for c in Concept.objects.filter(concept_id__in=to_fetch).only('concept_id', 'concept_name')
+        )
+
+    # ── Second pass: populate data dict ───────────────────────────────────
+    for episode, drugs_in_episode, concept_id in episode_rows:
         lot = episode.episode_number
         if lot is None:
             continue
 
-        # Get drug names for this episode via EpisodeEvent
-        event_drug_ids = EpisodeEvent.objects.filter(
-            episode=episode,
-        ).values_list('event_id', flat=True)
+        # Nullify dangling FK concept_ids (not in Concept table)
+        if concept_id and concept_id not in concept_name_map:
+            concept_id = None
 
-        drugs_in_episode = DrugExposure.objects.filter(
-            drug_exposure_id__in=event_drug_ids,
-        ).select_related('drug_concept')
-
-        drug_names = ' + '.join(
-            de.drug_concept.concept_name
-            for de in drugs_in_episode
-            if de.drug_concept
-        ) or 'Unknown'
+        drug_names = (
+            concept_name_map[concept_id]
+            if concept_id
+            else (
+                ' + '.join(
+                    de.drug_concept.concept_name
+                    for de in drugs_in_episode
+                    if de.drug_concept
+                ) or 'Unknown'
+            )
+        )
 
         start_date = str(episode.episode_start_date) if episode.episode_start_date else None
         end_date = str(episode.episode_end_date) if episode.episode_end_date else None
 
         if lot == 1:
             data['first_line_therapy'] = drug_names
+            data['first_line_therapy_id'] = concept_id
             data['first_line_date'] = start_date
             if end_date:
                 data['first_line_end_date'] = end_date
         elif lot == 2:
             data['second_line_therapy'] = drug_names
+            data['second_line_therapy_id'] = concept_id
             data['second_line_date'] = start_date
             if end_date:
                 data['second_line_end_date'] = end_date
@@ -462,6 +544,10 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             later = data.get('later_therapies', [])
             later.append({'therapy': drug_names, 'startDate': start_date, 'endDate': end_date})
             data['later_therapies'] = later
+            if concept_id:
+                ids = data.get('later_therapy_ids') or []
+                ids.append(concept_id)
+                data['later_therapy_ids'] = ids
             if not data.get('later_therapy'):
                 data['later_therapy'] = drug_names
             if not data.get('later_date'):
@@ -484,10 +570,7 @@ def _get_vitals_data(person: Person) -> dict:
 
     for vital_type, loinc_code in vital_sign_concepts.items():
         try:
-            concept = Concept.objects.filter(
-                concept_code=loinc_code,
-                vocabulary__vocabulary_id='LOINC'
-            ).first()
+            concept = _cc_by_loinc(loinc_code)
             if concept:
                 measurement = Measurement.objects.filter(
                     person=person,
@@ -533,7 +616,7 @@ def _get_biomarker_data(person: Person) -> dict:
     if er_measurements.exists():
         er_test = er_measurements.first()
         if er_test.value_as_concept_id:
-            concept = Concept.objects.get(pk=er_test.value_as_concept_id)
+            concept = _cc_by_id(er_test.value_as_concept_id)
             if 'positive' in concept.concept_name.lower():
                 data['estrogen_receptor_status'] = 'POSITIVE'
             elif 'negative' in concept.concept_name.lower():
@@ -543,7 +626,7 @@ def _get_biomarker_data(person: Person) -> dict:
     if pr_measurements.exists():
         pr_test = pr_measurements.first()
         if pr_test.value_as_concept_id:
-            concept = Concept.objects.get(pk=pr_test.value_as_concept_id)
+            concept = _cc_by_id(pr_test.value_as_concept_id)
             if 'positive' in concept.concept_name.lower():
                 data['progesterone_receptor_status'] = 'POSITIVE'
             elif 'negative' in concept.concept_name.lower():
@@ -553,7 +636,7 @@ def _get_biomarker_data(person: Person) -> dict:
     if her2_measurements.exists():
         her2_test = her2_measurements.first()
         if her2_test.value_as_concept_id:
-            concept = Concept.objects.get(pk=her2_test.value_as_concept_id)
+            concept = _cc_by_id(her2_test.value_as_concept_id)
             if 'positive' in concept.concept_name.lower():
                 data['her2_status'] = 'POSITIVE'
             elif 'negative' in concept.concept_name.lower():
@@ -623,7 +706,7 @@ def _get_infection_data(person: Person) -> dict:
     )
     for m in hiv_measurements:
         if m.value_as_concept_id:
-            concept = Concept.objects.get(pk=m.value_as_concept_id)
+            concept = _cc_by_id(m.value_as_concept_id)
             if 'negative' in concept.concept_name.lower():
                 data['no_hiv_status'] = True
                 data['hiv_status'] = False
@@ -636,7 +719,7 @@ def _get_infection_data(person: Person) -> dict:
     )
     for m in hepb_measurements:
         if m.value_as_concept_id:
-            concept = Concept.objects.get(pk=m.value_as_concept_id)
+            concept = _cc_by_id(m.value_as_concept_id)
             if 'negative' in concept.concept_name.lower():
                 data['no_hepatitis_b_status'] = True
                 data['hepatitis_b_status'] = False
@@ -649,7 +732,7 @@ def _get_infection_data(person: Person) -> dict:
     )
     for m in hepc_measurements:
         if m.value_as_concept_id:
-            concept = Concept.objects.get(pk=m.value_as_concept_id)
+            concept = _cc_by_id(m.value_as_concept_id)
             if 'negative' in concept.concept_name.lower():
                 data['no_hepatitis_c_status'] = True
                 data['hepatitis_c_status'] = False
@@ -707,7 +790,11 @@ def _get_assessment_data(person: Person) -> dict:
 def _get_laboratory_data(person: Person) -> dict:
     data = {}
 
-    measurements = Measurement.objects.filter(person=person).order_by('-measurement_date')
+    measurements = (
+        Measurement.objects.filter(person=person)
+        .select_related('measurement_concept')
+        .order_by('-measurement_date')
+    )
 
     # --- Legacy fields via concept-name matching ---
     legacy_lab_mappings = {
@@ -772,7 +859,11 @@ def _get_laboratory_data(person: Person) -> dict:
 def _get_performance_data(person: Person) -> dict:
     data = {}
 
-    observations = Observation.objects.filter(person=person).order_by('-observation_date')
+    observations = (
+        Observation.objects.filter(person=person)
+        .select_related('observation_concept')
+        .order_by('-observation_date')
+    )
 
     for obs in observations:
         if not obs.observation_concept:

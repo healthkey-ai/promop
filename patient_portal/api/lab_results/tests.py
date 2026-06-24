@@ -11,8 +11,8 @@ from rest_framework.test import APIClient
 
 from omop_core.models import (
     CareSite, Concept, ConceptClass, Domain, LoincClass, LoincCodeClass,
-    Measurement, MeasurementOwnership, Person, PatientInfo, Vocabulary,
-    VisitOccurrence,
+    Measurement, MeasurementOwnership, Person, PatientInfo, ProvenanceRecord,
+    Vocabulary, VisitOccurrence,
 )
 
 
@@ -739,13 +739,13 @@ class PersonalRepresentativeAccessTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
 
-class ProfessionalGroupAccessTest(TestCase):
-    """Tests for ProfessionalGroupAccess expires_at enforcement."""
+class GroupAccessTest(TestCase):
+    """Tests for GroupAccess expires_at enforcement."""
 
     def setUp(self):
         from omop_core.models import (
             Organization, PatientGroup, PatientGroupMembership,
-            ProfessionalGroupAccess,
+            GroupAccess,
         )
         from django.utils import timezone
         from datetime import timedelta
@@ -772,7 +772,7 @@ class ProfessionalGroupAccessTest(TestCase):
             value_as_number=11.0,
         )
 
-        self.grant = ProfessionalGroupAccess.objects.create(
+        self.grant = GroupAccess.objects.create(
             identity=self.doctor,
             group=self.group,
             role='doctor',
@@ -1142,7 +1142,7 @@ class DedupSyncTest(TestCase):
         return data
 
     def test_duplicate_upload_deduplicates(self):
-        """Same report uploaded twice creates one measurement, two visits, two ownership records."""
+        """Same report uploaded twice creates one measurement, one visit, one ownership record."""
         r1 = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
         self.assertEqual(r1.status_code, 201)
         self.assertEqual(r1.data['created_count'], 1)
@@ -1154,9 +1154,12 @@ class DedupSyncTest(TestCase):
         self.assertEqual(r2.data['created_count'], 0)
         self.assertEqual(r2.data['deduplicated_count'], 1)
         self.assertEqual(r2.data['measurement_ids'][0], m_id)
+        # Idempotent visit: same report_filename returns the same VisitOccurrence.
+        self.assertEqual(r1.data['visit_occurrence_id'], r2.data['visit_occurrence_id'])
 
         self.assertEqual(Measurement.objects.filter(person_id=3001).count(), 1)
-        self.assertEqual(MeasurementOwnership.objects.filter(measurement_id=m_id).count(), 2)
+        # Only one ownership record — ignore_conflicts prevents a second row.
+        self.assertEqual(MeasurementOwnership.objects.filter(measurement_id=m_id).count(), 1)
 
     def test_different_value_not_deduplicated(self):
         """Same test on same day with different value creates two measurements."""
@@ -1214,9 +1217,10 @@ class DedupSyncTest(TestCase):
         self.assertEqual(Measurement.objects.filter(person_id=3001).count(), 2)
 
     def test_delete_one_of_two_owners_preserves_measurement(self):
-        """Deleting one visit when two own the measurement preserves the measurement."""
-        r1 = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
-        r2 = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
+        """Deleting one visit when two distinct visits own the measurement preserves the measurement."""
+        # Use two DIFFERENT report filenames to get two distinct visits.
+        r1 = self.client.post('/api/lab-results/sync/', self._payload(report_filename='r1.pdf'), format='json')
+        r2 = self.client.post('/api/lab-results/sync/', self._payload(report_filename='r2.pdf'), format='json')
         m_id = r1.data['measurement_ids'][0]
         v1 = r1.data['visit_occurrence_id']
 
@@ -1230,14 +1234,10 @@ class DedupSyncTest(TestCase):
 
     def test_delete_last_owner_deletes_measurement(self):
         """Deleting the last owning visit removes the measurement."""
-        r1 = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
-        r2 = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
+        r1 = self.client.post('/api/lab-results/sync/', self._payload(report_filename='only.pdf'), format='json')
         m_id = r1.data['measurement_ids'][0]
 
         self.client.delete(f'/api/lab-results/visits/{r1.data["visit_occurrence_id"]}/')
-        self.assertTrue(Measurement.objects.filter(measurement_id=m_id).exists())
-
-        self.client.delete(f'/api/lab-results/visits/{r2.data["visit_occurrence_id"]}/')
         self.assertFalse(Measurement.objects.filter(measurement_id=m_id).exists())
 
     def test_ownership_records_created_on_sync(self):
@@ -1319,3 +1319,219 @@ class ResolvePersonIdEmailFallbackTest(TestCase):
         resp = client.get('/api/lab-results/summary/')
         # Two patients with same email, no org scope, non-superuser → 404
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_person_id — org isolation cannot be bypassed via can_access_patient
+# ---------------------------------------------------------------------------
+
+class ResolvePersonIdOrgBypassTest(TestCase):
+    """
+    Verify that an org-scoped token cannot access a patient from a different
+    org even when can_access_patient() would return True (e.g. via
+    GroupAccess that spans organisations).
+
+    Before the fix, _resolve_person_id only ran the org check when
+    can_access_patient() returned False.  A cross-org group grant therefore
+    caused the org check to be skipped entirely, granting access.
+    """
+
+    def setUp(self):
+        from omop_core.models import Organization, ApplicationOrganization, PatientGroupMembership, GroupAccess
+        from oauth2_provider.models import Application, AccessToken
+        from django.utils import timezone
+        from datetime import timedelta
+        _setup_vocab()
+
+        # Two orgs
+        self.org_a = Organization.objects.create(name='Org A', slug='rp-org-a')
+        self.org_b = Organization.objects.create(name='Org B', slug='rp-org-b')
+
+        # Provider user whose token is scoped to org-A
+        self.provider = Identity.objects.create_user(email='provider@test.com', password='x')
+
+        self.app = Application.objects.create(
+            name='Org A App',
+            user=self.provider,
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+        )
+        ApplicationOrganization.objects.create(application=self.app, organization=self.org_a)
+
+        self.token = AccessToken.objects.create(
+            user=self.provider,
+            application=self.app,
+            token='rp-bypass-test-token',
+            expires=timezone.now() + timedelta(hours=1),
+            scope='patient/*.read',
+        )
+
+        # Patient in org-A (accessible)
+        self.person_in_a = Person.objects.create(person_id=18001)
+        PatientInfo.objects.create(person=self.person_in_a, organization=self.org_a)
+
+        # Patient in org-B (must NOT be accessible via org-A token)
+        self.person_in_b = Person.objects.create(person_id=18002)
+        PatientInfo.objects.create(person=self.person_in_b, organization=self.org_b)
+
+        # Give the provider a GroupAccess that covers the org-B patient.
+        # This simulates a cross-org group grant that must not bypass org isolation.
+        from omop_core.models import PatientGroup
+        self.group = PatientGroup.objects.create(
+            name='Cross-org group', slug='cross-org-group', organization=self.org_b,
+        )
+        PatientGroupMembership.objects.create(group=self.group, person_id=self.person_in_b.person_id)
+        GroupAccess.objects.create(
+            identity=self.provider,
+            group=self.group,
+            role='navigator',
+        )
+
+        self.client = APIClient()
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.token.token}')
+
+    def test_org_token_denied_for_patient_in_other_org_even_with_group_access(self):
+        """Org-A token cannot read org-B patient even if GroupAccess covers them."""
+        resp = self.client.get(f'/api/lab-results/summary/?person_id={self.person_in_b.person_id}')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_org_token_allowed_for_patient_in_own_org(self):
+        """Org-A token can read org-A patient normally."""
+        resp = self.client.get(f'/api/lab-results/summary/?person_id={self.person_in_a.person_id}')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_org_token_denied_on_trend_endpoint_for_other_org_patient(self):
+        """Same isolation applies to the trend endpoint."""
+        resp = self.client.get(
+            f'/api/lab-results/values/?person_id={self.person_in_b.person_id}&concept_code=718-7'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_org_token_allowed_on_trend_endpoint_for_own_org_patient(self):
+        """Org-A token can access the trend endpoint for an org-A patient."""
+        resp = self.client.get(
+            f'/api/lab-results/values/?person_id={self.person_in_a.person_id}&concept_code=718-7'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+
+# ---------------------------------------------------------------------------
+# Sync visit idempotency (#148)
+# ---------------------------------------------------------------------------
+
+class SyncVisitIdempotencyTest(TestCase):
+    """
+    Verify that re-submitting the same report_filename does not create a
+    second VisitOccurrence row (hk-labs re-commit after a failed sync).
+    """
+
+    def setUp(self):
+        _setup_vocab()
+        self.user = Identity.objects.create_user(email='idemp@test.com', password='test')
+        self.user.is_superuser = True
+        self.user.save()
+        self.person = Person.objects.create(person_id=19001)
+        PatientInfo.objects.create(person=self.person)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _sync(self, filename='report-2026-01.pdf'):
+        return self.client.post('/api/lab-results/sync/', {
+            'person_id': self.person.person_id,
+            'measurements': [
+                {
+                    'loinc_code': '718-7',
+                    'test_name': 'Hemoglobin',
+                    'value': '13.5',
+                    'unit': 'g/dL',
+                    'measured_at': '2026-01-15',
+                },
+            ],
+            'lab_name': 'Test Lab',
+            'lab_date': '2026-01-15',
+            'report_filename': filename,
+            'source_type': 'document_extraction',
+        }, format='json')
+
+    def test_resubmit_same_filename_reuses_visit(self):
+        """Two syncs with the same report_filename must produce exactly one VisitOccurrence."""
+        resp1 = self._sync()
+        self.assertEqual(resp1.status_code, status.HTTP_201_CREATED)
+        visit_id_first = resp1.data['visit_occurrence_id']
+
+        resp2 = self._sync()
+        self.assertEqual(resp2.status_code, status.HTTP_201_CREATED)
+        visit_id_second = resp2.data['visit_occurrence_id']
+
+        self.assertEqual(visit_id_first, visit_id_second, 'Re-commit created a second VisitOccurrence')
+        self.assertEqual(
+            VisitOccurrence.objects.filter(
+                person_id=self.person.person_id,
+                visit_source_value='report-2026-01.pdf',
+            ).count(),
+            1,
+            'Orphan VisitOccurrence rows found after re-commit',
+        )
+
+    def test_different_filename_creates_new_visit(self):
+        """Different report_filename values must produce separate VisitOccurrence rows."""
+        resp1 = self._sync(filename='report-jan.pdf')
+        resp2 = self._sync(filename='report-feb.pdf')
+        self.assertEqual(resp1.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp2.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(
+            resp1.data['visit_occurrence_id'],
+            resp2.data['visit_occurrence_id'],
+        )
+
+
+# Provenance dedup on re-commit
+# ---------------------------------------------------------------------------
+
+class SyncProvenanceDedupTest(TestCase):
+    """
+    Verify that re-committing the same report does not create duplicate
+    ProvenanceRecord rows for already-existing measurements.
+    """
+
+    def setUp(self):
+        _setup_vocab()
+        self.user = Identity.objects.create_user(email='prov@test.com', password='test')
+        self.user.is_superuser = True
+        self.user.save()
+        self.person = Person.objects.create(person_id=20001)
+        PatientInfo.objects.create(person=self.person)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _sync(self):
+        return self.client.post('/api/lab-results/sync/', {
+            'person_id': self.person.person_id,
+            'measurements': [
+                {
+                    'loinc_code': '718-7',
+                    'test_name': 'Hemoglobin',
+                    'value': '13.5',
+                    'unit': 'g/dL',
+                    'measured_at': '2026-01-15',
+                },
+            ],
+            'lab_name': 'Test Lab',
+            'lab_date': '2026-01-15',
+            'report_filename': 'cbc-2026-01.pdf',
+            'source_type': 'document_extraction',
+        }, format='json')
+
+    def test_resubmit_does_not_duplicate_provenance(self):
+        """Two commits of the same file must produce exactly one ProvenanceRecord per measurement."""
+        resp1 = self._sync()
+        self.assertEqual(resp1.status_code, status.HTTP_201_CREATED)
+        m_id = resp1.data['measurement_ids'][0]
+
+        resp2 = self._sync()
+        self.assertEqual(resp2.status_code, status.HTTP_201_CREATED)
+
+        prov_count = ProvenanceRecord.objects.filter(object_id=m_id).count()
+        self.assertEqual(prov_count, 1, (
+            f'Expected 1 ProvenanceRecord for measurement {m_id} after re-commit, got {prov_count}'
+        ))

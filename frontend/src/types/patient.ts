@@ -4,6 +4,7 @@ export interface User {
   email: string;
   first_name: string;
   last_name: string;
+  is_staff?: boolean;
 }
 
 export interface PatientInfo {
@@ -80,6 +81,13 @@ export interface PatientInfo {
   second_line_outcome?: string;
   later_therapy?: string;
   later_line_therapy?: string;  // UI uses this name
+  // HemOnc concept_id fields
+  first_line_therapy_id?: number | null;
+  second_line_therapy_id?: number | null;
+  later_therapy_ids?: number[] | null;
+  first_line_therapy_display?: string | null;
+  second_line_therapy_display?: string | null;
+  later_therapy_display?: string[] | null;
   later_date?: string;
   later_line_date?: string;  // UI uses this name
   later_start_date?: string;

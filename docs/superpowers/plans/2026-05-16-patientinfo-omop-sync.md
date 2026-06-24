@@ -10,7 +10,7 @@
 
 **Run all tests with:**
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.PatientInfoOmopSyncTest --no-input
 ```
 
@@ -145,7 +145,7 @@ def get_gender_concept(gender_str):
 - [ ] **Step 2: Verify the file imports cleanly**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python -c "from omop_core.services.mappings import LAB_FIELD_TO_LOINC, CONDITION_FIELDS, DEMOGRAPHIC_FIELDS, THERAPY_LINE_FIELDS, get_gender_concept; print('ok', len(LAB_FIELD_TO_LOINC), 'lab fields')"
 ```
 Expected: `ok 55 lab fields` (or similar count)
@@ -229,7 +229,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.PatientInfoOmopSyncTest --no-input 2>&1 | tail -15
 ```
 Expected: errors or failures (module not found or test failures)
@@ -326,7 +326,7 @@ def _sync_measurement(person, field_name: str, value, today: date) -> None:
 - [ ] **Step 4: Run Measurement tests**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.PatientInfoOmopSyncTest.test_patch_lab_creates_measurement patient_portal.tests.PatientInfoOmopSyncTest.test_patch_lab_same_day_updates_not_duplicates patient_portal.tests.PatientInfoOmopSyncTest.test_patch_lab_different_day_appends --no-input 2>&1 | tail -10
 ```
 Expected: `Ran 3 tests ... OK`
@@ -406,7 +406,7 @@ from omop_core.services.omop_write_service import sync_to_omop
 - [ ] **Step 4: Run existing lab write-through tests to confirm nothing regressed**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.PatientInfoPatchWriteThroughTest patient_portal.tests.PatientInfoOmopSyncTest --no-input 2>&1 | tail -10
 ```
 Expected: all pass
@@ -464,7 +464,7 @@ Add these two tests to `PatientInfoOmopSyncTest` in `patient_portal/tests.py`:
 - [ ] **Step 2: Run to verify they fail**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.PatientInfoOmopSyncTest.test_patch_disease_creates_condition_occurrence patient_portal.tests.PatientInfoOmopSyncTest.test_patch_stage_appends_condition_occurrence --no-input 2>&1 | tail -10
 ```
 Expected: FAIL
@@ -515,7 +515,7 @@ from omop_core.models import Concept, Measurement, ConditionOccurrence
 - [ ] **Step 4: Run condition tests**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.PatientInfoOmopSyncTest.test_patch_disease_creates_condition_occurrence patient_portal.tests.PatientInfoOmopSyncTest.test_patch_stage_appends_condition_occurrence --no-input 2>&1 | tail -10
 ```
 Expected: `Ran 2 tests ... OK`
@@ -558,7 +558,7 @@ Add to `PatientInfoOmopSyncTest`:
 - [ ] **Step 2: Run to verify it fails**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.PatientInfoOmopSyncTest.test_patch_demographics_updates_person --no-input 2>&1 | tail -10
 ```
 Expected: FAIL
@@ -604,7 +604,7 @@ def _sync_demographics(person, patient_info) -> None:
 - [ ] **Step 4: Run demographics test**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.PatientInfoOmopSyncTest.test_patch_demographics_updates_person --no-input 2>&1 | tail -10
 ```
 Expected: `Ran 1 test ... OK`
@@ -715,7 +715,7 @@ Add to `PatientInfoOmopSyncTest`:
 - [ ] **Step 2: Run to verify they fail**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test \
     patient_portal.tests.PatientInfoOmopSyncTest.test_patch_first_line_therapy_creates_episode \
     patient_portal.tests.PatientInfoOmopSyncTest.test_patch_therapy_links_existing_drug_exposures \
@@ -819,7 +819,7 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
 - [ ] **Step 4: Run therapy tests**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test \
     patient_portal.tests.PatientInfoOmopSyncTest.test_patch_first_line_therapy_creates_episode \
     patient_portal.tests.PatientInfoOmopSyncTest.test_patch_therapy_links_existing_drug_exposures \
@@ -865,7 +865,7 @@ Add to `PatientInfoOmopSyncTest`:
 - [ ] **Step 2: Run the full PatientInfoOmopSyncTest class**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test patient_portal.tests.PatientInfoOmopSyncTest --no-input 2>&1 | tail -15
 ```
 Expected: `Ran 11 tests ... OK`
@@ -873,7 +873,7 @@ Expected: `Ran 11 tests ... OK`
 - [ ] **Step 3: Run previously passing write-through tests to confirm no regression**
 
 ```bash
-DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+DATABASE_URL="$STAGING_DATABASE_URL" \
   .venv/bin/python manage.py test \
     patient_portal.tests.PatientInfoPatchWriteThroughTest \
     patient_portal.tests.AuditLogMiddlewareTest \

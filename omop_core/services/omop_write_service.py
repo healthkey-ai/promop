@@ -30,7 +30,10 @@ def _today():
 def sync_to_omop(patient_info, changed_fields: set, today: date = None, changed_data: dict = None) -> None:
     """
     Write PatientInfo changes through to OMOP tables.
-    Never raises — failures are logged but must not block the HTTP response.
+
+    Raises on failure — callers must wrap in transaction.atomic() so that a
+    failed OMOP write rolls back the PatientInfo save and the read-model never
+    diverges from the OMOP source of truth.
 
     changed_data: the raw request.data dict, used for fields that may be read-only
     on the serializer (e.g. gender, which is a SerializerMethodField).
@@ -40,23 +43,20 @@ def sync_to_omop(patient_info, changed_fields: set, today: date = None, changed_
     if changed_data is None:
         changed_data = {}
     person = patient_info.person
-    try:
-        for field in changed_fields:
-            value = getattr(patient_info, field, None)
-            if value is None:
-                value = changed_data.get(field)
-            if field in LAB_FIELD_TO_LOINC and value is not None:
-                _sync_measurement(person, field, value, today)
-        if changed_fields & CONDITION_FIELDS:
-            _sync_condition(person, patient_info, today, changed_data)
-        if changed_fields & DEMOGRAPHIC_FIELDS:
-            _sync_demographics(person, patient_info, changed_data)
-        for line_number, prefix in THERAPY_LINE_PREFIXES.items():
-            line_fields = {f'{prefix}_{s}' for s in ('therapy', 'start_date', 'end_date', 'outcome', 'intent', 'discontinuation_reason')}
-            if changed_fields & line_fields:
-                _sync_therapy_line(person, patient_info, line_number, prefix, today)
-    except Exception as exc:
-        logger.error('{"event": "omop_sync_error", "error": "%s"}', exc)
+    for field in changed_fields:
+        value = getattr(patient_info, field, None)
+        if value is None:
+            value = changed_data.get(field)
+        if field in LAB_FIELD_TO_LOINC and value is not None:
+            _sync_measurement(person, field, value, today)
+    if changed_fields & CONDITION_FIELDS:
+        _sync_condition(person, patient_info, today, changed_data)
+    if changed_fields & DEMOGRAPHIC_FIELDS:
+        _sync_demographics(person, patient_info, changed_data)
+    for line_number, prefix in THERAPY_LINE_PREFIXES.items():
+        line_fields = {f'{prefix}_{s}' for s in ('therapy', 'start_date', 'end_date', 'outcome', 'intent', 'discontinuation_reason')}
+        if changed_fields & line_fields:
+            _sync_therapy_line(person, patient_info, line_number, prefix, today)
 
 
 def _sync_measurement(person, field_name: str, value, today: date) -> None:

@@ -1,4 +1,4 @@
-# ctomop
+#  PROMOP
 
 **Measurement Table** (Standard OMOP CDM)
 - **Vital Signs & Anthropometrics**: Essential measurements for clinical trial eligibility
