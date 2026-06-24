@@ -392,6 +392,54 @@ class FhirSyncTests(TestCase):
         self.assertEqual(again.json()['measurement_ids'], [])
         self.assertEqual(rows.count(), 1)
 
+    def test_unmapped_daily_rollups_coexist_by_source_value(self):
+        """Two daily rollups with no resolvable concept (both concept_id 0) but
+        distinct source_values must NOT collide on the (concept, date) key — for
+        cid 0 the key also includes source_value, so e.g. basal-energy and
+        mindful-minutes coexist as separate rows instead of overwriting per day."""
+        AGG_EXT = [{"url": "https://healthkey.ai/fhir/aggregation", "valueCode": "daily"}]
+
+        def rollup(code, display, unit, value):
+            return {"resource": {
+                "resourceType": "Observation",
+                "subject": {"reference": "Patient/p1"},
+                "code": {"coding": [{"system": "http://loinc.org", "code": code,
+                                     "display": display}]},
+                "effectiveDateTime": "2026-05-01T00:00:00Z",
+                "valueQuantity": {"value": value, "unit": unit},
+                "extension": AGG_EXT,
+            }}
+
+        # Unresolvable codes → concept_id 0 regardless of loaded vocabulary.
+        bundle = {"resourceType": "Bundle", "type": "collection", "entry": [
+            rollup("hk-basal", "Basal energy burned", "kcal", 1500),
+            rollup("hk-mind", "Mindful minutes", "min", 10),
+        ]}
+        resp = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+        pid = resp.json()['person_id']
+
+        rows = Measurement.objects.filter(person_id=pid, measurement_concept_id=0)
+        self.assertEqual(rows.count(), 2, "distinct unmapped rollups coexist (not collapsed)")
+        self.assertEqual(
+            set(rows.values_list('measurement_source_value', flat=True)),
+            {"Basal energy burned", "Mindful minutes"})
+
+        # Re-sync identical bundle → idempotent per source_value.
+        again = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        self.assertEqual(again.json()['measurement_ids'], [])
+        self.assertEqual(rows.count(), 2)
+
+        # Changing one unmapped metric updates only its row, still two rows.
+        bump = {"resourceType": "Bundle", "type": "collection", "entry": [
+            rollup("hk-basal", "Basal energy burned", "kcal", 1800)]}
+        self.client.post('/api/fhir/sync/', {'bundle': bump}, format='json')
+        self.assertEqual(rows.count(), 2)
+        self.assertEqual(
+            float(rows.get(measurement_source_value="Basal energy burned").value_as_number), 1800.0)
+        self.assertEqual(
+            float(rows.get(measurement_source_value="Mindful minutes").value_as_number), 10.0)
+
     def test_per_reading_timestamps_coexist_and_resync_is_idempotent(self):
         """Multiple same-day Observations with distinct effectiveDateTime times
         (e.g. per-reading heart rate) land as separate rows with
