@@ -4,11 +4,8 @@
 
 ### Critical
 
-#### #1 ServiceTokenAuthentication falls back to arbitrary superuser
-- **Severity:** critical / security
-- `patient_portal/api/authentication.py:108-115`
-- When the dedicated service identity (`urn:service|hk-labs-sync`) doesn't exist, auth falls back to `Identity.objects.filter(is_superuser=True).first()`. Silently impersonates a real admin, bypasses all authorization, corrupts provenance audit trails — HIPAA accountability gap.
-- **Action:** Remove the superuser fallback. Fail closed (return None).
+#### ~~#1 ServiceTokenAuthentication falls back to arbitrary superuser~~ ✓ FIXED
+- `get_or_create(issuer='urn:service', sub='hk-labs-sync')` — dedicated service identity, no superuser fallback.
 
 #### #2 _resolve_person_id allows org-scoped tokens to bypass access check
 - **Severity:** critical / security
@@ -16,37 +13,22 @@
 - When `can_access_patient()` fails but `get_request_org()` returns non-None, the function returns `(pid, None)` granting access. The org-person membership check happens later in each view but the logic is inverted.
 - **Action:** Move the org-person membership check into `_resolve_person_id` itself.
 
-#### #3 No rate limiting on auth or write endpoints
-- **Severity:** critical / security
-- `ctomop/settings.py`
-- No `DEFAULT_THROTTLE_CLASSES` or per-view throttling. SERVICE_AUTH_TOKEN can be brute-forced. Sync endpoint accepts 500 measurements/request with no rate limit.
-- **Action:** Add `DEFAULT_THROTTLE_CLASSES` and `DEFAULT_THROTTLE_RATES` to REST_FRAMEWORK settings. Add stricter per-view throttles on sync/auth endpoints.
+#### ~~#3 No rate limiting on auth or write endpoints~~ ✓ FIXED
+- `DEFAULT_THROTTLE_CLASSES` (Anon/User/Scoped) + rates (anon: 60/min, user: 300/min, sync: 60/min, patient_sync: 120/min) configured in `settings.py`.
 
 ### High
 
-#### #6 EXCLUSIVE table locks per measurement in sync loop
-- **Severity:** high / performance
-- `patient_portal/api/lab_results/sync.py:49-60,428`
-- `_next_pk()` acquires EXCLUSIVE lock on the entire measurement table, called once per measurement (up to 500). Fully serializes all concurrent sync requests.
-- **Action:** Use PostgreSQL sequences (`nextval()`) instead of `LOCK TABLE + MAX(pk)`.
+#### ~~#6 EXCLUSIVE table locks per measurement in sync loop~~ ✓ FIXED
+- `next_pk_batch()` uses PostgreSQL `nextval` sequences (`omop_core/services/pk.py`). One sequence call allocates all IDs for a batch.
 
-#### #7 Sequential INSERT per measurement instead of bulk_create
-- **Severity:** high / performance
-- `patient_portal/api/lab_results/sync.py:284-293`
-- 500 individual `Measurement.objects.create()` calls = 500 DB round trips per sync request.
-- **Action:** Pre-allocate IDs via sequence, build objects in a list, use `bulk_create()`.
+#### ~~#7 Sequential INSERT per measurement instead of bulk_create~~ ✓ FIXED
+- `Measurement.objects.bulk_create(new_objects)` at `sync.py:318`.
 
-#### #11 MeasurementDetailView.patch is not atomic
-- **Severity:** high / HIPAA
-- `patient_portal/api/lab_results/views.py:570-581`
-- `m.save()` commits the measurement update, then `ProvenanceRecord.objects.create()` creates the audit record. If provenance fails, the measurement is modified without an audit trail.
-- **Action:** Wrap in `transaction.atomic()`.
+#### ~~#11 MeasurementDetailView.patch is not atomic~~ ✓ FIXED
+- `with transaction.atomic()` wraps `m.save()` + `ProvenanceRecord.objects.create()` at `views.py:629`.
 
-#### #12 VisitDeleteView.delete is not atomic
-- **Severity:** high / HIPAA
-- `patient_portal/api/lab_results/views.py:659-676`
-- Provenance created, then measurements deleted, then visit deleted — not in a transaction. Partial failures leave inconsistent state.
-- **Action:** Wrap in `transaction.atomic()`.
+#### ~~#12 VisitDeleteView.delete is not atomic~~ ✓ FIXED
+- `with transaction.atomic()` wraps provenance + ownership delete + measurement delete + visit delete at `views.py:721`.
 
 ### Medium
 
