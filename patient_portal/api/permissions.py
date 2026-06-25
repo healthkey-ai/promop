@@ -74,3 +74,29 @@ class ScopedTokenPermission(BasePermission):
         if request.method in _SAFE_METHODS:
             return bool(token_scopes & _READ_SCOPES)
         return bool(token_scopes & _WRITE_SCOPES)
+
+
+class LabSyncPermission(ScopedTokenPermission):
+    """
+    Permission for the hk-labs → ctomop lab sync endpoint.
+
+    Identical to ScopedTokenPermission except that an authenticated end
+    user (Firebase/partner or session auth) is allowed to write, not just
+    read/PATCH. Committing labs is a legitimate patient self-service write:
+    SyncView resolves the target person from the authenticated identity and
+    enforces can_access_patient() for on-behalf-of writes, and binds the
+    actor to request.user for non-service callers — so a user can only write
+    records they actually control.
+
+    Service tokens and OAuth2 SMART scopes are handled exactly as in the
+    base class.
+    """
+
+    def has_permission(self, request, view):
+        token = request.auth
+        # End-user auth (partner/session): allow authenticated users to write;
+        # SyncView enforces per-person authorization. Service-token and OAuth2
+        # clients fall through to the base role model.
+        if token is None or isinstance(token, TokenClaims):
+            return bool(request.user and request.user.is_authenticated)
+        return super().has_permission(request, view)

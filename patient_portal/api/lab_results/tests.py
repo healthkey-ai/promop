@@ -586,9 +586,49 @@ class SyncOnBehalfOfTest(TestCase):
             }],
             'source_type': 'document_extraction',
         }, format='json')
-        # Since the ScopedTokenPermission role change a non-superuser/non-service
-        # caller is denied at the permission layer (before the actor-field
-        # validation is even reached).
+        # A non-superuser end user may now POST (LabSyncPermission); attribution
+        # is bound to the authenticated user, who does not own person 2001, so
+        # the write is denied by can_access_patient().
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_patient_self_commit_succeeds(self):
+        """A regular (non-superuser) patient can commit labs to a record they own.
+
+        Every lab result must be attributed to a user; here the authenticated
+        patient is that user."""
+        client = APIClient()
+        client.force_authenticate(user=self.actor)  # non-superuser, owns person 2001
+        resp = client.post(
+            '/api/lab-results/sync/',
+            self._sync_payload(actor_iss=self.actor.issuer, actor_sub=self.actor.sub),
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_non_superuser_cannot_impersonate_another_actor(self):
+        """A patient may only act as themselves: a payload actor naming a
+        different identity is ignored, so attribution falls back to the
+        attacker — who has no access to the target person and is denied."""
+        attacker = Identity.objects.create_user(email='attacker@test.com', password='test')
+        client = APIClient()
+        client.force_authenticate(user=attacker)
+        # Default payload names self.actor (not the attacker) and person 2001.
+        resp = client.post('/api/lab-results/sync/', self._sync_payload(), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        # The spoofed actor was ignored — no measurement was written for 2001.
+        self.assertFalse(Measurement.objects.filter(person_id=2001).exists())
+
+    def test_non_superuser_self_actor_without_access_forbidden(self):
+        """Acting as themselves, a patient still cannot write to a person they
+        do not own — enforced by can_access_patient()."""
+        outsider = Identity.objects.create_user(email='outsider@test.com', password='test')
+        client = APIClient()
+        client.force_authenticate(user=outsider)
+        resp = client.post(
+            '/api/lab-results/sync/',
+            self._sync_payload(actor_iss=outsider.issuer, actor_sub=outsider.sub),
+            format='json',
+        )
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_on_behalf_of_superuser_without_actor_fields_succeeds(self):
@@ -1056,12 +1096,12 @@ class ServiceTokenSyncFallbackTest(TestCase):
 
 
 class SyncNonSuperuserTest(TestCase):
-    """A non-superuser/non-service identity is denied POST sync entirely.
+    """A non-superuser patient may commit labs, but only to records they own.
 
-    Since the ScopedTokenPermission role change, write access requires a service
-    token or staff/superuser; a plain patient identity (even for its own person)
-    is rejected at the permission layer. Service-side ingest is covered by
-    ServiceTokenSyncFallbackTest / SyncOnBehalfOfTest.
+    Committing a lab is a legitimate patient self-service write (every result is
+    attributed to the authenticated user). The endpoint allows it, while
+    can_access_patient() still confines the write to records the user actually
+    owns; writes to other or nonexistent persons are rejected.
     """
 
     def setUp(self):
@@ -1090,22 +1130,22 @@ class SyncNonSuperuserTest(TestCase):
             'source_type': 'patient_self_report',
         }
 
-    def test_sync_own_data_denied(self):
-        # Own person, but a non-privileged caller can no longer POST sync.
+    def test_sync_own_data_allowed(self):
+        # A patient may commit labs to their own person record.
         resp = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
 
     def test_sync_other_person_denied(self):
+        # A patient cannot write to a person they do not own (can_access_patient).
         other = Person.objects.create(person_id=2002)
         PatientInfo.objects.create(person=other)
         resp = self.client.post('/api/lab-results/sync/', self._payload(person_id=2002), format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_sync_nonexistent_person_denied(self):
-        # Permission denial (403) now precedes the person lookup that previously
-        # produced a 404 for a non-privileged caller.
+        # A target person that does not exist yields 404.
         resp = self.client.post('/api/lab-results/sync/', self._payload(person_id=9999), format='json')
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
 
 class DedupSyncTest(TestCase):
