@@ -837,8 +837,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                             _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
                                 except Exception as _coex:
                                     logger.warning(
-                                        '{"event": "condition_occurrence_save_failed", "person_id": %s, "error": "%s"}',
-                                        person.person_id, _coex,
+                                        '{"event": "condition_occurrence_save_failed", "error_type": "%s"}',
+                                        type(_coex).__name__,
                                     )
 
                     # Process observations and create Measurement records
@@ -1728,7 +1728,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 )
                                 _pt_episode_event_ids.append(_ee.pk)
                         except Exception as _e:
-                            logger.warning(f"Could not write DrugExposure/Episode for LOT {lot_num}: {_e}")
+                            logger.warning('{"event": "drug_exposure_write_failed", "lot_num": %d, "error_type": "%s", "patient": "%s"}',
+                                           lot_num, type(_e).__name__, _timing_hash)
 
                     # --- OMOP-first: refresh PatientInfo from OMOP tables ---
                     # Release suppression so the single intentional refresh can run.

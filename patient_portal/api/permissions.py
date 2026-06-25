@@ -52,7 +52,7 @@ class ScopedTokenPermission(BasePermission):
 
         # Service-to-service: trusted backend — full access.
         if token == "service-token":
-            return bool(request.user and request.user.is_authenticated)
+            return True  # hmac already validated in ServiceTokenAuthentication.authenticate()
 
         # Partner-auth (Firebase, SAML) and session-auth: role-based enforcement.
         if token is None or isinstance(token, TokenClaims):

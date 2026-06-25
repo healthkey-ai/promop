@@ -489,6 +489,6 @@ def infer_lot_for_person(person, force: bool = False, dry_run: bool = False) -> 
         return lots
 
     except Exception as exc:
-        logger.error('{"event": "lot_inference_error", "person_id": %s, "error": "%s"}',
-                     getattr(person, 'person_id', '?'), exc)
+        logger.error('{"event": "lot_inference_error", "error_type": "%s"}',
+                     type(exc).__name__)
         return []

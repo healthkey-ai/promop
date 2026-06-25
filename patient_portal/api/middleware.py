@@ -65,7 +65,8 @@ class AuditLogMiddleware:
                 'duration_ms': round((time.monotonic() - start) * 1000),
             }
             logger.info(json.dumps(entry))
-        except Exception:
-            pass
+        except Exception as _audit_exc:
+            import sys
+            print(f"AuditLogMiddleware error: {type(_audit_exc).__name__}: {_audit_exc}", file=sys.stderr)
 
         return response

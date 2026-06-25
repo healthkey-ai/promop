@@ -58,7 +58,5 @@ def resolve_or_create_person(identity, email=None):
             return pu.person
         raise
 
-    logger.info(
-        "auto-provisioned Person %d for identity pk=%d", new_id, identity.pk,
-    )
+    logger.debug("auto-provisioned new Person for new Identity")
     return person
