@@ -30,7 +30,7 @@ from omop_core.models import (
     Person, ProvenanceRecord, VisitOccurrence,
 )
 from omop_core.services.pk import next_pk, next_pk_batch
-from patient_portal.api.permissions import ScopedTokenPermission, get_request_org
+from patient_portal.api.permissions import LabSyncPermission, get_request_org
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +162,7 @@ class SyncView(APIView):
       "source_type": "document_extraction"
     }
     """
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [LabSyncPermission]
     throttle_scope = 'sync'
 
     @transaction.atomic
@@ -175,6 +175,18 @@ class SyncView(APIView):
         actor_sub = data.get('actor_sub', '')
         person_id = data.get('person_id')
         is_on_behalf_of = bool(person_id)
+
+        # For regular end-user (non-service, non-superuser) callers, attribution
+        # is always the authenticated user: ignore any actor identity supplied in
+        # the request body. Every lab result stays tied to a real user, and a
+        # patient cannot impersonate another actor. Trusted service tokens and
+        # superusers supply the actor explicitly for server-to-server / admin
+        # on-behalf-of writes.
+        is_service = request.auth == 'service-token'
+        is_privileged = is_service or getattr(request.user, 'is_superuser', False)
+        if not is_privileged and getattr(request.user, 'is_authenticated', False):
+            actor_iss = getattr(request.user, 'issuer', '') or ''
+            actor_sub = getattr(request.user, 'sub', '') or ''
 
         if not person_id:
             if hasattr(request.user, 'issuer') and request.user.issuer != 'urn:service':
