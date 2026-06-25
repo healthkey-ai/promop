@@ -1,4 +1,4 @@
-# ctomop
+# promop
 
 A Django + React application for oncology patient data management using the OMOP CDM schema. Accepts FHIR R4 bundle uploads, exposes a DRF REST API, and serves a React TypeScript frontend.
 
@@ -15,8 +15,8 @@ A Django + React application for oncology patient data management using the OMOP
 ### 1. Clone and create virtual environment
 
 ```bash
-git clone https://github.com/healthkey-ai/ctomop.git
-cd ctomop
+git clone https://github.com/healthkey-ai/promop.git
+cd promop
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -33,35 +33,35 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U $(whoami) -d postgres \
   -c "CREATE ROLE postgres WITH SUPERUSER CREATEDB CREATEROLE LOGIN;"
 
 PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d postgres \
-  -c "CREATE DATABASE ctomop_dev OWNER postgres;" \
-  -c "CREATE DATABASE ctomop_test OWNER postgres;"
+  -c "CREATE DATABASE promop_dev OWNER postgres;" \
+  -c "CREATE DATABASE promop_test OWNER postgres;"
 ```
 
 ### 3. Apply migrations
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
   .venv/bin/python manage.py migrate
 ```
 
 ### 4. Create a superuser
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
   .venv/bin/python manage.py setup_admin
 ```
 
 Or interactively:
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
   .venv/bin/python manage.py createsuperuser
 ```
 
 ### 5. Run the backend
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
   DEBUG=True \
   .venv/bin/python manage.py runserver
 ```
@@ -84,7 +84,7 @@ The UI is available at `http://localhost:5173`.
 
 ```bash
 # Backend
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
 # Frontend
@@ -109,7 +109,7 @@ cd frontend && npm test -- --run
 
 `start.sh` runs `migrate` and `setup_admin` on every deploy. Push to `main` to trigger a Render deploy.
 
-- Backend: `https://ctomop.onrender.com`
+- Backend: `https://promop.onrender.com`
 - Admin credentials: set via `ADMIN_EMAIL` / `ADMIN_PASSWORD` env vars on Render
 
 ---

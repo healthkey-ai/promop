@@ -1,4 +1,4 @@
-# CLAUDE.md — LLM Instructions for ctomop
+# CLAUDE.md — LLM Instructions for promop
 
 This file tells LLMs (Claude, Copilot, etc.) how to work on this codebase consistently.
 
@@ -6,7 +6,7 @@ This file tells LLMs (Claude, Copilot, etc.) how to work on this codebase consis
 
 ## Project Overview
 
-**ctomop** is a Django + React application that:
+**promop** is a Django + React application that:
 - Stores clinical oncology patient data in an OMOP CDM–aligned PostgreSQL schema
 - Exposes a DRF REST API consumed by a React TypeScript frontend
 - Accepts FHIR R4 Bundle uploads to ingest patient records
@@ -358,7 +358,7 @@ describe('LabsTab - new_field', () => {
 
 ```bash
 # Backend tests — run against local PostgreSQL (matches CI)
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
 # Frontend tests (install deps first if needed: cd frontend && npm ci)
@@ -380,7 +380,7 @@ DATABASE_URL="$STAGING_DATABASE_URL" \
 
 ```bash
 # One-liner to run everything from the repo root:
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput \
   && (cd frontend && npm test -- --run)
 ```
@@ -394,15 +394,15 @@ brew services start postgresql@14
 PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U $(whoami) -d postgres \
   -c "CREATE ROLE postgres WITH SUPERUSER CREATEDB CREATEROLE LOGIN;"
 PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d postgres \
-  -c "CREATE DATABASE ctomop_test OWNER postgres;" \
-  -c "CREATE DATABASE ctomop_dev OWNER postgres;"
+  -c "CREATE DATABASE promop_test OWNER postgres;" \
+  -c "CREATE DATABASE promop_dev OWNER postgres;"
 
 # Apply migrations
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py migrate --noinput
 
 # Connect (use @14 bin directly — system psql binary has OpenSSL crash on this machine)
-PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -d ctomop_test
+PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -d promop_test
 ```
 
 ---
@@ -574,7 +574,7 @@ operations = [
 ## Migration Conventions
 
 - **Use `makemigrations`** — let Django generate migration files; don't write them by hand.
-- **Apply to staging DB before pushing**: run `migrate` against `ctomop_dev` to verify before committing.
+- **Apply to staging DB before pushing**: run `migrate` against `promop_dev` to verify before committing.
 - **Never apply schema changes manually** to the DB — always go through migrations so Django's state stays in sync.
 - **Production migrations run automatically** — `start.sh` calls `migrate` on every Render deploy.
 
@@ -604,7 +604,7 @@ Expected output: `MISSING from DB: []` and `EXTRA in DB: []`.
 
 ## Module Federation (GCP Cloud Run)
 
-ctomop serves as a Module Federation **remote** (`labs_results_remote`) consumed by the ht-phr host app. There are two Dockerfiles with different build targets:
+promop serves as a Module Federation **remote** (`labs_results_remote`) consumed by the ht-phr host app. There are two Dockerfiles with different build targets:
 
 | File | Build command | Output dir | Purpose |
 |------|--------------|------------|---------|
@@ -638,12 +638,12 @@ If `remoteEntry.js` returns 500 on staging, check that `WHITENOISE_ROOT` points 
 
 | Purpose | DATABASE_URL |
 |---|---|
-| Running tests | `postgresql://postgres@localhost:5432/ctomop_test` |
-| Local development (manual testing, sync uploads, shell exploration) | `postgresql://postgres@localhost:5432/ctomop_dev` |
+| Running tests | `postgresql://postgres@localhost:5432/promop_test` |
+| Local development (manual testing, sync uploads, shell exploration) | `postgresql://postgres@localhost:5432/promop_dev` |
 | Staging migrations / post-merge tests | `$STAGING_DATABASE_URL` (defined in `.env`) |
 | Production (read-only checks) | `$DATABASE_URL` (defined in `.env`) |
 
-Never use the production DB for writes. Never use remote databases for running tests — use local PostgreSQL to match CI. Never write test data into `ctomop_dev` — use `ctomop_test` for automated tests.
+Never use the production DB for writes. Never use remote databases for running tests — use local PostgreSQL to match CI. Never write test data into `promop_dev` — use `promop_test` for automated tests.
 
 ---
 

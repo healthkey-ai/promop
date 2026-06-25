@@ -1,6 +1,6 @@
-# ctomop API Surface
+# promop API Surface
 
-> Base URL: `https://ctomop.onrender.com/api` (production) | `http://localhost:8000/api` (dev)
+> Base URL: `https://promop.onrender.com/api` (production) | `http://localhost:8000/api` (dev)
 > Last revised: 2026-06-07
 
 ---

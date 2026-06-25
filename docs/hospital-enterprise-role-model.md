@@ -384,11 +384,11 @@ Follows the identity architecture's self-service pattern. The actor's `(issuer, 
 Host frontend
   | IdP token: iss="...", sub="abc123"
   |
-  +-> hk-labs commit → POST to ctomop /api/lab-results/sync/
+  +-> hk-labs commit → POST to promop /api/lab-results/sync/
   |     Body: { "actor_iss": "...", "actor_sub": "abc123",
   |             "measurements": [...] }
   |
-  +-> ctomop sync endpoint:
+  +-> promop sync endpoint:
         Identity.get_or_create(iss, sub)
         Resolve person from identity (PatientUser or verified PersonalRepresentative)
         can_access_patient(identity, person_id) → ALLOW (self or representative)
@@ -409,16 +409,16 @@ Host frontend
   +-> hk-labs:
   |     Authenticate actor (Firebase → Identity)
   |     can_access_patient(actor, 1042) → check group intersection / clearance
-  |     Pass (actor_iss, actor_sub, person_id=1042) to ctomop
+  |     Pass (actor_iss, actor_sub, person_id=1042) to promop
   |
-  +-> ctomop sync endpoint:
+  +-> promop sync endpoint:
         can_access_patient(actor, 1042) → validate (defense in depth)
         Record provenance: source=ADMIN_CORRECTION, actor=nav789, target=1042
         Create measurements for person_id=1042
 
 ```
 
-In integrated mode, both hk-labs and ctomop validate against the same authorization tables in the customer's shared database. The double-check is defense in depth, not coordination.
+In integrated mode, both hk-labs and promop validate against the same authorization tables in the customer's shared database. The double-check is defense in depth, not coordination.
 
 ### Rule-Based Group Sync (Host App)
 
@@ -493,7 +493,7 @@ Enterprise healthcare regulations mandate that security architectures must track
 
 ### 1. Data Modification Tracking (Provenance)
 
-Every write records who performed the action. This uses the existing `ProvenanceRecord` model in ctomop:
+Every write records who performed the action. This uses the existing `ProvenanceRecord` model in promop:
 
 ```
 ProvenanceRecord
@@ -591,7 +591,7 @@ All authorization tables live in the customer's database alongside the clinical 
 
 These tables reference both `Identity` (from the auth layer) and `Person` / `Organization` (from the clinical layer). They belong to `omop_core` because that's where Person and Organization are defined.
 
-In standalone mode for hk-labs (when not connected to ctomop), equivalent tables would live in the `accounts` app with simplified models.
+In standalone mode for hk-labs (when not connected to promop), equivalent tables would live in the `accounts` app with simplified models.
 
 ### Relationship to Identity Architecture
 

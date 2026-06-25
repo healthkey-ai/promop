@@ -7,7 +7,7 @@
 `first_line_therapy`, `second_line_therapy`, `later_therapy` are all `TextField(blank=True, null=True)`.
 No FK to Concept, no vocabulary validation, no enforcement.
 
-### Distinct values in ctomop_dev (queried live)
+### Distinct values in promop_dev (queried live)
 
 **first_line_therapy** — 21 distinct values, 334 patients
 | Value | Count |

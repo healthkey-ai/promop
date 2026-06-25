@@ -9,7 +9,7 @@ Synthetic patient data is generated as FHIR R4 bundles and loaded via the FHIR u
 ### Multiple myeloma patients
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
   .venv/bin/python manage.py generate_mm_fhir_bundle \
     --count 50 \
     --output /tmp/mm_bundle.json
@@ -29,7 +29,7 @@ Options:
 ### Breast cancer patients
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
   .venv/bin/python manage.py generate_fhir_bundle \
     --count 50 \
     --output /tmp/bc_bundle.json
@@ -40,7 +40,7 @@ DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_dev" \
 ## Load a FHIR bundle
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
   .venv/bin/python manage.py load_fhir_bundle /tmp/mm_bundle.json \
     --org abc-foundation \
     --batch-size 10
@@ -70,10 +70,10 @@ python manage.py load_fhir_bundle /tmp/mm_bundle.json --org abc-foundation --bat
 
 ```bash
 # Generate
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_dev" .venv/bin/python manage.py generate_mm_fhir_bundle --count 50 --output /tmp/mm_bundle.json
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" .venv/bin/python manage.py generate_mm_fhir_bundle --count 50 --output /tmp/mm_bundle.json
 
 # Load
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_dev" .venv/bin/python manage.py load_fhir_bundle /tmp/mm_bundle.json --org abc-foundation --batch-size 10 -v 2
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" .venv/bin/python manage.py load_fhir_bundle /tmp/mm_bundle.json --org abc-foundation --batch-size 10 -v 2
 ```
 
 ---

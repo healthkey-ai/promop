@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to ctomop are documented here.
+All notable changes to promop are documented here.
 
 ---
 

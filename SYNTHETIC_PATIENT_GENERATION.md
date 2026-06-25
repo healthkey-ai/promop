@@ -83,11 +83,11 @@ To make `create_enhanced_sample_data` functional:
 Until `create_enhanced_sample_data` is fixed, use:
 
 ```bash
-# From ctomop directory:
+# From promop directory:
 DATABASE_URL=postgresql://... python manage.py seed_test_patients
 
 # Verify:
 DATABASE_URL=postgresql://... python manage.py query_patient_info
 ```
 
-This creates 7 patients across all 4 diseases with clinically realistic field values, ready for trial matching via `search_trials_for_ctomop_patients`.
+This creates 7 patients across all 4 diseases with clinically realistic field values, ready for trial matching via `search_trials_for_promop_patients`.

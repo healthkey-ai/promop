@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Load OHDSI Athena vocabulary files (HemOnc, RxNorm oncology subset) into the ctomop PostgreSQL database and add a RxNav API service that resolves unknown drug names at FHIR upload time.
+**Goal:** Load OHDSI Athena vocabulary files (HemOnc, RxNorm oncology subset) into the promop PostgreSQL database and add a RxNav API service that resolves unknown drug names at FHIR upload time.
 
 **Architecture:** Three new OMOP-standard models (`Relationship`, `ConceptRelationship`, `ConceptAncestor`) are added to `omop_core/models.py`. A management command `load_athena_vocabularies` bulk-loads filtered Athena TSV files. A `rxnav_service` calls the free NIH RxNav API for drugs not found locally and caches results as `Concept` rows. The FHIR upload wires in `rxnav_service` so drug concepts are resolved at ingest time.
 
@@ -942,7 +942,7 @@ class FhirRxNavIntegrationTest(_SmartBase):
                     'medicationCodeableConcept': {'text': drug_name},
                     'effectivePeriod': {'start': '2023-01-15', 'end': '2023-07-01'},
                     'extension': [
-                        {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line',
+                        {'url': 'http://promop.io/fhir/StructureDefinition/therapy-line',
                          'valueInteger': 1},
                     ],
                 }},

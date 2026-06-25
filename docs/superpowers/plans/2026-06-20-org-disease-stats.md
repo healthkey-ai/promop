@@ -201,7 +201,7 @@ class Migration(migrations.Migration):
 - [ ] **Step 4: Apply the migration to local test DB**
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py migrate omop_core
 ```
 
@@ -228,7 +228,7 @@ Expected: no output.
 - [ ] **Step 6: Run the full backend test suite**
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 ```
 
@@ -332,7 +332,7 @@ class GetVisibleOrgsTest(TestCase):
 - [ ] **Step 2: Run to confirm tests fail**
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py test omop_core.tests.GetVisibleOrgsTest --verbosity=2 --noinput
 ```
 
@@ -384,7 +384,7 @@ def get_visible_orgs(user) -> QuerySet:
 - [ ] **Step 4: Run tests to confirm they pass**
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py test omop_core.tests.GetVisibleOrgsTest --verbosity=2 --noinput
 ```
 
@@ -502,7 +502,7 @@ class OrgDiseaseStatsTest(TestCase):
 - [ ] **Step 2: Run to confirm tests fail**
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py test patient_portal.tests.OrgDiseaseStatsTest --verbosity=2 --noinput
 ```
 
@@ -597,7 +597,7 @@ path('stats/org-disease/', org_disease_stats, name='stats-org-disease'),
 - [ ] **Step 6: Run tests to confirm they pass**
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py test patient_portal.tests.OrgDiseaseStatsTest --verbosity=2 --noinput
 ```
 
@@ -606,7 +606,7 @@ Expected: 7 tests pass.
 - [ ] **Step 7: Run full backend suite**
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/ctomop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 ```
 

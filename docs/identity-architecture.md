@@ -15,9 +15,9 @@ the same JWT.
 ### Data Ownership
 
 The customer owns all patient data. HealthKey services are software the
-customer deploys to manage that data on the customer's behalf. ctomop
+customer deploys to manage that data on the customer's behalf. promop
 stores OMOP clinical records in the customer's database. hk-labs processes
-lab uploads and writes results to ctomop. The customer controls the IdP,
+lab uploads and writes results to promop. The customer controls the IdP,
 the user accounts, and the infrastructure.
 
 HealthKey services never hold data independently of the customer. In
@@ -48,8 +48,8 @@ In **integrated mode**, services are embedded in the customer's host app:
 - The customer's host app (e.g. ht-phr) owns the frontend, IdP, and user accounts
 - HealthKey services mount as Module Federation remotes in the host frontend
 - The customer's IdP token is forwarded to all HealthKey backends
-- hk-labs pushes lab results to ctomop on commit
-- ctomop serves lab results to the host frontend directly
+- hk-labs pushes lab results to promop on commit
+- promop serves lab results to the host frontend directly
 - All services resolve the same `(issuer, sub)` from the customer's JWT
 
 ### HealthKey Platform Services
@@ -57,7 +57,7 @@ In **integrated mode**, services are embedded in the customer's host app:
 | Service | Role | Identity Model | Domain Linkage |
 |---|---|---|---|
 | **hk-labs** | Lab report upload, extraction, LOINC matching | `accounts.Identity` | `UploadJob.user -> Identity` |
-| **ctomop** | OMOP CDM storage, lab results API, patient portal | `patient_portal.Identity` | `PatientUser(identity -> Identity, person -> Person)` |
+| **promop** | OMOP CDM storage, lab results API, patient portal | `patient_portal.Identity` | `PatientUser(identity -> Identity, person -> Person)` |
 
 ### Host Applications (Customers)
 
@@ -68,7 +68,7 @@ data.
 
 | Host | IdP | Integration |
 |---|---|---|
-| **ht-phr** (HealthTree) | Firebase | Mounts `labs_remote` (hk-labs) and `labs_results_remote` (ctomop) via Module Federation |
+| **ht-phr** (HealthTree) | Firebase | Mounts `labs_remote` (hk-labs) and `labs_results_remote` (promop) via Module Federation |
 
 The host adopts the same Identity model pattern so its backend can resolve
 the same `(issuer, sub)` tuple when needed (e.g. for user profile storage).
@@ -281,7 +281,7 @@ in development.
 PARTNER_AUTH_PROVIDERS = [
     "apps.accounts.providers.firebase.FirebaseTokenProvider",
 ]
-CTOMOP_SYNC_URL = "https://ctomop.example.com/api/lab-results/sync/"  # hk-labs
+CTOMOP_SYNC_URL = "https://promop.example.com/api/lab-results/sync/"  # hk-labs
 CTOMOP_SERVICE_TOKEN = "..."         # for service-to-service calls
 ```
 
@@ -299,7 +299,7 @@ the linked models differ.
 
 ### hk-labs (Upload Pipeline)
 
-Lab report upload, LLM extraction, LOINC matching, commit to ctomop.
+Lab report upload, LLM extraction, LOINC matching, commit to promop.
 
 ```python
 AUTH_USER_MODEL = "accounts.Identity"
@@ -307,11 +307,11 @@ AUTH_USER_MODEL = "accounts.Identity"
 # UploadJob.user -> FK(Identity) via settings.AUTH_USER_MODEL
 ```
 
-- On commit, sends `actor_iss` + `actor_sub` to ctomop. ctomop resolves to Person
-- No local person_id storage. ctomop is the source of truth for person linkage
+- On commit, sends `actor_iss` + `actor_sub` to promop. promop resolves to Person
+- No local person_id storage. promop is the source of truth for person linkage
 - SimpleJWT for local email/password login (standalone mode)
 
-### ctomop (OMOP CDM + Lab Results)
+### promop (OMOP CDM + Lab Results)
 
 Clinical data storage (OMOP), lab results, patient portal.
 
@@ -377,18 +377,18 @@ Host frontend (e.g. ht-phr)
   |     UploadJob.user = identity_id=7
   |     ... extraction, review ...
   |
-  +-> hk-labs commit -> POST to ctomop /api/lab-results/sync/
+  +-> hk-labs commit -> POST to promop /api/lab-results/sync/
   |     Body: { "actor_iss": "...", "actor_sub": "abc123",
   |             "measurements": [...] }
   |
-  +-> ctomop sync endpoint:
+  +-> promop sync endpoint:
         Identity.get_or_create(iss, sub) -> identity_id=12
         _ensure_person(identity) -> Person + PatientInfo + PatientUser
         PatientUser.objects.get(identity_id=12) -> person_id=1042
         Create Measurements for person_id=1042
 ```
 
-hk-labs never stores a person_id. ctomop resolves identity to Person on its side.
+hk-labs never stores a person_id. promop resolves identity to Person on its side.
 
 ### On-Behalf-Of Upload (Navigator Uploads for Patient)
 
@@ -397,23 +397,23 @@ Host frontend
   | IdP token: sub="nav789" (navigator)
   | Target patient: person_id=1042
   |
-  +-> hk-labs commit -> POST to ctomop /api/lab-results/sync/
+  +-> hk-labs commit -> POST to promop /api/lab-results/sync/
   |     Body: { "actor_iss": "...", "actor_sub": "nav789",
   |             "person_id": 1042,
   |             "measurements": [...] }
   |
-  +-> ctomop sync endpoint:
+  +-> promop sync endpoint:
         Validate: actor has write access to person_id=1042
         Create Measurements for person_id=1042
 ```
 
-### Direct ctomop Read (Lab Results Display)
+### Direct promop Read (Lab Results Display)
 
 ```
 Host frontend
   | IdP token: sub="abc123"
   |
-  +-> ctomop backend (via labs_results_remote federation module)
+  +-> promop backend (via labs_results_remote federation module)
         Identity.get_or_create(iss, sub) -> identity_id=12
         PatientUser.objects.get(identity_id=12) -> person_id=1042
         Return lab results for person_id=1042
@@ -425,10 +425,10 @@ Each service operates independently with local identities (`iss="urn:local"`).
 No host app, no external IdP.
 
 When `CTOMOP_SYNC_URL` is empty, hk-labs stores upload metadata locally
-and does not push to ctomop. Lab results stay in hk-labs only.
+and does not push to promop. Lab results stay in hk-labs only.
 
-When a standalone hk-labs is configured to point at a standalone ctomop,
-it sends `(urn:local, sub)` on commit. ctomop auto-provisions a matching
+When a standalone hk-labs is configured to point at a standalone promop,
+it sends `(urn:local, sub)` on commit. promop auto-provisions a matching
 local identity and Person if needed.
 
 ---
@@ -447,7 +447,7 @@ Host IdP (Source of Truth, e.g. Firebase)
                          |
       +------------------+------------------+
       |                  |                  |
-  Host DB (ht-phr)   hk-labs DB         ctomop DB
+  Host DB (ht-phr)   hk-labs DB         promop DB
   +------------+    +------------+    +------------+
   | Identity   |    | Identity   |    | Identity   |
   |  id: 3     |    |  id: 7     |    |  id: 12    |
@@ -474,7 +474,7 @@ per database (auto-increment), used only for local FK references.
 ### Standalone Mode
 
 ```
-  hk-labs (standalone)             ctomop (standalone)
+  hk-labs (standalone)             promop (standalone)
   +------------------+             +------------------+
   | Identity         |             | Identity         |
   |  iss: urn:local  |             |  iss: urn:local  |
@@ -488,7 +488,7 @@ per database (auto-increment), used only for local FK references.
   |  user -----+                   | identity---+
   +------------+                   | person ----+
                                    +------------+
-  No sync to ctomop.                     |
+  No sync to promop.                     |
   Results stay local.              +-----+------+
                                    | Person     |
                                    |  id: 1042  |
@@ -497,7 +497,7 @@ per database (auto-increment), used only for local FK references.
 
 Each service has its own users, its own data. They can optionally be
 connected by configuring `CTOMOP_SYNC_URL`, at which point hk-labs pushes
-to ctomop using the `(urn:local, sub)` identity anchor.
+to promop using the `(urn:local, sub)` identity anchor.
 
 ---
 
@@ -552,10 +552,10 @@ separate tables:
 | ht-phr (host) | `identity_level` (IAL1/IAL2) | `IdentityProfile` |
 | ht-phr (host) | `is_admin`, `has_medical_records` | JWT custom claims (not stored) |
 | hk-labs | Upload history | `UploadJob.user -> Identity` |
-| ctomop | Person link | `PatientUser.identity -> Identity` |
-| ctomop | Patient demographics | `PatientInfo` (clinical, not auth) |
-| ctomop | Consent, messages | `PatientConsent`, `PatientMessage` via `PatientUser` |
-| ctomop | Org membership | Via OAuth2 Application scoping |
+| promop | Person link | `PatientUser.identity -> Identity` |
+| promop | Patient demographics | `PatientInfo` (clinical, not auth) |
+| promop | Consent, messages | `PatientConsent`, `PatientMessage` via `PatientUser` |
+| promop | Org membership | Via OAuth2 Application scoping |
 
 Host apps store their own app-specific data in their own tables. The
 platform doesn't prescribe what hosts keep locally.
@@ -578,7 +578,7 @@ Patient requests deletion (via host app UI or admin action)
   |     UploadJob.user -> SET NULL (preserve audit trail, anonymize actor)
   |     Delete Identity
   |
-  +-> ctomop:
+  +-> promop:
         PatientUser -> soft-delete (is_active=False) or hard delete
         Person -> anonymize (zero out demographics, keep measurements
                  for aggregate research if consented, else delete)
@@ -624,7 +624,7 @@ no token exchange, no identity service dependency.
    Bearer token mapped to a superuser. Options:
    - Keep as-is (service tokens are not user identities)
    - Create a service Identity with `iss="urn:service:<name>"`, `sub="<role>"`
-   - Use OAuth2 client_credentials flow (existing in ctomop)
+   - Use OAuth2 client_credentials flow (existing in promop)
 
 2. **Shared library scope** ... What goes in `healthkey-identity` vs stays
    per-service? Candidates: Identity model, IdentityManager, TokenProvider

@@ -22,11 +22,11 @@ npm start
 
 Use `sudo` or add your user to the `docker` group with  `sudo usermod -aG docker $USER`.
 
-To view your web files inside the container, use `docker exec -it ctomop_web bash`.
+To view your web files inside the container, use `docker exec -it promop_web bash`.
 
 ## Running the scripts
 
-You can run scripts (i.e., create_test_user.py) using: `docker exec -it ctomop_web python create_test_user.py`.
+You can run scripts (i.e., create_test_user.py) using: `docker exec -it promop_web python create_test_user.py`.
 
 ## Examine running containers
 
@@ -61,18 +61,18 @@ docker compose down
 
 ## Backup
 
-You can backup the Postgres database by backing up the volume here: `/var/lib/docker/volumes/ctomop_postgres_data/_data/`.
+You can backup the Postgres database by backing up the volume here: `/var/lib/docker/volumes/promop_postgres_data/_data/`.
 
 Using one of two methods:
 
 **Dump the Database**:
 
 ```bash
-docker exec -t ctomop_db pg_dump -U postgres -d yourdbname > backup.sql
+docker exec -t promop_db pg_dump -U postgres -d yourdbname > backup.sql
 ```
 
 **Backup the folder**:
 
 ```bash
-sudo cp -r /var/lib/docker/volumes/ctomop_postgres_data/_data /path/to/backup/
+sudo cp -r /var/lib/docker/volumes/promop_postgres_data/_data /path/to/backup/
 ```

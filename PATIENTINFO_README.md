@@ -1,6 +1,6 @@
 # PatientInfo Model
 
-This document describes the PatientInfo model that has been added to the CTOMOP project, adapted from the exactomop repository.
+This document describes the PatientInfo model that has been added to the CTOMOP project, adapted from the exapromop repository.
 
 ## Overview
 

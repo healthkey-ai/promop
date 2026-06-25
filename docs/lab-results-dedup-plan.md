@@ -2,17 +2,17 @@
 
 ## Problem
 
-When the same lab report is uploaded multiple times (e.g., same PDF re-uploaded, or two versions of the same report), hk-labs commits each upload independently. Each commit calls ctomop's `POST /api/lab-results/sync/`, creating duplicate measurements for the same patient/date/test/value.
+When the same lab report is uploaded multiple times (e.g., same PDF re-uploaded, or two versions of the same report), hk-labs commits each upload independently. Each commit calls promop's `POST /api/lab-results/sync/`, creating duplicate measurements for the same patient/date/test/value.
 
 **Requirements:**
 - Commit/sync must never fail — always return success to hk-labs
-- Duplicate measurements must not be created in ctomop
+- Duplicate measurements must not be created in promop
 - Uploads in hk-labs should show as "saved/completed" regardless of dedup
-- Measurements are only deleted from ctomop when ALL uploads referencing them are deleted
+- Measurements are only deleted from promop when ALL uploads referencing them are deleted
 
 ## Solution: Idempotent Sync with Ownership Tracking
 
-### 1. Dedup on Write (ctomop sync endpoint)
+### 1. Dedup on Write (promop sync endpoint)
 
 In `SyncView.post()`, before creating each measurement, check for an existing match:
 
@@ -140,8 +140,8 @@ with transaction.atomic():
 ### 6. hk-labs Changes
 
 None required. The existing flow works:
-- `ctomop_client.sync_measurements()` — returns success with measurement_ids (created or deduplicated)
-- `ctomop_client.delete_visit()` — ctomop handles ownership check internally
+- `promop_client.sync_measurements()` — returns success with measurement_ids (created or deduplicated)
+- `promop_client.delete_visit()` — promop handles ownership check internally
 
 ## Edge Cases
 
