@@ -7,3 +7,4 @@ dist
 *.js
 !src/**/*.js
 .DS_Store
+.nvmrc
