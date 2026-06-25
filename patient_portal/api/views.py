@@ -1979,15 +1979,10 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             )
                         except Exception:
                             pass
-                    # If this patient failed, force-rollback at the connection level
-                    # so a poisoned transaction doesn't cascade to subsequent patients
-                    # in the same batch.
-                    if _last_exc is not None:
-                        try:
-                            from django.db import connection as _db_conn
-                            _db_conn.rollback()
-                        except Exception:
-                            pass
+                    # _atomic_cm.__exit__ above already rolls back the savepoint/
+                    # transaction via Django's ORM machinery.  A raw connection.rollback()
+                    # would bypass savepoint tracking and break TestCase isolation, so
+                    # it is intentionally omitted here.
                     # Guarantee suppression is cleared even on BaseException.
                     # Use bare except to handle NameError (assigned before entry) and
                     # any error from calling __exit__ a second time on success path.
@@ -2238,10 +2233,11 @@ class PersonViewSet(viewsets.GenericViewSet):
             )
 
         try:
+            _new_person_id = next_pk(Person, 'person_id')
             person, created = Person.objects.get_or_create(
                 actor_iss=actor_iss,
                 actor_sub=actor_sub,
-                defaults={'person_id': lambda: next_pk(Person, 'person_id')},
+                defaults={'person_id': _new_person_id},
             )
         except IntegrityError:
             # Concurrent first-call race: another request won the INSERT

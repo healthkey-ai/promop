@@ -5,6 +5,7 @@ from datetime import date, datetime as dt
 from omop_core.models import (
     Concept, Measurement, ConditionOccurrence, DrugExposure, ProcedureOccurrence,
 )
+from omop_core.services.pk import next_pk
 from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.mappings import (
     LAB_FIELD_TO_LOINC,
@@ -77,9 +78,9 @@ def _sync_measurement(person, field_name: str, value, today: date) -> None:
         existing.value_as_number = value
         existing._skip_patient_info_refresh = True
         existing.save(update_fields=['value_as_number'])
+        del existing._skip_patient_info_refresh
     else:
-        last = Measurement.objects.order_by('-measurement_id').first()
-        new_id = (last.measurement_id + 1) if last else 1
+        new_id = next_pk(Measurement, 'measurement_id')
         m = Measurement(
             measurement_id=new_id,
             person=person,
@@ -92,6 +93,7 @@ def _sync_measurement(person, field_name: str, value, today: date) -> None:
         )
         m._skip_patient_info_refresh = True
         m.save()
+        del m._skip_patient_info_refresh
 
 
 def _sync_condition(person, patient_info, today: date, changed_data: dict = None) -> None:
@@ -115,9 +117,21 @@ def _sync_condition(person, patient_info, today: date, changed_data: dict = None
         if disease else None
     ) or type_concept
 
-    last = ConditionOccurrence.objects.order_by('-condition_occurrence_id').first()
-    new_id = (last.condition_occurrence_id + 1) if last else 1
+    # Upsert: if a row already exists for this person+source_value, update it
+    # rather than appending a duplicate on every PATCH.
+    existing_co = ConditionOccurrence.objects.filter(
+        person=person,
+        condition_source_value=source_value,
+    ).first()
+    if existing_co:
+        existing_co.condition_start_date = today
+        existing_co.condition_concept = condition_concept
+        existing_co._skip_patient_info_refresh = True
+        existing_co.save(update_fields=['condition_start_date', 'condition_concept_id'])
+        del existing_co._skip_patient_info_refresh
+        return
 
+    new_id = next_pk(ConditionOccurrence, 'condition_occurrence_id')
     co = ConditionOccurrence(
         condition_occurrence_id=new_id,
         person=person,
@@ -209,8 +223,7 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
             episode.episode_end_date = end_date
         episode.save(update_fields=['episode_source_value', 'episode_end_date'])
     else:
-        last_ep = Episode.objects.order_by('-episode_id').first()
-        new_ep_id = (last_ep.episode_id + 1) if last_ep else 1
+        new_ep_id = next_pk(Episode, 'episode_id')
         episode = Episode.objects.create(
             episode_id=new_ep_id,
             person=person,
@@ -236,6 +249,24 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
     field_concept = Concept.objects.filter(concept_id=CONCEPT_DRUG_EXPOSURE_FIELD).first()
     if field_concept is None:
         return
+
+    # Exclude drugs already linked to a *different* episode to prevent
+    # cross-episode contamination when end_date is absent.
+    # EpisodeEvent.episode_id is a plain BigIntegerField (no FK), so we
+    # resolve via two queries.
+    other_person_episode_ids = list(
+        Episode.objects.filter(person=person)
+        .exclude(episode_id=episode.episode_id)
+        .values_list('episode_id', flat=True)
+    )
+    if other_person_episode_ids:
+        other_episode_drug_ids = set(
+            EpisodeEvent.objects.filter(
+                episode_id__in=other_person_episode_ids,
+                episode_event_field_concept=field_concept,
+            ).values_list('event_id', flat=True)
+        )
+        drug_qs = drug_qs.exclude(drug_exposure_id__in=other_episode_drug_ids)
 
     existing_event_ids = set(
         EpisodeEvent.objects.filter(
