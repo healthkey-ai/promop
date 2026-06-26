@@ -96,6 +96,9 @@ class PatientInfoSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         # Bulk-fetch all Concept rows referenced by therapy_id fields in one query,
         # replacing the per-field Concept.objects.filter() calls in the display methods.
+        # NOTE: this fires one DB query per instance — do NOT use PatientInfoSerializer
+        # in list views (many=True) without pre-fetching therapy_id concepts, as it
+        # will produce N queries for N patients. Use PatientListSerializer for lists.
         concept_ids = set()
         if instance.first_line_therapy_id:
             concept_ids.add(instance.first_line_therapy_id)

@@ -17,7 +17,9 @@ def rename_user_id_to_identity_id(apps, schema_editor):
     with schema_editor.connection.cursor() as cursor:
         cursor.execute("""
             SELECT column_name FROM information_schema.columns
-            WHERE table_name = 'patient_user' AND column_name = 'user_id'
+            WHERE table_schema = current_schema()
+              AND table_name   = 'patient_user'
+              AND column_name  = 'user_id'
         """)
         if cursor.fetchone():
             cursor.execute(
@@ -30,7 +32,9 @@ def rename_identity_id_to_user_id(apps, schema_editor):
     with schema_editor.connection.cursor() as cursor:
         cursor.execute("""
             SELECT column_name FROM information_schema.columns
-            WHERE table_name = 'patient_user' AND column_name = 'identity_id'
+            WHERE table_schema = current_schema()
+              AND table_name   = 'patient_user'
+              AND column_name  = 'identity_id'
         """)
         if cursor.fetchone():
             cursor.execute(

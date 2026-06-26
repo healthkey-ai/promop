@@ -770,7 +770,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         )
 
                     # Extract disease, stage, and histologic type from Condition
-                    disease = 'Breast Cancer'
+                    disease = None
                     stage = ''
                     histologic_type = ''
                     condition_date = None
@@ -782,8 +782,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             histologic_type = code['text']
                         elif code.get('coding') and len(code['coding']) > 0:
                             histologic_type = code['coding'][0].get('display', '')
-                        
-                        # Get stage
+
+                        # Get stage and infer disease from stage text (e.g. "Breast Cancer Stage IIA")
                         stages = condition.get('stage', [])
                         if stages and len(stages) > 0:
                             stage_summary = stages[0].get('summary', {})
@@ -791,6 +791,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 stage_text = stage_summary['text']
                                 if 'Stage' in stage_text:
                                     stage = stage_text.split('Stage')[-1].strip()
+                                    if not disease:
+                                        disease = stage_text.split('Stage')[0].strip() or None
                             elif stage_summary.get('coding') and len(stage_summary['coding']) > 0:
                                 stage = stage_summary['coding'][0].get('code', '')
                         
@@ -817,10 +819,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 condition_concept=breast_cancer_concept,
                                 condition_start_date=condition_date.date(),
                             ).exists():
-                                last_condition = ConditionOccurrence.objects.all().order_by('-condition_occurrence_id').first()
-                                condition_id = last_condition.condition_occurrence_id + 1 if last_condition else 1
                                 _co = ConditionOccurrence(
-                                    condition_occurrence_id=condition_id,
+                                    condition_occurrence_id=next_pk(ConditionOccurrence, 'condition_occurrence_id'),
                                     person=person,
                                     condition_concept=breast_cancer_concept,
                                     condition_start_date=condition_date.date(),
@@ -845,8 +845,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     _timing_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
                     logger.info("TIMING patient=%s phase=person_setup elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
                     from omop_core.models import Measurement
-                    last_measurement = Measurement.objects.all().order_by('-measurement_id').first()
-                    measurement_id = last_measurement.measurement_id + 1 if last_measurement else 1
+                    from omop_core.services.pk import next_pk_batch as _next_pk_batch
                     
                     # Extract tumor characteristics and lab values from observations
                     tumor_size = None
@@ -1411,7 +1410,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     existing_m.save()
                             else:
                                 _m = Measurement(
-                                    measurement_id=measurement_id,
+                                    measurement_id=0,  # placeholder — batch-allocated before bulk_create
                                     person=person,
                                     measurement_concept=measurement_concept,
                                     measurement_date=obs_date.date(),
@@ -1429,7 +1428,6 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 _pending_measurements.append(_m)
                                 if prov_source:
                                     _pending_provenances.append((_m, prov_source, prov_user_id, prov_reason))
-                                measurement_id += 1
                         # Log slow observations (>0.5s) to catch future bottlenecks
                         _t_obs_elapsed = _time.monotonic() - _t_obs
                         if _t_obs_elapsed > 0.5:
@@ -1442,6 +1440,10 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     # Bulk-insert all new Measurements in one round-trip instead of
                     # one INSERT per observation (~48 round-trips → 1 round-trip).
                     if _pending_measurements:
+                        # Batch-allocate PKs from the sequence — race-safe under concurrent uploads.
+                        _m_ids = _next_pk_batch(Measurement, 'measurement_id', len(_pending_measurements))
+                        for _pending_m, _mid in zip(_pending_measurements, _m_ids):
+                            _pending_m.measurement_id = _mid
                         _t_bulk_insert = _time.monotonic()
                         try:
                             Measurement.objects.bulk_create(_pending_measurements)
@@ -1625,10 +1627,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     
                     # --- Write DrugExposure records for each therapy line ---
                     logger.info("TIMING patient=%s phase=measurements elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
-                    last_drug = DrugExposure.objects.all().order_by('-drug_exposure_id').first()
-                    drug_exposure_id = last_drug.drug_exposure_id + 1 if last_drug else 1
-                    last_episode = Episode.objects.all().order_by('-episode_id').first()
-                    episode_id_counter = last_episode.episode_id + 1 if last_episode else 1
+                    # PKs allocated on-demand via sequence — see next_pk() calls below.
 
                     for lot_num, lot_data in sorted(therapy_lines.items()):
                         try:
@@ -1675,7 +1674,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 ).first()
                                 if _de is None:
                                     _de = DrugExposure(
-                                        drug_exposure_id=drug_exposure_id,
+                                        drug_exposure_id=next_pk(DrugExposure, 'drug_exposure_id'),
                                         person=person,
                                         drug_concept=regimen_concept,
                                         drug_exposure_start_date=lot_start,
@@ -1688,7 +1687,6 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     _pt_drug_exposure_ids.append(_de.drug_exposure_id)
                                     if prov_source:
                                         _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                                    drug_exposure_id += 1
 
                                 # ep_source_concept reuses the same HemOnc lookup already resolved above
                                 ep_source_concept = regimen_concept if _hemonc_cid else None
@@ -1704,7 +1702,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 ).first()
                                 if _ep is None:
                                     _ep = Episode(
-                                        episode_id=episode_id_counter,
+                                        episode_id=next_pk(Episode, 'episode_id'),
                                         person=person,
                                         episode_concept=ep_concept,
                                         episode_object_concept=ep_obj_concept,
@@ -1717,7 +1715,6 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     )
                                     _ep.save()
                                     _pt_episode_ids.append(_ep.episode_id)
-                                    episode_id_counter += 1
 
                                 # Link drug exposure to episode (idempotent)
                                 ee_field_concept = _concept_de_field or regimen_concept

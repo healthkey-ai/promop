@@ -430,9 +430,9 @@ def _persist_lots(person, lots: list[_LineOfTherapy]) -> None:
                 episode.episode_end_date = lot.end
                 episode.save(update_fields=['episode_source_value', 'episode_end_date'])
         else:
-            # Episode.episode_id is BigIntegerField(primary_key=True) — no autoincrement.
-            last_ep = Episode.objects.order_by('-episode_id').first()
-            new_ep_id = (last_ep.episode_id + 1) if last_ep else 1
+            # Episode.episode_id is BigIntegerField(primary_key=True) — use sequence.
+            from omop_core.services.pk import next_pk
+            new_ep_id = next_pk(Episode, 'episode_id')
             episode = Episode.objects.create(
                 episode_id=new_ep_id,
                 person=person,

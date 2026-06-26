@@ -132,6 +132,22 @@ CREATE TABLE IF NOT EXISTS patient_consent (
 );
 CREATE INDEX IF NOT EXISTS patient_consent_patient_user_id_idx
     ON patient_consent (patient_user_id);
+
+-- Composite unique constraint on (issuer, sub) — required for identity integrity.
+-- 0001_initial adds this constraint on fresh DBs via AddConstraint (state + DB).
+-- On production the old 0001_initial never ran the new code, so this constraint is
+-- absent. We add it here with DO $$ so the statement is idempotent.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_identity_issuer_sub'
+          AND conrelid = 'identity'::regclass
+    ) THEN
+        ALTER TABLE identity
+            ADD CONSTRAINT uq_identity_issuer_sub UNIQUE (issuer, sub);
+    END IF;
+END $$;
 """,
                     reverse_sql=migrations.RunSQL.noop,
                 ),

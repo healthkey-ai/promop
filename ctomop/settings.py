@@ -34,7 +34,7 @@ if not DEBUG:
     # so that Render deploys (which call `migrate` in start.sh) and CI test runs
     # are not broken when DATABASE_URL is absent at import time.
     _management_commands = {'migrate', 'test', 'collectstatic', 'check', 'makemigrations', 'shell'}
-    _running_mgmt = bool(set(_sys.argv) & _management_commands)
+    _running_mgmt = len(_sys.argv) > 1 and _sys.argv[1] in _management_commands
     if not _running_mgmt:
         from django.core.exceptions import ImproperlyConfigured
         _config_errors = []
@@ -319,6 +319,9 @@ if not DEBUG:
     SECURE_SSL_REDIRECT = False
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31536000          # 1 year
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
     SECURE_BROWSER_XSS_FILTER = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
     X_FRAME_OPTIONS = 'DENY'
