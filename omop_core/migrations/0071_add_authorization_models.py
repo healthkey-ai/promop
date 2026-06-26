@@ -10,6 +10,11 @@ class Migration(migrations.Migration):
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
         ('omop_core', '0070_add_loinc_code_class'),
+        # Explicit dependency ensures the identity table (+ M2M junctions) exist
+        # before we create FK columns pointing to AUTH_USER_MODEL here.
+        # Without this, Django may schedule 0071 before patient_portal/0002 on
+        # production where both are unapplied and the order is otherwise ambiguous.
+        ('patient_portal', '0002_patient_models'),
     ]
 
     operations = [
