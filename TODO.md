@@ -93,6 +93,28 @@
 
 ---
 
+## Code review findings (2026-06-26, PR #175 dev→main)
+
+#### #19 _classify_drug fires 3 DB queries per unique drug in LOT inference
+- **Severity:** high / performance
+- `omop_core/services/lot_inference_service.py:112-136`
+- Called once per drug per patient in `_build_drug_eras`. Each drug with a concept_id issues: (1) ConceptRelationship HemOnc mappings, (2) ConceptAncestor ancestor names, (3) Concept direct names — 15–45 round-trips per LOT inference call.
+- **Action:** Pre-fetch ConceptRelationship for all drug_concept_ids before the era loop and pass a `hemonc_map` dict into `_classify_drug`.
+
+#### #20 ScopedTokenPermission is method-level only — no built-in object ownership enforcement
+- **Severity:** medium / security
+- `patient_portal/api/permissions.py:50-66`
+- The permission class allows any authenticated patient to PATCH. Object-level ownership (`can_access_patient()`) is enforced in `_ProvenanceMixin.perform_update` and `PatientInfoViewSet.partial_update`, but any new view using `ScopedTokenPermission` without those mixins would allow cross-patient writes.
+- **Action:** Add `has_object_permission` override that calls `can_access_patient(request.user, obj.person)`, or document the dependency on `_ProvenanceMixin` in the class docstring.
+
+#### #21 CORS_ALLOWED_ORIGINS silently empty if env var unset in production
+- **Severity:** medium / security
+- `ctomop/settings.py:226-230`
+- When `DEBUG=False` and `CORS_ALLOWED_ORIGINS` env var is absent, the list is empty → all cross-origin requests rejected. App starts without warning; deploy fails silently at the browser.
+- **Action:** Add `CORS_ALLOWED_ORIGINS` to the `ImproperlyConfigured` guard block alongside `DATABASE_URL` and `SECRET_KEY`.
+
+---
+
 ## Previous findings
 
 ### _next_pk holds row locks for entire sync transaction (superseded by #6/#7 above)
