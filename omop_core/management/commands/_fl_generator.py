@@ -10,7 +10,7 @@ which regimens are used at each line of therapy and their relative frequencies.
 """
 
 import random
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from omop_core.services.lot_regimens import (
     FL_CONDITION_CONCEPT_ID,
@@ -128,7 +128,12 @@ def _pick_regimen(regimen_list, early_stage=False):
     if not early_stage:
         eligible = [(n, d, w, cid) for n, d, w, cid in regimen_list if n not in _RADIATION_REGIMENS]
     else:
-        eligible = regimen_list
+        eligible = list(regimen_list)
+    if not eligible:
+        raise RuntimeError(
+            f"No eligible regimens to pick from (early_stage={early_stage}, "
+            f"pool_size={len(regimen_list)}). Check FL_LOT_WEIGHTS and the HemOnc DB."
+        )
     names, drugs_lists, weights, concept_ids = zip(*eligible)
     idx = random.choices(range(len(names)), weights=list(weights), k=1)[0]
     return names[idx], list(drugs_lists[idx]), concept_ids[idx]
@@ -154,6 +159,12 @@ class FLBundleGenerator:
                 f"Failed to load FL regimen catalog from OMOP Concept table: {exc}"
             ) from exc
 
+        if not catalog:
+            raise RuntimeError(
+                "FL regimen catalog is empty. Ensure the HemOnc vocabulary is loaded in the "
+                f"OMOP concept/concept_relationship tables (condition_concept_id={FL_CONDITION_CONCEPT_ID})."
+            )
+
         first_line: list[tuple] = []
         later_line: list[tuple] = []
 
@@ -175,6 +186,13 @@ class FLBundleGenerator:
             ('ISRT',             [],            10, None),
             ('Rituximab + ISRT', ['rituximab'],  8, None),
         ])
+
+        if not later_line:
+            raise RuntimeError(
+                "FL later-line regimen list is empty. Ensure FL_LOT_WEIGHTS has entries with "
+                f"later_weight > 0, and the HemOnc DB has those concept IDs. "
+                f"DB returned {len(catalog)} regimen(s) for condition_concept_id={FL_CONDITION_CONCEPT_ID}."
+            )
 
         return first_line, later_line
 
@@ -324,7 +342,7 @@ class FLBundleGenerator:
     # ------------------------------------------------------------------
 
     def _patient_resource(self, p):
-        birth_year = 2025 - p['age']
+        birth_year = date.today().year - p['age']
         birth_date = f"{birth_year}-{random.randint(1,12):02d}-{random.randint(1,28):02d}"
         base = 'http://ctomop.io/fhir/StructureDefinition/'
         return {
@@ -465,7 +483,7 @@ class FLBundleGenerator:
                         'Clonal B lymphocytes in bone marrow biopsy (%)', p['bm_b_cells_pct'], '%', dt),
             self._obs(pid, f"obs-{pid}-prior-lines", '21861-0', 'Prior lines of therapy', 'laboratory', dt, 'integer', p['prior_lines']),
             self._obs(pid, f"obs-{pid}-fl-grade", '44648-4', 'Histologic grade', 'laboratory', dt, 'string', grade_text),
-            self._obs(pid, f"obs-{pid}-fl-transformed", '44648-4-tx', 'Histologic transformation to DLBCL', 'laboratory', dt, 'boolean', p['transformed']),
+            self._obs(pid, f"obs-{pid}-fl-transformed", 'fl-transformed-dlbcl', 'Histologic transformation to DLBCL', 'laboratory', dt, 'boolean', p['transformed']),
             self._obs(pid, f"obs-{pid}-flipi", 'LP95826-0', 'FLIPI score', 'survey', dt, 'integer', p['flipi_score']),
             self._obs(pid, f"obs-{pid}-nodal-sites", '21912-1', 'Number of involved nodal sites', 'laboratory', dt, 'integer', p['nodal_sites']),
         ]
@@ -519,7 +537,7 @@ class FLBundleGenerator:
                     'note': [{'text': f"Line {line_num}: {name} — {outcome}"}],
                 })
                 for drug_key in drugs:
-                    if not _DRUG_INFO.get(drug_key):
+                    if drug_key not in _DRUG_INFO or _DRUG_INFO[drug_key] is None:
                         continue
                     resources.append(self._drug_med_statement(
                         p, drug_key, line_num, is_last, start_str, end_str, partof=regimen_id,
@@ -529,6 +547,8 @@ class FLBundleGenerator:
         return resources
 
     def _drug_med_statement(self, p, drug_key, line_num, is_last, start_str, end_str, partof=None):
+        if drug_key not in _DRUG_INFO or _DRUG_INFO[drug_key] is None:
+            raise ValueError(f"_drug_med_statement called with invalid key '{drug_key}'")
         rxcui, display = _DRUG_INFO[drug_key]
         resource = {
             'resourceType': 'MedicationStatement',
@@ -555,7 +575,7 @@ class FLBundleGenerator:
             'resourceType': 'Procedure',
             'id': f"proc-rt-{p['id']}-line{line_num}",
             'status': 'completed',
-            'category': {'coding': [{'system': 'http://snomed.info/sct', 'code': '363679005', 'display': 'Imaging'}]},
+            'category': {'coding': [{'system': 'http://snomed.info/sct', 'code': '367336001', 'display': 'Radiation oncology'}]},
             'code': {
                 'coding': [{'system': 'http://snomed.info/sct', 'code': snomed_code, 'display': snomed_display}],
                 'text': regimen_name,

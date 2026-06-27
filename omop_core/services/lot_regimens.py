@@ -385,16 +385,17 @@ def load_hemonc_regimens_for_disease(condition_concept_id: int) -> list[dict]:
     concept_ids = [r[0] for r in regimen_rows]
 
     with connection.cursor() as cursor:
-        cursor.execute("""
+        placeholders = ','.join(['%s'] * len(concept_ids))
+        cursor.execute(f"""
             SELECT DISTINCT cr.concept_id_1, c_drug.concept_name
             FROM concept_relationship cr
             JOIN concept c_drug ON c_drug.concept_id = cr.concept_id_2
-            WHERE cr.concept_id_1 = ANY(%(ids)s::int[])
+            WHERE cr.concept_id_1 IN ({placeholders})
               AND cr.relationship_id IN (
                   'Has cytotoxic chemo', 'Has targeted therapy',
                   'Has immunotherapy', 'Has steroid tx', 'Has hormonal tx'
               )
-        """, {'ids': concept_ids})
+        """, concept_ids)
         drug_rows = cursor.fetchall()
 
     drugs_by_regimen: dict[int, list[str]] = defaultdict(list)
