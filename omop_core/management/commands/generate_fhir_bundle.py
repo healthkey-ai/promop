@@ -1,16 +1,14 @@
 """
-Generate comprehensive FHIR Bundle JSON with breast cancer patient data
-
-This command creates a FHIR Bundle including:
-- Patient demographics with US addresses
-- Breast cancer diagnoses with stage and histologic type
-- Lab values (CBC, liver, kidney function)
-- Biomarkers (HER2, ER, PR status)
-- Genetic mutations (BRCA1, BRCA2, TP53, PIK3CA, etc.)
-- Prior lines of therapy (chemotherapy, targeted therapy)
+Generate synthetic FHIR Bundle JSON for multiple cancer types.
 
 Usage:
-    python manage.py generate_fhir_bundle --count 200 --output data/patients.json
+    python manage.py generate_fhir_bundle --disease breast-cancer --count 200 --output data/bc.json
+    python manage.py generate_fhir_bundle --disease mm            --count 100 --output data/mm.json
+    python manage.py generate_fhir_bundle --disease fl            --count 200 --output data/fl.json
+
+--disease defaults to 'breast-cancer' for backward compatibility.
+Disease-specific options (--tnbc-ratio, --rrmm-ratio, --watch-wait-ratio) are
+ignored when they don't apply to the selected disease.
 """
 
 import json
@@ -19,11 +17,25 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from django.core.management.base import BaseCommand
 
+_DISEASE_CHOICES = ['breast-cancer', 'mm', 'fl']
+_DEFAULT_OUTPUTS = {
+    'breast-cancer': 'data/synthetic_patients_fhir.json',
+    'mm':            'data/mm_patients_fhir.json',
+    'fl':            'data/fl_patients_fhir.json',
+}
+
 
 class Command(BaseCommand):
-    help = 'Generate comprehensive FHIR Bundle with breast cancer patient data'
+    help = 'Generate synthetic FHIR Bundle for breast-cancer, mm, or fl'
 
     def add_arguments(self, parser):
+        parser.add_argument(
+            '--disease',
+            type=str,
+            default='breast-cancer',
+            choices=_DISEASE_CHOICES,
+            help='Disease type to generate (default: breast-cancer)',
+        )
         parser.add_argument(
             '--count',
             type=int,
@@ -33,8 +45,8 @@ class Command(BaseCommand):
         parser.add_argument(
             '--output',
             type=str,
-            default='data/synthetic_patients_fhir.json',
-            help='Output file path (default: data/synthetic_patients_fhir.json)',
+            default=None,
+            help='Output file path (defaults per disease if omitted)',
         )
         parser.add_argument(
             '--seed',
@@ -42,42 +54,70 @@ class Command(BaseCommand):
             default=42,
             help='Random seed for reproducibility (default: 42)',
         )
+        # Disease-specific knobs — silently ignored when not applicable
         parser.add_argument(
             '--tnbc-ratio',
             type=float,
             default=0.15,
-            help='Fraction of patients that are TNBC (default: 0.15)',
+            help='[breast-cancer] Fraction of TNBC patients (default: 0.15)',
+        )
+        parser.add_argument(
+            '--rrmm-ratio',
+            type=float,
+            default=0.80,
+            dest='rrmm_ratio',
+            help='[mm] Fraction of patients with ≥1 prior line (default: 0.80)',
+        )
+        parser.add_argument(
+            '--watch-wait-ratio',
+            type=float,
+            default=0.20,
+            dest='watch_wait_ratio',
+            help='[fl] Fraction of watch-and-wait patients (default: 0.20)',
         )
 
     def handle(self, *args, **options):
-        count = options['count']
-        output_path = options['output']
-        seed = options['seed']
-        self.tnbc_ratio = options['tnbc_ratio']
+        disease = options['disease']
+        count   = options['count']
+        seed    = options['seed']
+        output_path = options['output'] or _DEFAULT_OUTPUTS[disease]
 
         random.seed(seed)
 
-        self.stdout.write('Generating comprehensive FHIR Bundle with breast cancer patients...')
+        if disease == 'mm':
+            bundle = self._generate_mm(count, options)
+        elif disease == 'fl':
+            bundle = self._generate_fl(count, options)
+        else:
+            bundle = self._generate_breast_cancer(count, options)
 
-        bundle = self.generate_bundle(count)
-        
-        # Save to file
-        output_file = Path(output_path)
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(output_file, 'w') as f:
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, 'w') as f:
             json.dump(bundle, f, indent=2)
-        
-        self.stdout.write(self.style.SUCCESS(f'✓ Generated FHIR Bundle with {count} patients'))
-        self.stdout.write(self.style.SUCCESS(f'✓ Saved to: {output_file}'))
-        self.stdout.write(self.style.SUCCESS(f'✓ Total resources: {len(bundle["entry"])}'))
-        self.stdout.write(self.style.SUCCESS('✓ Each patient includes:'))
-        self.stdout.write('  - Demographics with US address')
-        self.stdout.write('  - Breast cancer diagnosis with stage and histologic type')
-        self.stdout.write('  - Lab values (CBC, liver, kidney function)')
-        self.stdout.write('  - Biomarkers (HER2, ER, PR status)')
-        self.stdout.write('  - Genetic mutations (BRCA1, BRCA2, TP53, PIK3CA, etc.)')
-        self.stdout.write('  - Prior lines of therapy (chemotherapy, targeted therapy)')
+
+        self.stdout.write(self.style.SUCCESS(
+            f'✓ {count} {disease} patients, {len(bundle["entry"])} FHIR resources → {out}'
+        ))
+
+    # ------------------------------------------------------------------
+    # Disease dispatchers
+    # ------------------------------------------------------------------
+
+    def _generate_mm(self, count, options):
+        from omop_core.management.commands._mm_generator import Command as MMCommand
+        mm = MMCommand()
+        mm.rrmm_ratio = options['rrmm_ratio']
+        return mm._generate_bundle(count)
+
+    def _generate_fl(self, count, options):
+        from omop_core.management.commands._fl_generator import FLBundleGenerator
+        gen = FLBundleGenerator(watch_wait_ratio=options['watch_wait_ratio'])
+        return gen.generate_bundle(count)
+
+    def _generate_breast_cancer(self, count, options):
+        self.tnbc_ratio = options['tnbc_ratio']
+        return self.generate_bundle(count)
 
     def generate_bundle(self, num_patients):
         """Generate FHIR Bundle with all resources"""

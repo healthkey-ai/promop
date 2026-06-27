@@ -247,14 +247,40 @@ def get_regimen_concept_id(drug_names: frozenset) -> int | None:
 # ---------------------------------------------------------------------------
 
 REGIMEN_LOOKUP: dict[frozenset, str] = {
-    # Follicular Lymphoma / DLBCL
+    # Follicular Lymphoma — radiotherapy (early-stage I–II)
+    frozenset({'isrt'}):                                                         'ISRT',
+    frozenset({'ifrt'}):                                                         'IFRT',
+    frozenset({'rituximab', 'isrt'}):                                            'Rituximab + ISRT',
+    frozenset({'rituximab', 'ifrt'}):                                            'Rituximab + IFRT',
+    # Follicular Lymphoma — immunotherapy / chemoimmunotherapy
     frozenset({'rituximab', 'cyclophosphamide', 'doxorubicin', 'vincristine', 'prednisone'}): 'R-CHOP',
     frozenset({'obinutuzumab', 'cyclophosphamide', 'doxorubicin', 'vincristine', 'prednisone'}): 'G-CHOP',
     frozenset({'rituximab', 'cyclophosphamide', 'vincristine', 'prednisone'}):   'R-CVP',
     frozenset({'rituximab', 'bendamustine'}):                                    'BR',
     frozenset({'obinutuzumab', 'bendamustine'}):                                 'G-B',
     frozenset({'rituximab', 'lenalidomide'}):                                    'R2',
+    frozenset({'rituximab', 'fludarabine'}):                                     'FR',
+    frozenset({'fludarabine', 'cyclophosphamide', 'rituximab', 'mitoxantrone'}): 'R-FCM',
+    frozenset({'rituximab', 'gemcitabine', 'oxaliplatin'}):                      'R-GemOx',
+    frozenset({'rituximab', 'gemcitabine', 'dexamethasone', 'cisplatin'}):       'R-GDP',
+    frozenset({'rituximab', 'etoposide', 'cisplatin', 'cytarabine', 'methylprednisolone'}): 'R-ESHAP',
+    frozenset({'rituximab', 'chlorambucil'}):                                    'R-Chlorambucil',
+    frozenset({'obinutuzumab', 'chlorambucil'}):                                 'Clb-O',
     frozenset({'rituximab'}):                                                    'Rituximab monotherapy',
+    frozenset({'obinutuzumab'}):                                                 'Obinutuzumab monotherapy',
+    frozenset({'chlorambucil'}):                                                 'Chlorambucil',
+    frozenset({'lenalidomide'}):                                                 'Lenalidomide monotherapy',
+    # Follicular Lymphoma — targeted / novel agents
+    frozenset({'tazemetostat'}):                                                 'Tazemetostat',
+    frozenset({'copanlisib'}):                                                   'Copanlisib',
+    frozenset({'idelalisib'}):                                                   'Idelalisib',
+    frozenset({'umbralisib', 'ublituximab'}):                                    'U2',
+    frozenset({'mosunetuzumab'}):                                                'Mosunetuzumab',
+    frozenset({'glofitamab'}):                                                   'Glofitamab',
+    frozenset({'epcoritamab'}):                                                  'Epcoritamab',
+    frozenset({'axicabtagene'}):                                                 'Axicabtagene ciloleucel',
+    frozenset({'tisagenlecleucel'}):                                             'Tisagenlecleucel',
+    # Follicular Lymphoma / DLBCL — shared
     frozenset({'polatuzumab vedotin', 'bendamustine', 'rituximab'}):             'Pola-BR',
     frozenset({'tafasitamab', 'lenalidomide'}):                                  'Tafa-Len',
     frozenset({'loncastuximab tesirine'}):                                       'Lonca',
@@ -284,3 +310,102 @@ REGIMEN_LOOKUP: dict[frozenset, str] = {
     frozenset({'ado-trastuzumab emtansine'}):                                    'T-DM1',
     frozenset({'pembrolizumab', 'chemotherapy'}):                                'Pembrolizumab+Chemo',
 }
+
+# ---------------------------------------------------------------------------
+# Follicular Lymphoma — HemOnc concept IDs and LOT weights
+# ---------------------------------------------------------------------------
+
+#: OMOP concept_id for "Follicular lymphoma" (HemOnc / SNOMED)
+FL_CONDITION_CONCEPT_ID: int = 42542169
+
+#: Maps HemOnc Regimen concept_id -> (line1_weight, later_weight).
+#: weight=0 means "not used for that line of therapy".
+#: Weights are relative frequencies; higher values appear more often.
+FL_LOT_WEIGHTS: dict[int, tuple[int, int]] = {
+    35804570: (32, 18),  # BR (Bendamustine and Rituximab)
+    35805028: (24, 12),  # R-CHOP
+    35805630: (10,  0),  # R-CVP
+    35805634: ( 8,  0),  # G-CHOP
+    35803432: ( 5,  4),  # Rituximab monotherapy
+    35804583: ( 2,  2),  # Obinutuzumab monotherapy
+    35804591: ( 0, 12),  # R2 (Lenalidomide and Rituximab)
+    42542442: ( 0, 10),  # Tazemetostat
+    37557146: ( 0,  8),  # Mosunetuzumab
+    35805074: ( 0,  7),  # Axicabtagene ciloleucel
+    37557451: ( 0,  6),  # Glofitamab
+    37557299: ( 0,  5),  # Epcoritamab
+    35805647: ( 0,  5),  # Copanlisib
+    35804066: ( 0,  5),  # Tisagenlecleucel
+    35805062: ( 0,  4),  # R-GDP
+    35805082: ( 0,  4),  # R-GemOx
+}
+
+
+def load_hemonc_regimens_for_disease(condition_concept_id: int) -> list[dict]:
+    """Query the OMOP Concept/ConceptRelationship tables for non-biosimilar HemOnc
+    regimens that have a current adult indication for the given condition.
+
+    Returns a list of dicts::
+
+        {
+            'concept_id': int,
+            'concept_name': str,
+            'drugs': list[str],   # lowercased drug names from HemOnc drug relationships
+        }
+
+    Excludes biosimilar variants (those with a 'Synth regimen of' relationship).
+    Requires Django's database connection — call only from management commands or
+    other application code with DB access.
+    """
+    from collections import defaultdict
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT DISTINCT c_reg.concept_id, c_reg.concept_name
+            FROM concept c_reg
+            JOIN concept_relationship cr
+              ON cr.concept_id_1 = %(cond_id)s
+             AND cr.concept_id_2 = c_reg.concept_id
+             AND cr.relationship_id = 'Curr adult indic for'
+            WHERE c_reg.vocabulary_id = 'HemOnc'
+              AND c_reg.concept_class_id = 'Regimen'
+              AND NOT EXISTS (
+                  SELECT 1 FROM concept_relationship cr_bio
+                  WHERE cr_bio.concept_id_1 = c_reg.concept_id
+                    AND cr_bio.relationship_id = 'Synth regimen of'
+              )
+            ORDER BY c_reg.concept_name
+        """, {'cond_id': condition_concept_id})
+        regimen_rows = cursor.fetchall()
+
+    if not regimen_rows:
+        return []
+
+    concept_ids = [r[0] for r in regimen_rows]
+
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT DISTINCT cr.concept_id_1, c_drug.concept_name
+            FROM concept_relationship cr
+            JOIN concept c_drug ON c_drug.concept_id = cr.concept_id_2
+            WHERE cr.concept_id_1 = ANY(%(ids)s::int[])
+              AND cr.relationship_id IN (
+                  'Has cytotoxic chemo', 'Has targeted therapy',
+                  'Has immunotherapy', 'Has steroid tx', 'Has hormonal tx'
+              )
+        """, {'ids': concept_ids})
+        drug_rows = cursor.fetchall()
+
+    drugs_by_regimen: dict[int, list[str]] = defaultdict(list)
+    for cid, drug_name in drug_rows:
+        drugs_by_regimen[cid].append(drug_name.lower())
+
+    return [
+        {
+            'concept_id': cid,
+            'concept_name': cname,
+            'drugs': sorted(drugs_by_regimen.get(cid, [])),
+        }
+        for cid, cname in regimen_rows
+    ]
