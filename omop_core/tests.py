@@ -1,12 +1,14 @@
 """
-omop_core tests — TEST-01, TEST-02, TEST-03
+omop_core tests — TEST-01, TEST-02, TEST-03, TEST-04
 
 TEST-01: PatientInfo model-level tests
 TEST-02: refresh_patient_info service unit tests
 TEST-03: Signal integration tests at omop_core level
+TEST-04: FLBundleGenerator unit tests
 """
 
 from datetime import date
+from unittest.mock import patch
 
 from django.test import TestCase
 
@@ -567,3 +569,192 @@ class GetVisibleOrgsTest(TestCase):
                 GroupAccess.objects.create(
                     identity=self.nobody, org=self.org_a, group=self.group_a, role='org_admin'
                 )
+
+
+# ---------------------------------------------------------------------------
+# TEST-04: FLBundleGenerator
+# ---------------------------------------------------------------------------
+
+_FL_MOCK_CATALOG = [
+    {
+        'concept_id': 35804570,
+        'concept_name': 'Bendamustine and Rituximab (BR)',
+        'drugs': ['bendamustine', 'rituximab'],
+    },
+    {
+        'concept_id': 35805028,
+        'concept_name': 'R-CHOP',
+        'drugs': ['cyclophosphamide', 'doxorubicin', 'prednisone', 'rituximab', 'vincristine'],
+    },
+    {
+        'concept_id': 35805630,
+        'concept_name': 'R-CVP',
+        'drugs': ['cyclophosphamide', 'prednisone', 'rituximab', 'vincristine'],
+    },
+    {
+        'concept_id': 35805634,
+        'concept_name': 'G-CHOP',
+        'drugs': ['cyclophosphamide', 'doxorubicin', 'obinutuzumab', 'prednisone', 'vincristine'],
+    },
+    {
+        'concept_id': 35803432,
+        'concept_name': 'Rituximab monotherapy',
+        'drugs': ['rituximab'],
+    },
+    {
+        'concept_id': 35804583,
+        'concept_name': 'Obinutuzumab monotherapy',
+        'drugs': ['obinutuzumab'],
+    },
+    {
+        'concept_id': 35804591,
+        'concept_name': 'Lenalidomide and Rituximab (R2)',
+        'drugs': ['lenalidomide', 'rituximab'],
+    },
+    {
+        'concept_id': 42542442,
+        'concept_name': 'Tazemetostat monotherapy',
+        'drugs': ['tazemetostat'],
+    },
+    {
+        'concept_id': 37557146,
+        'concept_name': 'Mosunetuzumab monotherapy',
+        'drugs': ['mosunetuzumab'],
+    },
+    {
+        'concept_id': 35805074,
+        'concept_name': 'Axicabtagene ciloleucel monotherapy',
+        'drugs': ['axicabtagene ciloleucel'],
+    },
+    {
+        'concept_id': 37557451,
+        'concept_name': 'Glofitamab monotherapy',
+        'drugs': ['glofitamab'],
+    },
+    {
+        'concept_id': 37557299,
+        'concept_name': 'Epcoritamab monotherapy',
+        'drugs': ['epcoritamab'],
+    },
+    {
+        'concept_id': 35805647,
+        'concept_name': 'Copanlisib monotherapy',
+        'drugs': ['copanlisib'],
+    },
+    {
+        'concept_id': 35804066,
+        'concept_name': 'Tisagenlecleucel monotherapy',
+        'drugs': ['tisagenlecleucel'],
+    },
+    {
+        'concept_id': 35805062,
+        'concept_name': 'R-GDP',
+        'drugs': ['cisplatin', 'dexamethasone', 'gemcitabine', 'rituximab'],
+    },
+    {
+        'concept_id': 35805082,
+        'concept_name': 'R-GemOx',
+        'drugs': ['gemcitabine', 'oxaliplatin', 'rituximab'],
+    },
+]
+
+_MOCK_TARGET = 'omop_core.management.commands._fl_generator.load_hemonc_regimens_for_disease'
+
+
+class FLBundleGeneratorTest(TestCase):
+    """TEST-04: FLBundleGenerator — unit tests with mocked DB catalog."""
+
+    @patch(_MOCK_TARGET, return_value=_FL_MOCK_CATALOG)
+    def test_generate_bundle_structure(self, _mock):
+        from omop_core.management.commands._fl_generator import FLBundleGenerator
+        gen = FLBundleGenerator(watch_wait_ratio=0.0)
+        bundle = gen.generate_bundle(5)
+        self.assertEqual(bundle['resourceType'], 'Bundle')
+        self.assertEqual(bundle['type'], 'collection')
+        # Each patient contributes at minimum: Patient + Condition + labs + therapy resources
+        self.assertGreater(len(bundle['entry']), 5)
+
+    @patch(_MOCK_TARGET, return_value=_FL_MOCK_CATALOG)
+    def test_every_entry_has_resource_type(self, _mock):
+        from omop_core.management.commands._fl_generator import FLBundleGenerator
+        gen = FLBundleGenerator(watch_wait_ratio=0.0)
+        bundle = gen.generate_bundle(3)
+        for entry in bundle['entry']:
+            self.assertIn('resourceType', entry['resource'])
+
+    @patch(_MOCK_TARGET, return_value=_FL_MOCK_CATALOG)
+    def test_watch_and_wait_patients_have_no_therapy(self, _mock):
+        """Patients in watch-and-wait should not produce MedicationStatement resources."""
+        from omop_core.management.commands._fl_generator import FLBundleGenerator
+        gen = FLBundleGenerator(watch_wait_ratio=1.0)  # force all eligible to watch-and-wait
+        bundle = gen.generate_bundle(20)
+        # Some patients may not be eligible for W&W (high FLIPI / B symptoms), so filter by extension
+        waw_patient_ids = set()
+        for entry in bundle['entry']:
+            r = entry['resource']
+            if r['resourceType'] != 'Patient':
+                continue
+            for ext in r.get('extension', []):
+                if ext.get('url', '').endswith('fl-watch-and-wait') and ext.get('valueBoolean'):
+                    waw_patient_ids.add(r['id'])
+        med_patient_ids = {
+            entry['resource']['subject']['reference'].split('/')[-1]
+            for entry in bundle['entry']
+            if entry['resource']['resourceType'] == 'MedicationStatement'
+        }
+        self.assertTrue(waw_patient_ids.isdisjoint(med_patient_ids),
+                        "Watch-and-wait patients should have no MedicationStatements")
+
+    @patch(_MOCK_TARGET, return_value=_FL_MOCK_CATALOG)
+    def test_hemonc_concept_id_in_regimen_coding(self, _mock):
+        """Regimen-level MedicationStatements must carry a HemOnc system coding."""
+        from omop_core.management.commands._fl_generator import FLBundleGenerator
+        gen = FLBundleGenerator(watch_wait_ratio=0.0)
+        bundle = gen.generate_bundle(10)
+        regimen_stmts = [
+            e['resource'] for e in bundle['entry']
+            if e['resource']['resourceType'] == 'MedicationStatement'
+            and any(c.get('system') == 'http://ctomop.io/fhir/fl-regimen'
+                    for c in e['resource']['medicationCodeableConcept']['coding'])
+        ]
+        self.assertGreater(len(regimen_stmts), 0, "Expected at least one regimen MedicationStatement")
+        for stmt in regimen_stmts:
+            systems = {c['system'] for c in stmt['medicationCodeableConcept']['coding']}
+            # HemOnc coding should be present for DB-sourced regimens (not radiation)
+            has_hemonc = 'http://terminology.hl7.org/CodeSystem/hemonc' in systems
+            is_radiation_only = systems == {'http://ctomop.io/fhir/fl-regimen'}
+            self.assertTrue(has_hemonc or is_radiation_only,
+                            f"Unexpected coding systems: {systems}")
+
+    @patch(_MOCK_TARGET, return_value=[])
+    def test_empty_catalog_raises_runtime_error(self, _mock):
+        """Empty HemOnc catalog must raise RuntimeError with a clear message."""
+        from omop_core.management.commands._fl_generator import FLBundleGenerator
+        with self.assertRaisesRegex(RuntimeError, 'empty'):
+            FLBundleGenerator()
+
+    @patch(_MOCK_TARGET, return_value=_FL_MOCK_CATALOG)
+    def test_lot_weights_produce_both_line_lists(self, _mock):
+        """Both first_line and later_line regimen lists must be non-empty."""
+        from omop_core.management.commands._fl_generator import FLBundleGenerator
+        gen = FLBundleGenerator()
+        self.assertGreater(len(gen._first_line_regimens), 0)
+        self.assertGreater(len(gen._later_line_regimens), 0)
+
+    @patch(_MOCK_TARGET, return_value=_FL_MOCK_CATALOG)
+    def test_birth_year_is_current(self, _mock):
+        """Generated Patient resources must have birth years close to today's year."""
+        from datetime import date as _date
+        from omop_core.management.commands._fl_generator import FLBundleGenerator
+        gen = FLBundleGenerator(watch_wait_ratio=0.0)
+        bundle = gen.generate_bundle(5)
+        current_year = _date.today().year
+        for entry in bundle['entry']:
+            r = entry['resource']
+            if r['resourceType'] != 'Patient':
+                continue
+            birth_year = int(r['birthDate'][:4])
+            self.assertLessEqual(birth_year, current_year,
+                                 f"Birth year {birth_year} is in the future")
+            self.assertGreater(birth_year, current_year - 100,
+                               f"Birth year {birth_year} seems too far in the past")
