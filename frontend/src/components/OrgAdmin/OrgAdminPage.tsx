@@ -25,7 +25,7 @@ export default function OrgAdminPage() {
   const [createError, setCreateError] = useState<string | null>(null);
 
   const fetchOrgs = () => {
-    api.get<Org[]>('/api/orgs/')
+    api.get<Org[]>('/orgs/')
       .then(r => setOrgs(r.data))
       .catch((err) => {
         console.error('Failed to load organizations:', err);
@@ -43,7 +43,7 @@ export default function OrgAdminPage() {
       return;
     }
     try {
-      await api.post('/api/orgs/', { name: newOrgName.trim(), slug: newOrgSlug.trim() });
+      await api.post('/orgs/', { name: newOrgName.trim(), slug: newOrgSlug.trim() });
       setCreating(false);
       setNewOrgName('');
       setNewOrgSlug('');

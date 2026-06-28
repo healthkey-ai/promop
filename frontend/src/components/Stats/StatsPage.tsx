@@ -19,7 +19,7 @@ export default function StatsPage() {
   const [error, setError] = useState(false);
 
   useEffect(() => {
-    api.get<OrgStats[]>('/api/stats/org-disease/')
+    api.get<OrgStats[]>('/stats/org-disease/')
       .then(r => setData(r.data))
       .catch(() => setError(true));
   }, []);

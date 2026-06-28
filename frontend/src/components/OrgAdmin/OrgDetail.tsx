@@ -71,7 +71,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteSuccess, setInviteSuccess] = useState<string | null>(null);
 
-  const base = `/api/orgs/${slug}`;
+  const base = `/orgs/${slug}`;
 
   const fetchAll = async () => {
     try {
