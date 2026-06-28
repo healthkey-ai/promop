@@ -43,20 +43,26 @@ class OrgTrustSerializer(serializers.ModelSerializer):
     granting_org_slug = serializers.SlugRelatedField(
         source='granting_org', slug_field='slug', read_only=True,
     )
+    # Write field: accepts an org PK when creating a trust
     trusted_org = serializers.PrimaryKeyRelatedField(
         queryset=Organization.objects.all(),
         allow_null=True,
         required=False,
+        write_only=True,
+    )
+    # Read field: exposes the trusted org's slug in responses
+    trusted_org_slug = serializers.SlugRelatedField(
+        source='trusted_org', slug_field='slug', read_only=True, allow_null=True,
     )
 
     class Meta:
         model = OrgTrust
         fields = [
             'id', 'granting_org_slug',
-            'trusted_org',
+            'trusted_org', 'trusted_org_slug',
             'trusted_domain', 'created_at',
         ]
-        read_only_fields = ['id', 'granting_org_slug', 'created_at']
+        read_only_fields = ['id', 'granting_org_slug', 'trusted_org_slug', 'created_at']
 
     def validate(self, data):
         trusted_org = data.get('trusted_org')

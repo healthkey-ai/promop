@@ -27,7 +27,10 @@ export default function OrgAdminPage() {
   const fetchOrgs = () => {
     api.get<Org[]>('/api/orgs/')
       .then(r => setOrgs(r.data))
-      .catch(() => setError('Failed to load organizations.'));
+      .catch((err) => {
+        console.error('Failed to load organizations:', err);
+        setError('Failed to load organizations.');
+      });
   };
 
   useEffect(() => {

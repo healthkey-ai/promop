@@ -16,7 +16,7 @@ def get_visible_orgs(user) -> QuerySet:
     If a user has no matching grant and no matching trust, they see nothing.
     """
     if getattr(user, 'is_staff', False):
-        return Organization.objects.all()
+        return Organization.objects.filter(is_active=True)
 
     now = timezone.now()
     active = GroupAccess.objects.filter(
@@ -37,17 +37,22 @@ def get_visible_orgs(user) -> QuerySet:
     group_org_ids.discard(None)
     direct_ids |= group_org_ids
 
-    # Org-to-org trusts: orgs that trust any org the user already belongs to
+    # Org-to-org trusts: active orgs that trust any org the user already belongs to
     trusted_by_org = set(
-        OrgTrust.objects.filter(trusted_org_id__in=direct_ids)
-                        .values_list('granting_org_id', flat=True)
+        OrgTrust.objects.filter(
+            trusted_org_id__in=direct_ids,
+            granting_org__is_active=True,
+        ).values_list('granting_org_id', flat=True)
     ) if direct_ids else set()
 
-    # Domain trusts: orgs that trust the user's email domain
-    user_domain = (getattr(user, 'email', '') or '').split('@')[-1]
+    # Domain trusts: active orgs that trust the user's email domain
+    email = (getattr(user, 'email', '') or '')
+    user_domain = email.split('@')[1] if '@' in email else ''
     trusted_by_domain = set(
-        OrgTrust.objects.filter(trusted_domain=user_domain)
-                        .values_list('granting_org_id', flat=True)
+        OrgTrust.objects.filter(
+            trusted_domain=user_domain,
+            granting_org__is_active=True,
+        ).values_list('granting_org_id', flat=True)
     ) if user_domain else set()
 
     all_ids = direct_ids | trusted_by_org | trusted_by_domain

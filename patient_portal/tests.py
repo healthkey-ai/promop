@@ -6609,7 +6609,7 @@ class SetupDemoCommandTest(TestCase):
         call_command('setup_demo', stdout=out)
 
         from patient_portal.models import Identity
-        count = Identity.objects.filter(email='random@healthkey.ai').count()
+        count = Identity.objects.filter(email='random@healthkey.ai', issuer='urn:local').count()
         self.assertEqual(count, 1)
 
         trust_count = OrgTrust.objects.filter(trusted_domain='healthkey.ai').count()

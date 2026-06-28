@@ -19,8 +19,7 @@ interface Org {
 interface Trust {
   id: number;
   granting_org_slug: string;
-  trusted_org_id: number | null;
-  trusted_org_slug: string | null;
+  trusted_org_slug: string | null;   // read-only, from serializer
   trusted_domain: string;
   created_at: string;
 }
@@ -123,8 +122,14 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   };
 
   const handleRemoveTrust = async (trustId: number) => {
-    await api.delete(`${base}/trusts/${trustId}/`);
-    fetchAll();
+    if (!window.confirm('Remove this trust? Users who access this org only via this trust will lose access immediately.')) return;
+    try {
+      await api.delete(`${base}/trusts/${trustId}/`);
+      fetchAll();
+    } catch (err) {
+      console.error('Failed to remove trust:', err);
+      setTrustError('Failed to remove trust. Please try again.');
+    }
   };
 
   const handleInvite = async () => {
@@ -140,14 +145,30 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     }
   };
 
+  const [cancelError, setCancelError] = useState<string | null>(null);
+
   const handleCancelInvitation = async (invId: number) => {
-    await api.delete(`${base}/invitations/${invId}/`);
-    fetchAll();
+    if (!window.confirm('Cancel this invitation?')) return;
+    try {
+      await api.delete(`${base}/invitations/${invId}/`);
+      fetchAll();
+    } catch (err) {
+      console.error('Failed to cancel invitation:', err);
+      setCancelError('Failed to cancel invitation. Please try again.');
+    }
   };
 
+  const [accessError, setAccessError] = useState<string | null>(null);
+
   const handleRevokeAccess = async (accessId: number) => {
-    await api.delete(`${base}/access/${accessId}/`);
-    fetchAll();
+    if (!window.confirm('Revoke this access grant? The user will immediately lose access.')) return;
+    try {
+      await api.delete(`${base}/access/${accessId}/`);
+      fetchAll();
+    } catch (err) {
+      console.error('Failed to revoke access:', err);
+      setAccessError('Failed to revoke access. Please try again.');
+    }
   };
 
   if (error) return <div className="p-8 text-red-500">{error}</div>;
@@ -284,6 +305,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       {activeSection === 'admins' && (
         <div className="space-y-4">
           <h2 className="font-medium text-gray-900">Access Grants</h2>
+          {accessError && <p className="text-sm text-red-500">{accessError}</p>}
           {accessGrants.length === 0 ? (
             <p className="text-sm text-gray-500">No access grants.</p>
           ) : (
@@ -343,6 +365,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       {activeSection === 'invitations' && (
         <div className="space-y-3">
           <h2 className="font-medium text-gray-900">Invitations</h2>
+          {cancelError && <p className="text-sm text-red-500">{cancelError}</p>}
           {invitations.length === 0 ? (
             <p className="text-sm text-gray-500">No invitations.</p>
           ) : (

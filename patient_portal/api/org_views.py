@@ -14,6 +14,8 @@ Endpoints are registered in urls.py as:
   /api/orgs/confirm-invitation/       - public: confirm by token
 """
 import secrets
+from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
 from rest_framework import status
@@ -40,11 +42,14 @@ def _get_org(slug: str) -> Organization:
 
 
 def _visible_orgs(user):
-    """Return orgs the user may administer (staff: all; org_admin: own)."""
-    from omop_core.services.access import get_visible_orgs
+    """Return orgs the user may ADMINISTER (staff: all; org_admin: own only).
+
+    Intentionally narrower than get_visible_orgs() in services/access.py —
+    trust-based orgs (domain/org-to-org) appear in patient-data visibility but
+    NOT here, because the user holds no admin rights on those orgs.
+    """
     if getattr(user, 'is_staff', False):
         return Organization.objects.all()
-    from django.db.models import Q
     now = timezone.now()
     admin_org_ids = GroupAccess.objects.filter(
         identity=user, role='org_admin',
@@ -122,22 +127,25 @@ class OrgInviteView(APIView):
         if role not in dict(OrgInvitation.ROLE):
             return Response({'error': f'Invalid role: {role}'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Cancel any existing pending invitation for the same email+org
-        OrgInvitation.objects.filter(
-            org=org, email=email,
-            confirmed_at__isnull=True, cancelled_at__isnull=True,
-        ).update(cancelled_at=timezone.now())
+        # Cancel any existing pending invitation and create a fresh one atomically
+        # to prevent a race condition where two concurrent requests both pass
+        # the cancel step and then both try to INSERT, hitting the unique constraint.
+        with transaction.atomic():
+            OrgInvitation.objects.filter(
+                org=org, email=email,
+                confirmed_at__isnull=True, cancelled_at__isnull=True,
+            ).update(cancelled_at=timezone.now())
 
-        token = secrets.token_hex(32)  # 64 hex chars
-        expires_at = timezone.now() + timezone.timedelta(days=7)
-        invitation = OrgInvitation.objects.create(
-            org=org,
-            email=email,
-            role=role,
-            token=token,
-            invited_by=request.user,
-            expires_at=expires_at,
-        )
+            token = secrets.token_hex(32)  # 64 hex chars
+            expires_at = timezone.now() + timezone.timedelta(days=7)
+            invitation = OrgInvitation.objects.create(
+                org=org,
+                email=email,
+                role=role,
+                token=token,
+                invited_by=request.user,
+                expires_at=expires_at,
+            )
         return Response(OrgInvitationSerializer(invitation).data, status=status.HTTP_201_CREATED)
 
 
@@ -146,7 +154,7 @@ class OrgInvitationListView(APIView):
 
     def get(self, request, slug):
         org = _get_org(slug)
-        invitations = org.invitations.order_by('-created_at')
+        invitations = org.invitations.select_related('org').order_by('-created_at')
         return Response(OrgInvitationSerializer(invitations, many=True).data)
 
 
@@ -173,6 +181,9 @@ def confirm_invitation(request):
     token = request.data.get('token', '').strip()
     if not token:
         return Response({'error': 'token is required'}, status=status.HTTP_400_BAD_REQUEST)
+    # Reject malformed tokens before touching the DB (tokens are 64 lowercase hex chars)
+    if len(token) != 64 or not token.isalnum():
+        return Response({'error': 'Invalid token format.'}, status=status.HTTP_400_BAD_REQUEST)
 
     invitation = get_object_or_404(OrgInvitation, token=token)
 
@@ -183,21 +194,40 @@ def confirm_invitation(request):
     if invitation.status == OrgInvitation.STATUS_EXPIRED:
         return Response({'error': 'Invitation has expired.'}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Look up or create identity for invited email
+    # Look up identity — scope to local-auth to avoid matching OIDC accounts
+    # with the same email address (Identity.email has no unique constraint).
     try:
-        identity = Identity.objects.get(email=invitation.email)
+        identity = Identity.objects.get(email=invitation.email, issuer='urn:local')
     except Identity.DoesNotExist:
         return Response(
-            {'error': 'No account found for this email. Please sign up first.'},
+            {'error': 'No local account found for this email. Please sign up first.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except Identity.MultipleObjectsReturned:
+        return Response(
+            {'error': 'Multiple accounts found for this email. Please contact support.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Create GroupAccess (idempotent: update_or_create so re-confirm works)
-    GroupAccess.objects.update_or_create(
-        identity=identity,
-        org=invitation.org,
-        defaults={'role': invitation.role, 'granted_by': None},
-    )
+    # Grant access — use get_or_create rather than update_or_create to avoid
+    # silently downgrading an existing higher-privilege role (e.g. org_admin → doctor).
+    # If the grant already exists, leave it unchanged; the invitation is still
+    # marked confirmed so it can't be replayed.
+    ROLE_RANK = {'org_admin': 3, 'doctor': 2, 'navigator': 1}
+    existing = GroupAccess.objects.filter(identity=identity, org=invitation.org).first()
+    if existing:
+        if ROLE_RANK.get(existing.role, 0) < ROLE_RANK.get(invitation.role, 0):
+            # Upgrade to the higher role from the invitation
+            existing.role = invitation.role
+            existing.granted_by = invitation.invited_by
+            existing.save(update_fields=['role', 'granted_by'])
+    else:
+        GroupAccess.objects.create(
+            identity=identity,
+            org=invitation.org,
+            role=invitation.role,
+            granted_by=invitation.invited_by,
+        )
 
     invitation.confirmed_at = timezone.now()
     invitation.save(update_fields=['confirmed_at'])
