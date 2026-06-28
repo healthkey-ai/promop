@@ -16,10 +16,11 @@ from django.utils import timezone
 
 class UserSerializer(serializers.ModelSerializer):
     is_org_admin = serializers.SerializerMethodField()
+    org_accesses = serializers.SerializerMethodField()
 
     class Meta:
         model = Identity
-        fields = ['id', 'sub', 'email', 'name', 'is_staff', 'is_org_admin']
+        fields = ['id', 'sub', 'email', 'name', 'is_staff', 'is_superuser', 'is_org_admin', 'org_accesses']
 
     def get_is_org_admin(self, obj):
         now = timezone.now()
@@ -30,6 +31,22 @@ class UserSerializer(serializers.ModelSerializer):
         ).filter(
             Q(expires_at__isnull=True) | Q(expires_at__gt=now)
         ).exists()
+
+    def get_org_accesses(self, obj):
+        now = timezone.now()
+        from django.db.models import Q
+        grants = GroupAccess.objects.filter(
+            identity=obj,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+        ).select_related('org', 'group__organization').order_by('role')
+        result = []
+        for g in grants:
+            if g.org:
+                result.append({'org_name': g.org.name, 'org_slug': g.org.slug, 'role': g.role, 'expires_at': g.expires_at})
+            elif g.group and g.group.organization:
+                result.append({'org_name': g.group.organization.name, 'org_slug': g.group.organization.slug, 'role': g.role, 'expires_at': g.expires_at})
+        return result
 
 
 class OrganizationSerializer(serializers.ModelSerializer):

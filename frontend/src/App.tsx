@@ -13,6 +13,7 @@ import UploadFHIR from "@/components/Patient/UploadFHIR";
 import UploadCSV from "@/components/Patient/UploadCSV";
 import StatsPage from "@/components/Stats/StatsPage";
 import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
+import UserProfilePage from "@/components/User/UserProfilePage";
 import { useAuth } from "@/hooks/useAuth";
 
 function AppRoutes() {
@@ -74,6 +75,12 @@ function AppRoutes() {
         path="/org-admin"
         element={
           currentUser ? <OrgAdminPage /> : <Navigate to="/login" replace />
+        }
+      />
+      <Route
+        path="/profile"
+        element={
+          currentUser ? <UserProfilePage /> : <Navigate to="/login" replace />
         }
       />
 

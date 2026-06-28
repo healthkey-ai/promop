@@ -2135,17 +2135,13 @@ def org_disease_stats(request):
     """GET /api/stats/org-disease/ — per-org disease patient counts for the requesting user."""
     from django.db.models import Count
 
-    orgs = get_visible_orgs(request.user)
-    result = []
-    for org in orgs.order_by('name'):
+    def _disease_counts(qs):
         rows = (
-            PatientInfo.objects
-            .filter(organization=org)
-            .values('disease_slug')
+            qs.values('disease_slug')
             .annotate(count=Count('id'))
             .order_by('-count')
         )
-        disease_counts = [
+        return [
             {
                 'disease_slug': r['disease_slug'] or '',
                 'label': _DISEASE_LABELS.get(r['disease_slug'] or '', r['disease_slug'] or 'Unknown'),
@@ -2153,12 +2149,29 @@ def org_disease_stats(request):
             }
             for r in rows
         ]
+
+    orgs = get_visible_orgs(request.user)
+    result = []
+    for org in orgs.order_by('name'):
+        counts = _disease_counts(PatientInfo.objects.filter(organization=org))
         result.append({
             'org_slug': org.slug,
             'org_name': org.name,
-            'total': sum(d['count'] for d in disease_counts),
-            'disease_counts': disease_counts,
+            'total': sum(d['count'] for d in counts),
+            'disease_counts': counts,
         })
+
+    # For staff/superusers: also surface patients not assigned to any org.
+    if getattr(request.user, 'is_staff', False) or getattr(request.user, 'is_superuser', False):
+        counts = _disease_counts(PatientInfo.objects.filter(organization__isnull=True))
+        if counts:
+            result.insert(0, {
+                'org_slug': '__unassigned__',
+                'org_name': 'All Patients (Unassigned)',
+                'total': sum(d['count'] for d in counts),
+                'disease_counts': counts,
+            })
+
     return Response(result)
 
 

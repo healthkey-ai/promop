@@ -1,13 +1,22 @@
 import { useState, useEffect, useCallback } from "react";
 import api from "@/api/axios";
 
+interface OrgAccess {
+  org_name: string;
+  org_slug: string;
+  role: string;
+  expires_at: string | null;
+}
+
 interface User {
   id: number;
   sub: string;
   email: string;
   name: string;
   is_staff?: boolean;
+  is_superuser?: boolean;
   is_org_admin?: boolean;
+  org_accesses?: OrgAccess[];
 }
 
 export const useAuth = () => {

@@ -149,6 +149,14 @@ export default function PatientList() {
             <FileText size={16} />
             Upload FHIR
           </button>
+          {currentUser?.email && (
+            <button
+              onClick={() => navigate("/profile")}
+              className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-accent"
+            >
+              {currentUser.email}
+            </button>
+          )}
           <button
             onClick={handleLogout}
             className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-accent"

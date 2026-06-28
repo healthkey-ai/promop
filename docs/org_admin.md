@@ -106,7 +106,7 @@ A user with `is_staff=True` has full CRUD access to all orgs:
 
 Staff access is provisioned via:
 ```bash
-python manage.py create_staff_user   # creates adam@healthkey.ai / 1database (is_staff=True)
+python manage.py create_staff_user <email> <password>
 ```
 
 ---
