@@ -48,12 +48,108 @@ class Organization(models.Model):
     name = models.CharField(max_length=200)
     slug = models.SlugField(max_length=60, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
 
     class Meta:
         db_table = 'organization'
 
     def __str__(self):
         return self.name
+
+
+class OrgTrust(models.Model):
+    """Grants access to an org via a domain or an org-to-org trust."""
+    granting_org = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='trusts_granted',
+    )
+    trusted_org = models.ForeignKey(
+        Organization, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='trusted_by',
+    )
+    trusted_domain = models.CharField(max_length=255, blank=True, default='')
+    granted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'org_trust'
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    Q(trusted_org__isnull=False, trusted_domain='') |
+                    Q(trusted_org__isnull=True, trusted_domain__gt='')
+                ),
+                name='org_trust_org_xor_domain',
+            ),
+        ]
+
+    def __str__(self):
+        if self.trusted_org_id:
+            return f"{self.granting_org.slug} trusts org {self.trusted_org_id}"
+        return f"{self.granting_org.slug} trusts domain {self.trusted_domain}"
+
+
+class OrgInvitation(models.Model):
+    """An email invitation to join an org with a specific role."""
+    STATUS_PENDING = 'pending'
+    STATUS_CONFIRMED = 'confirmed'
+    STATUS_EXPIRED = 'expired'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_CONFIRMED, 'Confirmed'),
+        (STATUS_EXPIRED, 'Expired'),
+        (STATUS_CANCELLED, 'Cancelled'),
+    ]
+    ROLE = [
+        ('org_admin', 'Org Admin'),
+        ('doctor', 'Doctor'),
+        ('navigator', 'Navigator'),
+    ]
+    org = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='invitations',
+    )
+    email = models.EmailField()
+    role = models.CharField(max_length=20, choices=ROLE, default='doctor')
+    token = models.CharField(max_length=64, unique=True)
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'org_invitation'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['org', 'email'],
+                condition=Q(confirmed_at__isnull=True, cancelled_at__isnull=True),
+                name='uq_org_invitation_pending',
+            ),
+        ]
+
+    @property
+    def status(self):
+        from django.utils import timezone
+        if self.confirmed_at:
+            return self.STATUS_CONFIRMED
+        if self.cancelled_at:
+            return self.STATUS_CANCELLED
+        if timezone.now() > self.expires_at:
+            return self.STATUS_EXPIRED
+        return self.STATUS_PENDING
+
+    def __str__(self):
+        return f"Invite {self.email} to {self.org.slug} ({self.role})"
 
 
 class ApplicationOrganization(models.Model):

@@ -6,6 +6,8 @@ interface User {
   sub: string;
   email: string;
   name: string;
+  is_staff?: boolean;
+  is_org_admin?: boolean;
 }
 
 export const useAuth = () => {

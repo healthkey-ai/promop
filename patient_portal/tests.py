@@ -6224,3 +6224,440 @@ class OrgAdminPatientListScopingTest(TestCase):
         self.assertIn(self.pi_a1.id, ids)
         self.assertIn(self.pi_b.id, ids)
         self.assertIn(self.pi_none.id, ids)
+
+
+# ---------------------------------------------------------------------------
+# Org Management Tests
+# ---------------------------------------------------------------------------
+
+import secrets as _secrets
+from omop_core.models import Organization, OrgTrust, OrgInvitation, GroupAccess
+from omop_core.services.access import get_visible_orgs
+from rest_framework.test import APIClient
+
+
+def _make_user(email, is_staff=False):
+    from patient_portal.models import Identity
+    u = Identity.objects.create_user(email=email, password='testpass')
+    u.is_staff = is_staff
+    u.save()
+    return u
+
+
+def _make_org(name, slug):
+    return Organization.objects.create(name=name, slug=slug)
+
+
+class OrgManagementModelTest(TestCase):
+    """OrgTrust XOR constraint, OrgInvitation uniqueness."""
+
+    def setUp(self):
+        self.org = _make_org('Test Org', 'test-org')
+        self.org2 = _make_org('Partner Org', 'partner-org')
+
+    def test_domain_trust_created(self):
+        t = OrgTrust.objects.create(granting_org=self.org, trusted_domain='example.com')
+        self.assertEqual(t.trusted_domain, 'example.com')
+        self.assertIsNone(t.trusted_org)
+
+    def test_org_trust_created(self):
+        t = OrgTrust.objects.create(granting_org=self.org, trusted_org=self.org2)
+        self.assertEqual(t.trusted_org, self.org2)
+        self.assertEqual(t.trusted_domain, '')
+
+    def test_xor_constraint_both_raises(self):
+        from django.db import IntegrityError
+        with self.assertRaises(IntegrityError):
+            OrgTrust.objects.create(
+                granting_org=self.org,
+                trusted_org=self.org2,
+                trusted_domain='bad.com',
+            )
+
+    def test_xor_constraint_neither_raises(self):
+        from django.db import IntegrityError
+        with self.assertRaises(IntegrityError):
+            OrgTrust.objects.create(granting_org=self.org)
+
+    def test_invitation_uniqueness_pending(self):
+        """Two pending invitations for same org+email should fail."""
+        from django.utils import timezone
+        from django.db import IntegrityError
+        expires = timezone.now() + timezone.timedelta(days=7)
+        OrgInvitation.objects.create(
+            org=self.org, email='test@example.com', role='doctor',
+            token=_secrets.token_hex(32), expires_at=expires,
+        )
+        with self.assertRaises(IntegrityError):
+            OrgInvitation.objects.create(
+                org=self.org, email='test@example.com', role='doctor',
+                token=_secrets.token_hex(32), expires_at=expires,
+            )
+
+    def test_invitation_status_pending(self):
+        from django.utils import timezone
+        expires = timezone.now() + timezone.timedelta(days=7)
+        inv = OrgInvitation.objects.create(
+            org=self.org, email='user@example.com', role='doctor',
+            token=_secrets.token_hex(32), expires_at=expires,
+        )
+        self.assertEqual(inv.status, OrgInvitation.STATUS_PENDING)
+
+    def test_invitation_status_expired(self):
+        from django.utils import timezone
+        expires = timezone.now() - timezone.timedelta(days=1)
+        inv = OrgInvitation.objects.create(
+            org=self.org, email='user2@example.com', role='doctor',
+            token=_secrets.token_hex(32), expires_at=expires,
+        )
+        self.assertEqual(inv.status, OrgInvitation.STATUS_EXPIRED)
+
+    def test_organization_is_active_default_true(self):
+        self.assertTrue(self.org.is_active)
+
+    def test_organization_can_be_inactive(self):
+        self.org.is_active = False
+        self.org.save()
+        self.org.refresh_from_db()
+        self.assertFalse(self.org.is_active)
+
+
+class OrgTrustAccessTest(TestCase):
+    """get_visible_orgs includes trust-based orgs."""
+
+    def setUp(self):
+        self.org_a = _make_org('Org A', 'org-a')
+        self.org_b = _make_org('Org B', 'org-b')
+
+        self.direct_user = _make_user('direct@test.com')
+        GroupAccess.objects.create(identity=self.direct_user, org=self.org_a, role='org_admin')
+
+        self.domain_user = _make_user('user@trusted.com')
+
+        self.no_access_user = _make_user('noone@other.com')
+
+    def test_direct_groupaccess_visible(self):
+        orgs = get_visible_orgs(self.direct_user)
+        self.assertIn(self.org_a, orgs)
+        self.assertNotIn(self.org_b, orgs)
+
+    def test_domain_trust_gives_access(self):
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_domain='trusted.com')
+        orgs = get_visible_orgs(self.domain_user)
+        self.assertIn(self.org_b, orgs)
+
+    def test_org_to_org_trust_gives_access(self):
+        """User with access to org_a gets access to org_b via org-to-org trust."""
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_org=self.org_a)
+        orgs = get_visible_orgs(self.direct_user)
+        self.assertIn(self.org_a, orgs)
+        self.assertIn(self.org_b, orgs)
+
+    def test_no_access_user_sees_nothing(self):
+        orgs = get_visible_orgs(self.no_access_user)
+        self.assertEqual(list(orgs), [])
+
+    def test_no_open_org_fallback(self):
+        """Users with no grants/trusts must not see any org."""
+        new_user = _make_user('stranger@nowhere.com')
+        # Even if org exists, no access without grant or trust
+        orgs = get_visible_orgs(new_user)
+        self.assertEqual(list(orgs), [])
+
+    def test_staff_sees_all_orgs(self):
+        staff = _make_user('staff@test.com', is_staff=True)
+        orgs = get_visible_orgs(staff)
+        self.assertIn(self.org_a, orgs)
+        self.assertIn(self.org_b, orgs)
+
+
+class OrgViewSetStaffTest(TestCase):
+    """Staff can CRUD all orgs."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user('staff@example.com', is_staff=True)
+        self.client.force_authenticate(user=self.staff)
+        self.org = _make_org('Staff Org', 'staff-org')
+
+    def test_list_orgs(self):
+        resp = self.client.get('/api/orgs/')
+        self.assertEqual(resp.status_code, 200)
+        slugs = [o['slug'] for o in resp.data]
+        self.assertIn('staff-org', slugs)
+
+    def test_create_org(self):
+        resp = self.client.post('/api/orgs/', {'name': 'New Org', 'slug': 'new-org'})
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(Organization.objects.filter(slug='new-org').exists())
+
+    def test_get_org(self):
+        resp = self.client.get('/api/orgs/staff-org/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['slug'], 'staff-org')
+
+    def test_patch_org(self):
+        resp = self.client.patch('/api/orgs/staff-org/', {'name': 'Updated Name'})
+        self.assertEqual(resp.status_code, 200)
+        self.org.refresh_from_db()
+        self.assertEqual(self.org.name, 'Updated Name')
+
+    def test_delete_org(self):
+        resp = self.client.delete('/api/orgs/staff-org/')
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Organization.objects.filter(slug='staff-org').exists())
+
+
+class OrgViewSetOrgAdminTest(TestCase):
+    """Org admin can only edit their own org."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = _make_user('admin@example.com')
+        self.org = _make_org('Admin Org', 'admin-org')
+        self.other_org = _make_org('Other Org', 'other-org')
+        GroupAccess.objects.create(identity=self.admin, org=self.org, role='org_admin')
+        self.client.force_authenticate(user=self.admin)
+
+    def test_list_sees_only_own_org(self):
+        resp = self.client.get('/api/orgs/')
+        self.assertEqual(resp.status_code, 200)
+        slugs = [o['slug'] for o in resp.data]
+        self.assertIn('admin-org', slugs)
+        self.assertNotIn('other-org', slugs)
+
+    def test_cannot_create_org(self):
+        resp = self.client.post('/api/orgs/', {'name': 'New', 'slug': 'new-slug'})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_can_patch_own_org(self):
+        resp = self.client.patch('/api/orgs/admin-org/', {'name': 'Renamed Org'})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_cannot_delete_org(self):
+        resp = self.client.delete('/api/orgs/admin-org/')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_cannot_access_other_org(self):
+        resp = self.client.get('/api/orgs/other-org/')
+        self.assertEqual(resp.status_code, 403)
+
+
+class OrgViewSetUnauthorizedTest(TestCase):
+    """Non-admin gets 403."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = _make_user('plain@example.com')
+        self.org = _make_org('Secret Org', 'secret-org')
+        self.client.force_authenticate(user=self.user)
+
+    def test_list_returns_403(self):
+        resp = self.client.get('/api/orgs/')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_detail_returns_403(self):
+        resp = self.client.get('/api/orgs/secret-org/')
+        self.assertEqual(resp.status_code, 403)
+
+
+class OrgInvitationFlowTest(TestCase):
+    """Invite → confirm → GroupAccess created."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user('staff@example.com', is_staff=True)
+        self.org = _make_org('Invite Org', 'invite-org')
+        self.client.force_authenticate(user=self.staff)
+
+    def test_invite_creates_invitation(self):
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'newuser@example.com',
+            'role': 'doctor',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(
+            OrgInvitation.objects.filter(org=self.org, email='newuser@example.com').exists()
+        )
+
+    def test_list_invitations(self):
+        from django.utils import timezone
+        OrgInvitation.objects.create(
+            org=self.org, email='listed@example.com', role='doctor',
+            token=_secrets.token_hex(32),
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        resp = self.client.get('/api/orgs/invite-org/invitations/')
+        self.assertEqual(resp.status_code, 200)
+        emails = [i['email'] for i in resp.data]
+        self.assertIn('listed@example.com', emails)
+
+    def test_confirm_invitation_creates_access(self):
+        from django.utils import timezone
+        from patient_portal.models import Identity
+        # Create the identity for the invited email
+        invitee = Identity.objects.create_user(email='invitee@example.com', password='pass')
+        token = _secrets.token_hex(32)
+        OrgInvitation.objects.create(
+            org=self.org, email='invitee@example.com', role='doctor',
+            token=token,
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        # Confirm (public endpoint — no auth)
+        public_client = APIClient()
+        resp = public_client.post('/api/orgs/confirm-invitation/', {'token': token})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='doctor').exists()
+        )
+        inv = OrgInvitation.objects.get(token=token)
+        self.assertEqual(inv.status, OrgInvitation.STATUS_CONFIRMED)
+
+    def test_cancel_invitation(self):
+        from django.utils import timezone
+        token = _secrets.token_hex(32)
+        inv = OrgInvitation.objects.create(
+            org=self.org, email='cancel@example.com', role='doctor',
+            token=token,
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        resp = self.client.delete(f'/api/orgs/invite-org/invitations/{inv.id}/')
+        self.assertEqual(resp.status_code, 204)
+        inv.refresh_from_db()
+        self.assertEqual(inv.status, OrgInvitation.STATUS_CANCELLED)
+
+    def test_confirm_nonexistent_token_returns_404(self):
+        public_client = APIClient()
+        resp = public_client.post('/api/orgs/confirm-invitation/', {'token': 'deadbeef' * 8})
+        self.assertEqual(resp.status_code, 404)
+
+
+class OrgTrustAPITest(TestCase):
+    """Staff can manage trusts via API."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user('staff@example.com', is_staff=True)
+        self.org = _make_org('Trust Org', 'trust-org')
+        self.partner = _make_org('Partner', 'partner')
+        self.client.force_authenticate(user=self.staff)
+
+    def test_add_domain_trust(self):
+        resp = self.client.post('/api/orgs/trust-org/trusts/', {'trusted_domain': 'partner.com'})
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(OrgTrust.objects.filter(granting_org=self.org, trusted_domain='partner.com').exists())
+
+    def test_add_org_trust(self):
+        resp = self.client.post('/api/orgs/trust-org/trusts/', {'trusted_org': self.partner.id})
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(OrgTrust.objects.filter(granting_org=self.org, trusted_org=self.partner).exists())
+
+    def test_add_both_raises_400(self):
+        resp = self.client.post('/api/orgs/trust-org/trusts/', {
+            'trusted_domain': 'bad.com', 'trusted_org': self.partner.id,
+        })
+        self.assertEqual(resp.status_code, 400)
+
+    def test_list_trusts(self):
+        OrgTrust.objects.create(granting_org=self.org, trusted_domain='listed.com')
+        resp = self.client.get('/api/orgs/trust-org/trusts/')
+        self.assertEqual(resp.status_code, 200)
+        domains = [t['trusted_domain'] for t in resp.data]
+        self.assertIn('listed.com', domains)
+
+    def test_delete_trust(self):
+        trust = OrgTrust.objects.create(granting_org=self.org, trusted_domain='delete.com')
+        resp = self.client.delete(f'/api/orgs/trust-org/trusts/{trust.id}/')
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(OrgTrust.objects.filter(id=trust.id).exists())
+
+
+class OrgAccessAPITest(TestCase):
+    """Org admin / staff can view and revoke access grants."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user('staff@example.com', is_staff=True)
+        self.org = _make_org('Access Org', 'access-org')
+        self.grantee = _make_user('grantee@example.com')
+        self.grant = GroupAccess.objects.create(identity=self.grantee, org=self.org, role='doctor')
+        self.client.force_authenticate(user=self.staff)
+
+    def test_list_access_grants(self):
+        resp = self.client.get('/api/orgs/access-org/access/')
+        self.assertEqual(resp.status_code, 200)
+        emails = [g['email'] for g in resp.data]
+        self.assertIn('grantee@example.com', emails)
+
+    def test_revoke_access_grant(self):
+        resp = self.client.delete(f'/api/orgs/access-org/access/{self.grant.id}/')
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(GroupAccess.objects.filter(id=self.grant.id).exists())
+
+
+class SetupDemoCommandTest(TestCase):
+    """setup_demo management command is idempotent."""
+
+    def setUp(self):
+        _make_org('ABC Foundation', 'abc-foundation')
+
+    def test_idempotent_run_twice(self):
+        from django.core.management import call_command
+        import io
+        out = io.StringIO()
+        call_command('setup_demo', stdout=out)
+        call_command('setup_demo', stdout=out)
+
+        from patient_portal.models import Identity
+        count = Identity.objects.filter(email='random@healthkey.ai', issuer='urn:local').count()
+        self.assertEqual(count, 1)
+
+        trust_count = OrgTrust.objects.filter(trusted_domain='healthkey.ai').count()
+        self.assertEqual(trust_count, 1)
+
+    def test_demo_user_created(self):
+        from django.core.management import call_command
+        import io
+        call_command('setup_demo', stdout=io.StringIO())
+        from patient_portal.models import Identity
+        user = Identity.objects.get(email='random@healthkey.ai')
+        self.assertFalse(user.is_staff)
+        self.assertTrue(user.check_password('password123!'))
+
+    def test_domain_trust_created(self):
+        from django.core.management import call_command
+        import io
+        call_command('setup_demo', stdout=io.StringIO())
+        org = Organization.objects.get(slug='abc-foundation')
+        self.assertTrue(OrgTrust.objects.filter(granting_org=org, trusted_domain='healthkey.ai').exists())
+
+    def test_no_abc_foundation_skips_trust(self):
+        """Command should not crash if abc-foundation org doesn't exist."""
+        Organization.objects.filter(slug='abc-foundation').delete()
+        from django.core.management import call_command
+        import io
+        call_command('setup_demo', stdout=io.StringIO())  # should not raise
+
+
+class UserSerializerOrgAdminTest(TestCase):
+    """UserSerializer.is_org_admin field."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = _make_user('user@example.com')
+        self.org = _make_org('Serializer Org', 'serializer-org')
+
+    def test_is_org_admin_false_without_grant(self):
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.get('/api/user/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.data.get('user', resp.data)
+        self.assertFalse(data.get('is_org_admin'))
+
+    def test_is_org_admin_true_with_grant(self):
+        GroupAccess.objects.create(identity=self.user, org=self.org, role='org_admin')
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.get('/api/user/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.data.get('user', resp.data)
+        self.assertTrue(data.get('is_org_admin'))
