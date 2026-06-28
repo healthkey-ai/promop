@@ -6,16 +6,103 @@ from omop_core.models import (
     PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
     Survey, PatientSurveyResponse,
     StemCellTransplant, SctEligibility,
+    Organization, OrgTrust, OrgInvitation, GroupAccess,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from datetime import date
 from django.utils.timezone import localdate
+from django.utils import timezone
 
 
 class UserSerializer(serializers.ModelSerializer):
+    is_org_admin = serializers.SerializerMethodField()
+
     class Meta:
         model = Identity
-        fields = ['id', 'sub', 'email', 'name', 'is_staff']
+        fields = ['id', 'sub', 'email', 'name', 'is_staff', 'is_org_admin']
+
+    def get_is_org_admin(self, obj):
+        now = timezone.now()
+        from django.db.models import Q
+        return GroupAccess.objects.filter(
+            identity=obj,
+            role='org_admin',
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+        ).exists()
+
+
+class OrganizationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Organization
+        fields = ['id', 'name', 'slug', 'is_active', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+
+class OrgTrustSerializer(serializers.ModelSerializer):
+    granting_org_slug = serializers.SlugRelatedField(
+        source='granting_org', slug_field='slug', read_only=True,
+    )
+    trusted_org = serializers.PrimaryKeyRelatedField(
+        queryset=Organization.objects.all(),
+        allow_null=True,
+        required=False,
+    )
+
+    class Meta:
+        model = OrgTrust
+        fields = [
+            'id', 'granting_org_slug',
+            'trusted_org',
+            'trusted_domain', 'created_at',
+        ]
+        read_only_fields = ['id', 'granting_org_slug', 'created_at']
+
+    def validate(self, data):
+        trusted_org = data.get('trusted_org')
+        trusted_domain = data.get('trusted_domain', '')
+        if trusted_org and trusted_domain:
+            raise serializers.ValidationError(
+                'Specify either trusted_org or trusted_domain, not both.'
+            )
+        if not trusted_org and not trusted_domain:
+            raise serializers.ValidationError(
+                'Specify either trusted_org or trusted_domain.'
+            )
+        return data
+
+
+class OrgInvitationSerializer(serializers.ModelSerializer):
+    status = serializers.SerializerMethodField()
+    org_slug = serializers.SlugRelatedField(source='org', slug_field='slug', read_only=True)
+
+    class Meta:
+        model = OrgInvitation
+        fields = [
+            'id', 'org_slug', 'email', 'role', 'status',
+            'expires_at', 'created_at',
+        ]
+        read_only_fields = ['id', 'org_slug', 'status', 'expires_at', 'created_at']
+
+    def get_status(self, obj):
+        return obj.status
+
+
+class GroupAccessSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(source='identity.email', read_only=True)
+    org_slug = serializers.SlugRelatedField(source='org', slug_field='slug', read_only=True)
+    group_name = serializers.CharField(source='group.name', read_only=True, default=None)
+
+    class Meta:
+        model = GroupAccess
+        fields = [
+            'id', 'email', 'org_slug', 'group_name', 'role',
+            'expires_at', 'granted_at',
+        ]
+        read_only_fields = [
+            'id', 'email', 'org_slug', 'group_name', 'role',
+            'expires_at', 'granted_at',
+        ]
 
 
 class PatientListSerializer(serializers.ModelSerializer):

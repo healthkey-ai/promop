@@ -18,6 +18,13 @@ from .views import (
     # Stats
     org_disease_stats,
 )
+from .org_views import (
+    OrgListCreateView, OrgDetailView,
+    OrgInviteView, OrgInvitationListView, OrgInvitationDetailView,
+    OrgTrustListCreateView, OrgTrustDetailView,
+    OrgAccessListView, OrgAccessDetailView,
+    confirm_invitation,
+)
 
 router = DefaultRouter()
 
@@ -56,4 +63,16 @@ urlpatterns = [
     path('vocabularies/<str:model_name>/', vocabulary_list, name='vocabulary-list'),
     path('concepts/lookup/', concept_lookup, name='concept-lookup'),
     path('stats/org-disease/', org_disease_stats, name='stats-org-disease'),
+
+    # Org management
+    path('orgs/', OrgListCreateView.as_view(), name='org-list'),
+    path('orgs/confirm-invitation/', confirm_invitation, name='org-confirm-invitation'),
+    path('orgs/<slug:slug>/', OrgDetailView.as_view(), name='org-detail'),
+    path('orgs/<slug:slug>/invite/', OrgInviteView.as_view(), name='org-invite'),
+    path('orgs/<slug:slug>/invitations/', OrgInvitationListView.as_view(), name='org-invitation-list'),
+    path('orgs/<slug:slug>/invitations/<int:invitation_id>/', OrgInvitationDetailView.as_view(), name='org-invitation-detail'),
+    path('orgs/<slug:slug>/trusts/', OrgTrustListCreateView.as_view(), name='org-trust-list'),
+    path('orgs/<slug:slug>/trusts/<int:trust_id>/', OrgTrustDetailView.as_view(), name='org-trust-detail'),
+    path('orgs/<slug:slug>/access/', OrgAccessListView.as_view(), name='org-access-list'),
+    path('orgs/<slug:slug>/access/<int:access_id>/', OrgAccessDetailView.as_view(), name='org-access-detail'),
 ]

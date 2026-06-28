@@ -1,7 +1,9 @@
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework.permissions import BasePermission
 
 from .providers.base import TokenClaims
+from omop_core.models import GroupAccess, Organization
 
 
 def get_request_org(request):
@@ -100,3 +102,45 @@ class LabSyncPermission(ScopedTokenPermission):
         if token is None or isinstance(token, TokenClaims):
             return bool(request.user and request.user.is_authenticated)
         return super().has_permission(request, view)
+
+
+class IsStaffPermission(BasePermission):
+    """Allow access only to staff users (is_staff=True)."""
+
+    def has_permission(self, request, view):
+        return bool(
+            request.user and
+            request.user.is_authenticated and
+            getattr(request.user, 'is_staff', False)
+        )
+
+
+class IsStaffOrOrgAdmin(BasePermission):
+    """Allow staff users, or org_admin users for the org identified by view.kwargs['slug']."""
+
+    def has_permission(self, request, view):
+        if not (request.user and request.user.is_authenticated):
+            return False
+
+        if getattr(request.user, 'is_staff', False):
+            return True
+
+        slug = view.kwargs.get('slug')
+        if not slug:
+            # No slug: allow if user has any active org_admin grant (e.g., list view)
+            now = timezone.now()
+            return GroupAccess.objects.filter(
+                identity=request.user,
+                role='org_admin',
+            ).filter(
+                Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+            ).exists()
+
+        now = timezone.now()
+        return GroupAccess.objects.filter(
+            identity=request.user,
+            role='org_admin',
+            org__slug=slug,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+        ).exists()

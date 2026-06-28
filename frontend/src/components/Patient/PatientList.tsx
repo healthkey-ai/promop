@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, FileText, Trash2, LogOut } from "lucide-react";
+import { Upload, FileText, Trash2, LogOut, Settings } from "lucide-react";
 import api from "@/api/axios";
 import { clearTokens } from "@/utils/oauth";
+import { useAuth } from "@/hooks/useAuth";
 
 interface Patient {
   person_id: number;
@@ -15,6 +16,7 @@ interface Patient {
 
 export default function PatientList() {
   const navigate = useNavigate();
+  const { currentUser } = useAuth();
   const [patients, setPatients] = useState<Patient[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -124,6 +126,15 @@ export default function PatientList() {
           >
             Stats
           </button>
+          {(currentUser?.is_staff || currentUser?.is_org_admin) && (
+            <button
+              onClick={() => navigate("/org-admin")}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
+            >
+              <Settings size={14} />
+              Org Admin
+            </button>
+          )}
           <button
             onClick={() => navigate("/upload-csv")}
             className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
