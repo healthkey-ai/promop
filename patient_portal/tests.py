@@ -13,7 +13,7 @@ import io
 import json
 import os
 import tempfile
-from datetime import date
+from datetime import date, timedelta
 
 from patient_portal.models import Identity
 from django.test import TestCase
@@ -6198,6 +6198,26 @@ class OrgAdminPatientListScopingTest(TestCase):
             org=self.org_a,
             role='org_admin',
         )
+        PatientInfo.objects.filter(pk=self.pi_a1.pk).update(
+            disease='Breast Cancer',
+            stage='Breast Cancer Stage IIA',
+            updated_at=timezone.now(),
+        )
+        PatientInfo.objects.filter(pk=self.pi_a2.pk).update(
+            disease='Multiple Myeloma',
+            stage='III',
+            updated_at=timezone.now() - timedelta(days=45),
+        )
+        PatientInfo.objects.filter(pk=self.pi_b.pk).update(
+            disease='Breast Cancer',
+            stage='Stage II',
+            updated_at=timezone.now(),
+        )
+        PatientInfo.objects.filter(pk=self.pi_none.pk).update(
+            disease='Breast Cancer',
+            stage='Stage IV',
+            updated_at=timezone.now(),
+        )
 
     def _get(self, user):
         self.client.force_authenticate(user=user)
@@ -6224,6 +6244,42 @@ class OrgAdminPatientListScopingTest(TestCase):
         self.assertIn(self.pi_a1.id, ids)
         self.assertIn(self.pi_b.id, ids)
         self.assertIn(self.pi_none.id, ids)
+
+    def test_unpaginated_patient_list_still_returns_plain_list(self):
+        resp = self._get(self.org_admin)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsInstance(resp.data, list)
+
+    def test_paginated_patient_list_returns_filtered_count(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get(
+            '/api/patient-info/',
+            {'page': 1, 'page_size': 10, 'disease': 'Breast Cancer', 'stage': 'II'},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual([p['id'] for p in resp.data['results']], [self.pi_a1.id])
+        self.assertIn('filter_options', resp.data)
+
+    def test_paginated_patient_list_stage_filter_does_not_match_other_roman_stages(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get(
+            '/api/patient-info/',
+            {'page': 1, 'page_size': 10, 'disease': 'Breast Cancer', 'stage': 'I'},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['count'], 0)
+
+    def test_paginated_patient_list_filters_by_date(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get(
+            '/api/patient-info/',
+            {'page': 1, 'page_size': 10, 'date': '30d'},
+        )
+        self.assertEqual(resp.status_code, 200)
+        ids = {p['id'] for p in resp.data['results']}
+        self.assertIn(self.pi_a1.id, ids)
+        self.assertNotIn(self.pi_a2.id, ids)
 
 
 # ---------------------------------------------------------------------------

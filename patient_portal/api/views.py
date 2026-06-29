@@ -1,11 +1,13 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -37,7 +39,7 @@ from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name
 from omop_core.services.access import get_visible_orgs
-from datetime import datetime
+from datetime import datetime, timedelta
 from django.utils.timezone import localdate
 import csv
 import hashlib
@@ -58,6 +60,12 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 
 logger = logging.getLogger(__name__)
+
+
+class PatientInfoPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 
 # ---------------------------------------------------------------------------
@@ -141,9 +149,16 @@ def _record_provenance(record, source, source_user_id, target_patient_id=None, m
 class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PatientInfoSerializer
     permission_classes = [ScopedTokenPermission]
+    pagination_class = PatientInfoPagination
+
+    DATE_FILTERS = {
+        '7d': timedelta(days=7),
+        '30d': timedelta(days=30),
+        '90d': timedelta(days=90),
+    }
     
     def get_queryset(self):
-        qs = PatientInfo.objects.all().select_related('person')
+        qs = PatientInfo.objects.all().select_related('person', 'organization')
         org = get_request_org(self.request)
         if org is not None:
             qs = qs.filter(organization=org)
@@ -209,10 +224,103 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         if self.action == 'list':
             return PatientListSerializer
         return PatientInfoSerializer
+
+    def _normalize_all_param(self, value):
+        value = (value or '').strip()
+        if not value or value.lower() == 'all':
+            return None
+        return value
+
+    def _apply_patient_list_filters(self, queryset):
+        params = self.request.query_params
+
+        org_slug = self._normalize_all_param(params.get('org'))
+        if org_slug:
+            if org_slug == '__unassigned__':
+                queryset = queryset.filter(organization__isnull=True)
+            else:
+                queryset = queryset.filter(organization__slug=org_slug)
+
+        disease = self._normalize_all_param(params.get('disease'))
+        if disease:
+            queryset = queryset.filter(disease__iexact=disease)
+
+        stage = self._normalize_all_param(params.get('stage'))
+        if stage:
+            stage = stage.upper()
+            queryset = queryset.filter(
+                Q(stage__iexact=stage) |
+                Q(stage__iexact=f'Stage {stage}') |
+                Q(stage__iregex=rf'(^|[^A-Za-z0-9])stage\s+{stage}(?![IVX])[A-Z]*([^A-Za-z0-9]|$)')
+            )
+
+        date_filter = self._normalize_all_param(params.get('date'))
+        if date_filter in self.DATE_FILTERS:
+            queryset = queryset.filter(updated_at__gte=timezone.now() - self.DATE_FILTERS[date_filter])
+        elif date_filter == 'this_year':
+            start_of_year = timezone.make_aware(
+                datetime.combine(localdate().replace(month=1, day=1), datetime.min.time())
+            )
+            queryset = queryset.filter(updated_at__gte=start_of_year)
+
+        search = self._normalize_all_param(params.get('search'))
+        if search:
+            name_query = (
+                Q(person__given_name__icontains=search) |
+                Q(person__family_name__icontains=search) |
+                Q(email__icontains=search)
+            )
+            try:
+                name_query |= Q(person__person_id=int(search))
+            except (TypeError, ValueError):
+                pass
+            queryset = queryset.filter(name_query)
+
+        return queryset
+
+    def _build_filter_options(self, queryset):
+        org_rows = (
+            queryset
+            .exclude(organization__isnull=True)
+            .values('organization__slug', 'organization__name')
+            .distinct()
+            .order_by('organization__name')
+        )
+        org_options = [
+            {'value': row['organization__slug'], 'label': row['organization__name']}
+            for row in org_rows
+            if row['organization__slug'] and row['organization__name']
+        ]
+        if queryset.filter(organization__isnull=True).exists():
+            org_options.append({'value': '__unassigned__', 'label': 'Unassigned'})
+
+        diseases = (
+            queryset
+            .exclude(disease__isnull=True)
+            .exclude(disease='')
+            .values_list('disease', flat=True)
+            .distinct()
+            .order_by('disease')
+        )
+
+        return {
+            'orgs': org_options,
+            'diseases': list(diseases),
+            'stages': ['I', 'II', 'III', 'IV'],
+        }
     
     def list(self, request):
         """List all patients - accessible to authenticated users"""
-        queryset = self.get_queryset().order_by('-created_at')
+        base_queryset = self.get_queryset()
+        queryset = self._apply_patient_list_filters(base_queryset).order_by('-updated_at', '-created_at')
+
+        if 'page' in request.query_params or 'page_size' in request.query_params:
+            page = self.paginate_queryset(queryset)
+            serializer = PatientListSerializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            response.data['filter_options'] = self._build_filter_options(base_queryset)
+            return response
+
         serializer = PatientListSerializer(queryset, many=True)
         return Response(serializer.data)
 
