@@ -6157,12 +6157,50 @@ class OrgDiseaseStatsTest(TestCase):
         self.assertIn('org_slug', org)
         self.assertIn('org_name', org)
         self.assertIn('total', org)
+        self.assertIn('owned_count', org)
+        self.assertIn('accessible_count', org)
         self.assertIn('disease_counts', org)
         if org['disease_counts']:
             dc = org['disease_counts'][0]
             self.assertIn('disease_slug', dc)
             self.assertIn('label', dc)
             self.assertIn('count', dc)
+
+    def test_owned_and_accessible_counts_no_trusts(self):
+        resp = self._get(self.org_admin)
+        org_a = next(o for o in resp.data if o['org_slug'] == 'org-a')
+        self.assertEqual(org_a['owned_count'], 3)
+        self.assertEqual(org_a['accessible_count'], 3)
+
+    def test_org_trust_inflates_accessible_count(self):
+        from omop_core.models import OrgTrust
+        # org_b grants access to org_a's users (trusted_org=org_a)
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_org=self.org_a)
+        resp = self._get(self.org_admin)
+        org_a = next(o for o in resp.data if o['org_slug'] == 'org-a')
+        self.assertEqual(org_a['owned_count'], 3)
+        self.assertEqual(org_a['accessible_count'], 4)  # 3 owned + 1 from org_b
+
+    def test_domain_trust_inflates_accessible_count(self):
+        from omop_core.models import OrgTrust
+        # org_b grants access to users with @t.com — org_admin has email admin@t.com
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_domain='t.com')
+        resp = self._get(self.org_admin)
+        org_a = next(o for o in resp.data if o['org_slug'] == 'org-a')
+        self.assertEqual(org_a['owned_count'], 3)
+        self.assertEqual(org_a['accessible_count'], 4)  # 3 owned + 1 from org_b via domain trust
+
+    def test_self_trust_does_not_double_count(self):
+        from omop_core.models import OrgTrust
+        from django.db import IntegrityError
+        # DB constraint should prevent self-trust; confirm it raises
+        with self.assertRaises(IntegrityError):
+            OrgTrust.objects.create(granting_org=self.org_a, trusted_org=self.org_a)
+
+    def test_total_field_equals_owned_count(self):
+        resp = self._get(self.org_admin)
+        org_a = next(o for o in resp.data if o['org_slug'] == 'org-a')
+        self.assertEqual(org_a['total'], org_a['owned_count'])
 
 
 class OrgAdminPatientListScopingTest(TestCase):

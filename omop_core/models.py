@@ -1,7 +1,7 @@
 from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
-from django.db.models import Q
+from django.db.models import F, Q
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.postgres.indexes import GinIndex
@@ -86,6 +86,10 @@ class OrgTrust(models.Model):
                     Q(trusted_org__isnull=True, trusted_domain__gt='')
                 ),
                 name='org_trust_org_xor_domain',
+            ),
+            models.CheckConstraint(
+                check=Q(trusted_org__isnull=True) | ~Q(trusted_org=F('granting_org')),
+                name='org_trust_no_self_trust',
             ),
         ]
 

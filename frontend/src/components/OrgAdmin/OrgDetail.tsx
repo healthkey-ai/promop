@@ -54,6 +54,8 @@ interface OrgStatsData {
   org_slug: string;
   org_name: string;
   total: number;
+  owned_count: number;
+  accessible_count: number;
   disease_counts: DiseaseCount[];
 }
 
@@ -314,9 +316,15 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
               </tbody>
               <tfoot>
                 <tr className="border-t border-gray-200 bg-gray-50">
-                  <td className="px-4 py-2 font-medium text-gray-700">Total</td>
-                  <td className="px-4 py-2 text-right font-medium text-gray-700">{orgStats.total}</td>
+                  <td className="px-4 py-2 font-medium text-gray-700">Owned</td>
+                  <td className="px-4 py-2 text-right font-medium text-gray-700">{orgStats.owned_count}</td>
                 </tr>
+                {orgStats.accessible_count !== orgStats.owned_count && (
+                  <tr className="bg-gray-50">
+                    <td className="px-4 py-2 text-sm text-gray-500">Accessible (incl. trusted orgs)</td>
+                    <td className="px-4 py-2 text-right text-sm text-gray-500">{orgStats.accessible_count}</td>
+                  </tr>
+                )}
               </tfoot>
             </table>
           )}

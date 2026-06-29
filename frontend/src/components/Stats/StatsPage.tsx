@@ -11,6 +11,8 @@ interface OrgStats {
   org_slug: string;
   org_name: string;
   total: number;
+  owned_count: number;
+  accessible_count: number;
   disease_counts: DiseaseCount[];
 }
 
@@ -51,7 +53,12 @@ export default function StatsPage() {
         <div key={org.org_slug} className="bg-white rounded-lg border border-gray-200 shadow-sm">
           <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
             <h2 className="text-lg font-medium text-gray-900">{org.org_name}</h2>
-            <span className="text-sm text-gray-500">{org.total} patients</span>
+            <span className="text-sm text-gray-500">
+              {org.accessible_count} accessible
+              {org.accessible_count !== org.owned_count && (
+                <span className="ml-1 text-gray-400">({org.owned_count} owned)</span>
+              )}
+            </span>
           </div>
           <table className="w-full text-sm">
             <thead className="bg-gray-50">
@@ -70,8 +77,8 @@ export default function StatsPage() {
             </tbody>
             <tfoot>
               <tr className="border-t border-gray-200 bg-gray-50">
-                <td className="px-6 py-2 font-medium text-gray-700">Total</td>
-                <td className="px-6 py-2 text-right font-medium text-gray-700">{org.total}</td>
+                <td className="px-6 py-2 font-medium text-gray-700">Owned</td>
+                <td className="px-6 py-2 text-right font-medium text-gray-700">{org.owned_count}</td>
               </tr>
             </tfoot>
           </table>

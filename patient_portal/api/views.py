@@ -36,7 +36,7 @@ from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name
-from omop_core.services.access import get_visible_orgs
+from omop_core.services.access import get_visible_orgs, build_trusting_map
 from datetime import datetime
 from django.utils.timezone import localdate
 import csv
@@ -2150,31 +2150,30 @@ def org_disease_stats(request):
             for r in rows
         ]
 
-    from omop_core.models import OrgTrust
+    from django.db.models import Count
 
     orgs = get_visible_orgs(request.user)
     org_list = list(orgs.order_by('name'))
 
-    # For each org, find which other orgs have granted it access (trusted_org=org).
-    # Those granting orgs' patients are accessible to this org's users.
-    org_ids = [o.id for o in org_list]
-    trusting_map: dict[int, list[int]] = {o.id: [] for o in org_list}
-    for trust in OrgTrust.objects.filter(trusted_org_id__in=org_ids, granting_org__is_active=True).select_related('granting_org'):
-        trusting_map[trust.trusted_org_id].append(trust.granting_org_id)
+    # Build {org_id: set of granting_org_ids} covering both org-to-org and domain trusts
+    trusting_map = build_trusting_map(org_list)
+
+    # Batch-compute patient counts for all granting orgs in one query (avoids N+1)
+    all_granting_ids = {gid for gids in trusting_map.values() for gid in gids}
+    granting_counts: dict[int, int] = {}
+    if all_granting_ids:
+        granting_counts = dict(
+            PatientInfo.objects.filter(organization_id__in=all_granting_ids)
+            .values('organization_id')
+            .annotate(c=Count('id'))
+            .values_list('organization_id', 'c')
+        )
 
     result = []
     for org in org_list:
-        owned_qs = PatientInfo.objects.filter(organization=org)
-        counts = _disease_counts(owned_qs)
+        counts = _disease_counts(PatientInfo.objects.filter(organization=org))
         owned_count = sum(d['count'] for d in counts)
-
-        granting_ids = trusting_map.get(org.id, [])
-        if granting_ids:
-            accessible_count = owned_count + PatientInfo.objects.filter(
-                organization_id__in=granting_ids
-            ).count()
-        else:
-            accessible_count = owned_count
+        accessible_count = owned_count + sum(granting_counts.get(gid, 0) for gid in trusting_map[org.id])
 
         result.append({
             'org_slug': org.slug,
