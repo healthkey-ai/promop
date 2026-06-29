@@ -193,17 +193,25 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+_smtp_env_configured = bool(
+    os.environ.get('EMAIL_HOST_USER') and os.environ.get('EMAIL_HOST_PASSWORD')
+)
+
 # Email
 EMAIL_BACKEND = os.environ.get(
     'EMAIL_BACKEND',
-    'django.core.mail.backends.console.EmailBackend',  # prints to stdout in dev
+    (
+        'django.core.mail.backends.smtp.EmailBackend'
+        if (not DEBUG or _smtp_env_configured)
+        else 'django.core.mail.backends.console.EmailBackend'
+    ),
 )
-EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.sendgrid.net')
+EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.mailgun.org')
 EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))
-EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'true').lower() != 'false'
+EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'true').lower() == 'true'
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
-DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'PROMOP <noreply@cancerbot.org>')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'PROMOP <noreply@healthkey.ai>')
 
 # Base URL used to build invitation accept links in emails.
 # Set APP_BASE_URL on Render to e.g. https://ctomop.onrender.com

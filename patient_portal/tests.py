@@ -6592,18 +6592,37 @@ class OrgInvitationFlowTest(TestCase):
         token = OrgInvitation.objects.get(org=self.org, email='tokencheck@example.com').token
         self.assertIn(token, mail.outbox[0].body)
 
-    def test_email_failure_does_not_prevent_invitation_creation(self):
+    def test_email_failure_prevents_invitation_creation(self):
         from unittest.mock import patch
-        # Patch send_mail (inside _send_invitation_email's try/except) to simulate SMTP failure
-        with patch('django.core.mail.send_mail', side_effect=Exception('SMTP error')):
+        with patch('patient_portal.api.org_views.send_mail', side_effect=Exception('SMTP error')):
             resp = self.client.post('/api/orgs/invite-org/invite/', {
                 'email': 'failmail@example.com',
                 'role': 'doctor',
             })
-        self.assertEqual(resp.status_code, 201)
-        self.assertTrue(
+        self.assertEqual(resp.status_code, 502)
+        self.assertFalse(
             OrgInvitation.objects.filter(org=self.org, email='failmail@example.com').exists()
         )
+
+    def test_email_failure_preserves_existing_pending_invitation(self):
+        from django.utils import timezone
+        from unittest.mock import patch
+        token = _secrets.token_hex(32)
+        existing = OrgInvitation.objects.create(
+            org=self.org, email='existing@example.com', role='doctor',
+            token=token,
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        with patch('patient_portal.api.org_views.send_mail', side_effect=Exception('SMTP error')):
+            resp = self.client.post('/api/orgs/invite-org/invite/', {
+                'email': 'existing@example.com',
+                'role': 'navigator',
+            })
+        self.assertEqual(resp.status_code, 502)
+        existing.refresh_from_db()
+        self.assertEqual(existing.token, token)
+        self.assertEqual(existing.role, 'doctor')
+        self.assertIsNone(existing.cancelled_at)
 
 
 class OrgTrustAPITest(TestCase):

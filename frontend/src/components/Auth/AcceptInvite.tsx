@@ -1,8 +1,15 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import api from '@/api/axios';
+import axios from 'axios';
 
 type State = 'loading' | 'ready' | 'success' | 'error';
+
+const publicApi = axios.create({
+  baseURL: import.meta.env.VITE_API_URL || '/api',
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
 
 export default function AcceptInvite() {
   const [params] = useSearchParams();
@@ -20,7 +27,7 @@ export default function AcceptInvite() {
   const handleAccept = async () => {
     setConfirming(true);
     try {
-      const res = await api.post('/orgs/confirm-invitation/', { token });
+      const res = await publicApi.post('/orgs/confirm-invitation/', { token });
       setMessage(res.data.detail ?? 'Invitation accepted.');
       setState('success');
     } catch (err: unknown) {
