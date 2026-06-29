@@ -7,6 +7,7 @@ import {
 } from "react-router-dom";
 import { Login } from "@/components/Auth/Login";
 import { AuthCallback } from "@/components/Auth/AuthCallback";
+import AcceptInvite from "@/components/Auth/AcceptInvite";
 import PatientList from "@/components/Patient/PatientList";
 import PatientDetail from "@/components/Patient/PatientDetail";
 import UploadFHIR from "@/components/Patient/UploadFHIR";
@@ -39,6 +40,7 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
+      <Route path="/accept-invite" element={<AcceptInvite />} />
 
       <Route
         path="/"

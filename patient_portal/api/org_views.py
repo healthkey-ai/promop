@@ -13,7 +13,10 @@ Endpoints are registered in urls.py as:
   /api/orgs/{slug}/access/{id}/       - revoke access grant
   /api/orgs/confirm-invitation/       - public: confirm by token
 """
+import logging
 import secrets
+from django.conf import settings
+from django.core.mail import send_mail
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -23,6 +26,27 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+logger = logging.getLogger(__name__)
+
+
+def _send_invitation_email(invitation) -> None:
+    accept_url = f"{settings.APP_BASE_URL}/accept-invite?token={invitation.token}"
+    subject = f"You've been invited to join {invitation.org.name} on PROMOP"
+    body = (
+        f"Hi,\n\n"
+        f"You've been invited to join {invitation.org.name} as a {invitation.get_role_display()}.\n\n"
+        f"Click the link below to accept your invitation:\n\n"
+        f"  {accept_url}\n\n"
+        f"This link expires in 7 days. If you don't have a PROMOP account yet, "
+        f"please sign up at {settings.APP_BASE_URL}/login first.\n\n"
+        f"If you weren't expecting this invitation, you can ignore this email.\n\n"
+        f"— The PROMOP team"
+    )
+    try:
+        send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, [invitation.email])
+    except Exception:
+        logger.exception("Failed to send invitation email to %s", invitation.email)
 
 from omop_core.models import Organization, OrgTrust, OrgInvitation, GroupAccess
 from patient_portal.models import Identity
@@ -146,6 +170,7 @@ class OrgInviteView(APIView):
                 invited_by=request.user,
                 expires_at=expires_at,
             )
+        _send_invitation_email(invitation)
         return Response(OrgInvitationSerializer(invitation).data, status=status.HTTP_201_CREATED)
 
 
