@@ -210,12 +210,6 @@ export default function PatientList() {
               Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
             </button>
           )}
-          <button
-            onClick={() => navigate("/stats")}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
-          >
-            Stats
-          </button>
           {(currentUser?.is_staff || currentUser?.is_org_admin) && (
             <button
               onClick={() => navigate("/org-admin")}

@@ -13,7 +13,10 @@ Endpoints are registered in urls.py as:
   /api/orgs/{slug}/access/{id}/       - revoke access grant
   /api/orgs/confirm-invitation/       - public: confirm by token
 """
+import logging
 import secrets
+from django.conf import settings
+from django.core.mail import send_mail
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -23,6 +26,61 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+logger = logging.getLogger(__name__)
+
+
+class InvitationEmailError(Exception):
+    """Raised when an invitation email cannot be handed to the email backend."""
+
+
+def _send_invitation_email(invitation) -> None:
+    accept_url = f"{settings.APP_BASE_URL}/accept-invite?token={invitation.token}"
+    subject = f"You've been invited to join {invitation.org.name} on PROMOP"
+    body = (
+        f"Hi,\n\n"
+        f"You've been invited to join {invitation.org.name} as a {invitation.get_role_display()}.\n\n"
+        f"Click the link below to accept your invitation:\n\n"
+        f"  {accept_url}\n\n"
+        f"This link expires in 7 days. If you don't have a PROMOP account yet, "
+        f"please contact your administrator — account creation requires admin approval.\n\n"
+        f"If you weren't expecting this invitation, you can ignore this email.\n\n"
+        f"— The PROMOP team"
+    )
+    if settings.DEBUG:
+        logger.info(
+            "Invitation email preview\nTo: %s\nFrom: %s\nSubject: %s\n\n%s",
+            invitation.email,
+            settings.DEFAULT_FROM_EMAIL,
+            subject,
+            body,
+        )
+    try:
+        sent_count = send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, [invitation.email])
+    except Exception as exc:
+        logger.exception(
+            "Failed to send invitation email to %s via %s host=%s port=%s tls=%s from=%s: %s",
+            invitation.email,
+            settings.EMAIL_BACKEND,
+            getattr(settings, 'EMAIL_HOST', ''),
+            getattr(settings, 'EMAIL_PORT', ''),
+            getattr(settings, 'EMAIL_USE_TLS', ''),
+            settings.DEFAULT_FROM_EMAIL,
+            exc,
+        )
+        raise InvitationEmailError from exc
+    if sent_count != 1:
+        logger.error(
+            "Email backend reported %s invitation emails sent to %s via %s host=%s port=%s tls=%s from=%s",
+            sent_count,
+            invitation.email,
+            settings.EMAIL_BACKEND,
+            getattr(settings, 'EMAIL_HOST', ''),
+            getattr(settings, 'EMAIL_PORT', ''),
+            getattr(settings, 'EMAIL_USE_TLS', ''),
+            settings.DEFAULT_FROM_EMAIL,
+        )
+        raise InvitationEmailError
 
 from omop_core.models import Organization, OrgTrust, OrgInvitation, GroupAccess
 from patient_portal.models import Identity
@@ -127,25 +185,44 @@ class OrgInviteView(APIView):
         if role not in dict(OrgInvitation.ROLE):
             return Response({'error': f'Invalid role: {role}'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Cancel any existing pending invitation and create a fresh one atomically
-        # to prevent a race condition where two concurrent requests both pass
-        # the cancel step and then both try to INSERT, hitting the unique constraint.
-        with transaction.atomic():
-            OrgInvitation.objects.filter(
-                org=org, email=email,
-                confirmed_at__isnull=True, cancelled_at__isnull=True,
-            ).update(cancelled_at=timezone.now())
+        try:
+            with transaction.atomic():
+                invitation = OrgInvitation.objects.select_for_update().filter(
+                    org=org, email=email,
+                    confirmed_at__isnull=True, cancelled_at__isnull=True,
+                ).first()
 
-            token = secrets.token_hex(32)  # 64 hex chars
-            expires_at = timezone.now() + timezone.timedelta(days=7)
-            invitation = OrgInvitation.objects.create(
-                org=org,
-                email=email,
-                role=role,
-                token=token,
-                invited_by=request.user,
-                expires_at=expires_at,
+                token = secrets.token_hex(32)  # 64 hex chars
+                expires_at = timezone.now() + timezone.timedelta(days=7)
+                if invitation:
+                    invitation.role = role
+                    invitation.token = token
+                    invitation.invited_by = request.user
+                    invitation.expires_at = expires_at
+                    invitation.save(update_fields=['role', 'token', 'invited_by', 'expires_at'])
+                else:
+                    invitation = OrgInvitation.objects.create(
+                        org=org,
+                        email=email,
+                        role=role,
+                        token=token,
+                        invited_by=request.user,
+                        expires_at=expires_at,
+                    )
+
+                _send_invitation_email(invitation)
+        except InvitationEmailError:
+            return Response(
+                {'error': 'Invitation email could not be sent. Please try again.'},
+                status=status.HTTP_502_BAD_GATEWAY,
             )
+
+        # Defensive cleanup for stale duplicate pending rows from before the
+        # partial unique constraint existed; normal paths keep one pending invite.
+        OrgInvitation.objects.filter(
+            org=org, email=email,
+            confirmed_at__isnull=True, cancelled_at__isnull=True,
+        ).exclude(id=invitation.id).update(cancelled_at=timezone.now())
         return Response(OrgInvitationSerializer(invitation).data, status=status.HTTP_201_CREATED)
 
 
@@ -194,18 +271,15 @@ def confirm_invitation(request):
     if invitation.status == OrgInvitation.STATUS_EXPIRED:
         return Response({'error': 'Invitation has expired.'}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Look up identity — scope to local-auth to avoid matching OIDC accounts
-    # with the same email address (Identity.email has no unique constraint).
-    try:
-        identity = Identity.objects.get(email=invitation.email, issuer='urn:local')
-    except Identity.DoesNotExist:
+    # Prefer a local-auth identity; fall back to any identity with this email
+    # so that OIDC/SSO users can also confirm invitations.
+    identity = (
+        Identity.objects.filter(email__iexact=invitation.email, issuer='urn:local').first()
+        or Identity.objects.filter(email__iexact=invitation.email).first()
+    )
+    if not identity:
         return Response(
-            {'error': 'No local account found for this email. Please sign up first.'},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    except Identity.MultipleObjectsReturned:
-        return Response(
-            {'error': 'Multiple accounts found for this email. Please contact support.'},
+            {'error': 'No account found for this email. Please log in first, or contact your administrator.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 

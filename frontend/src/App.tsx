@@ -7,11 +7,11 @@ import {
 } from "react-router-dom";
 import { Login } from "@/components/Auth/Login";
 import { AuthCallback } from "@/components/Auth/AuthCallback";
+import AcceptInvite from "@/components/Auth/AcceptInvite";
 import PatientList from "@/components/Patient/PatientList";
 import PatientDetail from "@/components/Patient/PatientDetail";
 import UploadFHIR from "@/components/Patient/UploadFHIR";
 import UploadCSV from "@/components/Patient/UploadCSV";
-import StatsPage from "@/components/Stats/StatsPage";
 import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
 import UserProfilePage from "@/components/User/UserProfilePage";
 import { useAuth } from "@/hooks/useAuth";
@@ -28,7 +28,8 @@ function AppRoutes() {
     }
   }, [location.pathname, refresh]);
 
-  if (authLoading) {
+  const publicPaths = ['/accept-invite', '/login', '/auth/callback'];
+  if (authLoading && !publicPaths.includes(location.pathname)) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
@@ -40,6 +41,7 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
+      <Route path="/accept-invite" element={<AcceptInvite />} />
 
       <Route
         path="/"
@@ -65,12 +67,7 @@ function AppRoutes() {
           currentUser ? <UploadCSV /> : <Navigate to="/login" replace />
         }
       />
-      <Route
-        path="/stats"
-        element={
-          currentUser ? <StatsPage /> : <Navigate to="/login" replace />
-        }
-      />
+      <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
       <Route
         path="/org-admin"
         element={

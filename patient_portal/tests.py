@@ -6157,12 +6157,50 @@ class OrgDiseaseStatsTest(TestCase):
         self.assertIn('org_slug', org)
         self.assertIn('org_name', org)
         self.assertIn('total', org)
+        self.assertIn('owned_count', org)
+        self.assertIn('accessible_count', org)
         self.assertIn('disease_counts', org)
         if org['disease_counts']:
             dc = org['disease_counts'][0]
             self.assertIn('disease_slug', dc)
             self.assertIn('label', dc)
             self.assertIn('count', dc)
+
+    def test_owned_and_accessible_counts_no_trusts(self):
+        resp = self._get(self.org_admin)
+        org_a = next(o for o in resp.data if o['org_slug'] == 'org-a')
+        self.assertEqual(org_a['owned_count'], 3)
+        self.assertEqual(org_a['accessible_count'], 3)
+
+    def test_org_trust_inflates_accessible_count(self):
+        from omop_core.models import OrgTrust
+        # org_b grants access to org_a's users (trusted_org=org_a)
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_org=self.org_a)
+        resp = self._get(self.org_admin)
+        org_a = next(o for o in resp.data if o['org_slug'] == 'org-a')
+        self.assertEqual(org_a['owned_count'], 3)
+        self.assertEqual(org_a['accessible_count'], 4)  # 3 owned + 1 from org_b
+
+    def test_domain_trust_inflates_accessible_count(self):
+        from omop_core.models import OrgTrust
+        # org_b grants access to users with @t.com — org_admin has email admin@t.com
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_domain='t.com')
+        resp = self._get(self.org_admin)
+        org_a = next(o for o in resp.data if o['org_slug'] == 'org-a')
+        self.assertEqual(org_a['owned_count'], 3)
+        self.assertEqual(org_a['accessible_count'], 4)  # 3 owned + 1 from org_b via domain trust
+
+    def test_self_trust_does_not_double_count(self):
+        from omop_core.models import OrgTrust
+        from django.db import IntegrityError
+        # DB constraint should prevent self-trust; confirm it raises
+        with self.assertRaises(IntegrityError):
+            OrgTrust.objects.create(granting_org=self.org_a, trusted_org=self.org_a)
+
+    def test_total_field_equals_owned_count(self):
+        resp = self._get(self.org_admin)
+        org_a = next(o for o in resp.data if o['org_slug'] == 'org-a')
+        self.assertEqual(org_a['total'], org_a['owned_count'])
 
 
 class OrgAdminPatientListScopingTest(TestCase):
@@ -6719,6 +6757,61 @@ class OrgInvitationFlowTest(TestCase):
         public_client = APIClient()
         resp = public_client.post('/api/orgs/confirm-invitation/', {'token': 'deadbeef' * 8})
         self.assertEqual(resp.status_code, 404)
+
+    def test_invite_sends_email(self):
+        from django.core import mail
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'emailtest@example.com',
+            'role': 'doctor',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(len(mail.outbox), 1)
+        msg = mail.outbox[0]
+        self.assertEqual(msg.to, ['emailtest@example.com'])
+        self.assertIn('Invite Org', msg.subject)
+        self.assertIn('/accept-invite?token=', msg.body)
+
+    def test_invite_email_contains_valid_token(self):
+        from django.core import mail
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'tokencheck@example.com',
+            'role': 'navigator',
+        })
+        self.assertEqual(resp.status_code, 201)
+        token = OrgInvitation.objects.get(org=self.org, email='tokencheck@example.com').token
+        self.assertIn(token, mail.outbox[0].body)
+
+    def test_email_failure_prevents_invitation_creation(self):
+        from unittest.mock import patch
+        with patch('patient_portal.api.org_views.send_mail', side_effect=Exception('SMTP error')):
+            resp = self.client.post('/api/orgs/invite-org/invite/', {
+                'email': 'failmail@example.com',
+                'role': 'doctor',
+            })
+        self.assertEqual(resp.status_code, 502)
+        self.assertFalse(
+            OrgInvitation.objects.filter(org=self.org, email='failmail@example.com').exists()
+        )
+
+    def test_email_failure_preserves_existing_pending_invitation(self):
+        from django.utils import timezone
+        from unittest.mock import patch
+        token = _secrets.token_hex(32)
+        existing = OrgInvitation.objects.create(
+            org=self.org, email='existing@example.com', role='doctor',
+            token=token,
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        with patch('patient_portal.api.org_views.send_mail', side_effect=Exception('SMTP error')):
+            resp = self.client.post('/api/orgs/invite-org/invite/', {
+                'email': 'existing@example.com',
+                'role': 'navigator',
+            })
+        self.assertEqual(resp.status_code, 502)
+        existing.refresh_from_db()
+        self.assertEqual(existing.token, token)
+        self.assertEqual(existing.role, 'doctor')
+        self.assertIsNone(existing.cancelled_at)
 
 
 class OrgTrustAPITest(TestCase):

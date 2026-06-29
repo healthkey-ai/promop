@@ -44,13 +44,30 @@ interface AccessGrant {
   granted_at: string;
 }
 
-type Section = 'settings' | 'trusts' | 'admins' | 'invitations';
+interface DiseaseCount {
+  disease_slug: string;
+  label: string;
+  count: number;
+}
+
+interface OrgStatsData {
+  org_slug: string;
+  org_name: string;
+  total: number;
+  owned_count: number;
+  accessible_count: number;
+  disease_counts: DiseaseCount[];
+}
+
+type Section = 'settings' | 'trusts' | 'admins' | 'invitations' | 'stats';
 
 export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   const [org, setOrg] = useState<Org | null>(null);
+  const [allOrgs, setAllOrgs] = useState<Org[]>([]);
   const [trusts, setTrusts] = useState<Trust[]>([]);
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [accessGrants, setAccessGrants] = useState<AccessGrant[]>([]);
+  const [orgStats, setOrgStats] = useState<OrgStatsData | null>(null);
   const [activeSection, setActiveSection] = useState<Section>('settings');
   const [error, setError] = useState<string | null>(null);
 
@@ -63,7 +80,11 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   // Trust form state
   const [trustInput, setTrustInput] = useState('');
   const [trustType, setTrustType] = useState<'domain' | 'org_id'>('domain');
+  const [trustOrgId, setTrustOrgId] = useState('');
   const [trustError, setTrustError] = useState<string | null>(null);
+
+  // Delete org state
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // Invite form state
   const [inviteEmail, setInviteEmail] = useState('');
@@ -75,11 +96,13 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
 
   const fetchAll = async () => {
     try {
-      const [orgRes, trustRes, invRes, accessRes] = await Promise.all([
+      const [orgRes, trustRes, invRes, accessRes, statsRes, allOrgsRes] = await Promise.all([
         api.get<Org>(`${base}/`),
         api.get<Trust[]>(`${base}/trusts/`),
         api.get<Invitation[]>(`${base}/invitations/`),
         api.get<AccessGrant[]>(`${base}/access/`),
+        api.get<OrgStatsData[]>('/stats/org-disease/').catch(() => ({ data: [] as OrgStatsData[] })),
+        api.get<Org[]>('/orgs/').catch(() => ({ data: [] as Org[] })),
       ]);
       setOrg(orgRes.data);
       setOrgName(orgRes.data.name);
@@ -87,6 +110,8 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       setTrusts(trustRes.data);
       setInvitations(invRes.data);
       setAccessGrants(accessRes.data);
+      setOrgStats(statsRes.data.find((s: OrgStatsData) => s.org_slug === slug) ?? null);
+      setAllOrgs(allOrgsRes.data.filter((o: Org) => o.slug !== slug));
     } catch {
       setError('Failed to load org details.');
     }
@@ -112,12 +137,24 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       setTrustError(null);
       const payload = trustType === 'domain'
         ? { trusted_domain: trustInput.trim() }
-        : { trusted_org: parseInt(trustInput, 10) };
+        : { trusted_org: parseInt(trustOrgId, 10) };
       await api.post(`${base}/trusts/`, payload);
       setTrustInput('');
+      setTrustOrgId('');
       fetchAll();
     } catch {
       setTrustError('Failed to add trust. Check the value and try again.');
+    }
+  };
+
+  const handleDeleteOrg = async () => {
+    if (!window.confirm(`Permanently delete "${org?.name}"? This cannot be undone.`)) return;
+    try {
+      setDeleteError(null);
+      await api.delete(`${base}/`);
+      onBack();
+    } catch {
+      setDeleteError('Failed to delete organization.');
     }
   };
 
@@ -176,6 +213,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
 
   const sections: { key: Section; label: string }[] = [
     { key: 'settings', label: 'Settings' },
+    { key: 'stats', label: 'Stats' },
     { key: 'trusts', label: 'Access Rules' },
     { key: 'admins', label: 'Admins' },
     { key: 'invitations', label: 'Invitations' },
@@ -241,6 +279,55 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
           >
             Save
           </button>
+          {isStaff && (
+            <div className="pt-4 border-t border-gray-200">
+              {deleteError && <p className="text-sm text-red-500 mb-2">{deleteError}</p>}
+              <button
+                onClick={handleDeleteOrg}
+                className="px-3 py-1.5 text-sm bg-red-600 text-white rounded hover:bg-red-700"
+              >
+                Delete Organization
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Stats */}
+      {activeSection === 'stats' && (
+        <div>
+          {!orgStats ? (
+            <p className="text-sm text-gray-500">No patient data available for this organization.</p>
+          ) : (
+            <table className="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="text-left px-4 py-2 font-medium text-gray-600">Disease</th>
+                  <th className="text-right px-4 py-2 font-medium text-gray-600">Patients</th>
+                </tr>
+              </thead>
+              <tbody>
+                {orgStats.disease_counts.map(dc => (
+                  <tr key={dc.disease_slug} className="border-t border-gray-100">
+                    <td className="px-4 py-2 text-gray-800">{dc.label}</td>
+                    <td className="px-4 py-2 text-right text-gray-800">{dc.count}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t border-gray-200 bg-gray-50">
+                  <td className="px-4 py-2 font-medium text-gray-700">Owned</td>
+                  <td className="px-4 py-2 text-right font-medium text-gray-700">{orgStats.owned_count}</td>
+                </tr>
+                {orgStats.accessible_count !== orgStats.owned_count && (
+                  <tr className="bg-gray-50">
+                    <td className="px-4 py-2 text-sm text-gray-500">Accessible (incl. trusted orgs)</td>
+                    <td className="px-4 py-2 text-right text-sm text-gray-500">{orgStats.accessible_count}</td>
+                  </tr>
+                )}
+              </tfoot>
+            </table>
+          )}
         </div>
       )}
 
@@ -281,15 +368,28 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                 className="border border-gray-300 rounded px-2 py-1.5 text-sm"
               >
                 <option value="domain">Domain</option>
-                <option value="org_id">Org ID</option>
+                <option value="org_id">Organization</option>
               </select>
-              <input
-                type="text"
-                placeholder={trustType === 'domain' ? 'e.g. hospital.org' : 'Org ID'}
-                value={trustInput}
-                onChange={e => setTrustInput(e.target.value)}
-                className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
-              />
+              {trustType === 'domain' ? (
+                <input
+                  type="text"
+                  placeholder="e.g. hospital.org"
+                  value={trustInput}
+                  onChange={e => setTrustInput(e.target.value)}
+                  className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
+                />
+              ) : (
+                <select
+                  value={trustOrgId}
+                  onChange={e => setTrustOrgId(e.target.value)}
+                  className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
+                >
+                  <option value="">Select organization…</option>
+                  {allOrgs.map(o => (
+                    <option key={o.id} value={String(o.id)}>{o.name}</option>
+                  ))}
+                </select>
+              )}
               <button
                 onClick={handleAddTrust}
                 className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
