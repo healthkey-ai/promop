@@ -13,7 +13,7 @@ import io
 import json
 import os
 import tempfile
-from datetime import date
+from datetime import date, timedelta
 
 from patient_portal.models import Identity
 from django.test import TestCase
@@ -6236,6 +6236,26 @@ class OrgAdminPatientListScopingTest(TestCase):
             org=self.org_a,
             role='org_admin',
         )
+        PatientInfo.objects.filter(pk=self.pi_a1.pk).update(
+            disease='Breast Cancer',
+            stage='Breast Cancer Stage IIA',
+            updated_at=timezone.now(),
+        )
+        PatientInfo.objects.filter(pk=self.pi_a2.pk).update(
+            disease='Multiple Myeloma',
+            stage='III',
+            updated_at=timezone.now() - timedelta(days=45),
+        )
+        PatientInfo.objects.filter(pk=self.pi_b.pk).update(
+            disease='Breast Cancer',
+            stage='Stage II',
+            updated_at=timezone.now(),
+        )
+        PatientInfo.objects.filter(pk=self.pi_none.pk).update(
+            disease='Breast Cancer',
+            stage='Stage IV',
+            updated_at=timezone.now(),
+        )
 
     def _get(self, user):
         self.client.force_authenticate(user=user)
@@ -6262,6 +6282,175 @@ class OrgAdminPatientListScopingTest(TestCase):
         self.assertIn(self.pi_a1.id, ids)
         self.assertIn(self.pi_b.id, ids)
         self.assertIn(self.pi_none.id, ids)
+
+    def test_unpaginated_patient_list_still_returns_plain_list(self):
+        resp = self._get(self.org_admin)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsInstance(resp.data, list)
+
+    def test_paginated_patient_list_returns_filtered_count(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get(
+            '/api/patient-info/',
+            {'page': 1, 'page_size': 10, 'disease': 'Breast Cancer', 'stage': 'II'},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual([p['id'] for p in resp.data['results']], [self.pi_a1.id])
+        self.assertIn('filter_options', resp.data)
+
+    def test_paginated_patient_list_stage_filter_does_not_match_other_roman_stages(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get(
+            '/api/patient-info/',
+            {'page': 1, 'page_size': 10, 'disease': 'Breast Cancer', 'stage': 'I'},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['count'], 0)
+
+    def test_paginated_patient_list_filters_by_date(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get(
+            '/api/patient-info/',
+            {'page': 1, 'page_size': 10, 'date': '30d'},
+        )
+        self.assertEqual(resp.status_code, 200)
+        ids = {p['id'] for p in resp.data['results']}
+        self.assertIn(self.pi_a1.id, ids)
+        self.assertNotIn(self.pi_a2.id, ids)
+
+    def test_filter_options_absent_on_page_2(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get('/api/patient-info/', {'page': 2, 'page_size': 1})
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn('filter_options', resp.data)
+
+    def test_filter_options_present_on_page_1(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get('/api/patient-info/', {'page': 1, 'page_size': 1})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('filter_options', resp.data)
+
+
+# ---------------------------------------------------------------------------
+# bulk_delete_filtered Tests
+# ---------------------------------------------------------------------------
+
+class BulkDeleteFilteredTest(TestCase):
+    """Tests for DELETE /api/patient-info/bulk_delete_filtered/
+
+    PatientInfo has a unique constraint on person_id (one row per person).
+    Org scoping is enforced at the PatientInfo.organization level.
+    """
+
+    def setUp(self):
+        from oauth2_provider.models import Application, AccessToken
+        from omop_core.models import Organization, ApplicationOrganization
+        from django.utils import timezone as tz
+        import datetime
+
+        self.client = APIClient()
+
+        self.org_a = Organization.objects.create(name='BDF Org A', slug='bdf-org-a')
+        self.org_b = Organization.objects.create(name='BDF Org B', slug='bdf-org-b')
+
+        # Persons (IDs chosen to avoid conflicts with other test classes)
+        self.p1 = Person.objects.create(person_id=9001, gender_source_value='female',
+                                        race_source_value='unknown', ethnicity_source_value='unknown')
+        self.p2 = Person.objects.create(person_id=9002, gender_source_value='male',
+                                        race_source_value='unknown', ethnicity_source_value='unknown')
+        self.p3 = Person.objects.create(person_id=9003, gender_source_value='female',
+                                        race_source_value='unknown', ethnicity_source_value='unknown')
+
+        # p1, p2 in org_a; p3 in org_b
+        self.pi_a1 = PatientInfo.objects.create(person=self.p1, organization=self.org_a, disease='Breast Cancer')
+        self.pi_a2 = PatientInfo.objects.create(person=self.p2, organization=self.org_a, disease='Multiple Myeloma')
+        self.pi_b  = PatientInfo.objects.create(person=self.p3, organization=self.org_b, disease='Breast Cancer')
+
+        # Staff user — DELETE allowed via ScopedTokenPermission (is_staff=True)
+        self.staff = Identity.objects.create_user(email='bdf_staff@t.com', password='x', is_staff=True)
+
+        # OAuth2 write token for org_a
+        self.user_a = Identity.objects.create_user(email='bdf_svc_a@t.com', password='x')
+        self.app_a = Application.objects.create(
+            name='BDF Org A App',
+            client_id='bdf-org-a-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=self.user_a,
+        )
+        ApplicationOrganization.objects.create(application=self.app_a, organization=self.org_a)
+        self.write_token_a = AccessToken.objects.create(
+            user=self.user_a,
+            application=self.app_a,
+            token='bdf-org-a-write-token',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='patient/*.write',
+        )
+
+    def test_unauthenticated_request_rejected(self):
+        """DELETE without credentials must be rejected."""
+        resp = APIClient().delete('/api/patient-info/bulk_delete_filtered/')
+        self.assertIn(resp.status_code, [401, 403])
+
+    def test_org_a_token_cannot_delete_org_b_patients(self):
+        """Org A write token must not delete Org B's PatientInfo via bulk_delete_filtered."""
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f'Bearer {self.write_token_a.token}')
+        resp = c.delete('/api/patient-info/bulk_delete_filtered/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data['success'])
+        # pi_b belongs to org_b — must still exist
+        self.assertTrue(PatientInfo.objects.filter(pk=self.pi_b.pk).exists())
+        # p3 (org_b patient) must still exist
+        from omop_core.models import Person as P
+        self.assertTrue(P.objects.filter(person_id=self.p3.person_id).exists())
+
+    def test_disease_filter_scopes_deletion(self):
+        """Only PatientInfo matching the disease filter should be deleted."""
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.delete(
+            '/api/patient-info/bulk_delete_filtered/?disease=Multiple+Myeloma'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data['success'])
+        # pi_a2 (Multiple Myeloma) should be gone
+        self.assertFalse(PatientInfo.objects.filter(pk=self.pi_a2.pk).exists())
+        # pi_a1 and pi_b (Breast Cancer) should survive
+        self.assertTrue(PatientInfo.objects.filter(pk=self.pi_a1.pk).exists())
+        self.assertTrue(PatientInfo.objects.filter(pk=self.pi_b.pk).exists())
+
+    def test_deleted_count_matches_matched_rows(self):
+        """deleted_count must equal the number of PatientInfo rows that matched the filters."""
+        self.client.force_authenticate(user=self.staff)
+        # Breast Cancer across both orgs: pi_a1 + pi_b = 2
+        resp = self.client.delete(
+            '/api/patient-info/bulk_delete_filtered/?disease=Breast+Cancer'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['deleted_count'], 2)
+
+    def test_empty_filter_match_returns_zero(self):
+        """A filter that matches no records should return deleted_count=0 with no error."""
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.delete(
+            '/api/patient-info/bulk_delete_filtered/?disease=Nonexistent+Disease'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['deleted_count'], 0)
+        self.assertEqual(resp.data['errors'], [])
+
+    def test_org_a_token_deletes_all_org_a_patients_when_no_filter(self):
+        """Org A token with no additional filters deletes all PatientInfo in org A only."""
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f'Bearer {self.write_token_a.token}')
+        resp = c.delete('/api/patient-info/bulk_delete_filtered/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['deleted_count'], 2)
+        # pi_a1 and pi_a2 should be gone; pi_b should survive
+        self.assertFalse(PatientInfo.objects.filter(pk=self.pi_a1.pk).exists())
+        self.assertFalse(PatientInfo.objects.filter(pk=self.pi_a2.pk).exists())
+        self.assertTrue(PatientInfo.objects.filter(pk=self.pi_b.pk).exists())
 
 
 # ---------------------------------------------------------------------------

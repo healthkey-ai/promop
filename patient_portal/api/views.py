@@ -1,11 +1,13 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -37,7 +39,7 @@ from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name
 from omop_core.services.access import get_visible_orgs, build_trusting_map
-from datetime import datetime
+from datetime import datetime, timedelta
 from django.utils.timezone import localdate
 import csv
 import hashlib
@@ -58,6 +60,12 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 
 logger = logging.getLogger(__name__)
+
+
+class PatientInfoPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 
 # ---------------------------------------------------------------------------
@@ -141,9 +149,16 @@ def _record_provenance(record, source, source_user_id, target_patient_id=None, m
 class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PatientInfoSerializer
     permission_classes = [ScopedTokenPermission]
+    pagination_class = PatientInfoPagination
+
+    DATE_FILTERS = {
+        '7d': timedelta(days=7),
+        '30d': timedelta(days=30),
+        '90d': timedelta(days=90),
+    }
     
     def get_queryset(self):
-        qs = PatientInfo.objects.all().select_related('person')
+        qs = PatientInfo.objects.all().select_related('person', 'organization')
         org = get_request_org(self.request)
         if org is not None:
             qs = qs.filter(organization=org)
@@ -209,11 +224,111 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         if self.action == 'list':
             return PatientListSerializer
         return PatientInfoSerializer
+
+    def _normalize_all_param(self, value):
+        value = (value or '').strip()
+        if not value or value.lower() == 'all':
+            return None
+        return value
+
+    def _apply_patient_list_filters(self, queryset):
+        params = self.request.query_params
+
+        org_slug = self._normalize_all_param(params.get('org'))
+        if org_slug:
+            if org_slug == '__unassigned__':
+                queryset = queryset.filter(organization__isnull=True)
+            else:
+                queryset = queryset.filter(organization__slug=org_slug)
+
+        disease = self._normalize_all_param(params.get('disease'))
+        if disease:
+            queryset = queryset.filter(disease__iexact=disease)
+
+        stage = self._normalize_all_param(params.get('stage'))
+        if stage:
+            stage = stage.upper()
+            if stage not in {'I', 'II', 'III', 'IV'}:
+                return queryset.none()
+            queryset = queryset.filter(
+                Q(stage__iexact=stage) |
+                Q(stage__iexact=f'Stage {stage}') |
+                Q(stage__iregex=rf'(^|[^A-Za-z0-9])stage\s+{stage}(?![IVX])[A-Z]*([^A-Za-z0-9]|$)')
+            )
+
+        date_filter = self._normalize_all_param(params.get('date'))
+        if date_filter in self.DATE_FILTERS:
+            queryset = queryset.filter(updated_at__gte=timezone.now() - self.DATE_FILTERS[date_filter])
+        elif date_filter == 'this_year':
+            start_of_year = timezone.make_aware(
+                datetime.combine(localdate().replace(month=1, day=1), datetime.min.time())
+            )
+            queryset = queryset.filter(updated_at__gte=start_of_year)
+
+        search = self._normalize_all_param(params.get('search'))
+        if search:
+            name_query = (
+                Q(person__given_name__icontains=search) |
+                Q(person__family_name__icontains=search) |
+                Q(email__icontains=search)
+            )
+            try:
+                name_query |= Q(person__person_id=int(search))
+            except (TypeError, ValueError):
+                pass
+            queryset = queryset.filter(name_query)
+
+        return queryset
+
+    def _build_filter_options(self, queryset):
+        org_rows = (
+            queryset
+            .exclude(organization__isnull=True)
+            .values('organization__slug', 'organization__name')
+            .distinct()
+            .order_by('organization__name')
+        )
+        org_options = [
+            {'value': row['organization__slug'], 'label': row['organization__name']}
+            for row in org_rows
+            if row['organization__slug'] and row['organization__name']
+        ]
+        if queryset.filter(organization__isnull=True).exists():
+            org_options.append({'value': '__unassigned__', 'label': 'Unassigned'})
+
+        diseases = (
+            queryset
+            .exclude(disease__isnull=True)
+            .exclude(disease='')
+            .values_list('disease', flat=True)
+            .distinct()
+            .order_by('disease')
+        )
+
+        return {
+            'orgs': org_options,
+            'diseases': list(diseases),
+            'stages': ['I', 'II', 'III', 'IV'],
+        }
     
     def list(self, request):
         """List all patients - accessible to authenticated users"""
-        queryset = self.get_queryset().order_by('-created_at')
-        serializer = PatientListSerializer(queryset, many=True)
+        base_queryset = self.get_queryset()
+        queryset = self._apply_patient_list_filters(base_queryset).order_by('-updated_at', '-created_at')
+
+        if 'page' in request.query_params or 'page_size' in request.query_params:
+            page = self.paginate_queryset(queryset)
+            serializer = PatientListSerializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            try:
+                page_num = int(request.query_params.get('page', 1))
+            except (TypeError, ValueError):
+                page_num = 1
+            if page_num == 1:
+                response.data['filter_options'] = self._build_filter_options(base_queryset)
+            return response
+
+        serializer = PatientListSerializer(queryset[:500], many=True)
         return Response(serializer.data)
 
     def create(self, request):
@@ -2051,9 +2166,64 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 'deleted_count': deleted_count,
                 'errors': errors
             })
-            
+
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['delete'], permission_classes=[ScopedTokenPermission])
+    def bulk_delete_filtered(self, request):
+        """Delete PatientInfo records matching all active filters (org + disease + stage + date).
+        Only deletes the matched PatientInfo rows; Person/Identity are removed only if the
+        person has no remaining PatientInfo in any org after the deletion.
+        """
+        try:
+            base_queryset = self.get_queryset()
+            filtered_queryset = self._apply_patient_list_filters(base_queryset)
+
+            # Snapshot both the specific PatientInfo PKs and their person IDs in one query.
+            snapshot = list(filtered_queryset.values_list('id', 'person__person_id'))
+            if not snapshot:
+                return Response({'success': True, 'deleted_count': 0, 'errors': []})
+
+            patientinfo_ids = [row[0] for row in snapshot]
+            person_ids = [row[1] for row in snapshot]
+
+            errors = []
+            with transaction.atomic():
+                # Bulk-delete only the specifically filtered PatientInfo records — correctly
+                # scoped to org + disease + stage + date via the queryset snapshot.
+                PatientInfo.objects.filter(id__in=patientinfo_ids).delete()
+                deleted_count = len(patientinfo_ids)
+
+                # Clean up Person/Identity for persons that now have no PatientInfo at all.
+                persons = {p.person_id: p for p in Person.objects.filter(person_id__in=person_ids)}
+                from patient_portal.models import PatientUser as PU
+                for person_id in person_ids:
+                    person = persons.get(person_id)
+                    if person is None:
+                        continue
+                    try:
+                        if not PatientInfo.objects.filter(person=person).exists():
+                            try:
+                                pu = PU.objects.get(person=person)
+                                pu.identity.delete()
+                            except PU.DoesNotExist:
+                                pass
+                            person.delete()
+                    except Exception:
+                        id_hash = hashlib.sha256(str(person_id).encode()).hexdigest()[:12]
+                        logger.warning("bulk_delete_filtered: person cleanup failed (id_hash=%s)", id_hash)
+                        errors.append("Person cleanup failed.")
+
+            return Response({
+                'success': True,
+                'deleted_count': deleted_count,
+                'errors': errors
+            })
+
+        except Exception:
+            logger.exception("bulk_delete_filtered: unexpected error")
+            return Response({'error': 'Delete operation failed.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @csrf_exempt
 @api_view(['POST'])

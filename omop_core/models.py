@@ -1689,6 +1689,8 @@ class PatientInfo(models.Model):
             models.Index(fields=["patient_age"]),
             models.Index(fields=["disease"]),
             models.Index(fields=["stage"]),
+            models.Index(fields=["-updated_at"], name="ix_pi_updated_at"),
+            models.Index(fields=["organization", "-updated_at"], name="ix_pi_org_updated_at"),
         ]
 
     def __str__(self):
