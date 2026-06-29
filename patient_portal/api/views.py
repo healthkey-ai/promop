@@ -36,7 +36,7 @@ from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name
-from omop_core.services.access import get_visible_orgs
+from omop_core.services.access import get_visible_orgs, build_trusting_map
 from datetime import datetime
 from django.utils.timezone import localdate
 import csv
@@ -2150,14 +2150,37 @@ def org_disease_stats(request):
             for r in rows
         ]
 
+    from django.db.models import Count
+
     orgs = get_visible_orgs(request.user)
+    org_list = list(orgs.order_by('name'))
+
+    # Build {org_id: set of granting_org_ids} covering both org-to-org and domain trusts
+    trusting_map = build_trusting_map(org_list)
+
+    # Batch-compute patient counts for all granting orgs in one query (avoids N+1)
+    all_granting_ids = {gid for gids in trusting_map.values() for gid in gids}
+    granting_counts: dict[int, int] = {}
+    if all_granting_ids:
+        granting_counts = dict(
+            PatientInfo.objects.filter(organization_id__in=all_granting_ids)
+            .values('organization_id')
+            .annotate(c=Count('id'))
+            .values_list('organization_id', 'c')
+        )
+
     result = []
-    for org in orgs.order_by('name'):
+    for org in org_list:
         counts = _disease_counts(PatientInfo.objects.filter(organization=org))
+        owned_count = sum(d['count'] for d in counts)
+        accessible_count = owned_count + sum(granting_counts.get(gid, 0) for gid in trusting_map[org.id])
+
         result.append({
             'org_slug': org.slug,
             'org_name': org.name,
-            'total': sum(d['count'] for d in counts),
+            'total': owned_count,
+            'owned_count': owned_count,
+            'accessible_count': accessible_count,
             'disease_counts': counts,
         })
 
@@ -2165,10 +2188,13 @@ def org_disease_stats(request):
     if getattr(request.user, 'is_staff', False) or getattr(request.user, 'is_superuser', False):
         counts = _disease_counts(PatientInfo.objects.filter(organization__isnull=True))
         if counts:
+            unassigned_total = sum(d['count'] for d in counts)
             result.insert(0, {
                 'org_slug': '__unassigned__',
                 'org_name': 'All Patients (Unassigned)',
-                'total': sum(d['count'] for d in counts),
+                'total': unassigned_total,
+                'owned_count': unassigned_total,
+                'accessible_count': unassigned_total,
                 'disease_counts': counts,
             })
 
