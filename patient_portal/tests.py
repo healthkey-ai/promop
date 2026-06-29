@@ -6569,6 +6569,61 @@ class OrgInvitationFlowTest(TestCase):
         resp = public_client.post('/api/orgs/confirm-invitation/', {'token': 'deadbeef' * 8})
         self.assertEqual(resp.status_code, 404)
 
+    def test_invite_sends_email(self):
+        from django.core import mail
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'emailtest@example.com',
+            'role': 'doctor',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(len(mail.outbox), 1)
+        msg = mail.outbox[0]
+        self.assertEqual(msg.to, ['emailtest@example.com'])
+        self.assertIn('Invite Org', msg.subject)
+        self.assertIn('/accept-invite?token=', msg.body)
+
+    def test_invite_email_contains_valid_token(self):
+        from django.core import mail
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'tokencheck@example.com',
+            'role': 'navigator',
+        })
+        self.assertEqual(resp.status_code, 201)
+        token = OrgInvitation.objects.get(org=self.org, email='tokencheck@example.com').token
+        self.assertIn(token, mail.outbox[0].body)
+
+    def test_email_failure_prevents_invitation_creation(self):
+        from unittest.mock import patch
+        with patch('patient_portal.api.org_views.send_mail', side_effect=Exception('SMTP error')):
+            resp = self.client.post('/api/orgs/invite-org/invite/', {
+                'email': 'failmail@example.com',
+                'role': 'doctor',
+            })
+        self.assertEqual(resp.status_code, 502)
+        self.assertFalse(
+            OrgInvitation.objects.filter(org=self.org, email='failmail@example.com').exists()
+        )
+
+    def test_email_failure_preserves_existing_pending_invitation(self):
+        from django.utils import timezone
+        from unittest.mock import patch
+        token = _secrets.token_hex(32)
+        existing = OrgInvitation.objects.create(
+            org=self.org, email='existing@example.com', role='doctor',
+            token=token,
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        with patch('patient_portal.api.org_views.send_mail', side_effect=Exception('SMTP error')):
+            resp = self.client.post('/api/orgs/invite-org/invite/', {
+                'email': 'existing@example.com',
+                'role': 'navigator',
+            })
+        self.assertEqual(resp.status_code, 502)
+        existing.refresh_from_db()
+        self.assertEqual(existing.token, token)
+        self.assertEqual(existing.role, 'doctor')
+        self.assertIsNone(existing.cancelled_at)
+
 
 class OrgTrustAPITest(TestCase):
     """Staff can manage trusts via API."""

@@ -7,6 +7,7 @@ import {
 } from "react-router-dom";
 import { Login } from "@/components/Auth/Login";
 import { AuthCallback } from "@/components/Auth/AuthCallback";
+import AcceptInvite from "@/components/Auth/AcceptInvite";
 import PatientList from "@/components/Patient/PatientList";
 import PatientDetail from "@/components/Patient/PatientDetail";
 import UploadFHIR from "@/components/Patient/UploadFHIR";
@@ -27,7 +28,8 @@ function AppRoutes() {
     }
   }, [location.pathname, refresh]);
 
-  if (authLoading) {
+  const publicPaths = ['/accept-invite', '/login', '/auth/callback'];
+  if (authLoading && !publicPaths.includes(location.pathname)) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
@@ -39,6 +41,7 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
+      <Route path="/accept-invite" element={<AcceptInvite />} />
 
       <Route
         path="/"
