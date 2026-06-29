@@ -142,7 +142,7 @@ class Migration(migrations.Migration):
                 "db_table": "org_trust",
                 "constraints": [
                     models.CheckConstraint(
-                        condition=models.Q(
+                        check=models.Q(
                             models.Q(
                                 ("trusted_domain", ""), ("trusted_org__isnull", False)
                             ),

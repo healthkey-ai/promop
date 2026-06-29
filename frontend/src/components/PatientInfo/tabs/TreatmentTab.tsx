@@ -108,7 +108,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="sm:col-span-2">
             <Field label="Later Line Therapy" name="later_therapy" type="select"
-              value={formData?.later_therapy}
+              value={typeof formData?.later_therapy === 'string' ? formData.later_therapy.split(';')[0].trim() : formData?.later_therapy}
               options={getTherapyOptions(diseaseType, 'later', bcFirstLineOptions, bcSecondLineOptions, bcLaterLineOptions)}
               onChange={onChange}
               vocabSource={breastSource ? bcLaterLineSource : null} />

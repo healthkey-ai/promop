@@ -431,7 +431,7 @@ def _get_treatment_data(person: Person) -> dict:
 
     if len(therapy_details) > 2:
         later_drugs = therapy_details[2:]
-        data['later_therapy'] = '; '.join([d['drug'] for d in later_drugs[:3]])
+        data['later_therapy'] = later_drugs[0]['drug']
         data['later_date'] = later_drugs[0]['start_date']
         data['later_therapies'] = [
             {'therapy': d['drug'], 'startDate': d['start_date'], 'endDate': d['end_date']}
