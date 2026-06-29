@@ -133,8 +133,8 @@ class PatientListSerializer(serializers.ModelSerializer):
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)
     patient_name = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
-    organization_name = serializers.CharField(source='organization.name', read_only=True)
-    organization_slug = serializers.CharField(source='organization.slug', read_only=True)
+    organization_name = serializers.CharField(source='organization.name', read_only=True, allow_null=True)
+    organization_slug = serializers.CharField(source='organization.slug', read_only=True, allow_null=True)
     updated_at = serializers.DateTimeField(format='%Y-%m-%d', read_only=True)
     
     class Meta:
@@ -156,8 +156,8 @@ class PatientListSerializer(serializers.ModelSerializer):
         if obj.person:
             full_name = f"{obj.person.given_name or ''} {obj.person.family_name or ''}".strip()
             return full_name if full_name else f"Patient {obj.person.person_id}"
-        return f"Patient {obj.person.person_id}"
-    
+        return "Unknown Patient"
+
     def get_age(self, obj):
         if obj.date_of_birth:
             today = date.today()

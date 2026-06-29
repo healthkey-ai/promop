@@ -66,6 +66,7 @@ export default function PatientList() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [selectAllMode, setSelectAllMode] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [orgFilter, setOrgFilter] = useState(ALL_FILTER_VALUE);
@@ -109,10 +110,11 @@ export default function PatientList() {
     fetchPatients();
   }, [fetchPatients]);
 
-  const resetToFirstPage = () => {
+  const resetToFirstPage = useCallback(() => {
     setPage(1);
     setSelectedIds(new Set());
-  };
+    setSelectAllMode(false);
+  }, [setPage]);
 
   const stageOptions = useMemo(
     () => (filterOptions.stages.length > 0 ? filterOptions.stages : ["I", "II", "III", "IV"]),
@@ -121,13 +123,19 @@ export default function PatientList() {
 
   const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.checked) {
-      setSelectedIds(new Set(patients.map((p) => p.person_id)));
-    } else {
+      setSelectAllMode(true);
       setSelectedIds(new Set());
+    } else {
+      setSelectAllMode(false);
     }
   };
 
   const handleSelectOne = (personId: number) => {
+    if (selectAllMode) {
+      setSelectAllMode(false);
+      setSelectedIds(new Set([personId]));
+      return;
+    }
     const next = new Set(selectedIds);
     if (next.has(personId)) next.delete(personId);
     else next.add(personId);
@@ -137,11 +145,18 @@ export default function PatientList() {
   const handleDeleteConfirm = async () => {
     try {
       setDeleting(true);
-      await api.delete("/patient-info/bulk_delete/", {
-        data: { person_ids: Array.from(selectedIds) },
-      });
+      if (selectAllMode) {
+        await api.delete("/patient-info/bulk_delete_filtered/", {
+          params: { org: orgFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter },
+        });
+      } else {
+        await api.delete("/patient-info/bulk_delete/", {
+          data: { person_ids: Array.from(selectedIds) },
+        });
+      }
       const refreshed = await fetchPatients();
       if (!refreshed) return;
+      setSelectAllMode(false);
       setSelectedIds(new Set());
       setDeleteDialogOpen(false);
       setError(null);
@@ -173,7 +188,8 @@ export default function PatientList() {
     selectedIds.has(patient.person_id)
   ).length;
   const isAllSelected =
-    patients.length > 0 && visibleSelectedCount === patients.length;
+    patients.length > 0 &&
+    (selectAllMode || visibleSelectedCount === patients.length);
 
   const handleLogout = () => {
     clearTokens();
@@ -185,13 +201,13 @@ export default function PatientList() {
       <div className="mb-6 flex items-center justify-between">
         <h1 className="text-2xl font-bold text-foreground">PROMOP Admin</h1>
         <div className="flex gap-2">
-          {selectedIds.size > 0 && (
+          {(selectedIds.size > 0 || selectAllMode) && (
             <button
               onClick={() => setDeleteDialogOpen(true)}
               className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
             >
               <Trash2 size={16} />
-              Delete ({selectedIds.size})
+              Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
             </button>
           )}
           <button
@@ -330,6 +346,12 @@ export default function PatientList() {
         {patientCount} patient{patientCount === 1 ? "" : "s"}
       </div>
 
+      {selectAllMode && (
+        <div className="mb-3 rounded-md bg-muted px-4 py-2 text-sm text-muted-foreground">
+          All {patientCount} patient{patientCount === 1 ? "" : "s"} selected.
+        </div>
+      )}
+
       <div className="overflow-hidden rounded-lg border border-border bg-background shadow-sm">
         <table className="w-full text-left text-sm">
           <thead className="border-b border-border bg-muted/50">
@@ -374,7 +396,7 @@ export default function PatientList() {
                   <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                     <input
                       type="checkbox"
-                      checked={selectedIds.has(patient.person_id)}
+                      checked={selectAllMode || selectedIds.has(patient.person_id)}
                       onChange={() => handleSelectOne(patient.person_id)}
                       className="h-4 w-4 rounded border-input"
                     />
@@ -411,10 +433,12 @@ export default function PatientList() {
           totalCount={patientCount}
           onPageChange={(nextPage) => {
             setSelectedIds(new Set());
+            setSelectAllMode(false);
             setPage(nextPage);
           }}
           onPageSizeChange={(nextPageSize) => {
             setSelectedIds(new Set());
+            setSelectAllMode(false);
             setPageSize(nextPageSize);
           }}
           pageSizes={[10, 50]}
@@ -426,9 +450,13 @@ export default function PatientList() {
           <div className="w-full max-w-md rounded-lg bg-background p-6 shadow-xl">
             <h2 className="text-lg font-semibold">Confirm Delete</h2>
             <p className="mt-2 text-sm text-muted-foreground">
-              Are you sure you want to delete {selectedIds.size} patient record
-              {selectedIds.size !== 1 ? "s" : ""}? This action cannot be undone.
+              {selectAllMode
+                ? `Delete all ${patientCount} patient${patientCount === 1 ? "" : "s"} matching the current filters? This action cannot be undone.`
+                : `Are you sure you want to delete ${selectedIds.size} patient record${selectedIds.size !== 1 ? "s" : ""}? This action cannot be undone.`}
             </p>
+            {error && (
+              <p className="mt-3 text-sm text-destructive">{error}</p>
+            )}
             <div className="mt-6 flex justify-end gap-3">
               <button
                 onClick={() => setDeleteDialogOpen(false)}
