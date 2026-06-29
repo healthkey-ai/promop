@@ -44,13 +44,27 @@ interface AccessGrant {
   granted_at: string;
 }
 
-type Section = 'settings' | 'trusts' | 'admins' | 'invitations';
+interface DiseaseCount {
+  disease_slug: string;
+  label: string;
+  count: number;
+}
+
+interface OrgStatsData {
+  org_slug: string;
+  org_name: string;
+  total: number;
+  disease_counts: DiseaseCount[];
+}
+
+type Section = 'settings' | 'trusts' | 'admins' | 'invitations' | 'stats';
 
 export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   const [org, setOrg] = useState<Org | null>(null);
   const [trusts, setTrusts] = useState<Trust[]>([]);
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [accessGrants, setAccessGrants] = useState<AccessGrant[]>([]);
+  const [orgStats, setOrgStats] = useState<OrgStatsData | null>(null);
   const [activeSection, setActiveSection] = useState<Section>('settings');
   const [error, setError] = useState<string | null>(null);
 
@@ -75,11 +89,12 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
 
   const fetchAll = async () => {
     try {
-      const [orgRes, trustRes, invRes, accessRes] = await Promise.all([
+      const [orgRes, trustRes, invRes, accessRes, statsRes] = await Promise.all([
         api.get<Org>(`${base}/`),
         api.get<Trust[]>(`${base}/trusts/`),
         api.get<Invitation[]>(`${base}/invitations/`),
         api.get<AccessGrant[]>(`${base}/access/`),
+        api.get<OrgStatsData[]>('/stats/org-disease/').catch(() => ({ data: [] as OrgStatsData[] })),
       ]);
       setOrg(orgRes.data);
       setOrgName(orgRes.data.name);
@@ -87,6 +102,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       setTrusts(trustRes.data);
       setInvitations(invRes.data);
       setAccessGrants(accessRes.data);
+      setOrgStats(statsRes.data.find((s: OrgStatsData) => s.org_slug === slug) ?? null);
     } catch {
       setError('Failed to load org details.');
     }
@@ -176,6 +192,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
 
   const sections: { key: Section; label: string }[] = [
     { key: 'settings', label: 'Settings' },
+    { key: 'stats', label: 'Stats' },
     { key: 'trusts', label: 'Access Rules' },
     { key: 'admins', label: 'Admins' },
     { key: 'invitations', label: 'Invitations' },
@@ -241,6 +258,38 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
           >
             Save
           </button>
+        </div>
+      )}
+
+      {/* Stats */}
+      {activeSection === 'stats' && (
+        <div>
+          {!orgStats ? (
+            <p className="text-sm text-gray-500">No patient data available for this organization.</p>
+          ) : (
+            <table className="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="text-left px-4 py-2 font-medium text-gray-600">Disease</th>
+                  <th className="text-right px-4 py-2 font-medium text-gray-600">Patients</th>
+                </tr>
+              </thead>
+              <tbody>
+                {orgStats.disease_counts.map(dc => (
+                  <tr key={dc.disease_slug} className="border-t border-gray-100">
+                    <td className="px-4 py-2 text-gray-800">{dc.label}</td>
+                    <td className="px-4 py-2 text-right text-gray-800">{dc.count}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t border-gray-200 bg-gray-50">
+                  <td className="px-4 py-2 font-medium text-gray-700">Total</td>
+                  <td className="px-4 py-2 text-right font-medium text-gray-700">{orgStats.total}</td>
+                </tr>
+              </tfoot>
+            </table>
+          )}
         </div>
       )}
 
