@@ -2150,14 +2150,38 @@ def org_disease_stats(request):
             for r in rows
         ]
 
+    from omop_core.models import OrgTrust
+
     orgs = get_visible_orgs(request.user)
+    org_list = list(orgs.order_by('name'))
+
+    # For each org, find which other orgs have granted it access (trusted_org=org).
+    # Those granting orgs' patients are accessible to this org's users.
+    org_ids = [o.id for o in org_list]
+    trusting_map: dict[int, list[int]] = {o.id: [] for o in org_list}
+    for trust in OrgTrust.objects.filter(trusted_org_id__in=org_ids, granting_org__is_active=True).select_related('granting_org'):
+        trusting_map[trust.trusted_org_id].append(trust.granting_org_id)
+
     result = []
-    for org in orgs.order_by('name'):
-        counts = _disease_counts(PatientInfo.objects.filter(organization=org))
+    for org in org_list:
+        owned_qs = PatientInfo.objects.filter(organization=org)
+        counts = _disease_counts(owned_qs)
+        owned_count = sum(d['count'] for d in counts)
+
+        granting_ids = trusting_map.get(org.id, [])
+        if granting_ids:
+            accessible_count = owned_count + PatientInfo.objects.filter(
+                organization_id__in=granting_ids
+            ).count()
+        else:
+            accessible_count = owned_count
+
         result.append({
             'org_slug': org.slug,
             'org_name': org.name,
-            'total': sum(d['count'] for d in counts),
+            'total': owned_count,
+            'owned_count': owned_count,
+            'accessible_count': accessible_count,
             'disease_counts': counts,
         })
 
@@ -2165,10 +2189,13 @@ def org_disease_stats(request):
     if getattr(request.user, 'is_staff', False) or getattr(request.user, 'is_superuser', False):
         counts = _disease_counts(PatientInfo.objects.filter(organization__isnull=True))
         if counts:
+            unassigned_total = sum(d['count'] for d in counts)
             result.insert(0, {
                 'org_slug': '__unassigned__',
                 'org_name': 'All Patients (Unassigned)',
-                'total': sum(d['count'] for d in counts),
+                'total': unassigned_total,
+                'owned_count': unassigned_total,
+                'accessible_count': unassigned_total,
                 'disease_counts': counts,
             })
 
