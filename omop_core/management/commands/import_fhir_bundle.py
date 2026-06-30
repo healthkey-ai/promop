@@ -141,7 +141,7 @@ class Command(BaseCommand):
             content = json.dumps(mini_bundle).encode('utf-8')
 
             uploaded = SimpleUploadedFile('bundle.json', content, content_type='application/json')
-            django_request = factory.post('/api/patient-info/upload_fhir/', {'file': uploaded})
+            django_request = factory.post('/api/patient-info/upload_fhir/?skip_refresh=true', {'file': uploaded})
             django_request.user = user
             django_request._dont_enforce_csrf_checks = True
 
@@ -177,6 +177,25 @@ class Command(BaseCommand):
             if errors:
                 for e in errors[:3]:
                     self._print(f'    {e}', err=True)
+
+        # Bulk refresh PatientInfo for all imported patients now that OMOP writes are done.
+        self._print('Refreshing PatientInfo for all imported patients…')
+        from omop_core.models import PatientInfo
+        from omop_core.services.patient_info_service import refresh_patient_info
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        close_old_connections()
+        patients = PatientInfo.objects.select_related('person').all()
+        if org:
+            patients = patients.filter(organization=org)
+        refreshed = 0
+        for pi in patients:
+            try:
+                refresh_patient_info(pi.person)
+                infer_lot_for_person(pi.person)
+                refreshed += 1
+            except Exception as exc:
+                self._print(f'  refresh failed for person {pi.person_id}: {exc}', err=True)
+        self._print(f'Refreshed {refreshed} patients.')
 
         self._print(self.style.SUCCESS(
             f'Done. Total: created={total_created} updated={total_updated} errors={total_errors}'
