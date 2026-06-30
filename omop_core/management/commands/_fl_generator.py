@@ -519,7 +519,7 @@ class FLBundleGenerator:
                 codings = [{'system': 'http://ctomop.io/fhir/fl-regimen', 'code': name}]
                 if concept_id:
                     codings.append({
-                        'system': 'http://terminology.hl7.org/CodeSystem/hemonc',
+                        'system': 'http://ohdsi.org/omop/HemOnc',
                         'code': str(concept_id),
                         'display': name,
                     })
