@@ -124,7 +124,8 @@ class Command(BaseCommand):
             )
             action = 'Created' if created else 'Found existing'
             self._print(f'{action} org: {org.name} (slug={org.slug})')
-            _perms.get_request_org = lambda req: org
+            import patient_portal.api.views as _views_mod
+            _views_mod.get_request_org = lambda req: org
 
         factory = RequestFactory()
 
