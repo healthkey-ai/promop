@@ -13,6 +13,42 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        # Production databases created before this migration may lack a PK or
+        # unique constraint on organization.id / organization.slug because the
+        # original 0061_add_organization migration used CREATE TABLE IF NOT
+        # EXISTS raw SQL, which was silently skipped if the table already
+        # existed without those constraints.  Adding them here (idempotently)
+        # is required before we can create foreign keys that reference
+        # organization.id.
+        migrations.RunSQL(
+            sql="""
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'organization'::regclass AND contype = 'p'
+    ) THEN
+        ALTER TABLE organization ADD PRIMARY KEY (id);
+    END IF;
+END $$;
+""",
+            reverse_sql=migrations.RunSQL.noop,
+        ),
+        migrations.RunSQL(
+            sql="""
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'organization'::regclass
+          AND conname = 'organization_slug_key'
+    ) THEN
+        ALTER TABLE organization ADD CONSTRAINT organization_slug_key UNIQUE (slug);
+    END IF;
+END $$;
+""",
+            reverse_sql=migrations.RunSQL.noop,
+        ),
         migrations.AddField(
             model_name="organization",
             name="created_by",
