@@ -6943,3 +6943,220 @@ class UserSerializerOrgAdminTest(TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.data.get('user', resp.data)
         self.assertTrue(data.get('is_org_admin'))
+
+
+# ---------------------------------------------------------------------------
+# Wearable summary field tests
+# ---------------------------------------------------------------------------
+
+class WearablePatientInfoTest(TestCase):
+    """_get_wearable_data aggregates OMOP Measurement/Observation into PatientInfo."""
+
+    def setUp(self):
+        import datetime
+        from omop_core.models import Concept, Vocabulary, Domain, ConceptClass
+        from omop_core.services.mappings import WEARABLE_LOINC
+
+        self.today = datetime.date.today()
+
+        # Minimal vocab stubs
+        vocab_loinc, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_reference': '',
+                      'vocabulary_version': '', 'vocabulary_concept_id': 0},
+        )
+        domain_m, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        domain_o, _ = Domain.objects.get_or_create(
+            domain_id='Observation',
+            defaults={'domain_name': 'Observation', 'domain_concept_id': 27},
+        )
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+
+        base_id = 9_900_000
+        self.concepts = {}
+        for i, (key, loinc_code) in enumerate(WEARABLE_LOINC.items()):
+            c, _ = Concept.objects.get_or_create(
+                concept_id=base_id + i,
+                defaults={
+                    'concept_name': key,
+                    'domain_id': 'Observation' if key == 'sleep_duration' else 'Measurement',
+                    'vocabulary_id': 'LOINC',
+                    'concept_class_id': 'Lab Test',
+                    'concept_code': loinc_code,
+                    'valid_start_date': datetime.date(1970, 1, 1),
+                    'valid_end_date': datetime.date(2099, 12, 31),
+                },
+            )
+            self.concepts[key] = c
+
+        # Measurement type concept required by FK
+        import datetime
+        type_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='Meas Type',
+            defaults={'vocabulary_name': 'Meas Type', 'vocabulary_reference': '',
+                      'vocabulary_version': '', 'vocabulary_concept_id': 0},
+        )
+        type_domain, _ = Domain.objects.get_or_create(
+            domain_id='Type Concept',
+            defaults={'domain_name': 'Type Concept', 'domain_concept_id': 0},
+        )
+        type_cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Meas Type',
+            defaults={'concept_class_name': 'Meas Type', 'concept_class_concept_id': 0},
+        )
+        Concept.objects.get_or_create(
+            concept_id=32856,
+            defaults={
+                'concept_name': 'Lab',
+                'domain_id': 'Type Concept',
+                'vocabulary_id': 'Meas Type',
+                'concept_class_id': 'Meas Type',
+                'concept_code': 'Lab',
+                'valid_start_date': datetime.date(1970, 1, 1),
+                'valid_end_date': datetime.date(2099, 12, 31),
+            },
+        )
+
+        self.person = Person.objects.create(person_id=88_000)
+        PatientInfo.objects.get_or_create(person=self.person)
+        self._meas_id = 8_800_000
+        self._obs_id = 8_900_000
+
+    def _add_measurement(self, concept_key, days_ago, value):
+        """Insert a Measurement for the given concept key."""
+        import datetime
+        from django.utils import timezone
+        self._meas_id += 1
+        d = self.today - datetime.timedelta(days=days_ago)
+        Measurement.objects.create(
+            measurement_id=self._meas_id,
+            person=self.person,
+            measurement_concept=self.concepts[concept_key],
+            measurement_date=d,
+            measurement_datetime=timezone.make_aware(
+                datetime.datetime.combine(d, datetime.time())
+            ),
+            measurement_type_concept_id=32856,
+            value_as_number=value,
+            measurement_source_value=self.concepts[concept_key].concept_code,
+        )
+
+    def _add_sleep_obs(self, days_ago, hours):
+        from omop_core.models import Observation
+        from django.utils import timezone
+        import datetime
+        self._obs_id += 1
+        d = self.today - datetime.timedelta(days=days_ago)
+        Observation.objects.create(
+            observation_id=self._obs_id,
+            person=self.person,
+            observation_concept=self.concepts['sleep_duration'],
+            observation_date=d,
+            observation_datetime=timezone.make_aware(
+                datetime.datetime.combine(d, datetime.time())
+            ),
+            observation_type_concept_id=32856,
+            value_as_number=hours,
+            observation_source_value=self.concepts['sleep_duration'].concept_code,
+        )
+
+    def _refresh(self):
+        from omop_core.services.patient_info_service import refresh_patient_info
+        from omop_core.services.concept_cache import concept_cache_clear
+        concept_cache_clear()
+        return refresh_patient_info(self.person)
+
+    def test_no_wearable_data_leaves_fields_null(self):
+        pi = self._refresh()
+        self.assertIsNone(pi.wearable_last_sync_at)
+        self.assertIsNone(pi.median_daily_steps_30d)
+        self.assertIsNone(pi.wearable_coverage_ratio_30d)
+
+    def test_step_aggregation_30_days(self):
+        # 20 days of step data → meets MIN_VALID_DAYS (7)
+        for d in range(1, 21):
+            self._add_measurement('steps', d, 8000)
+        pi = self._refresh()
+        self.assertIsNotNone(pi.wearable_last_sync_at)
+        self.assertEqual(pi.median_daily_steps_30d, 8000)
+        self.assertIsNotNone(pi.wearable_coverage_ratio_30d)
+
+    def test_coverage_ratio_calculation(self):
+        # Exactly 15 days of step data → ratio = 0.5
+        for d in range(1, 16):
+            self._add_measurement('steps', d, 5000)
+        pi = self._refresh()
+        self.assertAlmostEqual(float(pi.wearable_coverage_ratio_30d), 0.5, places=1)
+
+    def test_insufficient_coverage_leaves_metric_null(self):
+        # Only 3 days → below MIN_VALID_DAYS, steps median should be None
+        for d in range(1, 4):
+            self._add_measurement('steps', d, 10000)
+        pi = self._refresh()
+        self.assertIsNone(pi.median_daily_steps_30d)
+        # But coverage ratio is still computed
+        self.assertIsNotNone(pi.wearable_coverage_ratio_30d)
+
+    def test_cardiovascular_aggregation(self):
+        for d in range(1, 20):
+            self._add_measurement('resting_hr', d, 60)
+            self._add_measurement('hrv_sdnn', d, 45)
+        pi = self._refresh()
+        self.assertEqual(pi.resting_heart_rate_avg_30d, 60)
+        self.assertAlmostEqual(float(pi.hrv_sdnn_avg_30d), 45.0, places=1)
+
+    def test_spo2_artifact_filter(self):
+        # Valid readings
+        for d in range(1, 20):
+            self._add_measurement('spo2', d, 97.0)
+        # Artifact reading below 70 — should be discarded
+        self._add_measurement('spo2', 20, 50.0)
+        pi = self._refresh()
+        # Min of valid readings only
+        self.assertAlmostEqual(float(pi.oxygen_saturation_min_30d), 97.0, places=1)
+
+    def test_activity_trend_improving(self):
+        # First half (days 16–29): 3000 steps/day; second half (days 1–15): 9000 steps/day
+        for d in range(16, 30):
+            self._add_measurement('steps', d, 3000)
+        for d in range(1, 16):
+            self._add_measurement('steps', d, 9000)
+        pi = self._refresh()
+        self.assertEqual(pi.activity_trend_30d, 'improving')
+
+    def test_activity_trend_declining(self):
+        for d in range(16, 30):
+            self._add_measurement('steps', d, 9000)
+        for d in range(1, 16):
+            self._add_measurement('steps', d, 3000)
+        pi = self._refresh()
+        self.assertEqual(pi.activity_trend_30d, 'declining')
+
+    def test_sleep_duration_from_observation(self):
+        for d in range(1, 20):
+            self._add_sleep_obs(d, 7.5)
+        pi = self._refresh()
+        self.assertAlmostEqual(float(pi.sleep_duration_hours_avg_30d), 7.5, places=1)
+
+    def test_wearable_fields_in_api_response(self):
+        """New fields appear in GET /api/patients/{id}/."""
+        user = _make_user('wearable-test@example.com', is_staff=True)
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get(f'/api/patient-info/{self.person.person_id}/')
+        self.assertEqual(resp.status_code, 200)
+        pi_data = resp.data.get('patient_info', resp.data)
+        for field in [
+            'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
+            'median_daily_steps_30d', 'active_minutes_per_day_30d',
+            'activity_trend_30d', 'resting_heart_rate_avg_30d',
+            'hrv_sdnn_avg_30d', 'oxygen_saturation_min_30d',
+            'respiratory_rate_avg_30d', 'sleep_duration_hours_avg_30d',
+        ]:
+            self.assertIn(field, pi_data, f'Missing field: {field}')

@@ -1566,6 +1566,18 @@ class PatientInfo(models.Model):
     concomitant_medications = models.TextField(blank=True, null=True)
     concomitant_medication_date = models.DateField(blank=True, null=True)
 
+    # Wearable summary fields (derived from OMOP Measurement/Observation, 30-day window)
+    wearable_last_sync_at = models.DateTimeField(blank=True, null=True, help_text="Latest wearable sample timestamp")
+    wearable_coverage_ratio_30d = models.DecimalField(max_digits=4, decimal_places=2, blank=True, null=True, help_text="Valid wearable days / 30 (data quality indicator)")
+    median_daily_steps_30d = models.IntegerField(blank=True, null=True, help_text="Median daily step count over valid days in last 30 days")
+    active_minutes_per_day_30d = models.DecimalField(max_digits=5, decimal_places=1, blank=True, null=True, help_text="Mean daily active/exercise minutes over last 30 days")
+    activity_trend_30d = models.CharField(max_length=20, blank=True, null=True, help_text="Activity trend: improving, stable, declining, or insufficient_data")
+    resting_heart_rate_avg_30d = models.IntegerField(blank=True, null=True, help_text="Mean resting heart rate over last 30 days")
+    hrv_sdnn_avg_30d = models.DecimalField(max_digits=6, decimal_places=1, blank=True, null=True, help_text="Mean HRV SDNN over last 30 days (ms)")
+    oxygen_saturation_min_30d = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True, help_text="Minimum valid SpO2 reading over last 30 days (%)")
+    respiratory_rate_avg_30d = models.DecimalField(max_digits=5, decimal_places=1, blank=True, null=True, help_text="Mean respiratory rate over last 30 days (breaths/min)")
+    sleep_duration_hours_avg_30d = models.DecimalField(max_digits=4, decimal_places=1, blank=True, null=True, help_text="Mean nightly sleep duration over last 30 days (hours)")
+
     # Remission and washout periods
     remission_duration_min = models.TextField(blank=True, null=True)
     washout_period_duration = models.TextField(blank=True, null=True)

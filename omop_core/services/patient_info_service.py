@@ -7,13 +7,19 @@ Usage:
 """
 
 import math
-from datetime import date
+import statistics
+from datetime import date, timedelta
 from django.db import transaction
+from django.utils import timezone
 from omop_core.models import (
     Person, PatientInfo, ConditionOccurrence, Concept,
     Measurement, Observation, DrugExposure, Location, ProcedureOccurrence,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
+from omop_core.services.mappings import (
+    WEARABLE_LOINC, WEARABLE_ARTIFACT_BOUNDS, WEARABLE_MIN_VALID_DAYS,
+    WEARABLE_TREND_IMPROVING_PCT, WEARABLE_TREND_DECLINING_PCT,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +79,12 @@ _OMOP_DERIVED_FIELDS = [
     'best_response', 'measurable_disease_by_recist_status',
     # Procedures
     'prior_procedures',
+    # Wearable summaries
+    'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
+    'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
+    'resting_heart_rate_avg_30d', 'hrv_sdnn_avg_30d',
+    'oxygen_saturation_min_30d', 'respiratory_rate_avg_30d',
+    'sleep_duration_hours_avg_30d',
 ]
 
 
@@ -220,6 +232,7 @@ def refresh_patient_info(person: Person) -> PatientInfo:
             _get_cll_data,
             _get_lymphoma_data,
             _get_prior_procedures,
+            _get_wearable_data,
         ]:
             for field, value in section_fn(person).items():
                 setattr(patient_info, field, value)
@@ -1147,6 +1160,165 @@ def _compute_derived_fields(patient_info: PatientInfo) -> None:
         m.get('gene', '').lower() == 'tp53' and m.get('interpretation') == 'pathogenic'
         for m in mutations
     )
+
+
+def _get_wearable_data(person: Person) -> dict:
+    """Derive 30-day wearable summaries from OMOP Measurement/Observation rows."""
+    data = {}
+
+    all_loinc_codes = list(WEARABLE_LOINC.values())
+
+    # Find the latest wearable sample date across Measurements and Observations
+    latest_m = (
+        Measurement.objects.filter(
+            person=person,
+            measurement_concept__concept_code__in=all_loinc_codes,
+            value_as_number__isnull=False,
+        )
+        .order_by('-measurement_datetime', '-measurement_date')
+        .first()
+    )
+    latest_o = (
+        Observation.objects.filter(
+            person=person,
+            observation_concept__concept_code=WEARABLE_LOINC['sleep_duration'],
+            value_as_number__isnull=False,
+        )
+        .order_by('-observation_datetime', '-observation_date')
+        .first()
+    )
+    if not latest_m and not latest_o:
+        return data
+
+    def _to_dt(obj, dt_field, date_field):
+        dt = getattr(obj, dt_field, None)
+        if dt:
+            return dt
+        d = getattr(obj, date_field)
+        return timezone.make_aware(
+            timezone.datetime.combine(d, timezone.datetime.min.time())
+        )
+
+    candidates = []
+    if latest_m:
+        candidates.append(_to_dt(latest_m, 'measurement_datetime', 'measurement_date'))
+    if latest_o:
+        candidates.append(_to_dt(latest_o, 'observation_datetime', 'observation_date'))
+    anchor_dt = max(candidates)
+    data['wearable_last_sync_at'] = anchor_dt
+
+    window_start = anchor_dt.date() - timedelta(days=29)
+    window_end = anchor_dt.date()
+
+    def _fetch_daily(loinc_code):
+        """Return {date: [valid float values]} for a metric over the 30-day window."""
+        lo, hi = WEARABLE_ARTIFACT_BOUNDS.get(
+            next((k for k, v in WEARABLE_LOINC.items() if v == loinc_code), ''),
+            (None, None),
+        )
+        qs = Measurement.objects.filter(
+            person=person,
+            measurement_concept__concept_code=loinc_code,
+            value_as_number__isnull=False,
+            measurement_date__gte=window_start,
+            measurement_date__lte=window_end,
+        ).values_list('measurement_date', 'value_as_number')
+        daily: dict[date, list[float]] = {}
+        for mdate, val in qs:
+            fval = float(val)
+            if lo is not None and not (lo <= fval <= hi):
+                continue
+            daily.setdefault(mdate, []).append(fval)
+        return daily
+
+    # ---- Steps -------------------------------------------------------
+    steps_daily = _fetch_daily(WEARABLE_LOINC['steps'])
+    steps_totals = {d: sum(vs) for d, vs in steps_daily.items()}
+    # Also fetch sleep from Observation (source_value = LOINC code)
+    sleep_obs = Observation.objects.filter(
+        person=person,
+        observation_concept__concept_code=WEARABLE_LOINC['sleep_duration'],
+        value_as_number__isnull=False,
+        observation_date__gte=window_start,
+        observation_date__lte=window_end,
+    ).values_list('observation_date', 'value_as_number')
+    sleep_daily: dict[date, list[float]] = {}
+    lo_s, hi_s = WEARABLE_ARTIFACT_BOUNDS['sleep_duration']
+    for odate, val in sleep_obs:
+        fval = float(val)
+        if lo_s <= fval <= hi_s:
+            sleep_daily.setdefault(odate, []).append(fval)
+
+    # ---- Coverage ratio ----------------------------------------------
+    all_valid_days = set(steps_totals.keys())
+    coverage = round(len(all_valid_days) / 30.0, 2)
+    data['wearable_coverage_ratio_30d'] = coverage
+
+    # ---- Median daily steps ------------------------------------------
+    if len(steps_totals) >= WEARABLE_MIN_VALID_DAYS:
+        data['median_daily_steps_30d'] = int(statistics.median(steps_totals.values()))
+
+    # ---- Active minutes ----------------------------------------------
+    active_daily = _fetch_daily(WEARABLE_LOINC['active_minutes'])
+    active_totals = {d: sum(vs) for d, vs in active_daily.items()}
+    if len(active_totals) >= WEARABLE_MIN_VALID_DAYS:
+        data['active_minutes_per_day_30d'] = round(
+            statistics.mean(active_totals.values()), 1
+        )
+
+    # ---- Activity trend (steps, first vs second half of window) ------
+    if steps_totals:
+        mid = window_start + timedelta(days=15)
+        first_half = [v for d, v in steps_totals.items() if d < mid]
+        second_half = [v for d, v in steps_totals.items() if d >= mid]
+        if len(first_half) >= WEARABLE_MIN_VALID_DAYS and len(second_half) >= WEARABLE_MIN_VALID_DAYS:
+            mean_first = statistics.mean(first_half)
+            mean_second = statistics.mean(second_half)
+            if mean_first > 0:
+                pct_change = (mean_second - mean_first) / mean_first * 100
+            else:
+                pct_change = 0.0
+            if pct_change >= WEARABLE_TREND_IMPROVING_PCT:
+                data['activity_trend_30d'] = 'improving'
+            elif pct_change <= WEARABLE_TREND_DECLINING_PCT:
+                data['activity_trend_30d'] = 'declining'
+            else:
+                data['activity_trend_30d'] = 'stable'
+        else:
+            data['activity_trend_30d'] = 'insufficient_data'
+
+    # ---- Resting heart rate ------------------------------------------
+    rhr_daily = _fetch_daily(WEARABLE_LOINC['resting_hr'])
+    rhr_means = {d: statistics.mean(vs) for d, vs in rhr_daily.items()}
+    if len(rhr_means) >= WEARABLE_MIN_VALID_DAYS:
+        data['resting_heart_rate_avg_30d'] = int(round(statistics.mean(rhr_means.values())))
+
+    # ---- HRV SDNN ----------------------------------------------------
+    hrv_daily = _fetch_daily(WEARABLE_LOINC['hrv_sdnn'])
+    hrv_means = {d: statistics.mean(vs) for d, vs in hrv_daily.items()}
+    if len(hrv_means) >= WEARABLE_MIN_VALID_DAYS:
+        data['hrv_sdnn_avg_30d'] = round(statistics.mean(hrv_means.values()), 1)
+
+    # ---- SpO2 minimum (after artifact filter) ------------------------
+    spo2_daily = _fetch_daily(WEARABLE_LOINC['spo2'])
+    all_spo2 = [v for vs in spo2_daily.values() for v in vs]
+    if all_spo2:
+        data['oxygen_saturation_min_30d'] = round(min(all_spo2), 2)
+
+    # ---- Respiratory rate -------------------------------------------
+    rr_daily = _fetch_daily(WEARABLE_LOINC['respiratory_rate'])
+    rr_means = {d: statistics.mean(vs) for d, vs in rr_daily.items()}
+    if len(rr_means) >= WEARABLE_MIN_VALID_DAYS:
+        data['respiratory_rate_avg_30d'] = round(statistics.mean(rr_means.values()), 1)
+
+    # ---- Sleep duration (from Observation) ---------------------------
+    sleep_nightly = {d: sum(vs) for d, vs in sleep_daily.items()}
+    if len(sleep_nightly) >= WEARABLE_MIN_VALID_DAYS:
+        data['sleep_duration_hours_avg_30d'] = round(
+            statistics.mean(sleep_nightly.values()), 1
+        )
+
+    return data
 
 
 # ---------------------------------------------------------------------------
