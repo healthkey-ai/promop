@@ -52,6 +52,8 @@ class Command(BaseCommand):
                             help='Skip first N patients (for resuming after failure)')
         parser.add_argument('--username', default='admin',
                             help='Django user to authenticate as (default: admin)')
+        parser.add_argument('--org', default=None, dest='org_slug',
+                            help='Org slug to create (if needed) and assign all imported patients to')
 
     def _print(self, msg, err=False):
         stream = self.stderr if err else self.stdout
@@ -104,6 +106,20 @@ class Command(BaseCommand):
                 f"User '{options['username']}' not found. "
                 "Run: manage.py createsuperuser"
             )
+
+        # Org setup — monkey-patch get_request_org so the upload view stamps the
+        # correct org on every PatientInfo it creates, even for superuser requests.
+        org = None
+        if options['org_slug']:
+            from omop_core.models import Organization
+            import patient_portal.api.permissions as _perms
+            org, created = Organization.objects.get_or_create(
+                slug=options['org_slug'],
+                defaults={'name': options['org_slug'].upper(), 'created_by': user},
+            )
+            action = 'Created' if created else 'Found existing'
+            self._print(f'{action} org: {org.name} (slug={org.slug})')
+            _perms.get_request_org = lambda req: org
 
         factory = RequestFactory()
 
