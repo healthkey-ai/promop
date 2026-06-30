@@ -249,6 +249,20 @@ export interface PatientInfo {
   phone_number?: string | null;
   facility_name?: string | null;
   prior_procedures?: Array<{procedure: string; date?: string | null; concept_id?: number}> | null;
+
+  // Wearable summary fields (OMOP-derived, 30-day rolling window)
+  // DecimalField values arrive as strings over JSON (DRF default); typed as string | number
+  // so both the API string and any locally-coerced number are accepted.
+  wearable_last_sync_at?: string;
+  wearable_coverage_ratio_30d?: string | number;
+  median_daily_steps_30d?: number;
+  active_minutes_per_day_30d?: string | number;
+  activity_trend_30d?: 'improving' | 'stable' | 'declining' | 'insufficient_data';
+  resting_heart_rate_avg_30d?: number;
+  hrv_sdnn_avg_30d?: string | number;
+  oxygen_saturation_min_30d?: string | number;
+  respiratory_rate_avg_30d?: string | number;
+  sleep_duration_hours_avg_30d?: string | number;
 }
 
 export interface PatientDocument {
