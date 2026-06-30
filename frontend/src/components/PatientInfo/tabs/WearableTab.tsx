@@ -5,7 +5,9 @@ const ACTIVITY_TREND_OPTIONS = ['improving', 'stable', 'declining', 'insufficien
 
 interface Props {
   formData: Record<string, unknown>;
-  onChange: (field: string, value: unknown) => void;
+  // onChange is accepted for API consistency with other tabs but not invoked —
+  // all wearable fields are read-only (derived from OMOP, not user-editable).
+  onChange?: (field: string, value: unknown) => void;
 }
 
 function formatSyncDate(raw: unknown): string {

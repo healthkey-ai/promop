@@ -7144,6 +7144,60 @@ class WearablePatientInfoTest(TestCase):
         pi = self._refresh()
         self.assertAlmostEqual(float(pi.sleep_duration_hours_avg_30d), 7.5, places=1)
 
+    def test_timestamped_sample_anchors_after_older_date_only_sample(self):
+        import datetime
+        from django.utils import timezone
+
+        self._meas_id += 1
+        old_date = self.today - datetime.timedelta(days=60)
+        Measurement.objects.create(
+            measurement_id=self._meas_id,
+            person=self.person,
+            measurement_concept=self.concepts['steps'],
+            measurement_date=old_date,
+            measurement_datetime=None,
+            measurement_type_concept_id=32856,
+            value_as_number=1000,
+            measurement_source_value=self.concepts['steps'].concept_code,
+        )
+        self._meas_id += 1
+        Measurement.objects.create(
+            measurement_id=self._meas_id,
+            person=self.person,
+            measurement_concept=self.concepts['resting_hr'],
+            measurement_date=self.today,
+            measurement_datetime=timezone.make_aware(
+                datetime.datetime.combine(self.today, datetime.time(hour=12))
+            ),
+            measurement_type_concept_id=32856,
+            value_as_number=65,
+            measurement_source_value=self.concepts['resting_hr'].concept_code,
+        )
+
+        pi = self._refresh()
+        self.assertEqual(pi.wearable_last_sync_at.date(), self.today)
+
+    def test_activity_trend_stable(self):
+        # Uniform 8000 steps/day for all 30 days → < 10% change → stable
+        for d in range(1, 31):
+            self._add_measurement('steps', d, 8000)
+        pi = self._refresh()
+        self.assertEqual(pi.activity_trend_30d, 'stable')
+
+    def test_activity_trend_insufficient_when_no_steps(self):
+        # Only HR data, no steps → trend must be 'insufficient_data', not None
+        for d in range(1, 20):
+            self._add_measurement('resting_hr', d, 65)
+        pi = self._refresh()
+        self.assertEqual(pi.activity_trend_30d, 'insufficient_data')
+
+    def test_coverage_ratio_counts_non_step_metrics(self):
+        # HR data only (no steps) → coverage should reflect those days, not 0.0
+        for d in range(1, 16):
+            self._add_measurement('resting_hr', d, 65)
+        pi = self._refresh()
+        self.assertGreater(float(pi.wearable_coverage_ratio_30d), 0.0)
+
     def test_wearable_fields_in_api_response(self):
         """New fields appear in GET /api/patients/{id}/."""
         user = _make_user('wearable-test@example.com', is_staff=True)
@@ -7160,3 +7214,29 @@ class WearablePatientInfoTest(TestCase):
             'respiratory_rate_avg_30d', 'sleep_duration_hours_avg_30d',
         ]:
             self.assertIn(field, pi_data, f'Missing field: {field}')
+
+    def test_wearable_fields_are_serializer_read_only(self):
+        from patient_portal.api.serializers import PatientInfoSerializer
+
+        pi = PatientInfo.objects.get(person=self.person)
+        serializer = PatientInfoSerializer(
+            pi,
+            data={
+                'median_daily_steps_30d': 99999,
+                'activity_trend_30d': 'improving',
+            },
+            partial=True,
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
+        pi.refresh_from_db()
+        self.assertIsNone(pi.median_daily_steps_30d)
+        self.assertIsNone(pi.activity_trend_30d)
+
+    def test_wearable_endpoint_requires_authentication(self):
+        """Unauthenticated requests to patient-info must be rejected."""
+        from rest_framework.test import APIClient as AnonClient
+        anon = AnonClient()
+        resp = anon.get(f'/api/patient-info/{self.person.person_id}/')
+        self.assertIn(resp.status_code, [401, 403])
