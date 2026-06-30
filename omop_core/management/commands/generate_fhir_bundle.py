@@ -195,6 +195,11 @@ class Command(BaseCommand):
                 bm_obs = self.generate_bone_marrow_biopsy(i, diagnosis_date)
                 bundle["entry"].append(bm_obs)
 
+            # Generate wearable observations (~70% of patients have synced wearable data)
+            if random.random() < 0.7:
+                for obs in self.generate_wearable_observations(i):
+                    bundle["entry"].append(obs)
+
         return bundle
 
     def generate_bone_marrow_biopsy(self, patient_id, diagnosis_date):
@@ -1512,6 +1517,83 @@ class Command(BaseCommand):
         
         random_days = random.randrange(days_between)
         return min_diagnosis + timedelta(days=random_days)
+
+    def generate_wearable_observations(self, patient_id):
+        """Generate 30 days of synthetic wearable Observations (steps, HR, SpO2, sleep, etc.)."""
+        today = datetime.now().date()
+        entries = []
+        # LOINC codes matching WEARABLE_LOINC in omop_core/services/mappings.py
+        metrics = [
+            ('55423-8', 'Steps count', 'steps', '/d',  '/d',
+             lambda: round(random.gauss(7500, 2500))),
+            ('77592-4', 'Active minutes', 'min',  'min', 'min',
+             lambda: round(random.gauss(35, 12))),
+            ('40443-4', 'Resting heart rate', 'bpm', '/min', '/min',
+             lambda: round(random.gauss(68, 8))),
+            ('80404-7', 'HRV SDNN', 'ms',   'ms',  'ms',
+             lambda: round(random.gauss(45, 15), 1)),
+            ('59408-5', 'SpO2', '%',    '%',   '%',
+             lambda: round(random.gauss(97.5, 0.8), 1)),
+            ('9279-1',  'Respiratory rate', 'breaths/min', '/min', '/min',
+             lambda: round(random.gauss(15, 2), 1)),
+        ]
+        obs_counter = hash(f'wearable-{patient_id}') % 10_000_000
+
+        for days_ago in range(1, 31):
+            sample_date = (today - timedelta(days=days_ago)).isoformat()
+            for loinc, display, unit_text, unit_code, unit_sys_code, value_fn in metrics:
+                obs_counter += 1
+                value = max(0, value_fn())
+                entries.append({
+                    "fullUrl": f"http://example.org/Observation/wearable-{patient_id}-{loinc}-{days_ago}",
+                    "resource": {
+                        "resourceType": "Observation",
+                        "id": f"wearable-{patient_id}-{loinc}-{days_ago}",
+                        "status": "final",
+                        "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "activity"}]}],
+                        "code": {
+                            "coding": [{"system": "http://loinc.org", "code": loinc, "display": display}],
+                            "text": display,
+                        },
+                        "subject": {"reference": f"Patient/{patient_id}"},
+                        "effectiveDateTime": sample_date,
+                        "valueQuantity": {
+                            "value": value,
+                            "unit": unit_text,
+                            "system": "http://unitsofmeasure.org",
+                            "code": unit_sys_code,
+                        },
+                    },
+                })
+
+        # Sleep comes from Observation with a different category
+        for days_ago in range(1, 31):
+            sample_date = (today - timedelta(days=days_ago)).isoformat()
+            obs_counter += 1
+            sleep_hrs = round(max(3.0, min(12.0, random.gauss(7.2, 1.1))), 1)
+            entries.append({
+                "fullUrl": f"http://example.org/Observation/wearable-{patient_id}-sleep-{days_ago}",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": f"wearable-{patient_id}-sleep-{days_ago}",
+                    "status": "final",
+                    "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "activity"}]}],
+                    "code": {
+                        "coding": [{"system": "http://loinc.org", "code": "93832-4", "display": "Sleep duration"}],
+                        "text": "Sleep duration",
+                    },
+                    "subject": {"reference": f"Patient/{patient_id}"},
+                    "effectiveDateTime": sample_date,
+                    "valueQuantity": {
+                        "value": sleep_hrs,
+                        "unit": "h",
+                        "system": "http://unitsofmeasure.org",
+                        "code": "h",
+                    },
+                },
+            })
+
+        return entries
 
     def get_first_names(self):
         return [
