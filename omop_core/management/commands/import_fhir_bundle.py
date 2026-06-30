@@ -50,8 +50,8 @@ class Command(BaseCommand):
                             help='Patients per batch (default: 1)')
         parser.add_argument('--start-from', type=int, default=0, dest='start_from',
                             help='Skip first N patients (for resuming after failure)')
-        parser.add_argument('--username', default='admin',
-                            help='Django user to authenticate as (default: admin)')
+        parser.add_argument('--email', default=None, dest='email',
+                            help='Admin email to authenticate as (default: first superuser)')
         parser.add_argument('--org', default=None, dest='org_slug',
                             help='Org slug to create (if needed) and assign all imported patients to')
 
@@ -100,11 +100,16 @@ class Command(BaseCommand):
         close_old_connections()
         User = get_user_model()
         try:
-            user = User.objects.get(username=options['username'])
+            if options['email']:
+                user = User.objects.get(email=options['email'])
+            else:
+                user = User.objects.filter(is_superuser=True).order_by('created_at').first()
+                if user is None:
+                    raise CommandError('No superuser found. Run: manage.py createsuperuser')
+                self._print(f'Authenticating as superuser: {user.email or user.uid}')
         except User.DoesNotExist:
             raise CommandError(
-                f"User '{options['username']}' not found. "
-                "Run: manage.py createsuperuser"
+                f"User with email '{options['email']}' not found."
             )
 
         # Org setup — monkey-patch get_request_org so the upload view stamps the
