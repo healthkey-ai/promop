@@ -2038,7 +2038,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     # Stamp the org derived from the OAuth2 token so this patient
                     # is scoped to the uploading service client's tenant.
                     upload_org = get_request_org(request)
-                    if upload_org is not None:
+                    if upload_org is not None and patient_info.organization_id is None:
                         _patch['organization'] = upload_org
 
                     # Apply patch to PatientInfo (suppress signal-triggering save)

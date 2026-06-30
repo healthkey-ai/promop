@@ -102,11 +102,19 @@ _FIRST_NAMES = [
     'James', 'Robert', 'John', 'Michael', 'William', 'David', 'Richard', 'Joseph',
     'Mary', 'Patricia', 'Jennifer', 'Linda', 'Barbara', 'Elizabeth', 'Susan', 'Jessica',
     'Thomas', 'Charles', 'Gary', 'George', 'Dorothy', 'Helen', 'Sandra', 'Donna',
+    'Christopher', 'Daniel', 'Paul', 'Mark', 'Donald', 'Steven', 'Kenneth', 'Andrew',
+    'Nancy', 'Betty', 'Margaret', 'Ruth', 'Lisa', 'Karen', 'Carol', 'Amanda',
+    'Kevin', 'Brian', 'Timothy', 'Ronald', 'Anthony', 'Edward', 'Jason', 'Jeffrey',
+    'Sharon', 'Cynthia', 'Emily', 'Angela', 'Melissa', 'Brenda', 'Amy', 'Anna',
 ]
 _LAST_NAMES = [
     'Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis',
     'Wilson', 'Anderson', 'Taylor', 'Thomas', 'Jackson', 'White', 'Harris', 'Martin',
     'Thompson', 'Young', 'Robinson', 'Lewis', 'Walker', 'Hall', 'Allen', 'Wright',
+    'Scott', 'Green', 'Adams', 'Baker', 'Nelson', 'Carter', 'Mitchell', 'Perez',
+    'Roberts', 'Turner', 'Phillips', 'Campbell', 'Parker', 'Evans', 'Edwards', 'Collins',
+    'Stewart', 'Sanchez', 'Morris', 'Rogers', 'Reed', 'Cook', 'Morgan', 'Bell',
+    'Murphy', 'Bailey', 'Rivera', 'Cooper', 'Richardson', 'Cox', 'Howard', 'Ward',
 ]
 _ETHNICITIES       = ['Caucasian/White', 'Hispanic/Latino', 'Black/African-American', 'Asian', 'Native American']
 _ETHNICITY_WEIGHTS = [72, 10, 10, 6, 2]
