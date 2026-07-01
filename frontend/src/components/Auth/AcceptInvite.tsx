@@ -17,12 +17,8 @@ export default function AcceptInvite() {
   const token = params.get('token') ?? '';
 
   const [state, setState] = useState<State>(token ? 'ready' : 'error');
-  const [message, setMessage] = useState('');
+  const [message, setMessage] = useState(token ? '' : 'No invitation token found in this link.');
   const [confirming, setConfirming] = useState(false);
-
-  useEffect(() => {
-    if (!token) setMessage('No invitation token found in this link.');
-  }, [token]);
 
   const handleAccept = async () => {
     setConfirming(true);

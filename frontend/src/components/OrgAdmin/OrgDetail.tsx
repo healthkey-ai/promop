@@ -117,6 +117,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     }
   }, [slug, base]);
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
   const handleSaveSettings = async () => {
