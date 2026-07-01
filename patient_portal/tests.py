@@ -6737,10 +6737,48 @@ class OrgInvitationFlowTest(TestCase):
             'role': 'doctor',
         })
         self.assertEqual(resp.status_code, 201)
-        self.assertFalse(resp.data['access_granted'])
+        self.assertTrue(resp.data['access_granted'])
+        invitee = Identity.objects.get(email='newuser@example.com', issuer='urn:local')
         self.assertTrue(
             OrgInvitation.objects.filter(org=self.org, email='newuser@example.com').exists()
         )
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='doctor').exists()
+        )
+
+    def test_invite_unknown_user_creates_placeholder_identity(self):
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'placeholder@example.com',
+            'role': 'navigator',
+        })
+        self.assertEqual(resp.status_code, 201)
+        invitee = Identity.objects.get(email='placeholder@example.com', issuer='urn:local')
+        self.assertFalse(invitee.has_usable_password())
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='navigator').exists()
+        )
+
+    def test_partner_auth_identity_claims_placeholder_access(self):
+        placeholder = Identity.objects.create_user(email='partner@example.com', password=None)
+        GroupAccess.objects.create(identity=placeholder, org=self.org, role='doctor')
+
+        from patient_portal.api.authentication import PartnerAuthentication
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(
+            issuer='https://issuer.example.com',
+            sub='partner-sub',
+            email='partner@example.com',
+            name='Partner User',
+            raw={},
+        )
+
+        identity = PartnerAuthentication._get_or_create_identity(claims)
+        self.assertNotEqual(identity.pk, placeholder.pk)
+        self.assertEqual(identity.email, 'partner@example.com')
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=identity, org=self.org, role='doctor').exists()
+        )
+        self.assertFalse(GroupAccess.objects.filter(identity=placeholder).exists())
 
     def test_invite_existing_user_grants_access_immediately(self):
         invitee = Identity.objects.create_user(email='existing-user@example.com', password='pass')

@@ -115,12 +115,25 @@ class PartnerAuthentication(BaseAuthentication):
     def _get_or_create_identity(claims: TokenClaims) -> Identity:
         identity, created = Identity.objects.get_or_create_from_claims(claims)
         if created:
+            if claims.email:
+                identity.email = claims.email
+            if claims.name:
+                identity.name = claims.name
             identity.set_unusable_password()
-            identity.save(update_fields=["password"])
+            identity.save(update_fields=["email", "name", "password"])
+            _claim_placeholder_access(identity, claims.email)
             logger.info(
                 "partner_auth: provisioned identity %d (%s|%s)",
                 identity.pk, claims.issuer, claims.sub,
             )
+        elif claims.email and not identity.email:
+            identity.email = claims.email
+            if claims.name and not identity.name:
+                identity.name = claims.name
+                identity.save(update_fields=["email", "name"])
+            else:
+                identity.save(update_fields=["email"])
+            _claim_placeholder_access(identity, claims.email)
         return identity
 
 
@@ -135,6 +148,41 @@ def _ensure_person(identity, claims=None):
         email = identity.email
 
     resolve_or_create_person(identity, email=email)
+
+
+def _claim_placeholder_access(identity: Identity, email: str | None) -> None:
+    """Move invite grants from an unusable local placeholder to a real login identity."""
+    if not email or identity.issuer == "urn:local":
+        return
+
+    from omop_core.models import GroupAccess
+
+    placeholders = Identity.objects.filter(
+        email__iexact=email,
+        issuer="urn:local",
+    ).exclude(pk=identity.pk)
+
+    role_rank = {"org_admin": 3, "doctor": 2, "navigator": 1}
+    for placeholder in placeholders:
+        if placeholder.has_usable_password():
+            continue
+
+        for grant in list(GroupAccess.objects.filter(identity=placeholder)):
+            existing = GroupAccess.objects.filter(
+                identity=identity,
+                org=grant.org,
+                group=grant.group,
+            ).first()
+            if existing:
+                if role_rank.get(existing.role, 0) < role_rank.get(grant.role, 0):
+                    existing.role = grant.role
+                    existing.granted_by = grant.granted_by
+                    existing.expires_at = grant.expires_at
+                    existing.save(update_fields=["role", "granted_by", "expires_at"])
+                grant.delete()
+            else:
+                grant.identity = identity
+                grant.save(update_fields=["identity"])
 
 
 class ServiceTokenAuthentication(BaseAuthentication):

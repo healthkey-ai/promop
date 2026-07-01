@@ -124,6 +124,13 @@ def _find_identity_by_email(email):
     )
 
 
+def _get_or_create_invitee_identity(email):
+    identity = _find_identity_by_email(email)
+    if identity:
+        return identity
+    return Identity.objects.create_user(email=email, password=None)
+
+
 ROLE_RANK = {'org_admin': 3, 'doctor': 2, 'navigator': 1}
 
 
@@ -235,9 +242,8 @@ class OrgInviteView(APIView):
                     expires_at=expires_at,
                 )
 
-            identity = _find_identity_by_email(email)
-            if identity:
-                _grant_org_access(identity, org, role, request.user)
+            identity = _get_or_create_invitee_identity(email)
+            _grant_org_access(identity, org, role, request.user)
 
         email_warning = None
         try:
@@ -252,7 +258,7 @@ class OrgInviteView(APIView):
             confirmed_at__isnull=True, cancelled_at__isnull=True,
         ).exclude(id=invitation.id).update(cancelled_at=timezone.now())
         data = OrgInvitationSerializer(invitation).data
-        data['access_granted'] = bool(identity)
+        data['access_granted'] = True
         if email_warning:
             data['email_warning'] = email_warning
         return Response(data, status=status.HTTP_201_CREATED)
