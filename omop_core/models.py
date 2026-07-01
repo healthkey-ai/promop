@@ -49,6 +49,12 @@ class Organization(models.Model):
     slug = models.SlugField(max_length=60, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
     is_active = models.BooleanField(default=True)
+    allows_public_aggregated_data = models.BooleanField(
+        default=False,
+        help_text="When true, aggregated de-identified data from this org is "
+                  "available for analysis in PRism Analytics to any signed-up user. "
+                  "Does not grant access to individual patient records in PRomop.",
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='+',

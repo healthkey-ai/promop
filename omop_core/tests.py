@@ -721,7 +721,7 @@ class FLBundleGeneratorTest(TestCase):
         for stmt in regimen_stmts:
             systems = {c['system'] for c in stmt['medicationCodeableConcept']['coding']}
             # HemOnc coding should be present for DB-sourced regimens (not radiation)
-            has_hemonc = 'http://terminology.hl7.org/CodeSystem/hemonc' in systems
+            has_hemonc = 'http://ohdsi.org/omop/HemOnc' in systems
             is_radiation_only = systems == {'http://ctomop.io/fhir/fl-regimen'}
             self.assertTrue(has_hemonc or is_radiation_only,
                             f"Unexpected coding systems: {systems}")
