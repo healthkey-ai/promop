@@ -2463,14 +2463,17 @@ class PersonViewSet(viewsets.GenericViewSet):
         except (Person.DoesNotExist, ValueError):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        org = get_request_org(request)
-        if org is not None:
-            if not PatientInfo.objects.filter(person=person, organization=org).exists():
-                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        elif not (getattr(request.user, 'is_superuser', False) or getattr(request.user, 'is_staff', False)):
-            from omop_core.authorization import can_access_patient
-            if not can_access_patient(request.user, person.person_id):
-                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        # Trusted backend (service-token): skip ACL — already validated at
+        # the permission layer (ScopedTokenPermission).
+        if request.auth != "service-token":
+            org = get_request_org(request)
+            if org is not None:
+                if not PatientInfo.objects.filter(person=person, organization=org).exists():
+                    return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+            elif not (getattr(request.user, 'is_superuser', False) or getattr(request.user, 'is_staff', False)):
+                from omop_core.authorization import can_access_patient
+                if not can_access_patient(request.user, person.person_id):
+                    return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         changed = []
         for field, (kind, placeholders) in _PERSON_PATCHABLE_FIELDS.items():
@@ -2516,6 +2519,10 @@ class _OmopFilterMixin:
         person_id = self.request.query_params.get('person_id')
         if person_id:
             qs = qs.filter(person_id=person_id)
+        # Trusted backend (service-token): full visibility. Already
+        # validated at the permission layer (ScopedTokenPermission).
+        if self.request.auth == "service-token":
+            return qs
         org = get_request_org(self.request)
         if org is not None:
             from omop_core.models import PatientInfo
@@ -2561,6 +2568,13 @@ class _ProvenanceMixin:
             if pk_field not in serializer.validated_data:
                 serializer.validated_data[pk_field] = next_pk(model_cls, pk_field)
 
+        # Trusted backend (service-token): skip ACL — already validated at
+        # the permission layer (ScopedTokenPermission).
+        if self.request.auth == "service-token":
+            obj = serializer.save()
+            self._prov(obj)
+            return
+
         # Org-scoping: reject cross-org persons; allow new/bootstrap patients
         org = get_request_org(self.request)
         if org is not None:
@@ -2587,6 +2601,13 @@ class _ProvenanceMixin:
         self._prov(obj)
 
     def perform_update(self, serializer):
+        # Trusted backend (service-token): skip ACL — already validated at
+        # the permission layer (ScopedTokenPermission).
+        if self.request.auth == "service-token":
+            obj = serializer.save()
+            self._prov(obj)
+            return
+
         org = get_request_org(self.request)
         if org is not None:
             person = serializer.validated_data.get('person') or serializer.instance.person
