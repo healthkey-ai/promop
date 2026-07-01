@@ -35,6 +35,11 @@ interface Invitation {
   created_at: string;
 }
 
+interface InviteResponse extends Invitation {
+  access_granted?: boolean;
+  email_warning?: string;
+}
+
 interface AccessGrant {
   id: number;
   email: string;
@@ -185,8 +190,14 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     try {
       setInviteError(null);
       setInviteSuccess(null);
-      await api.post(`${base}/invite/`, { email: inviteEmail, role: inviteRole });
-      setInviteSuccess(`Invitation sent to ${inviteEmail}.`);
+      const res = await api.post<InviteResponse>(`${base}/invite/`, { email: inviteEmail, role: inviteRole });
+      if (res.data.email_warning) {
+        setInviteSuccess(`User access was updated for ${inviteEmail}, but the invitation email was not sent.`);
+      } else if (res.data.access_granted) {
+        setInviteSuccess(`User access updated for ${inviteEmail}. Invitation sent.`);
+      } else {
+        setInviteSuccess(`Invitation sent to ${inviteEmail}.`);
+      }
       setInviteEmail('');
       fetchAll();
     } catch {

@@ -117,6 +117,22 @@ def _visible_orgs(user):
     return Organization.objects.filter(id__in=admin_org_ids)
 
 
+def _find_identity_by_email(email):
+    return (
+        Identity.objects.filter(email__iexact=email, issuer='urn:local').first()
+        or Identity.objects.filter(email__iexact=email).first()
+    )
+
+
+def _grant_org_access(identity, org, role, granted_by):
+    grant, _ = GroupAccess.objects.update_or_create(
+        identity=identity,
+        org=org,
+        defaults={'role': role, 'granted_by': granted_by},
+    )
+    return grant
+
+
 # ---------------------------------------------------------------------------
 # Org list / create
 # ---------------------------------------------------------------------------
@@ -185,37 +201,39 @@ class OrgInviteView(APIView):
         if role not in dict(OrgInvitation.ROLE):
             return Response({'error': f'Invalid role: {role}'}, status=status.HTTP_400_BAD_REQUEST)
 
+        with transaction.atomic():
+            invitation = OrgInvitation.objects.select_for_update().filter(
+                org=org, email=email,
+                confirmed_at__isnull=True, cancelled_at__isnull=True,
+            ).first()
+
+            token = secrets.token_hex(32)  # 64 hex chars
+            expires_at = timezone.now() + timezone.timedelta(days=7)
+            if invitation:
+                invitation.role = role
+                invitation.token = token
+                invitation.invited_by = request.user
+                invitation.expires_at = expires_at
+                invitation.save(update_fields=['role', 'token', 'invited_by', 'expires_at'])
+            else:
+                invitation = OrgInvitation.objects.create(
+                    org=org,
+                    email=email,
+                    role=role,
+                    token=token,
+                    invited_by=request.user,
+                    expires_at=expires_at,
+                )
+
+            identity = _find_identity_by_email(email)
+            if identity:
+                _grant_org_access(identity, org, role, request.user)
+
+        email_warning = None
         try:
-            with transaction.atomic():
-                invitation = OrgInvitation.objects.select_for_update().filter(
-                    org=org, email=email,
-                    confirmed_at__isnull=True, cancelled_at__isnull=True,
-                ).first()
-
-                token = secrets.token_hex(32)  # 64 hex chars
-                expires_at = timezone.now() + timezone.timedelta(days=7)
-                if invitation:
-                    invitation.role = role
-                    invitation.token = token
-                    invitation.invited_by = request.user
-                    invitation.expires_at = expires_at
-                    invitation.save(update_fields=['role', 'token', 'invited_by', 'expires_at'])
-                else:
-                    invitation = OrgInvitation.objects.create(
-                        org=org,
-                        email=email,
-                        role=role,
-                        token=token,
-                        invited_by=request.user,
-                        expires_at=expires_at,
-                    )
-
-                _send_invitation_email(invitation)
+            _send_invitation_email(invitation)
         except InvitationEmailError:
-            return Response(
-                {'error': 'Invitation email could not be sent. Please try again.'},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+            email_warning = 'Invitation was created, but the email could not be sent.'
 
         # Defensive cleanup for stale duplicate pending rows from before the
         # partial unique constraint existed; normal paths keep one pending invite.
@@ -223,7 +241,11 @@ class OrgInviteView(APIView):
             org=org, email=email,
             confirmed_at__isnull=True, cancelled_at__isnull=True,
         ).exclude(id=invitation.id).update(cancelled_at=timezone.now())
-        return Response(OrgInvitationSerializer(invitation).data, status=status.HTTP_201_CREATED)
+        data = OrgInvitationSerializer(invitation).data
+        data['access_granted'] = bool(identity)
+        if email_warning:
+            data['email_warning'] = email_warning
+        return Response(data, status=status.HTTP_201_CREATED)
 
 
 class OrgInvitationListView(APIView):
@@ -273,10 +295,7 @@ def confirm_invitation(request):
 
     # Prefer a local-auth identity; fall back to any identity with this email
     # so that OIDC/SSO users can also confirm invitations.
-    identity = (
-        Identity.objects.filter(email__iexact=invitation.email, issuer='urn:local').first()
-        or Identity.objects.filter(email__iexact=invitation.email).first()
-    )
+    identity = _find_identity_by_email(invitation.email)
     if not identity:
         return Response(
             {'error': 'No account found for this email. Please log in first, or contact your administrator.'},

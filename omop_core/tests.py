@@ -540,6 +540,24 @@ class GetVisibleOrgsTest(TestCase):
         self.assertIn(self.org_a, orgs)
         self.assertNotIn(self.org_b, orgs)
 
+    def test_direct_org_doctor_sees_their_org(self):
+        direct_doctor = Identity.objects.create_user(email='directdoc@test.com', password='x')
+        GroupAccess.objects.create(
+            identity=direct_doctor, org=self.org_b, role='doctor',
+        )
+        orgs = list(get_visible_orgs(direct_doctor))
+        self.assertIn(self.org_b, orgs)
+        self.assertNotIn(self.org_a, orgs)
+
+    def test_direct_org_navigator_sees_their_org(self):
+        navigator = Identity.objects.create_user(email='navigator@test.com', password='x')
+        GroupAccess.objects.create(
+            identity=navigator, org=self.org_b, role='navigator',
+        )
+        orgs = list(get_visible_orgs(navigator))
+        self.assertIn(self.org_b, orgs)
+        self.assertNotIn(self.org_a, orgs)
+
     def test_user_with_no_grants_sees_nothing(self):
         orgs = list(get_visible_orgs(self.nobody))
         self.assertEqual(orgs, [])
