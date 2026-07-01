@@ -118,9 +118,12 @@ def _visible_orgs(user):
 
 
 def _find_identity_by_email(email):
+    identities = list(Identity.objects.filter(email__iexact=email).order_by('id'))
     return (
-        Identity.objects.filter(email__iexact=email, issuer='urn:local').first()
-        or Identity.objects.filter(email__iexact=email).first()
+        next((identity for identity in identities if identity.issuer != 'urn:local'), None)
+        or next((identity for identity in identities if identity.issuer == 'urn:local' and identity.has_usable_password()), None)
+        or next((identity for identity in identities if identity.issuer == 'urn:local'), None)
+        or None
     )
 
 

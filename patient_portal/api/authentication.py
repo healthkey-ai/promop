@@ -134,6 +134,8 @@ class PartnerAuthentication(BaseAuthentication):
             else:
                 identity.save(update_fields=["email"])
             _claim_placeholder_access(identity, claims.email)
+        elif claims.email:
+            _claim_placeholder_access(identity, claims.email)
         return identity
 
 
