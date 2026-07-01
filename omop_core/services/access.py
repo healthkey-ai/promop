@@ -71,6 +71,7 @@ def get_visible_orgs(user) -> QuerySet:
 
     Access is always explicit — there are no open orgs. Access is granted via:
       - is_staff → all active orgs
+      - allows_public_aggregated_data → active orgs available to any authenticated user
       - GroupAccess (org_admin, doctor, navigator) → specific orgs/groups
       - OrgTrust (domain or org-to-org) → orgs that trust the user's email domain
         or that trust an org the user already belongs to
@@ -117,7 +118,14 @@ def get_visible_orgs(user) -> QuerySet:
         ).values_list('granting_org_id', flat=True)
     ) if user_domain else set()
 
-    all_ids = direct_ids | trusted_by_org | trusted_by_domain
+    public_ids = set(
+        Organization.objects.filter(
+            is_active=True,
+            allows_public_aggregated_data=True,
+        ).values_list('id', flat=True)
+    )
+
+    all_ids = public_ids | direct_ids | trusted_by_org | trusted_by_domain
 
     if not all_ids:
         return Organization.objects.none()

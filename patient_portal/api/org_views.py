@@ -124,13 +124,23 @@ def _find_identity_by_email(email):
     )
 
 
+ROLE_RANK = {'org_admin': 3, 'doctor': 2, 'navigator': 1}
+
+
 def _grant_org_access(identity, org, role, granted_by):
-    grant, _ = GroupAccess.objects.update_or_create(
+    existing = GroupAccess.objects.filter(identity=identity, org=org).first()
+    if existing:
+        if ROLE_RANK.get(existing.role, 0) < ROLE_RANK.get(role, 0):
+            existing.role = role
+            existing.granted_by = granted_by
+            existing.save(update_fields=['role', 'granted_by'])
+        return existing
+    return GroupAccess.objects.create(
         identity=identity,
         org=org,
-        defaults={'role': role, 'granted_by': granted_by},
+        role=role,
+        granted_by=granted_by,
     )
-    return grant
 
 
 # ---------------------------------------------------------------------------
@@ -306,21 +316,7 @@ def confirm_invitation(request):
     # silently downgrading an existing higher-privilege role (e.g. org_admin → doctor).
     # If the grant already exists, leave it unchanged; the invitation is still
     # marked confirmed so it can't be replayed.
-    ROLE_RANK = {'org_admin': 3, 'doctor': 2, 'navigator': 1}
-    existing = GroupAccess.objects.filter(identity=identity, org=invitation.org).first()
-    if existing:
-        if ROLE_RANK.get(existing.role, 0) < ROLE_RANK.get(invitation.role, 0):
-            # Upgrade to the higher role from the invitation
-            existing.role = invitation.role
-            existing.granted_by = invitation.invited_by
-            existing.save(update_fields=['role', 'granted_by'])
-    else:
-        GroupAccess.objects.create(
-            identity=identity,
-            org=invitation.org,
-            role=invitation.role,
-            granted_by=invitation.invited_by,
-        )
+    _grant_org_access(identity, invitation.org, invitation.role, invitation.invited_by)
 
     invitation.confirmed_at = timezone.now()
     invitation.save(update_fields=['confirmed_at'])

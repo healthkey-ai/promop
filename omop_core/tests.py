@@ -562,6 +562,13 @@ class GetVisibleOrgsTest(TestCase):
         orgs = list(get_visible_orgs(self.nobody))
         self.assertEqual(orgs, [])
 
+    def test_user_with_no_grants_sees_public_aggregated_org(self):
+        self.org_b.allows_public_aggregated_data = True
+        self.org_b.save(update_fields=['allows_public_aggregated_data'])
+        orgs = list(get_visible_orgs(self.nobody))
+        self.assertIn(self.org_b, orgs)
+        self.assertNotIn(self.org_a, orgs)
+
     def test_expired_grant_excluded(self):
         expired = Identity.objects.create_user(email='expired@test.com', password='x')
         GroupAccess.objects.create(

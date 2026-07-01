@@ -6164,6 +6164,15 @@ class OrgDiseaseStatsTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data, [])
 
+    def test_no_grants_sees_public_aggregated_org(self):
+        self.org_b.allows_public_aggregated_data = True
+        self.org_b.save(update_fields=['allows_public_aggregated_data'])
+        resp = self._get(self.nobody)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        slugs = {o['org_slug'] for o in resp.data}
+        self.assertIn('org-b', slugs)
+        self.assertNotIn('org-a', slugs)
+
     def test_unauthenticated_returns_401(self):
         self.client.logout()
         resp = self.client.get('/api/stats/org-disease/')
@@ -6290,6 +6299,13 @@ class OrgAdminPatientListScopingTest(TestCase):
 
     def test_no_grant_user_sees_nothing(self):
         resp = self._get(self.no_grant)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data), 0)
+
+    def test_direct_org_doctor_does_not_get_individual_patient_access(self):
+        doctor = Identity.objects.create_user(email='directdoc-patient-list@t.com', password='x')
+        GroupAccess.objects.create(identity=doctor, org=self.org_a, role='doctor')
+        resp = self._get(doctor)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.data), 0)
 
@@ -6749,6 +6765,18 @@ class OrgInvitationFlowTest(TestCase):
         self.assertTrue(resp.data['access_granted'])
         grant = GroupAccess.objects.get(identity=invitee, org=self.org)
         self.assertEqual(grant.role, 'doctor')
+
+    def test_invite_existing_user_does_not_downgrade_org_admin(self):
+        invitee = Identity.objects.create_user(email='admin-role@example.com', password='pass')
+        GroupAccess.objects.create(identity=invitee, org=self.org, role='org_admin')
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'admin-role@example.com',
+            'role': 'doctor',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        grant = GroupAccess.objects.get(identity=invitee, org=self.org)
+        self.assertEqual(grant.role, 'org_admin')
 
     def test_list_invitations(self):
         from django.utils import timezone
