@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, Trash2 } from 'lucide-react';
 import api from '@/api/axios';
 
@@ -94,7 +94,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
 
   const base = `/orgs/${slug}`;
 
-  const fetchAll = async () => {
+  const fetchAll = useCallback(async () => {
     try {
       const [orgRes, trustRes, invRes, accessRes, statsRes, allOrgsRes] = await Promise.all([
         api.get<Org>(`${base}/`),
@@ -115,9 +115,9 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     } catch {
       setError('Failed to load org details.');
     }
-  };
+  }, [slug, base]);
 
-  useEffect(() => { fetchAll(); }, [slug]);
+  useEffect(() => { fetchAll(); }, [fetchAll]);
 
   const handleSaveSettings = async () => {
     try {
