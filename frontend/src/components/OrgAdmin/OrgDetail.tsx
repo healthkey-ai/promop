@@ -13,6 +13,7 @@ interface Org {
   name: string;
   slug: string;
   is_active: boolean;
+  allows_public_aggregated_data: boolean;
   created_at: string;
 }
 
@@ -32,6 +33,11 @@ interface Invitation {
   status: string;
   expires_at: string;
   created_at: string;
+}
+
+interface InviteResponse extends Invitation {
+  access_granted?: boolean;
+  email_warning?: string;
 }
 
 interface AccessGrant {
@@ -74,6 +80,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   // Settings form state
   const [orgName, setOrgName] = useState('');
   const [isActive, setIsActive] = useState(true);
+  const [allowsPublicData, setAllowsPublicData] = useState(false);
   const [settingsSaved, setSettingsSaved] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
 
@@ -107,6 +114,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       setOrg(orgRes.data);
       setOrgName(orgRes.data.name);
       setIsActive(orgRes.data.is_active);
+      setAllowsPublicData(orgRes.data.allows_public_aggregated_data ?? false);
       setTrusts(trustRes.data);
       setInvitations(invRes.data);
       setAccessGrants(accessRes.data);
@@ -130,6 +138,15 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       setTimeout(() => setSettingsSaved(false), 2000);
     } catch {
       setSettingsError('Failed to save settings.');
+    }
+  };
+
+  const handlePublicDataToggle = async (checked: boolean) => {
+    setAllowsPublicData(checked);
+    try {
+      await api.patch(`${base}/`, { allows_public_aggregated_data: checked });
+    } catch {
+      setAllowsPublicData(!checked); // revert on error
     }
   };
 
@@ -174,8 +191,14 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     try {
       setInviteError(null);
       setInviteSuccess(null);
-      await api.post(`${base}/invite/`, { email: inviteEmail, role: inviteRole });
-      setInviteSuccess(`Invitation sent to ${inviteEmail}.`);
+      const res = await api.post<InviteResponse>(`${base}/invite/`, { email: inviteEmail, role: inviteRole });
+      if (res.data.email_warning) {
+        setInviteSuccess(`User access was updated for ${inviteEmail}, but the invitation email was not sent.`);
+      } else if (res.data.access_granted) {
+        setInviteSuccess(`User access updated for ${inviteEmail}. Invitation sent.`);
+      } else {
+        setInviteSuccess(`Invitation sent to ${inviteEmail}.`);
+      }
       setInviteEmail('');
       fetchAll();
     } catch {
@@ -398,6 +421,20 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                 Add
               </button>
             </div>
+          </div>
+
+          <div className="mt-6 pt-6 border-t border-gray-200">
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={allowsPublicData}
+                onChange={(e) => handlePublicDataToggle(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-300 text-blue-600"
+              />
+              <span className="text-sm text-gray-700">
+                Allow public access to aggregated de-identified data
+              </span>
+            </label>
           </div>
         </div>
       )}

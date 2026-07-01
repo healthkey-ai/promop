@@ -6141,6 +6141,24 @@ class OrgDiseaseStatsTest(TestCase):
         slugs = {o['org_slug'] for o in resp.data}
         self.assertIn('org-a', slugs)
 
+    def test_direct_org_doctor_sees_aggregated_org_data(self):
+        doctor = Identity.objects.create_user(email='directdoc@t.com', password='x')
+        GroupAccess.objects.create(identity=doctor, org=self.org_b, role='doctor')
+        resp = self._get(doctor)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        slugs = {o['org_slug'] for o in resp.data}
+        self.assertIn('org-b', slugs)
+        self.assertNotIn('org-a', slugs)
+
+    def test_direct_org_navigator_sees_aggregated_org_data(self):
+        navigator = Identity.objects.create_user(email='navigator@t.com', password='x')
+        GroupAccess.objects.create(identity=navigator, org=self.org_b, role='navigator')
+        resp = self._get(navigator)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        slugs = {o['org_slug'] for o in resp.data}
+        self.assertIn('org-b', slugs)
+        self.assertNotIn('org-a', slugs)
+
     def test_no_grants_returns_empty_list(self):
         resp = self._get(self.nobody)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -6703,9 +6721,34 @@ class OrgInvitationFlowTest(TestCase):
             'role': 'doctor',
         })
         self.assertEqual(resp.status_code, 201)
+        self.assertFalse(resp.data['access_granted'])
         self.assertTrue(
             OrgInvitation.objects.filter(org=self.org, email='newuser@example.com').exists()
         )
+
+    def test_invite_existing_user_grants_access_immediately(self):
+        invitee = Identity.objects.create_user(email='existing-user@example.com', password='pass')
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'existing-user@example.com',
+            'role': 'navigator',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='navigator').exists()
+        )
+
+    def test_invite_existing_user_updates_existing_org_role(self):
+        invitee = Identity.objects.create_user(email='role-update@example.com', password='pass')
+        GroupAccess.objects.create(identity=invitee, org=self.org, role='navigator')
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'role-update@example.com',
+            'role': 'doctor',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        grant = GroupAccess.objects.get(identity=invitee, org=self.org)
+        self.assertEqual(grant.role, 'doctor')
 
     def test_list_invitations(self):
         from django.utils import timezone
@@ -6781,19 +6824,28 @@ class OrgInvitationFlowTest(TestCase):
         token = OrgInvitation.objects.get(org=self.org, email='tokencheck@example.com').token
         self.assertIn(token, mail.outbox[0].body)
 
-    def test_email_failure_prevents_invitation_creation(self):
+    def test_email_failure_still_creates_invitation(self):
         from unittest.mock import patch
+        invitee = Identity.objects.create_user(email='failmail@example.com', password='pass')
         with patch('patient_portal.api.org_views.send_mail', side_effect=Exception('SMTP error')):
             resp = self.client.post('/api/orgs/invite-org/invite/', {
                 'email': 'failmail@example.com',
                 'role': 'doctor',
             })
-        self.assertEqual(resp.status_code, 502)
-        self.assertFalse(
-            OrgInvitation.objects.filter(org=self.org, email='failmail@example.com').exists()
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        self.assertEqual(
+            resp.data['email_warning'],
+            'Invitation was created, but the email could not be sent.',
+        )
+        self.assertTrue(
+            OrgInvitation.objects.filter(org=self.org, email='failmail@example.com', role='doctor').exists()
+        )
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='doctor').exists()
         )
 
-    def test_email_failure_preserves_existing_pending_invitation(self):
+    def test_email_failure_updates_existing_pending_invitation(self):
         from django.utils import timezone
         from unittest.mock import patch
         token = _secrets.token_hex(32)
@@ -6807,10 +6859,14 @@ class OrgInvitationFlowTest(TestCase):
                 'email': 'existing@example.com',
                 'role': 'navigator',
             })
-        self.assertEqual(resp.status_code, 502)
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(
+            resp.data['email_warning'],
+            'Invitation was created, but the email could not be sent.',
+        )
         existing.refresh_from_db()
-        self.assertEqual(existing.token, token)
-        self.assertEqual(existing.role, 'doctor')
+        self.assertNotEqual(existing.token, token)
+        self.assertEqual(existing.role, 'navigator')
         self.assertIsNone(existing.cancelled_at)
 
 

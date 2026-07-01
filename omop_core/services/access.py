@@ -87,9 +87,9 @@ def get_visible_orgs(user) -> QuerySet:
         Q(expires_at__isnull=True) | Q(expires_at__gt=now)
     )
 
-    # Direct GroupAccess grants
+    # Direct org grants (org_admin, doctor, navigator)
     direct_ids = set(
-        active.filter(role='org_admin')
+        active.filter(org__isnull=False)
               .values_list('org_id', flat=True)
     )
     group_org_ids = set(
