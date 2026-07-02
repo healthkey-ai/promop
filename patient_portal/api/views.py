@@ -15,8 +15,9 @@ from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from omop_core.models import (
     Person, PatientInfo, Concept, ProvenanceRecord,
-    ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
-    PatientDocument, PatientTrialEnrollment, Survey, PatientSurveyResponse,
+    ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
+    Observation, ProcedureOccurrence, VisitOccurrence,
+    PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
     # Controlled vocabulary lookup models
     Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
     ProgesteroneReceptorStatus, Her2Status, HrStatus, HrdStatus,
@@ -143,6 +144,34 @@ def _record_provenance(record, source, source_user_id, target_patient_id=None, m
         content_type=ContentType.objects.get_for_model(record),
         object_id=record.pk,
     )
+
+
+def _delete_omop_clinical_rows(person):
+    """Delete all OMOP clinical rows for a person, in FK dependency order.
+
+    Must be called inside a transaction.atomic() block.
+    Does NOT delete PatientInfo, PatientGroupMembership, PatientUser/Identity,
+    or Person — callers handle those after this returns.
+    """
+    episode_ids = list(Episode.objects.filter(person=person).values_list('episode_id', flat=True))
+    EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
+    Episode.objects.filter(person=person).delete()
+    visit_ids = list(VisitOccurrence.objects.filter(person=person).values_list('visit_occurrence_id', flat=True))
+    measurement_ids = list(Measurement.objects.filter(person=person).values_list('measurement_id', flat=True))
+    # Delete by both axes: visit_occurrence_id covers normal rows; measurement_id
+    # covers any ownership rows whose visit belongs to a different person (edge case
+    # where measurement_id has no DB FK so those rows would otherwise be orphaned).
+    MeasurementOwnership.objects.filter(
+        Q(visit_occurrence_id__in=visit_ids) | Q(measurement_id__in=measurement_ids)
+    ).delete()
+    Measurement.objects.filter(person=person).delete()
+    ConditionOccurrence.objects.filter(person=person).delete()
+    DrugExposure.objects.filter(person=person).delete()
+    Observation.objects.filter(person=person).delete()
+    ProcedureOccurrence.objects.filter(person=person).delete()
+    VisitOccurrence.objects.filter(person=person).delete()
+    PatientDocument.objects.filter(person=person).delete()
+    PatientTrialEnrollment.objects.filter(person=person).delete()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -2145,18 +2174,24 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         if not can_access_patient(request.user, person_id):
                             errors.append("Person not found.")
                             continue
-                    # Delete PatientInfo
-                    PatientInfo.objects.filter(person=person).delete()
-                    # Delete associated Identity if exists (via PatientUser)
-                    from patient_portal.models import PatientUser as PU
-                    try:
-                        pu = PU.objects.get(person=person)
-                        pu.identity.delete()
-                    except PU.DoesNotExist:
-                        pass
-                    # Delete Person
-                    person.delete()
-                    deleted_count += 1
+                    with transaction.atomic():
+                        # Delete OMOP clinical rows in FK dependency order.
+                        _delete_omop_clinical_rows(person)
+                        # PatientGroupMembership uses a plain BigIntegerField (no DB FK)
+                        # so it is never cascade-deleted by the ORM.
+                        PatientGroupMembership.objects.filter(person_id=person.person_id).delete()
+                        # Delete PatientInfo
+                        PatientInfo.objects.filter(person=person).delete()
+                        # Delete associated Identity if exists (via PatientUser)
+                        from patient_portal.models import PatientUser as PU
+                        try:
+                            pu = PU.objects.get(person=person)
+                            pu.identity.delete()
+                        except PU.DoesNotExist:
+                            pass
+                        # Delete Person last (other rows hold person FK)
+                        person.delete()
+                        deleted_count += 1
                 except Person.DoesNotExist:
                     errors.append("Person not found.")
                 except Exception:
@@ -2192,31 +2227,39 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             person_ids = [row[1] for row in snapshot]
 
             errors = []
+            # Bulk-delete only the specifically filtered PatientInfo records — correctly
+            # scoped to org + disease + stage + date via the queryset snapshot.
+            # This transaction commits before per-person orphan cleanup so a failure
+            # in the cleanup loop cannot roll back the PatientInfo deletions.
             with transaction.atomic():
-                # Bulk-delete only the specifically filtered PatientInfo records — correctly
-                # scoped to org + disease + stage + date via the queryset snapshot.
                 PatientInfo.objects.filter(id__in=patientinfo_ids).delete()
-                deleted_count = len(patientinfo_ids)
+            deleted_count = len(patientinfo_ids)
 
-                # Clean up Person/Identity for persons that now have no PatientInfo at all.
-                persons = {p.person_id: p for p in Person.objects.filter(person_id__in=person_ids)}
-                from patient_portal.models import PatientUser as PU
-                for person_id in person_ids:
-                    person = persons.get(person_id)
-                    if person is None:
-                        continue
-                    try:
-                        if not PatientInfo.objects.filter(person=person).exists():
+            # Clean up Person/OMOP rows/Identity for persons that now have no PatientInfo
+            # at all.  Each person gets its own savepoint so a single failure does not
+            # abort cleanup for the remaining persons.
+            persons = {p.person_id: p for p in Person.objects.filter(person_id__in=person_ids)}
+            from patient_portal.models import PatientUser as PU
+            for person_id in person_ids:
+                person = persons.get(person_id)
+                if person is None:
+                    continue
+                try:
+                    if not PatientInfo.objects.filter(person=person).exists():
+                        with transaction.atomic():
+                            _delete_omop_clinical_rows(person)
+                            # PatientGroupMembership uses a plain BigIntegerField (no DB FK).
+                            PatientGroupMembership.objects.filter(person_id=person.person_id).delete()
                             try:
                                 pu = PU.objects.get(person=person)
                                 pu.identity.delete()
                             except PU.DoesNotExist:
                                 pass
                             person.delete()
-                    except Exception:
-                        id_hash = hashlib.sha256(str(person_id).encode()).hexdigest()[:12]
-                        logger.warning("bulk_delete_filtered: person cleanup failed (id_hash=%s)", id_hash)
-                        errors.append("Person cleanup failed.")
+                except Exception:
+                    id_hash = hashlib.sha256(str(person_id).encode()).hexdigest()[:12]
+                    logger.warning("bulk_delete_filtered: person cleanup failed (id_hash=%s)", id_hash)
+                    errors.append("Person cleanup failed.")
 
             return Response({
                 'success': True,
