@@ -153,12 +153,17 @@ def _delete_omop_clinical_rows(person):
     Does NOT delete PatientInfo, PatientGroupMembership, PatientUser/Identity,
     or Person — callers handle those after this returns.
     """
-    from patient_portal.models import PatientUser as _PU
     episode_ids = list(Episode.objects.filter(person=person).values_list('episode_id', flat=True))
     EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
     Episode.objects.filter(person=person).delete()
     visit_ids = list(VisitOccurrence.objects.filter(person=person).values_list('visit_occurrence_id', flat=True))
-    MeasurementOwnership.objects.filter(visit_occurrence_id__in=visit_ids).delete()
+    measurement_ids = list(Measurement.objects.filter(person=person).values_list('measurement_id', flat=True))
+    # Delete by both axes: visit_occurrence_id covers normal rows; measurement_id
+    # covers any ownership rows whose visit belongs to a different person (edge case
+    # where measurement_id has no DB FK so those rows would otherwise be orphaned).
+    MeasurementOwnership.objects.filter(
+        Q(visit_occurrence_id__in=visit_ids) | Q(measurement_id__in=measurement_ids)
+    ).delete()
     Measurement.objects.filter(person=person).delete()
     ConditionOccurrence.objects.filter(person=person).delete()
     DrugExposure.objects.filter(person=person).delete()
