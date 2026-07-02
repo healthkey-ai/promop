@@ -7419,3 +7419,179 @@ class WearablePatientInfoTest(TestCase):
         anon = AnonClient()
         resp = anon.get(f'/api/patient-info/{self.person.person_id}/')
         self.assertIn(resp.status_code, [401, 403])
+
+
+# ---------------------------------------------------------------------------
+# Service-token ACL bypass integration tests
+# ---------------------------------------------------------------------------
+
+class ServiceTokenOmopAccessTest(TestCase):
+    """
+    Verify that service-token callers bypass row-level ACL checks in:
+      - _OmopFilterMixin.get_queryset  (MeasurementViewSet list/retrieve)
+      - _ProvenanceMixin.perform_create / perform_update  (MeasurementViewSet write)
+      - PersonViewSet.partial_update
+      - EpisodeEventViewSet.get_queryset + perform_create
+      - PatientInfoViewSet.get_queryset
+
+    Each test authenticates with the canonical service identity and
+    token="service-token" (the same sentinel ServiceTokenAuthentication sets).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+
+        # Two patients in different orgs so cross-org visibility is meaningful.
+        from omop_core.models import Organization
+        cls.org_a = Organization.objects.create(name='ST Org A', slug='st-org-a')
+        cls.org_b = Organization.objects.create(name='ST Org B', slug='st-org-b')
+
+        cls.person_a = Person.objects.create(person_id=29001)
+        cls.person_b = Person.objects.create(person_id=29002)
+        PatientInfo.objects.create(person=cls.person_a, organization=cls.org_a)
+        PatientInfo.objects.create(person=cls.person_b, organization=cls.org_b)
+
+        # One measurement per patient.
+        m_concept = Concept.objects.get(concept_id=3000963)   # Laboratory test result
+        type_concept = Concept.objects.get(concept_id=32817)  # EHR
+        cls.m_a = Measurement.objects.create(
+            measurement_id=29001,
+            person=cls.person_a,
+            measurement_concept=m_concept,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=type_concept,
+        )
+        cls.m_b = Measurement.objects.create(
+            measurement_id=29002,
+            person=cls.person_b,
+            measurement_concept=m_concept,
+            measurement_date=date(2024, 2, 1),
+            measurement_type_concept=type_concept,
+        )
+
+        # Episode + EpisodeEvent for person_a.
+        ep_concept = Concept.objects.get(concept_id=32531)   # Treatment Regimen
+        cls.ep_a = Episode.objects.create(
+            episode_id=29001,
+            person=cls.person_a,
+            episode_concept=ep_concept,
+            episode_object_concept=type_concept,
+            episode_type_concept=type_concept,
+            episode_start_date=date(2024, 1, 1),
+            episode_number=1,
+            episode_source_value='TEST-LOT',
+        )
+        drug_concept = Concept.objects.get(concept_id=19136160)
+        cls.drug_a = DrugExposure.objects.create(
+            drug_exposure_id=29001,
+            person=cls.person_a,
+            drug_concept=drug_concept,
+            drug_exposure_start_date=date(2024, 1, 1),
+            drug_type_concept=type_concept,
+        )
+        field_concept = Concept.objects.get(concept_id=1147094)
+        cls.ee_a = EpisodeEvent.objects.create(
+            episode_id=cls.ep_a.episode_id,
+            event_id=cls.drug_a.drug_exposure_id,
+            episode_event_field_concept=field_concept,
+        )
+
+        # Service identity — mirrors what ServiceTokenAuthentication creates.
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='hk-labs-sync',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token"
+        )
+
+    # --- MeasurementViewSet (via _OmopFilterMixin + _ProvenanceMixin) ---
+
+    def test_service_token_measurement_list_sees_all_orgs(self):
+        """GET /api/measurements/ returns measurements from all orgs."""
+        resp = self.client.get('/api/measurements/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
+        returned_ids = {r['measurement_id'] for r in rows}
+        self.assertIn(self.m_a.measurement_id, returned_ids)
+        self.assertIn(self.m_b.measurement_id, returned_ids)
+
+    def test_service_token_measurement_create(self):
+        """POST /api/measurements/ creates without org or ACL error."""
+        m_concept = Concept.objects.get(concept_id=3000963)
+        type_concept = Concept.objects.get(concept_id=32817)
+        resp = self.client.post('/api/measurements/', {
+            'person': self.person_a.person_id,
+            'measurement_concept': m_concept.concept_id,
+            'measurement_date': '2024-03-01',
+            'measurement_type_concept': type_concept.concept_id,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_service_token_measurement_update(self):
+        """PATCH /api/measurements/{id}/ updates without org ACL error."""
+        resp = self.client.patch(
+            f'/api/measurements/{self.m_a.measurement_id}/',
+            {'value_as_number': 7.5},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.m_a.refresh_from_db()
+        self.assertEqual(float(self.m_a.value_as_number), 7.5)
+
+    # --- PersonViewSet.partial_update ---
+
+    def test_service_token_person_patch_bypasses_acl(self):
+        """PATCH /api/persons/{person_id}/ succeeds without can_access_patient."""
+        resp = self.client.patch(
+            f'/api/persons/{self.person_b.person_id}/',
+            {'given_name': 'ServicePatched'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.person_b.refresh_from_db()
+        self.assertEqual(self.person_b.given_name, 'ServicePatched')
+
+    # --- EpisodeEventViewSet ---
+
+    def test_service_token_episode_event_list(self):
+        """GET /api/episode-events/?episode_id=X returns events without ACL error."""
+        resp = self.client.get(
+            f'/api/episode-events/?episode_id={self.ep_a.episode_id}'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
+        returned_ids = {r['event_id'] for r in rows}
+        self.assertIn(self.drug_a.drug_exposure_id, returned_ids)
+
+    def test_service_token_episode_event_create(self):
+        """POST /api/episode-events/ creates without PermissionDenied."""
+        drug2 = DrugExposure.objects.create(
+            drug_exposure_id=29099,
+            person=self.person_a,
+            drug_concept=Concept.objects.get(concept_id=19136160),
+            drug_exposure_start_date=date(2024, 4, 1),
+            drug_type_concept=Concept.objects.get(concept_id=32817),
+        )
+        resp = self.client.post('/api/episode-events/', {
+            'episode_id': self.ep_a.episode_id,
+            'event_id': drug2.drug_exposure_id,
+            'episode_event_field_concept': 1147094,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    # --- PatientInfoViewSet ---
+
+    def test_service_token_patient_info_list_sees_all_orgs(self):
+        """GET /api/patient-info/ returns patients from all orgs."""
+        resp = self.client.get('/api/patient-info/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
+        returned_pids = {r['person_id'] for r in rows}
+        self.assertIn(self.person_a.person_id, returned_pids)
+        self.assertIn(self.person_b.person_id, returned_pids)

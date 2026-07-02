@@ -5,6 +5,15 @@ from rest_framework.permissions import BasePermission
 from .providers.base import TokenClaims
 from omop_core.models import GroupAccess, Organization
 
+# Sentinel value set by ServiceTokenAuthentication when the HMAC check passes.
+# Use is_service_token() rather than comparing this string directly.
+SERVICE_TOKEN = "service-token"
+
+
+def is_service_token(request) -> bool:
+    """Return True when the request was authenticated as a trusted service token."""
+    return request.auth == SERVICE_TOKEN
+
 
 def get_request_org(request):
     """
@@ -53,7 +62,7 @@ class ScopedTokenPermission(BasePermission):
         token = request.auth
 
         # Service-to-service: trusted backend — full access.
-        if token == "service-token":
+        if token == SERVICE_TOKEN:
             return True  # hmac already validated in ServiceTokenAuthentication.authenticate()
 
         # Partner-auth (Firebase, SAML) and session-auth: role-based enforcement.

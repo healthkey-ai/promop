@@ -20,6 +20,7 @@ from rest_framework.exceptions import AuthenticationFailed
 
 from patient_portal.models import Identity
 
+from .permissions import SERVICE_TOKEN
 from .providers import get_providers
 from .providers.base import TokenClaims, decode_jwt_unverified
 
@@ -211,7 +212,7 @@ class ServiceTokenAuthentication(BaseAuthentication):
             identity.set_unusable_password()
             identity.save(update_fields=['password'])
 
-        return (identity, "service-token")
+        return (identity, SERVICE_TOKEN)
 
     def authenticate_header(self, request):
         return "Bearer"
