@@ -46,7 +46,7 @@ import hashlib
 import json
 import logging
 from io import StringIO
-from .permissions import ScopedTokenPermission, get_request_org
+from .permissions import ScopedTokenPermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
     UserSerializer, PatientInfoSerializer, PatientListSerializer, ProvenanceRecordSerializer,
@@ -159,6 +159,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     
     def get_queryset(self):
         qs = PatientInfo.objects.all().select_related('person', 'organization')
+        # Trusted backend (service-token): full visibility across all patients.
+        if is_service_token(self.request):
+            return qs
         org = get_request_org(self.request)
         if org is not None:
             qs = qs.filter(organization=org)
@@ -2463,9 +2466,10 @@ class PersonViewSet(viewsets.GenericViewSet):
         except (Person.DoesNotExist, ValueError):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Trusted backend (service-token): skip ACL — already validated at
-        # the permission layer (ScopedTokenPermission).
-        if request.auth != "service-token":
+        # Trusted backend (service-token): skip per-person row-level ACL.
+        # ScopedTokenPermission confirmed the caller holds a valid HMAC-verified
+        # service token. Service tokens have full cross-person write access by design.
+        if not is_service_token(request):
             org = get_request_org(request)
             if org is not None:
                 if not PatientInfo.objects.filter(person=person, organization=org).exists():
@@ -2521,7 +2525,7 @@ class _OmopFilterMixin:
             qs = qs.filter(person_id=person_id)
         # Trusted backend (service-token): full visibility. Already
         # validated at the permission layer (ScopedTokenPermission).
-        if self.request.auth == "service-token":
+        if is_service_token(self.request):
             return qs
         org = get_request_org(self.request)
         if org is not None:
@@ -2570,7 +2574,7 @@ class _ProvenanceMixin:
 
         # Trusted backend (service-token): skip ACL — already validated at
         # the permission layer (ScopedTokenPermission).
-        if self.request.auth == "service-token":
+        if is_service_token(self.request):
             obj = serializer.save()
             self._prov(obj)
             return
@@ -2603,7 +2607,7 @@ class _ProvenanceMixin:
     def perform_update(self, serializer):
         # Trusted backend (service-token): skip ACL — already validated at
         # the permission layer (ScopedTokenPermission).
-        if self.request.auth == "service-token":
+        if is_service_token(self.request):
             obj = serializer.save()
             self._prov(obj)
             return
@@ -2720,6 +2724,9 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
         episode_id = self.request.query_params.get('episode_id')
         if episode_id:
             qs = qs.filter(episode_id=episode_id)
+        # Trusted backend (service-token): full visibility across all episode events.
+        if is_service_token(self.request):
+            return qs
         # Org / per-patient scoping: EpisodeEvent.episode_id is a bare integer FK to Episode.
         # Resolve allowed episode_ids via the Episode → person → org chain.
         # Bootstrap patients (organization=NULL) are included so that create-path
@@ -2759,6 +2766,10 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+        # Trusted backend (service-token): skip ACL — full cross-patient write access.
+        if is_service_token(self.request):
+            serializer.save()
+            return
         episode_id = serializer.validated_data.get('episode_id')
         org = get_request_org(self.request)
         if org is not None:
@@ -2967,7 +2978,7 @@ class SurveyViewSet(viewsets.ModelViewSet):
         if request.method in ('GET', 'HEAD', 'OPTIONS'):
             return
         token = getattr(request, 'auth', None)
-        if token == 'service-token':
+        if is_service_token(request):
             return
         if token is not None and not isinstance(token, TokenClaims):
             # OAuth2: allow only internal service apps (no org).

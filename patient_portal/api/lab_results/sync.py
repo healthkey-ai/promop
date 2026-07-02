@@ -30,7 +30,7 @@ from omop_core.models import (
     Person, ProvenanceRecord, VisitOccurrence,
 )
 from omop_core.services.pk import next_pk, next_pk_batch
-from patient_portal.api.permissions import LabSyncPermission, get_request_org
+from patient_portal.api.permissions import LabSyncPermission, get_request_org, is_service_token
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +182,7 @@ class SyncView(APIView):
         # patient cannot impersonate another actor. Trusted service tokens and
         # superusers supply the actor explicitly for server-to-server / admin
         # on-behalf-of writes.
-        is_service = request.auth == 'service-token'
+        is_service = is_service_token(request)
         is_privileged = is_service or getattr(request.user, 'is_superuser', False)
         if not is_privileged and getattr(request.user, 'is_authenticated', False):
             actor_iss = getattr(request.user, 'issuer', '') or ''
