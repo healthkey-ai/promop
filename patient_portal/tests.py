@@ -6141,10 +6141,37 @@ class OrgDiseaseStatsTest(TestCase):
         slugs = {o['org_slug'] for o in resp.data}
         self.assertIn('org-a', slugs)
 
+    def test_direct_org_doctor_sees_aggregated_org_data(self):
+        doctor = Identity.objects.create_user(email='directdoc@t.com', password='x')
+        GroupAccess.objects.create(identity=doctor, org=self.org_b, role='doctor')
+        resp = self._get(doctor)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        slugs = {o['org_slug'] for o in resp.data}
+        self.assertIn('org-b', slugs)
+        self.assertNotIn('org-a', slugs)
+
+    def test_direct_org_navigator_sees_aggregated_org_data(self):
+        navigator = Identity.objects.create_user(email='navigator@t.com', password='x')
+        GroupAccess.objects.create(identity=navigator, org=self.org_b, role='navigator')
+        resp = self._get(navigator)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        slugs = {o['org_slug'] for o in resp.data}
+        self.assertIn('org-b', slugs)
+        self.assertNotIn('org-a', slugs)
+
     def test_no_grants_returns_empty_list(self):
         resp = self._get(self.nobody)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data, [])
+
+    def test_no_grants_sees_public_aggregated_org(self):
+        self.org_b.allows_public_aggregated_data = True
+        self.org_b.save(update_fields=['allows_public_aggregated_data'])
+        resp = self._get(self.nobody)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        slugs = {o['org_slug'] for o in resp.data}
+        self.assertIn('org-b', slugs)
+        self.assertNotIn('org-a', slugs)
 
     def test_unauthenticated_returns_401(self):
         self.client.logout()
@@ -6272,6 +6299,13 @@ class OrgAdminPatientListScopingTest(TestCase):
 
     def test_no_grant_user_sees_nothing(self):
         resp = self._get(self.no_grant)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data), 0)
+
+    def test_direct_org_doctor_does_not_get_individual_patient_access(self):
+        doctor = Identity.objects.create_user(email='directdoc-patient-list@t.com', password='x')
+        GroupAccess.objects.create(identity=doctor, org=self.org_a, role='doctor')
+        resp = self._get(doctor)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.data), 0)
 
@@ -6703,9 +6737,141 @@ class OrgInvitationFlowTest(TestCase):
             'role': 'doctor',
         })
         self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        invitee = Identity.objects.get(email='newuser@example.com', issuer='urn:local')
         self.assertTrue(
             OrgInvitation.objects.filter(org=self.org, email='newuser@example.com').exists()
         )
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='doctor').exists()
+        )
+
+    def test_invite_unknown_user_creates_placeholder_identity(self):
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'placeholder@example.com',
+            'role': 'navigator',
+        })
+        self.assertEqual(resp.status_code, 201)
+        invitee = Identity.objects.get(email='placeholder@example.com', issuer='urn:local')
+        self.assertFalse(invitee.has_usable_password())
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='navigator').exists()
+        )
+
+    def test_partner_auth_identity_claims_placeholder_access(self):
+        placeholder = Identity.objects.create_user(email='partner@example.com', password=None)
+        GroupAccess.objects.create(identity=placeholder, org=self.org, role='doctor')
+
+        from patient_portal.api.authentication import PartnerAuthentication
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(
+            issuer='https://issuer.example.com',
+            sub='partner-sub',
+            email='partner@example.com',
+            name='Partner User',
+            raw={},
+        )
+
+        identity = PartnerAuthentication._get_or_create_identity(claims)
+        self.assertNotEqual(identity.pk, placeholder.pk)
+        self.assertEqual(identity.email, 'partner@example.com')
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=identity, org=self.org, role='doctor').exists()
+        )
+        self.assertFalse(GroupAccess.objects.filter(identity=placeholder).exists())
+
+    def test_existing_partner_auth_identity_claims_later_placeholder_access(self):
+        partner = Identity.objects.create(
+            issuer='https://issuer.example.com',
+            sub='existing-partner-sub',
+            email='existing-partner@example.com',
+        )
+        partner.set_unusable_password()
+        partner.save()
+        placeholder = Identity.objects.create_user(email='existing-partner@example.com', password=None)
+        GroupAccess.objects.create(identity=placeholder, org=self.org, role='doctor')
+
+        from patient_portal.api.authentication import PartnerAuthentication
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(
+            issuer='https://issuer.example.com',
+            sub='existing-partner-sub',
+            email='existing-partner@example.com',
+            name='Existing Partner',
+            raw={},
+        )
+
+        identity = PartnerAuthentication._get_or_create_identity(claims)
+        self.assertEqual(identity.pk, partner.pk)
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=partner, org=self.org, role='doctor').exists()
+        )
+        self.assertFalse(GroupAccess.objects.filter(identity=placeholder).exists())
+
+    def test_reinvite_after_placeholder_claim_updates_partner_identity(self):
+        placeholder = Identity.objects.create_user(email='claimed@example.com', password=None)
+        GroupAccess.objects.create(identity=placeholder, org=self.org, role='navigator')
+
+        from patient_portal.api.authentication import PartnerAuthentication
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(
+            issuer='https://issuer.example.com',
+            sub='claimed-sub',
+            email='claimed@example.com',
+            name='Claimed User',
+            raw={},
+        )
+        partner = PartnerAuthentication._get_or_create_identity(claims)
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=partner, org=self.org, role='navigator').exists()
+        )
+
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'claimed@example.com',
+            'role': 'doctor',
+        })
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        partner_grant = GroupAccess.objects.get(identity=partner, org=self.org)
+        self.assertEqual(partner_grant.role, 'doctor')
+        self.assertFalse(GroupAccess.objects.filter(identity=placeholder).exists())
+
+    def test_invite_existing_user_grants_access_immediately(self):
+        invitee = Identity.objects.create_user(email='existing-user@example.com', password='pass')
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'existing-user@example.com',
+            'role': 'navigator',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='navigator').exists()
+        )
+
+    def test_invite_existing_user_updates_existing_org_role(self):
+        invitee = Identity.objects.create_user(email='role-update@example.com', password='pass')
+        GroupAccess.objects.create(identity=invitee, org=self.org, role='navigator')
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'role-update@example.com',
+            'role': 'doctor',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        grant = GroupAccess.objects.get(identity=invitee, org=self.org)
+        self.assertEqual(grant.role, 'doctor')
+
+    def test_invite_existing_user_does_not_downgrade_org_admin(self):
+        invitee = Identity.objects.create_user(email='admin-role@example.com', password='pass')
+        GroupAccess.objects.create(identity=invitee, org=self.org, role='org_admin')
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'admin-role@example.com',
+            'role': 'doctor',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        grant = GroupAccess.objects.get(identity=invitee, org=self.org)
+        self.assertEqual(grant.role, 'org_admin')
 
     def test_list_invitations(self):
         from django.utils import timezone
@@ -6781,19 +6947,28 @@ class OrgInvitationFlowTest(TestCase):
         token = OrgInvitation.objects.get(org=self.org, email='tokencheck@example.com').token
         self.assertIn(token, mail.outbox[0].body)
 
-    def test_email_failure_prevents_invitation_creation(self):
+    def test_email_failure_still_creates_invitation(self):
         from unittest.mock import patch
+        invitee = Identity.objects.create_user(email='failmail@example.com', password='pass')
         with patch('patient_portal.api.org_views.send_mail', side_effect=Exception('SMTP error')):
             resp = self.client.post('/api/orgs/invite-org/invite/', {
                 'email': 'failmail@example.com',
                 'role': 'doctor',
             })
-        self.assertEqual(resp.status_code, 502)
-        self.assertFalse(
-            OrgInvitation.objects.filter(org=self.org, email='failmail@example.com').exists()
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        self.assertEqual(
+            resp.data['email_warning'],
+            'Invitation was created, but the email could not be sent.',
+        )
+        self.assertTrue(
+            OrgInvitation.objects.filter(org=self.org, email='failmail@example.com', role='doctor').exists()
+        )
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='doctor').exists()
         )
 
-    def test_email_failure_preserves_existing_pending_invitation(self):
+    def test_email_failure_updates_existing_pending_invitation(self):
         from django.utils import timezone
         from unittest.mock import patch
         token = _secrets.token_hex(32)
@@ -6807,10 +6982,14 @@ class OrgInvitationFlowTest(TestCase):
                 'email': 'existing@example.com',
                 'role': 'navigator',
             })
-        self.assertEqual(resp.status_code, 502)
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(
+            resp.data['email_warning'],
+            'Invitation was created, but the email could not be sent.',
+        )
         existing.refresh_from_db()
-        self.assertEqual(existing.token, token)
-        self.assertEqual(existing.role, 'doctor')
+        self.assertNotEqual(existing.token, token)
+        self.assertEqual(existing.role, 'navigator')
         self.assertIsNone(existing.cancelled_at)
 
 
@@ -7240,3 +7419,179 @@ class WearablePatientInfoTest(TestCase):
         anon = AnonClient()
         resp = anon.get(f'/api/patient-info/{self.person.person_id}/')
         self.assertIn(resp.status_code, [401, 403])
+
+
+# ---------------------------------------------------------------------------
+# Service-token ACL bypass integration tests
+# ---------------------------------------------------------------------------
+
+class ServiceTokenOmopAccessTest(TestCase):
+    """
+    Verify that service-token callers bypass row-level ACL checks in:
+      - _OmopFilterMixin.get_queryset  (MeasurementViewSet list/retrieve)
+      - _ProvenanceMixin.perform_create / perform_update  (MeasurementViewSet write)
+      - PersonViewSet.partial_update
+      - EpisodeEventViewSet.get_queryset + perform_create
+      - PatientInfoViewSet.get_queryset
+
+    Each test authenticates with the canonical service identity and
+    token="service-token" (the same sentinel ServiceTokenAuthentication sets).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+
+        # Two patients in different orgs so cross-org visibility is meaningful.
+        from omop_core.models import Organization
+        cls.org_a = Organization.objects.create(name='ST Org A', slug='st-org-a')
+        cls.org_b = Organization.objects.create(name='ST Org B', slug='st-org-b')
+
+        cls.person_a = Person.objects.create(person_id=29001)
+        cls.person_b = Person.objects.create(person_id=29002)
+        PatientInfo.objects.create(person=cls.person_a, organization=cls.org_a)
+        PatientInfo.objects.create(person=cls.person_b, organization=cls.org_b)
+
+        # One measurement per patient.
+        m_concept = Concept.objects.get(concept_id=3000963)   # Laboratory test result
+        type_concept = Concept.objects.get(concept_id=32817)  # EHR
+        cls.m_a = Measurement.objects.create(
+            measurement_id=29001,
+            person=cls.person_a,
+            measurement_concept=m_concept,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=type_concept,
+        )
+        cls.m_b = Measurement.objects.create(
+            measurement_id=29002,
+            person=cls.person_b,
+            measurement_concept=m_concept,
+            measurement_date=date(2024, 2, 1),
+            measurement_type_concept=type_concept,
+        )
+
+        # Episode + EpisodeEvent for person_a.
+        ep_concept = Concept.objects.get(concept_id=32531)   # Treatment Regimen
+        cls.ep_a = Episode.objects.create(
+            episode_id=29001,
+            person=cls.person_a,
+            episode_concept=ep_concept,
+            episode_object_concept=type_concept,
+            episode_type_concept=type_concept,
+            episode_start_date=date(2024, 1, 1),
+            episode_number=1,
+            episode_source_value='TEST-LOT',
+        )
+        drug_concept = Concept.objects.get(concept_id=19136160)
+        cls.drug_a = DrugExposure.objects.create(
+            drug_exposure_id=29001,
+            person=cls.person_a,
+            drug_concept=drug_concept,
+            drug_exposure_start_date=date(2024, 1, 1),
+            drug_type_concept=type_concept,
+        )
+        field_concept = Concept.objects.get(concept_id=1147094)
+        cls.ee_a = EpisodeEvent.objects.create(
+            episode_id=cls.ep_a.episode_id,
+            event_id=cls.drug_a.drug_exposure_id,
+            episode_event_field_concept=field_concept,
+        )
+
+        # Service identity — mirrors what ServiceTokenAuthentication creates.
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='hk-labs-sync',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token"
+        )
+
+    # --- MeasurementViewSet (via _OmopFilterMixin + _ProvenanceMixin) ---
+
+    def test_service_token_measurement_list_sees_all_orgs(self):
+        """GET /api/measurements/ returns measurements from all orgs."""
+        resp = self.client.get('/api/measurements/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
+        returned_ids = {r['measurement_id'] for r in rows}
+        self.assertIn(self.m_a.measurement_id, returned_ids)
+        self.assertIn(self.m_b.measurement_id, returned_ids)
+
+    def test_service_token_measurement_create(self):
+        """POST /api/measurements/ creates without org or ACL error."""
+        m_concept = Concept.objects.get(concept_id=3000963)
+        type_concept = Concept.objects.get(concept_id=32817)
+        resp = self.client.post('/api/measurements/', {
+            'person': self.person_a.person_id,
+            'measurement_concept': m_concept.concept_id,
+            'measurement_date': '2024-03-01',
+            'measurement_type_concept': type_concept.concept_id,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_service_token_measurement_update(self):
+        """PATCH /api/measurements/{id}/ updates without org ACL error."""
+        resp = self.client.patch(
+            f'/api/measurements/{self.m_a.measurement_id}/',
+            {'value_as_number': 7.5},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.m_a.refresh_from_db()
+        self.assertEqual(float(self.m_a.value_as_number), 7.5)
+
+    # --- PersonViewSet.partial_update ---
+
+    def test_service_token_person_patch_bypasses_acl(self):
+        """PATCH /api/persons/{person_id}/ succeeds without can_access_patient."""
+        resp = self.client.patch(
+            f'/api/persons/{self.person_b.person_id}/',
+            {'given_name': 'ServicePatched'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.person_b.refresh_from_db()
+        self.assertEqual(self.person_b.given_name, 'ServicePatched')
+
+    # --- EpisodeEventViewSet ---
+
+    def test_service_token_episode_event_list(self):
+        """GET /api/episode-events/?episode_id=X returns events without ACL error."""
+        resp = self.client.get(
+            f'/api/episode-events/?episode_id={self.ep_a.episode_id}'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
+        returned_ids = {r['event_id'] for r in rows}
+        self.assertIn(self.drug_a.drug_exposure_id, returned_ids)
+
+    def test_service_token_episode_event_create(self):
+        """POST /api/episode-events/ creates without PermissionDenied."""
+        drug2 = DrugExposure.objects.create(
+            drug_exposure_id=29099,
+            person=self.person_a,
+            drug_concept=Concept.objects.get(concept_id=19136160),
+            drug_exposure_start_date=date(2024, 4, 1),
+            drug_type_concept=Concept.objects.get(concept_id=32817),
+        )
+        resp = self.client.post('/api/episode-events/', {
+            'episode_id': self.ep_a.episode_id,
+            'event_id': drug2.drug_exposure_id,
+            'episode_event_field_concept': 1147094,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    # --- PatientInfoViewSet ---
+
+    def test_service_token_patient_info_list_sees_all_orgs(self):
+        """GET /api/patient-info/ returns patients from all orgs."""
+        resp = self.client.get('/api/patient-info/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
+        returned_pids = {r['person_id'] for r in rows}
+        self.assertIn(self.person_a.person_id, returned_pids)
+        self.assertIn(self.person_b.person_id, returned_pids)

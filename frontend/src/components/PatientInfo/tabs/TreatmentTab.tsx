@@ -53,14 +53,25 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
     return parseInt(v) || 0;
   })();
 
+  // '3+' is a UI token for ≥3; server stores an integer. Convert in both directions.
+  const rawLines = formData?.therapy_lines_count;
+  const displayLines = rawLines == null || rawLines === ''
+    ? ''
+    : Number(rawLines) >= 3 ? '3+' : String(rawLines);
+
+  function handleLinesChange(_field: string, val: unknown) {
+    const num = val === '' || val == null ? null : val === '3+' ? 3 : parseInt(val as string, 10);
+    onChange('therapy_lines_count', num);
+  }
+
   return (
     <div>
       <Section title="Treatment History">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <Field label="Number of Prior Lines" name="therapy_lines_count" type="select"
-            value={formData?.therapy_lines_count}
+            value={displayLines}
             options={['0', '1', '2', '3+']}
-            onChange={onChange} />
+            onChange={handleLinesChange} />
           <Field label="Relapse Count" name="relapse_count" type="number"
             value={formData?.relapse_count} onChange={onChange} />
           <div className="sm:col-span-2">

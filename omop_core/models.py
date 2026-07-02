@@ -49,6 +49,12 @@ class Organization(models.Model):
     slug = models.SlugField(max_length=60, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
     is_active = models.BooleanField(default=True)
+    allows_public_aggregated_data = models.BooleanField(
+        default=False,
+        help_text="When true, aggregated de-identified data from this org is "
+                  "available for analysis in PRism Analytics to any signed-up user. "
+                  "Does not grant access to individual patient records in PRomop.",
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='+',
@@ -1769,16 +1775,21 @@ class PatientInfo(models.Model):
     
     def _update_therapy_computed_fields(self):
         """Update computed fields based on therapy line data"""
-        # Count therapy lines
-        lines_count = 0
+        # Count therapy lines from populated text fields.
+        # The user can also set therapy_lines_count directly from the UI without
+        # filling text fields (e.g. "I had 1 prior line but don't know the name").
+        # Take the max so an explicit user choice is never overwritten by the
+        # text-field count, but filling in a new text field still bumps the total.
+        text_lines = 0
         if self.first_line_therapy:
-            lines_count += 1
+            text_lines += 1
         if self.second_line_therapy:
-            lines_count += 1
+            text_lines += 1
         if self.later_therapy:
-            lines_count += 1
-        
-        self.therapy_lines_count = lines_count
+            text_lines += 1
+
+        self.therapy_lines_count = max(text_lines, self.therapy_lines_count or 0)
+        lines_count = self.therapy_lines_count
 
         # Set prior_therapy using the vocabulary expected by EXACT and CB matchers
         if lines_count == 0:

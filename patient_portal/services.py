@@ -34,8 +34,13 @@ def resolve_or_create_person(identity, email=None):
         # rather than silently linking to the wrong patient.
         pi = email_qs.first() if email_qs.count() == 1 else None
         if pi:
-            PatientUser.objects.get_or_create(
-                identity=identity, defaults={"person": pi.person},
+            # Re-point any existing PatientUser for this person to the current
+            # identity. Needed when the Firebase emulator restarts and issues a
+            # new UID for the same email: the old PatientUser row stays in the
+            # DB (person unique constraint) but its identity is now stale.
+            PatientUser.objects.update_or_create(
+                person=pi.person,
+                defaults={"identity": identity},
             )
             return pi.person
 

@@ -52,7 +52,7 @@ class UserSerializer(serializers.ModelSerializer):
 class OrganizationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Organization
-        fields = ['id', 'name', 'slug', 'is_active', 'created_at']
+        fields = ['id', 'name', 'slug', 'is_active', 'allows_public_aggregated_data', 'created_at']
         read_only_fields = ['id', 'created_at']
 
 
@@ -199,6 +199,12 @@ class PatientInfoSerializer(serializers.ModelSerializer):
         read_only_fields = (
             'organization', 'person', 'created_at', 'updated_at',
             'first_line_therapy_display', 'second_line_therapy_display', 'later_therapy_display',
+            # Wearable summaries are written by the device-sync service, never by the client API.
+            'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
+            'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
+            'resting_heart_rate_avg_30d', 'hrv_sdnn_avg_30d',
+            'oxygen_saturation_min_30d', 'respiratory_rate_avg_30d',
+            'sleep_duration_hours_avg_30d',
         )
 
     def get_patient_name(self, obj):

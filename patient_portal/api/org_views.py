@@ -117,6 +117,42 @@ def _visible_orgs(user):
     return Organization.objects.filter(id__in=admin_org_ids)
 
 
+def _find_identity_by_email(email):
+    identities = list(Identity.objects.filter(email__iexact=email).order_by('id'))
+    return (
+        next((identity for identity in identities if identity.issuer != 'urn:local'), None)
+        or next((identity for identity in identities if identity.issuer == 'urn:local' and identity.has_usable_password()), None)
+        or next((identity for identity in identities if identity.issuer == 'urn:local'), None)
+        or None
+    )
+
+
+def _get_or_create_invitee_identity(email):
+    identity = _find_identity_by_email(email)
+    if identity:
+        return identity
+    return Identity.objects.create_user(email=email, password=None)
+
+
+ROLE_RANK = {'org_admin': 3, 'doctor': 2, 'navigator': 1}
+
+
+def _grant_org_access(identity, org, role, granted_by):
+    existing = GroupAccess.objects.filter(identity=identity, org=org).first()
+    if existing:
+        if ROLE_RANK.get(existing.role, 0) < ROLE_RANK.get(role, 0):
+            existing.role = role
+            existing.granted_by = granted_by
+            existing.save(update_fields=['role', 'granted_by'])
+        return existing
+    return GroupAccess.objects.create(
+        identity=identity,
+        org=org,
+        role=role,
+        granted_by=granted_by,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Org list / create
 # ---------------------------------------------------------------------------
@@ -185,37 +221,38 @@ class OrgInviteView(APIView):
         if role not in dict(OrgInvitation.ROLE):
             return Response({'error': f'Invalid role: {role}'}, status=status.HTTP_400_BAD_REQUEST)
 
+        with transaction.atomic():
+            invitation = OrgInvitation.objects.select_for_update().filter(
+                org=org, email=email,
+                confirmed_at__isnull=True, cancelled_at__isnull=True,
+            ).first()
+
+            token = secrets.token_hex(32)  # 64 hex chars
+            expires_at = timezone.now() + timezone.timedelta(days=7)
+            if invitation:
+                invitation.role = role
+                invitation.token = token
+                invitation.invited_by = request.user
+                invitation.expires_at = expires_at
+                invitation.save(update_fields=['role', 'token', 'invited_by', 'expires_at'])
+            else:
+                invitation = OrgInvitation.objects.create(
+                    org=org,
+                    email=email,
+                    role=role,
+                    token=token,
+                    invited_by=request.user,
+                    expires_at=expires_at,
+                )
+
+            identity = _get_or_create_invitee_identity(email)
+            _grant_org_access(identity, org, role, request.user)
+
+        email_warning = None
         try:
-            with transaction.atomic():
-                invitation = OrgInvitation.objects.select_for_update().filter(
-                    org=org, email=email,
-                    confirmed_at__isnull=True, cancelled_at__isnull=True,
-                ).first()
-
-                token = secrets.token_hex(32)  # 64 hex chars
-                expires_at = timezone.now() + timezone.timedelta(days=7)
-                if invitation:
-                    invitation.role = role
-                    invitation.token = token
-                    invitation.invited_by = request.user
-                    invitation.expires_at = expires_at
-                    invitation.save(update_fields=['role', 'token', 'invited_by', 'expires_at'])
-                else:
-                    invitation = OrgInvitation.objects.create(
-                        org=org,
-                        email=email,
-                        role=role,
-                        token=token,
-                        invited_by=request.user,
-                        expires_at=expires_at,
-                    )
-
-                _send_invitation_email(invitation)
+            _send_invitation_email(invitation)
         except InvitationEmailError:
-            return Response(
-                {'error': 'Invitation email could not be sent. Please try again.'},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+            email_warning = 'Invitation was created, but the email could not be sent.'
 
         # Defensive cleanup for stale duplicate pending rows from before the
         # partial unique constraint existed; normal paths keep one pending invite.
@@ -223,7 +260,11 @@ class OrgInviteView(APIView):
             org=org, email=email,
             confirmed_at__isnull=True, cancelled_at__isnull=True,
         ).exclude(id=invitation.id).update(cancelled_at=timezone.now())
-        return Response(OrgInvitationSerializer(invitation).data, status=status.HTTP_201_CREATED)
+        data = OrgInvitationSerializer(invitation).data
+        data['access_granted'] = True
+        if email_warning:
+            data['email_warning'] = email_warning
+        return Response(data, status=status.HTTP_201_CREATED)
 
 
 class OrgInvitationListView(APIView):
@@ -273,10 +314,7 @@ def confirm_invitation(request):
 
     # Prefer a local-auth identity; fall back to any identity with this email
     # so that OIDC/SSO users can also confirm invitations.
-    identity = (
-        Identity.objects.filter(email__iexact=invitation.email, issuer='urn:local').first()
-        or Identity.objects.filter(email__iexact=invitation.email).first()
-    )
+    identity = _find_identity_by_email(invitation.email)
     if not identity:
         return Response(
             {'error': 'No account found for this email. Please log in first, or contact your administrator.'},
@@ -287,21 +325,7 @@ def confirm_invitation(request):
     # silently downgrading an existing higher-privilege role (e.g. org_admin → doctor).
     # If the grant already exists, leave it unchanged; the invitation is still
     # marked confirmed so it can't be replayed.
-    ROLE_RANK = {'org_admin': 3, 'doctor': 2, 'navigator': 1}
-    existing = GroupAccess.objects.filter(identity=identity, org=invitation.org).first()
-    if existing:
-        if ROLE_RANK.get(existing.role, 0) < ROLE_RANK.get(invitation.role, 0):
-            # Upgrade to the higher role from the invitation
-            existing.role = invitation.role
-            existing.granted_by = invitation.invited_by
-            existing.save(update_fields=['role', 'granted_by'])
-    else:
-        GroupAccess.objects.create(
-            identity=identity,
-            org=invitation.org,
-            role=invitation.role,
-            granted_by=invitation.invited_by,
-        )
+    _grant_org_access(identity, invitation.org, invitation.role, invitation.invited_by)
 
     invitation.confirmed_at = timezone.now()
     invitation.save(update_fields=['confirmed_at'])

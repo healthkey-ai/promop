@@ -15,8 +15,9 @@ from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from omop_core.models import (
     Person, PatientInfo, Concept, ProvenanceRecord,
-    ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
-    PatientDocument, PatientTrialEnrollment, Survey, PatientSurveyResponse,
+    ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
+    Observation, ProcedureOccurrence, VisitOccurrence,
+    PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
     # Controlled vocabulary lookup models
     Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
     ProgesteroneReceptorStatus, Her2Status, HrStatus, HrdStatus,
@@ -46,7 +47,7 @@ import hashlib
 import json
 import logging
 from io import StringIO
-from .permissions import ScopedTokenPermission, get_request_org
+from .permissions import ScopedTokenPermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
     UserSerializer, PatientInfoSerializer, PatientListSerializer, ProvenanceRecordSerializer,
@@ -145,6 +146,34 @@ def _record_provenance(record, source, source_user_id, target_patient_id=None, m
     )
 
 
+def _delete_omop_clinical_rows(person):
+    """Delete all OMOP clinical rows for a person, in FK dependency order.
+
+    Must be called inside a transaction.atomic() block.
+    Does NOT delete PatientInfo, PatientGroupMembership, PatientUser/Identity,
+    or Person — callers handle those after this returns.
+    """
+    episode_ids = list(Episode.objects.filter(person=person).values_list('episode_id', flat=True))
+    EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
+    Episode.objects.filter(person=person).delete()
+    visit_ids = list(VisitOccurrence.objects.filter(person=person).values_list('visit_occurrence_id', flat=True))
+    measurement_ids = list(Measurement.objects.filter(person=person).values_list('measurement_id', flat=True))
+    # Delete by both axes: visit_occurrence_id covers normal rows; measurement_id
+    # covers any ownership rows whose visit belongs to a different person (edge case
+    # where measurement_id has no DB FK so those rows would otherwise be orphaned).
+    MeasurementOwnership.objects.filter(
+        Q(visit_occurrence_id__in=visit_ids) | Q(measurement_id__in=measurement_ids)
+    ).delete()
+    Measurement.objects.filter(person=person).delete()
+    ConditionOccurrence.objects.filter(person=person).delete()
+    DrugExposure.objects.filter(person=person).delete()
+    Observation.objects.filter(person=person).delete()
+    ProcedureOccurrence.objects.filter(person=person).delete()
+    VisitOccurrence.objects.filter(person=person).delete()
+    PatientDocument.objects.filter(person=person).delete()
+    PatientTrialEnrollment.objects.filter(person=person).delete()
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PatientInfoSerializer
@@ -159,6 +188,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     
     def get_queryset(self):
         qs = PatientInfo.objects.all().select_related('person', 'organization')
+        # Trusted backend (service-token): full visibility across all patients.
+        if is_service_token(self.request):
+            return qs
         org = get_request_org(self.request)
         if org is not None:
             qs = qs.filter(organization=org)
@@ -2038,7 +2070,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     # Stamp the org derived from the OAuth2 token so this patient
                     # is scoped to the uploading service client's tenant.
                     upload_org = get_request_org(request)
-                    if upload_org is not None:
+                    if upload_org is not None and patient_info.organization_id is None:
                         _patch['organization'] = upload_org
 
                     # Apply patch to PatientInfo (suppress signal-triggering save)
@@ -2142,18 +2174,24 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         if not can_access_patient(request.user, person_id):
                             errors.append("Person not found.")
                             continue
-                    # Delete PatientInfo
-                    PatientInfo.objects.filter(person=person).delete()
-                    # Delete associated Identity if exists (via PatientUser)
-                    from patient_portal.models import PatientUser as PU
-                    try:
-                        pu = PU.objects.get(person=person)
-                        pu.identity.delete()
-                    except PU.DoesNotExist:
-                        pass
-                    # Delete Person
-                    person.delete()
-                    deleted_count += 1
+                    with transaction.atomic():
+                        # Delete OMOP clinical rows in FK dependency order.
+                        _delete_omop_clinical_rows(person)
+                        # PatientGroupMembership uses a plain BigIntegerField (no DB FK)
+                        # so it is never cascade-deleted by the ORM.
+                        PatientGroupMembership.objects.filter(person_id=person.person_id).delete()
+                        # Delete PatientInfo
+                        PatientInfo.objects.filter(person=person).delete()
+                        # Delete associated Identity if exists (via PatientUser)
+                        from patient_portal.models import PatientUser as PU
+                        try:
+                            pu = PU.objects.get(person=person)
+                            pu.identity.delete()
+                        except PU.DoesNotExist:
+                            pass
+                        # Delete Person last (other rows hold person FK)
+                        person.delete()
+                        deleted_count += 1
                 except Person.DoesNotExist:
                     errors.append("Person not found.")
                 except Exception:
@@ -2189,31 +2227,39 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             person_ids = [row[1] for row in snapshot]
 
             errors = []
+            # Bulk-delete only the specifically filtered PatientInfo records — correctly
+            # scoped to org + disease + stage + date via the queryset snapshot.
+            # This transaction commits before per-person orphan cleanup so a failure
+            # in the cleanup loop cannot roll back the PatientInfo deletions.
             with transaction.atomic():
-                # Bulk-delete only the specifically filtered PatientInfo records — correctly
-                # scoped to org + disease + stage + date via the queryset snapshot.
                 PatientInfo.objects.filter(id__in=patientinfo_ids).delete()
-                deleted_count = len(patientinfo_ids)
+            deleted_count = len(patientinfo_ids)
 
-                # Clean up Person/Identity for persons that now have no PatientInfo at all.
-                persons = {p.person_id: p for p in Person.objects.filter(person_id__in=person_ids)}
-                from patient_portal.models import PatientUser as PU
-                for person_id in person_ids:
-                    person = persons.get(person_id)
-                    if person is None:
-                        continue
-                    try:
-                        if not PatientInfo.objects.filter(person=person).exists():
+            # Clean up Person/OMOP rows/Identity for persons that now have no PatientInfo
+            # at all.  Each person gets its own savepoint so a single failure does not
+            # abort cleanup for the remaining persons.
+            persons = {p.person_id: p for p in Person.objects.filter(person_id__in=person_ids)}
+            from patient_portal.models import PatientUser as PU
+            for person_id in person_ids:
+                person = persons.get(person_id)
+                if person is None:
+                    continue
+                try:
+                    if not PatientInfo.objects.filter(person=person).exists():
+                        with transaction.atomic():
+                            _delete_omop_clinical_rows(person)
+                            # PatientGroupMembership uses a plain BigIntegerField (no DB FK).
+                            PatientGroupMembership.objects.filter(person_id=person.person_id).delete()
                             try:
                                 pu = PU.objects.get(person=person)
                                 pu.identity.delete()
                             except PU.DoesNotExist:
                                 pass
                             person.delete()
-                    except Exception:
-                        id_hash = hashlib.sha256(str(person_id).encode()).hexdigest()[:12]
-                        logger.warning("bulk_delete_filtered: person cleanup failed (id_hash=%s)", id_hash)
-                        errors.append("Person cleanup failed.")
+                except Exception:
+                    id_hash = hashlib.sha256(str(person_id).encode()).hexdigest()[:12]
+                    logger.warning("bulk_delete_filtered: person cleanup failed (id_hash=%s)", id_hash)
+                    errors.append("Person cleanup failed.")
 
             return Response({
                 'success': True,
@@ -2463,14 +2509,18 @@ class PersonViewSet(viewsets.GenericViewSet):
         except (Person.DoesNotExist, ValueError):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        org = get_request_org(request)
-        if org is not None:
-            if not PatientInfo.objects.filter(person=person, organization=org).exists():
-                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        elif not (getattr(request.user, 'is_superuser', False) or getattr(request.user, 'is_staff', False)):
-            from omop_core.authorization import can_access_patient
-            if not can_access_patient(request.user, person.person_id):
-                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        # Trusted backend (service-token): skip per-person row-level ACL.
+        # ScopedTokenPermission confirmed the caller holds a valid HMAC-verified
+        # service token. Service tokens have full cross-person write access by design.
+        if not is_service_token(request):
+            org = get_request_org(request)
+            if org is not None:
+                if not PatientInfo.objects.filter(person=person, organization=org).exists():
+                    return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+            elif not (getattr(request.user, 'is_superuser', False) or getattr(request.user, 'is_staff', False)):
+                from omop_core.authorization import can_access_patient
+                if not can_access_patient(request.user, person.person_id):
+                    return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         changed = []
         for field, (kind, placeholders) in _PERSON_PATCHABLE_FIELDS.items():
@@ -2516,6 +2566,10 @@ class _OmopFilterMixin:
         person_id = self.request.query_params.get('person_id')
         if person_id:
             qs = qs.filter(person_id=person_id)
+        # Trusted backend (service-token): full visibility. Already
+        # validated at the permission layer (ScopedTokenPermission).
+        if is_service_token(self.request):
+            return qs
         org = get_request_org(self.request)
         if org is not None:
             from omop_core.models import PatientInfo
@@ -2561,6 +2615,13 @@ class _ProvenanceMixin:
             if pk_field not in serializer.validated_data:
                 serializer.validated_data[pk_field] = next_pk(model_cls, pk_field)
 
+        # Trusted backend (service-token): skip ACL — already validated at
+        # the permission layer (ScopedTokenPermission).
+        if is_service_token(self.request):
+            obj = serializer.save()
+            self._prov(obj)
+            return
+
         # Org-scoping: reject cross-org persons; allow new/bootstrap patients
         org = get_request_org(self.request)
         if org is not None:
@@ -2587,6 +2648,13 @@ class _ProvenanceMixin:
         self._prov(obj)
 
     def perform_update(self, serializer):
+        # Trusted backend (service-token): skip ACL — already validated at
+        # the permission layer (ScopedTokenPermission).
+        if is_service_token(self.request):
+            obj = serializer.save()
+            self._prov(obj)
+            return
+
         org = get_request_org(self.request)
         if org is not None:
             person = serializer.validated_data.get('person') or serializer.instance.person
@@ -2699,6 +2767,9 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
         episode_id = self.request.query_params.get('episode_id')
         if episode_id:
             qs = qs.filter(episode_id=episode_id)
+        # Trusted backend (service-token): full visibility across all episode events.
+        if is_service_token(self.request):
+            return qs
         # Org / per-patient scoping: EpisodeEvent.episode_id is a bare integer FK to Episode.
         # Resolve allowed episode_ids via the Episode → person → org chain.
         # Bootstrap patients (organization=NULL) are included so that create-path
@@ -2738,6 +2809,10 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+        # Trusted backend (service-token): skip ACL — full cross-patient write access.
+        if is_service_token(self.request):
+            serializer.save()
+            return
         episode_id = serializer.validated_data.get('episode_id')
         org = get_request_org(self.request)
         if org is not None:
@@ -2946,7 +3021,7 @@ class SurveyViewSet(viewsets.ModelViewSet):
         if request.method in ('GET', 'HEAD', 'OPTIONS'):
             return
         token = getattr(request, 'auth', None)
-        if token == 'service-token':
+        if is_service_token(request):
             return
         if token is not None and not isinstance(token, TokenClaims):
             # OAuth2: allow only internal service apps (no org).

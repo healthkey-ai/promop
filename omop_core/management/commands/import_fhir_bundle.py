@@ -50,8 +50,10 @@ class Command(BaseCommand):
                             help='Patients per batch (default: 1)')
         parser.add_argument('--start-from', type=int, default=0, dest='start_from',
                             help='Skip first N patients (for resuming after failure)')
-        parser.add_argument('--username', default='admin',
-                            help='Django user to authenticate as (default: admin)')
+        parser.add_argument('--email', default=None, dest='email',
+                            help='Admin email to authenticate as (default: first superuser)')
+        parser.add_argument('--org', default=None, dest='org_slug',
+                            help='Org slug to create (if needed) and assign all imported patients to')
 
     def _print(self, msg, err=False):
         stream = self.stderr if err else self.stdout
@@ -98,12 +100,32 @@ class Command(BaseCommand):
         close_old_connections()
         User = get_user_model()
         try:
-            user = User.objects.get(username=options['username'])
+            if options['email']:
+                user = User.objects.get(email=options['email'])
+            else:
+                user = User.objects.filter(is_superuser=True).order_by('created_at').first()
+                if user is None:
+                    raise CommandError('No superuser found. Run: manage.py createsuperuser')
+                self._print(f'Authenticating as superuser: {user.email or user.uid}')
         except User.DoesNotExist:
             raise CommandError(
-                f"User '{options['username']}' not found. "
-                "Run: manage.py createsuperuser"
+                f"User with email '{options['email']}' not found."
             )
+
+        # Org setup — monkey-patch get_request_org so the upload view stamps the
+        # correct org on every PatientInfo it creates, even for superuser requests.
+        org = None
+        if options['org_slug']:
+            from omop_core.models import Organization
+            import patient_portal.api.permissions as _perms
+            org, created = Organization.objects.get_or_create(
+                slug=options['org_slug'],
+                defaults={'name': options['org_slug'].upper(), 'created_by': user},
+            )
+            action = 'Created' if created else 'Found existing'
+            self._print(f'{action} org: {org.name} (slug={org.slug})')
+            import patient_portal.api.views as _views_mod
+            _views_mod.get_request_org = lambda req: org
 
         factory = RequestFactory()
 
@@ -120,7 +142,7 @@ class Command(BaseCommand):
             content = json.dumps(mini_bundle).encode('utf-8')
 
             uploaded = SimpleUploadedFile('bundle.json', content, content_type='application/json')
-            django_request = factory.post('/api/patient-info/upload_fhir/', {'file': uploaded})
+            django_request = factory.post('/api/patient-info/upload_fhir/?skip_refresh=true', {'file': uploaded})
             django_request.user = user
             django_request._dont_enforce_csrf_checks = True
 
@@ -156,6 +178,25 @@ class Command(BaseCommand):
             if errors:
                 for e in errors[:3]:
                     self._print(f'    {e}', err=True)
+
+        # Bulk refresh PatientInfo for all imported patients now that OMOP writes are done.
+        self._print('Refreshing PatientInfo for all imported patients…')
+        from omop_core.models import PatientInfo
+        from omop_core.services.patient_info_service import refresh_patient_info
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        close_old_connections()
+        patients = PatientInfo.objects.select_related('person').all()
+        if org:
+            patients = patients.filter(organization=org)
+        refreshed = 0
+        for pi in patients:
+            try:
+                refresh_patient_info(pi.person)
+                infer_lot_for_person(pi.person)
+                refreshed += 1
+            except Exception as exc:
+                self._print(f'  refresh failed for person {pi.person_id}: {exc}', err=True)
+        self._print(f'Refreshed {refreshed} patients.')
 
         self._print(self.style.SUCCESS(
             f'Done. Total: created={total_created} updated={total_updated} errors={total_errors}'

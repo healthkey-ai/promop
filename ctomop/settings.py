@@ -353,21 +353,50 @@ if not DEBUG:
     SECURE_CONTENT_TYPE_NOSNIFF = True
     X_FRAME_OPTIONS = 'DENY'
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-    
-    # Add trusted origins for CSRF
-    production_url = os.environ.get('PRODUCTION_URL', '')
-    railway_domain = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
-    render_url = os.environ.get('RENDER_EXTERNAL_URL', '')
-    
-    csrf_origins = []
-    if production_url:
-        csrf_origins.append(production_url)
-    if railway_domain:
-        csrf_origins.append(f'https://{railway_domain}')
-    if render_url:
-        csrf_origins.append(render_url)
-    
-    CSRF_TRUSTED_ORIGINS = csrf_origins
+
+
+# Add trusted origins for CSRF. Django checks the Origin header on admin POSTs,
+# so every deployed public hostname must be present here. Keep this outside the
+# production-only block because staging may run with DEBUG=True.
+def _normalise_csrf_origin(value):
+    value = (value or '').strip().rstrip('/')
+    if not value:
+        return ''
+    if value.startswith(('http://', 'https://')):
+        return value
+    return f'https://{value}'
+
+
+csrf_origins = []
+for value in (
+    os.environ.get('PRODUCTION_URL', ''),
+    os.environ.get('RENDER_EXTERNAL_URL', ''),
+    os.environ.get('APP_BASE_URL', ''),
+):
+    origin = _normalise_csrf_origin(value)
+    if origin:
+        csrf_origins.append(origin)
+
+railway_domain = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
+railway_origin = _normalise_csrf_origin(railway_domain)
+if railway_origin:
+    csrf_origins.append(railway_origin)
+
+for origin in os.environ.get('CSRF_TRUSTED_ORIGINS', '').split(','):
+    origin = _normalise_csrf_origin(origin)
+    if origin:
+        csrf_origins.append(origin)
+
+for host in os.environ.get('ALLOWED_HOSTS', '').split(','):
+    host = host.strip()
+    if host and host != '*' and not host.startswith('.'):
+        csrf_origins.append(f'https://{host}')
+
+for host in ALLOWED_HOSTS:
+    if host and host != '*' and not host.startswith('.'):
+        csrf_origins.append(f'https://{host}')
+
+CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(csrf_origins))
 
 
 # ── Firebase Admin SDK ────────────────────────────────────────────────────
