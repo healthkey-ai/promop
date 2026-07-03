@@ -544,7 +544,23 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=['get', 'patch'], permission_classes=[ScopedTokenPermission])
     def me(self, request):
         """GET/PATCH /api/patient-info/me/ — current user's own PatientInfo."""
+        from patient_portal.models import PatientUser
         from patient_portal.services import resolve_or_create_person
+
+        # Fast path: user already has a confirmed patient record — no creation risk.
+        existing_pu = PatientUser.objects.filter(identity=request.user).select_related('person').first()
+        if existing_pu is None:
+            # Staff and superusers are not patients.
+            if getattr(request.user, 'is_staff', False) or getattr(request.user, 'is_superuser', False):
+                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+            # Users with a non-patient org role (doctor/navigator/org_admin) but no
+            # PatientUser are clinical staff, not patients — don't pollute the dataset.
+            from omop_core.models import GroupAccess
+            if GroupAccess.objects.filter(
+                identity=request.user,
+                role__in=['org_admin', 'doctor', 'navigator'],
+            ).exists():
+                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         person = resolve_or_create_person(request.user)
         patient_info, _ = PatientInfo.objects.get_or_create(person=person)
