@@ -29,50 +29,29 @@
 
 ### Medium
 
-#### #4 Person ID leaked in error response
-- **Severity:** medium / security
-- `patient_portal/api/lab_results/sync.py:211`
-- `f'Person {person_id} does not exist.'` enables person_id enumeration.
-- **Action:** Replace with generic `'Person not found.'`.
+#### ~~#4 Person ID leaked in error response~~ ✓ FIXED
+- Error message is now generic `'Person not found.'` (`sync.py:206`).
 
 #### ~~#5 ScopedTokenPermission bypasses scope enforcement for partner auth~~ ✓ FIXED
 - service-token → full access; staff/superuser → full access; patients → safe methods + PATCH only (POST/DELETE denied).
 
-#### #8 _get_or_create_hk_concept runs per-measurement without caching
-- **Severity:** medium / orm
-- `patient_portal/api/lab_results/sync.py:448-471`
-- For LOINC-unmatched tests, each measurement does a DB query. Race condition between concurrent requests can create duplicate concept_codes.
-- **Action:** Pre-build an `hk_concept_cache` before the loop. Add unique constraint on `(vocabulary_id, concept_code)`.
+#### ~~#8 _get_or_create_hk_concept runs per-measurement without caching~~ ✓ FIXED
+- `_preload_hk_concepts` pre-fetches all concept mappings before the loop (`sync.py:272`).
 
-#### #9 Missing db_index on authorization lookup columns
-- **Severity:** medium / database
-- `omop_core/models.py:107,183`
-- `PatientGroupMembership.person_id` and `PersonalRepresentative.person_id` lack standalone indexes but are filtered in `can_access_patient()` on every request.
-- **Action:** Add `db_index=True` to both fields.
+#### ~~#9 Missing db_index on authorization lookup columns~~ ✓ FIXED
+- Both `PatientGroupMembership.person_id` and `PersonalRepresentative.person_id` have `db_index=True` (`models.py:222, 317`).
 
-#### #10 resolve_or_create_person race condition on concurrent first-login
-- **Severity:** medium / database
-- `patient_portal/services.py:37-49`
-- Two concurrent requests for a brand-new identity can both enter Person creation. Second `PatientUser.objects.create()` fails with IntegrityError (OneToOneField).
-- **Action:** Catch `IntegrityError` on `PatientUser.create` and retry lookup.
+#### ~~#10 resolve_or_create_person race condition on concurrent first-login~~ ✓ FIXED
+- `IntegrityError` is caught on `PatientUser.objects.create` and retries lookup (`services.py:66`).
 
-#### #13 MeasurementDetailView.patch uses request.data without serializer
-- **Severity:** medium / drf
-- `patient_portal/api/lab_results/views.py:502-582`
-- Reads fields directly from `request.data` bypassing DRF validation.
-- **Action:** Create a `MeasurementUpdateSerializer` and use `serializer.is_valid(raise_exception=True)`.
+#### ~~#13 MeasurementDetailView.patch uses request.data without serializer~~ ✓ FIXED
+- `MeasurementUpdateSerializer` validates `request.data` before writing (`views.py:611`).
 
-#### #14 _hydrate_page fetches ALL measurements then truncates in Python
-- **Severity:** medium / orm
-- `patient_portal/api/lab_results/views.py:235-270`
-- Queries all matching measurements with no LIMIT, discards all but 10 per concept in Python.
-- **Action:** Use a window function (`ROW_NUMBER() OVER (PARTITION BY concept_id)`) to limit at the DB level.
+#### ~~#14 _hydrate_page fetches ALL measurements then truncates in Python~~ ✓ FIXED
+- Uses `ROW_NUMBER() OVER (PARTITION BY concept_id)` window function to limit at DB level (`views.py:278`).
 
-#### #15 _ensure_concept returns None without clear error propagation
-- **Severity:** medium / python
-- `patient_portal/api/lab_results/sync.py:98-126,254-255`
-- If `_ensure_concept()` returns None for required concepts, the FK assignment causes an `IntegrityError` with a confusing traceback.
-- **Action:** Add explicit null checks and return 503 with a clear message.
+#### ~~#15 _ensure_concept returns None without clear error propagation~~ ✓ FIXED
+- Explicit null check returns HTTP 503 with clear message when required concepts are missing (`sync.py:253`).
 
 #### ~~#17 Email fallback in _resolve_person_id can match wrong patient~~ ✓ FIXED
 - Email fallback now disabled for non-superuser users without org scope; org-filtered when org present; superusers retain cross-org access.
@@ -82,33 +61,21 @@
 
 ### Low
 
-#### #16 Provider registry module-level cache without invalidation
-- **Severity:** low / python
-- `patient_portal/api/providers/registry.py:9-30`
-- `_providers` is set once and never cleared. Makes testing difficult.
-- **Action:** Add a `clear_providers()` function for tests.
+#### ~~#16 Provider registry module-level cache without invalidation~~ ✓ FIXED
+- `clear_providers()` function added to `registry.py:33` for test isolation.
 
 ---
 
 ## Code review findings (2026-06-26, PR #175 dev→main)
 
-#### #19 _classify_drug fires 3 DB queries per unique drug in LOT inference
-- **Severity:** high / performance
-- `omop_core/services/lot_inference_service.py:112-136`
-- Called once per drug per patient in `_build_drug_eras`. Each drug with a concept_id issues: (1) ConceptRelationship HemOnc mappings, (2) ConceptAncestor ancestor names, (3) Concept direct names — 15–45 round-trips per LOT inference call.
-- **Action:** Pre-fetch ConceptRelationship for all drug_concept_ids before the era loop and pass a `hemonc_map` dict into `_classify_drug`.
+#### ~~#19 _classify_drug fires 3 DB queries per unique drug in LOT inference~~ ✓ FIXED
+- Added `_build_hemonc_map()` which pre-fetches all HemOnc relationships in 3 queries total. `_classify_drug` now accepts an optional `hemonc_map` dict; `_build_drug_eras` calls `_build_hemonc_map` once before the era loop and passes it in.
 
-#### #20 ScopedTokenPermission is method-level only — no built-in object ownership enforcement
-- **Severity:** medium / security
-- `patient_portal/api/permissions.py:50-66`
-- The permission class allows any authenticated patient to PATCH. Object-level ownership (`can_access_patient()`) is enforced in `_ProvenanceMixin.perform_update` and `PatientInfoViewSet.partial_update`, but any new view using `ScopedTokenPermission` without those mixins would allow cross-patient writes.
-- **Action:** Add `has_object_permission` override that calls `can_access_patient(request.user, obj.person)`, or document the dependency on `_ProvenanceMixin` in the class docstring.
+#### ~~#20 ScopedTokenPermission is method-level only — no built-in object ownership enforcement~~ ✓ FIXED
+- Added explicit `IMPORTANT — object-level ownership` docstring to `ScopedTokenPermission` documenting the required `_ProvenanceMixin` / `can_access_patient()` pairing for any new view using this permission class.
 
-#### #21 CORS_ALLOWED_ORIGINS silently empty if env var unset in production
-- **Severity:** medium / security
-- `ctomop/settings.py:226-230`
-- When `DEBUG=False` and `CORS_ALLOWED_ORIGINS` env var is absent, the list is empty → all cross-origin requests rejected. App starts without warning; deploy fails silently at the browser.
-- **Action:** Add `CORS_ALLOWED_ORIGINS` to the `ImproperlyConfigured` guard block alongside `DATABASE_URL` and `SECRET_KEY`.
+#### ~~#21 CORS_ALLOWED_ORIGINS silently empty if env var unset in production~~ ✓ FIXED
+- `CORS_ALLOWED_ORIGINS` is now included in the `ImproperlyConfigured` guard block in `settings.py`.
 
 ---
 
