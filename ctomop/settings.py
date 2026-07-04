@@ -71,6 +71,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'django.contrib.postgres',
     'rest_framework',
+    'drf_spectacular',
     'corsheaders',
     'oauth2_provider',
     'omop_core',
@@ -90,7 +91,15 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'patient_portal.api.middleware.AuditLogMiddleware',
+    'patient_portal.api.middleware.DeprecationWarningMiddleware',
 ]
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'PROMOP API',
+    'DESCRIPTION': 'PROMOP clinical oncology patient data API (v1)',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+}
 
 LOGGING = {
     'version': 1,
@@ -286,6 +295,7 @@ if DEBUG:
     ]
 
 REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_AUTHENTICATION_CLASSES': _auth_classes,
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',

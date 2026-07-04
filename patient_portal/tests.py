@@ -7737,3 +7737,179 @@ class MeEndpointGuardTest(TestCase):
     def test_unauthenticated_returns_401_or_403(self):
         resp = APIClient().get('/api/patient-info/me/')
         self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
+class ApiVersioningTest(TestCase):
+    """Tests for /api/v1/ versioned URL aliases and deprecation headers."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.user = Identity.objects.create_superuser(
+            email='versioning_test@test.com', password='pass'
+        )
+
+    def _client(self):
+        c = APIClient()
+        c.force_authenticate(user=self.user)
+        return c
+
+    def test_versioned_patient_records_list_returns_200(self):
+        resp = self._client().get('/api/v1/patient-records/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_versioned_path_has_no_deprecation_header(self):
+        resp = self._client().get('/api/v1/patient-records/')
+        self.assertNotIn('Deprecation', resp)
+
+    def test_legacy_path_has_deprecation_header(self):
+        resp = self._client().get('/api/patient-info/')
+        self.assertEqual(resp.get('Deprecation'), 'true')
+
+    def test_legacy_path_has_sunset_header(self):
+        resp = self._client().get('/api/patient-info/')
+        self.assertEqual(resp.get('Sunset'), 'Tue, 01 Sep 2026 00:00:00 GMT')
+
+    def test_legacy_path_has_link_header(self):
+        resp = self._client().get('/api/patient-info/')
+        link = resp.get('Link', '')
+        self.assertIn('/api/v1/', link)
+        self.assertIn('successor-version', link)
+
+    def test_schema_endpoint_returns_openapi_json(self):
+        resp = self._client().get('/api/v1/schema/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('openapi', resp.data)
+        self.assertEqual(resp.data['info']['title'], 'PROMOP API')
+
+    def test_schema_documents_v1_patient_records_not_legacy_patient_info(self):
+        resp = self._client().get('/api/v1/schema/')
+        paths = set(resp.data.get('paths', {}))
+        self.assertIn('/api/v1/patient-records/', paths)
+        self.assertNotIn('/api/v1/patient-info/', paths)
+        self.assertFalse(
+            any(path.startswith('/api/') and not path.startswith('/api/v1/') for path in paths),
+            'v1 schema should not include legacy /api/ paths',
+        )
+
+    def test_schema_accessible_without_authentication(self):
+        resp = APIClient().get('/api/v1/schema/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_swagger_ui_accessible_without_authentication(self):
+        resp = APIClient().get('/api/v1/docs/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_legacy_path_has_deprecation_header_on_post(self):
+        """Deprecation headers must appear on mutating requests, not just GET."""
+        resp = self._client().post('/api/patient-info/upload_fhir/', {}, format='json')
+        self.assertEqual(resp.get('Deprecation'), 'true')
+
+    def test_v1_lab_results_path_has_no_deprecation_header(self):
+        resp = self._client().get('/api/v1/lab-results/summary/')
+        self.assertNotIn('Deprecation', resp)
+
+    def test_legacy_lab_results_path_has_deprecation_header(self):
+        resp = self._client().get('/api/lab-results/summary/')
+        self.assertEqual(resp.get('Deprecation'), 'true')
+
+    def test_v1_fhir_path_has_no_deprecation_header(self):
+        resp = self._client().get('/api/v1/fhir/sync/')
+        self.assertNotIn('Deprecation', resp)
+
+    def test_legacy_fhir_path_has_deprecation_header(self):
+        resp = self._client().get('/api/fhir/sync/')
+        self.assertEqual(resp.get('Deprecation'), 'true')
+
+
+class V1MeEndpointTest(TestCase):
+    """Tests for /api/v1/patient-records/me/ — guard behaviour and no deprecation headers."""
+
+    @classmethod
+    def setUpTestData(cls):
+        import datetime
+        from django.utils import timezone as tz
+        from omop_core.models import Organization, GroupAccess
+
+        _make_vocab_fixtures()
+
+        cls.org = Organization.objects.create(name='V1 Me Test Org', slug='v1-me-test-org')
+
+        # Confirmed patient: has PatientUser + Person + PatientInfo
+        cls.patient_user = Identity.objects.create_user(
+            email='v1_patient_me@test.com', password='pass'
+        )
+        cls.patient_person = Person.objects.create(
+            person_id=89001,
+            year_of_birth=1990,
+            gender_source_value='female',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        PatientInfo.objects.create(person=cls.patient_person, organization=cls.org)
+        from patient_portal.models import PatientUser as PU
+        PU.objects.create(identity=cls.patient_user, person=cls.patient_person)
+
+        # Org admin with no patient record
+        cls.org_admin_user = Identity.objects.create_user(
+            email='v1_orgadmin_me@test.com', password='pass'
+        )
+        GroupAccess.objects.create(
+            identity=cls.org_admin_user, org=cls.org, role='org_admin'
+        )
+
+        # Clinical user with an expired grant (should be treated as a plain user)
+        cls.expired_clinical_user = Identity.objects.create_user(
+            email='v1_expired_doc_me@test.com', password='pass'
+        )
+        GroupAccess.objects.create(
+            identity=cls.expired_clinical_user,
+            org=cls.org,
+            role='doctor',
+            expires_at=tz.now() - datetime.timedelta(days=1),
+        )
+
+    def _client(self, user):
+        c = APIClient()
+        c.force_authenticate(user=user)
+        return c
+
+    # --- happy path -----------------------------------------------------------
+
+    def test_v1_confirmed_patient_get_returns_200(self):
+        resp = self._client(self.patient_user).get('/api/v1/patient-records/me/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('patient_info', resp.data)
+
+    def test_v1_confirmed_patient_patch_returns_200(self):
+        resp = self._client(self.patient_user).patch(
+            '/api/v1/patient-records/me/', {}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    # --- guard: clinical users without a patient record are blocked -----------
+
+    def test_v1_org_admin_without_patient_record_returns_404(self):
+        resp = self._client(self.org_admin_user).get('/api/v1/patient-records/me/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_v1_expired_clinical_grant_allows_auto_provisioning(self):
+        """Expired grant must not block auto-provisioning at the v1 path."""
+        resp = self._client(self.expired_clinical_user).get('/api/v1/patient-records/me/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_v1_unauthenticated_returns_401_or_403(self):
+        resp = APIClient().get('/api/v1/patient-records/me/')
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    # --- deprecation headers must be absent on v1 paths ----------------------
+
+    def test_v1_me_get_has_no_deprecation_header(self):
+        resp = self._client(self.patient_user).get('/api/v1/patient-records/me/')
+        self.assertNotIn('Deprecation', resp)
+
+    def test_v1_me_patch_has_no_deprecation_header(self):
+        resp = self._client(self.patient_user).patch(
+            '/api/v1/patient-records/me/', {}, format='json'
+        )
+        self.assertNotIn('Deprecation', resp)
