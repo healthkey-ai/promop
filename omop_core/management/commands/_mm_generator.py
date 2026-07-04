@@ -20,7 +20,7 @@ Each patient includes all attributes screened by the EXACT eligibility engine:
     LFTs (AST, ALT, ALP, bilirubin, albumin), LDH, ejection fraction
 
 Usage:
-    python manage.py generate_mm_fhir_bundle --count 100 --output data/mm_patients.json
+    python manage.py generate_fhir_bundle --disease mm --count 100 --output data/mm_patients.json
 """
 
 import json

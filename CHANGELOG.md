@@ -1,8 +1,45 @@
 # Changelog
 
-All notable changes to promop are documented here.
+All notable changes to PRomop are documented here.
 
 ---
+
+## [1.0.0] — 2026-07-04
+
+First stable release. Deployed in production across the HealthTree Foundation and CancerBot,
+supporting approximately 17,500 oncology patients and trial matching against 6,000 actively
+recruiting trials.
+
+### Core architecture
+- OMOP CDM v5.4 PostgreSQL schema as the authoritative clinical record
+- `PatientRecord` — 286-column denormalized projection auto-derived via Django signal chain on every OMOP write; reduces a 20-criterion eligibility search from 27–39 joins over raw OMOP to zero
+- FHIR R4 Bundle ingestion (`upload_fhir` endpoint + `import_fhir_bundle` management command) mapping observations → `Measurement`, conditions → `ConditionOccurrence`, medications → `DrugExposure` + `Episode`
+- Line-of-therapy inference from `DrugExposure` / `Episode` records (ARTEMIS-derived heuristics)
+
+### API
+- Versioned REST API at `/api/v1/` with OpenAPI 3.0 schema (`/api/v1/schema/`) and Swagger UI (`/api/v1/docs/`)
+- Legacy `/api/` paths retained with `Deprecation` / `Sunset` / `Link` headers (sunset: 2026-09-01)
+- `GET /api/v1/patient-records/me/` — patient self-service record access, guarded against auto-provisioning clinical users
+
+### Multi-tenant access control
+- Organization model with role-based `GroupAccess` (org admin, doctor, navigator)
+- Org invitation flow with email (Mailgun) and OIDC support
+- Inter-org trust rules (`OrgTrust`) and public aggregated org statistics
+- Service-token ACL bypass for machine-to-machine integrations
+- SMART on FHIR authorization + OAuth2 (django-oauth-toolkit)
+
+### Disease-specific extensions (oncology)
+- Multiple myeloma: ISS/R-ISS staging, beta-2 microglobulin, FISH cytogenetics, stem cell transplant history/eligibility, therapy line tracking
+- Follicular lymphoma: FLIPI, bone marrow involvement, transformation status; HemOnc concept-driven FHIR generator
+- Breast cancer: ER/PR/HER2 status, HER2 IHC/ISH, Ki-67, TNM staging
+- CLL: CLL-IPI, IGHV mutation status, del(17p)/del(11q)
+- Wearable summary fields (step count, resting heart rate, sleep, HRV, SpO2)
+
+### Developer experience
+- `generate_fhir_bundle --disease {breast-cancer|mm|fl}` — reproducible synthetic FHIR patient generator
+- `import_fhir_bundle` — batch FHIR import with `--org`, `--batch-size`, `--start-from` (resume support)
+- Audit log middleware — structured JSON log for every mutating API request
+- 640+ backend tests; CI on GitHub Actions (PostgreSQL 16)
 
 ## [Unreleased]
 

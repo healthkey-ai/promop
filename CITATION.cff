@@ -1,0 +1,40 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+type: software
+title: "PRomop: A Longitudinal Decision-Ready Patient Health Record Built on OMOP CDM and FHIR R4"
+authors:
+  - family-names: Blum
+    given-names: Adam
+    orcid: "https://orcid.org/0009-0009-4985-7615"
+    email: adam@healthkey.ai
+    affiliation: HealthKey AI
+repository-code: "https://github.com/healthkey-ai/promop"
+license: Apache-2.0
+version: "1.0.0"
+date-released: "2026-07-04"
+# Update doi once Zenodo archive is created (see JOSS submission checklist)
+keywords:
+  - OMOP CDM
+  - FHIR
+  - clinical data
+  - patient registry
+  - clinical trials
+  - electronic health records
+  - oncology
+  - longitudinal health record
+abstract: >
+  PRomop is an open-source longitudinal patient health record built on OMOP CDM v5.4
+  with FHIR R4 ingestion. Its central feature is PatientRecord, a denormalized
+  286-column projection derived automatically from OMOP tables that enables
+  population analytics, clinical trial matching, and clinical decision support to
+  operate from a single shared substrate without re-deriving patient state. Deployed
+  across approximately 17,500 real patients in two oncology organizations.
+preferred-citation:
+  type: article
+  title: "PRomop: Building a Comprehensive Longitudinal Decision-Ready Patient Health Record"
+  authors:
+    - family-names: Blum
+      given-names: Adam
+      orcid: "https://orcid.org/0009-0009-4985-7615"
+      affiliation: HealthKey AI
+  year: 2026

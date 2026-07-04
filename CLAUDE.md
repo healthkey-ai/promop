@@ -33,9 +33,9 @@ This file tells LLMs (Claude, Copilot, etc.) how to work on this codebase consis
 | React UI tabs | `frontend/src/components/PatientInfo/` — `GeneralTab.tsx`, `LabsTab.tsx`, `MultipleMyelomaTab.tsx`, `FollicularLymphomaTab.tsx` |
 | Patient detail page | `frontend/src/components/Patient/PatientDetail.tsx` |
 | API client | `frontend/src/utils/api.ts` and `frontend/src/api/axios.ts` |
-| FHIR bundle generator (breast cancer) | `omop_core/management/commands/generate_fhir_bundle.py` |
-| FHIR bundle generator (myeloma) | `omop_core/management/commands/generate_mm_fhir_bundle.py` |
-| FHIR upload loader | `patient_portal/api/views.py` — `upload_fhir_bundle` function/view |
+| FHIR bundle generator | `omop_core/management/commands/generate_fhir_bundle.py` — `--disease breast-cancer\|mm\|fl` |
+| FHIR bundle importer | `omop_core/management/commands/import_fhir_bundle.py` |
+| FHIR upload handler | `patient_portal/api/views.py` — `upload_fhir_bundle` function/view |
 | BQ loader (HealthTree) | `omop_core/management/commands/load_from_healthtree_bq.py` |
 | SCT sample data seeder | `omop_core/management/commands/populate_sct_sample_data.py` |
 | SCT migration audit | `omop_core/management/commands/audit_sct_history.py` |
@@ -447,7 +447,7 @@ Both vocabularies live in `omop_core/models.py` as `VocabularyLookup` subclasses
 
 ### FHIR extensions (MM bundle)
 
-The MM FHIR generator (`generate_mm_fhir_bundle.py`) emits three extensions on the `Patient` resource. The upload handler (`views.py`) reads them back:
+The MM FHIR generator (`generate_fhir_bundle --disease mm`) emits three extensions on the `Patient` resource. The upload handler (`views.py`) reads them back:
 
 | Extension URL suffix | Maps to field |
 |---|---|

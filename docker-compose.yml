@@ -4,40 +4,51 @@ services:
   db:
     image: postgres:15
     restart: always
-    container_name: ctomop_db
+    container_name: promop_db
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "${POSTGRES_PORT}:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   web:
     build: .
     restart: always
-    container_name: ctomop_web
+    container_name: promop_web
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
-      DEBUG: ${DEBUG}
-      PRODUCTION_URL: ${PRODUCTION_URL}
+      # Internal container-to-container connection always uses port 5432
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      SECRET_KEY: ${SECRET_KEY}
+      DEBUG: ${DEBUG:-False}
+      PRODUCTION_URL: ${PRODUCTION_URL:-http://localhost:8000}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       PORT: 8000
     ports:
       - "8000:8000"
     command: >
-      ./wait-for-db.sh db sh -c "
-      python manage.py migrate &&
-      gunicorn ctomop.wsgi:application
-      --bind 0.0.0.0:8000
-      --workers 4
-      --threads 2
-      --timeout 120
-      --access-logfile - 
-      --error-logfile - 
-      --log-level info
+      sh -c "
+        python manage.py migrate --noinput &&
+        python manage.py setup_admin &&
+        gunicorn ctomop.wsgi:application
+          --bind 0.0.0.0:8000
+          --workers 4
+          --threads 2
+          --timeout 120
+          --access-logfile -
+          --error-logfile -
+          --log-level info
       "
 
 volumes:
