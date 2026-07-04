@@ -12,7 +12,7 @@ repository-code: "https://github.com/healthkey-ai/promop"
 license: Apache-2.0
 version: "1.0.0"
 date-released: "2026-07-04"
-# Update doi once Zenodo archive is created (see JOSS submission checklist)
+doi: "10.5281/zenodo.21194710"
 keywords:
   - OMOP CDM
   - FHIR
