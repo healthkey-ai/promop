@@ -54,8 +54,17 @@ class ScopedTokenPermission(BasePermission):
       other authenticated   → safe methods + PATCH only
                               (read + self-edit; POST/DELETE denied)
 
-    NOTE: patient population scoping (multi-tenant isolation) is tracked
-    separately under HKI-SEC-04 and HKI-AUTH-04.
+    IMPORTANT — object-level ownership:
+    This class grants or denies access at the view level only. It does NOT
+    enforce per-patient ownership (e.g. preventing a patient from PATCHing
+    another patient's record). Any view using this permission class for
+    mutating endpoints MUST also enforce object ownership via one of:
+      - _ProvenanceMixin.perform_update / perform_destroy (lab results views)
+      - PatientInfoViewSet.partial_update (patient info views)
+      - an explicit can_access_patient() check in the action method
+
+    A new view that uses ScopedTokenPermission without one of these safeguards
+    will allow any authenticated patient to mutate any other patient's data.
     """
 
     def has_permission(self, request, view):

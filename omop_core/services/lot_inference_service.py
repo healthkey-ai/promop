@@ -108,32 +108,100 @@ def _drug_key(exposure: DrugExposure) -> str:
     return (exposure.drug_source_value or '').lower().strip()
 
 
-def _classify_drug(drug_concept_id: int, drug_source_value: str) -> str:
+def _build_hemonc_map(concept_ids: list) -> dict:
+    """Pre-fetch HemOnc ancestor/direct names for a list of drug concept IDs.
+
+    Returns a dict mapping concept_id -> frozenset of concept names for drugs
+    that have at least one HemOnc mapping. Concept IDs with no HemOnc mapping
+    are absent (callers use .get() and treat None as "no mapping").
+
+    Issues 3 queries total regardless of the number of concept IDs, replacing
+    the previous pattern of 3 queries per unique drug in the era-building loop.
+    """
+    if not concept_ids:
+        return {}
+
+    # Query 1: concept_id -> list of HemOnc concept IDs
+    rels = ConceptRelationship.objects.filter(
+        concept_1_id__in=concept_ids,
+        relationship_id='Maps to',
+        concept_2__vocabulary_id='HemOnc',
+    ).values('concept_1_id', 'concept_2_id')
+
+    concept_to_hemonc: dict = defaultdict(list)
+    all_hemonc_ids: set = set()
+    for rel in rels:
+        concept_to_hemonc[rel['concept_1_id']].append(rel['concept_2_id'])
+        all_hemonc_ids.add(rel['concept_2_id'])
+
+    if not all_hemonc_ids:
+        return {}
+
+    # Query 2: ancestor names for all HemOnc IDs
+    ancestor_rows = ConceptAncestor.objects.filter(
+        descendant_concept_id__in=all_hemonc_ids,
+    ).values('descendant_concept_id', 'ancestor_concept__concept_name')
+    hemonc_ancestors: dict = defaultdict(set)
+    for row in ancestor_rows:
+        hemonc_ancestors[row['descendant_concept_id']].add(row['ancestor_concept__concept_name'])
+
+    # Query 3: direct concept names for all HemOnc IDs
+    direct_names = {
+        c['concept_id']: c['concept_name']
+        for c in Concept.objects.filter(concept_id__in=all_hemonc_ids)
+                                .values('concept_id', 'concept_name')
+    }
+
+    result = {}
+    for concept_id, hemonc_ids in concept_to_hemonc.items():
+        names: set = set()
+        for hid in hemonc_ids:
+            names.update(hemonc_ancestors.get(hid, set()))
+            if hid in direct_names:
+                names.add(direct_names[hid])
+        result[concept_id] = frozenset(names)
+
+    return result
+
+
+def _classify_drug(drug_concept_id: int, drug_source_value: str,
+                   hemonc_map: Optional[dict] = None) -> str:
     if drug_concept_id:
-        hemonc_ids = list(
-            ConceptRelationship.objects.filter(
-                concept_1_id=drug_concept_id,
-                relationship_id='Maps to',
-                concept_2__vocabulary_id='HemOnc',
-            ).values_list('concept_2_id', flat=True)
-        )
-        if hemonc_ids:
-            ancestor_names = set(
-                ConceptAncestor.objects.filter(
-                    descendant_concept_id__in=hemonc_ids,
-                ).values_list('ancestor_concept__concept_name', flat=True)
+        if hemonc_map is not None:
+            ancestor_names = hemonc_map.get(drug_concept_id)
+            if ancestor_names is not None:
+                if ancestor_names & HEMONC_CART_CLASSES:
+                    return 'cart'
+                if ancestor_names & HEMONC_MYELOMA_CLASSES:
+                    return 'myeloma'
+                if ancestor_names & HEMONC_STEROID_CLASSES:
+                    return 'steroid'
+                return 'mixed'
+        else:
+            hemonc_ids = list(
+                ConceptRelationship.objects.filter(
+                    concept_1_id=drug_concept_id,
+                    relationship_id='Maps to',
+                    concept_2__vocabulary_id='HemOnc',
+                ).values_list('concept_2_id', flat=True)
             )
-            ancestor_names.update(
-                Concept.objects.filter(concept_id__in=hemonc_ids)
-                               .values_list('concept_name', flat=True)
-            )
-            if ancestor_names & HEMONC_CART_CLASSES:
-                return 'cart'
-            if ancestor_names & HEMONC_MYELOMA_CLASSES:
-                return 'myeloma'
-            if ancestor_names & HEMONC_STEROID_CLASSES:
-                return 'steroid'
-            return 'mixed'
+            if hemonc_ids:
+                ancestor_names = set(
+                    ConceptAncestor.objects.filter(
+                        descendant_concept_id__in=hemonc_ids,
+                    ).values_list('ancestor_concept__concept_name', flat=True)
+                )
+                ancestor_names.update(
+                    Concept.objects.filter(concept_id__in=hemonc_ids)
+                                   .values_list('concept_name', flat=True)
+                )
+                if ancestor_names & HEMONC_CART_CLASSES:
+                    return 'cart'
+                if ancestor_names & HEMONC_MYELOMA_CLASSES:
+                    return 'myeloma'
+                if ancestor_names & HEMONC_STEROID_CLASSES:
+                    return 'steroid'
+                return 'mixed'
     return DRUG_SUBTYPE_MAP.get(drug_source_value.lower().strip(), 'mixed')
 
 
@@ -142,12 +210,21 @@ def _build_drug_eras(exposures) -> list[_DrugEra]:
     for exp in exposures:
         by_drug[_drug_key(exp)].append(exp)
 
+    # Pre-fetch all HemOnc mappings for unique concept IDs in 3 queries total
+    # instead of 3 queries per unique drug (fixes TODO #19).
+    unique_concept_ids = [
+        exps[0].drug_concept_id
+        for exps in by_drug.values()
+        if exps[0].drug_concept_id
+    ]
+    hemonc_map = _build_hemonc_map(unique_concept_ids)
+
     eras = []
     for drug_key, exps in by_drug.items():
         exps_sorted = sorted(exps, key=lambda e: e.drug_exposure_start_date)
         rep = exps_sorted[0]
         concept_id = rep.drug_concept_id or 0
-        subtype = _classify_drug(concept_id, drug_key)
+        subtype = _classify_drug(concept_id, drug_key, hemonc_map)
         current = None
         for exp in exps_sorted:
             start = exp.drug_exposure_start_date
