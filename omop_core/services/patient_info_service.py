@@ -304,10 +304,9 @@ def _get_location_data(person: Person) -> dict:
     return data
 
 
-# Clinical-interpretation aliases: raw OMOP condition concept names that EXACT's
-# matcher does not recognise, mapped to the canonical disease titles it gates on
-# (ADR 0001 — CTOMOP owns the canonical disease title that SoC / ht-phr / EXACT all
-# read). Keyed by lowercased concept name; only exact matches are remapped, so
+# Clinical-interpretation aliases: raw OMOP condition concept names remapped to
+# the canonical disease titles PRomop uses (ADR 0001).
+# Keyed by lowercased concept name; only exact matches are remapped, so
 # unrelated conditions pass through untouched.
 _DISEASE_ALIASES = {
     'myeloma': 'multiple myeloma',

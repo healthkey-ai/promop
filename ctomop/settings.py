@@ -282,7 +282,7 @@ PARTNER_AUTH_PROVIDERS = [
     "patient_portal.api.providers.firebase.FirebaseTokenProvider",
 ]
 
-FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "healthtree-test" if DEBUG else "")
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "promop-test" if DEBUG else "")
 FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(
     "FIREBASE_SKIP_REVOCATION_CHECK", "true" if DEBUG else "false"
 ).lower() in ("1", "true")

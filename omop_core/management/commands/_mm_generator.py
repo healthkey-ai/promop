@@ -531,7 +531,7 @@ class Command(BaseCommand):
             }],
             'telecom': [{'system': 'phone', 'value': f"+1-555-{random.randint(100,999)}-{random.randint(1000,9999)}", 'use': 'home'}],
             'extension': [
-                # ctomop-recognised extensions (exact URLs the FHIR importer parses)
+                # PRomop-recognised extensions (exact URLs the FHIR importer parses)
                 {'url': 'https://healthkey.ai/fhir/StructureDefinition/ethnicity',
                  'valueString': p['ethnicity']},
                 {'url': 'https://healthkey.ai/fhir/StructureDefinition/bodyWeight',
@@ -776,7 +776,7 @@ class Command(BaseCommand):
 
     def _therapy_medications(self, p, diag_date):
         """
-        Generate MedicationStatement resources the ctomop FHIR importer can parse.
+        Generate MedicationStatement resources the PRomop FHIR importer can parse.
 
         Structure per therapy line:
           - One regimen-level MedicationStatement (no partOf) with the regimen name

@@ -27,7 +27,7 @@ class DeprecationWarningMiddleware:
         if datetime.datetime.now(datetime.timezone.utc) > _SUNSET_DT:
             logger.warning(
                 "DeprecationWarningMiddleware: Sunset date %s has passed — "
-                "remove legacy /api/ URL aliases from ctomop/urls.py.",
+                "remove legacy /api/ URL aliases from ctomop/urls.py (the Django project package).",
                 _SUNSET_DATE,
             )
 

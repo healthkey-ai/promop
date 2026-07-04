@@ -1,5 +1,5 @@
 """
-Dedicated sync API for hk-labs → ctomop writes.
+Dedicated sync API for writing lab results into PRomop.
 
 POST /api/lab-results/sync/
 

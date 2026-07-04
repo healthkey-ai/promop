@@ -942,8 +942,8 @@ class AlbuminUnits(models.TextChoices):
 
 
 # ---------------------------------------------------------------------------
-# Controlled vocabulary / lookup models (parity with cancerbot)
-# Each model mirrors cancerbot's OptionsListMixin: code + title + llm_hint
+# Controlled vocabulary / lookup tables
+# Each table provides: code (slug), title (display name), llm_hint (optional LLM guidance)
 # ---------------------------------------------------------------------------
 
 class VocabularyLookup(models.Model):
@@ -1209,8 +1209,8 @@ class BreastCancerLaterLineTherapy(VocabularyLookup):
 
 class PatientInfo(models.Model):
     """
-    Comprehensive patient information model adapted from exactomop repository
-    Integrated with OMOP CDM Person model for clinical trial matching and research
+    Comprehensive patient information model — OMOP CDM–aligned PatientRecord projection.
+    Derived automatically from OMOP clinical tables via the post_save signal chain.
     """
     # Link to OMOP Person
     person = models.OneToOneField(Person, on_delete=models.CASCADE, related_name='patient_info')
@@ -1648,7 +1648,7 @@ class PatientInfo(models.Model):
     measurable_disease_imwg = models.BooleanField(blank=True, null=True)
     mrd_status = models.CharField(max_length=50, blank=True, null=True)
 
-    # Later therapies (structured list, mirrors cancerbot JSONField)
+    # Later therapies (structured list of therapy-line objects)
     later_therapies = models.JSONField(blank=True, null=False, default=list)
 
     # CLL (Chronic Lymphocytic Leukemia)
@@ -1675,7 +1675,7 @@ class PatientInfo(models.Model):
     clonal_bone_marrow_b_lymphocytes = models.FloatField(blank=True, null=True, help_text="Clonal B lymphocytes in bone marrow biopsy (%)")
     bone_marrow_involvement = models.BooleanField(blank=True, null=True)
 
-    # HealthTree parity fields
+    # Core clinical fields derived from OMOP ConditionOccurrence
     diagnosis_date = models.DateField(blank=True, null=True, help_text="Date of initial diagnosis (from ConditionOccurrence)")
     condition_clinical_status = models.CharField(max_length=50, blank=True, null=True, help_text="Clinical status: active/remission/relapse")
     disease_slug = models.CharField(max_length=100, blank=True, null=True, help_text="Machine-readable disease ID e.g. 'multiple-myeloma'")
@@ -1884,7 +1884,7 @@ class PatientInfo(models.Model):
 
 
 # =============================================================================
-# HealthTree Parity — Document Storage
+# Document Storage
 # =============================================================================
 
 class PatientDocument(models.Model):
@@ -1920,9 +1920,9 @@ class PatientDocument(models.Model):
 
 # =============================================================================
 # Clinical Trial Enrollment Tracker
-# Trial metadata lives in EXACT (https://github.com/cancerbot-org/exact).
-# This model tracks only the patient's enrollment status; full trial details
-# are fetched on demand from EXACT's API using trial_id as the key.
+# Trial metadata is external to PRomop; this model tracks only enrollment status.
+# Full trial details are fetched on demand from an external registry API using
+# trial_id as the key.
 # =============================================================================
 
 class PatientTrialEnrollment(models.Model):
@@ -2097,8 +2097,8 @@ class Institution(models.Model):
         help_text="True → fhir_extract uses $export; False → paginated fallback.",
     )
 
-    # Retry / backoff parameters — encode per-vendor observed behaviour
-    # (HealthTree v1.1 Section 2.3.4). Defaults are conservative.
+    # Retry / backoff parameters — encode per-vendor observed behaviour.
+    # Defaults are conservative; tune per-integration as needed.
     base_backoff_seconds = models.IntegerField(default=1)
     max_backoff_seconds = models.IntegerField(default=300)
     max_retry_count = models.IntegerField(default=5)

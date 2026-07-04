@@ -395,7 +395,7 @@ class EpisodeEventSerializer(serializers.ModelSerializer):
 
 
 # ---------------------------------------------------------------------------
-# HealthTree parity serializers
+# PatientRecord supplementary serializers
 # ---------------------------------------------------------------------------
 
 class PatientDocumentSerializer(serializers.ModelSerializer):

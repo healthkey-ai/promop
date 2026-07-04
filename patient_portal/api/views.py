@@ -2991,7 +2991,7 @@ def vocabulary_list(request, model_name):
 
 
 # =============================================================================
-# HealthTree parity ViewSets
+# PatientRecord supplementary ViewSets
 # =============================================================================
 
 @method_decorator(csrf_exempt, name='dispatch')

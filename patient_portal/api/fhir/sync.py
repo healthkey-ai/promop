@@ -1,5 +1,5 @@
 """
-Identity-resolved FHIR ingest API for the fhir_importers connector → ctomop.
+Identity-resolved FHIR ingest API for patient self-service and EHR connector uploads.
 
 POST /api/fhir/sync/
 

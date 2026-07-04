@@ -54,8 +54,8 @@ class ScopedTokenPermission(BasePermission):
       other authenticated   → safe methods + PATCH only
                               (read + self-edit; POST/DELETE denied)
 
-    NOTE: patient population scoping (multi-tenant isolation per HealthTree
-    integration) is tracked separately under HKI-SEC-04 and HKI-AUTH-04.
+    NOTE: patient population scoping (multi-tenant isolation) is tracked
+    separately under HKI-SEC-04 and HKI-AUTH-04.
     """
 
     def has_permission(self, request, view):
@@ -89,7 +89,7 @@ class ScopedTokenPermission(BasePermission):
 
 class LabSyncPermission(ScopedTokenPermission):
     """
-    Permission for the hk-labs → ctomop lab sync endpoint.
+    Permission for the lab result sync endpoint.
 
     Identical to ScopedTokenPermission except that an authenticated end
     user (Firebase/partner or session auth) is allowed to write, not just

@@ -3552,7 +3552,7 @@ class RxNavServiceTest(TestCase):
 
 
 class LotInferenceTest(_SmartBase):
-    """Tests for omop_core.services.lot_inference_service (ARTEMIS-lite + HealthTree)."""
+    """Tests for omop_core.services.lot_inference_service (ARTEMIS-lite phase-aware rules)."""
 
     def _make_exposure(self, person, drug_name, start, end=None, pk=None):
         from omop_core.models import DrugExposure, Concept, Domain, Vocabulary, ConceptClass
@@ -3811,7 +3811,7 @@ class LotInferenceTest(_SmartBase):
         call_command('infer_lot', person_id=person.person_id, verbosity=0)
         self.assertEqual(Episode.objects.filter(person=person).count(), 1)
 
-    # ── HealthTree phase/procedure tests ──────────────────────────────────
+    # ── Phase / procedure tests ────────────────────────────────────────────
 
     def test_induction_label_first_lot(self):
         from datetime import date

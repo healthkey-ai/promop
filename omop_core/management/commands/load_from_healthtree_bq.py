@@ -435,7 +435,7 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.MIGRATE_HEADING(
-                f"HealthTree → CTOMOP loader\n"
+                f"HealthTree BQ → PRomop loader\n"
                 f"  BigQuery: {bq_project}.{bq_dataset}\n"
                 f"  Auth:     {'keyfile: ' + keyfile if keyfile else 'Application Default Credentials'}\n"
                 f"  Filter:   {'user_id=' + user_id_filter if user_id_filter else 'ALL patients'}\n"
@@ -645,7 +645,7 @@ class Command(BaseCommand):
             "city": patient_row.get("city"),
             "region": patient_row.get("state"),
             "postal_code": patient_row.get("postal_code"),
-            # HealthTree-specific denormalised arrays
+            # Denormalised arrays from HealthTree BQ schema
             "ai_lines_of_therapy": lot_rows,
             "survey_responses": survey_rows,
         }

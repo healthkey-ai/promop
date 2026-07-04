@@ -1,6 +1,6 @@
 # omop_core/services/lot_inference_service.py
 """
-LOT Inference Service — ARTEMIS-lite + HealthTree phase-aware rules.
+LOT Inference Service — ARTEMIS-lite phase-aware rules.
 
 Phases:
   1. Build drug eras (collapse same-drug exposures within era_gap days)
