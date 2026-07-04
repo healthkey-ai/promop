@@ -1,8 +1,8 @@
 services:
   - type: web
-    name: ctomop
+    name: promop
     runtime: python
-    repo: https://github.com/cancerbot-org/ctomop
+    repo: https://github.com/healthkey-ai/promop
     branch: main
     autoDeploy: true
     buildCommand: "pip install -r requirements.txt && cd frontend && npm install && npm run build && cd .. && python manage.py collectstatic --noinput"
@@ -16,10 +16,10 @@ services:
         value: False
       - key: DATABASE_URL
         fromDatabase:
-          name: ctomop-db
+          name: promop-db
           property: connectionString
 
 databases:
-  - name: ctomop-db
-    databaseName: ctomop
-    user: ctomop
+  - name: promop-db
+    databaseName: promop
+    user: promop

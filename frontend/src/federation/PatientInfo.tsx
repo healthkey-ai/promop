@@ -10,6 +10,7 @@ import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
 import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
+import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -55,7 +56,7 @@ function PatientInfoSkeleton() {
   return (
     <div className="space-y-6">
       <div className="flex gap-6 border-b border-border pb-3">
-        {[1, 2, 3, 4, 5, 6].map((i) => (
+        {[1, 2, 3, 4, 5, 6, 7].map((i) => (
           <div key={i} className="h-4 w-16 animate-pulse rounded bg-muted" />
         ))}
       </div>
@@ -222,6 +223,14 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
   if (isLoading) return <PatientInfoSkeleton />;
 
   if (isError) {
+    const httpStatus = (error as { response?: { status?: number } })?.response?.status;
+    if (httpStatus === 404) {
+      return (
+        <div className="rounded-2xl bg-background p-8 text-center shadow-sm">
+          <p className="text-sm text-gray-500">No patient record linked to this account.</p>
+        </div>
+      );
+    }
     return (
       <div className="rounded-2xl bg-background p-8 text-center shadow-sm">
         <AlertCircle className="mx-auto mb-3 h-10 w-10 text-red-400" />
@@ -232,7 +241,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
     );
   }
 
-  const tabLabels = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Behavior"];
+  const tabLabels = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Behavior", "Wearable"];
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
     1: "Disease-specific clinical information and genetic details.",
@@ -240,6 +249,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
     3: "Blood counts, electrolytes, coagulation, and cardiac markers.",
     4: "Chemistry panel, liver function tests, and other lab markers.",
     5: "Lifestyle, socioeconomic, and behavioural health factors.",
+    6: "Apple wearable 30-day summaries derived from synced OMOP data.",
   };
 
   return (
@@ -298,6 +308,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
           {activeTab === 3 && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === 5 && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
+          {activeTab === 6 && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
         </div>
       </div>
     </div>

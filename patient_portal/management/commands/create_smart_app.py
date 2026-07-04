@@ -20,14 +20,14 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument(
             '--name',
-            default='CTOMOP SMART App',
-            help='Application name (default: "CTOMOP SMART App")',
+            default='PRomop SMART App',
+            help='Application name (default: "PRomop SMART App")',
         )
         parser.add_argument(
             '--client-id',
-            default='ctomop-smart-app',
+            default='promop-smart-app',
             dest='client_id',
-            help='OAuth2 client_id (default: ctomop-smart-app)',
+            help='OAuth2 client_id (default: promop-smart-app)',
         )
         parser.add_argument(
             '--redirect-uris',

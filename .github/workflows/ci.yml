@@ -18,7 +18,7 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_DB: ctomop_test
+          POSTGRES_DB: promop_test
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
         ports:
@@ -30,7 +30,7 @@ jobs:
           --health-retries 5
 
     env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ctomop_test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/promop_test
       SECRET_KEY: ci-secret-key
       DEBUG: 'True'
 

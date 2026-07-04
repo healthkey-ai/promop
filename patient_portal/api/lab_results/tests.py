@@ -932,7 +932,7 @@ class FirebaseAuthedSyncTest(TestCase):
     def setUp(self):
         _setup_vocab()
         self.firebase_user = Identity.objects.get_or_create(
-            issuer='https://securetoken.google.com/healthtree-test',
+            issuer='https://securetoken.google.com/promop-test',
             sub='firebase-uid-abc123',
             defaults={'email': 'patient@example.com'},
         )[0]
@@ -1012,7 +1012,7 @@ class FirebaseAuthedSyncTest(TestCase):
 
     def test_firebase_authed_existing_user_no_patientuser_links_via_email(self):
         new_user = Identity.objects.get_or_create(
-            issuer='https://securetoken.google.com/healthtree-test',
+            issuer='https://securetoken.google.com/promop-test',
             sub='firebase-uid-brand-new',
             defaults={'email': 'emailmatch@example.com'},
         )[0]

@@ -17,7 +17,7 @@ from omop_core.models import PatientInfo, Person
 
 
 # person_id range 9001-9999 reserved for test data so it won't
-# collide with real patients loaded from cancerbot (which start at 1).
+# collide with real patients imported via FHIR upload (which start at 1).
 TEST_PATIENTS = [
     # ── Multiple Myeloma — relapsed/refractory, should match TEST-MM-001
     dict(
@@ -77,9 +77,8 @@ TEST_PATIENTS = [
         ),
     ),
 
-    # ── Multiple Myeloma — ht-phr local-stack demo login (demo@healthtree.org,
-    #    "Diana Demo"). person_id 9008 is the patient the host FindTrials page
-    #    resolves for the demo account; seeded here with the canonical disease
+    # ── Multiple Myeloma — demo patient for local stack testing.
+    #    person_id 9008 is a second MM patient seeded with the canonical disease
     #    title so the trial-match demo is reproducible without manual DB edits.
     dict(
         person_id=9008,

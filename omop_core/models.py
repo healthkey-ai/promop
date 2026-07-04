@@ -1,7 +1,7 @@
 from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
-from django.db.models import Q
+from django.db.models import F, Q
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.postgres.indexes import GinIndex
@@ -48,12 +48,118 @@ class Organization(models.Model):
     name = models.CharField(max_length=200)
     slug = models.SlugField(max_length=60, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(default=True)
+    allows_public_aggregated_data = models.BooleanField(
+        default=False,
+        help_text="When true, aggregated de-identified data from this org is "
+                  "available for analysis in PRism Analytics to any signed-up user. "
+                  "Does not grant access to individual patient records in PRomop.",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
 
     class Meta:
         db_table = 'organization'
 
     def __str__(self):
         return self.name
+
+
+class OrgTrust(models.Model):
+    """Grants access to an org via a domain or an org-to-org trust."""
+    granting_org = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='trusts_granted',
+    )
+    trusted_org = models.ForeignKey(
+        Organization, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='trusted_by',
+    )
+    trusted_domain = models.CharField(max_length=255, blank=True, default='')
+    granted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'org_trust'
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    Q(trusted_org__isnull=False, trusted_domain='') |
+                    Q(trusted_org__isnull=True, trusted_domain__gt='')
+                ),
+                name='org_trust_org_xor_domain',
+            ),
+            models.CheckConstraint(
+                check=Q(trusted_org__isnull=True) | ~Q(trusted_org=F('granting_org')),
+                name='org_trust_no_self_trust',
+            ),
+        ]
+
+    def __str__(self):
+        if self.trusted_org_id:
+            return f"{self.granting_org.slug} trusts org {self.trusted_org_id}"
+        return f"{self.granting_org.slug} trusts domain {self.trusted_domain}"
+
+
+class OrgInvitation(models.Model):
+    """An email invitation to join an org with a specific role."""
+    STATUS_PENDING = 'pending'
+    STATUS_CONFIRMED = 'confirmed'
+    STATUS_EXPIRED = 'expired'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_CONFIRMED, 'Confirmed'),
+        (STATUS_EXPIRED, 'Expired'),
+        (STATUS_CANCELLED, 'Cancelled'),
+    ]
+    ROLE = [
+        ('org_admin', 'Org Admin'),
+        ('doctor', 'Doctor'),
+        ('navigator', 'Navigator'),
+    ]
+    org = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='invitations',
+    )
+    email = models.EmailField()
+    role = models.CharField(max_length=20, choices=ROLE, default='doctor')
+    token = models.CharField(max_length=64, unique=True)
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'org_invitation'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['org', 'email'],
+                condition=Q(confirmed_at__isnull=True, cancelled_at__isnull=True),
+                name='uq_org_invitation_pending',
+            ),
+        ]
+
+    @property
+    def status(self):
+        from django.utils import timezone
+        if self.confirmed_at:
+            return self.STATUS_CONFIRMED
+        if self.cancelled_at:
+            return self.STATUS_CANCELLED
+        if timezone.now() > self.expires_at:
+            return self.STATUS_EXPIRED
+        return self.STATUS_PENDING
+
+    def __str__(self):
+        return f"Invite {self.email} to {self.org.slug} ({self.role})"
 
 
 class ApplicationOrganization(models.Model):
@@ -836,8 +942,8 @@ class AlbuminUnits(models.TextChoices):
 
 
 # ---------------------------------------------------------------------------
-# Controlled vocabulary / lookup models (parity with cancerbot)
-# Each model mirrors cancerbot's OptionsListMixin: code + title + llm_hint
+# Controlled vocabulary / lookup tables
+# Each table provides: code (slug), title (display name), llm_hint (optional LLM guidance)
 # ---------------------------------------------------------------------------
 
 class VocabularyLookup(models.Model):
@@ -1103,8 +1209,8 @@ class BreastCancerLaterLineTherapy(VocabularyLookup):
 
 class PatientInfo(models.Model):
     """
-    Comprehensive patient information model adapted from exactomop repository
-    Integrated with OMOP CDM Person model for clinical trial matching and research
+    Comprehensive patient information model — OMOP CDM–aligned PatientRecord projection.
+    Derived automatically from OMOP clinical tables via the post_save signal chain.
     """
     # Link to OMOP Person
     person = models.OneToOneField(Person, on_delete=models.CASCADE, related_name='patient_info')
@@ -1466,6 +1572,18 @@ class PatientInfo(models.Model):
     concomitant_medications = models.TextField(blank=True, null=True)
     concomitant_medication_date = models.DateField(blank=True, null=True)
 
+    # Wearable summary fields (derived from OMOP Measurement/Observation, 30-day window)
+    wearable_last_sync_at = models.DateTimeField(blank=True, null=True, help_text="Latest wearable sample timestamp")
+    wearable_coverage_ratio_30d = models.DecimalField(max_digits=4, decimal_places=2, blank=True, null=True, help_text="Valid wearable days / 30 (data quality indicator)")
+    median_daily_steps_30d = models.IntegerField(blank=True, null=True, help_text="Median daily step count over valid days in last 30 days")
+    active_minutes_per_day_30d = models.DecimalField(max_digits=5, decimal_places=1, blank=True, null=True, help_text="Mean daily active/exercise minutes over last 30 days")
+    activity_trend_30d = models.CharField(max_length=20, blank=True, null=True, help_text="Activity trend: improving, stable, declining, or insufficient_data")
+    resting_heart_rate_avg_30d = models.IntegerField(blank=True, null=True, help_text="Mean resting heart rate over last 30 days")
+    hrv_sdnn_avg_30d = models.DecimalField(max_digits=6, decimal_places=1, blank=True, null=True, help_text="Mean HRV SDNN over last 30 days (ms)")
+    oxygen_saturation_min_30d = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True, help_text="Minimum valid SpO2 reading over last 30 days (%)")
+    respiratory_rate_avg_30d = models.DecimalField(max_digits=5, decimal_places=1, blank=True, null=True, help_text="Mean respiratory rate over last 30 days (breaths/min)")
+    sleep_duration_hours_avg_30d = models.DecimalField(max_digits=4, decimal_places=1, blank=True, null=True, help_text="Mean nightly sleep duration over last 30 days (hours)")
+
     # Remission and washout periods
     remission_duration_min = models.TextField(blank=True, null=True)
     washout_period_duration = models.TextField(blank=True, null=True)
@@ -1530,7 +1648,7 @@ class PatientInfo(models.Model):
     measurable_disease_imwg = models.BooleanField(blank=True, null=True)
     mrd_status = models.CharField(max_length=50, blank=True, null=True)
 
-    # Later therapies (structured list, mirrors cancerbot JSONField)
+    # Later therapies (structured list of therapy-line objects)
     later_therapies = models.JSONField(blank=True, null=False, default=list)
 
     # CLL (Chronic Lymphocytic Leukemia)
@@ -1557,7 +1675,7 @@ class PatientInfo(models.Model):
     clonal_bone_marrow_b_lymphocytes = models.FloatField(blank=True, null=True, help_text="Clonal B lymphocytes in bone marrow biopsy (%)")
     bone_marrow_involvement = models.BooleanField(blank=True, null=True)
 
-    # HealthTree parity fields
+    # Core clinical fields derived from OMOP ConditionOccurrence
     diagnosis_date = models.DateField(blank=True, null=True, help_text="Date of initial diagnosis (from ConditionOccurrence)")
     condition_clinical_status = models.CharField(max_length=50, blank=True, null=True, help_text="Clinical status: active/remission/relapse")
     disease_slug = models.CharField(max_length=100, blank=True, null=True, help_text="Machine-readable disease ID e.g. 'multiple-myeloma'")
@@ -1589,6 +1707,8 @@ class PatientInfo(models.Model):
             models.Index(fields=["patient_age"]),
             models.Index(fields=["disease"]),
             models.Index(fields=["stage"]),
+            models.Index(fields=["-updated_at"], name="ix_pi_updated_at"),
+            models.Index(fields=["organization", "-updated_at"], name="ix_pi_org_updated_at"),
         ]
 
     def __str__(self):
@@ -1655,16 +1775,21 @@ class PatientInfo(models.Model):
     
     def _update_therapy_computed_fields(self):
         """Update computed fields based on therapy line data"""
-        # Count therapy lines
-        lines_count = 0
+        # Count therapy lines from populated text fields.
+        # The user can also set therapy_lines_count directly from the UI without
+        # filling text fields (e.g. "I had 1 prior line but don't know the name").
+        # Take the max so an explicit user choice is never overwritten by the
+        # text-field count, but filling in a new text field still bumps the total.
+        text_lines = 0
         if self.first_line_therapy:
-            lines_count += 1
+            text_lines += 1
         if self.second_line_therapy:
-            lines_count += 1
+            text_lines += 1
         if self.later_therapy:
-            lines_count += 1
-        
-        self.therapy_lines_count = lines_count
+            text_lines += 1
+
+        self.therapy_lines_count = max(text_lines, self.therapy_lines_count or 0)
+        lines_count = self.therapy_lines_count
 
         # Set prior_therapy using the vocabulary expected by EXACT and CB matchers
         if lines_count == 0:
@@ -1759,7 +1884,7 @@ class PatientInfo(models.Model):
 
 
 # =============================================================================
-# HealthTree Parity — Document Storage
+# Document Storage
 # =============================================================================
 
 class PatientDocument(models.Model):
@@ -1795,9 +1920,9 @@ class PatientDocument(models.Model):
 
 # =============================================================================
 # Clinical Trial Enrollment Tracker
-# Trial metadata lives in EXACT (https://github.com/cancerbot-org/exact).
-# This model tracks only the patient's enrollment status; full trial details
-# are fetched on demand from EXACT's API using trial_id as the key.
+# Trial metadata is external to PRomop; this model tracks only enrollment status.
+# Full trial details are fetched on demand from an external registry API using
+# trial_id as the key.
 # =============================================================================
 
 class PatientTrialEnrollment(models.Model):
@@ -1972,8 +2097,8 @@ class Institution(models.Model):
         help_text="True → fhir_extract uses $export; False → paginated fallback.",
     )
 
-    # Retry / backoff parameters — encode per-vendor observed behaviour
-    # (HealthTree v1.1 Section 2.3.4). Defaults are conservative.
+    # Retry / backoff parameters — encode per-vendor observed behaviour.
+    # Defaults are conservative; tune per-integration as needed.
     base_backoff_seconds = models.IntegerField(default=1)
     max_backoff_seconds = models.IntegerField(default=300)
     max_retry_count = models.IntegerField(default=5)

@@ -1,93 +1,107 @@
-# Synthetic Patient Generation — Status & Options
+# Synthetic Patient Generation
 
-## Available Commands
+Synthetic patient data is generated as FHIR R4 bundles and loaded via the FHIR import pipeline. This exercises the same ingestion code path used for real data.
 
-| Command | Status | What it does |
-|---|---|---|
-| `seed_test_patients` | **Working** | Creates 7 hardcoded patients directly into `PatientInfo` (2 MM, 2 FL, 1 BC, 2 CLL, person_ids 9001–9007). No OMOP pipeline. |
-| `populate_patient_info` | **Working** | Reads existing OMOP tables (Person, Measurement, ConditionOccurrence, DrugExposure, Observation) and derives `PatientInfo` records. Requires source OMOP data to exist first. |
-| `create_enhanced_sample_data` | **Broken** | Was supposed to create OMOP source records and a `PatientInfo` record for a single lung cancer patient. |
-| `generate_breast_cancer_patients` | Untested | Generates breast cancer patients specifically. |
-| `generate_fhir_bundle` | Untested | Generates breast cancer patients specifically. |
+---
 
-## `create_enhanced_sample_data` — What's Broken
+## Generate a FHIR bundle
 
-### 1. Missing Model Imports (6 models removed for OMOP compliance)
-
-```python
-from omop_genomics.models import BiomarkerMeasurement, TumorAssessment        # both removed
-from omop_oncology.models import TreatmentLine, SocialDeterminant, HealthBehavior, InfectionStatus  # all removed
-```
-
-These models were deliberately removed from the codebase. The apps now enforce strict OMOP CDM compliance — all data should be stored in standard OMOP tables:
-
-| Removed Model | Replacement Table | Notes |
-|---|---|---|
-| `BiomarkerMeasurement` | `Measurement` | PD-L1, ER/PR/HER2 as LOINC-coded measurements |
-| `TumorAssessment` | `Observation` | RECIST assessments as observations |
-| `TreatmentLine` | `Episode` | Treatment lines as episode records |
-| `SocialDeterminant` | `Observation` | Employment, insurance as observations |
-| `HealthBehavior` | `Observation` | Smoking, substance use as observations |
-| `InfectionStatus` | `Observation` / `Measurement` | HIV, Hepatitis status as observations |
-
-**Source**: Comments in `omop_genomics/models.py` (lines 4–9) and `omop_oncology/models.py` (lines 132–137) explicitly state this design decision.
-
-### 2. Wrong PatientInfo Field Names
-
-The command creates `PatientInfo` with field names from an older schema version:
-
-| Used in command | Actual field name |
-|---|---|
-| `patient_info_id` | `id` (auto) |
-| `age` | `patient_age` |
-| `primary_diagnosis` | `disease` |
-| `cancer_stage` | `stage` |
-| `cancer_stage_system` | *(doesn't exist)* |
-| `tnm_t` | `tumor_stage` |
-| `tnm_n` | `nodes_stage` |
-| `tnm_m` | `distant_metastasis_stage` |
-| `pdl1_expression` | `pd_l1_tumor_cels` |
-| `pdl1_assay` | `pd_l1_assay` |
-| `weight_kg` | `weight` |
-| `height_cm` | `height` |
-| `smoking_status` | `no_tobacco_use_status` (boolean) |
-| `hiv_status` | `no_hiv_status` (boolean) |
-| `employment_status` | *(doesn't exist)* |
-| `insurance_type` | *(doesn't exist)* |
-| `best_response` | *(doesn't exist on PatientInfo)* |
-
-### 3. Only 1 Patient
-
-The command creates a single lung cancer patient (person_id=1001). Lung cancer isn't even a supported disease in the matching engine (only MM, FL, BC, CLL).
-
-## How to Fix
-
-To make `create_enhanced_sample_data` functional:
-
-1. **Remove** all 6 deleted model imports and usages
-2. **Replace** with standard OMOP table inserts:
-   - `BiomarkerMeasurement` → `Measurement` with LOINC concept codes
-   - `TumorAssessment` → `Observation` records
-   - `TreatmentLine` → `Episode` records
-   - `SocialDeterminant`, `HealthBehavior`, `InfectionStatus` → `Observation` records
-3. **Remove** the direct `PatientInfo` creation (let `populate_patient_info` derive it)
-4. **Add** patients for supported diseases (MM, FL, BC, CLL) instead of lung cancer
-5. **Workflow** after fix:
-   ```bash
-   python manage.py create_enhanced_sample_data
-   python manage.py populate_patient_info --force-update
-   ```
-
-## Recommended Workflow for Local Testing
-
-Until `create_enhanced_sample_data` is fixed, use:
+The `generate_fhir_bundle` command supports multiple disease types via `--disease`.
 
 ```bash
-# From promop directory:
-DATABASE_URL=postgresql://... python manage.py seed_test_patients
+# Multiple myeloma (default count: 200)
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py generate_fhir_bundle \
+    --disease mm \
+    --count 100 \
+    --output /tmp/mm_bundle.json
 
-# Verify:
-DATABASE_URL=postgresql://... python manage.py query_patient_info
+# Follicular lymphoma
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py generate_fhir_bundle \
+    --disease fl \
+    --count 100 \
+    --output /tmp/fl_bundle.json
+
+# Breast cancer
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py generate_fhir_bundle \
+    --disease breast-cancer \
+    --count 100 \
+    --output /tmp/bc_bundle.json
 ```
 
-This creates 7 patients across all 4 diseases with clinically realistic field values, ready for trial matching via `search_trials_for_promop_patients`.
+### Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--disease` | `breast-cancer` | Disease type: `breast-cancer`, `mm`, `fl` |
+| `--count` | `200` | Number of patients to generate |
+| `--output` | Per-disease default (see below) | Output file path |
+| `--seed` | `42` | Integer seed for reproducibility |
+| `--tnbc-ratio` | `0.30` | (breast cancer) Fraction of TNBC patients |
+| `--rrmm-ratio` | `0.80` | (mm) Fraction of patients with ≥1 prior therapy line |
+| `--watch-wait-ratio` | `0.20` | (fl) Fraction on watch-and-wait at diagnosis |
+
+Default output paths (when `--output` is omitted):
+
+| Disease | Default output |
+|---|---|
+| `breast-cancer` | `data/synthetic_patients_fhir.json` |
+| `mm` | `data/mm_patients_fhir.json` |
+| `fl` | `data/fl_patients_fhir.json` |
+
+Pass `--seed` to reproduce the same patient set across runs.
+
+---
+
+## Import a FHIR bundle
+
+The `import_fhir_bundle` command loads a generated bundle into the database, bypassing the HTTP layer and Render's 30-second request timeout.
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py import_fhir_bundle /tmp/mm_bundle.json \
+    --org my-org \
+    --batch-size 5
+```
+
+### Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `file` | *(required)* | Path to FHIR Bundle JSON file |
+| `--org` | — | Org slug to assign all patients to (created if it does not exist) |
+| `--batch-size` | `1` | Patients per batch |
+| `--start-from` | `0` | Skip first N patients (for resuming after failure) |
+| `--email` | First superuser | Admin email to authenticate the import as |
+
+### What the importer does
+
+1. Parses the FHIR Bundle and groups entries by patient
+2. Uploads patients in batches via the `upload_fhir` view (same path as real FHIR ingestion)
+3. Writes OMOP records: `Person`, `Measurement`, `DrugExposure`, `Episode`, `EpisodeEvent`
+4. After each batch completes, runs `refresh_patient_info` and `infer_lot_for_person` to rebuild the `PatientRecord` projection
+
+---
+
+## End-to-end example (local)
+
+```bash
+# 1. Generate 50 MM patients
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py generate_fhir_bundle \
+    --disease mm --count 50 --output /tmp/mm_bundle.json
+
+# 2. Import into local dev DB
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py import_fhir_bundle /tmp/mm_bundle.json \
+    --org demo-org --batch-size 10 -v 2
+```
+
+### On Render (no virtual environment)
+
+```bash
+python manage.py generate_fhir_bundle --disease mm --count 50 --output /tmp/mm_bundle.json
+python manage.py import_fhir_bundle /tmp/mm_bundle.json --org demo-org --batch-size 10 -v 2
+```

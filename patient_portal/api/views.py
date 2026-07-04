@@ -1,11 +1,13 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -13,8 +15,9 @@ from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from omop_core.models import (
     Person, PatientInfo, Concept, ProvenanceRecord,
-    ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
-    PatientDocument, PatientTrialEnrollment, Survey, PatientSurveyResponse,
+    ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
+    Observation, ProcedureOccurrence, VisitOccurrence,
+    PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
     # Controlled vocabulary lookup models
     Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
     ProgesteroneReceptorStatus, Her2Status, HrStatus, HrdStatus,
@@ -36,15 +39,15 @@ from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name
-from omop_core.services.access import get_visible_orgs
-from datetime import datetime
+from omop_core.services.access import get_visible_orgs, build_trusting_map
+from datetime import datetime, timedelta
 from django.utils.timezone import localdate
 import csv
 import hashlib
 import json
 import logging
 from io import StringIO
-from .permissions import ScopedTokenPermission, get_request_org
+from .permissions import ScopedTokenPermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
     UserSerializer, PatientInfoSerializer, PatientListSerializer, ProvenanceRecordSerializer,
@@ -58,6 +61,12 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 
 logger = logging.getLogger(__name__)
+
+
+class PatientInfoPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 
 # ---------------------------------------------------------------------------
@@ -137,13 +146,51 @@ def _record_provenance(record, source, source_user_id, target_patient_id=None, m
     )
 
 
+def _delete_omop_clinical_rows(person):
+    """Delete all OMOP clinical rows for a person, in FK dependency order.
+
+    Must be called inside a transaction.atomic() block.
+    Does NOT delete PatientInfo, PatientGroupMembership, PatientUser/Identity,
+    or Person — callers handle those after this returns.
+    """
+    episode_ids = list(Episode.objects.filter(person=person).values_list('episode_id', flat=True))
+    EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
+    Episode.objects.filter(person=person).delete()
+    visit_ids = list(VisitOccurrence.objects.filter(person=person).values_list('visit_occurrence_id', flat=True))
+    measurement_ids = list(Measurement.objects.filter(person=person).values_list('measurement_id', flat=True))
+    # Delete by both axes: visit_occurrence_id covers normal rows; measurement_id
+    # covers any ownership rows whose visit belongs to a different person (edge case
+    # where measurement_id has no DB FK so those rows would otherwise be orphaned).
+    MeasurementOwnership.objects.filter(
+        Q(visit_occurrence_id__in=visit_ids) | Q(measurement_id__in=measurement_ids)
+    ).delete()
+    Measurement.objects.filter(person=person).delete()
+    ConditionOccurrence.objects.filter(person=person).delete()
+    DrugExposure.objects.filter(person=person).delete()
+    Observation.objects.filter(person=person).delete()
+    ProcedureOccurrence.objects.filter(person=person).delete()
+    VisitOccurrence.objects.filter(person=person).delete()
+    PatientDocument.objects.filter(person=person).delete()
+    PatientTrialEnrollment.objects.filter(person=person).delete()
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PatientInfoSerializer
     permission_classes = [ScopedTokenPermission]
+    pagination_class = PatientInfoPagination
+
+    DATE_FILTERS = {
+        '7d': timedelta(days=7),
+        '30d': timedelta(days=30),
+        '90d': timedelta(days=90),
+    }
     
     def get_queryset(self):
-        qs = PatientInfo.objects.all().select_related('person')
+        qs = PatientInfo.objects.all().select_related('person', 'organization')
+        # Trusted backend (service-token): full visibility across all patients.
+        if is_service_token(self.request):
+            return qs
         org = get_request_org(self.request)
         if org is not None:
             qs = qs.filter(organization=org)
@@ -209,11 +256,111 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         if self.action == 'list':
             return PatientListSerializer
         return PatientInfoSerializer
+
+    def _normalize_all_param(self, value):
+        value = (value or '').strip()
+        if not value or value.lower() == 'all':
+            return None
+        return value
+
+    def _apply_patient_list_filters(self, queryset):
+        params = self.request.query_params
+
+        org_slug = self._normalize_all_param(params.get('org'))
+        if org_slug:
+            if org_slug == '__unassigned__':
+                queryset = queryset.filter(organization__isnull=True)
+            else:
+                queryset = queryset.filter(organization__slug=org_slug)
+
+        disease = self._normalize_all_param(params.get('disease'))
+        if disease:
+            queryset = queryset.filter(disease__iexact=disease)
+
+        stage = self._normalize_all_param(params.get('stage'))
+        if stage:
+            stage = stage.upper()
+            if stage not in {'I', 'II', 'III', 'IV'}:
+                return queryset.none()
+            queryset = queryset.filter(
+                Q(stage__iexact=stage) |
+                Q(stage__iexact=f'Stage {stage}') |
+                Q(stage__iregex=rf'(^|[^A-Za-z0-9])stage\s+{stage}(?![IVX])[A-Z]*([^A-Za-z0-9]|$)')
+            )
+
+        date_filter = self._normalize_all_param(params.get('date'))
+        if date_filter in self.DATE_FILTERS:
+            queryset = queryset.filter(updated_at__gte=timezone.now() - self.DATE_FILTERS[date_filter])
+        elif date_filter == 'this_year':
+            start_of_year = timezone.make_aware(
+                datetime.combine(localdate().replace(month=1, day=1), datetime.min.time())
+            )
+            queryset = queryset.filter(updated_at__gte=start_of_year)
+
+        search = self._normalize_all_param(params.get('search'))
+        if search:
+            name_query = (
+                Q(person__given_name__icontains=search) |
+                Q(person__family_name__icontains=search) |
+                Q(email__icontains=search)
+            )
+            try:
+                name_query |= Q(person__person_id=int(search))
+            except (TypeError, ValueError):
+                pass
+            queryset = queryset.filter(name_query)
+
+        return queryset
+
+    def _build_filter_options(self, queryset):
+        org_rows = (
+            queryset
+            .exclude(organization__isnull=True)
+            .values('organization__slug', 'organization__name')
+            .distinct()
+            .order_by('organization__name')
+        )
+        org_options = [
+            {'value': row['organization__slug'], 'label': row['organization__name']}
+            for row in org_rows
+            if row['organization__slug'] and row['organization__name']
+        ]
+        if queryset.filter(organization__isnull=True).exists():
+            org_options.append({'value': '__unassigned__', 'label': 'Unassigned'})
+
+        diseases = (
+            queryset
+            .exclude(disease__isnull=True)
+            .exclude(disease='')
+            .values_list('disease', flat=True)
+            .distinct()
+            .order_by('disease')
+        )
+
+        return {
+            'orgs': org_options,
+            'diseases': list(diseases),
+            'stages': ['I', 'II', 'III', 'IV'],
+        }
     
     def list(self, request):
         """List all patients - accessible to authenticated users"""
-        queryset = self.get_queryset().order_by('-created_at')
-        serializer = PatientListSerializer(queryset, many=True)
+        base_queryset = self.get_queryset()
+        queryset = self._apply_patient_list_filters(base_queryset).order_by('-updated_at', '-created_at')
+
+        if 'page' in request.query_params or 'page_size' in request.query_params:
+            page = self.paginate_queryset(queryset)
+            serializer = PatientListSerializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            try:
+                page_num = int(request.query_params.get('page', 1))
+            except (TypeError, ValueError):
+                page_num = 1
+            if page_num == 1:
+                response.data['filter_options'] = self._build_filter_options(base_queryset)
+            return response
+
+        serializer = PatientListSerializer(queryset[:500], many=True)
         return Response(serializer.data)
 
     def create(self, request):
@@ -397,9 +544,33 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=['get', 'patch'], permission_classes=[ScopedTokenPermission])
     def me(self, request):
         """GET/PATCH /api/patient-info/me/ — current user's own PatientInfo."""
+        from patient_portal.models import PatientUser
         from patient_portal.services import resolve_or_create_person
 
-        person = resolve_or_create_person(request.user)
+        # Fast path: confirmed patient — use cached person directly, no extra query.
+        existing_pu = PatientUser.objects.filter(identity=request.user).select_related('person').first()
+        if existing_pu is not None:
+            person = existing_pu.person
+        else:
+            # Determine whether this identity may auto-provision a patient record.
+            # Staff/superusers and users with an *active* clinical-role grant are not
+            # patients; resolve_or_create_person skips creation when allow_create=False
+            # but still returns a Person via email match (re-links a deleted PatientUser).
+            from omop_core.models import GroupAccess
+            now = timezone.now()
+            is_clinical = (
+                getattr(request.user, 'is_staff', False)
+                or getattr(request.user, 'is_superuser', False)
+                or GroupAccess.objects.filter(
+                    identity=request.user,
+                    role__in=['org_admin', 'doctor', 'navigator'],
+                ).filter(
+                    Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+                ).exists()
+            )
+            person = resolve_or_create_person(request.user, allow_create=not is_clinical)
+            if person is None:
+                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         patient_info, _ = PatientInfo.objects.get_or_create(person=person)
 
         if request.method == 'GET':
@@ -660,31 +831,31 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     # Explicit extension URL → (value_key, parser) registry.
                     # Using exact URL matching avoids false positives from substring checks.
                     _PATIENT_EXTENSIONS = {
-                        'http://ctomop.io/fhir/StructureDefinition/race':
+                        'https://healthkey.ai/fhir/StructureDefinition/race':
                             ('valueString', lambda e: e.get('valueString')),
-                        'http://ctomop.io/fhir/StructureDefinition/ethnicity':
+                        'https://healthkey.ai/fhir/StructureDefinition/ethnicity':
                             ('valueString', lambda e: e.get('valueString')),
-                        'http://ctomop.io/fhir/StructureDefinition/bodyWeight':
+                        'https://healthkey.ai/fhir/StructureDefinition/bodyWeight':
                             ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
-                        'http://ctomop.io/fhir/StructureDefinition/bodyHeight':
+                        'https://healthkey.ai/fhir/StructureDefinition/bodyHeight':
                             ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
-                        'http://ctomop.io/fhir/StructureDefinition/systolic-bp':
+                        'https://healthkey.ai/fhir/StructureDefinition/systolic-bp':
                             ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
-                        'http://ctomop.io/fhir/StructureDefinition/diastolic-bp':
+                        'https://healthkey.ai/fhir/StructureDefinition/diastolic-bp':
                             ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
-                        'http://ctomop.io/fhir/StructureDefinition/heartRate':
+                        'https://healthkey.ai/fhir/StructureDefinition/heartRate':
                             ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
-                        'http://ctomop.io/fhir/StructureDefinition/ecog-performance-status':
+                        'https://healthkey.ai/fhir/StructureDefinition/ecog-performance-status':
                             ('valueInteger', lambda e: e.get('valueInteger')),
-                        'http://ctomop.io/fhir/StructureDefinition/mm-cytogenetic-markers':
+                        'https://healthkey.ai/fhir/StructureDefinition/mm-cytogenetic-markers':
                             ('valueString', lambda e: e.get('valueString')),
-                        'http://ctomop.io/fhir/StructureDefinition/mm-measurable-disease-imwg':
+                        'https://healthkey.ai/fhir/StructureDefinition/mm-measurable-disease-imwg':
                             ('valueBoolean', lambda e: e.get('valueBoolean')),
-                        'http://ctomop.io/fhir/StructureDefinition/mm-sct-date':
+                        'https://healthkey.ai/fhir/StructureDefinition/mm-sct-date':
                             ('valueString', lambda e: e.get('valueString')),
-                        'http://ctomop.io/fhir/StructureDefinition/mm-sct-history':
+                        'https://healthkey.ai/fhir/StructureDefinition/mm-sct-history':
                             ('valueString', lambda e: e.get('valueString')),
-                        'http://ctomop.io/fhir/StructureDefinition/mm-sct-eligibility':
+                        'https://healthkey.ai/fhir/StructureDefinition/mm-sct-eligibility':
                             ('valueString', lambda e: e.get('valueString')),
                     }
                     ext_results = {}
@@ -694,7 +865,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             _, parser = _PATIENT_EXTENSIONS[url]
                             ext_results[url] = parser(ext)
 
-                    base = 'http://ctomop.io/fhir/StructureDefinition/'
+                    base = 'https://healthkey.ai/fhir/StructureDefinition/'
                     race            = ext_results.get(f'{base}race')
                     ethnicity       = ext_results.get(f'{base}ethnicity')
                     weight          = ext_results.get(f'{base}bodyWeight')
@@ -1923,7 +2094,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     # Stamp the org derived from the OAuth2 token so this patient
                     # is scoped to the uploading service client's tenant.
                     upload_org = get_request_org(request)
-                    if upload_org is not None:
+                    if upload_org is not None and patient_info.organization_id is None:
                         _patch['organization'] = upload_org
 
                     # Apply patch to PatientInfo (suppress signal-triggering save)
@@ -2027,18 +2198,24 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         if not can_access_patient(request.user, person_id):
                             errors.append("Person not found.")
                             continue
-                    # Delete PatientInfo
-                    PatientInfo.objects.filter(person=person).delete()
-                    # Delete associated Identity if exists (via PatientUser)
-                    from patient_portal.models import PatientUser as PU
-                    try:
-                        pu = PU.objects.get(person=person)
-                        pu.identity.delete()
-                    except PU.DoesNotExist:
-                        pass
-                    # Delete Person
-                    person.delete()
-                    deleted_count += 1
+                    with transaction.atomic():
+                        # Delete OMOP clinical rows in FK dependency order.
+                        _delete_omop_clinical_rows(person)
+                        # PatientGroupMembership uses a plain BigIntegerField (no DB FK)
+                        # so it is never cascade-deleted by the ORM.
+                        PatientGroupMembership.objects.filter(person_id=person.person_id).delete()
+                        # Delete PatientInfo
+                        PatientInfo.objects.filter(person=person).delete()
+                        # Delete associated Identity if exists (via PatientUser)
+                        from patient_portal.models import PatientUser as PU
+                        try:
+                            pu = PU.objects.get(person=person)
+                            pu.identity.delete()
+                        except PU.DoesNotExist:
+                            pass
+                        # Delete Person last (other rows hold person FK)
+                        person.delete()
+                        deleted_count += 1
                 except Person.DoesNotExist:
                     errors.append("Person not found.")
                 except Exception:
@@ -2051,9 +2228,72 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 'deleted_count': deleted_count,
                 'errors': errors
             })
-            
+
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['delete'], permission_classes=[ScopedTokenPermission])
+    def bulk_delete_filtered(self, request):
+        """Delete PatientInfo records matching all active filters (org + disease + stage + date).
+        Only deletes the matched PatientInfo rows; Person/Identity are removed only if the
+        person has no remaining PatientInfo in any org after the deletion.
+        """
+        try:
+            base_queryset = self.get_queryset()
+            filtered_queryset = self._apply_patient_list_filters(base_queryset)
+
+            # Snapshot both the specific PatientInfo PKs and their person IDs in one query.
+            snapshot = list(filtered_queryset.values_list('id', 'person__person_id'))
+            if not snapshot:
+                return Response({'success': True, 'deleted_count': 0, 'errors': []})
+
+            patientinfo_ids = [row[0] for row in snapshot]
+            person_ids = [row[1] for row in snapshot]
+
+            errors = []
+            # Bulk-delete only the specifically filtered PatientInfo records — correctly
+            # scoped to org + disease + stage + date via the queryset snapshot.
+            # This transaction commits before per-person orphan cleanup so a failure
+            # in the cleanup loop cannot roll back the PatientInfo deletions.
+            with transaction.atomic():
+                PatientInfo.objects.filter(id__in=patientinfo_ids).delete()
+            deleted_count = len(patientinfo_ids)
+
+            # Clean up Person/OMOP rows/Identity for persons that now have no PatientInfo
+            # at all.  Each person gets its own savepoint so a single failure does not
+            # abort cleanup for the remaining persons.
+            persons = {p.person_id: p for p in Person.objects.filter(person_id__in=person_ids)}
+            from patient_portal.models import PatientUser as PU
+            for person_id in person_ids:
+                person = persons.get(person_id)
+                if person is None:
+                    continue
+                try:
+                    if not PatientInfo.objects.filter(person=person).exists():
+                        with transaction.atomic():
+                            _delete_omop_clinical_rows(person)
+                            # PatientGroupMembership uses a plain BigIntegerField (no DB FK).
+                            PatientGroupMembership.objects.filter(person_id=person.person_id).delete()
+                            try:
+                                pu = PU.objects.get(person=person)
+                                pu.identity.delete()
+                            except PU.DoesNotExist:
+                                pass
+                            person.delete()
+                except Exception:
+                    id_hash = hashlib.sha256(str(person_id).encode()).hexdigest()[:12]
+                    logger.warning("bulk_delete_filtered: person cleanup failed (id_hash=%s)", id_hash)
+                    errors.append("Person cleanup failed.")
+
+            return Response({
+                'success': True,
+                'deleted_count': deleted_count,
+                'errors': errors
+            })
+
+        except Exception:
+            logger.exception("bulk_delete_filtered: unexpected error")
+            return Response({'error': 'Delete operation failed.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @csrf_exempt
 @api_view(['POST'])
@@ -2111,7 +2351,7 @@ def health_check(request):
     http_status = 200 if db_status == 'connected' else 503
     return JsonResponse({
         'status': 'healthy' if db_status == 'connected' else 'unhealthy',
-        'service': 'ctomop',
+        'service': 'promop',
         'database': db_status,
     }, status=http_status)
 
@@ -2135,17 +2375,13 @@ def org_disease_stats(request):
     """GET /api/stats/org-disease/ — per-org disease patient counts for the requesting user."""
     from django.db.models import Count
 
-    orgs = get_visible_orgs(request.user)
-    result = []
-    for org in orgs.order_by('name'):
+    def _disease_counts(qs):
         rows = (
-            PatientInfo.objects
-            .filter(organization=org)
-            .values('disease_slug')
+            qs.values('disease_slug')
             .annotate(count=Count('id'))
             .order_by('-count')
         )
-        disease_counts = [
+        return [
             {
                 'disease_slug': r['disease_slug'] or '',
                 'label': _DISEASE_LABELS.get(r['disease_slug'] or '', r['disease_slug'] or 'Unknown'),
@@ -2153,12 +2389,55 @@ def org_disease_stats(request):
             }
             for r in rows
         ]
+
+    from django.db.models import Count
+
+    orgs = get_visible_orgs(request.user)
+    org_list = list(orgs.order_by('name'))
+
+    # Build {org_id: set of granting_org_ids} covering both org-to-org and domain trusts
+    trusting_map = build_trusting_map(org_list)
+
+    # Batch-compute patient counts for all granting orgs in one query (avoids N+1)
+    all_granting_ids = {gid for gids in trusting_map.values() for gid in gids}
+    granting_counts: dict[int, int] = {}
+    if all_granting_ids:
+        granting_counts = dict(
+            PatientInfo.objects.filter(organization_id__in=all_granting_ids)
+            .values('organization_id')
+            .annotate(c=Count('id'))
+            .values_list('organization_id', 'c')
+        )
+
+    result = []
+    for org in org_list:
+        counts = _disease_counts(PatientInfo.objects.filter(organization=org))
+        owned_count = sum(d['count'] for d in counts)
+        accessible_count = owned_count + sum(granting_counts.get(gid, 0) for gid in trusting_map[org.id])
+
         result.append({
             'org_slug': org.slug,
             'org_name': org.name,
-            'total': sum(d['count'] for d in disease_counts),
-            'disease_counts': disease_counts,
+            'total': owned_count,
+            'owned_count': owned_count,
+            'accessible_count': accessible_count,
+            'disease_counts': counts,
         })
+
+    # For staff/superusers: also surface patients not assigned to any org.
+    if getattr(request.user, 'is_staff', False) or getattr(request.user, 'is_superuser', False):
+        counts = _disease_counts(PatientInfo.objects.filter(organization__isnull=True))
+        if counts:
+            unassigned_total = sum(d['count'] for d in counts)
+            result.insert(0, {
+                'org_slug': '__unassigned__',
+                'org_name': 'All Patients (Unassigned)',
+                'total': unassigned_total,
+                'owned_count': unassigned_total,
+                'accessible_count': unassigned_total,
+                'disease_counts': counts,
+            })
+
     return Response(result)
 
 
@@ -2254,14 +2533,18 @@ class PersonViewSet(viewsets.GenericViewSet):
         except (Person.DoesNotExist, ValueError):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        org = get_request_org(request)
-        if org is not None:
-            if not PatientInfo.objects.filter(person=person, organization=org).exists():
-                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        elif not (getattr(request.user, 'is_superuser', False) or getattr(request.user, 'is_staff', False)):
-            from omop_core.authorization import can_access_patient
-            if not can_access_patient(request.user, person.person_id):
-                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        # Trusted backend (service-token): skip per-person row-level ACL.
+        # ScopedTokenPermission confirmed the caller holds a valid HMAC-verified
+        # service token. Service tokens have full cross-person write access by design.
+        if not is_service_token(request):
+            org = get_request_org(request)
+            if org is not None:
+                if not PatientInfo.objects.filter(person=person, organization=org).exists():
+                    return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+            elif not (getattr(request.user, 'is_superuser', False) or getattr(request.user, 'is_staff', False)):
+                from omop_core.authorization import can_access_patient
+                if not can_access_patient(request.user, person.person_id):
+                    return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         changed = []
         for field, (kind, placeholders) in _PERSON_PATCHABLE_FIELDS.items():
@@ -2307,6 +2590,10 @@ class _OmopFilterMixin:
         person_id = self.request.query_params.get('person_id')
         if person_id:
             qs = qs.filter(person_id=person_id)
+        # Trusted backend (service-token): full visibility. Already
+        # validated at the permission layer (ScopedTokenPermission).
+        if is_service_token(self.request):
+            return qs
         org = get_request_org(self.request)
         if org is not None:
             from omop_core.models import PatientInfo
@@ -2352,6 +2639,13 @@ class _ProvenanceMixin:
             if pk_field not in serializer.validated_data:
                 serializer.validated_data[pk_field] = next_pk(model_cls, pk_field)
 
+        # Trusted backend (service-token): skip ACL — already validated at
+        # the permission layer (ScopedTokenPermission).
+        if is_service_token(self.request):
+            obj = serializer.save()
+            self._prov(obj)
+            return
+
         # Org-scoping: reject cross-org persons; allow new/bootstrap patients
         org = get_request_org(self.request)
         if org is not None:
@@ -2378,6 +2672,13 @@ class _ProvenanceMixin:
         self._prov(obj)
 
     def perform_update(self, serializer):
+        # Trusted backend (service-token): skip ACL — already validated at
+        # the permission layer (ScopedTokenPermission).
+        if is_service_token(self.request):
+            obj = serializer.save()
+            self._prov(obj)
+            return
+
         org = get_request_org(self.request)
         if org is not None:
             person = serializer.validated_data.get('person') or serializer.instance.person
@@ -2490,6 +2791,9 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
         episode_id = self.request.query_params.get('episode_id')
         if episode_id:
             qs = qs.filter(episode_id=episode_id)
+        # Trusted backend (service-token): full visibility across all episode events.
+        if is_service_token(self.request):
+            return qs
         # Org / per-patient scoping: EpisodeEvent.episode_id is a bare integer FK to Episode.
         # Resolve allowed episode_ids via the Episode → person → org chain.
         # Bootstrap patients (organization=NULL) are included so that create-path
@@ -2529,6 +2833,10 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+        # Trusted backend (service-token): skip ACL — full cross-patient write access.
+        if is_service_token(self.request):
+            serializer.save()
+            return
         episode_id = serializer.validated_data.get('episode_id')
         org = get_request_org(self.request)
         if org is not None:
@@ -2683,7 +2991,7 @@ def vocabulary_list(request, model_name):
 
 
 # =============================================================================
-# HealthTree parity ViewSets
+# PatientRecord supplementary ViewSets
 # =============================================================================
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -2737,7 +3045,7 @@ class SurveyViewSet(viewsets.ModelViewSet):
         if request.method in ('GET', 'HEAD', 'OPTIONS'):
             return
         token = getattr(request, 'auth', None)
-        if token == 'service-token':
+        if is_service_token(request):
             return
         if token is not None and not isinstance(token, TokenClaims):
             # OAuth2: allow only internal service apps (no org).

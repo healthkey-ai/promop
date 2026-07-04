@@ -46,6 +46,15 @@ if not DEBUG:
             _config_errors.append(
                 'DATABASE_URL must be set (SQLite is not supported in production)'
             )
+        if not os.environ.get('ALLOWED_HOSTS'):
+            _config_errors.append(
+                'ALLOWED_HOSTS must be set to your domain(s), e.g. "app.example.com"'
+            )
+        if not os.environ.get('CORS_ALLOWED_ORIGINS'):
+            _config_errors.append(
+                'CORS_ALLOWED_ORIGINS must be set to your frontend origin(s), '
+                'e.g. "https://app.example.com"'
+            )
         if _config_errors:
             raise ImproperlyConfigured(
                 'Missing required production settings:\n'
@@ -57,7 +66,7 @@ if DEBUG:
 else:
     ALLOWED_HOSTS = [
         h.strip()
-        for h in os.environ.get('ALLOWED_HOSTS', 'ctomop.onrender.com').split(',')
+        for h in os.environ.get('ALLOWED_HOSTS', '').split(',')
         if h.strip()
     ]
 
@@ -71,6 +80,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'django.contrib.postgres',
     'rest_framework',
+    'drf_spectacular',
     'corsheaders',
     'oauth2_provider',
     'omop_core',
@@ -90,7 +100,15 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'patient_portal.api.middleware.AuditLogMiddleware',
+    'patient_portal.api.middleware.DeprecationWarningMiddleware',
 ]
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'PROMOP API',
+    'DESCRIPTION': 'PROMOP clinical oncology patient data API (v1)',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+}
 
 LOGGING = {
     'version': 1,
@@ -193,6 +211,33 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+_smtp_env_configured = bool(
+    os.environ.get('EMAIL_HOST_USER') and os.environ.get('EMAIL_HOST_PASSWORD')
+)
+
+# Email
+EMAIL_BACKEND = os.environ.get(
+    'EMAIL_BACKEND',
+    (
+        'django.core.mail.backends.smtp.EmailBackend'
+        if (not DEBUG or _smtp_env_configured)
+        else 'django.core.mail.backends.console.EmailBackend'
+    ),
+)
+EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.mailgun.org')
+EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))
+EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'true').lower() == 'true'
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'PROMOP <noreply@healthkey.ai>')
+
+# Base URL used to build invitation accept links in emails.
+# Set APP_BASE_URL to your deployment URL (e.g. https://your-app.example.com)
+APP_BASE_URL = os.environ.get(
+    'APP_BASE_URL',
+    os.environ.get('RENDER_EXTERNAL_URL', 'http://localhost:5173'),
+).rstrip('/')
+
 # Internationalization
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'UTC'
@@ -237,7 +282,7 @@ PARTNER_AUTH_PROVIDERS = [
     "patient_portal.api.providers.firebase.FirebaseTokenProvider",
 ]
 
-FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "healthtree-test" if DEBUG else "")
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "promop-test" if DEBUG else "")
 FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(
     "FIREBASE_SKIP_REVOCATION_CHECK", "true" if DEBUG else "false"
 ).lower() in ("1", "true")
@@ -259,6 +304,7 @@ if DEBUG:
     ]
 
 REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_AUTHENTICATION_CLASSES': _auth_classes,
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -326,21 +372,50 @@ if not DEBUG:
     SECURE_CONTENT_TYPE_NOSNIFF = True
     X_FRAME_OPTIONS = 'DENY'
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-    
-    # Add trusted origins for CSRF
-    production_url = os.environ.get('PRODUCTION_URL', '')
-    railway_domain = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
-    render_url = os.environ.get('RENDER_EXTERNAL_URL', '')
-    
-    csrf_origins = []
-    if production_url:
-        csrf_origins.append(production_url)
-    if railway_domain:
-        csrf_origins.append(f'https://{railway_domain}')
-    if render_url:
-        csrf_origins.append(render_url)
-    
-    CSRF_TRUSTED_ORIGINS = csrf_origins
+
+
+# Add trusted origins for CSRF. Django checks the Origin header on admin POSTs,
+# so every deployed public hostname must be present here. Keep this outside the
+# production-only block because staging may run with DEBUG=True.
+def _normalise_csrf_origin(value):
+    value = (value or '').strip().rstrip('/')
+    if not value:
+        return ''
+    if value.startswith(('http://', 'https://')):
+        return value
+    return f'https://{value}'
+
+
+csrf_origins = []
+for value in (
+    os.environ.get('PRODUCTION_URL', ''),
+    os.environ.get('RENDER_EXTERNAL_URL', ''),
+    os.environ.get('APP_BASE_URL', ''),
+):
+    origin = _normalise_csrf_origin(value)
+    if origin:
+        csrf_origins.append(origin)
+
+railway_domain = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
+railway_origin = _normalise_csrf_origin(railway_domain)
+if railway_origin:
+    csrf_origins.append(railway_origin)
+
+for origin in os.environ.get('CSRF_TRUSTED_ORIGINS', '').split(','):
+    origin = _normalise_csrf_origin(origin)
+    if origin:
+        csrf_origins.append(origin)
+
+for host in os.environ.get('ALLOWED_HOSTS', '').split(','):
+    host = host.strip()
+    if host and host != '*' and not host.startswith('.'):
+        csrf_origins.append(f'https://{host}')
+
+for host in ALLOWED_HOSTS:
+    if host and host != '*' and not host.startswith('.'):
+        csrf_origins.append(f'https://{host}')
+
+CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(csrf_origins))
 
 
 # ── Firebase Admin SDK ────────────────────────────────────────────────────

@@ -2,8 +2,8 @@
 """
 Lookup tables for LOT inference.
 
-MYELOMA_REGIMEN_LOOKUP: 140+ entries derived from HealthTree's combinationAcronymList.json
-  and myelomaTreatmentAcronyms.js. Keys are frozensets of lowercased active ingredient names.
+MYELOMA_REGIMEN_LOOKUP: 140+ entries covering common myeloma treatment regimens.
+  Keys are frozensets of lowercased active ingredient names.
 
 REGIMEN_LOOKUP: Cross-disease regimens (lymphoma, CLL, breast cancer).
 
@@ -14,7 +14,7 @@ PROCEDURE_SNOMED_MAP: Maps SNOMED concept code string → event subtype (transpl
 """
 
 # ---------------------------------------------------------------------------
-# Drug subtype classification (HealthTree-derived)
+# Drug subtype classification
 # ---------------------------------------------------------------------------
 
 DRUG_SUBTYPE_MAP: dict[str, str] = {
@@ -80,7 +80,7 @@ HEMONC_STEROID_CLASSES: frozenset[str] = frozenset({
 })
 
 # ---------------------------------------------------------------------------
-# Procedure SNOMED → event subtype (HealthTree-derived)
+# Procedure SNOMED → event subtype
 # ---------------------------------------------------------------------------
 
 PROCEDURE_SNOMED_MAP: dict[str, str] = {
@@ -90,7 +90,7 @@ PROCEDURE_SNOMED_MAP: dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
-# Myeloma regimen lookup — 140+ entries (HealthTree combinationAcronymList.json)
+# Myeloma regimen lookup — 140+ entries covering common myeloma regimens
 # Keys: frozenset of lowercased active ingredient names (steroids included)
 # ---------------------------------------------------------------------------
 

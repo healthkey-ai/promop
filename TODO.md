@@ -7,11 +7,8 @@
 #### ~~#1 ServiceTokenAuthentication falls back to arbitrary superuser~~ ✓ FIXED
 - `get_or_create(issuer='urn:service', sub='hk-labs-sync')` — dedicated service identity, no superuser fallback.
 
-#### #2 _resolve_person_id allows org-scoped tokens to bypass access check
-- **Severity:** critical / security
-- `patient_portal/api/lab_results/views.py:70-83`
-- When `can_access_patient()` fails but `get_request_org()` returns non-None, the function returns `(pid, None)` granting access. The org-person membership check happens later in each view but the logic is inverted.
-- **Action:** Move the org-person membership check into `_resolve_person_id` itself.
+#### ~~#2 _resolve_person_id allows org-scoped tokens to bypass access check~~ ✓ FIXED
+- Fixed in commit `e2ff378` (PR #163): org membership check moved inside `_resolve_person_id`; returns 403 before `can_access_patient()` is reached on org-scoped tokens.
 
 #### ~~#3 No rate limiting on auth or write endpoints~~ ✓ FIXED
 - `DEFAULT_THROTTLE_CLASSES` (Anon/User/Scoped) + rates (anon: 60/min, user: 300/min, sync: 60/min, patient_sync: 120/min) configured in `settings.py`.

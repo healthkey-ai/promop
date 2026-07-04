@@ -87,6 +87,36 @@ CONCEPT_TREATMENT_REGIMEN = 32531     # Treatment Regimen (episode concept)
 CONCEPT_DRUG_EXPOSURE_FIELD = 1147094  # drug_exposure_id field concept (EpisodeEvent)
 
 
+# Wearable metric LOINC codes → PatientInfo field (for 30-day aggregation)
+WEARABLE_LOINC = {
+    'steps':              '55423-8',   # Number of steps in 24 hours
+    'active_minutes':     '77592-4',   # Moderate-vigorous physical activity duration
+    'resting_hr':         '40443-4',   # Heart rate -- resting
+    'hrv_sdnn':           '80404-7',   # Heart rate variability SDNN
+    'spo2':               '59408-5',   # Oxygen saturation by pulse oximetry
+    'respiratory_rate':   '9279-1',    # Respiratory rate
+    'sleep_duration':     '93832-4',   # Sleep duration
+}
+
+# Artifact-filter bounds: readings outside [lo, hi] are discarded before aggregation
+WEARABLE_ARTIFACT_BOUNDS = {
+    'spo2':             (70.0, 100.0),
+    'resting_hr':       (20.0, 300.0),
+    'hrv_sdnn':         (1.0,  300.0),
+    'respiratory_rate': (4.0,  60.0),
+    'steps':            (0.0,  100_000.0),
+    'active_minutes':   (0.0,  1440.0),
+    'sleep_duration':   (0.0,  24.0),
+}
+
+# Minimum valid days required to emit a metric (else field stays None)
+WEARABLE_MIN_VALID_DAYS = 7
+
+# Activity trend thresholds: % change between first-half and second-half means
+WEARABLE_TREND_IMPROVING_PCT = 10.0
+WEARABLE_TREND_DECLINING_PCT = -10.0
+
+
 def get_gender_concept(gender_str):
     """Map a gender string to an OMOP Concept. Returns None if not found."""
     if not gender_str:

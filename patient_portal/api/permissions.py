@@ -1,7 +1,18 @@
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework.permissions import BasePermission
 
 from .providers.base import TokenClaims
+from omop_core.models import GroupAccess, Organization
+
+# Sentinel value set by ServiceTokenAuthentication when the HMAC check passes.
+# Use is_service_token() rather than comparing this string directly.
+SERVICE_TOKEN = "service-token"
+
+
+def is_service_token(request) -> bool:
+    """Return True when the request was authenticated as a trusted service token."""
+    return request.auth == SERVICE_TOKEN
 
 
 def get_request_org(request):
@@ -43,15 +54,15 @@ class ScopedTokenPermission(BasePermission):
       other authenticated   → safe methods + PATCH only
                               (read + self-edit; POST/DELETE denied)
 
-    NOTE: patient population scoping (multi-tenant isolation per HealthTree
-    integration) is tracked separately under HKI-SEC-04 and HKI-AUTH-04.
+    NOTE: patient population scoping (multi-tenant isolation) is tracked
+    separately under HKI-SEC-04 and HKI-AUTH-04.
     """
 
     def has_permission(self, request, view):
         token = request.auth
 
         # Service-to-service: trusted backend — full access.
-        if token == "service-token":
+        if token == SERVICE_TOKEN:
             return True  # hmac already validated in ServiceTokenAuthentication.authenticate()
 
         # Partner-auth (Firebase, SAML) and session-auth: role-based enforcement.
@@ -78,7 +89,7 @@ class ScopedTokenPermission(BasePermission):
 
 class LabSyncPermission(ScopedTokenPermission):
     """
-    Permission for the hk-labs → ctomop lab sync endpoint.
+    Permission for the lab result sync endpoint.
 
     Identical to ScopedTokenPermission except that an authenticated end
     user (Firebase/partner or session auth) is allowed to write, not just
@@ -100,3 +111,45 @@ class LabSyncPermission(ScopedTokenPermission):
         if token is None or isinstance(token, TokenClaims):
             return bool(request.user and request.user.is_authenticated)
         return super().has_permission(request, view)
+
+
+class IsStaffPermission(BasePermission):
+    """Allow access only to staff users (is_staff=True)."""
+
+    def has_permission(self, request, view):
+        return bool(
+            request.user and
+            request.user.is_authenticated and
+            getattr(request.user, 'is_staff', False)
+        )
+
+
+class IsStaffOrOrgAdmin(BasePermission):
+    """Allow staff users, or org_admin users for the org identified by view.kwargs['slug']."""
+
+    def has_permission(self, request, view):
+        if not (request.user and request.user.is_authenticated):
+            return False
+
+        if getattr(request.user, 'is_staff', False):
+            return True
+
+        slug = view.kwargs.get('slug')
+        if not slug:
+            # No slug: allow if user has any active org_admin grant (e.g., list view)
+            now = timezone.now()
+            return GroupAccess.objects.filter(
+                identity=request.user,
+                role='org_admin',
+            ).filter(
+                Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+            ).exists()
+
+        now = timezone.now()
+        return GroupAccess.objects.filter(
+            identity=request.user,
+            role='org_admin',
+            org__slug=slug,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+        ).exists()

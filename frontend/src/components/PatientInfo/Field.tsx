@@ -70,7 +70,7 @@ export default function Field({
       case 'select':
         return (
           <SelectControl
-            value={value || ''}
+            value={value != null && value !== '' ? String(value) : ''}
             options={optionObjects}
             disabled={disabled}
             placeholder="Select…"

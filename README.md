@@ -1,6 +1,36 @@
-# promop
+# PRomop
 
-A Django + React application for oncology patient data management using the OMOP CDM schema. Accepts FHIR R4 bundle uploads, exposes a DRF REST API, and serves a React TypeScript frontend.
+[![CI](https://github.com/healthkey-ai/promop/actions/workflows/ci.yml/badge.svg)](https://github.com/healthkey-ai/promop/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
+**PRomop** is an open-source longitudinal patient health record built on the [OMOP CDM v5.4](https://ohdsi.github.io/CommonDataModel/) with FHIR R4 ingestion. Its central feature is `PatientRecord` — a denormalized, 286-column projection derived automatically from OMOP tables that gives analytics, trial matching, and clinical decision support a single shared substrate, eliminating the repeated re-derivation of patient state across applications.
+
+Deployed across approximately 17,500 real oncology patients, with trial matching against 6,000 actively recruiting trials. A 20-criterion eligibility search over raw OMOP requires 27–39 joins; against `PatientRecord` it requires zero — an estimated 30–200× speedup.
+
+See [paper.md](paper.md) for the full research description.
+
+**New here?** → [**Load and query patient data in 10 minutes**](docs/quickstart.md)
+
+Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? See [BUILDING_WITH_DOCKER.md](BUILDING_WITH_DOCKER.md).
+
+---
+
+## Key Features
+
+- **FHIR R4 ingestion** — Bundle uploads mapped to OMOP tables (observations → `Measurement`, conditions → `ConditionOccurrence`, medications → `DrugExposure` + `Episode`)
+- **PatientRecord projection** — 286-column decision-ready view, auto-rebuilt via signal chain on every OMOP write
+- **Versioned REST API** — `/api/v1/` with [OpenAPI 3.0 schema](API_SURFACE.md) and Swagger UI at `/api/v1/docs/`
+- **Multi-tenant access control** — OAuth2 and SMART on FHIR authorization, org-scoped role-based access
+- **Synthetic FHIR generator** — reproducible patient bundles for multiple diseases (MM, FL, breast cancer)
+
+---
+
+## API Documentation
+
+- Interactive Swagger UI: `http://localhost:8000/api/v1/docs/`
+- OpenAPI schema: `GET /api/v1/schema/`
+- Full API surface reference: **[API_SURFACE.md](API_SURFACE.md)**
+- LOINC / SNOMED / HemOnc concept mapping: **[docs/concept-mapping.md](docs/concept-mapping.md)**
 
 ---
 
@@ -51,13 +81,6 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
   .venv/bin/python manage.py setup_admin
 ```
 
-Or interactively:
-
-```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
-  .venv/bin/python manage.py createsuperuser
-```
-
 ### 5. Run the backend
 
 ```bash
@@ -66,7 +89,7 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
   .venv/bin/python manage.py runserver
 ```
 
-The API is available at `http://localhost:8000/api/`.
+The API is available at `http://localhost:8000/api/v1/`.
 
 ### 6. Run the frontend
 
@@ -77,6 +100,18 @@ npm run dev
 ```
 
 The UI is available at `http://localhost:5173`.
+
+---
+
+## Docker
+
+See [BUILDING_WITH_DOCKER.md](BUILDING_WITH_DOCKER.md) for the full guide including dev mode,
+common tasks, environment variables, and troubleshooting. The short version:
+
+```bash
+cp .env.example .env   # set ADMIN_PASSWORD
+docker compose up --build
+```
 
 ---
 
@@ -93,15 +128,21 @@ cd frontend && npm test -- --run
 
 ---
 
+## Populating Sample Patient Data
+
+See [docs/sample-patient-data.md](docs/sample-patient-data.md) for instructions on generating and loading synthetic FHIR patient bundles for multiple disease types.
+
+---
+
 ## Project Structure
 
 | Directory | Purpose |
 |---|---|
-| `omop_core/` | OMOP CDM models, migrations, services |
-| `omop_oncology/` | Episode, EpisodeEvent, LOT inference |
+| `omop_core/` | OMOP CDM models, migrations, PatientRecord projection |
+| `omop_oncology/` | Episode, EpisodeEvent, line-of-therapy inference |
 | `patient_portal/` | DRF API, FHIR upload, serializers, views |
 | `frontend/` | React 18 + TypeScript + Tailwind UI |
-| `omop_core/management/commands/` | Management commands (generate, load, backfill) |
+| `omop_core/management/commands/` | Management commands (generate, import, backfill) |
 
 ---
 
@@ -114,6 +155,12 @@ cd frontend && npm test -- --run
 
 ---
 
-## Populating Sample Patient Data
+## Contributing
 
-See [docs/sample-patient-data.md](docs/sample-patient-data.md) for instructions on generating and loading synthetic FHIR patient bundles.
+Please open an issue or pull request on GitHub. The `dev` branch is the integration target; `main` is the production branch.
+
+---
+
+## Citation
+
+If you use PRomop in research, please cite it using [CITATION.cff](CITATION.cff) or via GitHub's "Cite this repository" button.

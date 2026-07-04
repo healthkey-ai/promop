@@ -1,14 +1,13 @@
 """
-Management command to fill PatientInfo.email using the pattern:
-    samar+<first_initial><last_name>@cancerbot.org
+Management command to fill PatientInfo.email from patient name.
 
-Only updates records where email is NULL or blank.
-Use --overwrite to update all records regardless.
+Generates a placeholder email address for patients who have no email recorded.
+The default pattern is: <first_initial><last_name>@<domain>
 
 Usage:
-    python manage.py fill_patient_emails
-    python manage.py fill_patient_emails --overwrite
-    python manage.py fill_patient_emails --dry-run
+    python manage.py fill_patient_emails --domain example.com
+    python manage.py fill_patient_emails --domain example.com --overwrite
+    python manage.py fill_patient_emails --domain example.com --dry-run
 """
 
 from django.core.management.base import BaseCommand
@@ -16,9 +15,14 @@ from omop_core.models import PatientInfo
 
 
 class Command(BaseCommand):
-    help = "Fill PatientInfo.email with samar+<first_initial><last_name>@cancerbot.org"
+    help = "Fill PatientInfo.email with a generated placeholder address derived from the patient name"
 
     def add_arguments(self, parser):
+        parser.add_argument(
+            '--domain',
+            default='example.com',
+            help='Email domain to use for generated addresses (default: example.com)',
+        )
         parser.add_argument(
             '--overwrite',
             action='store_true',
@@ -33,6 +37,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         overwrite = options['overwrite']
         dry_run = options['dry_run']
+        domain = options['domain']
 
         from django.db.models import Q
         if overwrite:
@@ -61,7 +66,7 @@ class Command(BaseCommand):
 
             first_initial = first[0].lower() if first else ''
             last_slug = last.lower().replace(' ', '') if last else f'person{person.person_id}'
-            email = f"samar+{first_initial}{last_slug}@cancerbot.org"
+            email = f"{first_initial}{last_slug}@{domain}"
 
             if dry_run:
                 self.stdout.write(f"  [dry-run] Person {person.person_id}: {first} {last} → {email}")

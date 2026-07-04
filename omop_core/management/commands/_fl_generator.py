@@ -10,6 +10,7 @@ which regimens are used at each line of therapy and their relative frequencies.
 """
 
 import random
+import uuid
 from datetime import date, datetime, timedelta
 
 from omop_core.services.lot_regimens import (
@@ -102,11 +103,19 @@ _FIRST_NAMES = [
     'James', 'Robert', 'John', 'Michael', 'William', 'David', 'Richard', 'Joseph',
     'Mary', 'Patricia', 'Jennifer', 'Linda', 'Barbara', 'Elizabeth', 'Susan', 'Jessica',
     'Thomas', 'Charles', 'Gary', 'George', 'Dorothy', 'Helen', 'Sandra', 'Donna',
+    'Christopher', 'Daniel', 'Paul', 'Mark', 'Donald', 'Steven', 'Kenneth', 'Andrew',
+    'Nancy', 'Betty', 'Margaret', 'Ruth', 'Lisa', 'Karen', 'Carol', 'Amanda',
+    'Kevin', 'Brian', 'Timothy', 'Ronald', 'Anthony', 'Edward', 'Jason', 'Jeffrey',
+    'Sharon', 'Cynthia', 'Emily', 'Angela', 'Melissa', 'Brenda', 'Amy', 'Anna',
 ]
 _LAST_NAMES = [
     'Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis',
     'Wilson', 'Anderson', 'Taylor', 'Thomas', 'Jackson', 'White', 'Harris', 'Martin',
     'Thompson', 'Young', 'Robinson', 'Lewis', 'Walker', 'Hall', 'Allen', 'Wright',
+    'Scott', 'Green', 'Adams', 'Baker', 'Nelson', 'Carter', 'Mitchell', 'Perez',
+    'Roberts', 'Turner', 'Phillips', 'Campbell', 'Parker', 'Evans', 'Edwards', 'Collins',
+    'Stewart', 'Sanchez', 'Morris', 'Rogers', 'Reed', 'Cook', 'Morgan', 'Bell',
+    'Murphy', 'Bailey', 'Rivera', 'Cooper', 'Richardson', 'Cox', 'Howard', 'Ward',
 ]
 _ETHNICITIES       = ['Caucasian/White', 'Hispanic/Latino', 'Black/African-American', 'Asian', 'Native American']
 _ETHNICITY_WEIGHTS = [72, 10, 10, 6, 2]
@@ -140,10 +149,17 @@ def _pick_regimen(regimen_list, early_stage=False):
 
 
 class FLBundleGenerator:
-    """Generates a FHIR R4 Bundle for Follicular Lymphoma patients."""
+    """Generates a FHIR R4 Bundle for Follicular Lymphoma patients.
+
+    Each instantiation produces a unique run_id that is appended to every
+    patient's family name (e.g. "Smith-a3f7").  This guarantees that two
+    separate generate runs can never produce matching patients and therefore
+    can never overwrite each other's org assignment on re-import.
+    """
 
     def __init__(self, watch_wait_ratio=0.20):
         self.watch_wait_ratio = watch_wait_ratio
+        self.run_id = uuid.uuid4().hex[:4]   # e.g. "a3f7" — unique per generate run
         self._first_line_regimens, self._later_line_regimens = self._build_regimen_lists()
 
     def _build_regimen_lists(self):
@@ -240,7 +256,7 @@ class FLBundleGenerator:
         p['age']        = int(random.triangular(42, 82, 62))
         p['ethnicity']  = _wc(_ETHNICITIES, _ETHNICITY_WEIGHTS)
         p['first_name'] = random.choice(_FIRST_NAMES)
-        p['last_name']  = random.choice(_LAST_NAMES)
+        p['last_name']  = random.choice(_LAST_NAMES) + '-' + self.run_id
         p['city'], p['state'] = random.choice(_US_LOCATIONS)
 
         if p['gender'] == 'male':
@@ -344,7 +360,7 @@ class FLBundleGenerator:
     def _patient_resource(self, p):
         birth_year = date.today().year - p['age']
         birth_date = f"{birth_year}-{random.randint(1,12):02d}-{random.randint(1,28):02d}"
-        base = 'http://ctomop.io/fhir/StructureDefinition/'
+        base = 'https://healthkey.ai/fhir/StructureDefinition/'
         return {
             'resourceType': 'Patient',
             'id': p['id'],
@@ -516,10 +532,10 @@ class FLBundleGenerator:
                     ))
             else:
                 regimen_id = f"med-{p['id']}-line{line_num}-regimen"
-                codings = [{'system': 'http://ctomop.io/fhir/fl-regimen', 'code': name}]
+                codings = [{'system': 'https://healthkey.ai/fhir/fl-regimen', 'code': name}]
                 if concept_id:
                     codings.append({
-                        'system': 'http://terminology.hl7.org/CodeSystem/hemonc',
+                        'system': 'http://ohdsi.org/omop/HemOnc',
                         'code': str(concept_id),
                         'display': name,
                     })
@@ -531,8 +547,8 @@ class FLBundleGenerator:
                     'subject': {'reference': f"Patient/{p['id']}"},
                     'effectivePeriod': {'start': start_str, 'end': end_str},
                     'extension': [
-                        {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line', 'valueInteger': line_num},
-                        {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-outcome', 'valueString': outcome},
+                        {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line', 'valueInteger': line_num},
+                        {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-outcome', 'valueString': outcome},
                     ],
                     'note': [{'text': f"Line {line_num}: {name} — {outcome}"}],
                 })
@@ -560,7 +576,7 @@ class FLBundleGenerator:
             },
             'subject': {'reference': f"Patient/{p['id']}"},
             'effectivePeriod': {'start': start_str, 'end': end_str},
-            'extension': [{'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line', 'valueInteger': line_num}],
+            'extension': [{'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line', 'valueInteger': line_num}],
         }
         if partof:
             resource['partOf'] = [{'reference': f"MedicationStatement/{partof}"}]
@@ -583,8 +599,8 @@ class FLBundleGenerator:
             'subject': {'reference': f"Patient/{p['id']}"},
             'performedPeriod': {'start': start_str, 'end': end_str},
             'extension': [
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line', 'valueInteger': line_num},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-outcome', 'valueString': outcome},
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line', 'valueInteger': line_num},
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-outcome', 'valueString': outcome},
             ],
             'note': [{'text': f"Line {line_num}: {regimen_name} — {outcome}"}],
         }
@@ -603,8 +619,8 @@ class FLBundleGenerator:
             'subject': {'reference': f"Patient/{p['id']}"},
             'effectivePeriod': {'start': maint_start.strftime('%Y-%m-%d'), 'end': maint_end.strftime('%Y-%m-%d')},
             'extension': [
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line', 'valueInteger': 1},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/fl-maintenance', 'valueBoolean': True},
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line', 'valueInteger': 1},
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/fl-maintenance', 'valueBoolean': True},
             ],
             'note': [{'text': 'Rituximab maintenance post first-line induction'}],
         }

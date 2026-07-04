@@ -128,7 +128,7 @@ class FhirSyncTests(TestCase):
         Person is resolved from that identity, any supplied person_id is ignored,
         and provenance is PATIENT_SELF (not EHR_SYNC)."""
         patient = Identity.objects.create(
-            issuer='https://securetoken.google.com/healthtree-test', sub='patient-abc',
+            issuer='https://securetoken.google.com/promop-test', sub='patient-abc',
             email='patient@test.com')
         patient.set_unusable_password()
         patient.save()
@@ -164,7 +164,7 @@ class FhirSyncTests(TestCase):
         """B4: a patient deletes their own measurement by source_value + datetime
         + value; other rows and provenance are untouched."""
         patient = Identity.objects.create(
-            issuer='https://securetoken.google.com/healthtree-test', sub='del-patient',
+            issuer='https://securetoken.google.com/promop-test', sub='del-patient',
             email='del@test.com')
         patient.set_unusable_password()
         patient.save()
@@ -203,7 +203,7 @@ class FhirSyncTests(TestCase):
     def test_patient_consent_records_reads_and_updates(self):
         """B6: per-category data-sharing consent persists in PatientConsent."""
         patient = Identity.objects.create(
-            issuer='https://securetoken.google.com/healthtree-test', sub='consent-patient',
+            issuer='https://securetoken.google.com/promop-test', sub='consent-patient',
             email='consent@test.com')
         patient.set_unusable_password()
         patient.save()

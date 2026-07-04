@@ -1,4 +1,4 @@
-# CTOMOP - Django OMOP Models
+# PRomop — Django OMOP Models
 
 A Django project implementing the OMOP Common Data Model (CDM) v6.0 with Oncology and Genomic extensions for cancer clinical trial matching.
 

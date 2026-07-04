@@ -13,7 +13,7 @@ import io
 import json
 import os
 import tempfile
-from datetime import date
+from datetime import date, timedelta
 
 from patient_portal.models import Identity
 from django.test import TestCase
@@ -120,12 +120,12 @@ def _make_fhir_bundle():
         'birthDate': '1975-03-15',
         'address': [{'city': 'Salt Lake City', 'state': 'UT', 'country': 'US', 'postalCode': '84101'}],
         'extension': [
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/ethnicity', 'valueString': 'White'},
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/bodyWeight',
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/ethnicity', 'valueString': 'White'},
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/bodyWeight',
              'valueQuantity': {'value': 65.0, 'unit': 'kg'}},
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/bodyHeight',
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/bodyHeight',
              'valueQuantity': {'value': 165.0, 'unit': 'cm'}},
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/ecog-performance-status',
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/ecog-performance-status',
              'valueInteger': 1},
         ],
     }
@@ -168,9 +168,9 @@ def _make_fhir_bundle():
             'medicationCodeableConcept': {'text': regimen_name},
             'effectivePeriod': {'start': start},
             'extension': [
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line',
                  'valueInteger': lot_num},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-outcome',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-outcome',
                  'valueString': outcome},
             ],
         }
@@ -3552,7 +3552,7 @@ class RxNavServiceTest(TestCase):
 
 
 class LotInferenceTest(_SmartBase):
-    """Tests for omop_core.services.lot_inference_service (ARTEMIS-lite + HealthTree)."""
+    """Tests for omop_core.services.lot_inference_service (ARTEMIS-lite phase-aware rules)."""
 
     def _make_exposure(self, person, drug_name, start, end=None, pk=None):
         from omop_core.models import DrugExposure, Concept, Domain, Vocabulary, ConceptClass
@@ -3811,7 +3811,7 @@ class LotInferenceTest(_SmartBase):
         call_command('infer_lot', person_id=person.person_id, verbosity=0)
         self.assertEqual(Episode.objects.filter(person=person).count(), 1)
 
-    # ── HealthTree phase/procedure tests ──────────────────────────────────
+    # ── Phase / procedure tests ────────────────────────────────────────────
 
     def test_induction_label_first_lot(self):
         from datetime import date
@@ -4223,7 +4223,7 @@ class FhirRxNavIntegrationTest(_SmartBase):
                     'medicationCodeableConcept': {'text': drug_name},
                     'effectivePeriod': {'start': '2023-01-15', 'end': '2023-07-01'},
                     'extension': [
-                        {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line',
+                        {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line',
                          'valueInteger': 1},
                     ],
                 }},
@@ -4999,15 +4999,15 @@ class SctFhirUploadTest(FhirUploadBase):
                         'birthDate': '1960-07-20',
                         'extension': [
                             {
-                                'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-date',
+                                'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-date',
                                 'valueString': '2021-03-15',
                             },
                             {
-                                'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
+                                'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-history',
                                 'valueString': 'autologous SCT,tandem SCT',
                             },
                             {
-                                'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-eligibility',
+                                'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-eligibility',
                                 'valueString': 'eligible for autologous SCT',
                             },
                         ],
@@ -5062,9 +5062,9 @@ class SctFhirUploadTest(FhirUploadBase):
     def test_invalid_sct_date_string_is_ignored(self):
         """A malformed mm-sct-date value must be silently dropped; upload must still succeed."""
         resp = self._upload_bundle_with_extensions([
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-date',
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-date',
              'valueString': 'not-a-date'},
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-history',
              'valueString': 'autologous SCT'},
         ], patient_suffix='003')
         self.assertIn(resp.status_code, [200, 201],
@@ -5076,7 +5076,7 @@ class SctFhirUploadTest(FhirUploadBase):
     def test_comma_only_sct_history_stores_empty_list(self):
         """A valueString of only commas/whitespace must produce an empty list, not error."""
         resp = self._upload_bundle_with_extensions([
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-history',
              'valueString': ',  ,'},
         ], patient_suffix='004')
         self.assertIn(resp.status_code, [200, 201],
@@ -5089,7 +5089,7 @@ class SctFhirUploadTest(FhirUploadBase):
     def test_unknown_vocab_tokens_filtered_from_sct_history(self):
         """Tokens not in the StemCellTransplant vocabulary are silently discarded."""
         resp = self._upload_bundle_with_extensions([
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-history',
              'valueString': 'autologous SCT,unknown experimental SCT,allogeneic SCT'},
         ], patient_suffix='005')
         self.assertIn(resp.status_code, [200, 201],
@@ -6141,10 +6141,37 @@ class OrgDiseaseStatsTest(TestCase):
         slugs = {o['org_slug'] for o in resp.data}
         self.assertIn('org-a', slugs)
 
+    def test_direct_org_doctor_sees_aggregated_org_data(self):
+        doctor = Identity.objects.create_user(email='directdoc@t.com', password='x')
+        GroupAccess.objects.create(identity=doctor, org=self.org_b, role='doctor')
+        resp = self._get(doctor)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        slugs = {o['org_slug'] for o in resp.data}
+        self.assertIn('org-b', slugs)
+        self.assertNotIn('org-a', slugs)
+
+    def test_direct_org_navigator_sees_aggregated_org_data(self):
+        navigator = Identity.objects.create_user(email='navigator@t.com', password='x')
+        GroupAccess.objects.create(identity=navigator, org=self.org_b, role='navigator')
+        resp = self._get(navigator)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        slugs = {o['org_slug'] for o in resp.data}
+        self.assertIn('org-b', slugs)
+        self.assertNotIn('org-a', slugs)
+
     def test_no_grants_returns_empty_list(self):
         resp = self._get(self.nobody)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data, [])
+
+    def test_no_grants_sees_public_aggregated_org(self):
+        self.org_b.allows_public_aggregated_data = True
+        self.org_b.save(update_fields=['allows_public_aggregated_data'])
+        resp = self._get(self.nobody)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        slugs = {o['org_slug'] for o in resp.data}
+        self.assertIn('org-b', slugs)
+        self.assertNotIn('org-a', slugs)
 
     def test_unauthenticated_returns_401(self):
         self.client.logout()
@@ -6157,12 +6184,50 @@ class OrgDiseaseStatsTest(TestCase):
         self.assertIn('org_slug', org)
         self.assertIn('org_name', org)
         self.assertIn('total', org)
+        self.assertIn('owned_count', org)
+        self.assertIn('accessible_count', org)
         self.assertIn('disease_counts', org)
         if org['disease_counts']:
             dc = org['disease_counts'][0]
             self.assertIn('disease_slug', dc)
             self.assertIn('label', dc)
             self.assertIn('count', dc)
+
+    def test_owned_and_accessible_counts_no_trusts(self):
+        resp = self._get(self.org_admin)
+        org_a = next(o for o in resp.data if o['org_slug'] == 'org-a')
+        self.assertEqual(org_a['owned_count'], 3)
+        self.assertEqual(org_a['accessible_count'], 3)
+
+    def test_org_trust_inflates_accessible_count(self):
+        from omop_core.models import OrgTrust
+        # org_b grants access to org_a's users (trusted_org=org_a)
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_org=self.org_a)
+        resp = self._get(self.org_admin)
+        org_a = next(o for o in resp.data if o['org_slug'] == 'org-a')
+        self.assertEqual(org_a['owned_count'], 3)
+        self.assertEqual(org_a['accessible_count'], 4)  # 3 owned + 1 from org_b
+
+    def test_domain_trust_inflates_accessible_count(self):
+        from omop_core.models import OrgTrust
+        # org_b grants access to users with @t.com — org_admin has email admin@t.com
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_domain='t.com')
+        resp = self._get(self.org_admin)
+        org_a = next(o for o in resp.data if o['org_slug'] == 'org-a')
+        self.assertEqual(org_a['owned_count'], 3)
+        self.assertEqual(org_a['accessible_count'], 4)  # 3 owned + 1 from org_b via domain trust
+
+    def test_self_trust_does_not_double_count(self):
+        from omop_core.models import OrgTrust
+        from django.db import IntegrityError
+        # DB constraint should prevent self-trust; confirm it raises
+        with self.assertRaises(IntegrityError):
+            OrgTrust.objects.create(granting_org=self.org_a, trusted_org=self.org_a)
+
+    def test_total_field_equals_owned_count(self):
+        resp = self._get(self.org_admin)
+        org_a = next(o for o in resp.data if o['org_slug'] == 'org-a')
+        self.assertEqual(org_a['total'], org_a['owned_count'])
 
 
 class OrgAdminPatientListScopingTest(TestCase):
@@ -6198,6 +6263,26 @@ class OrgAdminPatientListScopingTest(TestCase):
             org=self.org_a,
             role='org_admin',
         )
+        PatientInfo.objects.filter(pk=self.pi_a1.pk).update(
+            disease='Breast Cancer',
+            stage='Breast Cancer Stage IIA',
+            updated_at=timezone.now(),
+        )
+        PatientInfo.objects.filter(pk=self.pi_a2.pk).update(
+            disease='Multiple Myeloma',
+            stage='III',
+            updated_at=timezone.now() - timedelta(days=45),
+        )
+        PatientInfo.objects.filter(pk=self.pi_b.pk).update(
+            disease='Breast Cancer',
+            stage='Stage II',
+            updated_at=timezone.now(),
+        )
+        PatientInfo.objects.filter(pk=self.pi_none.pk).update(
+            disease='Breast Cancer',
+            stage='Stage IV',
+            updated_at=timezone.now(),
+        )
 
     def _get(self, user):
         self.client.force_authenticate(user=user)
@@ -6217,6 +6302,13 @@ class OrgAdminPatientListScopingTest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.data), 0)
 
+    def test_direct_org_doctor_does_not_get_individual_patient_access(self):
+        doctor = Identity.objects.create_user(email='directdoc-patient-list@t.com', password='x')
+        GroupAccess.objects.create(identity=doctor, org=self.org_a, role='doctor')
+        resp = self._get(doctor)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data), 0)
+
     def test_staff_sees_all_patients(self):
         resp = self._get(self.staff)
         self.assertEqual(resp.status_code, 200)
@@ -6224,3 +6316,1600 @@ class OrgAdminPatientListScopingTest(TestCase):
         self.assertIn(self.pi_a1.id, ids)
         self.assertIn(self.pi_b.id, ids)
         self.assertIn(self.pi_none.id, ids)
+
+    def test_unpaginated_patient_list_still_returns_plain_list(self):
+        resp = self._get(self.org_admin)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsInstance(resp.data, list)
+
+    def test_paginated_patient_list_returns_filtered_count(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get(
+            '/api/patient-info/',
+            {'page': 1, 'page_size': 10, 'disease': 'Breast Cancer', 'stage': 'II'},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual([p['id'] for p in resp.data['results']], [self.pi_a1.id])
+        self.assertIn('filter_options', resp.data)
+
+    def test_paginated_patient_list_stage_filter_does_not_match_other_roman_stages(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get(
+            '/api/patient-info/',
+            {'page': 1, 'page_size': 10, 'disease': 'Breast Cancer', 'stage': 'I'},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['count'], 0)
+
+    def test_paginated_patient_list_filters_by_date(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get(
+            '/api/patient-info/',
+            {'page': 1, 'page_size': 10, 'date': '30d'},
+        )
+        self.assertEqual(resp.status_code, 200)
+        ids = {p['id'] for p in resp.data['results']}
+        self.assertIn(self.pi_a1.id, ids)
+        self.assertNotIn(self.pi_a2.id, ids)
+
+    def test_filter_options_absent_on_page_2(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get('/api/patient-info/', {'page': 2, 'page_size': 1})
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn('filter_options', resp.data)
+
+    def test_filter_options_present_on_page_1(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get('/api/patient-info/', {'page': 1, 'page_size': 1})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('filter_options', resp.data)
+
+
+# ---------------------------------------------------------------------------
+# bulk_delete_filtered Tests
+# ---------------------------------------------------------------------------
+
+class BulkDeleteFilteredTest(TestCase):
+    """Tests for DELETE /api/patient-info/bulk_delete_filtered/
+
+    PatientInfo has a unique constraint on person_id (one row per person).
+    Org scoping is enforced at the PatientInfo.organization level.
+    """
+
+    def setUp(self):
+        from oauth2_provider.models import Application, AccessToken
+        from omop_core.models import Organization, ApplicationOrganization
+        from django.utils import timezone as tz
+        import datetime
+
+        self.client = APIClient()
+
+        self.org_a = Organization.objects.create(name='BDF Org A', slug='bdf-org-a')
+        self.org_b = Organization.objects.create(name='BDF Org B', slug='bdf-org-b')
+
+        # Persons (IDs chosen to avoid conflicts with other test classes)
+        self.p1 = Person.objects.create(person_id=9001, gender_source_value='female',
+                                        race_source_value='unknown', ethnicity_source_value='unknown')
+        self.p2 = Person.objects.create(person_id=9002, gender_source_value='male',
+                                        race_source_value='unknown', ethnicity_source_value='unknown')
+        self.p3 = Person.objects.create(person_id=9003, gender_source_value='female',
+                                        race_source_value='unknown', ethnicity_source_value='unknown')
+
+        # p1, p2 in org_a; p3 in org_b
+        self.pi_a1 = PatientInfo.objects.create(person=self.p1, organization=self.org_a, disease='Breast Cancer')
+        self.pi_a2 = PatientInfo.objects.create(person=self.p2, organization=self.org_a, disease='Multiple Myeloma')
+        self.pi_b  = PatientInfo.objects.create(person=self.p3, organization=self.org_b, disease='Breast Cancer')
+
+        # Staff user — DELETE allowed via ScopedTokenPermission (is_staff=True)
+        self.staff = Identity.objects.create_user(email='bdf_staff@t.com', password='x', is_staff=True)
+
+        # OAuth2 write token for org_a
+        self.user_a = Identity.objects.create_user(email='bdf_svc_a@t.com', password='x')
+        self.app_a = Application.objects.create(
+            name='BDF Org A App',
+            client_id='bdf-org-a-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=self.user_a,
+        )
+        ApplicationOrganization.objects.create(application=self.app_a, organization=self.org_a)
+        self.write_token_a = AccessToken.objects.create(
+            user=self.user_a,
+            application=self.app_a,
+            token='bdf-org-a-write-token',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='patient/*.write',
+        )
+
+    def test_unauthenticated_request_rejected(self):
+        """DELETE without credentials must be rejected."""
+        resp = APIClient().delete('/api/patient-info/bulk_delete_filtered/')
+        self.assertIn(resp.status_code, [401, 403])
+
+    def test_org_a_token_cannot_delete_org_b_patients(self):
+        """Org A write token must not delete Org B's PatientInfo via bulk_delete_filtered."""
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f'Bearer {self.write_token_a.token}')
+        resp = c.delete('/api/patient-info/bulk_delete_filtered/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data['success'])
+        # pi_b belongs to org_b — must still exist
+        self.assertTrue(PatientInfo.objects.filter(pk=self.pi_b.pk).exists())
+        # p3 (org_b patient) must still exist
+        from omop_core.models import Person as P
+        self.assertTrue(P.objects.filter(person_id=self.p3.person_id).exists())
+
+    def test_disease_filter_scopes_deletion(self):
+        """Only PatientInfo matching the disease filter should be deleted."""
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.delete(
+            '/api/patient-info/bulk_delete_filtered/?disease=Multiple+Myeloma'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data['success'])
+        # pi_a2 (Multiple Myeloma) should be gone
+        self.assertFalse(PatientInfo.objects.filter(pk=self.pi_a2.pk).exists())
+        # pi_a1 and pi_b (Breast Cancer) should survive
+        self.assertTrue(PatientInfo.objects.filter(pk=self.pi_a1.pk).exists())
+        self.assertTrue(PatientInfo.objects.filter(pk=self.pi_b.pk).exists())
+
+    def test_deleted_count_matches_matched_rows(self):
+        """deleted_count must equal the number of PatientInfo rows that matched the filters."""
+        self.client.force_authenticate(user=self.staff)
+        # Breast Cancer across both orgs: pi_a1 + pi_b = 2
+        resp = self.client.delete(
+            '/api/patient-info/bulk_delete_filtered/?disease=Breast+Cancer'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['deleted_count'], 2)
+
+    def test_empty_filter_match_returns_zero(self):
+        """A filter that matches no records should return deleted_count=0 with no error."""
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.delete(
+            '/api/patient-info/bulk_delete_filtered/?disease=Nonexistent+Disease'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['deleted_count'], 0)
+        self.assertEqual(resp.data['errors'], [])
+
+    def test_org_a_token_deletes_all_org_a_patients_when_no_filter(self):
+        """Org A token with no additional filters deletes all PatientInfo in org A only."""
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f'Bearer {self.write_token_a.token}')
+        resp = c.delete('/api/patient-info/bulk_delete_filtered/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['deleted_count'], 2)
+        # pi_a1 and pi_a2 should be gone; pi_b should survive
+        self.assertFalse(PatientInfo.objects.filter(pk=self.pi_a1.pk).exists())
+        self.assertFalse(PatientInfo.objects.filter(pk=self.pi_a2.pk).exists())
+        self.assertTrue(PatientInfo.objects.filter(pk=self.pi_b.pk).exists())
+
+
+# ---------------------------------------------------------------------------
+# Org Management Tests
+# ---------------------------------------------------------------------------
+
+import secrets as _secrets
+from omop_core.models import Organization, OrgTrust, OrgInvitation, GroupAccess
+from omop_core.services.access import get_visible_orgs
+from rest_framework.test import APIClient
+
+
+def _make_user(email, is_staff=False):
+    from patient_portal.models import Identity
+    u = Identity.objects.create_user(email=email, password='testpass')
+    u.is_staff = is_staff
+    u.save()
+    return u
+
+
+def _make_org(name, slug):
+    return Organization.objects.create(name=name, slug=slug)
+
+
+class OrgManagementModelTest(TestCase):
+    """OrgTrust XOR constraint, OrgInvitation uniqueness."""
+
+    def setUp(self):
+        self.org = _make_org('Test Org', 'test-org')
+        self.org2 = _make_org('Partner Org', 'partner-org')
+
+    def test_domain_trust_created(self):
+        t = OrgTrust.objects.create(granting_org=self.org, trusted_domain='example.com')
+        self.assertEqual(t.trusted_domain, 'example.com')
+        self.assertIsNone(t.trusted_org)
+
+    def test_org_trust_created(self):
+        t = OrgTrust.objects.create(granting_org=self.org, trusted_org=self.org2)
+        self.assertEqual(t.trusted_org, self.org2)
+        self.assertEqual(t.trusted_domain, '')
+
+    def test_xor_constraint_both_raises(self):
+        from django.db import IntegrityError
+        with self.assertRaises(IntegrityError):
+            OrgTrust.objects.create(
+                granting_org=self.org,
+                trusted_org=self.org2,
+                trusted_domain='bad.com',
+            )
+
+    def test_xor_constraint_neither_raises(self):
+        from django.db import IntegrityError
+        with self.assertRaises(IntegrityError):
+            OrgTrust.objects.create(granting_org=self.org)
+
+    def test_invitation_uniqueness_pending(self):
+        """Two pending invitations for same org+email should fail."""
+        from django.utils import timezone
+        from django.db import IntegrityError
+        expires = timezone.now() + timezone.timedelta(days=7)
+        OrgInvitation.objects.create(
+            org=self.org, email='test@example.com', role='doctor',
+            token=_secrets.token_hex(32), expires_at=expires,
+        )
+        with self.assertRaises(IntegrityError):
+            OrgInvitation.objects.create(
+                org=self.org, email='test@example.com', role='doctor',
+                token=_secrets.token_hex(32), expires_at=expires,
+            )
+
+    def test_invitation_status_pending(self):
+        from django.utils import timezone
+        expires = timezone.now() + timezone.timedelta(days=7)
+        inv = OrgInvitation.objects.create(
+            org=self.org, email='user@example.com', role='doctor',
+            token=_secrets.token_hex(32), expires_at=expires,
+        )
+        self.assertEqual(inv.status, OrgInvitation.STATUS_PENDING)
+
+    def test_invitation_status_expired(self):
+        from django.utils import timezone
+        expires = timezone.now() - timezone.timedelta(days=1)
+        inv = OrgInvitation.objects.create(
+            org=self.org, email='user2@example.com', role='doctor',
+            token=_secrets.token_hex(32), expires_at=expires,
+        )
+        self.assertEqual(inv.status, OrgInvitation.STATUS_EXPIRED)
+
+    def test_organization_is_active_default_true(self):
+        self.assertTrue(self.org.is_active)
+
+    def test_organization_can_be_inactive(self):
+        self.org.is_active = False
+        self.org.save()
+        self.org.refresh_from_db()
+        self.assertFalse(self.org.is_active)
+
+
+class OrgTrustAccessTest(TestCase):
+    """get_visible_orgs includes trust-based orgs."""
+
+    def setUp(self):
+        self.org_a = _make_org('Org A', 'org-a')
+        self.org_b = _make_org('Org B', 'org-b')
+
+        self.direct_user = _make_user('direct@test.com')
+        GroupAccess.objects.create(identity=self.direct_user, org=self.org_a, role='org_admin')
+
+        self.domain_user = _make_user('user@trusted.com')
+
+        self.no_access_user = _make_user('noone@other.com')
+
+    def test_direct_groupaccess_visible(self):
+        orgs = get_visible_orgs(self.direct_user)
+        self.assertIn(self.org_a, orgs)
+        self.assertNotIn(self.org_b, orgs)
+
+    def test_domain_trust_gives_access(self):
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_domain='trusted.com')
+        orgs = get_visible_orgs(self.domain_user)
+        self.assertIn(self.org_b, orgs)
+
+    def test_org_to_org_trust_gives_access(self):
+        """User with access to org_a gets access to org_b via org-to-org trust."""
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_org=self.org_a)
+        orgs = get_visible_orgs(self.direct_user)
+        self.assertIn(self.org_a, orgs)
+        self.assertIn(self.org_b, orgs)
+
+    def test_no_access_user_sees_nothing(self):
+        orgs = get_visible_orgs(self.no_access_user)
+        self.assertEqual(list(orgs), [])
+
+    def test_no_open_org_fallback(self):
+        """Users with no grants/trusts must not see any org."""
+        new_user = _make_user('stranger@nowhere.com')
+        # Even if org exists, no access without grant or trust
+        orgs = get_visible_orgs(new_user)
+        self.assertEqual(list(orgs), [])
+
+    def test_staff_sees_all_orgs(self):
+        staff = _make_user('staff@test.com', is_staff=True)
+        orgs = get_visible_orgs(staff)
+        self.assertIn(self.org_a, orgs)
+        self.assertIn(self.org_b, orgs)
+
+
+class OrgViewSetStaffTest(TestCase):
+    """Staff can CRUD all orgs."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user('staff@example.com', is_staff=True)
+        self.client.force_authenticate(user=self.staff)
+        self.org = _make_org('Staff Org', 'staff-org')
+
+    def test_list_orgs(self):
+        resp = self.client.get('/api/orgs/')
+        self.assertEqual(resp.status_code, 200)
+        slugs = [o['slug'] for o in resp.data]
+        self.assertIn('staff-org', slugs)
+
+    def test_create_org(self):
+        resp = self.client.post('/api/orgs/', {'name': 'New Org', 'slug': 'new-org'})
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(Organization.objects.filter(slug='new-org').exists())
+
+    def test_get_org(self):
+        resp = self.client.get('/api/orgs/staff-org/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['slug'], 'staff-org')
+
+    def test_patch_org(self):
+        resp = self.client.patch('/api/orgs/staff-org/', {'name': 'Updated Name'})
+        self.assertEqual(resp.status_code, 200)
+        self.org.refresh_from_db()
+        self.assertEqual(self.org.name, 'Updated Name')
+
+    def test_delete_org(self):
+        resp = self.client.delete('/api/orgs/staff-org/')
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Organization.objects.filter(slug='staff-org').exists())
+
+
+class OrgViewSetOrgAdminTest(TestCase):
+    """Org admin can only edit their own org."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = _make_user('admin@example.com')
+        self.org = _make_org('Admin Org', 'admin-org')
+        self.other_org = _make_org('Other Org', 'other-org')
+        GroupAccess.objects.create(identity=self.admin, org=self.org, role='org_admin')
+        self.client.force_authenticate(user=self.admin)
+
+    def test_list_sees_only_own_org(self):
+        resp = self.client.get('/api/orgs/')
+        self.assertEqual(resp.status_code, 200)
+        slugs = [o['slug'] for o in resp.data]
+        self.assertIn('admin-org', slugs)
+        self.assertNotIn('other-org', slugs)
+
+    def test_cannot_create_org(self):
+        resp = self.client.post('/api/orgs/', {'name': 'New', 'slug': 'new-slug'})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_can_patch_own_org(self):
+        resp = self.client.patch('/api/orgs/admin-org/', {'name': 'Renamed Org'})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_cannot_delete_org(self):
+        resp = self.client.delete('/api/orgs/admin-org/')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_cannot_access_other_org(self):
+        resp = self.client.get('/api/orgs/other-org/')
+        self.assertEqual(resp.status_code, 403)
+
+
+class OrgViewSetUnauthorizedTest(TestCase):
+    """Non-admin gets 403."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = _make_user('plain@example.com')
+        self.org = _make_org('Secret Org', 'secret-org')
+        self.client.force_authenticate(user=self.user)
+
+    def test_list_returns_403(self):
+        resp = self.client.get('/api/orgs/')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_detail_returns_403(self):
+        resp = self.client.get('/api/orgs/secret-org/')
+        self.assertEqual(resp.status_code, 403)
+
+
+class OrgInvitationFlowTest(TestCase):
+    """Invite → confirm → GroupAccess created."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user('staff@example.com', is_staff=True)
+        self.org = _make_org('Invite Org', 'invite-org')
+        self.client.force_authenticate(user=self.staff)
+
+    def test_invite_creates_invitation(self):
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'newuser@example.com',
+            'role': 'doctor',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        invitee = Identity.objects.get(email='newuser@example.com', issuer='urn:local')
+        self.assertTrue(
+            OrgInvitation.objects.filter(org=self.org, email='newuser@example.com').exists()
+        )
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='doctor').exists()
+        )
+
+    def test_invite_unknown_user_creates_placeholder_identity(self):
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'placeholder@example.com',
+            'role': 'navigator',
+        })
+        self.assertEqual(resp.status_code, 201)
+        invitee = Identity.objects.get(email='placeholder@example.com', issuer='urn:local')
+        self.assertFalse(invitee.has_usable_password())
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='navigator').exists()
+        )
+
+    def test_partner_auth_identity_claims_placeholder_access(self):
+        placeholder = Identity.objects.create_user(email='partner@example.com', password=None)
+        GroupAccess.objects.create(identity=placeholder, org=self.org, role='doctor')
+
+        from patient_portal.api.authentication import PartnerAuthentication
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(
+            issuer='https://issuer.example.com',
+            sub='partner-sub',
+            email='partner@example.com',
+            name='Partner User',
+            raw={},
+        )
+
+        identity = PartnerAuthentication._get_or_create_identity(claims)
+        self.assertNotEqual(identity.pk, placeholder.pk)
+        self.assertEqual(identity.email, 'partner@example.com')
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=identity, org=self.org, role='doctor').exists()
+        )
+        self.assertFalse(GroupAccess.objects.filter(identity=placeholder).exists())
+
+    def test_existing_partner_auth_identity_claims_later_placeholder_access(self):
+        partner = Identity.objects.create(
+            issuer='https://issuer.example.com',
+            sub='existing-partner-sub',
+            email='existing-partner@example.com',
+        )
+        partner.set_unusable_password()
+        partner.save()
+        placeholder = Identity.objects.create_user(email='existing-partner@example.com', password=None)
+        GroupAccess.objects.create(identity=placeholder, org=self.org, role='doctor')
+
+        from patient_portal.api.authentication import PartnerAuthentication
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(
+            issuer='https://issuer.example.com',
+            sub='existing-partner-sub',
+            email='existing-partner@example.com',
+            name='Existing Partner',
+            raw={},
+        )
+
+        identity = PartnerAuthentication._get_or_create_identity(claims)
+        self.assertEqual(identity.pk, partner.pk)
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=partner, org=self.org, role='doctor').exists()
+        )
+        self.assertFalse(GroupAccess.objects.filter(identity=placeholder).exists())
+
+    def test_reinvite_after_placeholder_claim_updates_partner_identity(self):
+        placeholder = Identity.objects.create_user(email='claimed@example.com', password=None)
+        GroupAccess.objects.create(identity=placeholder, org=self.org, role='navigator')
+
+        from patient_portal.api.authentication import PartnerAuthentication
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(
+            issuer='https://issuer.example.com',
+            sub='claimed-sub',
+            email='claimed@example.com',
+            name='Claimed User',
+            raw={},
+        )
+        partner = PartnerAuthentication._get_or_create_identity(claims)
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=partner, org=self.org, role='navigator').exists()
+        )
+
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'claimed@example.com',
+            'role': 'doctor',
+        })
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        partner_grant = GroupAccess.objects.get(identity=partner, org=self.org)
+        self.assertEqual(partner_grant.role, 'doctor')
+        self.assertFalse(GroupAccess.objects.filter(identity=placeholder).exists())
+
+    def test_invite_existing_user_grants_access_immediately(self):
+        invitee = Identity.objects.create_user(email='existing-user@example.com', password='pass')
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'existing-user@example.com',
+            'role': 'navigator',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='navigator').exists()
+        )
+
+    def test_invite_existing_user_updates_existing_org_role(self):
+        invitee = Identity.objects.create_user(email='role-update@example.com', password='pass')
+        GroupAccess.objects.create(identity=invitee, org=self.org, role='navigator')
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'role-update@example.com',
+            'role': 'doctor',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        grant = GroupAccess.objects.get(identity=invitee, org=self.org)
+        self.assertEqual(grant.role, 'doctor')
+
+    def test_invite_existing_user_does_not_downgrade_org_admin(self):
+        invitee = Identity.objects.create_user(email='admin-role@example.com', password='pass')
+        GroupAccess.objects.create(identity=invitee, org=self.org, role='org_admin')
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'admin-role@example.com',
+            'role': 'doctor',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        grant = GroupAccess.objects.get(identity=invitee, org=self.org)
+        self.assertEqual(grant.role, 'org_admin')
+
+    def test_list_invitations(self):
+        from django.utils import timezone
+        OrgInvitation.objects.create(
+            org=self.org, email='listed@example.com', role='doctor',
+            token=_secrets.token_hex(32),
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        resp = self.client.get('/api/orgs/invite-org/invitations/')
+        self.assertEqual(resp.status_code, 200)
+        emails = [i['email'] for i in resp.data]
+        self.assertIn('listed@example.com', emails)
+
+    def test_confirm_invitation_creates_access(self):
+        from django.utils import timezone
+        from patient_portal.models import Identity
+        # Create the identity for the invited email
+        invitee = Identity.objects.create_user(email='invitee@example.com', password='pass')
+        token = _secrets.token_hex(32)
+        OrgInvitation.objects.create(
+            org=self.org, email='invitee@example.com', role='doctor',
+            token=token,
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        # Confirm (public endpoint — no auth)
+        public_client = APIClient()
+        resp = public_client.post('/api/orgs/confirm-invitation/', {'token': token})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='doctor').exists()
+        )
+        inv = OrgInvitation.objects.get(token=token)
+        self.assertEqual(inv.status, OrgInvitation.STATUS_CONFIRMED)
+
+    def test_cancel_invitation(self):
+        from django.utils import timezone
+        token = _secrets.token_hex(32)
+        inv = OrgInvitation.objects.create(
+            org=self.org, email='cancel@example.com', role='doctor',
+            token=token,
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        resp = self.client.delete(f'/api/orgs/invite-org/invitations/{inv.id}/')
+        self.assertEqual(resp.status_code, 204)
+        inv.refresh_from_db()
+        self.assertEqual(inv.status, OrgInvitation.STATUS_CANCELLED)
+
+    def test_confirm_nonexistent_token_returns_404(self):
+        public_client = APIClient()
+        resp = public_client.post('/api/orgs/confirm-invitation/', {'token': 'deadbeef' * 8})
+        self.assertEqual(resp.status_code, 404)
+
+    def test_invite_sends_email(self):
+        from django.core import mail
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'emailtest@example.com',
+            'role': 'doctor',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(len(mail.outbox), 1)
+        msg = mail.outbox[0]
+        self.assertEqual(msg.to, ['emailtest@example.com'])
+        self.assertIn('Invite Org', msg.subject)
+        self.assertIn('/accept-invite?token=', msg.body)
+
+    def test_invite_email_contains_valid_token(self):
+        from django.core import mail
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'tokencheck@example.com',
+            'role': 'navigator',
+        })
+        self.assertEqual(resp.status_code, 201)
+        token = OrgInvitation.objects.get(org=self.org, email='tokencheck@example.com').token
+        self.assertIn(token, mail.outbox[0].body)
+
+    def test_email_failure_still_creates_invitation(self):
+        from unittest.mock import patch
+        invitee = Identity.objects.create_user(email='failmail@example.com', password='pass')
+        with patch('patient_portal.api.org_views.send_mail', side_effect=Exception('SMTP error')):
+            resp = self.client.post('/api/orgs/invite-org/invite/', {
+                'email': 'failmail@example.com',
+                'role': 'doctor',
+            })
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['access_granted'])
+        self.assertEqual(
+            resp.data['email_warning'],
+            'Invitation was created, but the email could not be sent.',
+        )
+        self.assertTrue(
+            OrgInvitation.objects.filter(org=self.org, email='failmail@example.com', role='doctor').exists()
+        )
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='doctor').exists()
+        )
+
+    def test_email_failure_updates_existing_pending_invitation(self):
+        from django.utils import timezone
+        from unittest.mock import patch
+        token = _secrets.token_hex(32)
+        existing = OrgInvitation.objects.create(
+            org=self.org, email='existing@example.com', role='doctor',
+            token=token,
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        with patch('patient_portal.api.org_views.send_mail', side_effect=Exception('SMTP error')):
+            resp = self.client.post('/api/orgs/invite-org/invite/', {
+                'email': 'existing@example.com',
+                'role': 'navigator',
+            })
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(
+            resp.data['email_warning'],
+            'Invitation was created, but the email could not be sent.',
+        )
+        existing.refresh_from_db()
+        self.assertNotEqual(existing.token, token)
+        self.assertEqual(existing.role, 'navigator')
+        self.assertIsNone(existing.cancelled_at)
+
+
+class OrgTrustAPITest(TestCase):
+    """Staff can manage trusts via API."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user('staff@example.com', is_staff=True)
+        self.org = _make_org('Trust Org', 'trust-org')
+        self.partner = _make_org('Partner', 'partner')
+        self.client.force_authenticate(user=self.staff)
+
+    def test_add_domain_trust(self):
+        resp = self.client.post('/api/orgs/trust-org/trusts/', {'trusted_domain': 'partner.com'})
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(OrgTrust.objects.filter(granting_org=self.org, trusted_domain='partner.com').exists())
+
+    def test_add_org_trust(self):
+        resp = self.client.post('/api/orgs/trust-org/trusts/', {'trusted_org': self.partner.id})
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(OrgTrust.objects.filter(granting_org=self.org, trusted_org=self.partner).exists())
+
+    def test_add_both_raises_400(self):
+        resp = self.client.post('/api/orgs/trust-org/trusts/', {
+            'trusted_domain': 'bad.com', 'trusted_org': self.partner.id,
+        })
+        self.assertEqual(resp.status_code, 400)
+
+    def test_list_trusts(self):
+        OrgTrust.objects.create(granting_org=self.org, trusted_domain='listed.com')
+        resp = self.client.get('/api/orgs/trust-org/trusts/')
+        self.assertEqual(resp.status_code, 200)
+        domains = [t['trusted_domain'] for t in resp.data]
+        self.assertIn('listed.com', domains)
+
+    def test_delete_trust(self):
+        trust = OrgTrust.objects.create(granting_org=self.org, trusted_domain='delete.com')
+        resp = self.client.delete(f'/api/orgs/trust-org/trusts/{trust.id}/')
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(OrgTrust.objects.filter(id=trust.id).exists())
+
+
+class OrgAccessAPITest(TestCase):
+    """Org admin / staff can view and revoke access grants."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user('staff@example.com', is_staff=True)
+        self.org = _make_org('Access Org', 'access-org')
+        self.grantee = _make_user('grantee@example.com')
+        self.grant = GroupAccess.objects.create(identity=self.grantee, org=self.org, role='doctor')
+        self.client.force_authenticate(user=self.staff)
+
+    def test_list_access_grants(self):
+        resp = self.client.get('/api/orgs/access-org/access/')
+        self.assertEqual(resp.status_code, 200)
+        emails = [g['email'] for g in resp.data]
+        self.assertIn('grantee@example.com', emails)
+
+    def test_revoke_access_grant(self):
+        resp = self.client.delete(f'/api/orgs/access-org/access/{self.grant.id}/')
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(GroupAccess.objects.filter(id=self.grant.id).exists())
+
+
+class SetupDemoCommandTest(TestCase):
+    """setup_demo management command is idempotent."""
+
+    def setUp(self):
+        _make_org('ABC Foundation', 'abc-foundation')
+
+    def test_idempotent_run_twice(self):
+        from django.core.management import call_command
+        import io
+        out = io.StringIO()
+        call_command('setup_demo', stdout=out)
+        call_command('setup_demo', stdout=out)
+
+        from patient_portal.models import Identity
+        count = Identity.objects.filter(email='random@healthkey.ai', issuer='urn:local').count()
+        self.assertEqual(count, 1)
+
+        trust_count = OrgTrust.objects.filter(trusted_domain='healthkey.ai').count()
+        self.assertEqual(trust_count, 1)
+
+    def test_demo_user_created(self):
+        from django.core.management import call_command
+        import io
+        call_command('setup_demo', stdout=io.StringIO())
+        from patient_portal.models import Identity
+        user = Identity.objects.get(email='random@healthkey.ai')
+        self.assertFalse(user.is_staff)
+        self.assertTrue(user.check_password('password123!'))
+
+    def test_domain_trust_created(self):
+        from django.core.management import call_command
+        import io
+        call_command('setup_demo', stdout=io.StringIO())
+        org = Organization.objects.get(slug='abc-foundation')
+        self.assertTrue(OrgTrust.objects.filter(granting_org=org, trusted_domain='healthkey.ai').exists())
+
+    def test_no_abc_foundation_skips_trust(self):
+        """Command should not crash if abc-foundation org doesn't exist."""
+        Organization.objects.filter(slug='abc-foundation').delete()
+        from django.core.management import call_command
+        import io
+        call_command('setup_demo', stdout=io.StringIO())  # should not raise
+
+
+class UserSerializerOrgAdminTest(TestCase):
+    """UserSerializer.is_org_admin field."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = _make_user('user@example.com')
+        self.org = _make_org('Serializer Org', 'serializer-org')
+
+    def test_is_org_admin_false_without_grant(self):
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.get('/api/user/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.data.get('user', resp.data)
+        self.assertFalse(data.get('is_org_admin'))
+
+    def test_is_org_admin_true_with_grant(self):
+        GroupAccess.objects.create(identity=self.user, org=self.org, role='org_admin')
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.get('/api/user/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.data.get('user', resp.data)
+        self.assertTrue(data.get('is_org_admin'))
+
+
+# ---------------------------------------------------------------------------
+# Wearable summary field tests
+# ---------------------------------------------------------------------------
+
+class WearablePatientInfoTest(TestCase):
+    """_get_wearable_data aggregates OMOP Measurement/Observation into PatientInfo."""
+
+    def setUp(self):
+        import datetime
+        from omop_core.models import Concept, Vocabulary, Domain, ConceptClass
+        from omop_core.services.mappings import WEARABLE_LOINC
+
+        self.today = datetime.date.today()
+
+        # Minimal vocab stubs
+        vocab_loinc, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_reference': '',
+                      'vocabulary_version': '', 'vocabulary_concept_id': 0},
+        )
+        domain_m, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        domain_o, _ = Domain.objects.get_or_create(
+            domain_id='Observation',
+            defaults={'domain_name': 'Observation', 'domain_concept_id': 27},
+        )
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+
+        base_id = 9_900_000
+        self.concepts = {}
+        for i, (key, loinc_code) in enumerate(WEARABLE_LOINC.items()):
+            c, _ = Concept.objects.get_or_create(
+                concept_id=base_id + i,
+                defaults={
+                    'concept_name': key,
+                    'domain_id': 'Observation' if key == 'sleep_duration' else 'Measurement',
+                    'vocabulary_id': 'LOINC',
+                    'concept_class_id': 'Lab Test',
+                    'concept_code': loinc_code,
+                    'valid_start_date': datetime.date(1970, 1, 1),
+                    'valid_end_date': datetime.date(2099, 12, 31),
+                },
+            )
+            self.concepts[key] = c
+
+        # Measurement type concept required by FK
+        import datetime
+        type_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='Meas Type',
+            defaults={'vocabulary_name': 'Meas Type', 'vocabulary_reference': '',
+                      'vocabulary_version': '', 'vocabulary_concept_id': 0},
+        )
+        type_domain, _ = Domain.objects.get_or_create(
+            domain_id='Type Concept',
+            defaults={'domain_name': 'Type Concept', 'domain_concept_id': 0},
+        )
+        type_cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Meas Type',
+            defaults={'concept_class_name': 'Meas Type', 'concept_class_concept_id': 0},
+        )
+        Concept.objects.get_or_create(
+            concept_id=32856,
+            defaults={
+                'concept_name': 'Lab',
+                'domain_id': 'Type Concept',
+                'vocabulary_id': 'Meas Type',
+                'concept_class_id': 'Meas Type',
+                'concept_code': 'Lab',
+                'valid_start_date': datetime.date(1970, 1, 1),
+                'valid_end_date': datetime.date(2099, 12, 31),
+            },
+        )
+
+        self.person = Person.objects.create(person_id=88_000)
+        PatientInfo.objects.get_or_create(person=self.person)
+        self._meas_id = 8_800_000
+        self._obs_id = 8_900_000
+
+    def _add_measurement(self, concept_key, days_ago, value):
+        """Insert a Measurement for the given concept key."""
+        import datetime
+        from django.utils import timezone
+        self._meas_id += 1
+        d = self.today - datetime.timedelta(days=days_ago)
+        Measurement.objects.create(
+            measurement_id=self._meas_id,
+            person=self.person,
+            measurement_concept=self.concepts[concept_key],
+            measurement_date=d,
+            measurement_datetime=timezone.make_aware(
+                datetime.datetime.combine(d, datetime.time())
+            ),
+            measurement_type_concept_id=32856,
+            value_as_number=value,
+            measurement_source_value=self.concepts[concept_key].concept_code,
+        )
+
+    def _add_sleep_obs(self, days_ago, hours):
+        from omop_core.models import Observation
+        from django.utils import timezone
+        import datetime
+        self._obs_id += 1
+        d = self.today - datetime.timedelta(days=days_ago)
+        Observation.objects.create(
+            observation_id=self._obs_id,
+            person=self.person,
+            observation_concept=self.concepts['sleep_duration'],
+            observation_date=d,
+            observation_datetime=timezone.make_aware(
+                datetime.datetime.combine(d, datetime.time())
+            ),
+            observation_type_concept_id=32856,
+            value_as_number=hours,
+            observation_source_value=self.concepts['sleep_duration'].concept_code,
+        )
+
+    def _refresh(self):
+        from omop_core.services.patient_info_service import refresh_patient_info
+        from omop_core.services.concept_cache import concept_cache_clear
+        concept_cache_clear()
+        return refresh_patient_info(self.person)
+
+    def test_no_wearable_data_leaves_fields_null(self):
+        pi = self._refresh()
+        self.assertIsNone(pi.wearable_last_sync_at)
+        self.assertIsNone(pi.median_daily_steps_30d)
+        self.assertIsNone(pi.wearable_coverage_ratio_30d)
+
+    def test_step_aggregation_30_days(self):
+        # 20 days of step data → meets MIN_VALID_DAYS (7)
+        for d in range(1, 21):
+            self._add_measurement('steps', d, 8000)
+        pi = self._refresh()
+        self.assertIsNotNone(pi.wearable_last_sync_at)
+        self.assertEqual(pi.median_daily_steps_30d, 8000)
+        self.assertIsNotNone(pi.wearable_coverage_ratio_30d)
+
+    def test_coverage_ratio_calculation(self):
+        # Exactly 15 days of step data → ratio = 0.5
+        for d in range(1, 16):
+            self._add_measurement('steps', d, 5000)
+        pi = self._refresh()
+        self.assertAlmostEqual(float(pi.wearable_coverage_ratio_30d), 0.5, places=1)
+
+    def test_insufficient_coverage_leaves_metric_null(self):
+        # Only 3 days → below MIN_VALID_DAYS, steps median should be None
+        for d in range(1, 4):
+            self._add_measurement('steps', d, 10000)
+        pi = self._refresh()
+        self.assertIsNone(pi.median_daily_steps_30d)
+        # But coverage ratio is still computed
+        self.assertIsNotNone(pi.wearable_coverage_ratio_30d)
+
+    def test_cardiovascular_aggregation(self):
+        for d in range(1, 20):
+            self._add_measurement('resting_hr', d, 60)
+            self._add_measurement('hrv_sdnn', d, 45)
+        pi = self._refresh()
+        self.assertEqual(pi.resting_heart_rate_avg_30d, 60)
+        self.assertAlmostEqual(float(pi.hrv_sdnn_avg_30d), 45.0, places=1)
+
+    def test_spo2_artifact_filter(self):
+        # Valid readings
+        for d in range(1, 20):
+            self._add_measurement('spo2', d, 97.0)
+        # Artifact reading below 70 — should be discarded
+        self._add_measurement('spo2', 20, 50.0)
+        pi = self._refresh()
+        # Min of valid readings only
+        self.assertAlmostEqual(float(pi.oxygen_saturation_min_30d), 97.0, places=1)
+
+    def test_activity_trend_improving(self):
+        # First half (days 16–29): 3000 steps/day; second half (days 1–15): 9000 steps/day
+        for d in range(16, 30):
+            self._add_measurement('steps', d, 3000)
+        for d in range(1, 16):
+            self._add_measurement('steps', d, 9000)
+        pi = self._refresh()
+        self.assertEqual(pi.activity_trend_30d, 'improving')
+
+    def test_activity_trend_declining(self):
+        for d in range(16, 30):
+            self._add_measurement('steps', d, 9000)
+        for d in range(1, 16):
+            self._add_measurement('steps', d, 3000)
+        pi = self._refresh()
+        self.assertEqual(pi.activity_trend_30d, 'declining')
+
+    def test_sleep_duration_from_observation(self):
+        for d in range(1, 20):
+            self._add_sleep_obs(d, 7.5)
+        pi = self._refresh()
+        self.assertAlmostEqual(float(pi.sleep_duration_hours_avg_30d), 7.5, places=1)
+
+    def test_timestamped_sample_anchors_after_older_date_only_sample(self):
+        import datetime
+        from django.utils import timezone
+
+        self._meas_id += 1
+        old_date = self.today - datetime.timedelta(days=60)
+        Measurement.objects.create(
+            measurement_id=self._meas_id,
+            person=self.person,
+            measurement_concept=self.concepts['steps'],
+            measurement_date=old_date,
+            measurement_datetime=None,
+            measurement_type_concept_id=32856,
+            value_as_number=1000,
+            measurement_source_value=self.concepts['steps'].concept_code,
+        )
+        self._meas_id += 1
+        Measurement.objects.create(
+            measurement_id=self._meas_id,
+            person=self.person,
+            measurement_concept=self.concepts['resting_hr'],
+            measurement_date=self.today,
+            measurement_datetime=timezone.make_aware(
+                datetime.datetime.combine(self.today, datetime.time(hour=12))
+            ),
+            measurement_type_concept_id=32856,
+            value_as_number=65,
+            measurement_source_value=self.concepts['resting_hr'].concept_code,
+        )
+
+        pi = self._refresh()
+        self.assertEqual(pi.wearable_last_sync_at.date(), self.today)
+
+    def test_activity_trend_stable(self):
+        # Uniform 8000 steps/day for all 30 days → < 10% change → stable
+        for d in range(1, 31):
+            self._add_measurement('steps', d, 8000)
+        pi = self._refresh()
+        self.assertEqual(pi.activity_trend_30d, 'stable')
+
+    def test_activity_trend_insufficient_when_no_steps(self):
+        # Only HR data, no steps → trend must be 'insufficient_data', not None
+        for d in range(1, 20):
+            self._add_measurement('resting_hr', d, 65)
+        pi = self._refresh()
+        self.assertEqual(pi.activity_trend_30d, 'insufficient_data')
+
+    def test_coverage_ratio_counts_non_step_metrics(self):
+        # HR data only (no steps) → coverage should reflect those days, not 0.0
+        for d in range(1, 16):
+            self._add_measurement('resting_hr', d, 65)
+        pi = self._refresh()
+        self.assertGreater(float(pi.wearable_coverage_ratio_30d), 0.0)
+
+    def test_wearable_fields_in_api_response(self):
+        """New fields appear in GET /api/patients/{id}/."""
+        user = _make_user('wearable-test@example.com', is_staff=True)
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get(f'/api/patient-info/{self.person.person_id}/')
+        self.assertEqual(resp.status_code, 200)
+        pi_data = resp.data.get('patient_info', resp.data)
+        for field in [
+            'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
+            'median_daily_steps_30d', 'active_minutes_per_day_30d',
+            'activity_trend_30d', 'resting_heart_rate_avg_30d',
+            'hrv_sdnn_avg_30d', 'oxygen_saturation_min_30d',
+            'respiratory_rate_avg_30d', 'sleep_duration_hours_avg_30d',
+        ]:
+            self.assertIn(field, pi_data, f'Missing field: {field}')
+
+    def test_wearable_fields_are_serializer_read_only(self):
+        from patient_portal.api.serializers import PatientInfoSerializer
+
+        pi = PatientInfo.objects.get(person=self.person)
+        serializer = PatientInfoSerializer(
+            pi,
+            data={
+                'median_daily_steps_30d': 99999,
+                'activity_trend_30d': 'improving',
+            },
+            partial=True,
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
+        pi.refresh_from_db()
+        self.assertIsNone(pi.median_daily_steps_30d)
+        self.assertIsNone(pi.activity_trend_30d)
+
+    def test_wearable_endpoint_requires_authentication(self):
+        """Unauthenticated requests to patient-info must be rejected."""
+        from rest_framework.test import APIClient as AnonClient
+        anon = AnonClient()
+        resp = anon.get(f'/api/patient-info/{self.person.person_id}/')
+        self.assertIn(resp.status_code, [401, 403])
+
+
+# ---------------------------------------------------------------------------
+# Service-token ACL bypass integration tests
+# ---------------------------------------------------------------------------
+
+class ServiceTokenOmopAccessTest(TestCase):
+    """
+    Verify that service-token callers bypass row-level ACL checks in:
+      - _OmopFilterMixin.get_queryset  (MeasurementViewSet list/retrieve)
+      - _ProvenanceMixin.perform_create / perform_update  (MeasurementViewSet write)
+      - PersonViewSet.partial_update
+      - EpisodeEventViewSet.get_queryset + perform_create
+      - PatientInfoViewSet.get_queryset
+
+    Each test authenticates with the canonical service identity and
+    token="service-token" (the same sentinel ServiceTokenAuthentication sets).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+
+        # Two patients in different orgs so cross-org visibility is meaningful.
+        from omop_core.models import Organization
+        cls.org_a = Organization.objects.create(name='ST Org A', slug='st-org-a')
+        cls.org_b = Organization.objects.create(name='ST Org B', slug='st-org-b')
+
+        cls.person_a = Person.objects.create(person_id=29001)
+        cls.person_b = Person.objects.create(person_id=29002)
+        PatientInfo.objects.create(person=cls.person_a, organization=cls.org_a)
+        PatientInfo.objects.create(person=cls.person_b, organization=cls.org_b)
+
+        # One measurement per patient.
+        m_concept = Concept.objects.get(concept_id=3000963)   # Laboratory test result
+        type_concept = Concept.objects.get(concept_id=32817)  # EHR
+        cls.m_a = Measurement.objects.create(
+            measurement_id=29001,
+            person=cls.person_a,
+            measurement_concept=m_concept,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=type_concept,
+        )
+        cls.m_b = Measurement.objects.create(
+            measurement_id=29002,
+            person=cls.person_b,
+            measurement_concept=m_concept,
+            measurement_date=date(2024, 2, 1),
+            measurement_type_concept=type_concept,
+        )
+
+        # Episode + EpisodeEvent for person_a.
+        ep_concept = Concept.objects.get(concept_id=32531)   # Treatment Regimen
+        cls.ep_a = Episode.objects.create(
+            episode_id=29001,
+            person=cls.person_a,
+            episode_concept=ep_concept,
+            episode_object_concept=type_concept,
+            episode_type_concept=type_concept,
+            episode_start_date=date(2024, 1, 1),
+            episode_number=1,
+            episode_source_value='TEST-LOT',
+        )
+        drug_concept = Concept.objects.get(concept_id=19136160)
+        cls.drug_a = DrugExposure.objects.create(
+            drug_exposure_id=29001,
+            person=cls.person_a,
+            drug_concept=drug_concept,
+            drug_exposure_start_date=date(2024, 1, 1),
+            drug_type_concept=type_concept,
+        )
+        field_concept = Concept.objects.get(concept_id=1147094)
+        cls.ee_a = EpisodeEvent.objects.create(
+            episode_id=cls.ep_a.episode_id,
+            event_id=cls.drug_a.drug_exposure_id,
+            episode_event_field_concept=field_concept,
+        )
+
+        # Service identity — mirrors what ServiceTokenAuthentication creates.
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='hk-labs-sync',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token"
+        )
+
+    # --- MeasurementViewSet (via _OmopFilterMixin + _ProvenanceMixin) ---
+
+    def test_service_token_measurement_list_sees_all_orgs(self):
+        """GET /api/measurements/ returns measurements from all orgs."""
+        resp = self.client.get('/api/measurements/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
+        returned_ids = {r['measurement_id'] for r in rows}
+        self.assertIn(self.m_a.measurement_id, returned_ids)
+        self.assertIn(self.m_b.measurement_id, returned_ids)
+
+    def test_service_token_measurement_create(self):
+        """POST /api/measurements/ creates without org or ACL error."""
+        m_concept = Concept.objects.get(concept_id=3000963)
+        type_concept = Concept.objects.get(concept_id=32817)
+        resp = self.client.post('/api/measurements/', {
+            'person': self.person_a.person_id,
+            'measurement_concept': m_concept.concept_id,
+            'measurement_date': '2024-03-01',
+            'measurement_type_concept': type_concept.concept_id,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_service_token_measurement_update(self):
+        """PATCH /api/measurements/{id}/ updates without org ACL error."""
+        resp = self.client.patch(
+            f'/api/measurements/{self.m_a.measurement_id}/',
+            {'value_as_number': 7.5},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.m_a.refresh_from_db()
+        self.assertEqual(float(self.m_a.value_as_number), 7.5)
+
+    # --- PersonViewSet.partial_update ---
+
+    def test_service_token_person_patch_bypasses_acl(self):
+        """PATCH /api/persons/{person_id}/ succeeds without can_access_patient."""
+        resp = self.client.patch(
+            f'/api/persons/{self.person_b.person_id}/',
+            {'given_name': 'ServicePatched'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.person_b.refresh_from_db()
+        self.assertEqual(self.person_b.given_name, 'ServicePatched')
+
+    # --- EpisodeEventViewSet ---
+
+    def test_service_token_episode_event_list(self):
+        """GET /api/episode-events/?episode_id=X returns events without ACL error."""
+        resp = self.client.get(
+            f'/api/episode-events/?episode_id={self.ep_a.episode_id}'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
+        returned_ids = {r['event_id'] for r in rows}
+        self.assertIn(self.drug_a.drug_exposure_id, returned_ids)
+
+    def test_service_token_episode_event_create(self):
+        """POST /api/episode-events/ creates without PermissionDenied."""
+        drug2 = DrugExposure.objects.create(
+            drug_exposure_id=29099,
+            person=self.person_a,
+            drug_concept=Concept.objects.get(concept_id=19136160),
+            drug_exposure_start_date=date(2024, 4, 1),
+            drug_type_concept=Concept.objects.get(concept_id=32817),
+        )
+        resp = self.client.post('/api/episode-events/', {
+            'episode_id': self.ep_a.episode_id,
+            'event_id': drug2.drug_exposure_id,
+            'episode_event_field_concept': 1147094,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    # --- PatientInfoViewSet ---
+
+    def test_service_token_patient_info_list_sees_all_orgs(self):
+        """GET /api/patient-info/ returns patients from all orgs."""
+        resp = self.client.get('/api/patient-info/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
+        returned_pids = {r['person_id'] for r in rows}
+        self.assertIn(self.person_a.person_id, returned_pids)
+        self.assertIn(self.person_b.person_id, returned_pids)
+
+
+class MeEndpointGuardTest(TestCase):
+    """Tests for the /api/patient-info/me/ auto-provisioning guard (PR #190)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        import datetime
+        from django.utils import timezone as tz
+        from omop_core.models import Organization, GroupAccess
+
+        _make_vocab_fixtures()
+
+        cls.org = Organization.objects.create(name='Guard Test Org', slug='guard-test-org')
+
+        # A confirmed patient: has PatientUser + Person
+        cls.patient_user = Identity.objects.create_user(
+            email='patient_me@test.com', password='pass'
+        )
+        cls.patient_person = Person.objects.create(
+            person_id=88001,
+            year_of_birth=1985,
+            gender_source_value='female',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        PatientInfo.objects.create(person=cls.patient_person, organization=cls.org)
+        from patient_portal.models import PatientUser as PU
+        PU.objects.create(identity=cls.patient_user, person=cls.patient_person)
+
+        # Staff user with no patient record
+        cls.staff_user = Identity.objects.create_user(
+            email='staff_me@test.com', password='pass', is_staff=True
+        )
+
+        # Superuser with no patient record
+        cls.super_user = Identity.objects.create_superuser(
+            email='super_me@test.com', password='pass'
+        )
+
+        # org_admin with an active GroupAccess grant
+        cls.org_admin_user = Identity.objects.create_user(
+            email='orgadmin_me@test.com', password='pass'
+        )
+        GroupAccess.objects.create(
+            identity=cls.org_admin_user, org=cls.org, role='org_admin'
+        )
+
+        # doctor with an active GroupAccess grant
+        cls.doctor_user = Identity.objects.create_user(
+            email='doctor_me@test.com', password='pass'
+        )
+        GroupAccess.objects.create(
+            identity=cls.doctor_user, org=cls.org, role='doctor'
+        )
+
+        # navigator with an active GroupAccess grant
+        cls.navigator_user = Identity.objects.create_user(
+            email='navigator_me@test.com', password='pass'
+        )
+        GroupAccess.objects.create(
+            identity=cls.navigator_user, org=cls.org, role='navigator'
+        )
+
+        # Clinical user whose grant is expired — should be allowed through
+        cls.expired_clinical_user = Identity.objects.create_user(
+            email='expired_doc_me@test.com', password='pass'
+        )
+        GroupAccess.objects.create(
+            identity=cls.expired_clinical_user,
+            org=cls.org,
+            role='doctor',
+            expires_at=tz.now() - datetime.timedelta(days=1),
+        )
+
+        # Staff user who is also a patient by email match (PatientUser deleted)
+        cls.staff_patient_user = Identity.objects.create_user(
+            email='staffpatient_me@test.com', password='pass', is_staff=True
+        )
+        staff_patient_person = Person.objects.create(
+            person_id=88002,
+            year_of_birth=1975,
+            gender_source_value='male',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        # PatientInfo with matching email exists, but no PatientUser row
+        PatientInfo.objects.create(
+            person=staff_patient_person,
+            email='staffpatient_me@test.com',
+            organization=cls.org,
+        )
+
+    def _client(self, user):
+        c = APIClient()
+        c.force_authenticate(user=user)
+        return c
+
+    def test_confirmed_patient_get_returns_200(self):
+        resp = self._client(self.patient_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('patient_info', resp.data)
+
+    def test_confirmed_patient_patch_returns_200(self):
+        resp = self._client(self.patient_user).patch(
+            '/api/patient-info/me/', {}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_staff_without_patient_record_returns_404(self):
+        resp = self._client(self.staff_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_superuser_without_patient_record_returns_404(self):
+        resp = self._client(self.super_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_org_admin_without_patient_record_returns_404(self):
+        resp = self._client(self.org_admin_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_doctor_without_patient_record_returns_404(self):
+        resp = self._client(self.doctor_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_navigator_without_patient_record_returns_404(self):
+        resp = self._client(self.navigator_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_expired_clinical_grant_allows_auto_provisioning(self):
+        """An expired clinical-role grant must not block patient self-registration."""
+        resp = self._client(self.expired_clinical_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_staff_with_email_match_returns_200(self):
+        """Staff user whose email matches a PatientInfo row is re-linked, not blocked."""
+        resp = self._client(self.staff_patient_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_unauthenticated_returns_401_or_403(self):
+        resp = APIClient().get('/api/patient-info/me/')
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
+class ApiVersioningTest(TestCase):
+    """Tests for /api/v1/ versioned URL aliases and deprecation headers."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.user = Identity.objects.create_superuser(
+            email='versioning_test@test.com', password='pass'
+        )
+
+    def _client(self):
+        c = APIClient()
+        c.force_authenticate(user=self.user)
+        return c
+
+    def test_versioned_patient_records_list_returns_200(self):
+        resp = self._client().get('/api/v1/patient-records/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_versioned_path_has_no_deprecation_header(self):
+        resp = self._client().get('/api/v1/patient-records/')
+        self.assertNotIn('Deprecation', resp)
+
+    def test_legacy_path_has_deprecation_header(self):
+        resp = self._client().get('/api/patient-info/')
+        self.assertEqual(resp.get('Deprecation'), 'true')
+
+    def test_legacy_path_has_sunset_header(self):
+        resp = self._client().get('/api/patient-info/')
+        self.assertEqual(resp.get('Sunset'), 'Tue, 01 Sep 2026 00:00:00 GMT')
+
+    def test_legacy_path_has_link_header(self):
+        resp = self._client().get('/api/patient-info/')
+        link = resp.get('Link', '')
+        self.assertIn('/api/v1/', link)
+        self.assertIn('successor-version', link)
+
+    def test_schema_endpoint_returns_openapi_json(self):
+        resp = self._client().get('/api/v1/schema/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('openapi', resp.data)
+        self.assertEqual(resp.data['info']['title'], 'PROMOP API')
+
+    def test_schema_documents_v1_patient_records_not_legacy_patient_info(self):
+        resp = self._client().get('/api/v1/schema/')
+        paths = set(resp.data.get('paths', {}))
+        self.assertIn('/api/v1/patient-records/', paths)
+        self.assertNotIn('/api/v1/patient-info/', paths)
+        self.assertFalse(
+            any(path.startswith('/api/') and not path.startswith('/api/v1/') for path in paths),
+            'v1 schema should not include legacy /api/ paths',
+        )
+
+    def test_schema_accessible_without_authentication(self):
+        resp = APIClient().get('/api/v1/schema/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_swagger_ui_accessible_without_authentication(self):
+        resp = APIClient().get('/api/v1/docs/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_legacy_path_has_deprecation_header_on_post(self):
+        """Deprecation headers must appear on mutating requests, not just GET."""
+        resp = self._client().post('/api/patient-info/upload_fhir/', {}, format='json')
+        self.assertEqual(resp.get('Deprecation'), 'true')
+
+    def test_v1_lab_results_path_has_no_deprecation_header(self):
+        resp = self._client().get('/api/v1/lab-results/summary/')
+        self.assertNotIn('Deprecation', resp)
+
+    def test_legacy_lab_results_path_has_deprecation_header(self):
+        resp = self._client().get('/api/lab-results/summary/')
+        self.assertEqual(resp.get('Deprecation'), 'true')
+
+    def test_v1_fhir_path_has_no_deprecation_header(self):
+        resp = self._client().get('/api/v1/fhir/sync/')
+        self.assertNotIn('Deprecation', resp)
+
+    def test_legacy_fhir_path_has_deprecation_header(self):
+        resp = self._client().get('/api/fhir/sync/')
+        self.assertEqual(resp.get('Deprecation'), 'true')
+
+
+class V1MeEndpointTest(TestCase):
+    """Tests for /api/v1/patient-records/me/ — guard behaviour and no deprecation headers."""
+
+    @classmethod
+    def setUpTestData(cls):
+        import datetime
+        from django.utils import timezone as tz
+        from omop_core.models import Organization, GroupAccess
+
+        _make_vocab_fixtures()
+
+        cls.org = Organization.objects.create(name='V1 Me Test Org', slug='v1-me-test-org')
+
+        # Confirmed patient: has PatientUser + Person + PatientInfo
+        cls.patient_user = Identity.objects.create_user(
+            email='v1_patient_me@test.com', password='pass'
+        )
+        cls.patient_person = Person.objects.create(
+            person_id=89001,
+            year_of_birth=1990,
+            gender_source_value='female',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        PatientInfo.objects.create(person=cls.patient_person, organization=cls.org)
+        from patient_portal.models import PatientUser as PU
+        PU.objects.create(identity=cls.patient_user, person=cls.patient_person)
+
+        # Org admin with no patient record
+        cls.org_admin_user = Identity.objects.create_user(
+            email='v1_orgadmin_me@test.com', password='pass'
+        )
+        GroupAccess.objects.create(
+            identity=cls.org_admin_user, org=cls.org, role='org_admin'
+        )
+
+        # Clinical user with an expired grant (should be treated as a plain user)
+        cls.expired_clinical_user = Identity.objects.create_user(
+            email='v1_expired_doc_me@test.com', password='pass'
+        )
+        GroupAccess.objects.create(
+            identity=cls.expired_clinical_user,
+            org=cls.org,
+            role='doctor',
+            expires_at=tz.now() - datetime.timedelta(days=1),
+        )
+
+    def _client(self, user):
+        c = APIClient()
+        c.force_authenticate(user=user)
+        return c
+
+    # --- happy path -----------------------------------------------------------
+
+    def test_v1_confirmed_patient_get_returns_200(self):
+        resp = self._client(self.patient_user).get('/api/v1/patient-records/me/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('patient_info', resp.data)
+
+    def test_v1_confirmed_patient_patch_returns_200(self):
+        resp = self._client(self.patient_user).patch(
+            '/api/v1/patient-records/me/', {}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    # --- guard: clinical users without a patient record are blocked -----------
+
+    def test_v1_org_admin_without_patient_record_returns_404(self):
+        resp = self._client(self.org_admin_user).get('/api/v1/patient-records/me/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_v1_expired_clinical_grant_allows_auto_provisioning(self):
+        """Expired grant must not block auto-provisioning at the v1 path."""
+        resp = self._client(self.expired_clinical_user).get('/api/v1/patient-records/me/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_v1_unauthenticated_returns_401_or_403(self):
+        resp = APIClient().get('/api/v1/patient-records/me/')
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    # --- deprecation headers must be absent on v1 paths ----------------------
+
+    def test_v1_me_get_has_no_deprecation_header(self):
+        resp = self._client(self.patient_user).get('/api/v1/patient-records/me/')
+        self.assertNotIn('Deprecation', resp)
+
+    def test_v1_me_patch_has_no_deprecation_header(self):
+        resp = self._client(self.patient_user).patch(
+            '/api/v1/patient-records/me/', {}, format='json'
+        )
+        self.assertNotIn('Deprecation', resp)

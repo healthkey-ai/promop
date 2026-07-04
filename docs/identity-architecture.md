@@ -268,7 +268,7 @@ iterates them in order; the first that recognises the token wins.
 
 ```python
 PARTNER_AUTH_PROVIDERS = []          # no external IdP
-CTOMOP_SYNC_URL = ""                 # no cross-service sync (hk-labs)
+PROMOP_SYNC_URL = ""                 # no cross-service sync (hk-labs)
 ```
 
 All users are local (`iss="urn:local"`). Service handles its own
@@ -281,8 +281,8 @@ in development.
 PARTNER_AUTH_PROVIDERS = [
     "apps.accounts.providers.firebase.FirebaseTokenProvider",
 ]
-CTOMOP_SYNC_URL = "https://promop.example.com/api/lab-results/sync/"  # hk-labs
-CTOMOP_SERVICE_TOKEN = "..."         # for service-to-service calls
+PROMOP_SYNC_URL = "https://promop.example.com/api/lab-results/sync/"  # hk-labs
+PROMOP_SERVICE_TOKEN = "..."         # for service-to-service calls
 ```
 
 External users authenticate via Firebase. Local identities remain for
@@ -424,7 +424,7 @@ Host frontend
 Each service operates independently with local identities (`iss="urn:local"`).
 No host app, no external IdP.
 
-When `CTOMOP_SYNC_URL` is empty, hk-labs stores upload metadata locally
+When `PROMOP_SYNC_URL` is empty, hk-labs stores upload metadata locally
 and does not push to promop. Lab results stay in hk-labs only.
 
 When a standalone hk-labs is configured to point at a standalone promop,
@@ -496,7 +496,7 @@ per database (auto-increment), used only for local FK references.
 ```
 
 Each service has its own users, its own data. They can optionally be
-connected by configuring `CTOMOP_SYNC_URL`, at which point hk-labs pushes
+connected by configuring `PROMOP_SYNC_URL`, at which point hk-labs pushes
 to promop using the `(urn:local, sub)` identity anchor.
 
 ---

@@ -1,8 +1,44 @@
+import datetime
 import json
 import logging
 import time
+from email.utils import parsedate_to_datetime
 
 logger = logging.getLogger('audit')
+
+_SUNSET_DATE = 'Tue, 01 Sep 2026 00:00:00 GMT'
+_SUNSET_DT = parsedate_to_datetime(_SUNSET_DATE)
+_SUCCESSOR = '</api/v1/>; rel="successor-version"'
+
+
+class DeprecationWarningMiddleware:
+    """
+    Adds HTTP deprecation headers to responses on legacy /api/ paths (non-versioned).
+    Versioned /api/v1/ paths are unaffected.
+
+    Headers added to legacy responses:
+      Deprecation: true
+      Sunset: <date>
+      Link: </api/v1/>; rel="successor-version"
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        if datetime.datetime.now(datetime.timezone.utc) > _SUNSET_DT:
+            logger.warning(
+                "DeprecationWarningMiddleware: Sunset date %s has passed — "
+                "remove legacy /api/ URL aliases from ctomop/urls.py (the Django project package).",
+                _SUNSET_DATE,
+            )
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        path = request.path
+        if path.startswith('/api/') and not path.startswith('/api/v1/'):
+            response['Deprecation'] = 'true'
+            response['Sunset'] = _SUNSET_DATE
+            response['Link'] = _SUCCESSOR
+        return response
 
 _SAFE_METHODS = frozenset({'GET', 'HEAD', 'OPTIONS', 'TRACE'})
 

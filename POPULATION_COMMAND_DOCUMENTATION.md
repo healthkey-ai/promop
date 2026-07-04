@@ -181,9 +181,9 @@ python manage.py populate_patient_info --force-update
 
 ### Integration with Other Commands
 ```bash
-# Create sample data, then populate PatientInfo
-python manage.py create_enhanced_sample_data
-python manage.py populate_patient_info --force-update
+# Generate a FHIR bundle and import it, then query results
+python manage.py generate_fhir_bundle --disease mm --count 50 --output /tmp/mm.json
+python manage.py import_fhir_bundle /tmp/mm.json --org demo-org
 
 # Query results
 python manage.py query_patient_info
