@@ -1,10 +1,13 @@
+import datetime
 import json
 import logging
 import time
+from email.utils import parsedate_to_datetime
 
 logger = logging.getLogger('audit')
 
 _SUNSET_DATE = 'Tue, 01 Sep 2026 00:00:00 GMT'
+_SUNSET_DT = parsedate_to_datetime(_SUNSET_DATE)
 _SUCCESSOR = '</api/v1/>; rel="successor-version"'
 
 
@@ -21,6 +24,12 @@ class DeprecationWarningMiddleware:
 
     def __init__(self, get_response):
         self.get_response = get_response
+        if datetime.datetime.now(datetime.timezone.utc) > _SUNSET_DT:
+            logger.warning(
+                "DeprecationWarningMiddleware: Sunset date %s has passed — "
+                "remove legacy /api/ URL aliases from ctomop/urls.py.",
+                _SUNSET_DATE,
+            )
 
     def __call__(self, request):
         response = self.get_response(request)

@@ -7754,12 +7754,12 @@ class ApiVersioningTest(TestCase):
         c.force_authenticate(user=self.user)
         return c
 
-    def test_versioned_patient_info_list_returns_200(self):
-        resp = self._client().get('/api/v1/patient-info/')
+    def test_versioned_patient_records_list_returns_200(self):
+        resp = self._client().get('/api/v1/patient-records/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_versioned_path_has_no_deprecation_header(self):
-        resp = self._client().get('/api/v1/patient-info/')
+        resp = self._client().get('/api/v1/patient-records/')
         self.assertNotIn('Deprecation', resp)
 
     def test_legacy_path_has_deprecation_header(self):
@@ -7768,7 +7768,7 @@ class ApiVersioningTest(TestCase):
 
     def test_legacy_path_has_sunset_header(self):
         resp = self._client().get('/api/patient-info/')
-        self.assertIsNotNone(resp.get('Sunset'))
+        self.assertEqual(resp.get('Sunset'), 'Tue, 01 Sep 2026 00:00:00 GMT')
 
     def test_legacy_path_has_link_header(self):
         resp = self._client().get('/api/patient-info/')
@@ -7781,3 +7781,42 @@ class ApiVersioningTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertIn('openapi', resp.data)
         self.assertEqual(resp.data['info']['title'], 'PROMOP API')
+
+    def test_schema_documents_v1_patient_records_not_legacy_patient_info(self):
+        resp = self._client().get('/api/v1/schema/')
+        paths = set(resp.data.get('paths', {}))
+        self.assertIn('/api/v1/patient-records/', paths)
+        self.assertNotIn('/api/v1/patient-info/', paths)
+        self.assertFalse(
+            any(path.startswith('/api/') and not path.startswith('/api/v1/') for path in paths),
+            'v1 schema should not include legacy /api/ paths',
+        )
+
+    def test_schema_accessible_without_authentication(self):
+        resp = APIClient().get('/api/v1/schema/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_swagger_ui_accessible_without_authentication(self):
+        resp = APIClient().get('/api/v1/docs/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_legacy_path_has_deprecation_header_on_post(self):
+        """Deprecation headers must appear on mutating requests, not just GET."""
+        resp = self._client().post('/api/patient-info/upload_fhir/', {}, format='json')
+        self.assertEqual(resp.get('Deprecation'), 'true')
+
+    def test_v1_lab_results_path_has_no_deprecation_header(self):
+        resp = self._client().get('/api/v1/lab-results/summary/')
+        self.assertNotIn('Deprecation', resp)
+
+    def test_legacy_lab_results_path_has_deprecation_header(self):
+        resp = self._client().get('/api/lab-results/summary/')
+        self.assertEqual(resp.get('Deprecation'), 'true')
+
+    def test_v1_fhir_path_has_no_deprecation_header(self):
+        resp = self._client().get('/api/v1/fhir/sync/')
+        self.assertNotIn('Deprecation', resp)
+
+    def test_legacy_fhir_path_has_deprecation_header(self):
+        resp = self._client().get('/api/fhir/sync/')
+        self.assertEqual(resp.get('Deprecation'), 'true')
