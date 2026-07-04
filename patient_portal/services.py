@@ -12,7 +12,7 @@ from patient_portal.models import PatientUser
 logger = logging.getLogger(__name__)
 
 
-def resolve_or_create_person(identity, email=None):
+def resolve_or_create_person(identity, email=None, allow_create=True):
     """Resolve an existing Person for *identity*, or auto-provision one.
 
     Lookup order:
@@ -20,13 +20,16 @@ def resolve_or_create_person(identity, email=None):
       2. PatientInfo whose email matches
       3. Brand-new Person + PatientUser (+ PatientInfo if email known)
 
-    Returns the linked Person.
+    When allow_create=False, steps 1 and 2 still run (an existing patient is
+    always returned) but step 3 is skipped — returns None instead of creating.
+
+    Returns the linked Person, or None if not found and allow_create=False.
     """
     pu = PatientUser.objects.filter(identity=identity).first()
     if pu:
         return pu.person
 
-    email = (email or identity.email or "").strip()
+    email = (email or getattr(identity, 'email', None) or "").strip()
     if email:
         email_qs = PatientInfo.objects.filter(email=email)
         # Guard against cross-org collision: if multiple patients share the
@@ -43,6 +46,9 @@ def resolve_or_create_person(identity, email=None):
                 defaults={"identity": identity},
             )
             return pi.person
+
+    if not allow_create:
+        return None
 
     try:
         with transaction.atomic():

@@ -222,6 +222,14 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
   if (isLoading) return <PatientInfoSkeleton />;
 
   if (isError) {
+    const httpStatus = (error as { response?: { status?: number } })?.response?.status;
+    if (httpStatus === 404) {
+      return (
+        <div className="rounded-2xl bg-background p-8 text-center shadow-sm">
+          <p className="text-sm text-gray-500">No patient record linked to this account.</p>
+        </div>
+      );
+    }
     return (
       <div className="rounded-2xl bg-background p-8 text-center shadow-sm">
         <AlertCircle className="mx-auto mb-3 h-10 w-10 text-red-400" />
