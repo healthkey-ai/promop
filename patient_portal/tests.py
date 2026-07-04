@@ -7737,3 +7737,47 @@ class MeEndpointGuardTest(TestCase):
     def test_unauthenticated_returns_401_or_403(self):
         resp = APIClient().get('/api/patient-info/me/')
         self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
+class ApiVersioningTest(TestCase):
+    """Tests for /api/v1/ versioned URL aliases and deprecation headers."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.user = Identity.objects.create_superuser(
+            email='versioning_test@test.com', password='pass'
+        )
+
+    def _client(self):
+        c = APIClient()
+        c.force_authenticate(user=self.user)
+        return c
+
+    def test_versioned_patient_info_list_returns_200(self):
+        resp = self._client().get('/api/v1/patient-info/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_versioned_path_has_no_deprecation_header(self):
+        resp = self._client().get('/api/v1/patient-info/')
+        self.assertNotIn('Deprecation', resp)
+
+    def test_legacy_path_has_deprecation_header(self):
+        resp = self._client().get('/api/patient-info/')
+        self.assertEqual(resp.get('Deprecation'), 'true')
+
+    def test_legacy_path_has_sunset_header(self):
+        resp = self._client().get('/api/patient-info/')
+        self.assertIsNotNone(resp.get('Sunset'))
+
+    def test_legacy_path_has_link_header(self):
+        resp = self._client().get('/api/patient-info/')
+        link = resp.get('Link', '')
+        self.assertIn('/api/v1/', link)
+        self.assertIn('successor-version', link)
+
+    def test_schema_endpoint_returns_openapi_json(self):
+        resp = self._client().get('/api/v1/schema/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('openapi', resp.data)
+        self.assertEqual(resp.data['info']['title'], 'PROMOP API')

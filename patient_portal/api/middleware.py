@@ -4,6 +4,33 @@ import time
 
 logger = logging.getLogger('audit')
 
+_SUNSET_DATE = 'Tue, 01 Sep 2026 00:00:00 GMT'
+_SUCCESSOR = '</api/v1/>; rel="successor-version"'
+
+
+class DeprecationWarningMiddleware:
+    """
+    Adds HTTP deprecation headers to responses on legacy /api/ paths (non-versioned).
+    Versioned /api/v1/ paths are unaffected.
+
+    Headers added to legacy responses:
+      Deprecation: true
+      Sunset: <date>
+      Link: </api/v1/>; rel="successor-version"
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        path = request.path
+        if path.startswith('/api/') and not path.startswith('/api/v1/'):
+            response['Deprecation'] = 'true'
+            response['Sunset'] = _SUNSET_DATE
+            response['Link'] = _SUCCESSOR
+        return response
+
 _SAFE_METHODS = frozenset({'GET', 'HEAD', 'OPTIONS', 'TRACE'})
 
 

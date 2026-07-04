@@ -32,3 +32,4 @@ whitenoise==6.7.0
 pytest==8.4.2
 pytest-django==4.11.1
 factory-boy==3.3.3
+drf-spectacular==0.28.0
