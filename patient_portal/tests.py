@@ -7595,3 +7595,145 @@ class ServiceTokenOmopAccessTest(TestCase):
         returned_pids = {r['person_id'] for r in rows}
         self.assertIn(self.person_a.person_id, returned_pids)
         self.assertIn(self.person_b.person_id, returned_pids)
+
+
+class MeEndpointGuardTest(TestCase):
+    """Tests for the /api/patient-info/me/ auto-provisioning guard (PR #190)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        import datetime
+        from django.utils import timezone as tz
+        from omop_core.models import Organization, GroupAccess
+
+        _make_vocab_fixtures()
+
+        cls.org = Organization.objects.create(name='Guard Test Org', slug='guard-test-org')
+
+        # A confirmed patient: has PatientUser + Person
+        cls.patient_user = Identity.objects.create_user(
+            email='patient_me@test.com', password='pass'
+        )
+        cls.patient_person = Person.objects.create(
+            person_id=88001,
+            year_of_birth=1985,
+            gender_source_value='female',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        PatientInfo.objects.create(person=cls.patient_person, organization=cls.org)
+        from patient_portal.models import PatientUser as PU
+        PU.objects.create(identity=cls.patient_user, person=cls.patient_person)
+
+        # Staff user with no patient record
+        cls.staff_user = Identity.objects.create_user(
+            email='staff_me@test.com', password='pass', is_staff=True
+        )
+
+        # Superuser with no patient record
+        cls.super_user = Identity.objects.create_superuser(
+            email='super_me@test.com', password='pass'
+        )
+
+        # org_admin with an active GroupAccess grant
+        cls.org_admin_user = Identity.objects.create_user(
+            email='orgadmin_me@test.com', password='pass'
+        )
+        GroupAccess.objects.create(
+            identity=cls.org_admin_user, org=cls.org, role='org_admin'
+        )
+
+        # doctor with an active GroupAccess grant
+        cls.doctor_user = Identity.objects.create_user(
+            email='doctor_me@test.com', password='pass'
+        )
+        GroupAccess.objects.create(
+            identity=cls.doctor_user, org=cls.org, role='doctor'
+        )
+
+        # navigator with an active GroupAccess grant
+        cls.navigator_user = Identity.objects.create_user(
+            email='navigator_me@test.com', password='pass'
+        )
+        GroupAccess.objects.create(
+            identity=cls.navigator_user, org=cls.org, role='navigator'
+        )
+
+        # Clinical user whose grant is expired — should be allowed through
+        cls.expired_clinical_user = Identity.objects.create_user(
+            email='expired_doc_me@test.com', password='pass'
+        )
+        GroupAccess.objects.create(
+            identity=cls.expired_clinical_user,
+            org=cls.org,
+            role='doctor',
+            expires_at=tz.now() - datetime.timedelta(days=1),
+        )
+
+        # Staff user who is also a patient by email match (PatientUser deleted)
+        cls.staff_patient_user = Identity.objects.create_user(
+            email='staffpatient_me@test.com', password='pass', is_staff=True
+        )
+        staff_patient_person = Person.objects.create(
+            person_id=88002,
+            year_of_birth=1975,
+            gender_source_value='male',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        # PatientInfo with matching email exists, but no PatientUser row
+        PatientInfo.objects.create(
+            person=staff_patient_person,
+            email='staffpatient_me@test.com',
+            organization=cls.org,
+        )
+
+    def _client(self, user):
+        c = APIClient()
+        c.force_authenticate(user=user)
+        return c
+
+    def test_confirmed_patient_get_returns_200(self):
+        resp = self._client(self.patient_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('patient_info', resp.data)
+
+    def test_confirmed_patient_patch_returns_200(self):
+        resp = self._client(self.patient_user).patch(
+            '/api/patient-info/me/', {}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_staff_without_patient_record_returns_404(self):
+        resp = self._client(self.staff_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_superuser_without_patient_record_returns_404(self):
+        resp = self._client(self.super_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_org_admin_without_patient_record_returns_404(self):
+        resp = self._client(self.org_admin_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_doctor_without_patient_record_returns_404(self):
+        resp = self._client(self.doctor_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_navigator_without_patient_record_returns_404(self):
+        resp = self._client(self.navigator_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_expired_clinical_grant_allows_auto_provisioning(self):
+        """An expired clinical-role grant must not block patient self-registration."""
+        resp = self._client(self.expired_clinical_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_staff_with_email_match_returns_200(self):
+        """Staff user whose email matches a PatientInfo row is re-linked, not blocked."""
+        resp = self._client(self.staff_patient_user).get('/api/patient-info/me/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_unauthenticated_returns_401_or_403(self):
+        resp = APIClient().get('/api/patient-info/me/')
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])

@@ -544,9 +544,33 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=['get', 'patch'], permission_classes=[ScopedTokenPermission])
     def me(self, request):
         """GET/PATCH /api/patient-info/me/ — current user's own PatientInfo."""
+        from patient_portal.models import PatientUser
         from patient_portal.services import resolve_or_create_person
 
-        person = resolve_or_create_person(request.user)
+        # Fast path: confirmed patient — use cached person directly, no extra query.
+        existing_pu = PatientUser.objects.filter(identity=request.user).select_related('person').first()
+        if existing_pu is not None:
+            person = existing_pu.person
+        else:
+            # Determine whether this identity may auto-provision a patient record.
+            # Staff/superusers and users with an *active* clinical-role grant are not
+            # patients; resolve_or_create_person skips creation when allow_create=False
+            # but still returns a Person via email match (re-links a deleted PatientUser).
+            from omop_core.models import GroupAccess
+            now = timezone.now()
+            is_clinical = (
+                getattr(request.user, 'is_staff', False)
+                or getattr(request.user, 'is_superuser', False)
+                or GroupAccess.objects.filter(
+                    identity=request.user,
+                    role__in=['org_admin', 'doctor', 'navigator'],
+                ).filter(
+                    Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+                ).exists()
+            )
+            person = resolve_or_create_person(request.user, allow_create=not is_clinical)
+            if person is None:
+                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         patient_info, _ = PatientInfo.objects.get_or_create(person=person)
 
         if request.method == 'GET':
