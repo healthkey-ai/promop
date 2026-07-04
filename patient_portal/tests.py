@@ -7820,3 +7820,96 @@ class ApiVersioningTest(TestCase):
     def test_legacy_fhir_path_has_deprecation_header(self):
         resp = self._client().get('/api/fhir/sync/')
         self.assertEqual(resp.get('Deprecation'), 'true')
+
+
+class V1MeEndpointTest(TestCase):
+    """Tests for /api/v1/patient-records/me/ — guard behaviour and no deprecation headers."""
+
+    @classmethod
+    def setUpTestData(cls):
+        import datetime
+        from django.utils import timezone as tz
+        from omop_core.models import Organization, GroupAccess
+
+        _make_vocab_fixtures()
+
+        cls.org = Organization.objects.create(name='V1 Me Test Org', slug='v1-me-test-org')
+
+        # Confirmed patient: has PatientUser + Person + PatientInfo
+        cls.patient_user = Identity.objects.create_user(
+            email='v1_patient_me@test.com', password='pass'
+        )
+        cls.patient_person = Person.objects.create(
+            person_id=89001,
+            year_of_birth=1990,
+            gender_source_value='female',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        PatientInfo.objects.create(person=cls.patient_person, organization=cls.org)
+        from patient_portal.models import PatientUser as PU
+        PU.objects.create(identity=cls.patient_user, person=cls.patient_person)
+
+        # Org admin with no patient record
+        cls.org_admin_user = Identity.objects.create_user(
+            email='v1_orgadmin_me@test.com', password='pass'
+        )
+        GroupAccess.objects.create(
+            identity=cls.org_admin_user, org=cls.org, role='org_admin'
+        )
+
+        # Clinical user with an expired grant (should be treated as a plain user)
+        cls.expired_clinical_user = Identity.objects.create_user(
+            email='v1_expired_doc_me@test.com', password='pass'
+        )
+        GroupAccess.objects.create(
+            identity=cls.expired_clinical_user,
+            org=cls.org,
+            role='doctor',
+            expires_at=tz.now() - datetime.timedelta(days=1),
+        )
+
+    def _client(self, user):
+        c = APIClient()
+        c.force_authenticate(user=user)
+        return c
+
+    # --- happy path -----------------------------------------------------------
+
+    def test_v1_confirmed_patient_get_returns_200(self):
+        resp = self._client(self.patient_user).get('/api/v1/patient-records/me/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('patient_info', resp.data)
+
+    def test_v1_confirmed_patient_patch_returns_200(self):
+        resp = self._client(self.patient_user).patch(
+            '/api/v1/patient-records/me/', {}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    # --- guard: clinical users without a patient record are blocked -----------
+
+    def test_v1_org_admin_without_patient_record_returns_404(self):
+        resp = self._client(self.org_admin_user).get('/api/v1/patient-records/me/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_v1_expired_clinical_grant_allows_auto_provisioning(self):
+        """Expired grant must not block auto-provisioning at the v1 path."""
+        resp = self._client(self.expired_clinical_user).get('/api/v1/patient-records/me/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_v1_unauthenticated_returns_401_or_403(self):
+        resp = APIClient().get('/api/v1/patient-records/me/')
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    # --- deprecation headers must be absent on v1 paths ----------------------
+
+    def test_v1_me_get_has_no_deprecation_header(self):
+        resp = self._client(self.patient_user).get('/api/v1/patient-records/me/')
+        self.assertNotIn('Deprecation', resp)
+
+    def test_v1_me_patch_has_no_deprecation_header(self):
+        resp = self._client(self.patient_user).patch(
+            '/api/v1/patient-records/me/', {}, format='json'
+        )
+        self.assertNotIn('Deprecation', resp)
