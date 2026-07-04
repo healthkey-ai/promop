@@ -831,31 +831,31 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     # Explicit extension URL → (value_key, parser) registry.
                     # Using exact URL matching avoids false positives from substring checks.
                     _PATIENT_EXTENSIONS = {
-                        'http://ctomop.io/fhir/StructureDefinition/race':
+                        'https://healthkey.ai/fhir/StructureDefinition/race':
                             ('valueString', lambda e: e.get('valueString')),
-                        'http://ctomop.io/fhir/StructureDefinition/ethnicity':
+                        'https://healthkey.ai/fhir/StructureDefinition/ethnicity':
                             ('valueString', lambda e: e.get('valueString')),
-                        'http://ctomop.io/fhir/StructureDefinition/bodyWeight':
+                        'https://healthkey.ai/fhir/StructureDefinition/bodyWeight':
                             ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
-                        'http://ctomop.io/fhir/StructureDefinition/bodyHeight':
+                        'https://healthkey.ai/fhir/StructureDefinition/bodyHeight':
                             ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
-                        'http://ctomop.io/fhir/StructureDefinition/systolic-bp':
+                        'https://healthkey.ai/fhir/StructureDefinition/systolic-bp':
                             ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
-                        'http://ctomop.io/fhir/StructureDefinition/diastolic-bp':
+                        'https://healthkey.ai/fhir/StructureDefinition/diastolic-bp':
                             ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
-                        'http://ctomop.io/fhir/StructureDefinition/heartRate':
+                        'https://healthkey.ai/fhir/StructureDefinition/heartRate':
                             ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
-                        'http://ctomop.io/fhir/StructureDefinition/ecog-performance-status':
+                        'https://healthkey.ai/fhir/StructureDefinition/ecog-performance-status':
                             ('valueInteger', lambda e: e.get('valueInteger')),
-                        'http://ctomop.io/fhir/StructureDefinition/mm-cytogenetic-markers':
+                        'https://healthkey.ai/fhir/StructureDefinition/mm-cytogenetic-markers':
                             ('valueString', lambda e: e.get('valueString')),
-                        'http://ctomop.io/fhir/StructureDefinition/mm-measurable-disease-imwg':
+                        'https://healthkey.ai/fhir/StructureDefinition/mm-measurable-disease-imwg':
                             ('valueBoolean', lambda e: e.get('valueBoolean')),
-                        'http://ctomop.io/fhir/StructureDefinition/mm-sct-date':
+                        'https://healthkey.ai/fhir/StructureDefinition/mm-sct-date':
                             ('valueString', lambda e: e.get('valueString')),
-                        'http://ctomop.io/fhir/StructureDefinition/mm-sct-history':
+                        'https://healthkey.ai/fhir/StructureDefinition/mm-sct-history':
                             ('valueString', lambda e: e.get('valueString')),
-                        'http://ctomop.io/fhir/StructureDefinition/mm-sct-eligibility':
+                        'https://healthkey.ai/fhir/StructureDefinition/mm-sct-eligibility':
                             ('valueString', lambda e: e.get('valueString')),
                     }
                     ext_results = {}
@@ -865,7 +865,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             _, parser = _PATIENT_EXTENSIONS[url]
                             ext_results[url] = parser(ext)
 
-                    base = 'http://ctomop.io/fhir/StructureDefinition/'
+                    base = 'https://healthkey.ai/fhir/StructureDefinition/'
                     race            = ext_results.get(f'{base}race')
                     ethnicity       = ext_results.get(f'{base}ethnicity')
                     weight          = ext_results.get(f'{base}bodyWeight')
@@ -2351,7 +2351,7 @@ def health_check(request):
     http_status = 200 if db_status == 'connected' else 503
     return JsonResponse({
         'status': 'healthy' if db_status == 'connected' else 'unhealthy',
-        'service': 'ctomop',
+        'service': 'promop',
         'database': db_status,
     }, status=http_status)
 

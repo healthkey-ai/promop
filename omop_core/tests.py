@@ -739,7 +739,7 @@ class FLBundleGeneratorTest(TestCase):
         regimen_stmts = [
             e['resource'] for e in bundle['entry']
             if e['resource']['resourceType'] == 'MedicationStatement'
-            and any(c.get('system') == 'http://ctomop.io/fhir/fl-regimen'
+            and any(c.get('system') == 'https://healthkey.ai/fhir/fl-regimen'
                     for c in e['resource']['medicationCodeableConcept']['coding'])
         ]
         self.assertGreater(len(regimen_stmts), 0, "Expected at least one regimen MedicationStatement")
@@ -747,7 +747,7 @@ class FLBundleGeneratorTest(TestCase):
             systems = {c['system'] for c in stmt['medicationCodeableConcept']['coding']}
             # HemOnc coding should be present for DB-sourced regimens (not radiation)
             has_hemonc = 'http://ohdsi.org/omop/HemOnc' in systems
-            is_radiation_only = systems == {'http://ctomop.io/fhir/fl-regimen'}
+            is_radiation_only = systems == {'https://healthkey.ai/fhir/fl-regimen'}
             self.assertTrue(has_hemonc or is_radiation_only,
                             f"Unexpected coding systems: {systems}")
 

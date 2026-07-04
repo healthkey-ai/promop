@@ -532,40 +532,40 @@ class Command(BaseCommand):
             'telecom': [{'system': 'phone', 'value': f"+1-555-{random.randint(100,999)}-{random.randint(1000,9999)}", 'use': 'home'}],
             'extension': [
                 # ctomop-recognised extensions (exact URLs the FHIR importer parses)
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/ethnicity',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/ethnicity',
                  'valueString': p['ethnicity']},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/bodyWeight',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/bodyWeight',
                  'valueQuantity': {'value': p['weight'], 'unit': 'kg'}},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/bodyHeight',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/bodyHeight',
                  'valueQuantity': {'value': p['height'], 'unit': 'cm'}},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/ecog-performance-status',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/ecog-performance-status',
                  'valueInteger': p['ecog']},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/karnofsky-score',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/karnofsky-score',
                  'valueInteger': p['kps']},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/systolic-bp',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/systolic-bp',
                  'valueQuantity': {'value': p['systolic_bp'], 'unit': 'mmHg'}},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/diastolic-bp',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/diastolic-bp',
                  'valueQuantity': {'value': p['diastolic_bp'], 'unit': 'mmHg'}},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/heartRate',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/heartRate',
                  'valueQuantity': {'value': p['heart_rate'], 'unit': 'beats/min'}},
                 # MM-specific extensions — omit entirely when empty so re-import
                 # doesn't silently leave stale values in the DB (upload handler
                 # treats absent extension as "no change", not "clear").
-                *([{'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
+                *([{'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-history',
                     'valueString': ','.join(p['sct_types'])}] if p['sct_types'] else []),
-                *([{'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-date',
+                *([{'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-date',
                     'valueString': p['sct_date']}] if p['sct_date'] else []),
-                *([{'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-eligibility',
+                *([{'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-eligibility',
                     'valueString': ','.join(p['sct_eligibility'])}] if p['sct_eligibility'] else []),
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-cytogenetic-markers',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-cytogenetic-markers',
                  'valueString': ','.join(p['cytogenetics']) if p['cytogenetics'] else ''},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-refractory-status',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-refractory-status',
                  'valueString': ','.join(p['refractory']) if p['refractory'] else ''},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-plasma-cell-leukemia',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-plasma-cell-leukemia',
                  'valueBoolean': p['plasma_cell_leukemia']},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-disease-progression',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-disease-progression',
                  'valueString': p['progression']},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-measurable-disease-imwg',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-measurable-disease-imwg',
                  'valueBoolean': p['measurable_disease_imwg']},
             ],
         }
@@ -812,7 +812,7 @@ class Command(BaseCommand):
             # Look up HemOnc concept_id for this drug combination
             _drug_key = frozenset(drugs)
             _hemonc_id = MYELOMA_REGIMEN_CONCEPT_IDS.get(_drug_key)
-            _regimen_coding = [{'system': 'http://ctomop.io/fhir/mm-regimen', 'code': name}]
+            _regimen_coding = [{'system': 'https://healthkey.ai/fhir/mm-regimen', 'code': name}]
             if _hemonc_id:
                 _regimen_coding.append({
                     'system': 'http://ohdsi.org/omop/HemOnc',
@@ -835,9 +835,9 @@ class Command(BaseCommand):
                     'end': line_end.strftime('%Y-%m-%d'),
                 },
                 'extension': [
-                    {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line',
+                    {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line',
                      'valueInteger': line_num},
-                    {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-outcome',
+                    {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-outcome',
                      'valueString': outcome},
                 ],
                 'note': [{'text': f"Line {line_num}: {name} — {outcome}"}],
@@ -864,7 +864,7 @@ class Command(BaseCommand):
                     },
                     'partOf': [{'reference': f"MedicationStatement/{regimen_id}"}],
                     'extension': [
-                        {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line',
+                        {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line',
                          'valueInteger': line_num},
                     ],
                 })

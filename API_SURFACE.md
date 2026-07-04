@@ -393,6 +393,9 @@ Full CRUD. Org-scoped. These do not feed into PatientRecord.
 
 ## Vocabulary & concept lookup endpoints
 
+For a full explanation of how LOINC, SNOMED, and HemOnc codes are resolved to OMOP Concept IDs,
+see [docs/concept-mapping.md](docs/concept-mapping.md).
+
 ### GET /api/concepts/lookup/
 
 Batch translate `(vocabulary_id, concept_code)` pairs to OMOP `concept_id`. Used by phr-etl to resolve raw clinical codes before writing OMOP records — unknown codes fall back to `concept_id = 0` on the client side.

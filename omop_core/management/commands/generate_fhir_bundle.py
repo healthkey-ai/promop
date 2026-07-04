@@ -284,11 +284,11 @@ class Command(BaseCommand):
             "birthDate": birth_date.strftime('%Y-%m-%d'),
             "extension": [
                 {
-                    "url": "http://ctomop.io/fhir/StructureDefinition/race",
+                    "url": "https://healthkey.ai/fhir/StructureDefinition/race",
                     "valueString": race
                 },
                 {
-                    "url": "http://ctomop.io/fhir/StructureDefinition/ethnicity",
+                    "url": "https://healthkey.ai/fhir/StructureDefinition/ethnicity",
                     "valueString": ethnicity
                 },
                 {

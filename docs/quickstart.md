@@ -234,6 +234,7 @@ search that requires 27–39 joins over raw OMOP runs as a flat predicate over a
 ## Next steps
 
 - **Full API reference:** [API_SURFACE.md](../API_SURFACE.md)
+- **LOINC / SNOMED / HemOnc concept mapping:** [docs/concept-mapping.md](concept-mapping.md)
 - **Synthetic data options:** [SYNTHETIC_PATIENT_GENERATION.md](../SYNTHETIC_PATIENT_GENERATION.md)
 - **Research background:** [paper.md](../paper.md)
 - **Deployment to Render:** [README.md § Deployment](../README.md#deployment-render)

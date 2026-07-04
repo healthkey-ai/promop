@@ -120,12 +120,12 @@ def _make_fhir_bundle():
         'birthDate': '1975-03-15',
         'address': [{'city': 'Salt Lake City', 'state': 'UT', 'country': 'US', 'postalCode': '84101'}],
         'extension': [
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/ethnicity', 'valueString': 'White'},
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/bodyWeight',
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/ethnicity', 'valueString': 'White'},
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/bodyWeight',
              'valueQuantity': {'value': 65.0, 'unit': 'kg'}},
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/bodyHeight',
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/bodyHeight',
              'valueQuantity': {'value': 165.0, 'unit': 'cm'}},
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/ecog-performance-status',
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/ecog-performance-status',
              'valueInteger': 1},
         ],
     }
@@ -168,9 +168,9 @@ def _make_fhir_bundle():
             'medicationCodeableConcept': {'text': regimen_name},
             'effectivePeriod': {'start': start},
             'extension': [
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line',
                  'valueInteger': lot_num},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-outcome',
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-outcome',
                  'valueString': outcome},
             ],
         }
@@ -4223,7 +4223,7 @@ class FhirRxNavIntegrationTest(_SmartBase):
                     'medicationCodeableConcept': {'text': drug_name},
                     'effectivePeriod': {'start': '2023-01-15', 'end': '2023-07-01'},
                     'extension': [
-                        {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line',
+                        {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line',
                          'valueInteger': 1},
                     ],
                 }},
@@ -4999,15 +4999,15 @@ class SctFhirUploadTest(FhirUploadBase):
                         'birthDate': '1960-07-20',
                         'extension': [
                             {
-                                'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-date',
+                                'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-date',
                                 'valueString': '2021-03-15',
                             },
                             {
-                                'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
+                                'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-history',
                                 'valueString': 'autologous SCT,tandem SCT',
                             },
                             {
-                                'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-eligibility',
+                                'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-eligibility',
                                 'valueString': 'eligible for autologous SCT',
                             },
                         ],
@@ -5062,9 +5062,9 @@ class SctFhirUploadTest(FhirUploadBase):
     def test_invalid_sct_date_string_is_ignored(self):
         """A malformed mm-sct-date value must be silently dropped; upload must still succeed."""
         resp = self._upload_bundle_with_extensions([
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-date',
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-date',
              'valueString': 'not-a-date'},
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-history',
              'valueString': 'autologous SCT'},
         ], patient_suffix='003')
         self.assertIn(resp.status_code, [200, 201],
@@ -5076,7 +5076,7 @@ class SctFhirUploadTest(FhirUploadBase):
     def test_comma_only_sct_history_stores_empty_list(self):
         """A valueString of only commas/whitespace must produce an empty list, not error."""
         resp = self._upload_bundle_with_extensions([
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-history',
              'valueString': ',  ,'},
         ], patient_suffix='004')
         self.assertIn(resp.status_code, [200, 201],
@@ -5089,7 +5089,7 @@ class SctFhirUploadTest(FhirUploadBase):
     def test_unknown_vocab_tokens_filtered_from_sct_history(self):
         """Tokens not in the StemCellTransplant vocabulary are silently discarded."""
         resp = self._upload_bundle_with_extensions([
-            {'url': 'http://ctomop.io/fhir/StructureDefinition/mm-sct-history',
+            {'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-history',
              'valueString': 'autologous SCT,unknown experimental SCT,allogeneic SCT'},
         ], patient_suffix='005')
         self.assertIn(resp.status_code, [200, 201],

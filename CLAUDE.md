@@ -625,7 +625,7 @@ If `remoteEntry.js` returns 500 on staging, check that `WHITENOISE_ROOT` points 
 
 ## Deployment
 
-- **Render service**: `https://ctomop.onrender.com`
+- **Render service**: `https://promop.onrender.com`
 - **`start.sh`** runs `python manage.py migrate` on every deploy — so migrations pushed to `main` are auto-applied on next Render deploy.
 - **Push to `main`** triggers deploy (once Render GitHub App access is granted in dashboard).
 - **Admin credentials**: set via `ADMIN_EMAIL` / `ADMIN_PASSWORD` env vars on Render (no hardcoded default)

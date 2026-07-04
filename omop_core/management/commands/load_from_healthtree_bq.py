@@ -346,7 +346,7 @@ def _q_surveys(project: str, dataset: str, user_id: str | None) -> str:
 
 class Command(BaseCommand):
     help = (
-        "Load HealthTree patient data from BigQuery into CTOMOP "
+        "Load HealthTree patient data from BigQuery into PRomop "
         "(Person + PatientInfo tables, including AI lines of therapy and "
         "survey responses)."
     )

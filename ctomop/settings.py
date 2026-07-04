@@ -46,6 +46,15 @@ if not DEBUG:
             _config_errors.append(
                 'DATABASE_URL must be set (SQLite is not supported in production)'
             )
+        if not os.environ.get('ALLOWED_HOSTS'):
+            _config_errors.append(
+                'ALLOWED_HOSTS must be set to your domain(s), e.g. "app.example.com"'
+            )
+        if not os.environ.get('CORS_ALLOWED_ORIGINS'):
+            _config_errors.append(
+                'CORS_ALLOWED_ORIGINS must be set to your frontend origin(s), '
+                'e.g. "https://app.example.com"'
+            )
         if _config_errors:
             raise ImproperlyConfigured(
                 'Missing required production settings:\n'
@@ -57,7 +66,7 @@ if DEBUG:
 else:
     ALLOWED_HOSTS = [
         h.strip()
-        for h in os.environ.get('ALLOWED_HOSTS', 'ctomop.onrender.com').split(',')
+        for h in os.environ.get('ALLOWED_HOSTS', '').split(',')
         if h.strip()
     ]
 
@@ -223,7 +232,7 @@ EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'PROMOP <noreply@healthkey.ai>')
 
 # Base URL used to build invitation accept links in emails.
-# Set APP_BASE_URL on Render to e.g. https://ctomop.onrender.com
+# Set APP_BASE_URL to your deployment URL (e.g. https://your-app.example.com)
 APP_BASE_URL = os.environ.get(
     'APP_BASE_URL',
     os.environ.get('RENDER_EXTERNAL_URL', 'http://localhost:5173'),

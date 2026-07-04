@@ -360,7 +360,7 @@ class FLBundleGenerator:
     def _patient_resource(self, p):
         birth_year = date.today().year - p['age']
         birth_date = f"{birth_year}-{random.randint(1,12):02d}-{random.randint(1,28):02d}"
-        base = 'http://ctomop.io/fhir/StructureDefinition/'
+        base = 'https://healthkey.ai/fhir/StructureDefinition/'
         return {
             'resourceType': 'Patient',
             'id': p['id'],
@@ -532,7 +532,7 @@ class FLBundleGenerator:
                     ))
             else:
                 regimen_id = f"med-{p['id']}-line{line_num}-regimen"
-                codings = [{'system': 'http://ctomop.io/fhir/fl-regimen', 'code': name}]
+                codings = [{'system': 'https://healthkey.ai/fhir/fl-regimen', 'code': name}]
                 if concept_id:
                     codings.append({
                         'system': 'http://ohdsi.org/omop/HemOnc',
@@ -547,8 +547,8 @@ class FLBundleGenerator:
                     'subject': {'reference': f"Patient/{p['id']}"},
                     'effectivePeriod': {'start': start_str, 'end': end_str},
                     'extension': [
-                        {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line', 'valueInteger': line_num},
-                        {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-outcome', 'valueString': outcome},
+                        {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line', 'valueInteger': line_num},
+                        {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-outcome', 'valueString': outcome},
                     ],
                     'note': [{'text': f"Line {line_num}: {name} — {outcome}"}],
                 })
@@ -576,7 +576,7 @@ class FLBundleGenerator:
             },
             'subject': {'reference': f"Patient/{p['id']}"},
             'effectivePeriod': {'start': start_str, 'end': end_str},
-            'extension': [{'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line', 'valueInteger': line_num}],
+            'extension': [{'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line', 'valueInteger': line_num}],
         }
         if partof:
             resource['partOf'] = [{'reference': f"MedicationStatement/{partof}"}]
@@ -599,8 +599,8 @@ class FLBundleGenerator:
             'subject': {'reference': f"Patient/{p['id']}"},
             'performedPeriod': {'start': start_str, 'end': end_str},
             'extension': [
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line', 'valueInteger': line_num},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-outcome', 'valueString': outcome},
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line', 'valueInteger': line_num},
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-outcome', 'valueString': outcome},
             ],
             'note': [{'text': f"Line {line_num}: {regimen_name} — {outcome}"}],
         }
@@ -619,8 +619,8 @@ class FLBundleGenerator:
             'subject': {'reference': f"Patient/{p['id']}"},
             'effectivePeriod': {'start': maint_start.strftime('%Y-%m-%d'), 'end': maint_end.strftime('%Y-%m-%d')},
             'extension': [
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/therapy-line', 'valueInteger': 1},
-                {'url': 'http://ctomop.io/fhir/StructureDefinition/fl-maintenance', 'valueBoolean': True},
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line', 'valueInteger': 1},
+                {'url': 'https://healthkey.ai/fhir/StructureDefinition/fl-maintenance', 'valueBoolean': True},
             ],
             'note': [{'text': 'Rituximab maintenance post first-line induction'}],
         }

@@ -20,7 +20,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument(
             '--name',
-            default='CTOMOP SMART App',
+            default='PRomop SMART App',
             help='Application name (default: "CTOMOP SMART App")',
         )
         parser.add_argument(
