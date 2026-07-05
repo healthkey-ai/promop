@@ -71,7 +71,7 @@ class PartnerAuthentication(BaseAuthentication):
 
             identity = self._get_or_create_identity(claims)
             if not identity.is_active:
-                return None
+                raise AuthenticationFailed("Account is disabled.")
             _ensure_person(identity, claims)
             self._to_cache(token, identity.pk, claims)
             return (identity, claims)
@@ -88,7 +88,7 @@ class PartnerAuthentication(BaseAuthentication):
         except Identity.DoesNotExist:
             return None
         if not identity.is_active:
-            return None
+            raise AuthenticationFailed("Account is disabled.")
         claims = TokenClaims(**data["claims"])
         return (identity, claims)
 
@@ -137,6 +137,9 @@ class PartnerAuthentication(BaseAuthentication):
             _claim_placeholder_access(identity, claims.email)
         elif claims.email:
             _claim_placeholder_access(identity, claims.email)
+            if claims.name and identity.name != claims.name:
+                identity.name = claims.name
+                identity.save(update_fields=["name"])
         return identity
 
 

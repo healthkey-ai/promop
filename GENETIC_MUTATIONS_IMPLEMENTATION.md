@@ -102,7 +102,7 @@ vus_patients = PatientInfo.objects.filter(
 
 ✅ **No OMOP Genomic Extension needed**
 ✅ **Complete genetic data capture** (gene, mutation, origin, interpretation)  
-✅ **Standard OMOP CDM v6.0 compliance**
+✅ **Standard OMOP CDM v5.4 compliance**
 ✅ **Full clinical trial matching capability**
 ✅ **Interoperability with all OMOP analytical tools**
 
