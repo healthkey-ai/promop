@@ -6152,7 +6152,7 @@ class OrgDiseaseStatsTest(TestCase):
 
     def test_direct_org_navigator_sees_aggregated_org_data(self):
         navigator = Identity.objects.create_user(email='navigator@t.com', password='x')
-        GroupAccess.objects.create(identity=navigator, org=self.org_b, role='navigator')
+        GroupAccess.objects.create(identity=navigator, org=self.org_b, role='analyst')
         resp = self._get(navigator)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         slugs = {o['org_slug'] for o in resp.data}
@@ -6749,13 +6749,13 @@ class OrgInvitationFlowTest(TestCase):
     def test_invite_unknown_user_creates_placeholder_identity(self):
         resp = self.client.post('/api/orgs/invite-org/invite/', {
             'email': 'placeholder@example.com',
-            'role': 'navigator',
+            'role': 'analyst',
         })
         self.assertEqual(resp.status_code, 201)
         invitee = Identity.objects.get(email='placeholder@example.com', issuer='urn:local')
         self.assertFalse(invitee.has_usable_password())
         self.assertTrue(
-            GroupAccess.objects.filter(identity=invitee, org=self.org, role='navigator').exists()
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='analyst').exists()
         )
 
     def test_partner_auth_identity_claims_placeholder_access(self):
@@ -6810,7 +6810,7 @@ class OrgInvitationFlowTest(TestCase):
 
     def test_reinvite_after_placeholder_claim_updates_partner_identity(self):
         placeholder = Identity.objects.create_user(email='claimed@example.com', password=None)
-        GroupAccess.objects.create(identity=placeholder, org=self.org, role='navigator')
+        GroupAccess.objects.create(identity=placeholder, org=self.org, role='analyst')
 
         from patient_portal.api.authentication import PartnerAuthentication
         from patient_portal.api.providers.base import TokenClaims
@@ -6823,7 +6823,7 @@ class OrgInvitationFlowTest(TestCase):
         )
         partner = PartnerAuthentication._get_or_create_identity(claims)
         self.assertTrue(
-            GroupAccess.objects.filter(identity=partner, org=self.org, role='navigator').exists()
+            GroupAccess.objects.filter(identity=partner, org=self.org, role='analyst').exists()
         )
 
         resp = self.client.post('/api/orgs/invite-org/invite/', {
@@ -6841,17 +6841,17 @@ class OrgInvitationFlowTest(TestCase):
         invitee = Identity.objects.create_user(email='existing-user@example.com', password='pass')
         resp = self.client.post('/api/orgs/invite-org/invite/', {
             'email': 'existing-user@example.com',
-            'role': 'navigator',
+            'role': 'analyst',
         })
         self.assertEqual(resp.status_code, 201)
         self.assertTrue(resp.data['access_granted'])
         self.assertTrue(
-            GroupAccess.objects.filter(identity=invitee, org=self.org, role='navigator').exists()
+            GroupAccess.objects.filter(identity=invitee, org=self.org, role='analyst').exists()
         )
 
     def test_invite_existing_user_updates_existing_org_role(self):
         invitee = Identity.objects.create_user(email='role-update@example.com', password='pass')
-        GroupAccess.objects.create(identity=invitee, org=self.org, role='navigator')
+        GroupAccess.objects.create(identity=invitee, org=self.org, role='analyst')
         resp = self.client.post('/api/orgs/invite-org/invite/', {
             'email': 'role-update@example.com',
             'role': 'doctor',
@@ -6941,7 +6941,7 @@ class OrgInvitationFlowTest(TestCase):
         from django.core import mail
         resp = self.client.post('/api/orgs/invite-org/invite/', {
             'email': 'tokencheck@example.com',
-            'role': 'navigator',
+            'role': 'analyst',
         })
         self.assertEqual(resp.status_code, 201)
         token = OrgInvitation.objects.get(org=self.org, email='tokencheck@example.com').token
@@ -6980,7 +6980,7 @@ class OrgInvitationFlowTest(TestCase):
         with patch('patient_portal.api.org_views.send_mail', side_effect=Exception('SMTP error')):
             resp = self.client.post('/api/orgs/invite-org/invite/', {
                 'email': 'existing@example.com',
-                'role': 'navigator',
+                'role': 'analyst',
             })
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(
@@ -6989,7 +6989,7 @@ class OrgInvitationFlowTest(TestCase):
         )
         existing.refresh_from_db()
         self.assertNotEqual(existing.token, token)
-        self.assertEqual(existing.role, 'navigator')
+        self.assertEqual(existing.role, 'analyst')
         self.assertIsNone(existing.cancelled_at)
 
 
@@ -7656,7 +7656,7 @@ class MeEndpointGuardTest(TestCase):
             email='navigator_me@test.com', password='pass'
         )
         GroupAccess.objects.create(
-            identity=cls.navigator_user, org=cls.org, role='navigator'
+            identity=cls.navigator_user, org=cls.org, role='analyst'
         )
 
         # Clinical user whose grant is expired — should be allowed through
