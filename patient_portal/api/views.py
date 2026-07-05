@@ -2665,12 +2665,12 @@ class _ProvenanceMixin:
                         and existing_pi.organization != org):
                     raise PermissionDenied('Person does not belong to your organization.')
         elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
-            from omop_core.authorization import can_access_patient
+            from omop_core.authorization import can_write_patient
             from rest_framework.exceptions import PermissionDenied
             person = serializer.validated_data.get('person')
             if not person:
                 raise PermissionDenied('person is required.')
-            if not can_access_patient(self.request.user, person.person_id):
+            if not can_write_patient(self.request.user, person.person_id):
                 raise PermissionDenied('Access denied.')
 
         obj = serializer.save()
@@ -2696,12 +2696,12 @@ class _ProvenanceMixin:
             if existing_pi.organization is not None and existing_pi.organization != org:
                 raise PermissionDenied('Person does not belong to your organization.')
         elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
-            from omop_core.authorization import can_access_patient
+            from omop_core.authorization import can_write_patient
             from rest_framework.exceptions import PermissionDenied
             person = serializer.validated_data.get('person') or serializer.instance.person
             if not person:
                 raise PermissionDenied('person is required.')
-            if not can_access_patient(self.request.user, person.person_id):
+            if not can_write_patient(self.request.user, person.person_id):
                 raise PermissionDenied('Access denied.')
         obj = serializer.save()
         self._prov(obj)

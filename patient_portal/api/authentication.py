@@ -129,7 +129,7 @@ class PartnerAuthentication(BaseAuthentication):
             )
         elif claims.email and not identity.email:
             identity.email = claims.email
-            if claims.name and not identity.name:
+            if claims.name and identity.name != claims.name:
                 identity.name = claims.name
                 identity.save(update_fields=["email", "name"])
             else:
@@ -168,7 +168,7 @@ def _claim_placeholder_access(identity: Identity, email: str | None) -> None:
         issuer="urn:local",
     ).exclude(pk=identity.pk)
 
-    role_rank = {"org_admin": 3, "doctor": 2, "navigator": 1}
+    role_rank = {"org_admin": 3, "doctor": 2, "analyst": 1}
     for placeholder in placeholders:
         if placeholder.has_usable_password():
             continue

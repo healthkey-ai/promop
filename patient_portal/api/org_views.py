@@ -408,7 +408,8 @@ class OrgAccessDetailView(APIView):
             changed_grant.append('role')
 
         if 'is_premium' in request.data:
-            is_premium = bool(request.data['is_premium'])
+            raw = request.data['is_premium']
+            is_premium = raw if isinstance(raw, bool) else str(raw).lower() in ('true', '1', 'yes')
             grant.identity.is_premium = is_premium
             changed_identity.append('is_premium')
 
