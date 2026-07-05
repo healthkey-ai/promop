@@ -43,6 +43,8 @@ interface InviteResponse extends Invitation {
 interface AccessGrant {
   id: number;
   email: string;
+  name: string;
+  is_premium: boolean;
   org_slug: string;
   group_name: string | null;
   role: string;
@@ -229,6 +231,17 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     } catch (err) {
       console.error('Failed to revoke access:', err);
       setAccessError('Failed to revoke access. Please try again.');
+    }
+  };
+
+  const handleUpdateGrant = async (grantId: number, patch: { role?: string; is_premium?: boolean }) => {
+    setAccessGrants(prev => prev.map(g => g.id === grantId ? { ...g, ...patch } : g));
+    try {
+      await api.patch(`${base}/access/${grantId}/`, patch);
+    } catch (err) {
+      console.error('Failed to update access grant:', err);
+      setAccessError('Failed to update access grant. Please try again.');
+      fetchAll();
     }
   };
 
@@ -449,18 +462,43 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
           ) : (
             <ul className="divide-y divide-gray-100 border border-gray-200 rounded-lg overflow-hidden">
               {accessGrants.map(g => (
-                <li key={g.id} className="flex items-center justify-between px-4 py-2">
-                  <span className="text-sm">
-                    <span className="font-medium">{g.email}</span>
-                    <span className="text-gray-400 ml-2">({g.role})</span>
-                  </span>
-                  <button
-                    onClick={() => handleRevokeAccess(g.id)}
-                    className="text-red-400 hover:text-red-600"
-                    title="Revoke access"
-                  >
-                    <Trash2 size={14} />
-                  </button>
+                <li key={g.id} className="flex items-center justify-between px-4 py-3 gap-3">
+                  <div className="flex flex-col gap-0.5 min-w-0">
+                    <span className="text-sm font-medium truncate">{g.name || g.email}</span>
+                    {g.name && <span className="text-xs text-gray-400 truncate">{g.email}</span>}
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    {g.role === 'org_admin' ? (
+                      <span className="text-xs px-2 py-0.5 rounded bg-purple-100 text-purple-700 font-medium">Org Admin</span>
+                    ) : (
+                      <>
+                        <select
+                          value={g.role}
+                          onChange={e => handleUpdateGrant(g.id, { role: e.target.value })}
+                          className="border border-gray-300 rounded px-2 py-1 text-xs"
+                        >
+                          <option value="doctor">Doctor</option>
+                          <option value="analyst">Analyst</option>
+                        </select>
+                        <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={g.is_premium}
+                            onChange={e => handleUpdateGrant(g.id, { is_premium: e.target.checked })}
+                            className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600"
+                          />
+                          Premium
+                        </label>
+                      </>
+                    )}
+                    <button
+                      onClick={() => handleRevokeAccess(g.id)}
+                      className="text-red-400 hover:text-red-600"
+                      title="Revoke access"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -486,7 +524,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
               >
                 <option value="org_admin">Org Admin</option>
                 <option value="doctor">Doctor</option>
-                <option value="navigator">Navigator</option>
+                <option value="analyst">Analyst</option>
               </select>
               <button
                 onClick={handleInvite}

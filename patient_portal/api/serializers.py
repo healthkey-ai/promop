@@ -113,17 +113,19 @@ class OrgInvitationSerializer(serializers.ModelSerializer):
 
 class GroupAccessSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(source='identity.email', read_only=True)
+    name = serializers.CharField(source='identity.name', read_only=True, default='')
+    is_premium = serializers.BooleanField(source='identity.is_premium', read_only=True)
     org_slug = serializers.SlugRelatedField(source='org', slug_field='slug', read_only=True)
     group_name = serializers.CharField(source='group.name', read_only=True, default=None)
 
     class Meta:
         model = GroupAccess
         fields = [
-            'id', 'email', 'org_slug', 'group_name', 'role',
+            'id', 'email', 'name', 'is_premium', 'org_slug', 'group_name', 'role',
             'expires_at', 'granted_at',
         ]
         read_only_fields = [
-            'id', 'email', 'org_slug', 'group_name', 'role',
+            'id', 'email', 'name', 'is_premium', 'org_slug', 'group_name', 'role',
             'expires_at', 'granted_at',
         ]
 

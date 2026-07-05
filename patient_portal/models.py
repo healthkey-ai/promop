@@ -56,6 +56,7 @@ class Identity(AbstractBaseUser, PermissionsMixin):
 
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
+    is_premium = models.BooleanField(default=False, help_text="Grants premium-tier feature access (e.g. data export) across all connected apps.")
     created_at = models.DateTimeField(auto_now_add=True)
 
     objects = IdentityManager()

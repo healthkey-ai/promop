@@ -447,9 +447,14 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             if patient_info.organization != org:
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
         elif not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
-            from omop_core.authorization import can_access_patient
+            from omop_core.authorization import can_access_patient, can_write_patient
             if not can_access_patient(request.user, person.person_id):
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+            if not can_write_patient(request.user, person.person_id):
+                return Response(
+                    {'error': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
 
         prov_source, prov_user_id, prov_reason = _extract_provenance(request)
         if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
@@ -563,7 +568,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 or getattr(request.user, 'is_superuser', False)
                 or GroupAccess.objects.filter(
                     identity=request.user,
-                    role__in=['org_admin', 'doctor', 'navigator'],
+                    role__in=['org_admin', 'doctor', 'analyst'],
                 ).filter(
                     Q(expires_at__isnull=True) | Q(expires_at__gt=now)
                 ).exists()
@@ -2660,12 +2665,12 @@ class _ProvenanceMixin:
                         and existing_pi.organization != org):
                     raise PermissionDenied('Person does not belong to your organization.')
         elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
-            from omop_core.authorization import can_access_patient
+            from omop_core.authorization import can_write_patient
             from rest_framework.exceptions import PermissionDenied
             person = serializer.validated_data.get('person')
             if not person:
                 raise PermissionDenied('person is required.')
-            if not can_access_patient(self.request.user, person.person_id):
+            if not can_write_patient(self.request.user, person.person_id):
                 raise PermissionDenied('Access denied.')
 
         obj = serializer.save()
@@ -2691,12 +2696,12 @@ class _ProvenanceMixin:
             if existing_pi.organization is not None and existing_pi.organization != org:
                 raise PermissionDenied('Person does not belong to your organization.')
         elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
-            from omop_core.authorization import can_access_patient
+            from omop_core.authorization import can_write_patient
             from rest_framework.exceptions import PermissionDenied
             person = serializer.validated_data.get('person') or serializer.instance.person
             if not person:
                 raise PermissionDenied('person is required.')
-            if not can_access_patient(self.request.user, person.person_id):
+            if not can_write_patient(self.request.user, person.person_id):
                 raise PermissionDenied('Access denied.')
         obj = serializer.save()
         self._prov(obj)

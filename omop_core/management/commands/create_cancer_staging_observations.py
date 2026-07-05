@@ -238,7 +238,7 @@ class Command(BaseCommand):
                         value_as_concept=value_concept,
                         value_as_string=staging_item['value_as_string'],
                         visit_occurrence=condition.visit_occurrence,
-                        # Link to condition using observation_event_id (new in CDM v6.0)
+                        # Link to condition using observation_event_id
                         observation_event_id=condition.condition_occurrence_id,
                         # Note: obs_event_field_concept would link to CONDITION_OCCURRENCE_ID concept
                         # but for simplicity we'll leave it null in this demo

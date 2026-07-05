@@ -5,7 +5,7 @@ import { useAuth } from '@/hooks/useAuth';
 const ROLE_LABELS: Record<string, string> = {
   org_admin: 'Org Admin',
   doctor: 'Doctor',
-  navigator: 'Navigator',
+  analyst: 'Analyst',
 };
 
 export default function UserProfilePage() {

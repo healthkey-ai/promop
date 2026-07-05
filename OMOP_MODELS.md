@@ -5,7 +5,7 @@ A Django project implementing the OMOP Common Data Model (CDM) v6.0 with Oncolog
 ## Overview
 
 This project provides Django models for:
-- **OMOP Core (CDM v6.0)**: Standard clinical data models including Person, Visit Occurrence, Condition Occurrence, Drug Exposure, Measurement, and Observation tables
+- **OMOP Core (CDM v5.4)**: Standard clinical data models including Person, Visit Occurrence, Condition Occurrence, Drug Exposure, Measurement, and Observation tables
 - **OMOP Oncology Extension**: Cancer-specific models including Episode, Histology, Cancer Modifiers, and Episode Events
 - **OMOP Genomic Extension**: Genomic variant and sequencing data models including Genomic Variant Occurrence, Specimen, Molecular Sequence, and Genomic Test Results
 
