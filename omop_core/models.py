@@ -120,7 +120,7 @@ class OrgInvitation(models.Model):
     ROLE = [
         ('org_admin', 'Org Admin'),
         ('doctor', 'Doctor'),
-        ('navigator', 'Navigator'),
+        ('analyst', 'Analyst'),
     ]
     org = models.ForeignKey(
         Organization, on_delete=models.CASCADE, related_name='invitations',
@@ -245,7 +245,7 @@ class GroupAccess(models.Model):
     ROLE_CHOICES = [
         ('org_admin', 'Org Admin'),
         ('doctor',    'Doctor'),
-        ('navigator', 'Navigator'),
+        ('analyst',   'Analyst'),
     ]
     identity = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE,

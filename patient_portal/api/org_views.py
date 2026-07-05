@@ -134,7 +134,7 @@ def _get_or_create_invitee_identity(email):
     return Identity.objects.create_user(email=email, password=None)
 
 
-ROLE_RANK = {'org_admin': 3, 'doctor': 2, 'navigator': 1}
+ROLE_RANK = {'org_admin': 3, 'doctor': 2, 'analyst': 1}
 
 
 def _grant_org_access(identity, org, role, granted_by):
@@ -378,6 +378,46 @@ class OrgAccessListView(APIView):
 
 class OrgAccessDetailView(APIView):
     permission_classes = [IsStaffOrOrgAdmin]
+
+    def patch(self, request, slug, access_id):
+        """Update role and/or premium status for an access grant.
+
+        Allowed fields: role ('doctor' | 'analyst'), is_premium (bool).
+        org_admin grants cannot be changed; premium is not applicable to org_admins.
+        """
+        org = _get_org(slug)
+        grant = get_object_or_404(GroupAccess, id=access_id, org=org)
+
+        if grant.role == 'org_admin':
+            return Response(
+                {'error': 'Cannot modify org_admin grants via this endpoint.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        changed_grant = []
+        changed_identity = []
+
+        new_role = request.data.get('role')
+        if new_role is not None:
+            if new_role not in ('doctor', 'analyst'):
+                return Response(
+                    {'error': "role must be 'doctor' or 'analyst'"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            grant.role = new_role
+            changed_grant.append('role')
+
+        if 'is_premium' in request.data:
+            is_premium = bool(request.data['is_premium'])
+            grant.identity.is_premium = is_premium
+            changed_identity.append('is_premium')
+
+        if changed_grant:
+            grant.save(update_fields=changed_grant)
+        if changed_identity:
+            grant.identity.save(update_fields=changed_identity)
+
+        return Response(GroupAccessSerializer(grant).data)
 
     def delete(self, request, slug, access_id):
         org = _get_org(slug)
