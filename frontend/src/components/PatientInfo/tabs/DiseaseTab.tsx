@@ -10,7 +10,7 @@ import {
   STAGING_MODALITIES_OPTIONS, DISTANT_METASTASIS_STAGE_OPTIONS,
   YES_NO_OPTIONS, ER_OPTIONS, PR_OPTIONS, HER2_OPTIONS, HR_OPTIONS, HRD_OPTIONS,
   DISEASE_OPTIONS,
-  FLIPI_RISK_OPTIONS, GELF_OPTIONS, FL_TUMOR_GRADE_OPTIONS,
+  FLIPI_RISK_OPTIONS, FLIPI_FACTOR_OPTIONS, GELF_OPTIONS, FL_TUMOR_GRADE_OPTIONS,
   ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS,
   MRD_STATUS_OPTIONS, CYTOGENETIC_RISK_OPTIONS,
   BINET_STAGE_OPTIONS, TUMOR_BURDEN_OPTIONS, DISEASE_ACTIVITY_OPTIONS,
@@ -186,6 +186,9 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
           <Field label="GELF Criteria" name="gelf_criteria_status" type="select" value={formData?.gelf_criteria_status} options={GELF_OPTIONS} onChange={onChange} vocabSource={gelfSource} />
           <Field label="FLIPI Score" name="flipi_score" type="number" value={formData?.flipi_score} onChange={onChange} />
           <Field label="FLIPI Risk Category" name="flipi_risk_category" type="select" value={formData?.flipi_risk_category} options={FLIPI_RISK_OPTIONS} onChange={onChange} vocabSource={flipiSource} />
+          <div className="sm:col-span-2">
+            <Field label="FLIPI Risk Factors" name="flipi_score_options" type="multiselect" value={formData?.flipi_score_options} options={FLIPI_FACTOR_OPTIONS} onChange={onChange} />
+          </div>
           <Field label="Bulky Disease" name="bulky_disease" type="select" value={formData?.bulky_disease} options={YES_NO_OPTIONS} onChange={onChange} />
           <Field label="B Symptoms" name="b_symptoms" type="select" value={formData?.b_symptoms} options={YES_NO_OPTIONS} onChange={onChange} />
         </div>
