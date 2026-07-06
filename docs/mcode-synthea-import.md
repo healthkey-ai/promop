@@ -227,18 +227,6 @@ Open `http://localhost:5173/` in your browser. Log in with the superuser credent
 
 ---
 
-## Why this matters more than it looks
-
-Building a reproducible synthetic oncology dataset sounds like a developer convenience. It's actually more than that.
-
-Historically, one of the main barriers to open-source oncology tooling has been that you can't ship a tool alongside realistic test data. You can ship unit tests with mocked data, but you can't say "clone this repo, run these two commands, and you have 200 breast cancer patients with realistic lab trends and treatment histories to explore." That gap has meant that oncology informatics tools have mostly been built inside institutions, on institutional data, by people who happen to have access — which skews both who builds them and what they prioritize.
-
-A seeded PRomop instance loaded from Synthea mCODE data changes that calculus. Anyone can run it. Anyone can contribute a feature and verify it against a realistic cohort. Anyone can reproduce a bug report. The data is the same everywhere.
-
-There's more work to do — mCODE FL and MM profiles, fuller Synthea coverage of treatment response, better mapping of TNM sub-staging — but the foundation is there.
-
----
-
 ## Get involved
 
 PRomop is open source under the Apache 2.0 license. The mCODE import pipeline lives in the `omop_core` app; the `PatientInfo` service and FHIR upload handler are the two most active areas.
