@@ -54,6 +54,10 @@ def suppress_patient_record_refresh():
         _suppress.active = was_active
 
 
+# Backward-compat alias for any out-of-tree callers — remove once all callers are updated.
+suppress_patient_info_refresh = suppress_patient_record_refresh
+
+
 def _refresh_for_instance(instance):
     """Call refresh_patient_record for the person linked to an OMOP event instance."""
     if getattr(_suppress, 'active', False):

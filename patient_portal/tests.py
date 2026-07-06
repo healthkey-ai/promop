@@ -5127,7 +5127,16 @@ class SctDataMigrationTest(TestCase):
         from django.apps import apps as django_apps
 
         class _Shim:
-            """Wraps the live registry so get_model('omop_core', 'PatientInfo') resolves to PatientRecord."""
+            """Wraps the live registry so get_model('omop_core', 'PatientInfo') resolves to PatientRecord.
+
+            PERMANENT: required as long as migrations 0085–0093 exist, because those
+            migrations call apps.get_model('omop_core', 'PatientInfo') and are tested
+            against the live registry (which only has PatientRecord after migration 0104).
+            Do not remove this shim when cleaning up old migrations.
+
+            Only get_model is intercepted; all other apps attributes pass through to
+            django_apps unchanged via __getattr__.
+            """
             def get_model(self, app_label, model_name, **kwargs):
                 if model_name.lower() == 'patientinfo':
                     model_name = 'PatientRecord'

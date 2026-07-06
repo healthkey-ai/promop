@@ -30,6 +30,8 @@ router = DefaultRouter()
 
 # Core PatientRecord
 router.register(r'user', CurrentUserViewSet, basename='user')
+# Legacy URL prefix preserved for backwards compatibility with the federation host app (ht-phr).
+# New integrations should use /api/v1/patient-records/ instead.
 router.register(r'patient-info', PatientRecordViewSet, basename='patient-info')
 
 # Person identity resolution + demographic patch

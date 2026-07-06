@@ -428,7 +428,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         patient_serializer = PatientRecordSerializer(patient_info)
 
         return Response({
-            'patient_info': patient_serializer.data,
+            'patient_info': patient_serializer.data,  # legacy wire format — preserved for frontend/federation host compatibility
             'user': user_data
         })
 
@@ -583,7 +583,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             patient_serializer = PatientRecordSerializer(patient_info)
             full_name = f"{person.given_name or ''} {person.family_name or ''}".strip()
             return Response({
-                'patient_info': patient_serializer.data,
+                'patient_info': patient_serializer.data,  # legacy wire format — preserved for frontend/federation host compatibility
                 'user': user_serializer.data,
                 'patient_name': full_name,
             })
@@ -2265,7 +2265,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
                     patients_result.append({
                         'person_id': person.person_id,
-                        'patient_info_id': patient_info.pk,
+                        'patient_info_id': patient_info.pk,  # legacy wire format — preserved for frontend/federation host compatibility
                         'measurement_ids': _pt_measurement_ids,
                         'condition_ids': _pt_condition_ids,
                         'drug_exposure_ids': _pt_drug_exposure_ids,
@@ -2401,7 +2401,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if not snapshot:
                 return Response({'success': True, 'deleted_count': 0, 'errors': []})
 
-            patientinfo_ids = [row[0] for row in snapshot]
+            patient_record_ids = [row[0] for row in snapshot]
             person_ids = [row[1] for row in snapshot]
 
             errors = []
@@ -2410,8 +2410,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # This transaction commits before per-person orphan cleanup so a failure
             # in the cleanup loop cannot roll back the PatientRecord deletions.
             with transaction.atomic():
-                PatientRecord.objects.filter(id__in=patientinfo_ids).delete()
-            deleted_count = len(patientinfo_ids)
+                PatientRecord.objects.filter(id__in=patient_record_ids).delete()
+            deleted_count = len(patient_record_ids)
 
             # Clean up Person/OMOP rows/Identity for persons that now have no PatientRecord
             # at all.  Each person gets its own savepoint so a single failure does not
