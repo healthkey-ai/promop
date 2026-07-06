@@ -36,7 +36,7 @@ from omop_core.models import (
     ProcedureOccurrence, ProvenanceRecord,
 )
 from omop_core.services.pk import next_pk_batch
-from omop_core.signals import suppress_patient_info_refresh
+from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.api.permissions import ScopedTokenPermission, get_request_org
 # Reuse the proven HK-Labs concept-fallback machinery.
 from patient_portal.api.lab_results.sync import HK_LABS_VOCAB_ID, _ensure_hk_deps
@@ -265,10 +265,10 @@ class FhirSyncView(APIView):
             'observations': Observation.objects.filter(person=person).count(),
         }
 
-        # NOTE: the denormalized PatientInfo is intentionally NOT rebuilt here.
-        # refresh_patient_info is O(N) in the person's data (per-row queries) and
+        # NOTE: the denormalized PatientRecord is intentionally NOT rebuilt here.
+        # refresh_patient_record is O(N) in the person's data (per-row queries) and
         # would put the synchronous ingest back into "slow request" territory.
-        # First-cut display reads the OMOP tables directly; PatientInfo
+        # First-cut display reads the OMOP tables directly; PatientRecord
         # derivation is part of the deferred oncology enrichment (fhir_importers
         # #10) and should run out-of-band, not inside this request.
         return Response(result, status=status.HTTP_201_CREATED)
@@ -402,7 +402,7 @@ class FhirSyncView(APIView):
 
         meas_ct = ContentType.objects.get_for_model(Measurement)
         touched, new_rows = [], []
-        with suppress_patient_info_refresh():
+        with suppress_patient_record_refresh():
             for (cid, obs_date, sv_key), o in desired.items():
                 existing_qs = Measurement.objects.filter(
                     person=person, measurement_concept_id=cid, measurement_date=obs_date,
@@ -442,7 +442,7 @@ class FhirSyncView(APIView):
                     keep.measurement_datetime = o['dt']
                     keep.value_as_string = o['vstr']
                     keep.unit_source_value = o['unit']
-                    keep._skip_patient_info_refresh = True
+                    keep._skip_patient_record_refresh = True
                     keep.save(update_fields=['value_as_number', 'measurement_datetime',
                                              'value_as_string', 'unit_source_value'])
                 if changed or extras:
@@ -582,7 +582,7 @@ class FhirSyncView(APIView):
         desired = {(getattr(r, sv_field), getattr(r, date_field)): r for r in rows}  # last wins
         ct = ContentType.objects.get_for_model(model)
         touched, new_rows = [], []
-        with suppress_patient_info_refresh():
+        with suppress_patient_record_refresh():
             for (sv, date), inst in desired.items():
                 existing = list(model.objects.filter(**{
                     'person': person, sv_field: sv, date_field: date}).order_by(pk_field))
@@ -597,7 +597,7 @@ class FhirSyncView(APIView):
                     model.objects.filter(**{f'{pk_field}__in': extra_ids}).delete()
                 if getattr(keep, cid_field) != getattr(inst, cid_field):
                     setattr(keep, cid_field, getattr(inst, cid_field))
-                    keep._skip_patient_info_refresh = True
+                    keep._skip_patient_record_refresh = True
                     keep.save(update_fields=[cid_field])
                     touched.append(getattr(keep, pk_field))
                 elif extras:
@@ -694,8 +694,8 @@ class FhirSyncView(APIView):
 
         org = get_request_org(request)
         if org is not None:
-            from omop_core.models import PatientInfo
-            if not PatientInfo.objects.filter(person_id=person_id, organization=org).exists():
+            from omop_core.models import PatientRecord
+            if not PatientRecord.objects.filter(person_id=person_id, organization=org).exists():
                 return Response({'detail': 'Person not in your organization.'},
                                 status=status.HTTP_403_FORBIDDEN)
 
@@ -764,7 +764,7 @@ class FhirPatientDeleteView(APIView):
 
         meas_ct = ContentType.objects.get_for_model(Measurement)
         deleted = 0
-        with suppress_patient_info_refresh():
+        with suppress_patient_record_refresh():
             for target in targets:
                 sv = (target.get('source_value') or '')[:50]
                 obs_date = _parse_date(target.get('date') or target.get('datetime'))

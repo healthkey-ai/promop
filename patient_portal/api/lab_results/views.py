@@ -9,7 +9,7 @@ from rest_framework.views import APIView
 
 from omop_core.models import (
     CareSite, Concept, LoincClass, LoincCodeClass,
-    Measurement, MeasurementOwnership, PatientInfo,
+    Measurement, MeasurementOwnership, PatientRecord,
     ProvenanceRecord, VisitOccurrence,
 )
 from patient_portal.api.permissions import ScopedTokenPermission, get_request_org
@@ -90,7 +90,7 @@ def _resolve_person_id(request):
             # Org-scoped path: membership in the org is the only check.
             # Note: patients with organization=NULL (bootstrap/unassigned) are
             # intentionally unreachable via org-scoped tokens.
-            if not PatientInfo.objects.filter(
+            if not PatientRecord.objects.filter(
                 person_id=pid, organization=org,
             ).exists():
                 return None, Response(
@@ -123,7 +123,7 @@ def _resolve_person_id(request):
     except PatientUser.DoesNotExist:
         pass
 
-    # Fallback: resolve by email on PatientInfo.
+    # Fallback: resolve by email on PatientRecord.
     # Without an org scope, only superusers may use the email fallback —
     # a non-superuser without org context could otherwise match a patient
     # from a different organisation via email collision.
@@ -131,7 +131,7 @@ def _resolve_person_id(request):
     org = get_request_org(request)
     pi = None
     if email:
-        email_qs = PatientInfo.objects.filter(email=email)
+        email_qs = PatientRecord.objects.filter(email=email)
         if org is not None:
             pi = email_qs.filter(organization=org).first()
         elif getattr(request.user, 'is_superuser', False):
@@ -550,8 +550,8 @@ class MeasurementDetailView(APIView):
 
         org = get_request_org(request)
         if org is not None:
-            from omop_core.models import PatientInfo
-            if not PatientInfo.objects.filter(
+            from omop_core.models import PatientRecord
+            if not PatientRecord.objects.filter(
                 person_id=m.person_id, organization=org
             ).exists():
                 return None
@@ -697,8 +697,8 @@ class VisitDeleteView(APIView):
         if not is_service:
             org = get_request_org(request)
             if org is not None:
-                from omop_core.models import PatientInfo
-                if not PatientInfo.objects.filter(
+                from omop_core.models import PatientRecord
+                if not PatientRecord.objects.filter(
                     person_id=visit.person_id, organization=org
                 ).exists():
                     return Response(

@@ -104,7 +104,7 @@ class FhirSyncTests(TestCase):
             condition_type_concept=existing.condition_type_concept,
             condition_source_value='legacy',
         )
-        legacy._skip_patient_info_refresh = True
+        legacy._skip_patient_record_refresh = True
         legacy.save()
 
         # Sequence is now behind the table max → next_pk_batch must self-heal.

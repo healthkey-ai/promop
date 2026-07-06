@@ -17,7 +17,7 @@ from collections import Counter
 
 from django.core.management.base import BaseCommand
 
-from omop_core.models import PatientInfo
+from omop_core.models import PatientRecord
 
 # Must stay in sync with _OLD_TO_NEW_SCT in migration 0086.
 _OLD_TO_NEW_SCT = {
@@ -46,7 +46,7 @@ class Command(BaseCommand):
     )
 
     def handle(self, *args, **options):
-        qs = PatientInfo.objects.exclude(
+        qs = PatientRecord.objects.exclude(
             stem_cell_transplant_history=[]
         ).exclude(
             stem_cell_transplant_history__isnull=True
@@ -54,10 +54,10 @@ class Command(BaseCommand):
 
         total_rows = qs.count()
         if total_rows == 0:
-            self.stdout.write('No PatientInfo rows with non-empty SCT history found.')
+            self.stdout.write('No PatientRecord rows with non-empty SCT history found.')
             return
 
-        self.stdout.write(f'Scanning {total_rows} PatientInfo rows...\n')
+        self.stdout.write(f'Scanning {total_rows} PatientRecord rows...\n')
 
         value_counter: Counter = Counter()
         for pi in qs.iterator():

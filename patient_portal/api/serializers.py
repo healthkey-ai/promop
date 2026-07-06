@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from patient_portal.models import Identity
 from omop_core.models import (
-    PatientInfo, Concept,
+    PatientRecord, Concept,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
     Survey, PatientSurveyResponse,
@@ -140,7 +140,7 @@ class PatientListSerializer(serializers.ModelSerializer):
     updated_at = serializers.DateTimeField(format='%Y-%m-%d', read_only=True)
     
     class Meta:
-        model = PatientInfo
+        model = PatientRecord
         fields = [
             'id',
             'person_id',
@@ -181,7 +181,7 @@ class GenderField(serializers.CharField):
         return self.DISPLAY_TO_CODE.get(title, data)
 
 
-class PatientInfoSerializer(serializers.ModelSerializer):
+class PatientRecordSerializer(serializers.ModelSerializer):
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)
     patient_name = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
@@ -192,7 +192,7 @@ class PatientInfoSerializer(serializers.ModelSerializer):
     later_therapy_display = serializers.SerializerMethodField()
 
     class Meta:
-        model = PatientInfo
+        model = PatientRecord
         fields = '__all__'
         # organization and person must never be client-writable: they are
         # set server-side from the auth token / FHIR upload respectively.
@@ -218,7 +218,7 @@ class PatientInfoSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         # Bulk-fetch all Concept rows referenced by therapy_id fields in one query,
         # replacing the per-field Concept.objects.filter() calls in the display methods.
-        # NOTE: this fires one DB query per instance — do NOT use PatientInfoSerializer
+        # NOTE: this fires one DB query per instance — do NOT use PatientRecordSerializer
         # in list views (many=True) without pre-fetching therapy_id concepts, as it
         # will produce N queries for N patients. Use PatientListSerializer for lists.
         concept_ids = set()

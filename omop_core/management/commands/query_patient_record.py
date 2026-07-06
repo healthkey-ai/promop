@@ -1,20 +1,20 @@
 """
-Django management command to query and display PatientInfo records.
+Django management command to query and display PatientRecord records.
 
-This command demonstrates how to query the PatientInfo model and display
+This command demonstrates how to query the PatientRecord model and display
 patient data in a readable format.
 
 Usage:
-    python manage.py query_patient_info
-    python manage.py query_patient_info --person-id 1001
+    python manage.py query_patient_record
+    python manage.py query_patient_record --person-id 1001
 """
 
 from django.core.management.base import BaseCommand
-from omop_core.models import PatientInfo
+from omop_core.models import PatientRecord
 
 
 class Command(BaseCommand):
-    help = 'Query and display PatientInfo records'
+    help = 'Query and display PatientRecord records'
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -33,7 +33,7 @@ class Command(BaseCommand):
         disease = options.get('disease')
 
         # Build query
-        queryset = PatientInfo.objects.select_related('person')
+        queryset = PatientRecord.objects.select_related('person')
         
         if person_id:
             queryset = queryset.filter(person__person_id=person_id)
@@ -43,10 +43,10 @@ class Command(BaseCommand):
 
         # Display results
         if not queryset.exists():
-            self.stdout.write(self.style.WARNING('No PatientInfo records found'))
+            self.stdout.write(self.style.WARNING('No PatientRecord records found'))
             return
 
-        self.stdout.write(f'Found {queryset.count()} PatientInfo record(s):\n')
+        self.stdout.write(f'Found {queryset.count()} PatientRecord record(s):\n')
 
         for patient_info in queryset:
             self.display_patient_info(patient_info)

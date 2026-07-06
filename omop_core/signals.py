@@ -1,20 +1,20 @@
 """
-OMOP post_save signals — auto-refresh PatientInfo whenever OMOP tables are written.
+OMOP post_save signals — auto-refresh PatientRecord whenever OMOP tables are written.
 
 Any write to ConditionOccurrence, DrugExposure, Measurement, Observation, or
-ProcedureOccurrence triggers refresh_patient_info(person), keeping PatientInfo in
+ProcedureOccurrence triggers refresh_patient_record(person), keeping PatientRecord in
 sync without requiring direct writes to the denormalized table.
 
 Signal suppression during bulk uploads:
   Option 1 — context manager (preferred for bulk operations like upload_fhir):
-      from omop_core.signals import suppress_patient_info_refresh
-      with suppress_patient_info_refresh():
+      from omop_core.signals import suppress_patient_record_refresh
+      with suppress_patient_record_refresh():
           # all OMOP writes here — signals fire but refresh is skipped
           ...
-      refresh_patient_info(person)  # single refresh at the end
+      refresh_patient_record(person)  # single refresh at the end
 
   Option 2 — per-instance flag:
-      instance._skip_patient_info_refresh = True
+      instance._skip_patient_record_refresh = True
       instance.save()
 """
 
@@ -38,11 +38,11 @@ _suppress = threading.local()
 
 
 @contextmanager
-def suppress_patient_info_refresh():
-    """Suppress signal-triggered PatientInfo refreshes for the current thread.
+def suppress_patient_record_refresh():
+    """Suppress signal-triggered PatientRecord refreshes for the current thread.
 
-    Use around bulk OMOP writes and call refresh_patient_info() explicitly
-    once at the end to keep PatientInfo in sync with a single DB round-trip.
+    Use around bulk OMOP writes and call refresh_patient_record() explicitly
+    once at the end to keep PatientRecord in sync with a single DB round-trip.
 
     Re-entrant safe: nested calls preserve the outer suppression state.
     """
@@ -55,20 +55,20 @@ def suppress_patient_info_refresh():
 
 
 def _refresh_for_instance(instance):
-    """Call refresh_patient_info for the person linked to an OMOP event instance."""
+    """Call refresh_patient_record for the person linked to an OMOP event instance."""
     if getattr(_suppress, 'active', False):
         return
-    if getattr(instance, '_skip_patient_info_refresh', False):
+    if getattr(instance, '_skip_patient_record_refresh', False):
         return
     try:
         person = instance.person
         # Lazy import to avoid circular-import issues at module load time
-        from omop_core.services.patient_info_service import refresh_patient_info
-        refresh_patient_info(person)
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(person)
     except Exception as exc:
         # Signals must not raise — log and continue
         logger.warning(
-            "PatientInfo refresh failed for person_id=%s after %s save: %s",
+            "PatientRecord refresh failed for person_id=%s after %s save: %s",
             getattr(instance, 'person_id', '?'),
             type(instance).__name__,
             exc,

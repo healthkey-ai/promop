@@ -1,7 +1,7 @@
 """
 Seed the minimal set of OMOP CDM concepts required for the mCODE FHIR import
 pipeline to write Measurements, ConditionOccurrences, and DrugExposures and for
-refresh_patient_info to derive PatientInfo fields from them.
+refresh_patient_record to derive PatientRecord fields from them.
 
 This is a dev/test shortcut.  Production environments should load concepts via
 the full load_athena_vocabularies command instead.
@@ -137,7 +137,7 @@ _CONCEPTS = [
     _c(4112853, 'Malignant tumor of breast', 'Condition', 'SNOMED', 'Disorder', 'S', '254837009'),
 
     # ------------------------------------------------------------------
-    # Tumor marker biomarkers — critical for refresh_patient_info to set
+    # Tumor marker biomarkers — critical for refresh_patient_record to set
     # estrogen_receptor_status, progesterone_receptor_status, her2_status.
     # ------------------------------------------------------------------
     _c(3004390, 'Estrogen receptor [Interpretation] in Tissue',    'Measurement', 'LOINC', 'Lab Test', 'S', '16112-5'),
@@ -155,7 +155,7 @@ _CONCEPTS = [
     _c(36305408, 'Response to cancer treatment',   'Observation',  'LOINC', 'Clinical Observation', 'S', '88040-1'),
 
     # ------------------------------------------------------------------
-    # CBC — enables CBC fields in PatientInfo via _LOINC_LAB_FIELDS
+    # CBC — enables CBC fields in PatientRecord via _LOINC_LAB_FIELDS
     # ------------------------------------------------------------------
     _c(3023314, 'Hematocrit [Volume Fraction] of Blood by Automated count', 'Measurement', 'LOINC', 'Lab Test', 'S', '4544-3'),
     _c(3000905, 'Leukocytes [#/volume] in Blood by Automated count',        'Measurement', 'LOINC', 'Lab Test', 'S', '6690-2'),
@@ -196,7 +196,7 @@ _CONCEPTS = [
     _c(3004410, 'Hemoglobin A1c/Hemoglobin.total in Blood',    'Measurement', 'LOINC', 'Lab Test', 'S', '4548-4'),
 
     # ------------------------------------------------------------------
-    # Vitals — enables weight, height, BP, HR in PatientInfo
+    # Vitals — enables weight, height, BP, HR in PatientRecord
     # ------------------------------------------------------------------
     _c(3025315, 'Body weight',             'Measurement', 'LOINC', 'Clinical Observation', 'S', '29463-7'),
     _c(3036277, 'Body height',             'Measurement', 'LOINC', 'Clinical Observation', 'S', '8302-2'),

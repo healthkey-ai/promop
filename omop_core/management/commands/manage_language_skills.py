@@ -133,7 +133,7 @@ class Command(BaseCommand):
 
         # Show summary
         summary = person.get_language_skills_summary()
-        display = person.patient_info.get_languages_display() if hasattr(person, 'patient_info') else 'No PatientInfo'
+        display = person.patient_record.get_languages_display() if hasattr(person, 'patient_record') else 'No PatientRecord'
         self.stdout.write(f'\nSummary: {display}')
 
     def add_language(self, person, language_spec):

@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    CurrentUserViewSet, PatientInfoViewSet, login_view, logout_view, auth_test,
+    CurrentUserViewSet, PatientRecordViewSet, login_view, logout_view, auth_test,
     # Person identity resolution
     PersonViewSet,
     # OMOP clinical event ViewSets
@@ -28,9 +28,9 @@ from .org_views import (
 
 router = DefaultRouter()
 
-# Core PatientInfo
+# Core PatientRecord
 router.register(r'user', CurrentUserViewSet, basename='user')
-router.register(r'patient-info', PatientInfoViewSet, basename='patient-info')
+router.register(r'patient-info', PatientRecordViewSet, basename='patient-info')
 
 # Person identity resolution + demographic patch
 router.register(r'persons', PersonViewSet, basename='persons')

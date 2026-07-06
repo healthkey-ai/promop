@@ -30,10 +30,10 @@ def _today():
 
 def sync_to_omop(patient_info, changed_fields: set, today: date = None, changed_data: dict = None) -> None:
     """
-    Write PatientInfo changes through to OMOP tables.
+    Write PatientRecord changes through to OMOP tables.
 
     Raises on failure — callers must wrap in transaction.atomic() so that a
-    failed OMOP write rolls back the PatientInfo save and the read-model never
+    failed OMOP write rolls back the PatientRecord save and the read-model never
     diverges from the OMOP source of truth.
 
     changed_data: the raw request.data dict, used for fields that may be read-only
@@ -76,9 +76,9 @@ def _sync_measurement(person, field_name: str, value, today: date) -> None:
     ).first()
     if existing:
         existing.value_as_number = value
-        existing._skip_patient_info_refresh = True
+        existing._skip_patient_record_refresh = True
         existing.save(update_fields=['value_as_number'])
-        del existing._skip_patient_info_refresh
+        del existing._skip_patient_record_refresh
     else:
         new_id = next_pk(Measurement, 'measurement_id')
         m = Measurement(
@@ -91,9 +91,9 @@ def _sync_measurement(person, field_name: str, value, today: date) -> None:
             measurement_source_value=loinc_code,
             unit_source_value=unit,
         )
-        m._skip_patient_info_refresh = True
+        m._skip_patient_record_refresh = True
         m.save()
-        del m._skip_patient_info_refresh
+        del m._skip_patient_record_refresh
 
 
 def _sync_condition(person, patient_info, today: date, changed_data: dict = None) -> None:
@@ -126,9 +126,9 @@ def _sync_condition(person, patient_info, today: date, changed_data: dict = None
     if existing_co:
         existing_co.condition_start_date = today
         existing_co.condition_concept = condition_concept
-        existing_co._skip_patient_info_refresh = True
+        existing_co._skip_patient_record_refresh = True
         existing_co.save(update_fields=['condition_start_date', 'condition_concept_id'])
-        del existing_co._skip_patient_info_refresh
+        del existing_co._skip_patient_record_refresh
         return
 
     new_id = next_pk(ConditionOccurrence, 'condition_occurrence_id')
@@ -140,13 +140,13 @@ def _sync_condition(person, patient_info, today: date, changed_data: dict = None
         condition_type_concept=type_concept,
         condition_source_value=source_value,
     )
-    # Skip the post_save signal that calls refresh_patient_info — the PatientInfo
+    # Skip the post_save signal that calls refresh_patient_record — the PatientRecord
     # disease field was already saved correctly by the serializer; re-deriving it
     # from OMOP immediately would overwrite the user's selection with the OMOP
     # concept name (which may differ in casing or be unresolved).
-    co._skip_patient_info_refresh = True
+    co._skip_patient_record_refresh = True
     co.save()
-    del co._skip_patient_info_refresh
+    del co._skip_patient_record_refresh
 
 
 def _sync_demographics(person, patient_info, changed_data: dict = None) -> None:
@@ -154,7 +154,7 @@ def _sync_demographics(person, patient_info, changed_data: dict = None) -> None:
         changed_data = {}
     update_fields = []
 
-    # 'gender' on PatientInfo is a read-only SerializerMethodField so it may not be
+    # 'gender' on PatientRecord is a read-only SerializerMethodField so it may not be
     # updated on the model instance after save; fall back to the raw request value.
     gender_str = getattr(patient_info, 'gender', None) or changed_data.get('gender')
     if gender_str:

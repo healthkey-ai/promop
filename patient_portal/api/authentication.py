@@ -144,7 +144,7 @@ class PartnerAuthentication(BaseAuthentication):
 
 
 def _ensure_person(identity, claims=None):
-    """Auto-provision an OMOP Person + PatientInfo + PatientUser."""
+    """Auto-provision an OMOP Person + PatientRecord + PatientUser."""
     from patient_portal.services import resolve_or_create_person
 
     email = ""

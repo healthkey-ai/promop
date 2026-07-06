@@ -60,7 +60,7 @@ class ScopedTokenPermission(BasePermission):
     another patient's record). Any view using this permission class for
     mutating endpoints MUST also enforce object ownership via one of:
       - _ProvenanceMixin.perform_update / perform_destroy (lab results views)
-      - PatientInfoViewSet.partial_update (patient info views)
+      - PatientRecordViewSet.partial_update (patient info views)
       - an explicit can_access_patient() check in the action method
 
     A new view that uses ScopedTokenPermission without one of these safeguards

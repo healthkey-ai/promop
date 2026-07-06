@@ -14,7 +14,7 @@ from django.utils import timezone
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from omop_core.models import (
-    Person, PatientInfo, Concept, ProvenanceRecord,
+    Person, PatientRecord, Concept, ProvenanceRecord,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence,
     PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
@@ -32,7 +32,7 @@ from omop_core.models import (
     BreastCancerFirstLineTherapy, BreastCancerSecondLineTherapy, BreastCancerLaterLineTherapy,
 )
 from omop_oncology.models import Episode, EpisodeEvent
-from omop_core.services.patient_info_service import refresh_patient_info
+from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.omop_write_service import sync_to_omop
 from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
@@ -50,7 +50,7 @@ from io import StringIO
 from .permissions import ScopedTokenPermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
-    UserSerializer, PatientInfoSerializer, PatientListSerializer, ProvenanceRecordSerializer,
+    UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
     ConditionOccurrenceSerializer, DrugExposureSerializer, MeasurementSerializer,
     ObservationSerializer, ProcedureOccurrenceSerializer,
     EpisodeSerializer, EpisodeEventSerializer,
@@ -63,7 +63,7 @@ from django.views.decorators.http import require_http_methods
 logger = logging.getLogger(__name__)
 
 
-class PatientInfoPagination(PageNumberPagination):
+class PatientRecordPagination(PageNumberPagination):
     page_size = 25
     page_size_query_param = 'page_size'
     max_page_size = 100
@@ -150,7 +150,7 @@ def _delete_omop_clinical_rows(person):
     """Delete all OMOP clinical rows for a person, in FK dependency order.
 
     Must be called inside a transaction.atomic() block.
-    Does NOT delete PatientInfo, PatientGroupMembership, PatientUser/Identity,
+    Does NOT delete PatientRecord, PatientGroupMembership, PatientUser/Identity,
     or Person — callers handle those after this returns.
     """
     episode_ids = list(Episode.objects.filter(person=person).values_list('episode_id', flat=True))
@@ -175,10 +175,10 @@ def _delete_omop_clinical_rows(person):
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
-    serializer_class = PatientInfoSerializer
+class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = PatientRecordSerializer
     permission_classes = [ScopedTokenPermission]
-    pagination_class = PatientInfoPagination
+    pagination_class = PatientRecordPagination
 
     DATE_FILTERS = {
         '7d': timedelta(days=7),
@@ -187,7 +187,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     }
     
     def get_queryset(self):
-        qs = PatientInfo.objects.all().select_related('person', 'organization')
+        qs = PatientRecord.objects.all().select_related('person', 'organization')
         # Trusted backend (service-token): full visibility across all patients.
         if is_service_token(self.request):
             return qs
@@ -255,7 +255,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     def get_serializer_class(self):
         if self.action == 'list':
             return PatientListSerializer
-        return PatientInfoSerializer
+        return PatientRecordSerializer
 
     def _normalize_all_param(self, value):
         value = (value or '').strip()
@@ -391,7 +391,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 ethnicity_source_value='unknown',
             )
 
-        serializer = PatientInfoSerializer(data=data, context={'request': request})
+        serializer = PatientRecordSerializer(data=data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         serializer.save(person=person)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -400,10 +400,10 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         """Get detailed patient info for a specific person"""
         try:
             person = Person.objects.get(person_id=pk)
-            patient_info = PatientInfo.objects.get(person=person)
+            patient_info = PatientRecord.objects.get(person=person)
         except Person.DoesNotExist:
             return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        except PatientInfo.DoesNotExist:
+        except PatientRecord.DoesNotExist:
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
 
         # AUTH-04: enforce per-patient row-level access
@@ -425,7 +425,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         except PatientUser.DoesNotExist:
             user_data = None
 
-        patient_serializer = PatientInfoSerializer(patient_info)
+        patient_serializer = PatientRecordSerializer(patient_info)
 
         return Response({
             'patient_info': patient_serializer.data,
@@ -433,13 +433,13 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         })
 
     def partial_update(self, request, pk=None):
-        """PATCH /api/patient-info/{person_id}/ — update PatientInfo and write through to OMOP."""
+        """PATCH /api/patient-info/{person_id}/ — update PatientRecord and write through to OMOP."""
         try:
             person = Person.objects.get(person_id=pk)
-            patient_info = PatientInfo.objects.get(person=person)
+            patient_info = PatientRecord.objects.get(person=person)
         except Person.DoesNotExist:
             return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        except PatientInfo.DoesNotExist:
+        except PatientRecord.DoesNotExist:
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
 
         org = get_request_org(request)
@@ -466,7 +466,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         # Capture previous values for fields being changed (exclude provenance meta-fields).
         # Use {field}_id for FK fields so we get a serializable PK, not a model object.
         _prov_meta = {'source', 'source_user_id', 'modification_reason'}
-        _read_only = set(PatientInfoSerializer.Meta.read_only_fields)
+        _read_only = set(PatientRecordSerializer.Meta.read_only_fields)
         def _prev_val(obj, field):
             fk_id = f'{field}_id'
             if hasattr(obj, fk_id):
@@ -478,7 +478,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             if field not in _prov_meta and field not in _read_only and hasattr(patient_info, field)
         }
 
-        serializer = PatientInfoSerializer(patient_info, data=request.data, partial=True)
+        serializer = PatientRecordSerializer(patient_info, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
 
         changed_fields = {f for f in request.data if f not in _prov_meta}
@@ -515,10 +515,10 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         """GET /api/patient-info/{person_id}/provenance/ — full provenance history for a patient."""
         try:
             person = Person.objects.get(person_id=pk)
-            patient_info = PatientInfo.objects.get(person=person)
+            patient_info = PatientRecord.objects.get(person=person)
         except Person.DoesNotExist:
             return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        except PatientInfo.DoesNotExist:
+        except PatientRecord.DoesNotExist:
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
 
         org = get_request_org(request)
@@ -531,9 +531,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
         from django.db.models import Q
-        # Build a single query for all provenance records across PatientInfo + OMOP tables
+        # Build a single query for all provenance records across PatientRecord + OMOP tables
         q = Q(
-            content_type=ContentType.objects.get_for_model(PatientInfo),
+            content_type=ContentType.objects.get_for_model(PatientRecord),
             object_id=patient_info.pk,
         )
         for model_cls in [Measurement, ConditionOccurrence, DrugExposure, ProcedureOccurrence]:
@@ -548,7 +548,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['get', 'patch'], permission_classes=[ScopedTokenPermission])
     def me(self, request):
-        """GET/PATCH /api/patient-info/me/ — current user's own PatientInfo."""
+        """GET/PATCH /api/patient-info/me/ — current user's own PatientRecord."""
         from patient_portal.models import PatientUser
         from patient_portal.services import resolve_or_create_person
 
@@ -576,11 +576,11 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             person = resolve_or_create_person(request.user, allow_create=not is_clinical)
             if person is None:
                 return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        patient_info, _ = PatientInfo.objects.get_or_create(person=person)
+        patient_info, _ = PatientRecord.objects.get_or_create(person=person)
 
         if request.method == 'GET':
             user_serializer = UserSerializer(request.user)
-            patient_serializer = PatientInfoSerializer(patient_info)
+            patient_serializer = PatientRecordSerializer(patient_info)
             full_name = f"{person.given_name or ''} {person.family_name or ''}".strip()
             return Response({
                 'patient_info': patient_serializer.data,
@@ -598,7 +598,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             person.family_name = parts[1] if len(parts) > 1 else ''
             person.save(update_fields=['given_name', 'family_name'])
 
-        serializer = PatientInfoSerializer(patient_info, data=patch_data, partial=True)
+        serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
         serializer.is_valid(raise_exception=True)
 
         changed_fields = set(patch_data.keys())
@@ -671,7 +671,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             except ValueError:
                                 pass
                     
-                    patient_info, pi_created = PatientInfo.objects.update_or_create(
+                    patient_info, pi_created = PatientRecord.objects.update_or_create(
                         person=person,
                         defaults={
                             'date_of_birth': date_of_birth,
@@ -795,7 +795,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             _concept_generic_lab   = _cc_by_id(3000963)  # Generic lab
 
             # When skip_refresh=true the caller (e.g. load_fhir_bundle) will run
-            # refresh_patient_info for all patients after the upload completes.
+            # refresh_patient_record for all patients after the upload completes.
             # This eliminates the per-patient refresh cost during the tight write loop.
             _skip_refresh = request.query_params.get('skip_refresh', 'false').lower() in ('1', 'true')
 
@@ -937,11 +937,11 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     given_name = ' '.join(name.get('given', [])) if name.get('given') else ''
                     family_name = name.get('family', '')
                     
-                    # Suppress signal-triggered PatientInfo refreshes for all OMOP
+                    # Suppress signal-triggered PatientRecord refreshes for all OMOP
                     # writes below. Use __enter__/__exit__ explicitly so the finally
                     # block guarantees cleanup even on BaseException (e.g. KeyboardInterrupt),
                     # without requiring 1000 lines of re-indentation.
-                    from omop_core.signals import suppress_patient_info_refresh as _suppress_cm_fn
+                    from omop_core.signals import suppress_patient_record_refresh as _suppress_cm_fn
                     _suppress_cm = _suppress_cm_fn()
                     _suppress_cm.__enter__()
 
@@ -1087,7 +1087,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     condition_type_concept=type_concept,
                                     condition_source_value=disease,
                                 )
-                                _co._skip_patient_info_refresh = True
+                                _co._skip_patient_record_refresh = True
                                 try:
                                     with transaction.atomic():
                                         _co.save()
@@ -1662,7 +1662,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 break
 
                         # BP panel (85354-9) — expand components to individual measurements
-                        # for systolic (8480-6) and diastolic (8462-4) so refresh_patient_info
+                        # for systolic (8480-6) and diastolic (8462-4) so refresh_patient_record
                         # can derive BP from the Measurement table.
                         if obs_loinc == '85354-9':
                             _bp_type = _concept_lab_type or _concept_generic_lab
@@ -1693,7 +1693,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                         measurement_source_value=_comp_loinc,
                                         unit_source_value=_comp_unit[:50] if _comp_unit else None,
                                     )
-                                    _cm._skip_patient_info_refresh = True
+                                    _cm._skip_patient_record_refresh = True
                                     _existing_measurements[_comp_key] = _cm
                                     _pending_measurements.append(_cm)
                                     _bp_any_written = True
@@ -1731,7 +1731,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                         or existing_m.value_as_string != value_string):
                                     existing_m.value_as_number = value_number
                                     existing_m.value_as_string = value_string
-                                    existing_m._skip_patient_info_refresh = True
+                                    existing_m._skip_patient_record_refresh = True
                                     existing_m.save()
                             else:
                                 _m = Measurement(
@@ -1746,7 +1746,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     measurement_source_value=source_value,
                                     unit_source_value=unit[:50] if unit else None,
                                 )
-                                _m._skip_patient_info_refresh = True
+                                _m._skip_patient_record_refresh = True
                                 # Keep the dict current so duplicate observations
                                 # in the same patient don't re-insert the same row.
                                 _existing_measurements[_mkey] = _m
@@ -2007,7 +2007,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                         drug_type_concept=drug_type_concept,
                                         drug_source_value=(lot_data.get('regimen') or '')[:50],
                                     )
-                                    _de._skip_patient_info_refresh = True
+                                    _de._skip_patient_record_refresh = True
                                     _de.save()
                                     _pt_drug_exposure_ids.append(_de.drug_exposure_id)
                                     if prov_source:
@@ -2053,19 +2053,19 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             logger.warning('{"event": "drug_exposure_write_failed", "lot_num": %d, "error_type": "%s", "patient": "%s"}',
                                            lot_num, type(_e).__name__, _timing_hash)
 
-                    # --- OMOP-first: refresh PatientInfo from OMOP tables ---
+                    # --- OMOP-first: refresh PatientRecord from OMOP tables ---
                     # Release suppression so the single intentional refresh can run.
                     # We stay inside the atomic block so that a refresh failure rolls
                     # back all OMOP writes for this patient.
                     _suppress_cm.__exit__(None, None, None)
                     logger.info("TIMING patient=%s phase=drug_exposures elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
                     if _skip_refresh:
-                        # Bulk mode — just ensure the PatientInfo row exists so the
+                        # Bulk mode — just ensure the PatientRecord row exists so the
                         # patch block below has an object to write FHIR-specific fields
                         # into.  The full OMOP-derived refresh is deferred to the caller.
-                        patient_info, _ = PatientInfo.objects.get_or_create(person=person)
+                        patient_info, _ = PatientRecord.objects.get_or_create(person=person)
                     else:
-                        patient_info = refresh_patient_info(person)
+                        patient_info = refresh_patient_record(person)
                         infer_lot_for_person(person)
 
                     # --- Patch fields from FHIR that aren't yet in OMOP tables ---
@@ -2161,7 +2161,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         _patch['pd_l1_tumor_cells'] = pdl1_percentage
                     if genetic_mutations:
                         _patch['genetic_mutations'] = genetic_mutations
-                    # Therapy lines (denormalized PatientInfo fields)
+                    # Therapy lines (denormalized PatientRecord fields)
                     if first_line_therapy:
                         _patch.update({
                             'first_line_therapy': first_line_therapy,
@@ -2193,7 +2193,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             'later_outcome': later_outcome,
                         })
                     # Labs are now written to the OMOP Measurement table (FHIR-06/07/08)
-                    # and derived into PatientInfo via refresh_patient_info (FHIR-09).
+                    # and derived into PatientRecord via refresh_patient_record (FHIR-09).
                     # Only fields not yet modelled in OMOP are patched directly below.
                     _patch.update({k: v for k, v in {
                         'serum_bilirubin_level_direct': bilirubin_direct,
@@ -2251,7 +2251,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     if upload_org is not None and patient_info.organization_id is None:
                         _patch['organization'] = upload_org
 
-                    # Apply patch to PatientInfo (suppress signal-triggering save)
+                    # Apply patch to PatientRecord (suppress signal-triggering save)
                     for _field, _val in _patch.items():
                         setattr(patient_info, _field, _val)
                     patient_info.save()
@@ -2344,7 +2344,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             for person_id in person_ids:
                 try:
                     person = Person.objects.get(person_id=person_id)
-                    if org is not None and not PatientInfo.objects.filter(person=person, organization=org).exists():
+                    if org is not None and not PatientRecord.objects.filter(person=person, organization=org).exists():
                         errors.append("Person not found.")
                         continue
                     elif org is None and not _is_privileged:
@@ -2358,8 +2358,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         # PatientGroupMembership uses a plain BigIntegerField (no DB FK)
                         # so it is never cascade-deleted by the ORM.
                         PatientGroupMembership.objects.filter(person_id=person.person_id).delete()
-                        # Delete PatientInfo
-                        PatientInfo.objects.filter(person=person).delete()
+                        # Delete PatientRecord
+                        PatientRecord.objects.filter(person=person).delete()
                         # Delete associated Identity if exists (via PatientUser)
                         from patient_portal.models import PatientUser as PU
                         try:
@@ -2388,15 +2388,15 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['delete'], permission_classes=[ScopedTokenPermission])
     def bulk_delete_filtered(self, request):
-        """Delete PatientInfo records matching all active filters (org + disease + stage + date).
-        Only deletes the matched PatientInfo rows; Person/Identity are removed only if the
-        person has no remaining PatientInfo in any org after the deletion.
+        """Delete PatientRecord records matching all active filters (org + disease + stage + date).
+        Only deletes the matched PatientRecord rows; Person/Identity are removed only if the
+        person has no remaining PatientRecord in any org after the deletion.
         """
         try:
             base_queryset = self.get_queryset()
             filtered_queryset = self._apply_patient_list_filters(base_queryset)
 
-            # Snapshot both the specific PatientInfo PKs and their person IDs in one query.
+            # Snapshot both the specific PatientRecord PKs and their person IDs in one query.
             snapshot = list(filtered_queryset.values_list('id', 'person__person_id'))
             if not snapshot:
                 return Response({'success': True, 'deleted_count': 0, 'errors': []})
@@ -2405,15 +2405,15 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             person_ids = [row[1] for row in snapshot]
 
             errors = []
-            # Bulk-delete only the specifically filtered PatientInfo records — correctly
+            # Bulk-delete only the specifically filtered PatientRecord records — correctly
             # scoped to org + disease + stage + date via the queryset snapshot.
             # This transaction commits before per-person orphan cleanup so a failure
-            # in the cleanup loop cannot roll back the PatientInfo deletions.
+            # in the cleanup loop cannot roll back the PatientRecord deletions.
             with transaction.atomic():
-                PatientInfo.objects.filter(id__in=patientinfo_ids).delete()
+                PatientRecord.objects.filter(id__in=patientinfo_ids).delete()
             deleted_count = len(patientinfo_ids)
 
-            # Clean up Person/OMOP rows/Identity for persons that now have no PatientInfo
+            # Clean up Person/OMOP rows/Identity for persons that now have no PatientRecord
             # at all.  Each person gets its own savepoint so a single failure does not
             # abort cleanup for the remaining persons.
             persons = {p.person_id: p for p in Person.objects.filter(person_id__in=person_ids)}
@@ -2423,7 +2423,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 if person is None:
                     continue
                 try:
-                    if not PatientInfo.objects.filter(person=person).exists():
+                    if not PatientRecord.objects.filter(person=person).exists():
                         with transaction.atomic():
                             _delete_omop_clinical_rows(person)
                             # PatientGroupMembership uses a plain BigIntegerField (no DB FK).
@@ -2557,7 +2557,7 @@ def org_disease_stats(request):
     granting_counts: dict[int, int] = {}
     if all_granting_ids:
         granting_counts = dict(
-            PatientInfo.objects.filter(organization_id__in=all_granting_ids)
+            PatientRecord.objects.filter(organization_id__in=all_granting_ids)
             .values('organization_id')
             .annotate(c=Count('id'))
             .values_list('organization_id', 'c')
@@ -2565,7 +2565,7 @@ def org_disease_stats(request):
 
     result = []
     for org in org_list:
-        counts = _disease_counts(PatientInfo.objects.filter(organization=org))
+        counts = _disease_counts(PatientRecord.objects.filter(organization=org))
         owned_count = sum(d['count'] for d in counts)
         accessible_count = owned_count + sum(granting_counts.get(gid, 0) for gid in trusting_map[org.id])
 
@@ -2580,7 +2580,7 @@ def org_disease_stats(request):
 
     # For staff/superusers: also surface patients not assigned to any org.
     if getattr(request.user, 'is_staff', False) or getattr(request.user, 'is_superuser', False):
-        counts = _disease_counts(PatientInfo.objects.filter(organization__isnull=True))
+        counts = _disease_counts(PatientRecord.objects.filter(organization__isnull=True))
         if counts:
             unassigned_total = sum(d['count'] for d in counts)
             result.insert(0, {
@@ -2693,7 +2693,7 @@ class PersonViewSet(viewsets.GenericViewSet):
         if not is_service_token(request):
             org = get_request_org(request)
             if org is not None:
-                if not PatientInfo.objects.filter(person=person, organization=org).exists():
+                if not PatientRecord.objects.filter(person=person, organization=org).exists():
                     return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
             elif not (getattr(request.user, 'is_superuser', False) or getattr(request.user, 'is_staff', False)):
                 from omop_core.authorization import can_access_patient
@@ -2750,8 +2750,8 @@ class _OmopFilterMixin:
             return qs
         org = get_request_org(self.request)
         if org is not None:
-            from omop_core.models import PatientInfo
-            allowed = PatientInfo.objects.filter(organization=org).values('person_id')
+            from omop_core.models import PatientRecord
+            allowed = PatientRecord.objects.filter(organization=org).values('person_id')
             qs = qs.filter(person_id__in=allowed)
         elif not (self.request.user and (
             getattr(self.request.user, 'is_superuser', False) or
@@ -2806,9 +2806,9 @@ class _ProvenanceMixin:
             person = serializer.validated_data.get('person')
             if person:
                 from rest_framework.exceptions import PermissionDenied
-                # Allow bootstrap (no PatientInfo yet) and unclaimed patients (org=NULL).
-                # Block only when a PatientInfo exists and is already claimed by a different org.
-                existing_pi = PatientInfo.objects.filter(person=person).first()
+                # Allow bootstrap (no PatientRecord yet) and unclaimed patients (org=NULL).
+                # Block only when a PatientRecord exists and is already claimed by a different org.
+                existing_pi = PatientRecord.objects.filter(person=person).first()
                 if (existing_pi is not None
                         and existing_pi.organization is not None
                         and existing_pi.organization != org):
@@ -2837,9 +2837,9 @@ class _ProvenanceMixin:
         if org is not None:
             person = serializer.validated_data.get('person') or serializer.instance.person
             from rest_framework.exceptions import NotFound, PermissionDenied
-            # On updates the patient must already have a PatientInfo; missing = not found.
+            # On updates the patient must already have a PatientRecord; missing = not found.
             # Unclaimed patients (org=NULL) are allowed; only reject explicit cross-org.
-            existing_pi = PatientInfo.objects.filter(person=person).first()
+            existing_pi = PatientRecord.objects.filter(person=person).first()
             if existing_pi is None:
                 raise NotFound('Person not found.')
             if existing_pi.organization is not None and existing_pi.organization != org:
@@ -2955,7 +2955,7 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
         org = get_request_org(self.request)
         if org is not None:
             from django.db.models import Q
-            allowed_pids = PatientInfo.objects.filter(
+            allowed_pids = PatientRecord.objects.filter(
                 Q(organization=org) | Q(organization__isnull=True)
             ).values('person_id')
             allowed_episodes = Episode.objects.filter(person_id__in=allowed_pids).values('episode_id')
@@ -3001,7 +3001,7 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
                 episode = Episode.objects.get(episode_id=episode_id)
             except Episode.DoesNotExist:
                 raise NotFound('Episode not found.')
-            pi = PatientInfo.objects.filter(person_id=episode.person_id).first()
+            pi = PatientRecord.objects.filter(person_id=episode.person_id).first()
             if pi is not None and pi.organization is not None and pi.organization != org:
                 raise PermissionDenied('Episode does not belong to your organization.')
         elif self.request.user and not (
