@@ -59,7 +59,7 @@ Synthea writes individual patient JSON files into `output/fhir/`. PRomop expects
 ```bash
 # Run from the Synthea directory
 python -c "
-import json, glob, sys
+import json, glob
 
 entries = []
 for path in glob.glob('output/fhir/*.json'):
@@ -178,7 +178,7 @@ Synthea FHIR bundles
         ▼
   PRomop (Django + PostgreSQL)
   ├── OMOP CDM tables (Person, Measurement, ConditionOccurrence, DrugExposure …)
-  └── PatientRecord (286-column denormalized projection)
+  └── PatientInfo (286-column denormalized projection)
         │  read-only, managed=False
         ▼
   PRism backend (Django, port 8000)
@@ -189,9 +189,9 @@ Synthea FHIR bundles
   └── Dashboard panels (response rates, treatment patterns, survival, staging …)
 ```
 
-PRism reads `PatientRecord` directly from PRomop's PostgreSQL database using `managed=False` Django models — no REST calls between the two backends. The PRomop REST API remains the integration point for external tools; PRism bypasses it for query performance.
+PRism reads `PatientInfo` directly from PRomop's PostgreSQL database using `managed=False` Django models — no REST calls between the two backends. The PRomop REST API remains the integration point for external tools; PRism bypasses it for query performance.
 
-To run the full stack, you need three terminals. Keep the PRomop server from the previous step running, then start the PRism backend and frontend:
+To run the full stack, you need three terminals:
 
 ```bash
 # Terminal 1 — PRomop REST API (port 8001; PRism backend claims 8000)
@@ -213,7 +213,7 @@ cd ~/prism/frontend
 npm install && npm run dev
 ```
 
-Open `http://localhost:5173/` in your browser. Log in with the superuser credentials you created during PRomop setup. The cohort builder loads all patients from the shared `PatientRecord` table; applying filters narrows the cohort and updates the dashboard panels in real time. With 200 mCODE breast cancer patients you have enough density to see meaningful distributions — staging breakdowns, receptor status frequencies, treatment pattern counts, and lab value ranges that reflect the mCODE module's realistic clinical modeling.
+Open `http://localhost:5173/` in your browser. Log in with the superuser credentials you created during PRomop setup. The cohort builder loads all patients from the shared `PatientInfo` table; applying filters narrows the cohort and updates the dashboard panels in real time. With 200 mCODE breast cancer patients you have enough density to see meaningful distributions — staging breakdowns, receptor status frequencies, treatment pattern counts, and lab value ranges that reflect the mCODE module's realistic clinical modeling.
 
 ---
 
