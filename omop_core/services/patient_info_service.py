@@ -626,35 +626,41 @@ def _get_biomarker_data(person: Person) -> dict:
         data['pd_l1_tumor_cells'] = int(pdl1_test.value_as_number) if pdl1_test.value_as_number else None
         data['pd_l1_assay'] = pdl1_test.value_source_value
 
+    def _receptor_status(measurement):
+        """Return 'POSITIVE', 'NEGATIVE', or None from a receptor Measurement row."""
+        if measurement.value_as_concept_id:
+            concept = _cc_by_id(measurement.value_as_concept_id)
+            if concept:
+                name = concept.concept_name.lower()
+                if 'positive' in name:
+                    return 'POSITIVE'
+                if 'negative' in name:
+                    return 'NEGATIVE'
+        if measurement.value_as_string:
+            s = measurement.value_as_string.lower()
+            if 'positive' in s:
+                return 'POSITIVE'
+            if 'negative' in s:
+                return 'NEGATIVE'
+        return None
+
     er_measurements = measurements.filter(measurement_concept__concept_code='16112-5')
     if er_measurements.exists():
-        er_test = er_measurements.first()
-        if er_test.value_as_concept_id:
-            concept = _cc_by_id(er_test.value_as_concept_id)
-            if 'positive' in concept.concept_name.lower():
-                data['estrogen_receptor_status'] = 'POSITIVE'
-            elif 'negative' in concept.concept_name.lower():
-                data['estrogen_receptor_status'] = 'NEGATIVE'
+        status = _receptor_status(er_measurements.first())
+        if status:
+            data['estrogen_receptor_status'] = status
 
     pr_measurements = measurements.filter(measurement_concept__concept_code='16113-3')
     if pr_measurements.exists():
-        pr_test = pr_measurements.first()
-        if pr_test.value_as_concept_id:
-            concept = _cc_by_id(pr_test.value_as_concept_id)
-            if 'positive' in concept.concept_name.lower():
-                data['progesterone_receptor_status'] = 'POSITIVE'
-            elif 'negative' in concept.concept_name.lower():
-                data['progesterone_receptor_status'] = 'NEGATIVE'
+        status = _receptor_status(pr_measurements.first())
+        if status:
+            data['progesterone_receptor_status'] = status
 
     her2_measurements = measurements.filter(measurement_concept__concept_code='48676-1')
     if her2_measurements.exists():
-        her2_test = her2_measurements.first()
-        if her2_test.value_as_concept_id:
-            concept = _cc_by_id(her2_test.value_as_concept_id)
-            if 'positive' in concept.concept_name.lower():
-                data['her2_status'] = 'POSITIVE'
-            elif 'negative' in concept.concept_name.lower():
-                data['her2_status'] = 'NEGATIVE'
+        status = _receptor_status(her2_measurements.first())
+        if status:
+            data['her2_status'] = status
 
     if 'estrogen_receptor_status' in data and 'progesterone_receptor_status' in data and 'her2_status' in data:
         data['tnbc_status'] = (

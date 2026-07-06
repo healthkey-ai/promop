@@ -725,10 +725,20 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             # Group resources by patient
             patients_data = {}
             
+            def _resolve_patient_ref(ref: str) -> str:
+                """Resolve a FHIR subject reference to a bare patient id.
+
+                Handles both relative references ('Patient/UUID') and absolute
+                URN references ('urn:uuid:UUID') used by mCODE bundles.
+                """
+                if ref.startswith('urn:uuid:'):
+                    return ref[len('urn:uuid:'):]
+                return ref.split('/')[-1] if '/' in ref else ref
+
             for entry in fhir_data.get('entry', []):
                 resource = entry.get('resource', {})
                 resource_type = resource.get('resourceType')
-                
+
                 if resource_type == 'Patient':
                     patient_id = resource.get('id', '')
                     patients_data[patient_id] = {
@@ -739,17 +749,17 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     }
                 elif resource_type == 'Condition':
                     patient_ref = resource.get('subject', {}).get('reference', '')
-                    patient_id = patient_ref.split('/')[-1] if '/' in patient_ref else ''
+                    patient_id = _resolve_patient_ref(patient_ref)
                     if patient_id in patients_data:
                         patients_data[patient_id]['conditions'].append(resource)
                 elif resource_type == 'Observation':
                     patient_ref = resource.get('subject', {}).get('reference', '')
-                    patient_id = patient_ref.split('/')[-1] if '/' in patient_ref else ''
+                    patient_id = _resolve_patient_ref(patient_ref)
                     if patient_id in patients_data:
                         patients_data[patient_id]['observations'].append(resource)
                 elif resource_type == 'MedicationStatement':
                     patient_ref = resource.get('subject', {}).get('reference', '')
-                    patient_id = patient_ref.split('/')[-1] if '/' in patient_ref else ''
+                    patient_id = _resolve_patient_ref(patient_ref)
                     if patient_id in patients_data:
                         patients_data[patient_id]['medications'].append(resource)
             
@@ -970,14 +980,25 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     if not disease:
                                         disease = stage_text.split('Stage')[0].strip() or None
                             elif stage_summary.get('coding') and len(stage_summary['coding']) > 0:
-                                stage = stage_summary['coding'][0].get('code', '')
+                                # Prefer display (e.g. "Stage 2B") over the raw code
+                                _sc = stage_summary['coding'][0]
+                                stage_display = _sc.get('display', '')
+                                if 'Stage' in stage_display:
+                                    stage = stage_display.split('Stage')[-1].strip()
+                                else:
+                                    stage = stage_display or _sc.get('code', '')
                         
-                        # Get condition onset date
+                        # Get condition onset date (handles both 'YYYY-MM-DD' and ISO datetime)
                         if condition.get('onsetDateTime'):
                             try:
-                                naive_dt = datetime.strptime(condition['onsetDateTime'], '%Y-%m-%d')
-                                condition_date = timezone.make_aware(naive_dt)
-                            except ValueError:
+                                raw = condition['onsetDateTime']
+                                if 'T' in raw:
+                                    condition_date = datetime.fromisoformat(raw)
+                                    if condition_date.tzinfo is None:
+                                        condition_date = timezone.make_aware(condition_date)
+                                else:
+                                    condition_date = timezone.make_aware(datetime.strptime(raw, '%Y-%m-%d'))
+                            except (ValueError, TypeError):
                                 pass
                     
                     # Upsert ConditionOccurrence for the diagnosis
@@ -1311,8 +1332,18 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 test_date = observation['effectiveDateTime'][:10]
                         elif loinc_code == '69548-6':  # Test Interpretation
                             report_interpretation = value_codeable
-                        elif loinc_code == '16112-5':  # Androgen Receptor
-                            androgen_receptor_status = value_codeable
+                        elif loinc_code == '16112-5':  # Estrogen Receptor (ER) — mCODE tumor marker
+                            if observation.get('valueCodeableConcept'):
+                                value_concept = observation['valueCodeableConcept']
+                                er_status = value_concept.get('text') or (value_concept.get('coding') or [{}])[0].get('display')
+                        elif loinc_code == '16113-3':  # Progesterone Receptor (PR) — mCODE tumor marker
+                            if observation.get('valueCodeableConcept'):
+                                value_concept = observation['valueCodeableConcept']
+                                pr_status = value_concept.get('text') or (value_concept.get('coding') or [{}])[0].get('display')
+                        elif loinc_code == '48676-1':  # HER2 [Interpretation] in Tissue — mCODE tumor marker
+                            if observation.get('valueCodeableConcept'):
+                                value_concept = observation['valueCodeableConcept']
+                                her2_status = value_concept.get('text') or (value_concept.get('coding') or [{}])[0].get('display')
                         elif loinc_code == '42804-5':  # Therapy Intent
                             obs_date = observation.get('effectiveDateTime', '')[:10] if observation.get('effectiveDateTime') else None
                             therapy_intent_observations.append({'date': obs_date, 'value': value_codeable})
@@ -1389,7 +1420,15 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             distant_metastasis_stage = (observation.get('valueCodeableConcept') or {}).get('text')
                         elif obs_text == 'staging modality' or loinc_code == '85319-2':
                             staging_modalities = observation.get('valueString')
-                        elif 'recist' in obs_text or loinc_code == '21908-9':
+                        elif loinc_code == '21908-9':
+                            # mCODE TNM clinical stage group — valueCodeableConcept e.g. "Stage 2B"
+                            val_concept = observation.get('valueCodeableConcept') or {}
+                            stage_text = val_concept.get('text') or (val_concept.get('coding') or [{}])[0].get('display', '')
+                            if stage_text and 'Stage' in stage_text:
+                                stage = stage_text.split('Stage')[-1].strip()
+                            elif stage_text:
+                                stage = stage_text
+                        elif 'recist' in obs_text:
                             val = observation.get('valueBoolean')
                             if val is not None:
                                 measurable_disease_by_recist_status = val
@@ -1516,11 +1555,16 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         obs_date = None
                         if observation.get('effectiveDateTime'):
                             try:
-                                naive_dt = datetime.strptime(observation['effectiveDateTime'], '%Y-%m-%d')
-                                obs_date = timezone.make_aware(naive_dt)
-                            except ValueError:
+                                raw_dt = observation['effectiveDateTime']
+                                if 'T' in raw_dt:
+                                    obs_date = datetime.fromisoformat(raw_dt)
+                                    if obs_date.tzinfo is None:
+                                        obs_date = timezone.make_aware(obs_date)
+                                else:
+                                    obs_date = timezone.make_aware(datetime.strptime(raw_dt, '%Y-%m-%d'))
+                            except (ValueError, TypeError):
                                 continue
-                        
+
                         if not obs_date:
                             continue
                         
