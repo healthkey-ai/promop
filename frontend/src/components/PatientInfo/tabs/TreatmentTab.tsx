@@ -11,6 +11,13 @@ import {
   CLL_FIRST_LINE, CLL_SECOND_LINE, CLL_LATER_LINE,
 } from '../patientConstants';
 
+interface LaterTherapy {
+  therapy: string;
+  startDate?: string | null;
+  endDate?: string | null;
+  lineNumber?: number | null;
+}
+
 interface Props {
   formData: Record<string, unknown>;
   onChange: (field: string, value: unknown) => void;
@@ -115,7 +122,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
         </div>
       </Section>}
 
-      {linesCount >= 3 && <Section title="Later Line Therapy">
+      {(linesCount >= 3 || (Array.isArray(formData?.later_therapies) && (formData.later_therapies as LaterTherapy[]).length > 0)) && <Section title="Later Line Therapy">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="sm:col-span-2">
             <Field label="Later Line Therapy" name="later_therapy" type="select"
@@ -129,20 +136,26 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
           <Field label="Therapy Intent" name="later_intent" type="select" value={formData?.later_intent} options={THERAPY_INTENT_OPTIONS} onChange={onChange} />
           <Field label="Reason for Discontinuation" name="later_discontinuation_reason" type="select" value={formData?.later_discontinuation_reason} options={DISCONTINUATION_REASON_OPTIONS} onChange={onChange} />
           <Field label="Later Line Outcome" name="later_outcome" type="select" value={formData?.later_outcome} options={THERAPY_OUTCOME_OPTIONS} onChange={onChange} />
-          {Array.isArray(formData?.later_therapies) && (formData.later_therapies as Array<{ therapy: string; startDate: string; endDate?: string | null }>).length > 0 && (
-            <div className="sm:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-1">All Later Therapy Lines</label>
-              <ul className="text-sm text-gray-800 space-y-1 pl-1">
-                {(formData.later_therapies as Array<{ therapy: string; startDate: string; endDate?: string | null }>).map((t, i) => (
-                  <li key={i} className="flex gap-2">
-                    <span className="font-medium">Line {i + 3}:</span>
-                    <span>{t.therapy}</span>
-                    <span className="text-gray-500">{t.startDate}{t.endDate ? ` – ${t.endDate}` : ''}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+          {(() => {
+            const laterTherapies = Array.isArray(formData?.later_therapies)
+              ? (formData.later_therapies as LaterTherapy[])
+              : [];
+            if (!laterTherapies.length) return null;
+            return (
+              <div className="sm:col-span-2">
+                <label className="block text-sm font-medium text-portal-text-primary mb-1">All Later Therapy Lines</label>
+                <ul className="text-sm text-portal-text-primary space-y-1 pl-1">
+                  {laterTherapies.map((t) => (
+                    <li key={`${t.startDate ?? ''}-${t.therapy}`} className="flex gap-2">
+                      <span className="font-medium">Line {t.lineNumber ?? 3}:</span>
+                      <span>{t.therapy}</span>
+                      <span className="text-portal-text-secondary">{t.startDate}{t.endDate ? ` – ${t.endDate}` : ''}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })()}
         </div>
       </Section>}
 

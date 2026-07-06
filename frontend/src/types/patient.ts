@@ -82,7 +82,7 @@ export interface PatientInfo {
   second_line_outcome?: string;
   later_therapy?: string;
   later_line_therapy?: string;  // UI uses this name
-  later_therapies?: Array<{ therapy: string; startDate: string; endDate?: string | null }> | null;
+  later_therapies?: Array<{ therapy: string; startDate?: string | null; endDate?: string | null; lineNumber?: number | null }> | null;
   // HemOnc concept_id fields
   first_line_therapy_id?: number | null;
   second_line_therapy_id?: number | null;
