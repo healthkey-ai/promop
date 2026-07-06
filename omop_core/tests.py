@@ -783,3 +783,57 @@ class FLBundleGeneratorTest(TestCase):
                                  f"Birth year {birth_year} is in the future")
             self.assertGreater(birth_year, current_year - 100,
                                f"Birth year {birth_year} seems too far in the past")
+
+
+# ---------------------------------------------------------------------------
+# TEST-05: seed_omop_concepts management command
+# ---------------------------------------------------------------------------
+
+class SeedOmopConceptsTest(TestCase):
+    """Verify that seed_omop_concepts creates all expected concepts."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from django.core.management import call_command
+        call_command('seed_omop_concepts', verbosity=0)
+
+    def _concept(self, concept_id):
+        return Concept.objects.filter(concept_id=concept_id).first()
+
+    def test_gender_concepts_created(self):
+        for cid, name in [(8507, 'MALE'), (8532, 'FEMALE'), (8551, 'UNKNOWN')]:
+            c = self._concept(cid)
+            self.assertIsNotNone(c, f'Concept {cid} ({name}) not seeded')
+            self.assertEqual(c.vocabulary_id, 'Gender')
+
+    def test_loinc_concepts_have_loinc_vocabulary(self):
+        loinc_codes = [
+            (3016723, '2160-0'),   # Creatinine serum
+            (3051825, '38483-4'),  # Creatinine blood (mCODE)
+            (3006923, '1742-6'),   # ALT
+            (3013721, '1920-8'),   # AST
+        ]
+        for cid, code in loinc_codes:
+            c = self._concept(cid)
+            self.assertIsNotNone(c, f'Concept {cid} (LOINC {code}) not seeded')
+            self.assertEqual(c.vocabulary_id, 'LOINC', f'Concept {cid} should have vocabulary_id=LOINC')
+            self.assertEqual(c.concept_code, code)
+
+    def test_mcode_cmp_concepts_created(self):
+        for cid, code, label in [
+            (3032503, '49765-1', 'Calcium Blood'),
+            (3000285, '2947-0',  'Sodium Blood'),
+            (3005456, '6298-4',  'Potassium Blood'),
+            (3004295, '6299-2',  'BUN Blood'),
+            (3030354, '33914-3', 'eGFR'),
+            (3000483, '2339-0',  'Glucose Blood'),
+        ]:
+            c = self._concept(cid)
+            self.assertIsNotNone(c, f'mCODE CMP concept {cid} ({label}) not seeded')
+            self.assertEqual(c.concept_code, code)
+
+    def test_seed_is_idempotent(self):
+        from django.core.management import call_command
+        call_command('seed_omop_concepts', verbosity=0)
+        self.assertEqual(Concept.objects.filter(concept_id=8532).count(), 1,
+                         'Duplicate concept created on second seed_omop_concepts run')

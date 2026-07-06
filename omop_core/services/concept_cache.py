@@ -25,8 +25,10 @@ def concept_by_id(concept_id: int):
     """Return the Concept with this concept_id, or None.  Result is cached."""
     if concept_id not in _cache:
         from omop_core.models import Concept
-        _cache[concept_id] = Concept.objects.filter(concept_id=concept_id).first()
-    return _cache[concept_id]
+        result = Concept.objects.filter(concept_id=concept_id).first()
+        if result is not None:
+            _cache[concept_id] = result
+    return _cache.get(concept_id)
 
 
 def concept_by_loinc(loinc_code: str):
@@ -39,11 +41,13 @@ def concept_by_vocab(vocabulary_id: str, concept_code: str):
     key = (vocabulary_id, concept_code)
     if key not in _cache:
         from omop_core.models import Concept
-        _cache[key] = Concept.objects.filter(
+        result = Concept.objects.filter(
             vocabulary_id=vocabulary_id,
             concept_code=concept_code,
         ).first()
-    return _cache[key]
+        if result is not None:
+            _cache[key] = result
+    return _cache.get(key)
 
 
 def concept_by_name_ilike(name: str):
@@ -51,8 +55,10 @@ def concept_by_name_ilike(name: str):
     key = ('_ilike', name)
     if key not in _cache:
         from omop_core.models import Concept
-        _cache[key] = Concept.objects.filter(concept_name__icontains=name).first()
-    return _cache[key]
+        result = Concept.objects.filter(concept_name__icontains=name).first()
+        if result is not None:
+            _cache[key] = result
+    return _cache.get(key)
 
 
 def concept_cache_clear() -> None:

@@ -7,6 +7,7 @@ Usage:
     DATABASE_URL=... python manage.py import_fhir_bundle data/mm_patients_fhir.json --batch-size 5
 """
 
+import argparse
 import json
 import socket
 import sys
@@ -42,10 +43,17 @@ def _patch_db_timeouts():
 
 
 class Command(BaseCommand):
-    help = 'Import a FHIR R4 Bundle JSON file directly (no HTTP timeout)'
+    help = 'Import a FHIR R4 Bundle JSON file (or a directory of per-patient bundles) directly (no HTTP timeout)'
 
     def add_arguments(self, parser):
-        parser.add_argument('file', help='Path to FHIR Bundle JSON file')
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument('--file', dest='file', default=None,
+                           help='Path to a single FHIR Bundle JSON file (may contain multiple patients)')
+        group.add_argument('--directory', dest='directory', default=None,
+                           help='Directory of per-patient FHIR Bundle JSON files (searched recursively)')
+        # Positional for backwards compatibility — treated as --file
+        parser.add_argument('file_positional', nargs='?', default=None,
+                            help=argparse.SUPPRESS)
         parser.add_argument('--batch-size', type=int, default=1, dest='batch_size',
                             help='Patients per batch (default: 1)')
         parser.add_argument('--start-from', type=int, default=0, dest='start_from',
@@ -66,28 +74,56 @@ class Command(BaseCommand):
 
         _patch_db_timeouts()
 
-        bundle_path = Path(options['file'])
-        if not bundle_path.exists():
-            raise CommandError(f'File not found: {bundle_path}')
+        # Resolve source: --file / positional (backwards compat) / --directory
+        file_arg = options.get('file') or options.get('file_positional')
+        dir_arg = options.get('directory')
 
-        self._print(f'Loading {bundle_path}…')
-        with open(bundle_path) as f:
-            bundle = json.load(f)
-
-        if bundle.get('resourceType') != 'Bundle':
-            raise CommandError('File must be a FHIR Bundle')
-
-        # Group entries by patient
         groups: list[list[dict]] = []
-        current: list[dict] = []
-        for entry in bundle.get('entry', []):
-            rt = entry.get('resource', {}).get('resourceType')
-            if rt == 'Patient' and current:
+
+        if dir_arg:
+            # Directory mode: each .json file is a single-patient bundle
+            dir_path = Path(dir_arg)
+            if not dir_path.is_dir():
+                raise CommandError(f'Directory not found: {dir_path}')
+            json_files = sorted(dir_path.rglob('*.json'))
+            if not json_files:
+                raise CommandError(f'No .json files found under {dir_path}')
+            self._print(f'Found {len(json_files)} patient files in {dir_path}')
+            for json_file in json_files:
+                try:
+                    with open(json_file) as f:
+                        bundle = json.load(f)
+                except (json.JSONDecodeError, OSError) as exc:
+                    self._print(f'  Skipping {json_file.name}: {exc}', err=True)
+                    continue
+                if bundle.get('resourceType') != 'Bundle':
+                    self._print(f'  Skipping {json_file.name}: not a FHIR Bundle', err=True)
+                    continue
+                entries = bundle.get('entry', [])
+                if entries:
+                    groups.append(entries)
+        else:
+            # Single-file mode: bundle may contain multiple patients
+            if not file_arg:
+                raise CommandError('Provide --file <path> or --directory <path>')
+            bundle_path = Path(file_arg)
+            if not bundle_path.exists():
+                raise CommandError(f'File not found: {bundle_path}')
+            self._print(f'Loading {bundle_path}…')
+            with open(bundle_path) as f:
+                bundle = json.load(f)
+            if bundle.get('resourceType') != 'Bundle':
+                raise CommandError('File must be a FHIR Bundle')
+            # Group entries by patient (split on each Patient resource boundary)
+            current: list[dict] = []
+            for entry in bundle.get('entry', []):
+                rt = entry.get('resource', {}).get('resourceType')
+                if rt == 'Patient' and current:
+                    groups.append(current)
+                    current = []
+                current.append(entry)
+            if current:
                 groups.append(current)
-                current = []
-            current.append(entry)
-        if current:
-            groups.append(current)
 
         start_from = options['start_from']
         if start_from:

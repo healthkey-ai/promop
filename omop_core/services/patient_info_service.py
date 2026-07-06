@@ -102,15 +102,26 @@ _LOINC_LAB_FIELDS = {
     '751-8':   ('anc_thousand_per_ul',            float),
     '731-0':   ('alc_thousand_per_ul',            float),
     '742-7':   ('amc_thousand_per_ul',            float),
+    # Hematocrit — service default is 20570-8 (calculated); mCODE uses 4544-3 (automated count)
+    '4544-3':  ('hematocrit_percent',             float),
     # CMP
     '17861-6': ('serum_calcium_mg_dl',            float),
+    '49765-1': ('serum_calcium_mg_dl',            float),  # mCODE: Calcium in Blood
     '2160-0':  ('serum_creatinine_mg_dl',         float),
+    '38483-4': ('serum_creatinine_mg_dl',         float),  # mCODE: Creatinine in Blood
     '2164-2':  ('creatinine_clearance_ml_min',    float),
     '62238-1': ('egfr_ml_min_173m2',              float),
+    '33914-3': ('egfr_ml_min_173m2',              float),  # mCODE: eGFR CKD-EPI
     '3094-0':  ('bun_mg_dl',                      float),
+    '6299-2':  ('bun_mg_dl',                      float),  # mCODE: BUN in Blood
     '2951-2':  ('sodium_meq_l',                   float),
+    '2947-0':  ('sodium_meq_l',                   float),  # mCODE: Sodium in Blood
     '2823-3':  ('potassium_meq_l',                float),
+    '6298-4':  ('potassium_meq_l',                float),  # mCODE: Potassium in Blood
     '2601-3':  ('magnesium_mg_dl',                float),
+    # Glucose — service default is 2345-7 (Serum); mCODE uses 2339-0 (Blood)
+    '2345-7':  ('glucose_mg_dl',                  int),
+    '2339-0':  ('glucose_mg_dl',                  int),    # mCODE: Glucose in Blood
     # LFT / cardiac
     '1975-2':  ('bilirubin_total_mg_dl',          float),
     '1742-6':  ('alt_u_l',                        int),
@@ -120,7 +131,6 @@ _LOINC_LAB_FIELDS = {
     '2885-2':  ('total_protein',                  float),
     '10839-9': ('troponin_ng_ml',                 float),
     '42637-9': ('bnp_pg_ml',                      int),
-    '2345-7':  ('glucose_mg_dl',                  int),
     '4548-4':  ('hba1c_percent',                  float),
     '2532-0':  ('ldh_u_l',                        int),
     # Other markers
@@ -626,35 +636,41 @@ def _get_biomarker_data(person: Person) -> dict:
         data['pd_l1_tumor_cells'] = int(pdl1_test.value_as_number) if pdl1_test.value_as_number else None
         data['pd_l1_assay'] = pdl1_test.value_source_value
 
+    def _receptor_status(measurement):
+        """Return 'POSITIVE', 'NEGATIVE', or None from a receptor Measurement row."""
+        if measurement.value_as_concept_id:
+            concept = _cc_by_id(measurement.value_as_concept_id)
+            if concept:
+                name = concept.concept_name.lower()
+                if 'positive' in name:
+                    return 'POSITIVE'
+                if 'negative' in name:
+                    return 'NEGATIVE'
+        if measurement.value_as_string:
+            s = measurement.value_as_string.lower()
+            if 'positive' in s:
+                return 'POSITIVE'
+            if 'negative' in s:
+                return 'NEGATIVE'
+        return None
+
     er_measurements = measurements.filter(measurement_concept__concept_code='16112-5')
     if er_measurements.exists():
-        er_test = er_measurements.first()
-        if er_test.value_as_concept_id:
-            concept = _cc_by_id(er_test.value_as_concept_id)
-            if 'positive' in concept.concept_name.lower():
-                data['estrogen_receptor_status'] = 'POSITIVE'
-            elif 'negative' in concept.concept_name.lower():
-                data['estrogen_receptor_status'] = 'NEGATIVE'
+        status = _receptor_status(er_measurements.first())
+        if status:
+            data['estrogen_receptor_status'] = status
 
     pr_measurements = measurements.filter(measurement_concept__concept_code='16113-3')
     if pr_measurements.exists():
-        pr_test = pr_measurements.first()
-        if pr_test.value_as_concept_id:
-            concept = _cc_by_id(pr_test.value_as_concept_id)
-            if 'positive' in concept.concept_name.lower():
-                data['progesterone_receptor_status'] = 'POSITIVE'
-            elif 'negative' in concept.concept_name.lower():
-                data['progesterone_receptor_status'] = 'NEGATIVE'
+        status = _receptor_status(pr_measurements.first())
+        if status:
+            data['progesterone_receptor_status'] = status
 
     her2_measurements = measurements.filter(measurement_concept__concept_code='48676-1')
     if her2_measurements.exists():
-        her2_test = her2_measurements.first()
-        if her2_test.value_as_concept_id:
-            concept = _cc_by_id(her2_test.value_as_concept_id)
-            if 'positive' in concept.concept_name.lower():
-                data['her2_status'] = 'POSITIVE'
-            elif 'negative' in concept.concept_name.lower():
-                data['her2_status'] = 'NEGATIVE'
+        status = _receptor_status(her2_measurements.first())
+        if status:
+            data['her2_status'] = status
 
     if 'estrogen_receptor_status' in data and 'progesterone_receptor_status' in data and 'her2_status' in data:
         data['tnbc_status'] = (
@@ -721,6 +737,8 @@ def _get_infection_data(person: Person) -> dict:
     for m in hiv_measurements:
         if m.value_as_concept_id:
             concept = _cc_by_id(m.value_as_concept_id)
+            if not concept:
+                continue
             if 'negative' in concept.concept_name.lower():
                 data['no_hiv_status'] = True
                 data['hiv_status'] = False
@@ -734,6 +752,8 @@ def _get_infection_data(person: Person) -> dict:
     for m in hepb_measurements:
         if m.value_as_concept_id:
             concept = _cc_by_id(m.value_as_concept_id)
+            if not concept:
+                continue
             if 'negative' in concept.concept_name.lower():
                 data['no_hepatitis_b_status'] = True
                 data['hepatitis_b_status'] = False
@@ -747,6 +767,8 @@ def _get_infection_data(person: Person) -> dict:
     for m in hepc_measurements:
         if m.value_as_concept_id:
             concept = _cc_by_id(m.value_as_concept_id)
+            if not concept:
+                continue
             if 'negative' in concept.concept_name.lower():
                 data['no_hepatitis_c_status'] = True
                 data['hepatitis_c_status'] = False

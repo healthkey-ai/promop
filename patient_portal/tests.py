@@ -7913,3 +7913,364 @@ class V1MeEndpointTest(TestCase):
             '/api/v1/patient-records/me/', {}, format='json'
         )
         self.assertNotIn('Deprecation', resp)
+
+
+# ---------------------------------------------------------------------------
+# mCODE / Synthea FHIR import enhancements (branch fhir_import_enhancement)
+# ---------------------------------------------------------------------------
+
+def _make_loinc_concept(concept_id, concept_code, concept_name):
+    """Create a Concept with vocabulary_id='LOINC' as required by concept_cache.py."""
+    today = date.today()
+    far_future = date(2099, 12, 31)
+    loinc_vocab, _ = Vocabulary.objects.get_or_create(
+        vocabulary_id='LOINC',
+        defaults={'vocabulary_name': 'LOINC', 'vocabulary_concept_id': 0},
+    )
+    domain, _ = Domain.objects.get_or_create(
+        domain_id='Measurement',
+        defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+    )
+    cc, _ = ConceptClass.objects.get_or_create(
+        concept_class_id='Lab Test',
+        defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+    )
+    obj, _ = Concept.objects.get_or_create(
+        concept_id=concept_id,
+        defaults={
+            'concept_name': concept_name,
+            'domain': domain,
+            'vocabulary': loinc_vocab,
+            'concept_class': cc,
+            'concept_code': concept_code,
+            'valid_start_date': today,
+            'valid_end_date': far_future,
+        },
+    )
+    return obj
+
+
+def _upload_bundle_direct(admin_client, bundle):
+    bundle_bytes = json.dumps(bundle).encode('utf-8')
+    f = io.BytesIO(bundle_bytes)
+    f.name = 'mcode_test.json'
+    return admin_client.post(
+        '/api/patient-info/upload_fhir/', {'file': f}, format='multipart'
+    )
+
+
+class USCoreRaceEthnicityTest(FhirUploadBase):
+    """US Core nested race/ethnicity extensions (mCODE/Synthea style) are parsed."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle = {
+            'resourceType': 'Bundle',
+            'type': 'collection',
+            'entry': [{'resource': {
+                'resourceType': 'Patient',
+                'id': 'pt-uscore-001',
+                'name': [{'family': 'USCoreRace', 'given': ['Test']}],
+                'gender': 'female',
+                'birthDate': '1980-06-01',
+                'extension': [
+                    {
+                        'url': 'http://hl7.org/fhir/us/core/StructureDefinition/us-core-race',
+                        'extension': [
+                            {'url': 'ombCategory', 'valueCoding': {'display': 'Asian'}},
+                            {'url': 'text', 'valueString': 'Asian'},
+                        ],
+                    },
+                    {
+                        'url': 'http://hl7.org/fhir/us/core/StructureDefinition/us-core-ethnicity',
+                        'extension': [
+                            {'url': 'ombCategory', 'valueCoding': {'display': 'Non Hispanic or Latino'}},
+                            {'url': 'text', 'valueString': 'Non Hispanic or Latino'},
+                        ],
+                    },
+                ],
+            }}],
+        }
+        _upload_bundle_direct(_client, bundle)
+        cls._pi = PatientInfo.objects.filter(
+            person__family_name='USCoreRace'
+        ).first()
+
+    def test_us_core_race_parsed(self):
+        self.assertIsNotNone(self._pi, 'PatientInfo not created')
+        self.assertEqual(self._pi.race, 'Asian')
+
+    def test_us_core_ethnicity_parsed(self):
+        self.assertIsNotNone(self._pi, 'PatientInfo not created')
+        self.assertEqual(self._pi.ethnicity, 'Non Hispanic or Latino')
+
+
+class SyntheaFullUrlReferenceTest(FhirUploadBase):
+    """Synthea/mCODE bundles may reference Patient entries by fullUrl urn:uuid."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        _make_loinc_concept(3051825, '38483-4', 'Creatinine [Mass/volume] in Blood')
+        from omop_core.services import concept_cache
+        concept_cache._cache.clear()
+
+        patient_full_url = 'urn:uuid:synthea-patient-fullurl-001'
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle = {
+            'resourceType': 'Bundle',
+            'type': 'collection',
+            'entry': [
+                {
+                    'fullUrl': patient_full_url,
+                    'resource': {
+                        'resourceType': 'Patient',
+                        'id': 'synthea-resource-id-001',
+                        'name': [{'family': 'SyntheaFullUrl', 'given': ['Test']}],
+                        'gender': 'female',
+                        'birthDate': '1974-02-03',
+                    },
+                },
+                {
+                    'fullUrl': 'urn:uuid:condition-001',
+                    'resource': {
+                        'resourceType': 'Condition',
+                        'subject': {'reference': patient_full_url},
+                        'code': {'coding': [{
+                            'system': 'http://snomed.info/sct',
+                            'code': '254837009',
+                            'display': 'Malignant neoplasm of breast',
+                        }]},
+                        'onsetDateTime': '2020-04-15',
+                    },
+                },
+                {
+                    'fullUrl': 'urn:uuid:observation-creatinine-001',
+                    'resource': {
+                        'resourceType': 'Observation',
+                        'status': 'final',
+                        'subject': {'reference': patient_full_url},
+                        'effectiveDateTime': '2023-05-01',
+                        'code': {'coding': [{
+                            'system': 'http://loinc.org',
+                            'code': '38483-4',
+                            'display': 'Creatinine [Mass/volume] in Blood',
+                        }]},
+                        'valueQuantity': {'value': 1.2, 'unit': 'mg/dL'},
+                    },
+                },
+            ],
+        }
+        cls._resp = _upload_bundle_direct(_client, bundle)
+        cls._person = Person.objects.filter(family_name='SyntheaFullUrl').first()
+        cls._pi = PatientInfo.objects.filter(person=cls._person).first() if cls._person else None
+
+    def test_upload_succeeds(self):
+        self.assertEqual(self._resp.status_code, status.HTTP_200_OK)
+
+    def test_condition_referenced_by_fullurl_is_attached(self):
+        self.assertIsNotNone(self._person, 'Person not created')
+        self.assertTrue(
+            ConditionOccurrence.objects.filter(person=self._person).exists(),
+            'Condition referencing Patient fullUrl was not attached',
+        )
+
+    def test_observation_referenced_by_fullurl_populates_patient_info(self):
+        self.assertIsNotNone(self._pi, 'PatientInfo not created')
+        self.assertIsNotNone(self._pi.serum_creatinine_mg_dl)
+        self.assertAlmostEqual(float(self._pi.serum_creatinine_mg_dl), 1.2, places=1)
+
+
+class BPPanelExpansionTest(FhirUploadBase):
+    """BP panel observation (LOINC 85354-9) is expanded into systolic + diastolic Measurements."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Seed LOINC concepts required by concept_cache for component resolution
+        _make_loinc_concept(3004249, '8480-6', 'Systolic blood pressure')
+        _make_loinc_concept(3012888, '8462-4', 'Diastolic blood pressure')
+        from omop_core.services import concept_cache
+        concept_cache._cache.clear()
+
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle = {
+            'resourceType': 'Bundle',
+            'type': 'collection',
+            'entry': [{'resource': {
+                'resourceType': 'Patient',
+                'id': 'pt-bp-001',
+                'name': [{'family': 'BPPanel', 'given': ['Test']}],
+                'gender': 'male',
+                'birthDate': '1965-04-20',
+            }}, {'resource': {
+                'resourceType': 'Observation',
+                'status': 'final',
+                'subject': {'reference': 'Patient/pt-bp-001'},
+                'effectiveDateTime': '2023-01-10',
+                'code': {
+                    'coding': [{'system': 'http://loinc.org', 'code': '85354-9',
+                                'display': 'Blood pressure panel'}],
+                },
+                'component': [
+                    {
+                        'code': {'coding': [{'system': 'http://loinc.org', 'code': '8480-6',
+                                             'display': 'Systolic blood pressure'}]},
+                        'valueQuantity': {'value': 122.0, 'unit': 'mmHg'},
+                    },
+                    {
+                        'code': {'coding': [{'system': 'http://loinc.org', 'code': '8462-4',
+                                             'display': 'Diastolic blood pressure'}]},
+                        'valueQuantity': {'value': 78.0, 'unit': 'mmHg'},
+                    },
+                ],
+            }}],
+        }
+        _upload_bundle_direct(_client, bundle)
+        cls._person = Person.objects.filter(family_name='BPPanel').first()
+        cls._pi = PatientInfo.objects.filter(person=cls._person).first() if cls._person else None
+
+    def test_systolic_measurement_written(self):
+        from omop_core.models import Measurement
+        m = Measurement.objects.filter(
+            person=self._person, measurement_source_value='8480-6'
+        ).first()
+        self.assertIsNotNone(m, 'No Measurement for 8480-6 (systolic)')
+        self.assertAlmostEqual(float(m.value_as_number), 122.0, places=1)
+
+    def test_diastolic_measurement_written(self):
+        from omop_core.models import Measurement
+        m = Measurement.objects.filter(
+            person=self._person, measurement_source_value='8462-4'
+        ).first()
+        self.assertIsNotNone(m, 'No Measurement for 8462-4 (diastolic)')
+        self.assertAlmostEqual(float(m.value_as_number), 78.0, places=1)
+
+    def test_panel_measurement_not_written(self):
+        """The parent BP panel row (85354-9) must not become its own Measurement."""
+        from omop_core.models import Measurement
+        panel_m = Measurement.objects.filter(
+            person=self._person, measurement_source_value='85354-9'
+        ).first()
+        self.assertIsNone(panel_m, 'Panel row 85354-9 should not be written as a Measurement')
+
+    def test_patient_info_systolic_populated(self):
+        self.assertIsNotNone(self._pi)
+        self.assertIsNotNone(self._pi.systolic_blood_pressure)
+        self.assertAlmostEqual(float(self._pi.systolic_blood_pressure), 122.0, places=1)
+
+    def test_patient_info_diastolic_populated(self):
+        self.assertIsNotNone(self._pi)
+        self.assertIsNotNone(self._pi.diastolic_blood_pressure)
+        self.assertAlmostEqual(float(self._pi.diastolic_blood_pressure), 78.0, places=1)
+
+
+class BreastCancerSnomed254837009Test(FhirUploadBase):
+    """Conditions coded with SNOMED 254837009 are treated as the primary cancer onset."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle = {
+            'resourceType': 'Bundle',
+            'type': 'collection',
+            'entry': [
+                {'resource': {
+                    'resourceType': 'Patient',
+                    'id': 'pt-snomed-001',
+                    'name': [{'family': 'SnomedBC', 'given': ['Test']}],
+                    'gender': 'female',
+                    'birthDate': '1970-11-01',
+                }},
+                # Non-cancer condition with an earlier date — should NOT win for diagnosis_date
+                {'resource': {
+                    'resourceType': 'Condition',
+                    'subject': {'reference': 'Patient/pt-snomed-001'},
+                    'code': {'coding': [{'system': 'http://snomed.info/sct',
+                                         'code': '44054006', 'display': 'Type 2 diabetes'}]},
+                    'onsetDateTime': '2015-03-01',
+                }},
+                # Breast cancer (SNOMED 254837009) — should set diagnosis_date
+                {'resource': {
+                    'resourceType': 'Condition',
+                    'subject': {'reference': 'Patient/pt-snomed-001'},
+                    'code': {'coding': [{'system': 'http://snomed.info/sct',
+                                         'code': '254837009',
+                                         'display': 'Malignant neoplasm of breast'}]},
+                    'onsetDateTime': '2021-07-15',
+                    'stage': [{'summary': {'text': 'Stage IIIA'}}],
+                }},
+                # Another non-cancer condition after the breast cancer — should NOT override
+                {'resource': {
+                    'resourceType': 'Condition',
+                    'subject': {'reference': 'Patient/pt-snomed-001'},
+                    'code': {'coding': [{'system': 'http://snomed.info/sct',
+                                         'code': '73211009', 'display': 'Hypertension'}]},
+                    'onsetDateTime': '2022-01-01',
+                }},
+            ],
+        }
+        _upload_bundle_direct(_client, bundle)
+        cls._pi = PatientInfo.objects.filter(person__family_name='SnomedBC').first()
+
+    def test_disease_populated(self):
+        self.assertIsNotNone(self._pi, 'PatientInfo not created')
+        self.assertIsNotNone(self._pi.disease)
+
+    def test_diagnosis_date_is_breast_cancer_onset(self):
+        """diagnosis_date must be 2021-07-15 (the breast cancer onset), not 2022-01-01."""
+        self.assertIsNotNone(self._pi)
+        self.assertEqual(self._pi.diagnosis_date, date(2021, 7, 15))
+
+    def test_stage_from_breast_cancer_condition(self):
+        self.assertIsNotNone(self._pi)
+        self.assertIn('IIIA', self._pi.stage or '')
+
+
+class MCODECreatinineLoincTest(FhirUploadBase):
+    """mCODE uses LOINC 38483-4 (Creatinine in Blood) instead of 2160-0."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle = {
+            'resourceType': 'Bundle',
+            'type': 'collection',
+            'entry': [
+                {'resource': {
+                    'resourceType': 'Patient',
+                    'id': 'pt-creat-001',
+                    'name': [{'family': 'MCODECreat', 'given': ['Test']}],
+                    'gender': 'female',
+                    'birthDate': '1968-08-22',
+                }},
+                {'resource': {
+                    'resourceType': 'Observation',
+                    'status': 'final',
+                    'subject': {'reference': 'Patient/pt-creat-001'},
+                    'effectiveDateTime': '2023-05-01',
+                    'code': {
+                        'coding': [{'system': 'http://loinc.org', 'code': '38483-4',
+                                    'display': 'Creatinine [Mass/volume] in Blood'}],
+                    },
+                    'valueQuantity': {'value': 1.1, 'unit': 'mg/dL'},
+                }},
+            ],
+        }
+        _upload_bundle_direct(_client, bundle)
+        cls._pi = PatientInfo.objects.filter(person__family_name='MCODECreat').first()
+
+    def test_creatinine_populated_from_loinc_38483_4(self):
+        self.assertIsNotNone(self._pi, 'PatientInfo not created')
+        self.assertIsNotNone(self._pi.serum_creatinine_mg_dl,
+                             'serum_creatinine_mg_dl not populated from LOINC 38483-4')
+        self.assertAlmostEqual(float(self._pi.serum_creatinine_mg_dl), 1.1, places=1)
