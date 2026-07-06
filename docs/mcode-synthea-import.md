@@ -98,6 +98,13 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 
 This is the minimum viable vocabulary for development and testing. If you later load the full Athena vocabulary, the seed command is safe to re-run — it uses `get_or_create` and won't clobber existing rows.
 
+Create a superuser so you can log into the UI later:
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  python manage.py createsuperuser
+```
+
 ---
 
 ## Importing the mCODE bundle
@@ -155,9 +162,15 @@ With 200 mCODE patients you should see:
 
 ## Pointing PRism at the data
 
-PRism is our frontend for navigating individual patient records — tabbed views for labs, therapy lines, biomarkers, and disease history, built for oncology care teams and researchers. Once PRomop is running locally, point PRism at it by setting `REACT_APP_API_BASE_URL=http://localhost:8000` in your `.env.local`:
+PRism is our frontend for navigating individual patient records — tabbed views for labs, therapy lines, biomarkers, and disease history, built for oncology care teams and researchers. PRomop's API *is* PRism's backend — keep the `runserver` process from the previous step running, and start the PRism frontend in a second terminal:
 
 ```bash
+# Terminal 1 — keep this running
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True ALLOWED_HOSTS=localhost CORS_ALLOWED_ORIGINS=http://localhost:3000 \
+  python manage.py runserver
+
+# Terminal 2 — PRism frontend
 cd ../prism/frontend
 echo "REACT_APP_API_BASE_URL=http://localhost:8000" > .env.local
 npm install && npm start
