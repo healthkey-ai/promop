@@ -36,6 +36,7 @@ export interface PatientInfo {
   // Follicular Lymphoma specific
   gelf_criteria?: string;
   flipi_score?: number;
+  flipi_score_options?: string;
   tumor_grade?: string;
   
   // Multiple Myeloma specific
@@ -81,6 +82,7 @@ export interface PatientInfo {
   second_line_outcome?: string;
   later_therapy?: string;
   later_line_therapy?: string;  // UI uses this name
+  later_therapies?: Array<{ therapy: string; startDate: string; endDate?: string | null }> | null;
   // HemOnc concept_id fields
   first_line_therapy_id?: number | null;
   second_line_therapy_id?: number | null;

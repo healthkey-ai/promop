@@ -129,6 +129,20 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
           <Field label="Therapy Intent" name="later_intent" type="select" value={formData?.later_intent} options={THERAPY_INTENT_OPTIONS} onChange={onChange} />
           <Field label="Reason for Discontinuation" name="later_discontinuation_reason" type="select" value={formData?.later_discontinuation_reason} options={DISCONTINUATION_REASON_OPTIONS} onChange={onChange} />
           <Field label="Later Line Outcome" name="later_outcome" type="select" value={formData?.later_outcome} options={THERAPY_OUTCOME_OPTIONS} onChange={onChange} />
+          {Array.isArray(formData?.later_therapies) && (formData.later_therapies as Array<{ therapy: string; startDate: string; endDate?: string | null }>).length > 0 && (
+            <div className="sm:col-span-2">
+              <label className="block text-sm font-medium text-gray-700 mb-1">All Later Therapy Lines</label>
+              <ul className="text-sm text-gray-800 space-y-1 pl-1">
+                {(formData.later_therapies as Array<{ therapy: string; startDate: string; endDate?: string | null }>).map((t, i) => (
+                  <li key={i} className="flex gap-2">
+                    <span className="font-medium">Line {i + 3}:</span>
+                    <span>{t.therapy}</span>
+                    <span className="text-gray-500">{t.startDate}{t.endDate ? ` – ${t.endDate}` : ''}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       </Section>}
 
