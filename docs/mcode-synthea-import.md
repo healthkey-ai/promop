@@ -36,29 +36,30 @@ The result is something you can actually query: "Give me all stage III breast ca
 
 ## Generating the synthetic cohort
 
-Synthea ships with an mCODE breast cancer module. You'll need Java 11+ and the Synthea jar:
+Synthea ships with an mCODE breast cancer module. You'll need Java 17+ and the Synthea jar:
 
 ```bash
 # Download Synthea (check https://github.com/synthetichealth/synthea for latest)
 wget https://github.com/synthetichealth/synthea/releases/latest/download/synthea-with-dependencies.jar
 ```
 
-Generate 200 breast cancer patients. The `--exporter.fhir.export true` flag produces R4 bundles; `BreastCancer` loads the mCODE-aligned disease module:
+Generate 200 breast cancer patients. The `--exporter.fhir.export=true` flag produces R4 bundles; `-m breast_cancer` loads the mCODE-aligned disease module:
 
 ```bash
 java -jar synthea-with-dependencies.jar \
   -p 200 \
   -m breast_cancer \
-  --exporter.fhir.export true \
-  --exporter.fhir.use_us_core_ig true \
+  --exporter.fhir.export=true \
+  --exporter.fhir.use_us_core_ig=true \
   Massachusetts
 ```
 
-Synthea writes individual patient JSON files into `output/fhir/`. PRomop expects a single Bundle, so concatenate them:
+Synthea writes individual patient JSON files into `output/fhir/`. PRomop can import that directory directly after setup. If you prefer to keep a single reproducible artifact under `data/`, concatenate the files into one collection Bundle. Run this from the Synthea directory, pointing the output at your PRomop `data/` folder:
 
 ```bash
+# Run from the Synthea directory
 python -c "
-import json, glob, sys
+import json, glob
 
 entries = []
 for path in glob.glob('output/fhir/*.json'):
@@ -66,8 +67,10 @@ for path in glob.glob('output/fhir/*.json'):
     entries.extend(bundle.get('entry', []))
 
 print(json.dumps({'resourceType': 'Bundle', 'type': 'collection', 'entry': entries}))
-" > data/synthea_bc_200.json
+" > /path/to/promop/data/synthea_bc_200.json
 ```
+
+Replace `/path/to/promop` with the absolute path to your PRomop clone.
 
 ---
 
@@ -77,7 +80,7 @@ Clone the repo and set up the environment:
 
 ```bash
 git clone https://github.com/healthkey-ai/promop.git && cd promop
-python -m venv .venv && source .venv/bin/activate
+python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -86,6 +89,7 @@ Create a dev database and apply migrations:
 ```bash
 createdb -U postgres promop_dev
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True SECRET_KEY=dev-only-secret \
   python manage.py migrate
 ```
 
@@ -93,29 +97,49 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True SECRET_KEY=dev-only-secret \
   python manage.py seed_omop_concepts
 ```
 
 This is the minimum viable vocabulary for development and testing. If you later load the full Athena vocabulary, the seed command is safe to re-run — it uses `get_or_create` and won't clobber existing rows.
 
+Create a superuser so you can log into the UI later:
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True SECRET_KEY=dev-only-secret \
+  python manage.py createsuperuser
+```
+
 ---
 
 ## Importing the mCODE bundle
 
-The `import_fhir_bundle` command drives the same upload pipeline as the REST API, but bypasses HTTP and Render's 30-second request timeout. It's the right tool for loading large cohorts from the command line:
+The `import_fhir_bundle` command drives the same upload pipeline as the REST API, but bypasses HTTP and Render's 30-second request timeout. It's the right tool for loading large cohorts from the command line.
+
+To import Synthea's per-patient bundle directory directly:
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True SECRET_KEY=dev-only-secret \
+  python manage.py import_fhir_bundle --directory /path/to/synthea/output/fhir --batch-size 20
+```
+
+If you created a single collection Bundle above, import it like this:
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True SECRET_KEY=dev-only-secret \
   python manage.py import_fhir_bundle data/synthea_bc_200.json --batch-size 20
 ```
 
 You'll see batched output as patients are processed. The importer:
 
-1. Parses Patient, Condition, Observation, MedicationStatement, and MedicationRequest resources from the bundle
+1. Parses Patient, Condition, Observation, and MedicationStatement resources from the bundle
 2. Writes each to the appropriate OMOP CDM table (Person, ConditionOccurrence, Measurement, DrugExposure, Episode)
 3. Expands BP panel observations (LOINC 85354-9) into individual systolic/diastolic Measurement rows
 4. Parses US Core race/ethnicity nested extensions
-5. Calls `refresh_patient_info` once per patient to rebuild the `PatientInfo` read model from the OMOP tables
+5. Bulk-refreshes the `PatientInfo` read model from the OMOP tables after import; pass `--org` if you want that refresh scoped to the imported organization
 
 The mCODE FHIR bundle uses a handful of LOINC codes that differ from standard (e.g., `38483-4` for creatinine in blood vs. `2160-0` for creatinine in serum/plasma). PRomop maps both, so your CMP labs fill at the same rates you'd expect from a non-mCODE bundle.
 
@@ -123,26 +147,27 @@ The mCODE FHIR bundle uses a handful of LOINC codes that differ from standard (e
 
 ## What you get
 
-After importing 200 patients, fire up the API:
+After importing 200 patients, verify the import worked:
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
-  DEBUG=True ALLOWED_HOSTS=localhost CORS_ALLOWED_ORIGINS=http://localhost:3000 \
-  python manage.py runserver
-```
+  DEBUG=True SECRET_KEY=dev-only-secret \
+  python manage.py shell -c "
+from omop_core.models import Person, PatientInfo
+print('Persons imported:', Person.objects.count())
+print('PatientInfo records:', PatientInfo.objects.count())
 
-A few queries worth running to verify the import worked:
+from django.db.models import Count
+stages = PatientInfo.objects.exclude(stage='').exclude(stage=None) \
+    .values('stage').annotate(n=Count('id')).order_by('-n')
+print('Stage distribution:')
+for s in stages:
+    print(f'  {s[\"stage\"]}: {s[\"n\"]}')
 
-```bash
-# Patient count and disease distribution
-curl -s http://localhost:8000/api/stats/disease/ | python -m json.tool
-
-# Lab fill rates — check that CMP fields are populated
-curl -s "http://localhost:8000/api/patients/?disease=breast-cancer&limit=5" \
-  | python -m json.tool | grep -E "creatinine|hemoglobin|sodium|potassium"
-
-# Stage distribution
-curl -s "http://localhost:8000/api/stats/stage/?disease=breast-cancer" | python -m json.tool
+filled = PatientInfo.objects.exclude(serum_creatinine_mg_dl=None).count()
+total = PatientInfo.objects.count()
+print(f'Creatinine fill rate: {filled}/{total} ({100*filled//total if total else 0}%)')
+"
 ```
 
 With 200 mCODE patients you should see:
@@ -155,15 +180,50 @@ With 200 mCODE patients you should see:
 
 ## Pointing PRism at the data
 
-PRism is our frontend for navigating individual patient records — tabbed views for labs, therapy lines, biomarkers, and disease history, built for oncology care teams and researchers. Once PRomop is running locally, point PRism at it by setting `REACT_APP_API_BASE_URL=http://localhost:8000` in your `.env.local`:
+PRism is a read-only oncology analytics platform — a cohort builder and dashboard suite that sits on top of the OMOP CDM data that PRomop manages. Where PRomop handles ingestion and exposes a per-patient REST API, PRism is for population-level analysis: filtering a cohort by 20+ clinical criteria, then visualizing treatment patterns, response rates, survival curves, staging distributions, lab value trends, and therapy sequences across the cohort.
 
-```bash
-cd ../prism/frontend
-echo "REACT_APP_API_BASE_URL=http://localhost:8000" > .env.local
-npm install && npm start
+```
+Synthea FHIR bundles
+        │
+        ▼
+  PRomop (Django + PostgreSQL)
+  ├── OMOP CDM tables (Person, Measurement, ConditionOccurrence, DrugExposure …)
+  └── PatientInfo (286-column denormalized projection)
+        │  read-only, managed=False
+        ▼
+  PRism backend (Django, port 8000)
+        │
+        ▼
+  PRism frontend (React/Vite, port 5173)
+  ├── Cohort builder (clinical criteria filters)
+  └── Dashboard panels (response rates, treatment patterns, survival, staging …)
 ```
 
-Log in with the superuser credentials you created during setup. The patient list populates from the PRomop API; clicking a patient opens the tabbed detail view. The mCODE import populates enough fields — staging, receptor status, therapy lines, CMP labs — to make the views feel live rather than half-empty.
+PRism reads `PatientInfo` directly from PRomop's PostgreSQL database using `managed=False` Django models — no REST calls between the two backends. The PRomop REST API remains the integration point for external tools; PRism bypasses it for query performance.
+
+To run the full stack, you need three terminals:
+
+```bash
+# Terminal 1 — PRomop REST API (port 8001; PRism backend claims 8000)
+cd /path/to/promop
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True ALLOWED_HOSTS=localhost \
+  CORS_ALLOWED_ORIGINS="http://localhost:5173" \
+  SECRET_KEY=dev-only-secret \
+  python manage.py runserver 8001
+
+# Terminal 2 — PRism backend (port 8000; Vite proxy forwards /api/* here)
+cd ~/prism/backend
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True SECRET_KEY=dev-only-secret \
+  python manage.py runserver 8000
+
+# Terminal 3 — PRism frontend
+cd ~/prism/frontend
+npm install && npm run dev
+```
+
+Open `http://localhost:5173/` in your browser. Log in with the superuser credentials you created during PRomop setup. The cohort builder loads all patients from the shared `PatientInfo` table; applying filters narrows the cohort and updates the dashboard panels in real time. With 200 mCODE breast cancer patients you have enough density to see meaningful distributions — staging breakdowns, receptor status frequencies, treatment pattern counts, and lab value ranges that reflect the mCODE module's realistic clinical modeling.
 
 ---
 
