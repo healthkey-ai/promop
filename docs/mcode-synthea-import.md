@@ -137,15 +137,7 @@ The mCODE FHIR bundle uses a handful of LOINC codes that differ from standard (e
 
 ## What you get
 
-After importing 200 patients, fire up the API:
-
-```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
-  DEBUG=True ALLOWED_HOSTS=localhost CORS_ALLOWED_ORIGINS=http://localhost:3000 \
-  python manage.py runserver
-```
-
-A few queries worth running to verify the import worked:
+After importing 200 patients, verify the import worked:
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
@@ -178,21 +170,50 @@ With 200 mCODE patients you should see:
 
 ## Pointing PRism at the data
 
-PRism is our frontend for navigating individual patient records — tabbed views for labs, therapy lines, biomarkers, and disease history, built for oncology care teams and researchers. PRomop's API *is* PRism's backend — keep the `runserver` process from the previous step running, and start the PRism frontend in a second terminal:
+PRism is a read-only oncology analytics platform — a cohort builder and dashboard suite that sits on top of the OMOP CDM data that PRomop manages. Where PRomop handles ingestion and exposes a per-patient REST API, PRism is for population-level analysis: filtering a cohort by 20+ clinical criteria, then visualizing treatment patterns, response rates, survival curves, staging distributions, lab value trends, and therapy sequences across the cohort.
 
-```bash
-# Terminal 1 — keep this running
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
-  DEBUG=True ALLOWED_HOSTS=localhost CORS_ALLOWED_ORIGINS=http://localhost:3000 \
-  python manage.py runserver
-
-# Terminal 2 — PRism frontend
-cd ../prism/frontend
-echo "REACT_APP_API_BASE_URL=http://localhost:8000" > .env.local
-npm install && npm start
+```
+Synthea FHIR bundles
+        │
+        ▼
+  PRomop (Django + PostgreSQL)
+  ├── OMOP CDM tables (Person, Measurement, ConditionOccurrence, DrugExposure …)
+  └── PatientRecord (286-column denormalized projection)
+        │  read-only, managed=False
+        ▼
+  PRism backend (Django, port 8000)
+        │
+        ▼
+  PRism frontend (React/Vite, port 5173)
+  ├── Cohort builder (clinical criteria filters)
+  └── Dashboard panels (response rates, treatment patterns, survival, staging …)
 ```
 
-Log in with the superuser credentials you created during setup. The patient list populates from the PRomop API; clicking a patient opens the tabbed detail view. The mCODE import populates enough fields — staging, receptor status, therapy lines, CMP labs — to make the views feel live rather than half-empty.
+PRism reads `PatientRecord` directly from PRomop's PostgreSQL database using `managed=False` Django models — no REST calls between the two backends. The PRomop REST API remains the integration point for external tools; PRism bypasses it for query performance.
+
+To run the full stack, you need three terminals. Keep the PRomop server from the previous step running, then start the PRism backend and frontend:
+
+```bash
+# Terminal 1 — PRomop REST API (port 8001; PRism backend claims 8000)
+cd /path/to/promop
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True ALLOWED_HOSTS=localhost \
+  CORS_ALLOWED_ORIGINS="http://localhost:5173" \
+  SECRET_KEY=dev-only-secret \
+  python manage.py runserver 8001
+
+# Terminal 2 — PRism backend (port 8000; Vite proxy forwards /api/* here)
+cd ~/prism/backend
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True SECRET_KEY=dev-only-secret \
+  python manage.py runserver 8000
+
+# Terminal 3 — PRism frontend
+cd ~/prism/frontend
+npm install && npm run dev
+```
+
+Open `http://localhost:5173/` in your browser. Log in with the superuser credentials you created during PRomop setup. The cohort builder loads all patients from the shared `PatientRecord` table; applying filters narrows the cohort and updates the dashboard panels in real time. With 200 mCODE breast cancer patients you have enough density to see meaningful distributions — staging breakdowns, receptor status frequencies, treatment pattern counts, and lab value ranges that reflect the mCODE module's realistic clinical modeling.
 
 ---
 
