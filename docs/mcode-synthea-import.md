@@ -54,9 +54,10 @@ java -jar synthea-with-dependencies.jar \
   Massachusetts
 ```
 
-Synthea writes individual patient JSON files into `output/fhir/`. PRomop expects a single Bundle, so concatenate them:
+Synthea writes individual patient JSON files into `output/fhir/`. PRomop expects a single Bundle, so concatenate them. Run this from the Synthea directory, pointing the output at your PRomop `data/` folder:
 
 ```bash
+# Run from the Synthea directory
 python -c "
 import json, glob, sys
 
@@ -66,8 +67,10 @@ for path in glob.glob('output/fhir/*.json'):
     entries.extend(bundle.get('entry', []))
 
 print(json.dumps({'resourceType': 'Bundle', 'type': 'collection', 'entry': entries}))
-" > data/synthea_bc_200.json
+" > /path/to/promop/data/synthea_bc_200.json
 ```
+
+Replace `/path/to/promop` with the absolute path to your PRomop clone.
 
 ---
 
@@ -86,6 +89,7 @@ Create a dev database and apply migrations:
 ```bash
 createdb -U postgres promop_dev
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True SECRET_KEY=dev-only-secret \
   python manage.py migrate
 ```
 
@@ -93,6 +97,7 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True SECRET_KEY=dev-only-secret \
   python manage.py seed_omop_concepts
 ```
 
@@ -102,6 +107,7 @@ Create a superuser so you can log into the UI later:
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True SECRET_KEY=dev-only-secret \
   python manage.py createsuperuser
 ```
 
@@ -113,6 +119,7 @@ The `import_fhir_bundle` command drives the same upload pipeline as the REST API
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True SECRET_KEY=dev-only-secret \
   python manage.py import_fhir_bundle data/synthea_bc_200.json --batch-size 20
 ```
 
@@ -141,15 +148,24 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 A few queries worth running to verify the import worked:
 
 ```bash
-# Patient count and disease distribution
-curl -s http://localhost:8000/api/stats/disease/ | python -m json.tool
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True SECRET_KEY=dev-only-secret \
+  python manage.py shell -c "
+from omop_core.models import Person, PatientInfo
+print('Persons imported:', Person.objects.count())
+print('PatientInfo records:', PatientInfo.objects.count())
 
-# Lab fill rates — check that CMP fields are populated
-curl -s "http://localhost:8000/api/patients/?disease=breast-cancer&limit=5" \
-  | python -m json.tool | grep -E "creatinine|hemoglobin|sodium|potassium"
+from django.db.models import Count
+stages = PatientInfo.objects.exclude(disease_stage='').exclude(disease_stage=None) \
+    .values('disease_stage').annotate(n=Count('id')).order_by('-n')
+print('Stage distribution:')
+for s in stages:
+    print(f'  {s[\"disease_stage\"]}: {s[\"n\"]}')
 
-# Stage distribution
-curl -s "http://localhost:8000/api/stats/stage/?disease=breast-cancer" | python -m json.tool
+filled = PatientInfo.objects.exclude(creatinine=None).count()
+total = PatientInfo.objects.count()
+print(f'Creatinine fill rate: {filled}/{total} ({100*filled//total if total else 0}%)')
+"
 ```
 
 With 200 mCODE patients you should see:
