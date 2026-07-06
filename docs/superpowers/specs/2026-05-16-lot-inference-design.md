@@ -38,14 +38,14 @@ Episode records (episode_number = LOT, episode_source_value = "VRD (induction)")
 EpisodeEvent links (episode ↔ drug_exposure / procedure_occurrence)
     │
     ▼
-refresh_patient_info()          ← existing service
+refresh_patient_record()          ← existing service
     │
     ▼
 PatientInfo.first/second/later_line_therapy
 ```
 
 Inference is triggered:
-1. **Automatically** — as a post-FHIR-upload step after `refresh_patient_info`
+1. **Automatically** — as a post-FHIR-upload step after `refresh_patient_record`
 2. **On demand** — Django management command `manage.py infer_lot` for backfill
 
 ---
@@ -139,7 +139,7 @@ Priority lookup order:
 For each inferred LOT:
 - **Upsert Episode** — match on `(person, episode_number, episode_start_date)`; if found, update `episode_end_date` and `episode_source_value`; else create with `episode_concept_id=32531` (Treatment Regimen)
 - **Create EpisodeEvent** — for each `DrugExposure` and `ProcedureOccurrence` in the episode date range, `get_or_create` an `EpisodeEvent` linking it to the episode
-- After all episodes persisted: call `refresh_patient_info(person)`
+- After all episodes persisted: call `refresh_patient_record(person)`
 
 ---
 
@@ -319,7 +319,7 @@ python manage.py infer_lot [--person-id N] [--all] [--dry-run] [--force]
 
 ## FHIR Upload Integration
 
-After the existing `refresh_patient_info(person)` call at the end of FHIR upload processing, add:
+After the existing `refresh_patient_record(person)` call at the end of FHIR upload processing, add:
 
 ```python
 from omop_core.services.lot_inference_service import infer_lot_for_person

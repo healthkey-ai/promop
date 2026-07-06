@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the comprehensive `populate_patient_info` management command that was created to populate PatientInfo records from OMOP CDM and extension models. This command enables the transformation of normalized clinical data into comprehensive patient profiles suitable for clinical trial matching.
+This document describes the comprehensive `populate_patient_record` management command that was created to populate PatientInfo records from OMOP CDM and extension models. This command enables the transformation of normalized clinical data into comprehensive patient profiles suitable for clinical trial matching.
 
 ## What Was Built
 
@@ -31,7 +31,7 @@ The project was extended with comprehensive tables to support all PatientInfo fi
 
 #### Command Features
 ```bash
-python manage.py populate_patient_info [options]
+python manage.py populate_patient_record [options]
 
 Options:
   --person-id ID     Process specific person only
@@ -170,13 +170,13 @@ The command maps data from OMOP models to PatientInfo fields:
 ### Basic Usage
 ```bash
 # Populate all patients
-python manage.py populate_patient_info
+python manage.py populate_patient_record
 
 # Process specific patient with verbose output
-python manage.py populate_patient_info --person-id 1001 --verbose
+python manage.py populate_patient_record --person-id 1001 --verbose
 
 # Force update existing records
-python manage.py populate_patient_info --force-update
+python manage.py populate_patient_record --force-update
 ```
 
 ### Integration with Other Commands
@@ -186,7 +186,7 @@ python manage.py generate_fhir_bundle --disease mm --count 50 --output /tmp/mm.j
 python manage.py import_fhir_bundle /tmp/mm.json --org demo-org
 
 # Query results
-python manage.py query_patient_info
+python manage.py query_patient_record
 ```
 
 ## Example Output
@@ -262,4 +262,4 @@ The foundation is now in place for:
 
 ## Conclusion
 
-The `populate_patient_info` management command successfully bridges the gap between normalized OMOP CDM data and the comprehensive PatientInfo model needed for clinical trial matching. It demonstrates how Django management commands can elegantly handle complex data transformations while maintaining data integrity and providing flexible operation modes.
+The `populate_patient_record` management command successfully bridges the gap between normalized OMOP CDM data and the comprehensive PatientInfo model needed for clinical trial matching. It demonstrates how Django management commands can elegantly handle complex data transformations while maintaining data integrity and providing flexible operation modes.

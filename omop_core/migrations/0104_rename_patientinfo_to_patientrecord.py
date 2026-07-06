@@ -58,4 +58,26 @@ class Migration(migrations.Migration):
                 to="omop_core.person",
             ),
         ),
+        migrations.RunSQL(
+            sql="""
+            CREATE VIEW patient_info AS
+            SELECT * FROM patient_record;
+
+            CREATE OR REPLACE FUNCTION patient_info_readonly()
+            RETURNS trigger AS $$
+            BEGIN
+                RAISE EXCEPTION 'patient_info is a read-only compatibility view; write to patient_record instead';
+            END;
+            $$ LANGUAGE plpgsql;
+
+            CREATE TRIGGER patient_info_readonly_trigger
+            INSTEAD OF INSERT OR UPDATE OR DELETE ON patient_info
+            FOR EACH ROW EXECUTE FUNCTION patient_info_readonly();
+            """,
+            reverse_sql="""
+            DROP TRIGGER IF EXISTS patient_info_readonly_trigger ON patient_info;
+            DROP FUNCTION IF EXISTS patient_info_readonly();
+            DROP VIEW IF EXISTS patient_info;
+            """,
+        ),
     ]
