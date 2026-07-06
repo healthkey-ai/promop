@@ -4,31 +4,18 @@
 
 ---
 
-## The problem with cancer data
-
-If you've tried to build anything serious on top of oncology clinical data, you've run into the same wall. The data exists — hospitals are drowning in it — but it's locked behind IRBs, BAAs, de-identification pipelines, and data use agreements that can take months to negotiate. By the time you have data you can actually load into your development environment, the prototype you wanted to validate is long stale.
-
-This creates a perverse situation: the people most motivated to build tools that help cancer patients are exactly the people who can't get access to cancer data. So they build on synthetic data that doesn't look like real oncology data, or they build on OMOP data that's been scrubbed of the disease-specific richness that makes oncology different from general medicine.
-
-mCODE changes this. And Synthea makes it reproducible. And PRomop gives you somewhere to put it.
-
----
-
-## What mCODE actually is (and isn't)
-
+## mCode and Synthea
 mCODE — *minimal Common Oncology Data Elements* — is a FHIR Implementation Guide maintained by MITRE and HL7. It defines what a cancer patient record *should* look like in FHIR R4: which SNOMED codes represent primary tumor conditions, how TNM staging is expressed as a LOINC observation, how treatment lines are structured, what receptor status looks like for breast cancer.
 
-What mCODE is *not* is a data standard invented by a committee that nobody uses. It's been adopted by the Integrated Canopy platform, included in Da Vinci use cases, and is the basis for several real-world oncology data exchange programs. When you build against mCODE, you're building against something that looks like production oncology data — not a toy schema.
-
-The practical implication: Synthea, the open-source synthetic patient generator from MITRE, can produce mCODE-conformant FHIR bundles. Hundreds of breast cancer patients, complete with labs, medication histories, TNM stage, receptor status, and realistic clinical timelines — generated in seconds, freely shareable, zero PHI.
+Synthea, the open-source synthetic patient generator from MITRE, can produce mCODE-conformant FHIR bundles. Hundreds of breast cancer patients, complete with labs, medication histories, TNM stage, receptor status, and realistic clinical timelines — generated in seconds, freely shareable, zero PHI.
 
 ---
 
-## Where OMOP fits in
+## Where PRomop fits in
 
 FHIR and OMOP solve different problems. FHIR is a data *exchange* format — it's how a hospital sends you a patient record. OMOP CDM is a *research* format — it's the schema you use once you have the data, to run cohort queries, survival analyses, and population-level statistics across multiple institutions.
 
-The missing piece is the translation layer. PRomop is that layer for oncology. It's an open-source Django application that accepts FHIR R4 bundles and writes the clinical data into an OMOP CDM v5.4 PostgreSQL schema, then materializes a `PatientInfo` read model that surfaces the oncology-specific fields — disease stage, receptor status, line-of-therapy summaries, lab trends — that general-purpose OMOP tools tend to bury or miss entirely.
+The missing piece is the translation layer. PRomop is that layer for oncology. It's an open-source Django application that accepts FHIR R4 bundles and writes the clinical data into an OMOP CDM v5.4 PostgreSQL schema, then materializes a `PatientRecord` read model that surfaces the oncology-specific fields — disease stage, receptor status, line-of-therapy summaries, lab trends — that general-purpose OMOP tools tend to bury or miss entirely.
 
 The result is something you can actually query: "Give me all stage III breast cancer patients with ER+ status who received a platinum-based regimen in the first line and had a creatinine above 1.2 before starting treatment." That query runs in milliseconds on a local PostgreSQL instance loaded from synthetic Synthea data.
 
