@@ -36,25 +36,25 @@ The result is something you can actually query: "Give me all stage III breast ca
 
 ## Generating the synthetic cohort
 
-Synthea ships with an mCODE breast cancer module. You'll need Java 11+ and the Synthea jar:
+Synthea ships with an mCODE breast cancer module. You'll need Java 17+ and the Synthea jar:
 
 ```bash
 # Download Synthea (check https://github.com/synthetichealth/synthea for latest)
 wget https://github.com/synthetichealth/synthea/releases/latest/download/synthea-with-dependencies.jar
 ```
 
-Generate 200 breast cancer patients. The `--exporter.fhir.export true` flag produces R4 bundles; `BreastCancer` loads the mCODE-aligned disease module:
+Generate 200 breast cancer patients. The `--exporter.fhir.export=true` flag produces R4 bundles; `-m breast_cancer` loads the mCODE-aligned disease module:
 
 ```bash
 java -jar synthea-with-dependencies.jar \
   -p 200 \
   -m breast_cancer \
-  --exporter.fhir.export true \
-  --exporter.fhir.use_us_core_ig true \
+  --exporter.fhir.export=true \
+  --exporter.fhir.use_us_core_ig=true \
   Massachusetts
 ```
 
-Synthea writes individual patient JSON files into `output/fhir/`. PRomop expects a single Bundle, so concatenate them. Run this from the Synthea directory, pointing the output at your PRomop `data/` folder:
+Synthea writes individual patient JSON files into `output/fhir/`. PRomop can import that directory directly after setup. If you prefer to keep a single reproducible artifact under `data/`, concatenate the files into one collection Bundle. Run this from the Synthea directory, pointing the output at your PRomop `data/` folder:
 
 ```bash
 # Run from the Synthea directory
@@ -80,7 +80,7 @@ Clone the repo and set up the environment:
 
 ```bash
 git clone https://github.com/healthkey-ai/promop.git && cd promop
-python -m venv .venv && source .venv/bin/activate
+python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -115,7 +115,17 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 
 ## Importing the mCODE bundle
 
-The `import_fhir_bundle` command drives the same upload pipeline as the REST API, but bypasses HTTP and Render's 30-second request timeout. It's the right tool for loading large cohorts from the command line:
+The `import_fhir_bundle` command drives the same upload pipeline as the REST API, but bypasses HTTP and Render's 30-second request timeout. It's the right tool for loading large cohorts from the command line.
+
+To import Synthea's per-patient bundle directory directly:
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  DEBUG=True SECRET_KEY=dev-only-secret \
+  python manage.py import_fhir_bundle --directory /path/to/synthea/output/fhir --batch-size 20
+```
+
+If you created a single collection Bundle above, import it like this:
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
@@ -125,11 +135,11 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 
 You'll see batched output as patients are processed. The importer:
 
-1. Parses Patient, Condition, Observation, MedicationStatement, and MedicationRequest resources from the bundle
+1. Parses Patient, Condition, Observation, and MedicationStatement resources from the bundle
 2. Writes each to the appropriate OMOP CDM table (Person, ConditionOccurrence, Measurement, DrugExposure, Episode)
 3. Expands BP panel observations (LOINC 85354-9) into individual systolic/diastolic Measurement rows
 4. Parses US Core race/ethnicity nested extensions
-5. Calls `refresh_patient_info` once per patient to rebuild the `PatientInfo` read model from the OMOP tables
+5. Bulk-refreshes the `PatientInfo` read model from the OMOP tables after import; pass `--org` if you want that refresh scoped to the imported organization
 
 The mCODE FHIR bundle uses a handful of LOINC codes that differ from standard (e.g., `38483-4` for creatinine in blood vs. `2160-0` for creatinine in serum/plasma). PRomop maps both, so your CMP labs fill at the same rates you'd expect from a non-mCODE bundle.
 
@@ -148,13 +158,13 @@ print('Persons imported:', Person.objects.count())
 print('PatientInfo records:', PatientInfo.objects.count())
 
 from django.db.models import Count
-stages = PatientInfo.objects.exclude(disease_stage='').exclude(disease_stage=None) \
-    .values('disease_stage').annotate(n=Count('id')).order_by('-n')
+stages = PatientInfo.objects.exclude(stage='').exclude(stage=None) \
+    .values('stage').annotate(n=Count('id')).order_by('-n')
 print('Stage distribution:')
 for s in stages:
-    print(f'  {s[\"disease_stage\"]}: {s[\"n\"]}')
+    print(f'  {s[\"stage\"]}: {s[\"n\"]}')
 
-filled = PatientInfo.objects.exclude(creatinine=None).count()
+filled = PatientInfo.objects.exclude(serum_creatinine_mg_dl=None).count()
 total = PatientInfo.objects.count()
 print(f'Creatinine fill rate: {filled}/{total} ({100*filled//total if total else 0}%)')
 "
