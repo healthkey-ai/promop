@@ -8008,6 +8008,83 @@ class USCoreRaceEthnicityTest(FhirUploadBase):
         self.assertEqual(self._pi.ethnicity, 'Non Hispanic or Latino')
 
 
+class SyntheaFullUrlReferenceTest(FhirUploadBase):
+    """Synthea/mCODE bundles may reference Patient entries by fullUrl urn:uuid."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        _make_loinc_concept(3051825, '38483-4', 'Creatinine [Mass/volume] in Blood')
+        from omop_core.services import concept_cache
+        concept_cache._cache.clear()
+
+        patient_full_url = 'urn:uuid:synthea-patient-fullurl-001'
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle = {
+            'resourceType': 'Bundle',
+            'type': 'collection',
+            'entry': [
+                {
+                    'fullUrl': patient_full_url,
+                    'resource': {
+                        'resourceType': 'Patient',
+                        'id': 'synthea-resource-id-001',
+                        'name': [{'family': 'SyntheaFullUrl', 'given': ['Test']}],
+                        'gender': 'female',
+                        'birthDate': '1974-02-03',
+                    },
+                },
+                {
+                    'fullUrl': 'urn:uuid:condition-001',
+                    'resource': {
+                        'resourceType': 'Condition',
+                        'subject': {'reference': patient_full_url},
+                        'code': {'coding': [{
+                            'system': 'http://snomed.info/sct',
+                            'code': '254837009',
+                            'display': 'Malignant neoplasm of breast',
+                        }]},
+                        'onsetDateTime': '2020-04-15',
+                    },
+                },
+                {
+                    'fullUrl': 'urn:uuid:observation-creatinine-001',
+                    'resource': {
+                        'resourceType': 'Observation',
+                        'status': 'final',
+                        'subject': {'reference': patient_full_url},
+                        'effectiveDateTime': '2023-05-01',
+                        'code': {'coding': [{
+                            'system': 'http://loinc.org',
+                            'code': '38483-4',
+                            'display': 'Creatinine [Mass/volume] in Blood',
+                        }]},
+                        'valueQuantity': {'value': 1.2, 'unit': 'mg/dL'},
+                    },
+                },
+            ],
+        }
+        cls._resp = _upload_bundle_direct(_client, bundle)
+        cls._person = Person.objects.filter(family_name='SyntheaFullUrl').first()
+        cls._pi = PatientInfo.objects.filter(person=cls._person).first() if cls._person else None
+
+    def test_upload_succeeds(self):
+        self.assertEqual(self._resp.status_code, status.HTTP_200_OK)
+
+    def test_condition_referenced_by_fullurl_is_attached(self):
+        self.assertIsNotNone(self._person, 'Person not created')
+        self.assertTrue(
+            ConditionOccurrence.objects.filter(person=self._person).exists(),
+            'Condition referencing Patient fullUrl was not attached',
+        )
+
+    def test_observation_referenced_by_fullurl_populates_patient_info(self):
+        self.assertIsNotNone(self._pi, 'PatientInfo not created')
+        self.assertIsNotNone(self._pi.serum_creatinine_mg_dl)
+        self.assertAlmostEqual(float(self._pi.serum_creatinine_mg_dl), 1.2, places=1)
+
+
 class BPPanelExpansionTest(FhirUploadBase):
     """BP panel observation (LOINC 85354-9) is expanded into systolic + diastolic Measurements."""
 

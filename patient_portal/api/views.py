@@ -722,18 +722,23 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             errors = []
             patients_result = []
 
-            # Group resources by patient
+            # Group resources by patient. Some mCODE/Synthea bundles reference
+            # Patient resources by entry.fullUrl (often urn:uuid:...) rather than
+            # by Patient/{id}, so keep aliases for both forms.
             patients_data = {}
+            patient_ref_aliases = {}
             
             def _resolve_patient_ref(ref: str) -> str:
-                """Resolve a FHIR subject reference to a bare patient id.
-
-                Handles both relative references ('Patient/UUID') and absolute
-                URN references ('urn:uuid:UUID') used by mCODE bundles.
-                """
-                if ref.startswith('urn:uuid:'):
-                    return ref[len('urn:uuid:'):]
-                return ref.split('/')[-1] if '/' in ref else ref
+                """Resolve a FHIR subject reference to the local patient bucket id."""
+                ref = (ref or '').strip()
+                if not ref:
+                    return ''
+                if ref in patient_ref_aliases:
+                    return patient_ref_aliases[ref]
+                bare_ref = ref[len('urn:uuid:'):] if ref.startswith('urn:uuid:') else ref
+                if bare_ref in patient_ref_aliases:
+                    return patient_ref_aliases[bare_ref]
+                return ref.split('/')[-1] if '/' in ref else bare_ref
 
             for entry in fhir_data.get('entry', []):
                 resource = entry.get('resource', {})
@@ -747,6 +752,14 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         'observations': [],
                         'medications': []
                     }
+                    if patient_id:
+                        patient_ref_aliases[patient_id] = patient_id
+                        patient_ref_aliases[f'Patient/{patient_id}'] = patient_id
+                    full_url = (entry.get('fullUrl') or '').strip()
+                    if full_url:
+                        patient_ref_aliases[full_url] = patient_id
+                        if full_url.startswith('urn:uuid:'):
+                            patient_ref_aliases[full_url[len('urn:uuid:'):]] = patient_id
                 elif resource_type == 'Condition':
                     patient_ref = resource.get('subject', {}).get('reference', '')
                     patient_id = _resolve_patient_ref(patient_ref)

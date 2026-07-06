@@ -46,7 +46,7 @@ class Command(BaseCommand):
     help = 'Import a FHIR R4 Bundle JSON file (or a directory of per-patient bundles) directly (no HTTP timeout)'
 
     def add_arguments(self, parser):
-        group = parser.add_mutually_exclusive_group(required=True)
+        group = parser.add_mutually_exclusive_group()
         group.add_argument('--file', dest='file', default=None,
                            help='Path to a single FHIR Bundle JSON file (may contain multiple patients)')
         group.add_argument('--directory', dest='directory', default=None,
