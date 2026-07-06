@@ -125,8 +125,11 @@ _CONCEPTS = [
     # ------------------------------------------------------------------
     # Generic lab fallback — used when no specific LOINC concept is found.
     # concept_id 3000963 is pre-hoisted in upload_fhir as _concept_generic_lab.
+    # vocabulary_id='None' and concept_code='0' are intentional non-LOINC
+    # placeholders so this concept is never matched by LOINC code lookups
+    # and cannot pollute specific lab fields (e.g. hemoglobin_g_dl).
     # ------------------------------------------------------------------
-    _c(3000963, 'Hemoglobin [Mass/volume] in Blood', 'Measurement', 'LOINC', 'Lab Test', 'S', '718-7'),
+    _c(3000963, 'Generic Lab Measurement', 'Measurement', 'None', 'Lab Test', 'S', '0'),
 
     # ------------------------------------------------------------------
     # Breast cancer condition

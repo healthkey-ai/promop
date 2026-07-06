@@ -737,6 +737,8 @@ def _get_infection_data(person: Person) -> dict:
     for m in hiv_measurements:
         if m.value_as_concept_id:
             concept = _cc_by_id(m.value_as_concept_id)
+            if not concept:
+                continue
             if 'negative' in concept.concept_name.lower():
                 data['no_hiv_status'] = True
                 data['hiv_status'] = False
@@ -750,6 +752,8 @@ def _get_infection_data(person: Person) -> dict:
     for m in hepb_measurements:
         if m.value_as_concept_id:
             concept = _cc_by_id(m.value_as_concept_id)
+            if not concept:
+                continue
             if 'negative' in concept.concept_name.lower():
                 data['no_hepatitis_b_status'] = True
                 data['hepatitis_b_status'] = False
@@ -763,6 +767,8 @@ def _get_infection_data(person: Person) -> dict:
     for m in hepc_measurements:
         if m.value_as_concept_id:
             concept = _cc_by_id(m.value_as_concept_id)
+            if not concept:
+                continue
             if 'negative' in concept.concept_name.lower():
                 data['no_hepatitis_c_status'] = True
                 data['hepatitis_c_status'] = False

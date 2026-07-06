@@ -981,7 +981,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     stage = ''
                     histologic_type = ''
                     condition_date = None
-                    breast_cancer_onset = None  # onset from primary cancer condition (SNOMED 254837009)
+                    breast_cancer_onset = None  # onset from primary cancer condition
+                    _any_bc_condition = False   # True if any BC condition was seen in the bundle
 
                     for condition in data['conditions']:
                         # Get histologic type from code
@@ -992,13 +993,21 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         elif coding_list:
                             histologic_type = coding_list[0].get('display', '')
 
-                        # Identify primary breast cancer condition
+                        # Identify primary breast cancer condition.
+                        # Check SNOMED 254837009 (mCODE canonical), coding display
+                        # containing 'breast' (e.g. SNOMED 413448000), and histologic type.
                         snomed_code = next(
                             (c.get('code') for c in coding_list
                              if 'snomed' in c.get('system', '').lower()),
                             None
                         )
-                        is_breast_cancer = (snomed_code == '254837009')
+                        is_breast_cancer = (
+                            snomed_code == '254837009'
+                            or any('breast' in c.get('display', '').lower() for c in coding_list)
+                            or bool(histologic_type and 'breast' in histologic_type.lower())
+                        )
+                        if is_breast_cancer:
+                            _any_bc_condition = True
 
                         # Get stage and infer disease from stage text (e.g. "Breast Cancer Stage IIA")
                         stages = condition.get('stage', [])
@@ -1032,7 +1041,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                         datetime.strptime(raw, '%Y-%m-%d')
                                     )
                                 condition_date = _parsed_date  # fallback: last wins
-                                if is_breast_cancer and breast_cancer_onset is None:
+                                if is_breast_cancer and _parsed_date and (breast_cancer_onset is None or _parsed_date < breast_cancer_onset):
                                     breast_cancer_onset = _parsed_date
                             except (ValueError, TypeError):
                                 pass
@@ -1042,7 +1051,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         condition_date = breast_cancer_onset
                     
                     # Upsert ConditionOccurrence for the diagnosis
-                    if condition_date:
+                    if _any_bc_condition and condition_date:
                         from omop_core.models import ConditionOccurrence
 
                         # Use pre-hoisted concept lookups (computed once before the patient loop)
@@ -1644,6 +1653,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         # can derive BP from the Measurement table.
                         if obs_loinc == '85354-9':
                             _bp_type = _concept_lab_type or _concept_generic_lab
+                            _bp_any_written = False
                             for _comp in observation.get('component', []):
                                 _comp_loinc = next(
                                     (c.get('code') for c in _comp.get('code', {}).get('coding', [])
@@ -1673,7 +1683,12 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     _cm._skip_patient_info_refresh = True
                                     _existing_measurements[_comp_key] = _cm
                                     _pending_measurements.append(_cm)
-                            continue  # skip writing a measurement for the panel itself
+                                    _bp_any_written = True
+                            if _bp_any_written:
+                                continue  # skip writing a measurement for the panel itself
+                            # No component concepts were found — fall through and write the
+                            # panel row itself using measurement_source_value='85354-9' as
+                            # a fallback so the observation is not silently discarded.
 
                         if obs_loinc:
                             measurement_concept = _cc_by_loinc(obs_loinc)
