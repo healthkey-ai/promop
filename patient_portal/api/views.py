@@ -770,9 +770,10 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             # Hoist constant Concept lookups — these are the same for every patient and every
             # observation. Using the process-level concept_cache means each of these is a
             # zero-cost memory hit on all subsequent calls (across batches and requests).
-            _concept_breast_cancer = Concept.objects.filter(
-                concept_name__icontains='breast cancer'
-            ).first()
+            _concept_breast_cancer = (
+                Concept.objects.filter(concept_code='254837009', vocabulary_id='SNOMED').first()
+                or Concept.objects.filter(concept_name__icontains='breast cancer').first()
+            )
             _concept_ehr_type      = _cc_by_id(32817)    # EHR
             _concept_lab_type      = _cc_by_id(32856)    # Lab
             _concept_drug_type     = _cc_by_id(32869)    # EHR prescription
@@ -883,6 +884,26 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     base = 'https://healthkey.ai/fhir/StructureDefinition/'
                     race            = ext_results.get(f'{base}race')
                     ethnicity       = ext_results.get(f'{base}ethnicity')
+
+                    # US Core race / ethnicity extensions (mCODE / Synthea FHIR bundles).
+                    # These are nested extensions; extract the 'text' sub-extension value.
+                    if not race or not ethnicity:
+                        for ext in patient_resource.get('extension', []):
+                            url = ext.get('url', '')
+                            if not race and url == (
+                                'http://hl7.org/fhir/us/core/StructureDefinition/us-core-race'
+                            ):
+                                for sub in ext.get('extension', []):
+                                    if sub.get('url') == 'text':
+                                        race = sub.get('valueString')
+                                        break
+                            elif not ethnicity and url == (
+                                'http://hl7.org/fhir/us/core/StructureDefinition/us-core-ethnicity'
+                            ):
+                                for sub in ext.get('extension', []):
+                                    if sub.get('url') == 'text':
+                                        ethnicity = sub.get('valueString')
+                                        break
                     weight          = ext_results.get(f'{base}bodyWeight')
                     height          = ext_results.get(f'{base}bodyHeight')
                     systolic_bp     = ext_results.get(f'{base}systolic-bp')
@@ -960,14 +981,24 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     stage = ''
                     histologic_type = ''
                     condition_date = None
+                    breast_cancer_onset = None  # onset from primary cancer condition (SNOMED 254837009)
 
                     for condition in data['conditions']:
                         # Get histologic type from code
                         code = condition.get('code', {})
+                        coding_list = code.get('coding', [])
                         if code.get('text'):
                             histologic_type = code['text']
-                        elif code.get('coding') and len(code['coding']) > 0:
-                            histologic_type = code['coding'][0].get('display', '')
+                        elif coding_list:
+                            histologic_type = coding_list[0].get('display', '')
+
+                        # Identify primary breast cancer condition
+                        snomed_code = next(
+                            (c.get('code') for c in coding_list
+                             if 'snomed' in c.get('system', '').lower()),
+                            None
+                        )
+                        is_breast_cancer = (snomed_code == '254837009')
 
                         # Get stage and infer disease from stage text (e.g. "Breast Cancer Stage IIA")
                         stages = condition.get('stage', [])
@@ -987,19 +1018,28 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     stage = stage_display.split('Stage')[-1].strip()
                                 else:
                                     stage = stage_display or _sc.get('code', '')
-                        
+
                         # Get condition onset date (handles both 'YYYY-MM-DD' and ISO datetime)
                         if condition.get('onsetDateTime'):
                             try:
                                 raw = condition['onsetDateTime']
                                 if 'T' in raw:
-                                    condition_date = datetime.fromisoformat(raw)
-                                    if condition_date.tzinfo is None:
-                                        condition_date = timezone.make_aware(condition_date)
+                                    _parsed_date = datetime.fromisoformat(raw)
+                                    if _parsed_date.tzinfo is None:
+                                        _parsed_date = timezone.make_aware(_parsed_date)
                                 else:
-                                    condition_date = timezone.make_aware(datetime.strptime(raw, '%Y-%m-%d'))
+                                    _parsed_date = timezone.make_aware(
+                                        datetime.strptime(raw, '%Y-%m-%d')
+                                    )
+                                condition_date = _parsed_date  # fallback: last wins
+                                if is_breast_cancer and breast_cancer_onset is None:
+                                    breast_cancer_onset = _parsed_date
                             except (ValueError, TypeError):
                                 pass
+
+                    # Prefer primary cancer onset over any condition date
+                    if breast_cancer_onset:
+                        condition_date = breast_cancer_onset
                     
                     # Upsert ConditionOccurrence for the diagnosis
                     if condition_date:
@@ -1598,6 +1638,43 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             if _c.get('system') == 'http://loinc.org':
                                 obs_loinc = _c.get('code')
                                 break
+
+                        # BP panel (85354-9) — expand components to individual measurements
+                        # for systolic (8480-6) and diastolic (8462-4) so refresh_patient_info
+                        # can derive BP from the Measurement table.
+                        if obs_loinc == '85354-9':
+                            _bp_type = _concept_lab_type or _concept_generic_lab
+                            for _comp in observation.get('component', []):
+                                _comp_loinc = next(
+                                    (c.get('code') for c in _comp.get('code', {}).get('coding', [])
+                                     if c.get('system') == 'http://loinc.org'),
+                                    None
+                                )
+                                if not _comp_loinc:
+                                    continue
+                                _comp_concept = _cc_by_loinc(_comp_loinc)
+                                if not _comp_concept:
+                                    continue
+                                _comp_value = (_comp.get('valueQuantity') or {}).get('value')
+                                _comp_unit = (_comp.get('valueQuantity') or {}).get('unit')
+                                _comp_key = (_comp_concept.pk, obs_date.date(), _comp_loinc)
+                                if _comp_key not in _existing_measurements:
+                                    _cm = Measurement(
+                                        measurement_id=0,
+                                        person=person,
+                                        measurement_concept=_comp_concept,
+                                        measurement_date=obs_date.date(),
+                                        measurement_datetime=obs_date,
+                                        measurement_type_concept=_bp_type,
+                                        value_as_number=_comp_value,
+                                        measurement_source_value=_comp_loinc,
+                                        unit_source_value=_comp_unit[:50] if _comp_unit else None,
+                                    )
+                                    _cm._skip_patient_info_refresh = True
+                                    _existing_measurements[_comp_key] = _cm
+                                    _pending_measurements.append(_cm)
+                            continue  # skip writing a measurement for the panel itself
+
                         if obs_loinc:
                             measurement_concept = _cc_by_loinc(obs_loinc)
                         if not measurement_concept and obs_name:

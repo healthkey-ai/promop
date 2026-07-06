@@ -47,6 +47,11 @@ _VOCABULARIES = [
          vocabulary_reference='OMOP generated',
          vocabulary_version='v5',
          vocabulary_concept_id=0),
+    dict(vocabulary_id='Gender',
+         vocabulary_name='OMOP Gender',
+         vocabulary_reference='OMOP generated',
+         vocabulary_version='v5',
+         vocabulary_concept_id=0),
 ]
 
 _DOMAINS = [
@@ -57,6 +62,7 @@ _DOMAINS = [
     dict(domain_id='Episode',      domain_name='Episode',        domain_concept_id=0),
     dict(domain_id='Observation',  domain_name='Observation',    domain_concept_id=0),
     dict(domain_id='Metadata',     domain_name='Metadata',       domain_concept_id=0),
+    dict(domain_id='Gender',       domain_name='Gender',          domain_concept_id=0),
 ]
 
 _CONCEPT_CLASSES = [
@@ -67,6 +73,7 @@ _CONCEPT_CLASSES = [
     dict(concept_class_id='Qualifier Value',     concept_class_name='Qualifier Value',      concept_class_concept_id=0),
     dict(concept_class_id='Field',               concept_class_name='Field',                concept_class_concept_id=0),
     dict(concept_class_id='Treatment',           concept_class_name='Treatment',            concept_class_concept_id=0),
+    dict(concept_class_id='Gender',              concept_class_name='Gender',               concept_class_concept_id=0),
 ]
 
 
@@ -96,6 +103,13 @@ def _c(concept_id, concept_name, domain_id, vocabulary_id, concept_class_id,
 
 
 _CONCEPTS = [
+    # ------------------------------------------------------------------
+    # Gender concepts — needed for Person.gender_concept FK.
+    # ------------------------------------------------------------------
+    _c(8507, 'MALE',    'Gender', 'Gender', 'Gender', 'S', 'M'),
+    _c(8532, 'FEMALE',  'Gender', 'Gender', 'Gender', 'S', 'F'),
+    _c(8551, 'UNKNOWN', 'Gender', 'Gender', 'Gender', 'S', 'U'),
+
     # ------------------------------------------------------------------
     # Type concepts — needed for measurement_type_concept_id and
     # condition_type_concept_id FK fields in every OMOP event table.
@@ -152,9 +166,31 @@ _CONCEPTS = [
     # CMP basics
     # ------------------------------------------------------------------
     _c(3016723, 'Creatinine [Mass/volume] in Serum or Plasma', 'Measurement', 'LOINC', 'Lab Test', 'S', '2160-0'),
+    _c(3051825, 'Creatinine [Mass/volume] in Blood',           'Measurement', 'LOINC', 'Lab Test', None, '38483-4'),  # mCODE variant
     _c(3006906, 'Calcium [Mass/volume] in Serum or Plasma',    'Measurement', 'LOINC', 'Lab Test', 'S', '17861-6'),
+    _c(3032503, 'Calcium [Mass/volume] in Blood',              'Measurement', 'LOINC', 'Lab Test', None, '49765-1'),
     _c(3016436, 'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma',
                                                                'Measurement', 'LOINC', 'Lab Test', 'S', '2532-0'),
+    _c(3000285, 'Sodium [Moles/volume] in Blood',              'Measurement', 'LOINC', 'Lab Test', None, '2947-0'),
+    _c(3005456, 'Potassium [Moles/volume] in Blood',           'Measurement', 'LOINC', 'Lab Test', None, '6298-4'),
+    _c(3004295, 'Urea nitrogen [Mass/volume] in Blood',        'Measurement', 'LOINC', 'Lab Test', None, '6299-2'),
+    _c(3030354, 'Glomerular filtration rate in Serum or Plasma by CKD-EPI',
+                                                               'Measurement', 'LOINC', 'Lab Test', None, '33914-3'),
+    _c(3000483, 'Glucose [Mass/volume] in Blood',              'Measurement', 'LOINC', 'Lab Test', None, '2339-0'),
+    # ------------------------------------------------------------------
+    # LFT — present in mCODE synthetic data
+    # ------------------------------------------------------------------
+    _c(3006923, 'Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma',
+                                                               'Measurement', 'LOINC', 'Lab Test', 'S', '1742-6'),
+    _c(3013721, 'Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma',
+                                                               'Measurement', 'LOINC', 'Lab Test', 'S', '1920-8'),
+    _c(3024561, 'Albumin [Mass/volume] in Serum or Plasma',    'Measurement', 'LOINC', 'Lab Test', 'S', '1751-7'),
+    _c(3024128, 'Bilirubin.total [Mass/volume] in Serum or Plasma',
+                                                               'Measurement', 'LOINC', 'Lab Test', 'S', '1975-2'),
+    _c(3020630, 'Protein [Mass/volume] in Serum or Plasma',    'Measurement', 'LOINC', 'Lab Test', 'S', '2885-2'),
+    _c(3035995, 'Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma',
+                                                               'Measurement', 'LOINC', 'Lab Test', 'S', '6768-6'),
+    _c(3004410, 'Hemoglobin A1c/Hemoglobin.total in Blood',    'Measurement', 'LOINC', 'Lab Test', 'S', '4548-4'),
 
     # ------------------------------------------------------------------
     # Vitals — enables weight, height, BP, HR in PatientInfo

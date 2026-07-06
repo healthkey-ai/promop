@@ -102,15 +102,26 @@ _LOINC_LAB_FIELDS = {
     '751-8':   ('anc_thousand_per_ul',            float),
     '731-0':   ('alc_thousand_per_ul',            float),
     '742-7':   ('amc_thousand_per_ul',            float),
+    # Hematocrit — service default is 20570-8 (calculated); mCODE uses 4544-3 (automated count)
+    '4544-3':  ('hematocrit_percent',             float),
     # CMP
     '17861-6': ('serum_calcium_mg_dl',            float),
+    '49765-1': ('serum_calcium_mg_dl',            float),  # mCODE: Calcium in Blood
     '2160-0':  ('serum_creatinine_mg_dl',         float),
+    '38483-4': ('serum_creatinine_mg_dl',         float),  # mCODE: Creatinine in Blood
     '2164-2':  ('creatinine_clearance_ml_min',    float),
     '62238-1': ('egfr_ml_min_173m2',              float),
+    '33914-3': ('egfr_ml_min_173m2',              float),  # mCODE: eGFR CKD-EPI
     '3094-0':  ('bun_mg_dl',                      float),
+    '6299-2':  ('bun_mg_dl',                      float),  # mCODE: BUN in Blood
     '2951-2':  ('sodium_meq_l',                   float),
+    '2947-0':  ('sodium_meq_l',                   float),  # mCODE: Sodium in Blood
     '2823-3':  ('potassium_meq_l',                float),
+    '6298-4':  ('potassium_meq_l',                float),  # mCODE: Potassium in Blood
     '2601-3':  ('magnesium_mg_dl',                float),
+    # Glucose — service default is 2345-7 (Serum); mCODE uses 2339-0 (Blood)
+    '2345-7':  ('glucose_mg_dl',                  int),
+    '2339-0':  ('glucose_mg_dl',                  int),    # mCODE: Glucose in Blood
     # LFT / cardiac
     '1975-2':  ('bilirubin_total_mg_dl',          float),
     '1742-6':  ('alt_u_l',                        int),
@@ -120,7 +131,6 @@ _LOINC_LAB_FIELDS = {
     '2885-2':  ('total_protein',                  float),
     '10839-9': ('troponin_ng_ml',                 float),
     '42637-9': ('bnp_pg_ml',                      int),
-    '2345-7':  ('glucose_mg_dl',                  int),
     '4548-4':  ('hba1c_percent',                  float),
     '2532-0':  ('ldh_u_l',                        int),
     # Other markers
