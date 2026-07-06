@@ -1,7 +1,7 @@
 # omop_core/services/mappings.py
 from omop_core.models import Concept
 
-# Maps PatientInfo field name → (LOINC code, unit string, display name)
+# Maps PatientRecord field name → (LOINC code, unit string, display name)
 LAB_FIELD_TO_LOINC = {
     # Blood counts
     'hemoglobin_g_dl':                ('718-7',    'g/dL',            'Hemoglobin [Mass/volume] in Blood'),
@@ -66,7 +66,7 @@ CONDITION_FIELDS = frozenset({'disease', 'stage', 'condition_code_icd_10', 'cond
 
 DEMOGRAPHIC_FIELDS = frozenset({'gender', 'date_of_birth', 'patient_age', 'ethnicity'})
 
-# Maps line number (1/2/3) → PatientInfo field prefix
+# Maps line number (1/2/3) → PatientRecord field prefix
 THERAPY_LINE_PREFIXES = {
     1: 'first_line',
     2: 'second_line',
@@ -87,7 +87,7 @@ CONCEPT_TREATMENT_REGIMEN = 32531     # Treatment Regimen (episode concept)
 CONCEPT_DRUG_EXPOSURE_FIELD = 1147094  # drug_exposure_id field concept (EpisodeEvent)
 
 
-# Wearable metric LOINC codes → PatientInfo field (for 30-day aggregation)
+# Wearable metric LOINC codes → PatientRecord field (for 30-day aggregation)
 WEARABLE_LOINC = {
     'steps':              '55423-8',   # Number of steps in 24 hours
     'active_minutes':     '77592-4',   # Moderate-vigorous physical activity duration

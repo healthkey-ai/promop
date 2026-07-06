@@ -1,7 +1,7 @@
 import factory
 from omop_core.models import (
     Concept, Vocabulary, Domain, ConceptClass,
-    Person, PatientInfo,
+    Person, PatientRecord,
     Measurement, Observation, ConditionOccurrence, DrugExposure,
 )
 
@@ -67,9 +67,9 @@ class PersonFactory(factory.django.DjangoModelFactory):
     location_id = None
 
 
-class PatientInfoFactory(factory.django.DjangoModelFactory):
+class PatientRecordFactory(factory.django.DjangoModelFactory):
     class Meta:
-        model = PatientInfo
+        model = PatientRecord
 
     person = factory.SubFactory(PersonFactory)
     disease = 'chronic lymphocytic leukemia'

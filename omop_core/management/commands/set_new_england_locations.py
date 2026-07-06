@@ -11,7 +11,7 @@ Usage:
 
 import random
 from django.core.management.base import BaseCommand
-from omop_core.models import PatientInfo
+from omop_core.models import PatientRecord
 
 
 # (city, state_abbr, zip)
@@ -166,9 +166,9 @@ class Command(BaseCommand):
 
         from django.db.models import Q
         if overwrite:
-            qs = PatientInfo.objects.all()
+            qs = PatientRecord.objects.all()
         else:
-            qs = PatientInfo.objects.filter(
+            qs = PatientRecord.objects.filter(
                 Q(city__isnull=True) | Q(city='')
             )
 

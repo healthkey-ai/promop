@@ -5,7 +5,7 @@ import logging
 
 from django.db import IntegrityError, transaction
 
-from omop_core.models import PatientInfo, Person
+from omop_core.models import PatientRecord, Person
 from omop_core.services.pk import next_pk
 from patient_portal.models import PatientUser
 
@@ -17,8 +17,8 @@ def resolve_or_create_person(identity, email=None, allow_create=True):
 
     Lookup order:
       1. Existing PatientUser link
-      2. PatientInfo whose email matches
-      3. Brand-new Person + PatientUser (+ PatientInfo if email known)
+      2. PatientRecord whose email matches
+      3. Brand-new Person + PatientUser (+ PatientRecord if email known)
 
     When allow_create=False, steps 1 and 2 still run (an existing patient is
     always returned) but step 3 is skipped — returns None instead of creating.
@@ -31,7 +31,7 @@ def resolve_or_create_person(identity, email=None, allow_create=True):
 
     email = (email or getattr(identity, 'email', None) or "").strip()
     if email:
-        email_qs = PatientInfo.objects.filter(email=email)
+        email_qs = PatientRecord.objects.filter(email=email)
         # Guard against cross-org collision: if multiple patients share the
         # same email, skip the email match and auto-provision a new person
         # rather than silently linking to the wrong patient.
@@ -61,7 +61,7 @@ def resolve_or_create_person(identity, email=None, allow_create=True):
                 ethnicity_source_value="unknown",
             )
             if email:
-                PatientInfo.objects.create(person=person, email=email)
+                PatientRecord.objects.create(person=person, email=email)
             PatientUser.objects.create(identity=identity, person=person)
     except IntegrityError:
         pu = PatientUser.objects.filter(identity=identity).select_related('person').first()

@@ -1,5 +1,5 @@
 """
-Tests for populate_patient_info management command — new field extraction methods.
+Tests for populate_patient_record management command — new field extraction methods.
 
 Covers:
   - get_demographics: languages_skills population
@@ -13,10 +13,10 @@ Covers:
 """
 
 import pytest
-from omop_core.management.commands.populate_patient_info import Command
+from omop_core.management.commands.populate_patient_record import Command
 from omop_core.models import PersonLanguageSkill
 from tests.factories import (
-    ConceptFactory, PersonFactory, PatientInfoFactory,
+    ConceptFactory, PersonFactory, PatientRecordFactory,
     MeasurementFactory, ObservationFactory,
     ConditionOccurrenceFactory, DrugExposureFactory,
     VocabularyFactory,
@@ -373,8 +373,8 @@ class TestLymphomaData:
 class TestMeasurableDiseaseImwg:
 
     def _pi(self, **kwargs):
-        """PatientInfo with controlled lab fields; skip save() side effects."""
-        pi = PatientInfoFactory.build(**kwargs)
+        """PatientRecord with controlled lab fields; skip save() side effects."""
+        pi = PatientRecordFactory.build(**kwargs)
         return pi
 
     def test_serum_m_protein_high_sets_true(self):
@@ -413,7 +413,7 @@ class TestMeasurableDiseaseImwg:
 class TestTp53Disruption:
 
     def _pi_with_mutations(self, mutations):
-        pi = PatientInfoFactory.build()
+        pi = PatientRecordFactory.build()
         pi.genetic_mutations = mutations
         pi.monoclonal_protein_serum = None
         pi.monoclonal_protein_urine = None

@@ -70,7 +70,7 @@ class Command(BaseCommand):
         sys.stderr.flush()
 
     def handle(self, *args, **options):
-        from patient_portal.api.views import PatientInfoViewSet
+        from patient_portal.api.views import PatientRecordViewSet
 
         _patch_db_timeouts()
 
@@ -149,7 +149,7 @@ class Command(BaseCommand):
             )
 
         # Org setup — monkey-patch get_request_org so the upload view stamps the
-        # correct org on every PatientInfo it creates, even for superuser requests.
+        # correct org on every PatientRecord it creates, even for superuser requests.
         org = None
         if options['org_slug']:
             from omop_core.models import Organization
@@ -185,7 +185,7 @@ class Command(BaseCommand):
             request = DRFRequest(django_request, parsers=[MultiPartParser(), JSONParser()])
             request.user = user
 
-            viewset = PatientInfoViewSet()
+            viewset = PatientRecordViewSet()
             viewset.request = request
             viewset.format_kwarg = None
             viewset.kwargs = {}
@@ -215,19 +215,19 @@ class Command(BaseCommand):
                 for e in errors[:3]:
                     self._print(f'    {e}', err=True)
 
-        # Bulk refresh PatientInfo for all imported patients now that OMOP writes are done.
-        self._print('Refreshing PatientInfo for all imported patients…')
-        from omop_core.models import PatientInfo
-        from omop_core.services.patient_info_service import refresh_patient_info
+        # Bulk refresh PatientRecord for all imported patients now that OMOP writes are done.
+        self._print('Refreshing PatientRecord for all imported patients…')
+        from omop_core.models import PatientRecord
+        from omop_core.services.patient_record_service import refresh_patient_record
         from omop_core.services.lot_inference_service import infer_lot_for_person
         close_old_connections()
-        patients = PatientInfo.objects.select_related('person').all()
+        patients = PatientRecord.objects.select_related('person').all()
         if org:
             patients = patients.filter(organization=org)
         refreshed = 0
         for pi in patients:
             try:
-                refresh_patient_info(pi.person)
+                refresh_patient_record(pi.person)
                 infer_lot_for_person(pi.person)
                 refreshed += 1
             except Exception as exc:

@@ -5,7 +5,7 @@ Reads FHIR patient data from the HealthTree BigQuery warehouse
 (the same source as the ht-analytics-dbt project) and populates:
 
   * omop_core.Person        — core OMOP demographics
-  * omop_core.PatientInfo   — extended denormalised patient info including:
+  * omop_core.PatientRecord   — extended denormalised patient info including:
       - ai_lines_of_therapy   (from core__ai_lines_of_therapy)
       - survey_responses      (from core__survey_responses)
 
@@ -42,7 +42,7 @@ Usage
   # Dry-run (query BQ but don't write to Django DB)
   python manage.py load_from_healthtree_bq --dry-run
 
-  # Force-update existing PatientInfo records
+  # Force-update existing PatientRecord records
   python manage.py load_from_healthtree_bq --force-update
 
 Environment variables
@@ -63,7 +63,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction, IntegrityError
 from django.utils import timezone
 
-from omop_core.models import Concept, Location, PatientInfo, Person
+from omop_core.models import Concept, Location, PatientRecord, Person
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -347,7 +347,7 @@ def _q_surveys(project: str, dataset: str, user_id: str | None) -> str:
 class Command(BaseCommand):
     help = (
         "Load HealthTree patient data from BigQuery into PRomop "
-        "(Person + PatientInfo tables, including AI lines of therapy and "
+        "(Person + PatientRecord tables, including AI lines of therapy and "
         "survey responses)."
     )
 
@@ -388,7 +388,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--force-update",
             action="store_true",
-            help="Re-populate PatientInfo even if it already exists.",
+            help="Re-populate PatientRecord even if it already exists.",
         )
         parser.add_argument(
             "--dry-run",
@@ -484,7 +484,7 @@ class Command(BaseCommand):
         )
 
         # ------------------------------------------------------------------
-        # 4. Upsert Person + PatientInfo records
+        # 4. Upsert Person + PatientRecord records
         # ------------------------------------------------------------------
         created_persons = 0
         updated_persons = 0
@@ -523,7 +523,7 @@ class Command(BaseCommand):
             self.style.SUCCESS(
                 f"\nDone{'  [DRY RUN — no DB writes]' if dry_run else ''}.\n"
                 f"  Person   — created: {created_persons:,}  updated: {updated_persons:,}\n"
-                f"  PatientInfo — created: {created_pi:,}  updated: {updated_pi:,}  "
+                f"  PatientRecord — created: {created_pi:,}  updated: {updated_pi:,}  "
                 f"skipped: {skipped_pi:,}\n"
                 f"  Errors: {errors:,}"
             )
@@ -611,8 +611,8 @@ class Command(BaseCommand):
             person.save(update_fields=list(person_defaults.keys()))
             result["updated_person"] = 1
 
-        # ----- PatientInfo -----
-        pi_exists = PatientInfo.objects.filter(person=person).exists()
+        # ----- PatientRecord -----
+        pi_exists = PatientRecord.objects.filter(person=person).exists()
 
         if pi_exists and not force_update:
             result["skipped_pi"] = 1
@@ -628,7 +628,7 @@ class Command(BaseCommand):
             else None
         )
 
-        # Map gender to PatientInfo choices
+        # Map gender to PatientRecord choices
         gender_pi = None
         if gender_raw in ("male", "m"):
             gender_pi = "M"
@@ -655,11 +655,11 @@ class Command(BaseCommand):
             pi_fields.update(self._derive_therapy_fields(lot_rows))
 
         if pi_exists:
-            PatientInfo.objects.filter(person=person).update(**pi_fields)
+            PatientRecord.objects.filter(person=person).update(**pi_fields)
             result["updated_pi"] = 1
         else:
             pi_fields["person"] = person
-            PatientInfo.objects.create(**pi_fields)
+            PatientRecord.objects.create(**pi_fields)
             result["created_pi"] = 1
 
         return result
@@ -670,7 +670,7 @@ class Command(BaseCommand):
 
     def _derive_therapy_fields(self, lot_rows: list[dict]) -> dict:
         """
-        Populate legacy scalar therapy fields on PatientInfo from the
+        Populate legacy scalar therapy fields on PatientRecord from the
         ai_lines_of_therapy JSON array so the existing UI / matching logic
         still works without changes.
         """

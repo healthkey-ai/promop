@@ -129,7 +129,7 @@ DrugExposure (RxNorm concept_ids)
     ↓ _segment_into_lots()     — apply gap rule (180d) + switch rule (50%)
     ↓ _name_regimen()          — frozenset of drug names → text label via MYELOMA_REGIMEN_LOOKUP
     ↓ _persist_lots()          — write Episode + EpisodeEvent rows
-    ↓ refresh_patient_info()   — read Episode records → write PatientInfo therapy text fields
+    ↓ refresh_patient_record()   — read Episode records → write PatientInfo therapy text fields
 ```
 
 `MYELOMA_REGIMEN_LOOKUP` in `omop_oncology/services/lot_regimens.py`:

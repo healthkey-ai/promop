@@ -1,8 +1,8 @@
 """
 omop_core tests — TEST-01, TEST-02, TEST-03, TEST-04
 
-TEST-01: PatientInfo model-level tests
-TEST-02: refresh_patient_info service unit tests
+TEST-01: PatientRecord model-level tests
+TEST-02: refresh_patient_record service unit tests
 TEST-03: Signal integration tests at omop_core level
 TEST-04: FLBundleGenerator unit tests
 """
@@ -14,9 +14,9 @@ from django.test import TestCase
 
 from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
-    Person, PatientInfo, ConditionOccurrence, DrugExposure, Measurement, Observation,
+    Person, PatientRecord, ConditionOccurrence, DrugExposure, Measurement, Observation,
 )
-from omop_core.services.patient_info_service import refresh_patient_info
+from omop_core.services.patient_record_service import refresh_patient_record
 
 
 # ---------------------------------------------------------------------------
@@ -96,30 +96,30 @@ class _OmopBase(TestCase):
 
 
 # ===========================================================================
-# TEST-01: PatientInfo model-level tests
+# TEST-01: PatientRecord model-level tests
 # ===========================================================================
 
-class PatientInfoModelTest(_OmopBase):
-    """PatientInfo field persistence, nullability, and OneToOne constraint."""
+class PatientRecordModelTest(_OmopBase):
+    """PatientRecord field persistence, nullability, and OneToOne constraint."""
 
     PERSON_ID = 90100
 
     def test_create_patient_info_with_basic_fields(self):
-        """PatientInfo can be created and fields persist to the DB."""
-        pi = PatientInfo.objects.create(
+        """PatientRecord can be created and fields persist to the DB."""
+        pi = PatientRecord.objects.create(
             person=self.person,
             disease='Breast Cancer',
             hemoglobin_g_dl=11.5,
             wbc_count_thousand_per_ul=4.2,
         )
-        fetched = PatientInfo.objects.get(pk=pi.pk)
+        fetched = PatientRecord.objects.get(pk=pi.pk)
         self.assertEqual(fetched.disease, 'Breast Cancer')
         self.assertAlmostEqual(float(fetched.hemoglobin_g_dl), 11.5, places=1)
         self.assertAlmostEqual(float(fetched.wbc_count_thousand_per_ul), 4.2, places=1)
 
     def test_all_lab_fields_nullable(self):
         """All new UI lab fields allow NULL."""
-        pi = PatientInfo.objects.create(person=self.person)
+        pi = PatientRecord.objects.create(person=self.person)
         for field in (
             'hemoglobin_g_dl', 'hematocrit_percent', 'wbc_count_thousand_per_ul',
             'rbc_million_per_ul', 'platelet_count_thousand_per_ul',
@@ -133,19 +133,19 @@ class PatientInfoModelTest(_OmopBase):
         ):
             self.assertIsNone(
                 getattr(pi, field),
-                f'{field} should be NULL on a freshly created PatientInfo',
+                f'{field} should be NULL on a freshly created PatientRecord',
             )
 
     def test_one_to_one_constraint(self):
-        """Two PatientInfo rows for the same Person are rejected."""
+        """Two PatientRecord rows for the same Person are rejected."""
         from django.db import IntegrityError
-        PatientInfo.objects.create(person=self.person)
+        PatientRecord.objects.create(person=self.person)
         with self.assertRaises(IntegrityError):
-            PatientInfo.objects.create(person=self.person)
+            PatientRecord.objects.create(person=self.person)
 
     def test_cbc_fields_persist_with_correct_precision(self):
         """CBC decimal fields store at the declared precision."""
-        pi = PatientInfo.objects.create(
+        pi = PatientRecord.objects.create(
             person=self.person,
             hemoglobin_g_dl=12.3,
             platelet_count_thousand_per_ul=250.5,
@@ -158,7 +158,7 @@ class PatientInfoModelTest(_OmopBase):
 
     def test_lft_integer_fields_persist(self):
         """LFT integer fields (alt_u_l, ast_u_l, etc.) store correctly."""
-        pi = PatientInfo.objects.create(
+        pi = PatientRecord.objects.create(
             person=self.person,
             alt_u_l=42,
             ast_u_l=38,
@@ -173,42 +173,42 @@ class PatientInfoModelTest(_OmopBase):
 
 
 # ===========================================================================
-# TEST-02: refresh_patient_info service unit tests
+# TEST-02: refresh_patient_record service unit tests
 # ===========================================================================
 
-class RefreshPatientInfoNewRecordTest(_OmopBase):
-    """refresh_patient_info creates a PatientInfo when one does not exist."""
+class RefreshPatientRecordNewRecordTest(_OmopBase):
+    """refresh_patient_record creates a PatientRecord when one does not exist."""
 
     PERSON_ID = 90200
 
     def test_creates_patient_info_when_absent(self):
-        self.assertFalse(PatientInfo.objects.filter(person=self.person).exists())
-        pi = refresh_patient_info(self.person)
+        self.assertFalse(PatientRecord.objects.filter(person=self.person).exists())
+        pi = refresh_patient_record(self.person)
         self.assertIsNotNone(pi)
-        self.assertTrue(PatientInfo.objects.filter(person=self.person).exists())
+        self.assertTrue(PatientRecord.objects.filter(person=self.person).exists())
 
     def test_returns_patient_info_instance(self):
-        pi = refresh_patient_info(self.person)
-        self.assertIsInstance(pi, PatientInfo)
+        pi = refresh_patient_record(self.person)
+        self.assertIsInstance(pi, PatientRecord)
 
     def test_idempotent_on_second_call(self):
-        refresh_patient_info(self.person)
-        refresh_patient_info(self.person)
-        self.assertEqual(PatientInfo.objects.filter(person=self.person).count(), 1)
+        refresh_patient_record(self.person)
+        refresh_patient_record(self.person)
+        self.assertEqual(PatientRecord.objects.filter(person=self.person).count(), 1)
 
 
-class RefreshPatientInfoDemographicsTest(_OmopBase):
-    """Demographics section of refresh_patient_info."""
+class RefreshPatientRecordDemographicsTest(_OmopBase):
+    """Demographics section of refresh_patient_record."""
 
     PERSON_ID = 90210
 
     def test_age_derived_from_year_of_birth(self):
-        pi = refresh_patient_info(self.person)
+        pi = refresh_patient_record(self.person)
         expected_age = date.today().year - self.person.year_of_birth
         self.assertEqual(pi.patient_age, expected_age)
 
 
-class RefreshPatientInfoDiseaseTest(_OmopBase):
+class RefreshPatientRecordDiseaseTest(_OmopBase):
     """Disease / condition section."""
 
     PERSON_ID = 90220
@@ -221,7 +221,7 @@ class RefreshPatientInfoDiseaseTest(_OmopBase):
             condition_start_date=date(2022, 1, 1),
             condition_type_concept=self.type_concept,
         )
-        pi = refresh_patient_info(self.person)
+        pi = refresh_patient_record(self.person)
         self.assertIn('neoplasm', pi.disease.lower())
 
     def test_diagnosis_date_from_condition(self):
@@ -232,7 +232,7 @@ class RefreshPatientInfoDiseaseTest(_OmopBase):
             condition_start_date=date(2021, 6, 15),
             condition_type_concept=self.type_concept,
         )
-        pi = refresh_patient_info(self.person)
+        pi = refresh_patient_record(self.person)
         self.assertEqual(pi.diagnosis_date, date(2021, 6, 15))
 
     def test_disease_slug_generated(self):
@@ -243,7 +243,7 @@ class RefreshPatientInfoDiseaseTest(_OmopBase):
             condition_start_date=date(2022, 1, 1),
             condition_type_concept=self.type_concept,
         )
-        pi = refresh_patient_info(self.person)
+        pi = refresh_patient_record(self.person)
         self.assertIsNotNone(pi.disease_slug)
         self.assertNotIn(' ', pi.disease_slug)
 
@@ -254,13 +254,13 @@ class CanonicalizeDiseaseTest(_OmopBase):
     PERSON_ID = 90225
 
     def test_canonicalize_helper_maps_known_aliases(self):
-        from omop_core.services.patient_info_service import _canonicalize_disease
+        from omop_core.services.patient_record_service import _canonicalize_disease
         self.assertEqual(_canonicalize_disease('myeloma'), 'multiple myeloma')
         self.assertEqual(_canonicalize_disease('Myeloma'), 'multiple myeloma')
         self.assertEqual(_canonicalize_disease('  MYELOMA  '), 'multiple myeloma')
 
     def test_canonicalize_helper_passes_through_unknown(self):
-        from omop_core.services.patient_info_service import _canonicalize_disease
+        from omop_core.services.patient_record_service import _canonicalize_disease
         self.assertEqual(_canonicalize_disease('breast cancer'), 'breast cancer')
         self.assertEqual(_canonicalize_disease(''), '')
         self.assertIsNone(_canonicalize_disease(None))
@@ -274,12 +274,12 @@ class CanonicalizeDiseaseTest(_OmopBase):
             condition_start_date=date(2022, 3, 1),
             condition_type_concept=self.type_concept,
         )
-        pi = refresh_patient_info(self.person)
+        pi = refresh_patient_record(self.person)
         self.assertEqual(pi.disease, 'multiple myeloma')
         self.assertEqual(pi.disease_slug, 'multiple-myeloma')
 
 
-class RefreshPatientInfoLabsFromMeasurementTest(_OmopBase):
+class RefreshPatientRecordLabsFromMeasurementTest(_OmopBase):
     """Labs are derived from Measurement records using source_value fallback."""
 
     PERSON_ID = 90230
@@ -298,25 +298,25 @@ class RefreshPatientInfoLabsFromMeasurementTest(_OmopBase):
 
     def test_hemoglobin_derived_from_measurement_source_value(self):
         self._make_measurement(92301, 'Hemoglobin [Mass/volume] in Blood', 11.2)
-        pi = refresh_patient_info(self.person)
+        pi = refresh_patient_record(self.person)
         self.assertIsNotNone(pi.hemoglobin_g_dl)
         self.assertAlmostEqual(float(pi.hemoglobin_g_dl), 11.2, places=1)
 
     def test_wbc_derived_from_measurement_source_value(self):
         self._make_measurement(92302, 'Leukocytes [#/volume] in Blood', 4.5)
-        pi = refresh_patient_info(self.person)
+        pi = refresh_patient_record(self.person)
         self.assertIsNotNone(pi.wbc_count_thousand_per_ul)
         self.assertAlmostEqual(float(pi.wbc_count_thousand_per_ul), 4.5, places=1)
 
     def test_creatinine_derived_from_measurement_source_value(self):
         self._make_measurement(92303, 'Creatinine [Mass/volume] in Serum or Plasma', 0.9)
-        pi = refresh_patient_info(self.person)
+        pi = refresh_patient_record(self.person)
         self.assertIsNotNone(pi.serum_creatinine_mg_dl)
         self.assertAlmostEqual(float(pi.serum_creatinine_mg_dl), 0.9, places=1)
 
     def test_alt_derived_from_measurement_source_value(self):
         self._make_measurement(92304, 'Alanine aminotransferase [Enzymatic activity/volum', 55)
-        pi = refresh_patient_info(self.person)
+        pi = refresh_patient_record(self.person)
         self.assertIsNotNone(pi.alt_u_l)
         self.assertEqual(pi.alt_u_l, 55)
 
@@ -341,48 +341,48 @@ class RefreshPatientInfoLabsFromMeasurementTest(_OmopBase):
             value_as_number=13.5,
             measurement_source_value='Hemoglobin [Mass/volume] in Blood',
         )
-        pi = refresh_patient_info(self.person)
+        pi = refresh_patient_record(self.person)
         self.assertAlmostEqual(float(pi.hemoglobin_g_dl), 13.5, places=1)
 
     def test_cleared_measurement_clears_lab_field(self):
         """Deleting the only Measurement clears the derived field."""
         m = self._make_measurement(92320, 'Hemoglobin [Mass/volume] in Blood', 11.0)
-        pi = refresh_patient_info(self.person)
+        pi = refresh_patient_record(self.person)
         self.assertIsNotNone(pi.hemoglobin_g_dl)
 
         m.delete()
-        pi = refresh_patient_info(self.person)
+        pi = refresh_patient_record(self.person)
         # hemoglobin_g_dl is in _OMOP_DERIVED_FIELDS so it should be cleared
         self.assertIsNone(pi.hemoglobin_g_dl)
 
 
-class RefreshPatientInfoComputedFieldsTest(_OmopBase):
+class RefreshPatientRecordComputedFieldsTest(_OmopBase):
     """_compute_derived_fields section."""
 
     PERSON_ID = 90240
 
     def test_measurable_disease_imwg_true_with_high_serum_mp(self):
-        pi = PatientInfo.objects.create(
+        pi = PatientRecord.objects.create(
             person=self.person,
             monoclonal_protein_serum=1.5,
         )
-        from omop_core.services.patient_info_service import _compute_derived_fields
+        from omop_core.services.patient_record_service import _compute_derived_fields
         _compute_derived_fields(pi)
         self.assertTrue(pi.measurable_disease_imwg)
 
     def test_measurable_disease_imwg_false_with_low_values(self):
-        pi = PatientInfo.objects.create(
+        pi = PatientRecord.objects.create(
             person=self.person,
             monoclonal_protein_serum=0.1,
             monoclonal_protein_urine=50,
         )
-        from omop_core.services.patient_info_service import _compute_derived_fields
+        from omop_core.services.patient_record_service import _compute_derived_fields
         _compute_derived_fields(pi)
         self.assertFalse(pi.measurable_disease_imwg)
 
     def test_measurable_disease_imwg_none_when_no_data(self):
-        pi = PatientInfo.objects.create(person=self.person)
-        from omop_core.services.patient_info_service import _compute_derived_fields
+        pi = PatientRecord.objects.create(person=self.person)
+        from omop_core.services.patient_record_service import _compute_derived_fields
         _compute_derived_fields(pi)
         self.assertIsNone(pi.measurable_disease_imwg)
 
@@ -392,7 +392,7 @@ class RefreshPatientInfoComputedFieldsTest(_OmopBase):
 # ===========================================================================
 
 class MeasurementSignalLabFieldTest(_OmopBase):
-    """Saving a Measurement triggers refresh_patient_info and populates lab fields."""
+    """Saving a Measurement triggers refresh_patient_record and populates lab fields."""
 
     PERSON_ID = 90300
 
@@ -401,7 +401,7 @@ class MeasurementSignalLabFieldTest(_OmopBase):
 
     def test_measurement_save_updates_hemoglobin_g_dl(self):
         """Saving a Measurement with the right source_value updates hemoglobin_g_dl."""
-        PatientInfo.objects.create(person=self.person)
+        PatientRecord.objects.create(person=self.person)
         Measurement.objects.create(
             measurement_id=93001,
             person=self.person,
@@ -411,13 +411,13 @@ class MeasurementSignalLabFieldTest(_OmopBase):
             value_as_number=10.8,
             measurement_source_value='Hemoglobin [Mass/volume] in Blood',
         )
-        pi = PatientInfo.objects.get(person=self.person)
+        pi = PatientRecord.objects.get(person=self.person)
         self.assertIsNotNone(pi.hemoglobin_g_dl)
         self.assertAlmostEqual(float(pi.hemoglobin_g_dl), 10.8, places=1)
 
     def test_measurement_delete_clears_hemoglobin_g_dl(self):
         """Deleting the Measurement clears the derived field."""
-        PatientInfo.objects.create(person=self.person)
+        PatientRecord.objects.create(person=self.person)
         m = Measurement.objects.create(
             measurement_id=93010,
             person=self.person,
@@ -427,7 +427,7 @@ class MeasurementSignalLabFieldTest(_OmopBase):
             value_as_number=10.8,
             measurement_source_value='Hemoglobin [Mass/volume] in Blood',
         )
-        pi = PatientInfo.objects.get(person=self.person)
+        pi = PatientRecord.objects.get(person=self.person)
         self.assertIsNotNone(pi.hemoglobin_g_dl)
 
         m.delete()
@@ -435,8 +435,8 @@ class MeasurementSignalLabFieldTest(_OmopBase):
         self.assertIsNone(pi.hemoglobin_g_dl)
 
     def test_skip_flag_suppresses_refresh(self):
-        """_skip_patient_info_refresh=True prevents refresh_patient_info from running."""
-        PatientInfo.objects.create(person=self.person, hemoglobin_g_dl=99.0)
+        """_skip_patient_record_refresh=True prevents refresh_patient_record from running."""
+        PatientRecord.objects.create(person=self.person, hemoglobin_g_dl=99.0)
         m = Measurement(
             measurement_id=93020,
             person=self.person,
@@ -446,20 +446,20 @@ class MeasurementSignalLabFieldTest(_OmopBase):
             value_as_number=5.0,
             measurement_source_value='Hemoglobin [Mass/volume] in Blood',
         )
-        m._skip_patient_info_refresh = True
+        m._skip_patient_record_refresh = True
         m.save()
-        # PatientInfo should NOT have been updated
-        pi = PatientInfo.objects.get(person=self.person)
+        # PatientRecord should NOT have been updated
+        pi = PatientRecord.objects.get(person=self.person)
         self.assertAlmostEqual(float(pi.hemoglobin_g_dl), 99.0, places=0)
 
 
 class ConditionSignalTest(_OmopBase):
-    """Saving a ConditionOccurrence triggers refresh_patient_info."""
+    """Saving a ConditionOccurrence triggers refresh_patient_record."""
 
     PERSON_ID = 90310
 
     def test_condition_save_updates_disease(self):
-        PatientInfo.objects.create(person=self.person)
+        PatientRecord.objects.create(person=self.person)
         ConditionOccurrence.objects.create(
             condition_occurrence_id=93101,
             person=self.person,
@@ -467,12 +467,12 @@ class ConditionSignalTest(_OmopBase):
             condition_start_date=date(2022, 1, 1),
             condition_type_concept=self.type_concept,
         )
-        pi = PatientInfo.objects.get(person=self.person)
+        pi = PatientRecord.objects.get(person=self.person)
         self.assertIsNotNone(pi.disease)
         self.assertIn('neoplasm', pi.disease.lower())
 
     def test_condition_delete_clears_disease(self):
-        PatientInfo.objects.create(person=self.person)
+        PatientRecord.objects.create(person=self.person)
         co = ConditionOccurrence.objects.create(
             condition_occurrence_id=93110,
             person=self.person,
@@ -480,7 +480,7 @@ class ConditionSignalTest(_OmopBase):
             condition_start_date=date(2022, 1, 1),
             condition_type_concept=self.type_concept,
         )
-        pi = PatientInfo.objects.get(person=self.person)
+        pi = PatientRecord.objects.get(person=self.person)
         self.assertIsNotNone(pi.disease)
 
         co.delete()

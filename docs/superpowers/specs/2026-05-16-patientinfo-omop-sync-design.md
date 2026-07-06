@@ -26,7 +26,7 @@ FHIR import ──────────────────────�
                                               LOT inference (#67)
                                                           │
                                     omop_read_service ◄───┘
-                                    (patient_info_service.py)
+                                    (patient_record_service.py)
                                           │
                                           ▼
                                      PatientInfo
@@ -38,7 +38,7 @@ FHIR import ──────────────────────�
 |---|---|
 | `omop_core/services/mappings.py` | Shared field→LOINC/concept mappings (moved from views.py) |
 | `omop_core/services/omop_write_service.py` | **New.** PatientInfo → OMOP write-through |
-| `omop_core/services/patient_info_service.py` | **Existing.** OMOP → PatientInfo read/refresh |
+| `omop_core/services/patient_record_service.py` | **Existing.** OMOP → PatientInfo read/refresh |
 
 ---
 
@@ -106,7 +106,7 @@ Moves out of `views.py`:
 
 ---
 
-## patient_info_service.py (existing — read direction)
+## patient_record_service.py (existing — read direction)
 
 No structural changes. Continues to handle OMOP → PatientInfo refresh:
 - Called after FHIR import completes
@@ -124,7 +124,7 @@ LOT inference is a separate pipeline, not part of either sync service:
 
 1. FHIR import → raw `DrugExposure` + `ProcedureOccurrence` rows
 2. LOT inference (#67) — reads those rows, applies OHDSI Artemis + custom rules, creates named `Episode` records with `episode_number` and `episode_source_value` (regimen name), creates `EpisodeEvent` links
-3. `patient_info_service.py` refresh — reads the new `Episode` records, writes `first/second/later_line_therapy` into `PatientInfo`
+3. `patient_record_service.py` refresh — reads the new `Episode` records, writes `first/second/later_line_therapy` into `PatientInfo`
 
 The `omop_write_service` handles the reverse: if a human manually corrects the named therapy in `PatientInfo` via the UI, that correction propagates back to the `Episode` record.
 

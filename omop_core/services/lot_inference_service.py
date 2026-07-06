@@ -8,7 +8,7 @@ Phases:
   3. Segment into LOTs (gap rule + switch rule + transplant/CAR-T rules)
   4. Assign phase labels (induction / consolidation / maintenance / transplant / CAR T-Cell)
   5. Name each regimen (myeloma lookup → cross-disease lookup → alphabetic fallback)
-  6. Persist Episode + EpisodeEvent records; call refresh_patient_info
+  6. Persist Episode + EpisodeEvent records; call refresh_patient_record
 """
 import logging
 from collections import defaultdict
@@ -32,7 +32,7 @@ from omop_core.services.lot_regimens import (
     REGIMEN_LOOKUP,
     STEROID_SUBTYPES,
 )
-from omop_core.services.patient_info_service import refresh_patient_info
+from omop_core.services.patient_record_service import refresh_patient_record
 from omop_oncology.models import Episode, EpisodeEvent
 
 logger = logging.getLogger('audit')
@@ -562,7 +562,7 @@ def infer_lot_for_person(person, force: bool = False, dry_run: bool = False) -> 
             return lots
 
         _persist_lots(person, lots)
-        refresh_patient_info(person)
+        refresh_patient_record(person)
         return lots
 
     except Exception as exc:

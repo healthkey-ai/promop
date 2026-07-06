@@ -1,9 +1,9 @@
 """
-patient_info_service.py — Reusable service for deriving PatientInfo from OMOP tables.
+patient_record_service.py — Reusable service for deriving PatientRecord from OMOP tables.
 
 Usage:
-    from omop_core.services.patient_info_service import refresh_patient_info
-    patient_info = refresh_patient_info(person)
+    from omop_core.services.patient_record_service import refresh_patient_record
+    patient_info = refresh_patient_record(person)
 """
 
 import math
@@ -14,7 +14,7 @@ from django.db.models.functions import Cast, Coalesce
 from django.db import transaction
 from django.utils import timezone
 from omop_core.models import (
-    Person, PatientInfo, ConditionOccurrence, Concept,
+    Person, PatientRecord, ConditionOccurrence, Concept,
     Measurement, Observation, DrugExposure, Location, ProcedureOccurrence,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
@@ -90,7 +90,7 @@ _OMOP_DERIVED_FIELDS = [
 ]
 
 
-# LOINC code → (PatientInfo field name, coercion function)
+# LOINC code → (PatientRecord field name, coercion function)
 # Used to derive UI lab fields from the OMOP Measurement table.
 _LOINC_LAB_FIELDS = {
     # CBC
@@ -141,7 +141,7 @@ _LOINC_LAB_FIELDS = {
 
 # Source-value fallback map for environments where LOINC Concepts aren't loaded.
 # Key  = measurement_source_value (as stored by the FHIR upload pipeline or PATCH write-through)
-# Value = PatientInfo field name
+# Value = PatientRecord field name
 _SOURCE_VALUE_LAB_FIELDS = {
     'Hemoglobin [Mass/volume] in Blood':          'hemoglobin_g_dl',
     'Hematocrit [Volume Fraction] of Blood':      'hematocrit_percent',
@@ -200,7 +200,7 @@ _SOURCE_VALUE_LAB_FIELDS = {
 }
 
 
-def _clear_derived_fields(patient_info: PatientInfo) -> None:
+def _clear_derived_fields(patient_info: PatientRecord) -> None:
     """Reset all OMOP-derived fields to None so deletions are reflected."""
     for field in _OMOP_DERIVED_FIELDS:
         if hasattr(patient_info, field):
@@ -208,10 +208,10 @@ def _clear_derived_fields(patient_info: PatientInfo) -> None:
             setattr(patient_info, field, default)
 
 
-def refresh_patient_info(person: Person) -> PatientInfo:
-    """Derive and upsert PatientInfo from OMOP tables for a given person.
+def refresh_patient_record(person: Person) -> PatientRecord:
+    """Derive and upsert PatientRecord from OMOP tables for a given person.
 
-    This is the single source of truth for PatientInfo derivation. It is called
+    This is the single source of truth for PatientRecord derivation. It is called
     by:
       - The populate_patient_info management command
       - OMOP post_save signals (ConditionOccurrence, DrugExposure, Measurement, etc.)
@@ -219,9 +219,9 @@ def refresh_patient_info(person: Person) -> PatientInfo:
     """
     with transaction.atomic():
         try:
-            patient_info = PatientInfo.objects.select_for_update().get(person=person)
-        except PatientInfo.DoesNotExist:
-            patient_info = PatientInfo(person=person)
+            patient_info = PatientRecord.objects.select_for_update().get(person=person)
+        except PatientRecord.DoesNotExist:
+            patient_info = PatientRecord(person=person)
 
         # Clear all OMOP-derived fields before re-deriving so deletions are reflected.
         _clear_derived_fields(patient_info)
@@ -1141,8 +1141,8 @@ def _get_prior_procedures(person: Person) -> dict:
 # Derived fields (must run after all sections are populated)
 # ---------------------------------------------------------------------------
 
-def _compute_derived_fields(patient_info: PatientInfo) -> None:
-    """Compute fields that depend on other PatientInfo fields being set."""
+def _compute_derived_fields(patient_info: PatientRecord) -> None:
+    """Compute fields that depend on other PatientRecord fields being set."""
     serum_mp = patient_info.monoclonal_protein_serum
     urine_mp = patient_info.monoclonal_protein_urine
     kappa = patient_info.kappa_flc

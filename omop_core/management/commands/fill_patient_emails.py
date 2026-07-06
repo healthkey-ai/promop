@@ -1,5 +1,5 @@
 """
-Management command to fill PatientInfo.email from patient name.
+Management command to fill PatientRecord.email from patient name.
 
 Generates a placeholder email address for patients who have no email recorded.
 The default pattern is: <first_initial><last_name>@<domain>
@@ -11,11 +11,11 @@ Usage:
 """
 
 from django.core.management.base import BaseCommand
-from omop_core.models import PatientInfo
+from omop_core.models import PatientRecord
 
 
 class Command(BaseCommand):
-    help = "Fill PatientInfo.email with a generated placeholder address derived from the patient name"
+    help = "Fill PatientRecord.email with a generated placeholder address derived from the patient name"
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -41,9 +41,9 @@ class Command(BaseCommand):
 
         from django.db.models import Q
         if overwrite:
-            qs = PatientInfo.objects.select_related('person').all()
+            qs = PatientRecord.objects.select_related('person').all()
         else:
-            qs = PatientInfo.objects.select_related('person').filter(
+            qs = PatientRecord.objects.select_related('person').filter(
                 Q(email__isnull=True) | Q(email='')
             )
 

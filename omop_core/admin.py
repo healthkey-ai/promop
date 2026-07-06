@@ -1,6 +1,6 @@
 from django.contrib import admin
 from .models import (
-    Person, PatientInfo, Concept, Vocabulary, Domain, ConceptClass
+    Person, PatientRecord, Concept, Vocabulary, Domain, ConceptClass
 )
 
 @admin.register(Person)
@@ -10,8 +10,8 @@ class PersonAdmin(admin.ModelAdmin):
     list_filter = ['year_of_birth']
 
 
-@admin.register(PatientInfo)
-class PatientInfoAdmin(admin.ModelAdmin):
+@admin.register(PatientRecord)
+class PatientRecordAdmin(admin.ModelAdmin):
     list_display = ['person', 'disease', 'updated_at']
     search_fields = ['person__person_id']
     list_filter = ['disease', 'created_at', 'updated_at']

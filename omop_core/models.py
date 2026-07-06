@@ -884,9 +884,9 @@ class LoincCodeClass(models.Model):
         return f"{self.loinc_num} → {self.loinc_class_id}"
 
 
-# Choice classes for PatientInfo model
+# Choice classes for PatientRecord model
 class GenderChoices(models.TextChoices):
-    """Gender choices for PatientInfo"""
+    """Gender choices for PatientRecord"""
     MALE = 'M', 'Male'
     FEMALE = 'F', 'Female'
     UNKNOWN = 'U', 'Unknown'
@@ -1207,13 +1207,13 @@ class BreastCancerLaterLineTherapy(VocabularyLookup):
 # ---------------------------------------------------------------------------
 
 
-class PatientInfo(models.Model):
+class PatientRecord(models.Model):
     """
     Comprehensive patient information model — OMOP CDM–aligned PatientRecord projection.
     Derived automatically from OMOP clinical tables via the post_save signal chain.
     """
     # Link to OMOP Person
-    person = models.OneToOneField(Person, on_delete=models.CASCADE, related_name='patient_info')
+    person = models.OneToOneField(Person, on_delete=models.CASCADE, related_name='patient_record')
     
     # General Information
     email = models.EmailField(max_length=255, null=True, blank=True, db_index=True)
@@ -1701,18 +1701,18 @@ class PatientInfo(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = "patient_info"
+        db_table = "patient_record"
         indexes = [
             models.Index(fields=["person"]),
             models.Index(fields=["patient_age"]),
             models.Index(fields=["disease"]),
             models.Index(fields=["stage"]),
-            models.Index(fields=["-updated_at"], name="ix_pi_updated_at"),
-            models.Index(fields=["organization", "-updated_at"], name="ix_pi_org_updated_at"),
+            models.Index(fields=["-updated_at"], name="ix_pr_updated_at"),
+            models.Index(fields=["organization", "-updated_at"], name="ix_pr_org_updated_at"),
         ]
 
     def __str__(self):
-        return f"PatientInfo for Person {self.person.person_id} (age={self.patient_age}, gender={self.gender})"
+        return f"PatientRecord for Person {self.person.person_id} (age={self.patient_age}, gender={self.gender})"
 
     def get_languages(self):
         """Return a dictionary of languages and their skill levels"""
@@ -1852,7 +1852,7 @@ class PatientInfo(models.Model):
         
         if self.pk:
             try:
-                old_instance = PatientInfo.objects.get(pk=self.pk)
+                old_instance = PatientRecord.objects.get(pk=self.pk)
                 
                 # Compute what the prior logical default would have been
                 old_relapse = 0
@@ -1875,7 +1875,7 @@ class PatientInfo(models.Model):
                 elif self.relapse_count is None:
                      # fallback
                      self.relapse_count = computed_relapse_count
-            except PatientInfo.DoesNotExist:
+            except PatientRecord.DoesNotExist:
                 if self.relapse_count is None:
                     self.relapse_count = computed_relapse_count
         else:

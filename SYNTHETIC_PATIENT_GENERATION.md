@@ -81,7 +81,7 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 1. Parses the FHIR Bundle and groups entries by patient
 2. Uploads patients in batches via the `upload_fhir` view (same path as real FHIR ingestion)
 3. Writes OMOP records: `Person`, `Measurement`, `DrugExposure`, `Episode`, `EpisodeEvent`
-4. After each batch completes, runs `refresh_patient_info` and `infer_lot_for_person` to rebuild the `PatientRecord` projection
+4. After each batch completes, runs `refresh_patient_record` and `infer_lot_for_person` to rebuild the `PatientRecord` projection
 
 ---
 
