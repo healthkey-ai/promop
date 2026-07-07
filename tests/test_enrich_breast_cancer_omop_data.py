@@ -69,6 +69,15 @@ class TestPerformanceAndStageBackfill:
         stage_concept = _loinc_concept('21908-9', 'Stage group.clinical Cancer')
         m = MeasurementFactory(person=person, measurement_concept=stage_concept, value_as_string=None)
 
+        # Creating the Measurement above fires the OMOP post_save signal,
+        # which calls refresh_patient_record() outside the command's own
+        # suppress_patient_record_refresh() context. Since `stage` is itself
+        # derived from this same (still-null) measurement, that refresh
+        # clears it back to None — re-set it so the precondition this test
+        # is actually checking (the command reads an existing stage value to
+        # backfill the measurement) holds regardless of that side effect.
+        PatientRecord.objects.filter(person=person).update(stage='IIIB')
+
         call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id))
 
         m.refresh_from_db()

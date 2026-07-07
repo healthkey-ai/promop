@@ -45,6 +45,7 @@ from django.db.utils import InterfaceError, OperationalError
 
 from omop_core.models import (
     Person, PatientRecord, Measurement, Observation, Concept, Vocabulary,
+    Domain, ConceptClass,
 )
 from omop_core.services.mappings import (
     WEARABLE_LOINC, WEARABLE_MIN_VALID_DAYS, CONCEPT_EHR_TYPE,
@@ -109,14 +110,35 @@ def _get_or_create_snomed_vocabulary():
     return vocab
 
 
+def _get_or_create_domain(domain_id):
+    domain, _ = Domain.objects.get_or_create(
+        domain_id=domain_id, defaults={'domain_name': domain_id, 'domain_concept_id': 0},
+    )
+    return domain
+
+
+def _get_or_create_concept_class(concept_class_id):
+    concept_class, _ = ConceptClass.objects.get_or_create(
+        concept_class_id=concept_class_id,
+        defaults={'concept_class_name': concept_class_id, 'concept_class_concept_id': 0},
+    )
+    return concept_class
+
+
 def _get_or_create_concept(concept_code, concept_name):
     """Get or create a SNOMED Concept row keyed by concept_code, using the
-    numeric code itself as concept_id (see module docstring for why)."""
+    numeric code itself as concept_id (see module docstring for why).
+
+    Also ensures the Vocabulary/Domain/ConceptClass rows it references exist —
+    true on the real staging DB (seeded separately), but not on a freshly
+    migrated local/test DB, where these reference tables start empty."""
     concept_id = int(concept_code)
     try:
         existing = Concept.objects.get(concept_id=concept_id)
     except Concept.DoesNotExist:
         _get_or_create_snomed_vocabulary()
+        _get_or_create_domain('Observation')
+        _get_or_create_concept_class('Clinical Observation')
         return Concept.objects.create(
             concept_id=concept_id,
             concept_name=concept_name,
@@ -502,22 +524,32 @@ class Command(BaseCommand):
             )
             existing_concept_ids.add(concept.concept_id)
 
-        # Tobacco status — weighted random pick.
-        codes, weights = zip(*[(c, w) for c, (_, w) in _TOBACCO_CODES.items()])
-        tobacco_code = random.choices(codes, weights=weights, k=1)[0]
-        _make(tobacco_code, None)
+        # Tobacco status — weighted random pick. Guard on the whole category,
+        # not just the randomly-chosen code: a rerun that happens to pick a
+        # *different* tobacco code than a prior run would otherwise pass the
+        # per-concept check in _make() and add a second, contradictory
+        # tobacco-status observation instead of being a no-op.
+        tobacco_concept_ids = {int(code) for code in _TOBACCO_CODES}
+        if not existing_concept_ids & tobacco_concept_ids:
+            codes, weights = zip(*[(c, w) for c, (_, w) in _TOBACCO_CODES.items()])
+            tobacco_code = random.choices(codes, weights=weights, k=1)[0]
+            _make(tobacco_code, None)
 
-        # Tumor/metastasis staging, consistent with the patient's existing stage.
+        # Tumor/metastasis staging, consistent with the patient's existing
+        # stage. Deterministic (not random), so the per-concept check in
+        # _make() is sufficient here.
         if record and record.stage and record.stage in _STAGE_TO_TM:
             t_val, m_val = _STAGE_TO_TM[record.stage]
             _make('21905-5', t_val)
             _make('21901-4', m_val)
 
-        # Best response — random pick weighted toward response/stability.
-        response_code = random.choices(
-            list(_RESPONSE_CODES.keys()), weights=[0.3, 0.35, 0.25, 0.10], k=1,
-        )[0]
-        _make(response_code, None)
+        # Best response — same category-guard reasoning as tobacco above.
+        response_concept_ids = {int(code) for code in _RESPONSE_CODES}
+        if not existing_concept_ids & response_concept_ids:
+            response_code = random.choices(
+                list(_RESPONSE_CODES.keys()), weights=[0.3, 0.35, 0.25, 0.10], k=1,
+            )[0]
+            _make(response_code, None)
 
         return created
 
