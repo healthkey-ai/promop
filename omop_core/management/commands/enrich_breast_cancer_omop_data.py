@@ -1,0 +1,403 @@
+"""
+Management command: enrich_breast_cancer_omop_data
+
+Backfills OMOP source data for the breast-cancer cohort (ABC Foundation +
+BBC Foundation orgs by default) so that patient_record_service.py's live
+derivation from OMOP tables has real data to read, instead of always
+returning empty for fields whose Measurement/Observation rows are missing
+or carry null values.
+
+Addresses three data gaps found while building benchmark_patient_record:
+  1. ECOG / Karnofsky / "Stage group.clinical Cancer" Measurement rows exist
+     for this cohort but every value column is null.
+  2. Observation has zero rows at all for this cohort, so tobacco status
+     (_get_behavior_data), tumor/metastasis staging + best_response
+     (_get_assessment_data), and sleep duration (_get_wearable_data) always
+     return empty.
+  3. None of the six wearable Measurement LOINC codes appear for this
+     cohort, so _get_wearable_data's Measurement-sourced metrics (steps,
+     active minutes, resting HR, HRV, SpO2, respiratory rate) always
+     return empty.
+
+This is a stopgap for the *existing* ABC/BBC cohort. It does not fix the
+underlying causes — see GitHub issues #200 (missing PatientRecord
+extractors for fields with no derivation code at all, e.g. `stage`) and
+#201 (import_fhir_bundle should populate these rows for future imports).
+
+After enriching a person's OMOP rows, calls refresh_patient_record(person)
+so `patient_record` reflects the richer data. This command DOES write to
+the database (unlike the read-only benchmark_patient_record command).
+
+Usage:
+    python manage.py enrich_breast_cancer_omop_data --dry-run
+    python manage.py enrich_breast_cancer_omop_data
+    python manage.py enrich_breast_cancer_omop_data --org-slugs abc-foundation,bbc-foundation --limit 50
+    python manage.py enrich_breast_cancer_omop_data --person-ids 1341,1410
+"""
+import random
+from datetime import date, timedelta
+
+from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
+from django.db.models import Max
+
+from omop_core.models import (
+    Person, PatientRecord, Measurement, Observation, Concept, Vocabulary,
+)
+from omop_core.services.mappings import (
+    WEARABLE_LOINC, WEARABLE_MIN_VALID_DAYS, CONCEPT_EHR_TYPE,
+)
+from omop_core.services.patient_record_service import refresh_patient_record
+
+
+# SNOMED CT codes read by _get_behavior_data / _get_assessment_data but not
+# present in this DB's Concept table at all (no SNOMED vocabulary loaded
+# here — confirmed via direct query). Used as the concept_id too, since
+# there's no existing Athena surrogate id to reuse and these numeric SNOMED
+# codes are well outside this DB's existing concept_id range.
+_TOBACCO_CODES = {
+    '266919005': ('Never smoked tobacco', 0.7),
+    '8517006':   ('Ex-smoker', 0.2),
+    '77176002':  ('Current smoker', 0.1),
+}
+_RESPONSE_CODES = {
+    '182840001': 'Complete Response',
+    '182841002': 'Partial Response',
+    '182843004': 'Stable Disease',
+    '182842009': 'Progressive Disease',
+}
+
+# Rough clinical-stage -> (T, M) mapping, used only to synthesize a plausible
+# tumor/metastasis Observation pair consistent with the patient's existing
+# patient_record.stage value (LOINC 21905-5 / 21901-4, read by
+# _get_assessment_data to set measurable_disease_by_recist_status).
+_STAGE_TO_TM = {
+    'I': ('T1', 'M0'), 'IA': ('T1', 'M0'), 'IB': ('T1', 'M0'),
+    'II': ('T2', 'M0'), 'IIA': ('T2', 'M0'), 'IIB': ('T2', 'M0'),
+    'III': ('T3', 'M0'), 'IIIA': ('T3', 'M0'), 'IIIB': ('T3', 'M0'), 'IIIC': ('T4', 'M0'),
+    'IV': ('T4', 'M1'),
+}
+
+# Plausible ranges for synthesized wearable daily readings.
+_WEARABLE_RANGES = {
+    'steps': (2000, 12000),
+    'active_minutes': (0, 90),
+    'resting_hr': (55, 90),
+    'hrv_sdnn': (20, 80),
+    'spo2': (94.0, 99.0),
+    'respiratory_rate': (12, 20),
+    'sleep_duration': (5.5, 8.5),
+}
+
+_WEARABLE_DAYS = 30
+
+
+def _get_or_create_snomed_vocabulary():
+    vocab, _ = Vocabulary.objects.get_or_create(
+        vocabulary_id='SNOMED',
+        defaults={
+            'vocabulary_name': 'Systematic Nomenclature of Medicine - Clinical Terms',
+            'vocabulary_reference': 'http://www.snomed.org',
+            'vocabulary_version': 'SNOMED CT (synthetic, benchmark seed)',
+            'vocabulary_concept_id': 0,
+        },
+    )
+    return vocab
+
+
+def _get_or_create_concept(concept_code, concept_name):
+    """Get or create a SNOMED Concept row keyed by concept_code, using the
+    numeric code itself as concept_id (see module docstring for why)."""
+    concept_id = int(concept_code)
+    try:
+        existing = Concept.objects.get(concept_id=concept_id)
+    except Concept.DoesNotExist:
+        _get_or_create_snomed_vocabulary()
+        return Concept.objects.create(
+            concept_id=concept_id,
+            concept_name=concept_name,
+            domain_id='Observation',
+            vocabulary_id='SNOMED',
+            concept_class_id='Clinical Observation',
+            standard_concept='S',
+            concept_code=concept_code,
+            valid_start_date='1970-01-01',
+            valid_end_date='2099-12-31',
+        )
+    if existing.concept_code != concept_code:
+        raise CommandError(
+            f'Concept id {concept_id} already exists for a different concept_code '
+            f'({existing.concept_code!r}, expected {concept_code!r}) — refusing to overwrite.'
+        )
+    return existing
+
+
+class _IdAllocator:
+    """Hands out sequential PKs for a bigint-PK-without-identity table.
+    Seeded once from MAX(pk); safe for this single-process, one-off command."""
+
+    def __init__(self, model, pk_field):
+        current = model.objects.aggregate(m=Max(pk_field))['m'] or 0
+        self._next = current + 1
+
+    def take(self):
+        value = self._next
+        self._next += 1
+        return value
+
+
+class Command(BaseCommand):
+    help = (
+        'Backfill OMOP Measurement/Observation rows for the breast-cancer '
+        'cohort so live OMOP derivation has real data to read, then refresh '
+        'patient_record from the enriched data.'
+    )
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--org-slugs', default='abc-foundation,bbc-foundation',
+            help='Comma-separated organization slugs to scope the cohort to.',
+        )
+        parser.add_argument(
+            '--person-ids', default='',
+            help='Comma-separated person_ids — overrides --org-slugs cohort selection.',
+        )
+        parser.add_argument('--limit', type=int, default=None)
+        parser.add_argument(
+            '--dry-run', action='store_true',
+            help='Print planned inserts/updates without writing.',
+        )
+
+    def handle(self, *args, **options):
+        dry_run = options['dry_run']
+
+        if options['person_ids']:
+            person_ids = [int(x) for x in options['person_ids'].split(',') if x.strip()]
+        else:
+            org_slugs = [s.strip() for s in options['org_slugs'].split(',') if s.strip()]
+            qs = (
+                PatientRecord.objects
+                .filter(organization__slug__in=org_slugs, disease__icontains='breast')
+                .order_by('person_id')
+                .values_list('person_id', flat=True)
+            )
+            person_ids = list(qs[:options['limit']]) if options['limit'] else list(qs)
+
+        if not person_ids:
+            raise CommandError('No matching patients found for the given cohort.')
+
+        self.stdout.write(f'Enriching OMOP data for {len(person_ids)} patient(s)'
+                           f'{" (dry-run)" if dry_run else ""}...')
+
+        measurement_ids = _IdAllocator(Measurement, 'measurement_id')
+        observation_ids = _IdAllocator(Observation, 'observation_id')
+
+        if not dry_run:
+            # Ensure the SNOMED codes _get_behavior_data/_get_assessment_data
+            # read actually exist as Concept rows before touching any person.
+            for code, (name, _weight) in _TOBACCO_CODES.items():
+                _get_or_create_concept(code, name)
+            for code, name in _RESPONSE_CODES.items():
+                _get_or_create_concept(code, name)
+
+        ehr_type_concept_id = CONCEPT_EHR_TYPE
+        counts = {'perf_backfilled': 0, 'obs_created': 0, 'wearable_rows_created': 0, 'refreshed': 0}
+
+        for person_id in person_ids:
+            try:
+                person = Person.objects.get(person_id=person_id)
+            except Person.DoesNotExist:
+                self.stderr.write(self.style.WARNING(f'  person_id={person_id}: not found, skipping'))
+                continue
+
+            try:
+                record = PatientRecord.objects.get(person=person)
+            except PatientRecord.DoesNotExist:
+                record = None
+
+            with transaction.atomic():
+                counts['perf_backfilled'] += self._backfill_performance_and_stage(
+                    person, record, dry_run,
+                )
+                counts['obs_created'] += self._create_missing_observations(
+                    person, record, observation_ids, ehr_type_concept_id, dry_run,
+                )
+                counts['wearable_rows_created'] += self._create_missing_wearable_measurements(
+                    person, measurement_ids, observation_ids, ehr_type_concept_id, dry_run,
+                )
+
+                if dry_run:
+                    transaction.set_rollback(True)
+                else:
+                    refresh_patient_record(person)
+                    counts['refreshed'] += 1
+
+        self.stdout.write(self.style.SUCCESS(
+            f"\nDone{' (dry-run, nothing written)' if dry_run else ''}. "
+            f"Performance/stage values backfilled: {counts['perf_backfilled']}, "
+            f"Observation rows created: {counts['obs_created']}, "
+            f"wearable Measurement/Observation rows created: {counts['wearable_rows_created']}, "
+            f"patient_record refreshed: {counts['refreshed']}"
+        ))
+
+    # ------------------------------------------------------------------
+
+    def _backfill_performance_and_stage(self, person, record, dry_run):
+        """Fill null value_as_number/value_as_string on existing ECOG /
+        Karnofsky / stage Measurement rows. Idempotent: only touches rows
+        that are still null."""
+        updated = 0
+        measurements = Measurement.objects.filter(
+            person=person,
+            measurement_concept__concept_name__in=[
+                'ECOG Performance Status score',
+                'Karnofsky Performance Status score',
+                'Stage group.clinical Cancer',
+            ],
+        ).select_related('measurement_concept')
+
+        for m in measurements:
+            name = m.measurement_concept.concept_name
+            changed = False
+            if name == 'ECOG Performance Status score' and m.value_as_number is None:
+                m.value_as_number = random.choice([0, 1, 2])
+                changed = True
+            elif name == 'Karnofsky Performance Status score' and m.value_as_number is None:
+                m.value_as_number = random.choice([70, 80, 90, 100])
+                changed = True
+            elif name == 'Stage group.clinical Cancer' and not m.value_as_string:
+                if record and record.stage:
+                    m.value_as_string = f'Stage {record.stage}'
+                    changed = True
+
+            if changed:
+                updated += 1
+                if not dry_run:
+                    m.save(update_fields=['value_as_number', 'value_as_string'])
+
+        return updated
+
+    def _create_missing_observations(self, person, record, observation_ids,
+                                      ehr_type_concept_id, dry_run):
+        """Insert one tobacco-status, one T/M-staging pair, and one
+        best_response Observation row per person, skipping any concept the
+        person already has an Observation row for (idempotent)."""
+        created = 0
+        existing_concept_ids = set(
+            Observation.objects.filter(person=person)
+            .values_list('observation_concept_id', flat=True)
+        )
+        obs_date = (record.diagnosis_date if record and record.diagnosis_date else date.today())
+
+        def _make(concept_code, value_as_string):
+            nonlocal created
+            concept = Concept.objects.filter(concept_code=concept_code).first()
+            if concept is None:
+                if not dry_run:
+                    raise CommandError(
+                        f'Concept code {concept_code!r} not found — expected it to have '
+                        f'been created up front in handle().'
+                    )
+                created += 1  # dry-run: concept doesn't exist yet, but would be created
+                return
+            if concept.concept_id in existing_concept_ids:
+                return
+            created += 1
+            if dry_run:
+                return
+            Observation.objects.create(
+                observation_id=observation_ids.take(),
+                person=person,
+                observation_concept=concept,
+                observation_date=obs_date,
+                observation_type_concept_id=ehr_type_concept_id,
+                value_as_string=value_as_string,
+            )
+            existing_concept_ids.add(concept.concept_id)
+
+        # Tobacco status — weighted random pick.
+        codes, weights = zip(*[(c, w) for c, (_, w) in _TOBACCO_CODES.items()])
+        tobacco_code = random.choices(codes, weights=weights, k=1)[0]
+        _make(tobacco_code, None)
+
+        # Tumor/metastasis staging, consistent with the patient's existing stage.
+        if record and record.stage and record.stage in _STAGE_TO_TM:
+            t_val, m_val = _STAGE_TO_TM[record.stage]
+            _make('21905-5', t_val)
+            _make('21901-4', m_val)
+
+        # Best response — random pick weighted toward response/stability.
+        response_code = random.choices(
+            list(_RESPONSE_CODES.keys()), weights=[0.3, 0.35, 0.25, 0.10], k=1,
+        )[0]
+        _make(response_code, None)
+
+        return created
+
+    def _create_missing_wearable_measurements(self, person, measurement_ids, observation_ids,
+                                                ehr_type_concept_id, dry_run):
+        """Insert up to 30 days of synthetic daily readings for each wearable
+        metric the person doesn't already have WEARABLE_MIN_VALID_DAYS worth
+        of (idempotent — tops up rather than duplicating). Sleep duration is
+        Observation-sourced per _get_wearable_data; everything else is
+        Measurement-sourced."""
+        created = 0
+        today = date.today()
+
+        for metric_key, loinc_code in WEARABLE_LOINC.items():
+            if metric_key == 'sleep_duration':
+                continue
+
+            concept = Concept.objects.get(concept_code=loinc_code)
+            existing_days = set(
+                Measurement.objects.filter(
+                    person=person, measurement_concept=concept,
+                ).values_list('measurement_date', flat=True)
+            )
+            if len(existing_days) >= WEARABLE_MIN_VALID_DAYS:
+                continue
+
+            lo, hi = _WEARABLE_RANGES[metric_key]
+            is_float = metric_key in ('hrv_sdnn', 'spo2')
+            for day_offset in range(_WEARABLE_DAYS):
+                d = today - timedelta(days=day_offset)
+                if d in existing_days:
+                    continue
+                value = random.uniform(lo, hi) if is_float else random.randint(lo, hi)
+                created += 1
+                if dry_run:
+                    continue
+                Measurement.objects.create(
+                    measurement_id=measurement_ids.take(),
+                    person=person,
+                    measurement_concept=concept,
+                    measurement_date=d,
+                    measurement_type_concept_id=ehr_type_concept_id,
+                    value_as_number=value,
+                )
+
+        sleep_concept = Concept.objects.get(concept_code=WEARABLE_LOINC['sleep_duration'])
+        existing_sleep_days = set(
+            Observation.objects.filter(
+                person=person, observation_concept=sleep_concept,
+            ).values_list('observation_date', flat=True)
+        )
+        if len(existing_sleep_days) < WEARABLE_MIN_VALID_DAYS:
+            lo, hi = _WEARABLE_RANGES['sleep_duration']
+            for day_offset in range(_WEARABLE_DAYS):
+                d = today - timedelta(days=day_offset)
+                if d in existing_sleep_days:
+                    continue
+                created += 1
+                if dry_run:
+                    continue
+                Observation.objects.create(
+                    observation_id=observation_ids.take(),
+                    person=person,
+                    observation_concept=sleep_concept,
+                    observation_date=d,
+                    observation_type_concept_id=ehr_type_concept_id,
+                    value_as_number=round(random.uniform(lo, hi), 1),
+                )
+
+        return created
