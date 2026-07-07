@@ -996,6 +996,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     condition_date = None
                     breast_cancer_onset = None  # onset from primary cancer condition
                     _any_bc_condition = False   # True if any BC condition was seen in the bundle
+                    _clinical_status_source = None  # FHIR Condition.clinicalStatus code for primary BC
 
                     for condition in data['conditions']:
                         # Get histologic type from code
@@ -1021,6 +1022,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         )
                         if is_breast_cancer:
                             _any_bc_condition = True
+                            _cs = condition.get('clinicalStatus', {}).get('coding', [])
+                            if _cs:
+                                _clinical_status_source = _cs[0].get('code')
 
                         # Get stage and infer disease from stage text (e.g. "Breast Cancer Stage IIA")
                         stages = condition.get('stage', [])
@@ -1086,6 +1090,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     condition_start_datetime=condition_date,
                                     condition_type_concept=type_concept,
                                     condition_source_value=disease,
+                                    condition_status_source_value=_clinical_status_source,
                                 )
                                 _co._skip_patient_record_refresh = True
                                 try:

@@ -278,11 +278,15 @@ def _get_demographics(person: Person) -> dict:
         today = date.today()
         data['patient_age'] = today.year - person.year_of_birth
 
+    gender_src = None
     if person.gender_concept:
-        gender_name = person.gender_concept.concept_name.lower()
-        if 'male' in gender_name and 'female' not in gender_name:
+        gender_src = person.gender_concept.concept_name.lower()
+    elif person.gender_source_value:
+        gender_src = person.gender_source_value.lower()
+    if gender_src:
+        if 'male' in gender_src and 'female' not in gender_src:
             data['gender'] = 'M'
-        elif 'female' in gender_name:
+        elif 'female' in gender_src:
             data['gender'] = 'F'
         else:
             data['gender'] = 'U'
@@ -384,16 +388,24 @@ def _get_disease_data(person: Person) -> dict:
         person=person,
     ).order_by('-condition_start_date').first()
 
-    if most_recent_condition and most_recent_condition.condition_status_concept:
-        status_name = most_recent_condition.condition_status_concept.concept_name.lower()
-        if 'remission' in status_name:
-            data['condition_clinical_status'] = 'remission'
-        elif 'relapse' in status_name or 'recur' in status_name:
-            data['condition_clinical_status'] = 'relapse'
-        elif 'active' in status_name:
-            data['condition_clinical_status'] = 'active'
+    if most_recent_condition:
+        if most_recent_condition.condition_status_concept:
+            status_name = most_recent_condition.condition_status_concept.concept_name.lower()
+        elif most_recent_condition.condition_status_source_value:
+            status_name = most_recent_condition.condition_status_source_value.lower()
         else:
-            data['condition_clinical_status'] = status_name[:50]
+            status_name = None
+        if status_name:
+            if 'remission' in status_name:
+                data['condition_clinical_status'] = 'remission'
+            elif 'relapse' in status_name or 'recur' in status_name or 'recurrence' in status_name:
+                data['condition_clinical_status'] = 'relapse'
+            elif 'active' in status_name:
+                data['condition_clinical_status'] = 'active'
+            elif 'resolved' in status_name or 'inactive' in status_name:
+                data['condition_clinical_status'] = 'resolved'
+            else:
+                data['condition_clinical_status'] = status_name[:50]
 
     # disease_slug — machine-readable ID derived from disease name
     disease_name = data.get('disease', '')
@@ -1324,7 +1336,7 @@ def _get_lymphoma_data(person: Person) -> dict:
         if not m.measurement_concept:
             continue
         cname = m.measurement_concept.concept_name.lower()
-        if 'grade' in cname and 'lymphoma' in cname and m.value_as_number is not None:
+        if 'grade' in cname and m.value_as_number is not None:
             data['tumor_grade'] = int(m.value_as_number)
 
     return data
