@@ -46,6 +46,7 @@ import csv
 import hashlib
 import json
 import logging
+import re
 from io import StringIO
 from .permissions import ScopedTokenPermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
@@ -1468,41 +1469,43 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             if observation.get('valueQuantity'):
                                 tumor_size = observation['valueQuantity'].get('value')
                         
-                        # Check for lymph node status
-                        elif 'lymph node' in obs_text or 'lymph nodes' in obs_text:
+                        # Check for lymph node status — exclude TNM N-stage LOINC (21906-3)
+                        # which carries AJCC notation, not a binary status
+                        elif ('lymph node' in obs_text or 'lymph nodes' in obs_text) and loinc_code != '21906-3':
                             if observation.get('valueCodeableConcept'):
                                 value_concept = observation['valueCodeableConcept']
-                                if value_concept.get('text'):
-                                    lymph_node_status = value_concept['text']
-                                elif value_concept.get('coding'):
-                                    lymph_node_status = value_concept['coding'][0].get('display')
-                        
-                        # Check for metastasis status
-                        elif 'metastasis' in obs_text or 'metastases' in obs_text:
+                                raw = (value_concept.get('text') or
+                                       (value_concept.get('coding') or [{}])[0].get('display'))
+                                if raw:
+                                    lymph_node_status = raw[:50]
+
+                        # Check for metastasis status — exclude TNM M-stage LOINCs (21907-1, 21901-4)
+                        # which carry AJCC notation and are routed to distant_metastasis_stage below
+                        elif ('metastasis' in obs_text or 'metastases' in obs_text) and loinc_code not in ('21907-1', '21901-4'):
                             if observation.get('valueCodeableConcept'):
                                 value_concept = observation['valueCodeableConcept']
-                                if value_concept.get('text'):
-                                    metastasis_status = value_concept['text']
-                                elif value_concept.get('coding'):
-                                    metastasis_status = value_concept['coding'][0].get('display')
+                                raw = (value_concept.get('text') or
+                                       (value_concept.get('coding') or [{}])[0].get('display'))
+                                if raw:
+                                    metastasis_status = raw[:50]
 
                         # TNM staging fields
                         if obs_text == 'tumor stage' or loinc_code == '21905-5':
                             tumor_stage = (observation.get('valueCodeableConcept') or {}).get('text')
                         elif obs_text == 'nodes stage' or loinc_code == '21906-3':
                             nodes_stage = (observation.get('valueCodeableConcept') or {}).get('text')
-                        elif obs_text == 'distant metastasis stage' or loinc_code == '21901-4':
+                        elif obs_text == 'distant metastasis stage' or loinc_code in ('21901-4', '21907-1'):
                             distant_metastasis_stage = (observation.get('valueCodeableConcept') or {}).get('text')
                         elif obs_text == 'staging modality':
                             staging_modalities = observation.get('valueString')
                         elif loinc_code == '21908-9':
                             # mCODE TNM clinical stage group — valueCodeableConcept e.g. "Stage 2B"
+                            # or Synthea AJCC form "American Joint Committee on Cancer stage IA (qualifier value)"
                             val_concept = observation.get('valueCodeableConcept') or {}
                             stage_text = val_concept.get('text') or (val_concept.get('coding') or [{}])[0].get('display', '')
-                            if stage_text and 'Stage' in stage_text:
-                                stage = stage_text.split('Stage')[-1].strip()
-                            elif stage_text:
-                                stage = stage_text
+                            if stage_text:
+                                _m = re.search(r'\bstage\s+(\S+)', stage_text, re.IGNORECASE)
+                                stage = _m.group(1).rstrip(')') if _m else stage_text
                         elif 'recist' in obs_text:
                             val = observation.get('valueBoolean')
                             if val is not None:
