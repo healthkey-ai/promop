@@ -184,6 +184,12 @@ class Command(BaseCommand):
                 populated = sum(1 for v in fields.values() if v not in (None, '', [], {}))
                 field_coverage.append(populated)
 
+        if not patient_record_times and not omop_times:
+            raise CommandError(
+                f'None of the given person_ids {person_ids} resolved to an actual '
+                f'Person/PatientRecord — no timing samples collected.'
+            )
+
         pr_stats = _stats(patient_record_times)
         omop_stats = _stats(omop_times)
 

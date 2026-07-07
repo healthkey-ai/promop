@@ -25,6 +25,29 @@ def _loinc_concept(code, name):
     return ConceptFactory(concept_code=code, concept_name=name, vocabulary=vocab)
 
 
+@pytest.fixture(autouse=True)
+def _seed_loinc_concepts_the_command_assumes_exist():
+    """enrich_breast_cancer_omop_data assumes the T/M-staging and wearable
+    LOINC concepts already exist (true on the real staging DB — verified
+    directly — where these were loaded by load_athena_vocabularies.py /
+    seed_omop_concepts.py). A fresh test DB has none of them, so seed the
+    same set here; the command itself only creates the SNOMED concepts that
+    were confirmed missing on staging (tobacco/best_response)."""
+    codes = {
+        '21905-5': 'Primary tumor.clinical [Class] Cancer',
+        '21901-4': 'Distant metastases.pathology [Class] Cancer',
+        '55423-8': 'Number of steps in unspecified time Pedometer',
+        '77592-4': 'Moderate physical activity [IPAQ]',
+        '40443-4': 'Heart rate --resting',
+        '80404-7': 'R-R interval.standard deviation (Heart rate variability)',
+        '59408-5': 'Oxygen saturation in Arterial blood by Pulse oximetry',
+        '9279-1': 'Respiratory rate',
+        '93832-4': 'Sleep duration',
+    }
+    for code, name in codes.items():
+        _loinc_concept(code, name)
+
+
 class TestPerformanceAndStageBackfill:
 
     def test_backfills_null_ecog_value(self):
