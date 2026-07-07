@@ -380,6 +380,16 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
 cd frontend && npm test -- --run
 ```
 
+### Rule: Feature Branch + PR for Every Code Change
+
+**Never commit directly to `dev` or `main`.** All fixes, enhancements, and refactors must go on a feature branch and land via a pull request.
+
+1. `git checkout -b <descriptive-branch-name>` before writing any code
+2. Commit the work on the feature branch
+3. Run the test suites (see below)
+4. Open a PR targeting `dev`
+5. Perform a code review on the PR before merging — the only exception is if a full code review was done immediately before opening the PR in the same work session (no need to review twice)
+
 ### Rule: Run Tests Before Every Push
 
 **Always run both test suites before pushing to any branch.** Do not push if any test is failing.
