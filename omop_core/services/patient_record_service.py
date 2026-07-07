@@ -617,33 +617,39 @@ def _get_vitals_data(person: Person) -> dict:
         'temperature': '8310-5',
     }
 
+    measurements = (
+        Measurement.objects
+        .filter(
+            person=person,
+            measurement_concept__concept_code__in=vital_sign_concepts.values(),
+            value_as_number__isnull=False,
+        )
+        .select_related('measurement_concept')
+        .order_by('-measurement_date')
+    )
+    first_by_code = {}
+    for measurement in measurements:
+        first_by_code.setdefault(measurement.measurement_concept.concept_code, measurement)
+
     for vital_type, loinc_code in vital_sign_concepts.items():
-        try:
-            concept = _cc_by_loinc(loinc_code)
-            if concept:
-                measurement = Measurement.objects.filter(
-                    person=person,
-                    measurement_concept=concept,
-                    value_as_number__isnull=False
-                ).order_by('-measurement_date').first()
-                if measurement:
-                    value = float(measurement.value_as_number)
-                    if vital_type == 'systolic_bp':
-                        data['systolic_blood_pressure'] = int(value)
-                    elif vital_type == 'diastolic_bp':
-                        data['diastolic_blood_pressure'] = int(value)
-                    elif vital_type == 'heart_rate':
-                        data['heartrate'] = int(value)
-                    elif vital_type == 'weight':
-                        data['weight'] = value
-                        data['weight_units'] = 'kg'
-                    elif vital_type == 'height':
-                        data['height'] = value
-                        data['height_units'] = 'cm'
-                    elif vital_type == 'temperature':
-                        data['temperature'] = value
-        except Exception:
+        measurement = first_by_code.get(loinc_code)
+        if not measurement:
             continue
+        value = float(measurement.value_as_number)
+        if vital_type == 'systolic_bp':
+            data['systolic_blood_pressure'] = int(value)
+        elif vital_type == 'diastolic_bp':
+            data['diastolic_blood_pressure'] = int(value)
+        elif vital_type == 'heart_rate':
+            data['heartrate'] = int(value)
+        elif vital_type == 'weight':
+            data['weight'] = value
+            data['weight_units'] = 'kg'
+        elif vital_type == 'height':
+            data['height'] = value
+            data['height_units'] = 'cm'
+        elif vital_type == 'temperature':
+            data['temperature'] = value
 
     return data
 
@@ -651,26 +657,38 @@ def _get_vitals_data(person: Person) -> dict:
 def _get_biomarker_data(person: Person) -> dict:
     data = {}
 
-    measurements = Measurement.objects.filter(person=person).order_by('-measurement_date')
-
-    pdl1_measurements = measurements.filter(
-        measurement_concept__concept_code__in=['85337-4']
+    measurements = list(
+        Measurement.objects
+        .filter(person=person)
+        .select_related('measurement_concept', 'value_as_concept')
+        .order_by('-measurement_date')
     )
-    if pdl1_measurements.exists():
-        pdl1_test = pdl1_measurements.first()
+    observations = list(
+        Observation.objects
+        .filter(person=person)
+        .select_related('observation_concept', 'value_as_concept')
+        .order_by('-observation_date')
+    )
+
+    def _measurement_code(measurement):
+        return measurement.measurement_concept.concept_code if measurement.measurement_concept else None
+
+    def _observation_code(observation):
+        return observation.observation_concept.concept_code if observation.observation_concept else None
+
+    pdl1_test = next((m for m in measurements if _measurement_code(m) == '85337-4'), None)
+    if pdl1_test:
         data['pd_l1_tumor_cells'] = int(pdl1_test.value_as_number) if pdl1_test.value_as_number else None
         data['pd_l1_assay'] = pdl1_test.value_source_value
 
     def _receptor_status(measurement):
         """Return 'POSITIVE', 'NEGATIVE', or None from a receptor Measurement row."""
-        if measurement.value_as_concept_id:
-            concept = _cc_by_id(measurement.value_as_concept_id)
-            if concept:
-                name = concept.concept_name.lower()
-                if 'positive' in name:
-                    return 'POSITIVE'
-                if 'negative' in name:
-                    return 'NEGATIVE'
+        if measurement.value_as_concept:
+            name = measurement.value_as_concept.concept_name.lower()
+            if 'positive' in name:
+                return 'POSITIVE'
+            if 'negative' in name:
+                return 'NEGATIVE'
         if measurement.value_as_string:
             s = measurement.value_as_string.lower()
             if 'positive' in s:
@@ -679,21 +697,21 @@ def _get_biomarker_data(person: Person) -> dict:
                 return 'NEGATIVE'
         return None
 
-    er_measurements = measurements.filter(measurement_concept__concept_code='16112-5')
-    if er_measurements.exists():
-        status = _receptor_status(er_measurements.first())
+    er_measurement = next((m for m in measurements if _measurement_code(m) == '16112-5'), None)
+    if er_measurement:
+        status = _receptor_status(er_measurement)
         if status:
             data['estrogen_receptor_status'] = status
 
-    pr_measurements = measurements.filter(measurement_concept__concept_code='16113-3')
-    if pr_measurements.exists():
-        status = _receptor_status(pr_measurements.first())
+    pr_measurement = next((m for m in measurements if _measurement_code(m) == '16113-3'), None)
+    if pr_measurement:
+        status = _receptor_status(pr_measurement)
         if status:
             data['progesterone_receptor_status'] = status
 
-    her2_measurements = measurements.filter(measurement_concept__concept_code='48676-1')
-    if her2_measurements.exists():
-        status = _receptor_status(her2_measurements.first())
+    her2_measurement = next((m for m in measurements if _measurement_code(m) == '48676-1'), None)
+    if her2_measurement:
+        status = _receptor_status(her2_measurement)
         if status:
             data['her2_status'] = status
 
@@ -706,10 +724,10 @@ def _get_biomarker_data(person: Person) -> dict:
 
     def _first_m(concept_code):
         """Return the most recent Measurement for a LOINC code, checking concept first then source_value."""
-        m = measurements.filter(measurement_concept__concept_code=concept_code).first()
-        if not m:
-            m = measurements.filter(measurement_source_value=concept_code).first()
-        return m
+        return (
+            next((m for m in measurements if _measurement_code(m) == concept_code), None)
+            or next((m for m in measurements if m.measurement_source_value == concept_code), None)
+        )
 
     # Ki-67 proliferation index — LOINC 85319-2
     ki67_m = _first_m('85319-2')
@@ -735,32 +753,27 @@ def _get_biomarker_data(person: Person) -> dict:
     menopause_m = _first_m('76690-7')
     if menopause_m:
         val = menopause_m.value_as_string
-        if not val and menopause_m.value_as_concept_id:
-            c = _cc_by_id(menopause_m.value_as_concept_id)
-            if c:
-                val = c.concept_name
+        if not val and menopause_m.value_as_concept:
+            val = menopause_m.value_as_concept.concept_name
         if val:
             data['menopausal_status'] = val
     else:
-        menopause_obs = (
-            Observation.objects.filter(person=person, observation_concept__concept_code='76690-7')
-            .order_by('-observation_date').first()
-        )
+        menopause_obs = next((obs for obs in observations if _observation_code(obs) == '76690-7'), None)
         if menopause_obs:
             val = menopause_obs.value_as_string
-            if not val and menopause_obs.value_as_concept_id:
-                c = _cc_by_id(menopause_obs.value_as_concept_id)
-                if c:
-                    val = c.concept_name
+            if not val and menopause_obs.value_as_concept:
+                val = menopause_obs.value_as_concept.concept_name
             if val:
                 data['menopausal_status'] = val
 
     # HRD status — Observation concept name containing 'homologous recombination'
-    hrd_obs = (
-        Observation.objects.filter(
-            person=person,
-            observation_concept__concept_name__icontains='homologous recombination',
-        ).order_by('-observation_date').first()
+    hrd_obs = next(
+        (
+            obs for obs in observations
+            if obs.observation_concept
+            and 'homologous recombination' in obs.observation_concept.concept_name.lower()
+        ),
+        None,
     )
     if hrd_obs:
         val = hrd_obs.value_as_string or hrd_obs.value_source_value
@@ -768,16 +781,15 @@ def _get_biomarker_data(person: Person) -> dict:
             data['hrd_status'] = val
 
     # Bone-only metastasis status — LOINC 44667-4 or concept-name matching
-    bone_obs = (
-        Observation.objects.filter(person=person, observation_concept__concept_code='44667-4')
-        .order_by('-observation_date').first()
-    )
+    bone_obs = next((obs for obs in observations if _observation_code(obs) == '44667-4'), None)
     if not bone_obs:
-        bone_obs = (
-            Observation.objects.filter(
-                person=person,
-                observation_concept__concept_name__icontains='bone only metastas',
-            ).order_by('-observation_date').first()
+        bone_obs = next(
+            (
+                obs for obs in observations
+                if obs.observation_concept
+                and 'bone only metastas' in obs.observation_concept.concept_name.lower()
+            ),
+            None,
         )
     if bone_obs:
         if bone_obs.value_as_number is not None:
@@ -790,11 +802,14 @@ def _get_biomarker_data(person: Person) -> dict:
                 data['bone_only_metastasis_status'] = False
 
     # Histologic type — Observation concept matching 'histologic' or 'histology'
-    histologic_obs = (
-        Observation.objects.filter(
-            person=person,
-            observation_concept__concept_name__icontains='histolog',
-        ).exclude(value_as_string__isnull=True).order_by('-observation_date').first()
+    histologic_obs = next(
+        (
+            obs for obs in observations
+            if obs.value_as_string
+            and obs.observation_concept
+            and 'histolog' in obs.observation_concept.concept_name.lower()
+        ),
+        None,
     )
     if histologic_obs and histologic_obs.value_as_string:
         data['histologic_type'] = histologic_obs.value_as_string
@@ -822,21 +837,35 @@ def _get_staging_data(person: Person) -> dict:
         .select_related('observation_concept')
         .order_by('-observation_date')
     )
+    measurements = list(measurements)
+    observations = list(observations)
 
     def _stage_value(loinc_code):
         """Return the best string value for a staging LOINC code (Measurement then Observation)."""
         # Primary: concept code match
-        m = measurements.filter(measurement_concept__concept_code=loinc_code).first()
+        m = next(
+            (
+                measurement for measurement in measurements
+                if measurement.measurement_concept
+                and measurement.measurement_concept.concept_code == loinc_code
+            ),
+            None,
+        )
         if m:
             return m.value_as_string or (str(int(m.value_as_number)) if m.value_as_number is not None else None)
         # Secondary: LOINC stored as source_value (FHIR upload path)
-        m = Measurement.objects.filter(
-            person=person, measurement_source_value=loinc_code,
-        ).order_by('-measurement_date').first()
+        m = next((measurement for measurement in measurements if measurement.measurement_source_value == loinc_code), None)
         if m:
             return m.value_as_string or (str(int(m.value_as_number)) if m.value_as_number is not None else None)
         # Tertiary: Observation by concept code
-        obs = observations.filter(observation_concept__concept_code=loinc_code).first()
+        obs = next(
+            (
+                observation for observation in observations
+                if observation.observation_concept
+                and observation.observation_concept.concept_code == loinc_code
+            ),
+            None,
+        )
         if obs:
             return obs.value_as_string
         return None
@@ -862,11 +891,11 @@ def _get_staging_data(person: Person) -> dict:
         data['distant_metastasis_stage'] = m_val
 
     # Staging modalities — Observation concept name containing 'staging method'
-    staging_obs = observations.filter(
-        observation_concept__concept_name__icontains='staging',
-    ).exclude(value_as_string__isnull=True)
     staging_vals = list(dict.fromkeys(
-        obs.value_as_string for obs in staging_obs if obs.value_as_string
+        obs.value_as_string for obs in observations
+        if obs.value_as_string
+        and obs.observation_concept
+        and 'staging' in obs.observation_concept.concept_name.lower()
     ))
     if staging_vals:
         data['staging_modalities'] = ', '.join(staging_vals)
@@ -1008,7 +1037,12 @@ def _get_infection_data(person: Person) -> dict:
 def _get_assessment_data(person: Person) -> dict:
     data = {}
 
-    observations = Observation.objects.filter(person=person).order_by('-observation_date')
+    observations = (
+        Observation.objects
+        .filter(person=person)
+        .select_related('observation_concept')
+        .order_by('-observation_date')
+    )
 
     response_obs = observations.filter(
         observation_concept__concept_code__in=[
@@ -1193,8 +1227,18 @@ def _get_genetic_mutations(person: Person) -> dict:
 
 def _get_cll_data(person: Person) -> dict:
     data = {}
-    measurements = Measurement.objects.filter(person=person).order_by('-measurement_date')
-    observations = Observation.objects.filter(person=person).order_by('-observation_date')
+    measurements = (
+        Measurement.objects
+        .filter(person=person)
+        .select_related('measurement_concept')
+        .order_by('-measurement_date')
+    )
+    observations = (
+        Observation.objects
+        .filter(person=person)
+        .select_related('observation_concept')
+        .order_by('-observation_date')
+    )
     conditions = ConditionOccurrence.objects.filter(person=person)
 
     loinc_map = {
@@ -1317,8 +1361,18 @@ def _get_cll_data(person: Person) -> dict:
 
 def _get_lymphoma_data(person: Person) -> dict:
     data = {}
-    observations = Observation.objects.filter(person=person).order_by('-observation_date')
-    measurements = Measurement.objects.filter(person=person).order_by('-measurement_date')
+    observations = (
+        Observation.objects
+        .filter(person=person)
+        .select_related('observation_concept')
+        .order_by('-observation_date')
+    )
+    measurements = (
+        Measurement.objects
+        .filter(person=person)
+        .select_related('measurement_concept')
+        .order_by('-measurement_date')
+    )
 
     for obs in observations:
         if not obs.observation_concept:
@@ -1505,6 +1559,22 @@ def _get_wearable_data(person: Person) -> dict:
     window_start = anchor_dt.date() - timedelta(days=29)
     window_end = anchor_dt.date()
 
+    measurement_rows = (
+        Measurement.objects.filter(
+            person=person,
+            measurement_concept__concept_code__in=[
+                code for key, code in WEARABLE_LOINC.items() if key != 'sleep_duration'
+            ],
+            value_as_number__isnull=False,
+            measurement_date__gte=window_start,
+            measurement_date__lte=window_end,
+        )
+        .values_list('measurement_concept__concept_code', 'measurement_date', 'value_as_number')
+    )
+    rows_by_code = {}
+    for concept_code, mdate, val in measurement_rows:
+        rows_by_code.setdefault(concept_code, []).append((mdate, val))
+
     def _fetch_daily(metric_key):
         """Return {date: [valid float values]} for a metric over the 30-day window.
 
@@ -1514,15 +1584,8 @@ def _get_wearable_data(person: Person) -> dict:
         """
         loinc_code = WEARABLE_LOINC[metric_key]
         lo, hi = WEARABLE_ARTIFACT_BOUNDS[metric_key]
-        qs = Measurement.objects.filter(
-            person=person,
-            measurement_concept__concept_code=loinc_code,
-            value_as_number__isnull=False,
-            measurement_date__gte=window_start,
-            measurement_date__lte=window_end,
-        ).values_list('measurement_date', 'value_as_number')
         daily: dict[date, list[float]] = {}
-        for mdate, val in qs:
+        for mdate, val in rows_by_code.get(loinc_code, []):
             fval = float(val)
             if not (lo <= fval <= hi):
                 continue

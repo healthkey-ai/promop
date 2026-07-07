@@ -8,6 +8,8 @@ Covers:
   - --dry-run makes no persisted changes
   - patient_record reflects the enriched OMOP data afterwards
 """
+from io import StringIO
+
 import pytest
 from django.core.management import call_command
 
@@ -165,3 +167,56 @@ class TestRefreshesPatientRecord:
 
         record = PatientRecord.objects.get(person=person)
         assert record.no_tobacco_use_status is not None or record.tobacco_use_details is not None
+
+    def test_refresh_is_deferred_until_after_all_patients_are_enriched(self, monkeypatch):
+        person_a = PersonFactory()
+        person_b = PersonFactory()
+        PatientRecordFactory(person=person_a, stage='II')
+        PatientRecordFactory(person=person_b, stage='IV')
+
+        snapshots = []
+
+        def fake_refresh(person):
+            snapshots.append({
+                'person_id': person.person_id,
+                'person_a_observations': Observation.objects.filter(person=person_a).count(),
+                'person_b_observations': Observation.objects.filter(person=person_b).count(),
+            })
+
+        monkeypatch.setattr(
+            'omop_core.management.commands.enrich_breast_cancer_omop_data.refresh_patient_record',
+            fake_refresh,
+        )
+        monkeypatch.setattr(
+            'omop_core.services.patient_record_service.refresh_patient_record',
+            fake_refresh,
+        )
+
+        call_command(
+            'enrich_breast_cancer_omop_data',
+            person_ids=f'{person_a.person_id},{person_b.person_id}',
+        )
+
+        assert [snapshot['person_id'] for snapshot in snapshots] == [
+            person_a.person_id,
+            person_b.person_id,
+        ]
+        assert snapshots[0]['person_a_observations'] > 0
+        assert snapshots[0]['person_b_observations'] > 0
+
+    def test_outputs_enrichment_and_refresh_progress(self):
+        person = PersonFactory()
+        PatientRecordFactory(person=person, stage='II')
+        output = StringIO()
+
+        call_command(
+            'enrich_breast_cancer_omop_data',
+            person_ids=str(person.person_id),
+            stdout=output,
+        )
+
+        text = output.getvalue()
+        assert 'Phase 1/2: Enrichment (1 patients)' in text
+        assert f'[1/1  100.0%]  person_id={person.person_id}' in text
+        assert 'Phase 2/2: PatientRecord refresh (1 patients)' in text
+        assert 'refreshed in' in text
