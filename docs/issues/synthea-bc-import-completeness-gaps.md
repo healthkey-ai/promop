@@ -2,11 +2,74 @@
 
 **Date:** 2026-07-07
 **File analysed:** `data/synthea_bc_200.json` (200 patients, 13 391 entries)
-**Comparison orgs:** synthea vs ABC Foundation / BBC Foundation
+**Staging DB queried:** `STAGING_DATABASE_URL` (live PatientRecord table)
+**Comparison orgs:** SYNTHEA vs ABC Foundation / BBC Foundation
 
 ---
 
-## Executive Summary
+## Staging DB — Org Inventory
+
+| Org | Patients |
+|---|---|
+| BBC Foundation | 319 |
+| SYNTHEA | 200 |
+| ABC Foundation | 121 |
+| BMM Foundation | 100 |
+| AFL | 100 |
+| AMM Foundation | 100 |
+| BFL | 100 |
+| (unassigned) | 2 |
+
+---
+
+## Staging DB — Field Completeness by Org (key fields)
+
+Fields are shown as % of patients in that org where the field is non-NULL / non-empty.
+"—" means the field is not expected for that disease type.
+
+| Field | SYNTHEA (200) | ABC Foundation (121) | BBC Foundation (319) |
+|---|---|---|---|
+| `patient_age` | **100%** | ~100% | ~100% |
+| `gender` | 0% | 0% | 0% |
+| `date_of_birth` | 0% | ~100% | ~100% |
+| `disease` | 0% | ~100% | ~100% |
+| `diagnosis_date` | 0% | ~90% | ~90% |
+| `stage` | 0% | ~80% | ~75% |
+| `condition_clinical_status` | **0%** | **0%** | **0%** |
+| `estrogen_receptor_status` | 0% | ~19% | ~34% |
+| `progesterone_receptor_status` | 0% | ~19% | ~34% |
+| `her2_status` | 0% | ~19% | ~34% |
+| `hemoglobin_g_dl` | 0% | ~68% | ~68% |
+| `wbc_count_thousand_per_ul` | 0% | ~68% | ~68% |
+| `platelet_count_thousand_per_ul` | 0% | ~68% | ~68% |
+| `serum_creatinine_mg_dl` | 0% | ~68% | ~68% |
+| `ldh_u_l` | 0% | ~68% | ~68% |
+| `first_line_therapy` | 0% | ~85% | ~80% |
+| `ecog_performance_status` | 0% | ~70% | ~65% |
+| `tumor_grade` | **0%** | **0%** | **0%** |
+
+Key findings from the live DB:
+
+- **`condition_clinical_status` is 0% everywhere** — no import path writes this field.
+  This is a pipeline gap that affects all orgs, not just SYNTHEA.
+- **`gender` is 0% for every org except AMM Foundation** — the FHIR import path does not
+  write `gender` to `PatientRecord`; it only writes to `Person.gender_concept`.
+  `patient_record_service._get_demographics()` reads from `person.gender_concept`, so the
+  field should populate on refresh — this points to a missing refresh after import for some
+  orgs, or the gender concept not being resolved.
+- **`tumor_grade` is 0% everywhere** including lymphoma orgs (AFL, BFL) — the
+  `_get_lymphoma_data()` path in `patient_record_service.py` checks for `measurement_concept`
+  with "grade" AND "lymphoma" in the concept name; this combination may not match the
+  concept names in the staging OMOP Concept table.
+- **BBC has a ~31% lab gap** — roughly 100 of 319 BBC patients have no lab observations;
+  these were likely imported without an Observation bundle attached.
+- **Receptor status sparsity even in breast cancer orgs** (19–34%) — likely because only
+  mCODE-structured bundles include LOINC 16112-5/16113-3/48676-1 Observations; older
+  uploads may have used free-text or different codes.
+
+---
+
+## Root Cause: Bundle Contents
 
 The Synthea bundle is nearly empty of the clinical resources that PRomop depends on.
 Out of the 13 391 FHIR entries across 200 patients, the bundle contains:
@@ -274,6 +337,39 @@ no surgical or oncologic treatment procedures.
 | `prior_procedures` | Procedure (SNOMED) | Partial (2 codes) | Sparse |
 | `race` / `ethnicity` | US Core Patient extension | Yes | **Populated** |
 | `gender` / `date_of_birth` | Patient demographics | Yes | **Populated** |
+
+---
+
+## Cross-Cutting Pipeline Gaps (affect all orgs, not just SYNTHEA)
+
+These were surfaced by the DB completeness query and are independent of the Synthea export
+problem. They should be fixed regardless of which data source is used.
+
+### Gap 1 — `condition_clinical_status` never written (0% everywhere)
+
+The `_get_disease_data()` service path only sets `condition_clinical_status` when
+`ConditionOccurrence.condition_status_concept` is non-NULL. The FHIR upload handler does
+not write `condition_status_concept` to `ConditionOccurrence` — it writes the SNOMED
+condition code but leaves `condition_status_concept_id = NULL`. The FHIR
+`Condition.clinicalStatus` field (e.g. `active`, `remission`) is parsed and available but
+is not mapped into the OMOP `condition_status_concept_id`.
+
+### Gap 2 — `gender` 0% except AMM Foundation
+
+`PatientRecord.gender` is populated in `_get_demographics()` from `person.gender_concept`.
+The FHIR handler does write `gender_concept` to `Person`, so the field should appear after
+`refresh_patient_record` runs. The 0% result for most orgs suggests either:
+- The `refresh_patient_record` call after import is not running for those orgs, or
+- `person.gender_concept_id` is NULL (gender concept lookup failed) for those patients.
+AMM Foundation being the sole exception is suspicious — it may have been imported via a
+different code path that explicitly set `PatientRecord.gender`.
+
+### Gap 3 — `tumor_grade` 0% for lymphoma orgs (AFL, BFL)
+
+The `_get_lymphoma_data()` function matches `measurement_concept.concept_name` containing
+both "grade" and "lymphoma". OMOP concept names for grading observations (e.g.
+LOINC 21858-6 "Grade Cancer") typically contain "grade" but not "lymphoma". The
+matching logic needs to be broadened or switched to LOINC code matching.
 
 ---
 
