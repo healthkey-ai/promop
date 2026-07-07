@@ -67,7 +67,14 @@ _OMOP_DERIVED_FIELDS = [
     'ecog_performance_status', 'karnofsky_performance_score',
     # Biomarkers
     'pd_l1_tumor_cells', 'pd_l1_assay',
+    'pd_l1_ic_percentage', 'pd_l1_combined_positive_score', 'ki67_proliferation_index',
     'estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status', 'tnbc_status',
+    'hr_status', 'hrd_status', 'menopausal_status',
+    # Staging
+    'stage', 'tumor_stage', 'nodes_stage', 'distant_metastasis_stage', 'staging_modalities',
+    'metastatic_status', 'bone_only_metastasis_status',
+    # Biopsy
+    'histologic_type', 'biopsy_grade',
     # Genomics
     'genetic_mutations',
     # CLL
@@ -79,8 +86,12 @@ _OMOP_DERIVED_FIELDS = [
     'flipi_score', 'gelf_criteria_status', 'tumor_grade',
     # Assessment
     'best_response', 'measurable_disease_by_recist_status',
+    # Clinical (breast cancer)
+    'peripheral_neuropathy_grade', 'toxicity_grade', 'renal_adequacy_status',
     # Procedures
     'prior_procedures',
+    # BMI (computed from weight + height)
+    'bmi',
     # Wearable summaries
     'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
     'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
@@ -234,6 +245,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             _get_treatment_data,
             _get_vitals_data,
             _get_biomarker_data,
+            _get_staging_data,
             _get_social_data,
             _get_behavior_data,
             _get_infection_data,
@@ -243,6 +255,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             _get_genetic_mutations,
             _get_cll_data,
             _get_lymphoma_data,
+            _get_bc_clinical_data,
             _get_prior_procedures,
             _get_wearable_data,
         ]:
@@ -678,6 +691,207 @@ def _get_biomarker_data(person: Person) -> dict:
             and data['progesterone_receptor_status'] == 'NEGATIVE'
             and data['her2_status'] == 'NEGATIVE'
         )
+
+    def _first_m(concept_code):
+        """Return the most recent Measurement for a LOINC code, checking concept first then source_value."""
+        m = measurements.filter(measurement_concept__concept_code=concept_code).first()
+        if not m:
+            m = measurements.filter(measurement_source_value=concept_code).first()
+        return m
+
+    # Ki-67 proliferation index — LOINC 85319-2
+    ki67_m = _first_m('85319-2')
+    if ki67_m and ki67_m.value_as_number is not None:
+        data['ki67_proliferation_index'] = int(ki67_m.value_as_number)
+
+    # PD-L1 immune cell percentage — LOINC 85336-6
+    pdl1_ic_m = _first_m('85336-6')
+    if pdl1_ic_m and pdl1_ic_m.value_as_number is not None:
+        data['pd_l1_ic_percentage'] = int(pdl1_ic_m.value_as_number)
+
+    # PD-L1 combined positive score — LOINC 96893-3
+    pdl1_cps_m = _first_m('96893-3')
+    if pdl1_cps_m and pdl1_cps_m.value_as_number is not None:
+        data['pd_l1_combined_positive_score'] = int(pdl1_cps_m.value_as_number)
+
+    # Biopsy (Nottingham) grade — LOINC 44648-4
+    biopsy_m = _first_m('44648-4')
+    if biopsy_m and biopsy_m.value_as_number is not None:
+        data['biopsy_grade'] = int(biopsy_m.value_as_number)
+
+    # Menopausal status — LOINC 76690-7 (Measurement first, then Observation)
+    menopause_m = _first_m('76690-7')
+    if menopause_m:
+        val = menopause_m.value_as_string
+        if not val and menopause_m.value_as_concept_id:
+            c = _cc_by_id(menopause_m.value_as_concept_id)
+            if c:
+                val = c.concept_name
+        if val:
+            data['menopausal_status'] = val
+    else:
+        menopause_obs = (
+            Observation.objects.filter(person=person, observation_concept__concept_code='76690-7')
+            .order_by('-observation_date').first()
+        )
+        if menopause_obs:
+            val = menopause_obs.value_as_string
+            if not val and menopause_obs.value_as_concept_id:
+                c = _cc_by_id(menopause_obs.value_as_concept_id)
+                if c:
+                    val = c.concept_name
+            if val:
+                data['menopausal_status'] = val
+
+    # HRD status — Observation concept name containing 'homologous recombination'
+    hrd_obs = (
+        Observation.objects.filter(
+            person=person,
+            observation_concept__concept_name__icontains='homologous recombination',
+        ).order_by('-observation_date').first()
+    )
+    if hrd_obs:
+        val = hrd_obs.value_as_string or hrd_obs.value_source_value
+        if val:
+            data['hrd_status'] = val
+
+    # Bone-only metastasis status — LOINC 44667-4 or concept-name matching
+    bone_obs = (
+        Observation.objects.filter(person=person, observation_concept__concept_code='44667-4')
+        .order_by('-observation_date').first()
+    )
+    if not bone_obs:
+        bone_obs = (
+            Observation.objects.filter(
+                person=person,
+                observation_concept__concept_name__icontains='bone only metastas',
+            ).order_by('-observation_date').first()
+        )
+    if bone_obs:
+        if bone_obs.value_as_number is not None:
+            data['bone_only_metastasis_status'] = bool(int(bone_obs.value_as_number))
+        elif bone_obs.value_as_string:
+            s = bone_obs.value_as_string.lower()
+            if s in ('yes', 'true', '1', 'positive'):
+                data['bone_only_metastasis_status'] = True
+            elif s in ('no', 'false', '0', 'negative'):
+                data['bone_only_metastasis_status'] = False
+
+    # Histologic type — Observation concept matching 'histologic' or 'histology'
+    histologic_obs = (
+        Observation.objects.filter(
+            person=person,
+            observation_concept__concept_name__icontains='histolog',
+        ).exclude(value_as_string__isnull=True).order_by('-observation_date').first()
+    )
+    if histologic_obs and histologic_obs.value_as_string:
+        data['histologic_type'] = histologic_obs.value_as_string
+
+    return data
+
+
+def _get_staging_data(person: Person) -> dict:
+    """Derive TNM staging and overall stage group from OMOP Measurement/Observation rows.
+
+    Reads staging data in two tiers:
+    1. OMOP Measurement with LOINC concept code (OMOP-native path)
+    2. OMOP Measurement with LOINC code as source_value (FHIR upload path)
+    3. OMOP Observation with LOINC concept code (assessment/clinical path)
+    """
+    data = {}
+
+    measurements = (
+        Measurement.objects.filter(person=person)
+        .select_related('measurement_concept')
+        .order_by('-measurement_date')
+    )
+    observations = (
+        Observation.objects.filter(person=person)
+        .select_related('observation_concept')
+        .order_by('-observation_date')
+    )
+
+    def _stage_value(loinc_code):
+        """Return the best string value for a staging LOINC code (Measurement then Observation)."""
+        # Primary: concept code match
+        m = measurements.filter(measurement_concept__concept_code=loinc_code).first()
+        if m:
+            return m.value_as_string or (str(int(m.value_as_number)) if m.value_as_number is not None else None)
+        # Secondary: LOINC stored as source_value (FHIR upload path)
+        m = Measurement.objects.filter(
+            person=person, measurement_source_value=loinc_code,
+        ).order_by('-measurement_date').first()
+        if m:
+            return m.value_as_string or (str(int(m.value_as_number)) if m.value_as_number is not None else None)
+        # Tertiary: Observation by concept code
+        obs = observations.filter(observation_concept__concept_code=loinc_code).first()
+        if obs:
+            return obs.value_as_string
+        return None
+
+    # Overall clinical stage group — LOINC 21908-9
+    stage_val = _stage_value('21908-9')
+    if stage_val:
+        data['stage'] = stage_val
+
+    # T stage — LOINC 21905-5
+    t_val = _stage_value('21905-5')
+    if t_val:
+        data['tumor_stage'] = t_val
+
+    # N stage — LOINC 21906-3
+    n_val = _stage_value('21906-3')
+    if n_val:
+        data['nodes_stage'] = n_val
+
+    # M (distant metastasis) stage — LOINC 21901-4
+    m_val = _stage_value('21901-4')
+    if m_val:
+        data['distant_metastasis_stage'] = m_val
+
+    # Staging modalities — Observation concept name containing 'staging method'
+    staging_obs = observations.filter(
+        observation_concept__concept_name__icontains='staging',
+    ).exclude(value_as_string__isnull=True)
+    staging_vals = list(dict.fromkeys(
+        obs.value_as_string for obs in staging_obs if obs.value_as_string
+    ))
+    if staging_vals:
+        data['staging_modalities'] = ', '.join(staging_vals)
+
+    return data
+
+
+def _get_bc_clinical_data(person: Person) -> dict:
+    """Derive breast-cancer clinical assessment fields from OMOP Observation rows.
+
+    Covers CTCAE toxicity/neuropathy grades stored as clinical assessments.
+    """
+    data = {}
+
+    observations = (
+        Observation.objects.filter(person=person)
+        .select_related('observation_concept')
+        .order_by('-observation_date')
+    )
+
+    # Peripheral neuropathy CTCAE grade — concept name match
+    pn_obs = observations.filter(
+        observation_concept__concept_name__icontains='peripheral neuropathy',
+    ).first()
+    if pn_obs and pn_obs.value_as_number is not None:
+        data['peripheral_neuropathy_grade'] = int(pn_obs.value_as_number)
+
+    # Toxicity grade — CTCAE adverse event grade
+    tox_obs = observations.filter(
+        observation_concept__concept_name__icontains='toxicity grade',
+    ).first()
+    if not tox_obs:
+        tox_obs = observations.filter(
+            observation_concept__concept_name__icontains='adverse event',
+        ).first()
+    if tox_obs and tox_obs.value_as_number is not None:
+        data['toxicity_grade'] = int(tox_obs.value_as_number)
 
     return data
 
@@ -1183,6 +1397,39 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
         m.get('gene', '').lower() == 'tp53' and m.get('interpretation') == 'pathogenic'
         for m in mutations
     )
+
+    # BMI — computed from weight and height when units are known
+    weight = patient_info.weight
+    height = patient_info.height
+    if weight is not None and height is not None and float(height) > 0:
+        weight_units = (patient_info.weight_units or 'kg').lower()
+        height_units = (patient_info.height_units or 'cm').lower()
+        weight_kg = float(weight) * (0.453592 if weight_units in ('lbs', 'lb') else 1.0)
+        height_m = float(height) * (0.0254 if height_units in ('in', 'inch', 'inches') else 0.01)
+        if height_m >= 0.5:  # sanity-check: skip implausible heights
+            patient_info.bmi = round(weight_kg / (height_m ** 2), 1)
+
+    # HR status — derived from ER and PR receptor status (HR+ = ER+ or PR+)
+    er = patient_info.estrogen_receptor_status
+    pr = patient_info.progesterone_receptor_status
+    if er is not None or pr is not None:
+        if (er and 'positive' in er.lower()) or (pr and 'positive' in pr.lower()):
+            patient_info.hr_status = 'HR+'
+        elif er == 'NEGATIVE' and pr == 'NEGATIVE':
+            patient_info.hr_status = 'HR-'
+
+    # Metastatic status — True when M stage is M1
+    m_stage = patient_info.distant_metastasis_stage
+    if m_stage is not None:
+        patient_info.metastatic_status = 'M1' in m_stage.upper()
+
+    # Renal adequacy — eGFR >= 30 mL/min/1.73m² (CTCAE G4 threshold)
+    egfr = patient_info.egfr_ml_min_173m2
+    creatinine = patient_info.serum_creatinine_mg_dl
+    if egfr is not None:
+        patient_info.renal_adequacy_status = float(egfr) >= 30.0
+    elif creatinine is not None:
+        patient_info.renal_adequacy_status = float(creatinine) <= 1.5
 
 
 def _get_wearable_data(person: Person) -> dict:
