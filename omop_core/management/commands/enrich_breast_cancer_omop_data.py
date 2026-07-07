@@ -212,10 +212,17 @@ class Command(BaseCommand):
         return f'  ETA ~{Command._fmt_elapsed(remaining)}'
 
     def _run_with_db_retries(self, label, retries, func):
+        """Retry func() on transient connection failures.
+
+        close_old_connections() is only called AFTER a failure, not before
+        the first attempt — calling it unconditionally up front closes any
+        connection currently inside an atomic block (e.g. pytest-django's
+        per-test transaction wrapping), breaking tests even when the
+        connection was perfectly healthy.
+        """
         attempt = 1
         while True:
             try:
-                close_old_connections()
                 return func()
             except (OperationalError, InterfaceError) as exc:
                 close_old_connections()
