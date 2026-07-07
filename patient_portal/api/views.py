@@ -38,7 +38,7 @@ from omop_core.services.omop_write_service import sync_to_omop
 from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
-from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name
+from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
 from omop_core.services.access import get_visible_orgs, build_trusting_map
 from datetime import datetime, timedelta
 from django.utils.timezone import localdate
@@ -1380,9 +1380,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             annual_household_income = value_number
                         # Cancer Assessment Fields
                         elif loinc_code == '89247-1':  # ECOG Performance Status
-                            # Store the date from effectiveDateTime
                             if observation.get('effectiveDateTime'):
                                 ecog_assessment_date = observation['effectiveDateTime'][:10]
+                            # Capture integer score (0-4) for Measurement row creation in Phase 2
+                            if observation.get('valueInteger') is not None:
+                                value_number = float(observation['valueInteger'])
+                            elif value_codeable:
+                                # Some implementations encode as "0", "1", etc. in text
+                                try:
+                                    value_number = float(value_codeable)
+                                except (ValueError, TypeError):
+                                    pass
                         elif loinc_code == '85337-4':  # Test Methodology
                             test_methodology = value_codeable
                             # Also check if this is Oncotype DX score
@@ -1480,7 +1488,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             nodes_stage = (observation.get('valueCodeableConcept') or {}).get('text')
                         elif obs_text == 'distant metastasis stage' or loinc_code == '21901-4':
                             distant_metastasis_stage = (observation.get('valueCodeableConcept') or {}).get('text')
-                        elif obs_text == 'staging modality' or loinc_code == '85319-2':
+                        elif obs_text == 'staging modality':
                             staging_modalities = observation.get('valueString')
                         elif loinc_code == '21908-9':
                             # mCODE TNM clinical stage group — valueCodeableConcept e.g. "Stage 2B"
@@ -1645,13 +1653,19 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             value_qty = observation['valueQuantity']
                             value_number = value_qty.get('value')
                             unit = value_qty.get('unit')
+                        elif observation.get('valueInteger') is not None:
+                            # FHIR integer type — used for ECOG (0-4), Karnofsky, grades, etc.
+                            value_number = float(observation['valueInteger'])
                         elif observation.get('valueCodeableConcept'):
                             value_concept = observation['valueCodeableConcept']
                             if value_concept.get('text'):
                                 value_string = value_concept['text']
                             elif value_concept.get('coding'):
                                 value_string = value_concept['coding'][0].get('display')
-                        
+                        elif observation.get('valueBoolean') is not None:
+                            # FHIR boolean — store as 1/0 in value_as_number for easy extraction
+                            value_number = 1.0 if observation['valueBoolean'] else 0.0
+
                         # Find measurement concept — LOINC lookup first (FHIR-06/07/08),
                         # fall back to name-based, then generic lab concept.
                         measurement_concept = None
@@ -1785,6 +1799,114 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             "TIMING patient=%s phase=measurements_bulk_insert elapsed=%.3fs count=%d",
                             _timing_hash, _time.monotonic() - _t_bulk_insert, len(_pending_measurements),
                         )
+
+                    # --- Write OMOP Observation rows for clinical assessments ---
+                    # These are non-lab FHIR observations (ECOG, TNM staging, smoking status,
+                    # treatment response) that the patient_record_service extractors read from
+                    # the OMOP Observation table, not the Measurement table.
+                    _ASSESSMENT_LOINC = {
+                        '89247-1',  # ECOG Performance Status
+                        '89243-0',  # Karnofsky Performance Status
+                        '21908-9',  # Stage group.clinical Cancer (TNM overall)
+                        '21905-5',  # Primary tumor.clinical [Class] Cancer (T)
+                        '21906-3',  # Regional lymph nodes.clinical [Class] Cancer (N)
+                        '21901-4',  # Distant metastasis.clinical [Class] Cancer (M)
+                    }
+                    _ASSESSMENT_SNOMED = {
+                        # Smoking/tobacco status
+                        '266919005',  # Never smoked tobacco
+                        '8517006',    # Ex-smoker
+                        '77176002',   # Smoker
+                        # Treatment response (RECIST)
+                        '182840001',  # Complete response
+                        '182841002',  # Partial response
+                        '182843004',  # Stable disease
+                        '182842009',  # Progressive disease
+                    }
+                    _existing_obs_keys = {
+                        (o.observation_concept_id, o.observation_date, o.observation_source_value)
+                        for o in Observation.objects.filter(person=person)
+                    }
+                    _pending_observations = []
+                    for _obs_fhir in data['observations']:
+                        _obs_fhir_code = _obs_fhir.get('code', {})
+                        _obs_date_str = _obs_fhir.get('effectiveDateTime') or _obs_fhir.get('effectivePeriod', {}).get('start')
+                        if not _obs_date_str:
+                            continue
+                        try:
+                            _obs_dt = datetime.fromisoformat(_obs_date_str[:10])
+                        except (ValueError, TypeError):
+                            continue
+                        _obs_date_only = _obs_dt.date()
+
+                        _obs_concept = None
+                        _obs_src = None
+
+                        # Check for LOINC-coded assessment observations
+                        for _coding in _obs_fhir_code.get('coding', []):
+                            _sys = _coding.get('system', '')
+                            _code = _coding.get('code', '')
+                            if 'loinc.org' in _sys and _code in _ASSESSMENT_LOINC:
+                                _obs_concept = _cc_by_loinc(_code)
+                                _obs_src = _code
+                                break
+                            if 'snomed' in _sys.lower() and _code in _ASSESSMENT_SNOMED:
+                                _obs_concept = _cc_by_vocab('SNOMED', _code)
+                                _obs_src = _code
+                                break
+
+                        if not _obs_concept:
+                            continue
+
+                        _obs_key = (_obs_concept.pk, _obs_date_only, _obs_src)
+                        if _obs_key in _existing_obs_keys:
+                            continue
+
+                        # Extract value
+                        _obs_val_num = None
+                        _obs_val_str = None
+                        if _obs_fhir.get('valueQuantity'):
+                            _obs_val_num = _obs_fhir['valueQuantity'].get('value')
+                        elif _obs_fhir.get('valueInteger') is not None:
+                            _obs_val_num = float(_obs_fhir['valueInteger'])
+                        elif _obs_fhir.get('valueCodeableConcept'):
+                            _vc = _obs_fhir['valueCodeableConcept']
+                            _obs_val_str = _vc.get('text') or (_vc.get('coding') or [{}])[0].get('display')
+                            if _obs_val_str and len(_obs_val_str) > 60:
+                                _obs_val_str = _obs_val_str[:60]
+                        elif _obs_fhir.get('valueBoolean') is not None:
+                            _obs_val_num = 1.0 if _obs_fhir['valueBoolean'] else 0.0
+
+                        _new_obs = Observation(
+                            observation_id=0,  # allocated below
+                            person=person,
+                            observation_concept=_obs_concept,
+                            observation_date=_obs_date_only,
+                            observation_datetime=timezone.make_aware(_obs_dt) if _obs_dt.tzinfo is None else _obs_dt,
+                            observation_type_concept=_concept_ehr_type or _obs_concept,
+                            value_as_number=_obs_val_num,
+                            value_as_string=_obs_val_str,
+                            observation_source_value=_obs_src[:50] if _obs_src else None,
+                        )
+                        _new_obs._skip_patient_record_refresh = True
+                        _existing_obs_keys.add(_obs_key)
+                        _pending_observations.append(_new_obs)
+
+                    if _pending_observations:
+                        _obs_ids = _next_pk_batch(Observation, 'observation_id', len(_pending_observations))
+                        for _po, _oid in zip(_pending_observations, _obs_ids):
+                            _po.observation_id = _oid
+                        try:
+                            Observation.objects.bulk_create(_pending_observations)
+                            logger.info(
+                                '{"event": "observations_written", "person_id": %d, "count": %d}',
+                                person.person_id, len(_pending_observations),
+                            )
+                        except Exception as _obs_ex:
+                            logger.warning(
+                                '{"event": "observation_bulk_create_failed", "count": %d, "error": "%s"}',
+                                len(_pending_observations), _obs_ex,
+                            )
 
                     # Extract therapy information from MedicationStatement resources
                     therapy_lines = {}  # {line_number: {'regimen': name, 'start_date': date, 'end_date': date, 'outcome': outcome}}
