@@ -1424,7 +1424,7 @@ class ResolvePersonIdOrgBypassTest(TestCase):
         GroupAccess.objects.create(
             identity=self.provider,
             group=self.group,
-            role='navigator',
+            role='analyst',
         )
 
         self.client = APIClient()

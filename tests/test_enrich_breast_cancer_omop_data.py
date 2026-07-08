@@ -11,7 +11,7 @@ Covers:
 from io import StringIO
 
 import pytest
-from django.core.management import call_command
+from django.core.management import call_command, CommandError
 
 from omop_core.models import Measurement, Observation, PatientRecord
 from tests.factories import (
@@ -58,7 +58,7 @@ class TestPerformanceAndStageBackfill:
         ecog_concept = _loinc_concept('89247-1', 'ECOG Performance Status score')
         m = MeasurementFactory(person=person, measurement_concept=ecog_concept, value_as_number=None)
 
-        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id))
+        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id), confirm=True)
 
         m.refresh_from_db()
         assert m.value_as_number in (0, 1, 2)
@@ -69,7 +69,16 @@ class TestPerformanceAndStageBackfill:
         stage_concept = _loinc_concept('21908-9', 'Stage group.clinical Cancer')
         m = MeasurementFactory(person=person, measurement_concept=stage_concept, value_as_string=None)
 
-        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id))
+        # Creating the Measurement above fires the OMOP post_save signal,
+        # which calls refresh_patient_record() outside the command's own
+        # suppress_patient_record_refresh() context. Since `stage` is itself
+        # derived from this same (still-null) measurement, that refresh
+        # clears it back to None — re-set it so the precondition this test
+        # is actually checking (the command reads an existing stage value to
+        # backfill the measurement) holds regardless of that side effect.
+        PatientRecord.objects.filter(person=person).update(stage='IIIB')
+
+        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id), confirm=True)
 
         m.refresh_from_db()
         assert m.value_as_string == 'Stage IIIB'
@@ -80,7 +89,7 @@ class TestPerformanceAndStageBackfill:
         ecog_concept = _loinc_concept('89247-1', 'ECOG Performance Status score')
         m = MeasurementFactory(person=person, measurement_concept=ecog_concept, value_as_number=3)
 
-        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id))
+        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id), confirm=True)
 
         m.refresh_from_db()
         assert m.value_as_number == 3
@@ -92,7 +101,7 @@ class TestMissingObservations:
         person = PersonFactory()
         PatientRecordFactory(person=person, stage='II')
 
-        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id))
+        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id), confirm=True)
 
         codes = set(
             Observation.objects.filter(person=person)
@@ -104,7 +113,7 @@ class TestMissingObservations:
         person = PersonFactory()
         PatientRecordFactory(person=person, stage='IV')
 
-        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id))
+        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id), confirm=True)
 
         t_obs = Observation.objects.get(person=person, observation_concept__concept_code='21905-5')
         m_obs = Observation.objects.get(person=person, observation_concept__concept_code='21901-4')
@@ -115,10 +124,10 @@ class TestMissingObservations:
         person = PersonFactory()
         PatientRecordFactory(person=person, stage='II')
 
-        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id))
+        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id), confirm=True)
         first_count = Observation.objects.filter(person=person).count()
 
-        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id))
+        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id), confirm=True)
         second_count = Observation.objects.filter(person=person).count()
 
         assert first_count == second_count
@@ -132,7 +141,7 @@ class TestWearableMeasurements:
         person = PersonFactory()
         PatientRecordFactory(person=person, stage='I')
 
-        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id))
+        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id), confirm=True)
 
         steps_rows = Measurement.objects.filter(
             person=person, measurement_concept__concept_code='55423-8',
@@ -141,6 +150,13 @@ class TestWearableMeasurements:
 
 
 class TestDryRun:
+
+    def test_requires_confirm_for_synthetic_writes(self):
+        person = PersonFactory()
+        PatientRecordFactory(person=person, stage='II')
+
+        with pytest.raises(CommandError, match='writes synthetic OMOP rows'):
+            call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id))
 
     def test_dry_run_persists_nothing(self):
         person = PersonFactory()
@@ -163,7 +179,7 @@ class TestRefreshesPatientRecord:
         person = PersonFactory()
         PatientRecordFactory(person=person, stage='II')
 
-        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id))
+        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id), confirm=True)
 
         record = PatientRecord.objects.get(person=person)
         assert record.no_tobacco_use_status is not None or record.tobacco_use_details is not None
@@ -195,6 +211,7 @@ class TestRefreshesPatientRecord:
         call_command(
             'enrich_breast_cancer_omop_data',
             person_ids=f'{person_a.person_id},{person_b.person_id}',
+            confirm=True,
         )
 
         assert [snapshot['person_id'] for snapshot in snapshots] == [
@@ -213,6 +230,7 @@ class TestRefreshesPatientRecord:
             'enrich_breast_cancer_omop_data',
             person_ids=str(person.person_id),
             stdout=output,
+            confirm=True,
         )
 
         text = output.getvalue()
@@ -220,3 +238,44 @@ class TestRefreshesPatientRecord:
         assert f'[1/1  100.0%]  person_id={person.person_id}' in text
         assert 'Phase 2/2: PatientRecord refresh (1 patients)' in text
         assert 'refreshed in' in text
+
+    def test_refresh_only_defaults_to_breast_cancer_records(self, monkeypatch):
+        breast_person = PersonFactory()
+        other_person = PersonFactory()
+        org = PatientRecordFactory(person=breast_person, disease='Breast Cancer').organization
+        PatientRecordFactory(person=other_person, organization=org, disease='Multiple Myeloma')
+        refreshed = []
+
+        monkeypatch.setattr(
+            'omop_core.management.commands.enrich_breast_cancer_omop_data.refresh_patient_record',
+            lambda person: refreshed.append(person.person_id),
+        )
+
+        call_command(
+            'enrich_breast_cancer_omop_data',
+            org_slugs=org.slug,
+            refresh_only=True,
+        )
+
+        assert refreshed == [breast_person.person_id]
+
+    def test_refresh_only_can_refresh_all_org_patients(self, monkeypatch):
+        breast_person = PersonFactory()
+        other_person = PersonFactory()
+        org = PatientRecordFactory(person=breast_person, disease='Breast Cancer').organization
+        PatientRecordFactory(person=other_person, organization=org, disease='Multiple Myeloma')
+        refreshed = []
+
+        monkeypatch.setattr(
+            'omop_core.management.commands.enrich_breast_cancer_omop_data.refresh_patient_record',
+            lambda person: refreshed.append(person.person_id),
+        )
+
+        call_command(
+            'enrich_breast_cancer_omop_data',
+            org_slugs=org.slug,
+            refresh_only=True,
+            refresh_all_org_patients=True,
+        )
+
+        assert refreshed == [breast_person.person_id, other_person.person_id]
