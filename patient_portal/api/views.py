@@ -46,6 +46,7 @@ import csv
 import hashlib
 import json
 import logging
+import re
 from io import StringIO
 from .permissions import ScopedTokenPermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
@@ -1348,15 +1349,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             psa = value_number
                         # Behavior - Lifestyle
                         elif loinc_code == '72166-2':  # Smoking Status
-                            smoking_status = value_codeable
+                            smoking_status = value_codeable[:50] if value_codeable else value_codeable
                         elif loinc_code == '63640-7':  # Pack Years
                             pack_years = value_number
                         elif loinc_code == '74013-4':  # Alcohol Use
-                            alcohol_use = value_codeable
+                            alcohol_use = value_codeable[:50] if value_codeable else value_codeable
                         elif loinc_code == '11286-7':  # Drinks per Week
                             drinks_per_week = value_number
                         elif loinc_code == '68516-4':  # Exercise Frequency
-                            exercise_frequency = value_codeable
+                            exercise_frequency = value_codeable[:50] if value_codeable else value_codeable
                         elif loinc_code == '89555-7':  # Exercise Minutes per Week
                             exercise_minutes_per_week = value_number
                         elif loinc_code == '88365-2':  # Diet Type
@@ -1365,18 +1366,18 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         elif loinc_code == '93832-4':  # Sleep Hours per Night
                             sleep_hours_per_night = value_number
                         elif loinc_code == '93831-6':  # Sleep Quality
-                            sleep_quality = value_codeable
+                            sleep_quality = value_codeable[:50] if value_codeable else value_codeable
                         elif loinc_code == '73985-4':  # Stress Level
-                            stress_level = value_codeable
+                            stress_level = value_codeable[:50] if value_codeable else value_codeable
                         elif loinc_code == '93033-9':  # Social Support
-                            social_support = value_codeable
+                            social_support = value_codeable[:50] if value_codeable else value_codeable
                         # Behavior - Socioeconomic
                         elif loinc_code == '74165-2':  # Employment Status
-                            employment_status = value_codeable
+                            employment_status = value_codeable[:50] if value_codeable else value_codeable
                         elif loinc_code == '82589-3':  # Education Level
                             education_level = value_codeable
                         elif loinc_code == '45404-1':  # Marital Status
-                            marital_status = value_codeable
+                            marital_status = value_codeable[:50] if value_codeable else value_codeable
                         elif loinc_code == '76513-1':  # Insurance Type
                             insurance_type = value_codeable
                         elif loinc_code == '63512-8':  # Number of Dependents
@@ -1397,16 +1398,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 except (ValueError, TypeError):
                                     pass
                         elif loinc_code == '85337-4':  # Test Methodology
-                            test_methodology = value_codeable
+                            test_methodology = value_codeable[:50] if value_codeable else value_codeable
                             # Also check if this is Oncotype DX score
                             if value_number is not None:
                                 oncotype_dx_score = value_number
                         elif loinc_code == '31208-2':  # Specimen Source
-                            test_specimen_type = value_codeable
+                            test_specimen_type = value_codeable[:50] if value_codeable else value_codeable
                             if observation.get('effectiveDateTime'):
                                 test_date = observation['effectiveDateTime'][:10]
                         elif loinc_code == '69548-6':  # Test Interpretation
-                            report_interpretation = value_codeable
+                            report_interpretation = value_codeable[:50] if value_codeable else value_codeable
                         elif loinc_code == '16112-5':  # Estrogen Receptor (ER) — mCODE tumor marker
                             if observation.get('valueCodeableConcept'):
                                 value_concept = observation['valueCodeableConcept']
@@ -1423,7 +1424,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             obs_date = observation.get('effectiveDateTime', '')[:10] if observation.get('effectiveDateTime') else None
                             therapy_intent_observations.append({'date': obs_date, 'value': value_codeable})
                             if not therapy_intent:  # Keep first for backwards compatibility
-                                therapy_intent = value_codeable
+                                therapy_intent = value_codeable[:50] if value_codeable else value_codeable
                         elif loinc_code == '91379-3':  # Reason for Discontinuation
                             obs_date = observation.get('effectiveDateTime', '')[:10] if observation.get('effectiveDateTime') else None
                             discontinuation_observations.append({'date': obs_date, 'value': value_codeable})
@@ -1440,7 +1441,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             phosphorus = value_number
                         # Reproductive Health
                         elif loinc_code == '2106-3':  # Pregnancy Test
-                            pregnancy_test_result_value = value_codeable
+                            pregnancy_test_result_value = value_codeable[:50] if value_codeable else value_codeable
                             if observation.get('effectiveDateTime'):
                                 pregnancy_test_date = observation['effectiveDateTime'][:10]
                         elif loinc_code == '8659-8':  # Contraceptive Use
@@ -1468,41 +1469,44 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             if observation.get('valueQuantity'):
                                 tumor_size = observation['valueQuantity'].get('value')
                         
-                        # Check for lymph node status
-                        elif 'lymph node' in obs_text or 'lymph nodes' in obs_text:
+                        # Check for lymph node status — exclude TNM N-stage LOINC (21906-3)
+                        # which carries AJCC notation, not a binary status
+                        elif ('lymph node' in obs_text or 'lymph nodes' in obs_text) and loinc_code != '21906-3':
                             if observation.get('valueCodeableConcept'):
                                 value_concept = observation['valueCodeableConcept']
-                                if value_concept.get('text'):
-                                    lymph_node_status = value_concept['text']
-                                elif value_concept.get('coding'):
-                                    lymph_node_status = value_concept['coding'][0].get('display')
-                        
-                        # Check for metastasis status
-                        elif 'metastasis' in obs_text or 'metastases' in obs_text:
+                                raw = (value_concept.get('text') or
+                                       (value_concept.get('coding') or [{}])[0].get('display'))
+                                if raw:
+                                    lymph_node_status = raw[:50]
+
+                        # Check for metastasis status — exclude TNM M-stage LOINCs (21907-1, 21901-4)
+                        # which carry AJCC notation and are routed to distant_metastasis_stage below
+                        elif ('metastasis' in obs_text or 'metastases' in obs_text) and loinc_code not in ('21907-1', '21901-4'):
                             if observation.get('valueCodeableConcept'):
                                 value_concept = observation['valueCodeableConcept']
-                                if value_concept.get('text'):
-                                    metastasis_status = value_concept['text']
-                                elif value_concept.get('coding'):
-                                    metastasis_status = value_concept['coding'][0].get('display')
+                                raw = (value_concept.get('text') or
+                                       (value_concept.get('coding') or [{}])[0].get('display'))
+                                if raw:
+                                    metastasis_status = raw[:50]
 
                         # TNM staging fields
                         if obs_text == 'tumor stage' or loinc_code == '21905-5':
                             tumor_stage = (observation.get('valueCodeableConcept') or {}).get('text')
                         elif obs_text == 'nodes stage' or loinc_code == '21906-3':
                             nodes_stage = (observation.get('valueCodeableConcept') or {}).get('text')
-                        elif obs_text == 'distant metastasis stage' or loinc_code == '21901-4':
+                        elif obs_text == 'distant metastasis stage' or loinc_code in ('21901-4', '21907-1'):
                             distant_metastasis_stage = (observation.get('valueCodeableConcept') or {}).get('text')
                         elif obs_text == 'staging modality':
                             staging_modalities = observation.get('valueString')
                         elif loinc_code == '21908-9':
                             # mCODE TNM clinical stage group — valueCodeableConcept e.g. "Stage 2B"
+                            # or Synthea AJCC form "American Joint Committee on Cancer stage IA (qualifier value)"
                             val_concept = observation.get('valueCodeableConcept') or {}
                             stage_text = val_concept.get('text') or (val_concept.get('coding') or [{}])[0].get('display', '')
-                            if stage_text and 'Stage' in stage_text:
-                                stage = stage_text.split('Stage')[-1].strip()
-                            elif stage_text:
-                                stage = stage_text
+                            if stage_text:
+                                # Skip optional "group" word: "stage group IIB" → "IIB"
+                                _m = re.search(r'\bstage\s+(?:group\s+)?(\S+)', stage_text, re.IGNORECASE)
+                                stage = _m.group(1).rstrip(')') if _m else stage_text
                         elif 'recist' in obs_text:
                             val = observation.get('valueBoolean')
                             if val is not None:
