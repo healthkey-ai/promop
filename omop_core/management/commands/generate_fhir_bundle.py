@@ -179,6 +179,10 @@ class Command(BaseCommand):
             assigned_lines = therapy_lines[i-1] if therapy_lines else None
             for med in self.generate_prior_therapy(i, diagnosis_date, assigned_lines):
                 bundle["entry"].append(med)
+
+            # Generate oncology procedures
+            for procedure in self.generate_oncology_procedures(i, diagnosis_date, cancer_stage):
+                bundle["entry"].append(procedure)
             
             # Generate supportive therapy
             supportive = self.generate_supportive_therapy(i, diagnosis_date)
@@ -1491,6 +1495,53 @@ class Command(BaseCommand):
                 }]
             }
         }
+
+    def generate_oncology_procedures(self, patient_id, diagnosis_date, stage):
+        """Generate breast cancer procedures useful for OMOP ProcedureOccurrence testing."""
+        procedures = []
+
+        procedure_defs = [
+            ('biopsy', '387713003', 'Surgical biopsy of breast', -14, 0),
+            ('sentinel-node-biopsy', '23426006', 'Sentinel lymph node biopsy', 7, 35),
+        ]
+        if stage == '0':
+            procedure_defs.append(('lumpectomy', '392021009', 'Lumpectomy of breast', 14, 45))
+        elif stage == 'IV':
+            procedure_defs.append(('radiation-therapy', '108290001', 'Radiation oncology procedure', 45, 120))
+        else:
+            procedure_defs.append(random.choice([
+                ('lumpectomy', '392021009', 'Lumpectomy of breast', 14, 45),
+                ('mastectomy', '172043006', 'Mastectomy', 14, 45),
+                ('radiation-therapy', '108290001', 'Radiation oncology procedure', 45, 120),
+            ]))
+
+        for key, code, display, min_days, max_days in procedure_defs:
+            procedure_date = diagnosis_date + timedelta(days=random.randint(min_days, max_days))
+            procedures.append({
+                "fullUrl": f"http://example.org/Procedure/procedure-{patient_id}-{key}",
+                "resource": {
+                    "resourceType": "Procedure",
+                    "id": f"procedure-{patient_id}-{key}",
+                    "status": "completed",
+                    "code": {
+                        "coding": [{
+                            "system": "http://snomed.info/sct",
+                            "code": code,
+                            "display": display
+                        }],
+                        "text": display
+                    },
+                    "subject": {
+                        "reference": f"Patient/{patient_id}"
+                    },
+                    "performedDateTime": procedure_date.strftime('%Y-%m-%d'),
+                    "reasonReference": [{
+                        "reference": f"Condition/condition-{patient_id}"
+                    }]
+                }
+            })
+
+        return procedures
 
     def generate_random_date(self, start_year, end_year):
         """Generate random date between years"""

@@ -549,12 +549,12 @@ class GetVisibleOrgsTest(TestCase):
         self.assertIn(self.org_b, orgs)
         self.assertNotIn(self.org_a, orgs)
 
-    def test_direct_org_navigator_sees_their_org(self):
-        navigator = Identity.objects.create_user(email='navigator@test.com', password='x')
+    def test_direct_org_analyst_sees_their_org(self):
+        analyst = Identity.objects.create_user(email='analyst@test.com', password='x')
         GroupAccess.objects.create(
-            identity=navigator, org=self.org_b, role='navigator',
+            identity=analyst, org=self.org_b, role='analyst',
         )
-        orgs = list(get_visible_orgs(navigator))
+        orgs = list(get_visible_orgs(analyst))
         self.assertIn(self.org_b, orgs)
         self.assertNotIn(self.org_a, orgs)
 

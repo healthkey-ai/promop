@@ -751,7 +751,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         'patient': resource,
                         'conditions': [],
                         'observations': [],
-                        'medications': []
+                        'medications': [],
+                        'procedures': [],
                     }
                     if patient_id:
                         patient_ref_aliases[patient_id] = patient_id
@@ -776,6 +777,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     patient_id = _resolve_patient_ref(patient_ref)
                     if patient_id in patients_data:
                         patients_data[patient_id]['medications'].append(resource)
+                elif resource_type == 'Procedure':
+                    patient_ref = resource.get('subject', {}).get('reference', '')
+                    patient_id = _resolve_patient_ref(patient_ref)
+                    if patient_id in patients_data:
+                        patients_data[patient_id]['procedures'].append(resource)
             
             # Hoist SCT vocabulary sets for FHIR upload validation (avoids N+1 per patient).
             _allowed_sct_titles = set(StemCellTransplant.objects.values_list('title', flat=True))
@@ -989,6 +995,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 'name': full_name,
                             },
                         )
+
+                    # Block analysts from updating existing patients via FHIR upload.
+                    if not person_is_new and not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+                        from omop_core.authorization import can_write_patient
+                        if not can_write_patient(request.user, person.person_id):
+                            errors.append({
+                                'patient': f'{given_name} {family_name}',
+                                'error': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.',
+                            })
+                            continue
 
                     # Extract disease, stage, and histologic type from Condition
                     disease = None
@@ -2183,6 +2199,78 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         except Exception as _e:
                             logger.warning('{"event": "drug_exposure_write_failed", "lot_num": %d, "error_type": "%s", "patient": "%s"}',
                                            lot_num, type(_e).__name__, _timing_hash)
+
+                    # --- Write ProcedureOccurrence records ---
+                    _existing_proc_keys = {
+                        (p.procedure_source_value, p.procedure_date)
+                        for p in ProcedureOccurrence.objects.filter(person=person)
+                    }
+                    for _proc_fhir in data.get('procedures', []):
+                        _performed = (
+                            _proc_fhir.get('performedDateTime')
+                            or _proc_fhir.get('performedPeriod', {}).get('start')
+                        )
+                        if not _performed:
+                            continue
+                        try:
+                            _proc_dt = datetime.fromisoformat(_performed[:10])
+                        except (ValueError, TypeError):
+                            continue
+                        _proc_date = _proc_dt.date()
+
+                        _proc_code = _proc_fhir.get('code', {})
+                        _proc_coding = (_proc_code.get('coding') or [{}])[0]
+                        _proc_system = _proc_coding.get('system', '')
+                        _proc_code_value = _proc_coding.get('code', '')
+                        _proc_display = (
+                            _proc_coding.get('display')
+                            or _proc_code.get('text')
+                            or _proc_fhir.get('id')
+                            or 'FHIR Procedure'
+                        )
+                        _proc_source = (_proc_code_value or _proc_display or '')[:50]
+                        _proc_key = (_proc_source, _proc_date)
+                        if _proc_key in _existing_proc_keys:
+                            continue
+
+                        _proc_concept = None
+                        if _proc_code_value and 'snomed' in _proc_system.lower():
+                            _proc_concept = _cc_by_vocab('SNOMED', _proc_code_value)
+                        if _proc_concept is None and _proc_display:
+                            _proc_concept = Concept.objects.filter(
+                                concept_name__icontains=_proc_display,
+                                domain__domain_id='Procedure',
+                            ).first()
+                        if _proc_concept is None:
+                            _proc_concept = Concept.objects.filter(domain__domain_id='Procedure').first()
+                        if _proc_concept is None:
+                            logger.warning(
+                                '{"event": "procedure_write_skipped", "reason": "no_procedure_concept", "patient": "%s", "procedure": "%s"}',
+                                _timing_hash, _proc_display,
+                            )
+                            continue
+
+                        _proc = ProcedureOccurrence(
+                            procedure_occurrence_id=next_pk(ProcedureOccurrence, 'procedure_occurrence_id'),
+                            person=person,
+                            procedure_concept=_proc_concept,
+                            procedure_date=_proc_date,
+                            procedure_datetime=timezone.make_aware(_proc_dt) if _proc_dt.tzinfo is None else _proc_dt,
+                            procedure_type_concept=_concept_ehr_type or _proc_concept,
+                            procedure_source_value=_proc_source,
+                            procedure_source_concept=_proc_concept,
+                        )
+                        _proc._skip_patient_record_refresh = True
+                        _proc.save()
+                        _pt_procedure_ids.append(_proc.procedure_occurrence_id)
+                        _existing_proc_keys.add(_proc_key)
+                        if prov_source:
+                            _record_provenance(_proc, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+
+                    logger.info(
+                        "TIMING patient=%s phase=procedures elapsed=%.1fs count=%d",
+                        _timing_hash, _time.monotonic() - _pt_start, len(_pt_procedure_ids),
+                    )
 
                     # --- OMOP-first: refresh PatientRecord from OMOP tables ---
                     # Release suppression so the single intentional refresh can run.

@@ -224,7 +224,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
     This is the single source of truth for PatientRecord derivation. It is called
     by:
-      - The populate_patient_info management command
+      - The populate_patient_record management command
       - OMOP post_save signals (ConditionOccurrence, DrugExposure, Measurement, etc.)
       - The FHIR upload endpoint (after writing OMOP records)
     """
@@ -654,18 +654,43 @@ def _get_vitals_data(person: Person) -> dict:
     return data
 
 
+_BIOMARKER_MEASUREMENT_LOINCS = frozenset({
+    '85337-4',  # PD-L1 tumor cells
+    '16112-5',  # Estrogen receptor
+    '16113-3',  # Progesterone receptor
+    '48676-1',  # HER2
+    '85319-2',  # Ki-67
+    '85336-6',  # PD-L1 immune cells
+    '96893-3',  # PD-L1 combined positive score
+    '44648-4',  # Biopsy/Nottingham grade
+    '76690-7',  # Menopausal status
+})
+_BIOMARKER_OBS_LOINCS = frozenset({'76690-7', '44667-4'})
+
+
 def _get_biomarker_data(person: Person) -> dict:
+    from django.db.models import Q
     data = {}
 
     measurements = list(
         Measurement.objects
         .filter(person=person)
+        .filter(
+            Q(measurement_concept__concept_code__in=_BIOMARKER_MEASUREMENT_LOINCS)
+            | Q(measurement_source_value__in=_BIOMARKER_MEASUREMENT_LOINCS)
+        )
         .select_related('measurement_concept', 'value_as_concept')
         .order_by('-measurement_date')
     )
     observations = list(
         Observation.objects
         .filter(person=person)
+        .filter(
+            Q(observation_concept__concept_code__in=_BIOMARKER_OBS_LOINCS)
+            | Q(observation_concept__concept_name__icontains='homologous recombination')
+            | Q(observation_concept__concept_name__icontains='bone only metastas')
+            | Q(observation_concept__concept_name__icontains='histologic')
+        )
         .select_related('observation_concept', 'value_as_concept')
         .order_by('-observation_date')
     )
@@ -817,6 +842,9 @@ def _get_biomarker_data(person: Person) -> dict:
     return data
 
 
+_STAGING_LOINCS = frozenset({'21908-9', '21905-5', '21906-3', '21901-4'})
+
+
 def _get_staging_data(person: Person) -> dict:
     """Derive TNM staging and overall stage group from OMOP Measurement/Observation rows.
 
@@ -825,20 +853,25 @@ def _get_staging_data(person: Person) -> dict:
     2. OMOP Measurement with LOINC code as source_value (FHIR upload path)
     3. OMOP Observation with LOINC concept code (assessment/clinical path)
     """
+    from django.db.models import Q
     data = {}
 
-    measurements = (
-        Measurement.objects.filter(person=person)
+    measurements = list(
+        Measurement.objects
+        .filter(person=person)
+        .filter(
+            Q(measurement_concept__concept_code__in=_STAGING_LOINCS)
+            | Q(measurement_source_value__in=_STAGING_LOINCS)
+        )
         .select_related('measurement_concept')
         .order_by('-measurement_date')
     )
-    observations = (
-        Observation.objects.filter(person=person)
+    observations = list(
+        Observation.objects
+        .filter(person=person, observation_concept__concept_code__in=_STAGING_LOINCS)
         .select_related('observation_concept')
         .order_by('-observation_date')
     )
-    measurements = list(measurements)
-    observations = list(observations)
 
     def _stage_value(loinc_code):
         """Return the best string value for a staging LOINC code (Measurement then Observation)."""

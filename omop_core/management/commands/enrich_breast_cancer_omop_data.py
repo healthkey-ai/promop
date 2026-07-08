@@ -31,9 +31,9 @@ benchmark_patient_record command).
 
 Usage:
     python manage.py enrich_breast_cancer_omop_data --dry-run
-    python manage.py enrich_breast_cancer_omop_data
-    python manage.py enrich_breast_cancer_omop_data --org-slugs abc-foundation,bbc-foundation --limit 50
-    python manage.py enrich_breast_cancer_omop_data --person-ids 1341,1410
+    python manage.py enrich_breast_cancer_omop_data --confirm
+    python manage.py enrich_breast_cancer_omop_data --confirm --org-slugs abc-foundation,bbc-foundation --limit 50
+    python manage.py enrich_breast_cancer_omop_data --confirm --person-ids 1341,1410
 """
 import random
 import time
@@ -206,6 +206,14 @@ class Command(BaseCommand):
             help='Print planned inserts/updates without writing.',
         )
         parser.add_argument(
+            '--confirm', action='store_true',
+            help=(
+                'Required to actually write synthetic data. '
+                'This command writes randomized synthetic OMOP rows — '
+                'pass --confirm to acknowledge this is intentional.'
+            ),
+        )
+        parser.add_argument(
             '--refresh-only',
             action='store_true',
             help='Skip enrichment and only refresh PatientRecord for the selected cohort.',
@@ -275,6 +283,13 @@ class Command(BaseCommand):
         db_retries = options['db_retries']
         job_start = time.monotonic()
 
+        if not dry_run and not refresh_only and not options['confirm']:
+            raise CommandError(
+                'This command writes synthetic OMOP rows into the database.\n'
+                'Pass --confirm to acknowledge this is intentional, or --dry-run to preview.\n'
+                'Re-run with: manage.py enrich_breast_cancer_omop_data --confirm ...'
+            )
+
         if options['person_ids']:
             self._write_progress('Selecting patients from --person-ids...')
             refresh_person_ids = [int(x) for x in options['person_ids'].split(',') if x.strip()]
@@ -324,6 +339,20 @@ class Command(BaseCommand):
             for code, name in _RESPONSE_CODES.items():
                 _get_or_create_concept(code, name)
 
+        # Pre-fetch all wearable LOINC concepts in one query. This avoids N+1
+        # Concept.objects.get() calls inside _create_missing_wearable_measurements
+        # and provides an early abort if any required concept is missing.
+        self._write_progress('Pre-fetching wearable LOINC concepts...')
+        wearable_concepts = {}
+        for metric_key, loinc_code in WEARABLE_LOINC.items():
+            concept = Concept.objects.filter(concept_code=loinc_code).first()
+            if concept is None:
+                raise CommandError(
+                    f'Required wearable LOINC concept {loinc_code!r} ({metric_key}) '
+                    f'not found in Concept table. Run seed_omop_concepts first.'
+                )
+            wearable_concepts[metric_key] = concept
+
         ehr_type_concept_id = CONCEPT_EHR_TYPE
         counts = {'perf_backfilled': 0, 'obs_created': 0, 'wearable_rows_created': 0, 'refreshed': 0}
         processed_persons = []
@@ -370,7 +399,8 @@ class Command(BaseCommand):
                             person, record, observation_ids, ehr_type_concept_id, dry_run,
                         )
                         wearable_rows_created = self._create_missing_wearable_measurements(
-                            person, measurement_ids, observation_ids, ehr_type_concept_id, dry_run,
+                            person, measurement_ids, observation_ids, ehr_type_concept_id,
+                            dry_run, wearable_concepts,
                         )
                         if dry_run:
                             transaction.set_rollback(True)
@@ -563,12 +593,15 @@ class Command(BaseCommand):
         return created
 
     def _create_missing_wearable_measurements(self, person, measurement_ids, observation_ids,
-                                                ehr_type_concept_id, dry_run):
+                                                ehr_type_concept_id, dry_run, wearable_concepts):
         """Insert up to 30 days of synthetic daily readings for each wearable
         metric the person doesn't already have WEARABLE_MIN_VALID_DAYS worth
         of (idempotent — tops up rather than duplicating). Sleep duration is
         Observation-sourced per _get_wearable_data; everything else is
-        Measurement-sourced."""
+        Measurement-sourced.
+
+        wearable_concepts: {metric_key: Concept} pre-fetched in handle() — avoids
+        N+1 Concept.objects.get() calls inside the per-person enrichment loop."""
         created = 0
         today = date.today()
         measurements_to_create = []
@@ -578,7 +611,7 @@ class Command(BaseCommand):
             if metric_key == 'sleep_duration':
                 continue
 
-            concept = Concept.objects.get(concept_code=loinc_code)
+            concept = wearable_concepts[metric_key]  # pre-fetched — no DB query here
             existing_days = set(
                 Measurement.objects.filter(
                     person=person, measurement_concept=concept,
@@ -605,7 +638,7 @@ class Command(BaseCommand):
                     value_as_number=value,
                 ))
 
-        sleep_concept = Concept.objects.get(concept_code=WEARABLE_LOINC['sleep_duration'])
+        sleep_concept = wearable_concepts['sleep_duration']  # pre-fetched — no DB query here
         existing_sleep_days = set(
             Observation.objects.filter(
                 person=person, observation_concept=sleep_concept,

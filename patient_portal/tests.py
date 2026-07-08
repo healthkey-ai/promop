@@ -55,6 +55,10 @@ def _make_vocab_fixtures():
         domain_id='Drug',
         defaults={'domain_name': 'Drug', 'domain_concept_id': 13},
     )
+    domain_procedure, _ = Domain.objects.get_or_create(
+        domain_id='Procedure',
+        defaults={'domain_name': 'Procedure', 'domain_concept_id': 10},
+    )
     domain_type, _ = Domain.objects.get_or_create(
         domain_id='Type Concept',
         defaults={'domain_name': 'Type Concept', 'domain_concept_id': 58},
@@ -95,6 +99,8 @@ def _make_vocab_fixtures():
     _concept(1147094,  'drug_exposure_id field',  domain_type)   # EpisodeEvent field concept
     # Generic drug concept — fallback when named regimen not found
     _concept(19136160, 'Drug',                    domain_drug)
+    # Generic procedure concept — fallback for FHIR Procedure ingestion
+    _concept(20000001, 'Procedure',               domain_procedure)
     # Gender concepts used by get_gender_concept() in views.py
     _concept(8532, 'FEMALE', domain_gender)
     _concept(8507, 'MALE',   domain_gender)
@@ -181,6 +187,22 @@ def _make_fhir_bundle():
     lot1 = _med_statement('med-ac-t',    'AC-T',    1, '2022-03-01', '2022-09-01', 'CR')
     lot2 = _med_statement('med-kadcyla', 'Kadcyla', 2, '2023-01-15', None,         'PR')
 
+    procedure = {
+        'resourceType': 'Procedure',
+        'id': 'proc-biopsy-001',
+        'status': 'completed',
+        'subject': {'reference': f'Patient/{patient_id}'},
+        'performedDateTime': '2022-01-20',
+        'code': {
+            'coding': [{
+                'system': 'http://snomed.info/sct',
+                'code': '387713003',
+                'display': 'Surgical biopsy of breast',
+            }],
+            'text': 'Surgical biopsy of breast',
+        },
+    }
+
     return {
         'resourceType': 'Bundle',
         'type': 'collection',
@@ -192,6 +214,7 @@ def _make_fhir_bundle():
             {'resource': creatinine_obs},
             {'resource': lot1},
             {'resource': lot2},
+            {'resource': procedure},
         ],
     }
 
@@ -287,6 +310,14 @@ class FhirUploadOmopTablesTest(FhirUploadBase):
         source_values = set(drug_exposures.values_list('drug_source_value', flat=True))
         self.assertIn('AC-T', source_values)
         self.assertIn('Kadcyla', source_values)
+
+    def test_procedure_occurrence_created(self):
+        """A FHIR Procedure resource should create a ProcedureOccurrence row."""
+        procedures = ProcedureOccurrence.objects.filter(person=self._person)
+        self.assertEqual(procedures.count(), 1)
+        procedure = procedures.first()
+        self.assertEqual(procedure.procedure_date, date(2022, 1, 20))
+        self.assertEqual(procedure.procedure_source_value, '387713003')
 
     def test_episodes_created_with_correct_lot_numbers(self):
         """Episode rows should exist with the correct episode_number for each LOT."""

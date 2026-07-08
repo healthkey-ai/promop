@@ -41,18 +41,20 @@ from omop_core.models import Person, PatientRecord
 from omop_core.services.patient_record_service import (
     _get_demographics, _get_location_data, _get_disease_data,
     _get_treatment_data, _get_vitals_data, _get_biomarker_data,
+    _get_staging_data, _get_bc_clinical_data,
     _get_social_data, _get_behavior_data, _get_infection_data,
     _get_assessment_data, _get_laboratory_data, _get_performance_data,
     _get_genetic_mutations, _get_prior_procedures, _get_wearable_data,
     _compute_derived_fields,
 )
 
-# 15 of refresh_patient_record's 17 section extractors — everything except
+# 17 of refresh_patient_record's 19 section extractors — everything except
 # _get_cll_data/_get_lymphoma_data, which are specific to other cancers and
 # don't feed any breast-cancer trial-matching attribute.
 _BC_SECTIONS = [
     _get_demographics, _get_location_data, _get_disease_data,
     _get_treatment_data, _get_vitals_data, _get_biomarker_data,
+    _get_staging_data, _get_bc_clinical_data,
     _get_social_data, _get_behavior_data, _get_infection_data,
     _get_assessment_data, _get_laboratory_data, _get_performance_data,
     _get_genetic_mutations, _get_prior_procedures, _get_wearable_data,
