@@ -998,8 +998,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
                     # Block analysts from updating existing patients via FHIR upload.
                     if not person_is_new and not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+                        request_org = get_request_org(request)
+                        same_org_upload = (
+                            request_org is not None
+                            and PatientRecord.objects.filter(person=person, organization=request_org).exists()
+                        )
                         from omop_core.authorization import can_write_patient
-                        if not can_write_patient(request.user, person.person_id):
+                        if not same_org_upload and not can_write_patient(request.user, person.person_id):
                             errors.append({
                                 'patient': f'{given_name} {family_name}',
                                 'error': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.',

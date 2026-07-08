@@ -2069,7 +2069,7 @@ class SmartFhirUploadTest(_SmartBase):
 
     def test_fhir_upload_upsert_no_duplicates(self):
         """Re-uploading the same bundle must not create duplicate records."""
-        from omop_core.models import Person, Measurement, ConditionOccurrence
+        from omop_core.models import Person, Measurement, ConditionOccurrence, ProcedureOccurrence
 
         resp1 = self._upload('bundle_upsert_1.json')
         self.assertIn(resp1.status_code, [200, 201])
@@ -2078,6 +2078,7 @@ class SmartFhirUploadTest(_SmartBase):
         person_count_after_first = Person.objects.count()
         measurement_count_after_first = Measurement.objects.count()
         condition_count_after_first = ConditionOccurrence.objects.count()
+        procedure_count_after_first = ProcedureOccurrence.objects.count()
 
         resp2 = self._upload('bundle_upsert_2.json')
         self.assertIn(resp2.status_code, [200, 201])
@@ -2090,6 +2091,7 @@ class SmartFhirUploadTest(_SmartBase):
         self.assertEqual(Person.objects.count(), person_count_after_first)
         self.assertEqual(Measurement.objects.count(), measurement_count_after_first)
         self.assertEqual(ConditionOccurrence.objects.count(), condition_count_after_first)
+        self.assertEqual(ProcedureOccurrence.objects.count(), procedure_count_after_first)
 
     def test_fhir_upload_response_includes_record_ids(self):
         """Response must include per-patient breakdown of created OMOP record IDs."""
