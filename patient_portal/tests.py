@@ -429,7 +429,12 @@ class UIViewsReflectUploadedDataTest(FhirUploadBase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         record = resp.data['patient_info']
         for field in ('disease', 'hemoglobin_g_dl', 'wbc_count_thousand_per_ul',
-                      'serum_creatinine_mg_dl', 'first_line_therapy', 'second_line_therapy'):
+                      'serum_creatinine_mg_dl', 'first_line_therapy', 'second_line_therapy',
+                      'first_line_outcome', 'first_line_discontinuation_reason',
+                      'first_line_start_date', 'first_line_end_date',
+                      'second_line_outcome', 'second_line_discontinuation_reason',
+                      'later_outcome', 'later_discontinuation_reason',
+                      'treatment_refractory_status', 'relapse_count', 'best_response'):
             self.assertIn(field, record, f'Field {field!r} missing from patient-info response')
 
     def test_patient_info_endpoint_lab_values_match_observations(self):
@@ -1994,6 +1999,17 @@ class SmartPatientRecordReadOnlyTest(_SmartBase):
     def test_patient_info_read_with_write_token_succeeds(self):
         resp = self.write_client.get('/api/patient-info/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_patient_info_patch_writes_best_response(self):
+        PatientRecord.objects.get_or_create(person=self.person, defaults={'organization': self.organization})
+        resp = self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'best_response': 'Complete Response'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        pi = PatientRecord.objects.get(person=self.person)
+        self.assertEqual(pi.best_response, 'Complete Response')
 
 
 class SmartFhirUploadTest(_SmartBase):
