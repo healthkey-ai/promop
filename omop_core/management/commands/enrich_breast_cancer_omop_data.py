@@ -210,6 +210,14 @@ class Command(BaseCommand):
             action='store_true',
             help='Skip enrichment and only refresh PatientRecord for the selected cohort.',
         )
+        parser.add_argument(
+            '--refresh-all-org-patients',
+            action='store_true',
+            help=(
+                'With --refresh-only and --org-slugs, refresh all PatientRecords in the '
+                'selected orgs instead of only records still matching disease__icontains=breast.'
+            ),
+        )
 
     def _write_progress(self, message, stream=None):
         stream = stream or self.stdout
@@ -262,6 +270,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         dry_run = options['dry_run']
         refresh_only = options['refresh_only']
+        refresh_all_org_patients = options['refresh_all_org_patients']
         start_after_person_id = options['start_after_person_id']
         db_retries = options['db_retries']
         job_start = time.monotonic()
@@ -282,7 +291,7 @@ class Command(BaseCommand):
                 .filter(organization__slug__in=org_slugs)
             )
             qs = org_qs.filter(disease__icontains='breast')
-            refresh_base_qs = org_qs if refresh_only else qs
+            refresh_base_qs = org_qs if refresh_only and refresh_all_org_patients else qs
             refresh_qs = refresh_base_qs.order_by('person_id').values_list('person_id', flat=True)
             refresh_person_ids = list(refresh_qs[:options['limit']]) if options['limit'] else list(refresh_qs)
             if start_after_person_id is not None:

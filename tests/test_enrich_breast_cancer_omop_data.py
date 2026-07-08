@@ -229,3 +229,44 @@ class TestRefreshesPatientRecord:
         assert f'[1/1  100.0%]  person_id={person.person_id}' in text
         assert 'Phase 2/2: PatientRecord refresh (1 patients)' in text
         assert 'refreshed in' in text
+
+    def test_refresh_only_defaults_to_breast_cancer_records(self, monkeypatch):
+        breast_person = PersonFactory()
+        other_person = PersonFactory()
+        org = PatientRecordFactory(person=breast_person, disease='Breast Cancer').organization
+        PatientRecordFactory(person=other_person, organization=org, disease='Multiple Myeloma')
+        refreshed = []
+
+        monkeypatch.setattr(
+            'omop_core.management.commands.enrich_breast_cancer_omop_data.refresh_patient_record',
+            lambda person: refreshed.append(person.person_id),
+        )
+
+        call_command(
+            'enrich_breast_cancer_omop_data',
+            org_slugs=org.slug,
+            refresh_only=True,
+        )
+
+        assert refreshed == [breast_person.person_id]
+
+    def test_refresh_only_can_refresh_all_org_patients(self, monkeypatch):
+        breast_person = PersonFactory()
+        other_person = PersonFactory()
+        org = PatientRecordFactory(person=breast_person, disease='Breast Cancer').organization
+        PatientRecordFactory(person=other_person, organization=org, disease='Multiple Myeloma')
+        refreshed = []
+
+        monkeypatch.setattr(
+            'omop_core.management.commands.enrich_breast_cancer_omop_data.refresh_patient_record',
+            lambda person: refreshed.append(person.person_id),
+        )
+
+        call_command(
+            'enrich_breast_cancer_omop_data',
+            org_slugs=org.slug,
+            refresh_only=True,
+            refresh_all_org_patients=True,
+        )
+
+        assert refreshed == [breast_person.person_id, other_person.person_id]
