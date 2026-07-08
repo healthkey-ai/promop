@@ -2000,7 +2000,9 @@ class SmartPatientRecordReadOnlyTest(_SmartBase):
         resp = self.write_client.get('/api/patient-info/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-    def test_patient_info_patch_writes_best_response(self):
+    def test_patient_info_patch_ignores_best_response(self):
+        """best_response is derived-only (no sync_to_omop write-through) — PATCH must not persist it,
+        or the value would silently vanish on the next refresh_patient_record (promop#205)."""
         PatientRecord.objects.get_or_create(person=self.person, defaults={'organization': self.organization})
         resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
@@ -2009,7 +2011,7 @@ class SmartPatientRecordReadOnlyTest(_SmartBase):
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         pi = PatientRecord.objects.get(person=self.person)
-        self.assertEqual(pi.best_response, 'Complete Response')
+        self.assertIsNone(pi.best_response)
 
 
 class SmartFhirUploadTest(_SmartBase):
