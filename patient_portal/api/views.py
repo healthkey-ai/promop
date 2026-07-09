@@ -14,7 +14,7 @@ from django.utils import timezone
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from omop_core.models import (
-    Person, PatientRecord, Concept, ProvenanceRecord,
+    Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence,
     PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
@@ -753,6 +753,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         'observations': [],
                         'medications': [],
                         'procedures': [],
+                        'medication_requests': [],
+                        'immunizations': [],
+                        'diagnostic_reports': [],
                     }
                     if patient_id:
                         patient_ref_aliases[patient_id] = patient_id
@@ -777,11 +780,26 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     patient_id = _resolve_patient_ref(patient_ref)
                     if patient_id in patients_data:
                         patients_data[patient_id]['medications'].append(resource)
+                elif resource_type == 'MedicationRequest':
+                    patient_ref = resource.get('subject', {}).get('reference', '')
+                    patient_id = _resolve_patient_ref(patient_ref)
+                    if patient_id in patients_data:
+                        patients_data[patient_id]['medication_requests'].append(resource)
                 elif resource_type == 'Procedure':
                     patient_ref = resource.get('subject', {}).get('reference', '')
                     patient_id = _resolve_patient_ref(patient_ref)
                     if patient_id in patients_data:
                         patients_data[patient_id]['procedures'].append(resource)
+                elif resource_type == 'Immunization':
+                    patient_ref = resource.get('patient', {}).get('reference', '')
+                    patient_id = _resolve_patient_ref(patient_ref)
+                    if patient_id in patients_data:
+                        patients_data[patient_id]['immunizations'].append(resource)
+                elif resource_type == 'DiagnosticReport':
+                    patient_ref = resource.get('subject', {}).get('reference', '')
+                    patient_id = _resolve_patient_ref(patient_ref)
+                    if patient_id in patients_data:
+                        patients_data[patient_id]['diagnostic_reports'].append(resource)
             
             # Hoist SCT vocabulary sets for FHIR upload validation (avoids N+1 per patient).
             _allowed_sct_titles = set(StemCellTransplant.objects.values_list('title', flat=True))
@@ -962,15 +980,20 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     _atomic_cm.__enter__()
                     _atomic_entered = True
 
-                    # Upsert Person: match on name + birth year to avoid duplicates on re-upload
+                    # Upsert Person: match on name + full birth date to avoid duplicates on re-upload
                     person = None
                     person_is_new = False
                     if (given_name or family_name) and year_of_birth:
-                        person = Person.objects.filter(
+                        person_match = Person.objects.filter(
                             given_name=given_name,
                             family_name=family_name,
                             year_of_birth=year_of_birth,
-                        ).first()
+                        )
+                        if month_of_birth:
+                            person_match = person_match.filter(month_of_birth=month_of_birth)
+                        if day_of_birth:
+                            person_match = person_match.filter(day_of_birth=day_of_birth)
+                        person = person_match.first()
                     if person is None:
                         from omop_core.services.pk import next_pk as _next_pk
                         person = Person.objects.create(
@@ -1020,6 +1043,37 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     _any_bc_condition = False   # True if any BC condition was seen in the bundle
                     _clinical_status_source = None  # FHIR Condition.clinicalStatus code for primary BC
 
+                    def _disease_from_condition_code(codeable):
+                        codeable = codeable or {}
+                        condition_text = ' '.join(
+                            filter(
+                                None,
+                                [
+                                    codeable.get('text', ''),
+                                    *[
+                                        coding.get('display', '')
+                                        for coding in codeable.get('coding', [])
+                                    ],
+                                ],
+                            )
+                        ).lower()
+                        if 'myeloma' in condition_text:
+                            return 'Multiple Myeloma'
+                        if 'breast' in condition_text:
+                            return 'Breast Cancer'
+                        if 'follicular lymphoma' in condition_text:
+                            return 'Follicular Lymphoma'
+                        if 'chronic lymphocytic leukemia' in condition_text or 'cll' in condition_text:
+                            return 'Chronic Lymphocytic Leukemia'
+                        return None
+
+                    def _disease_slug_from_name(name):
+                        if not name:
+                            return None
+                        if name.strip().lower() == 'multiple myeloma':
+                            return 'MM'
+                        return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')[:100]
+
                     for condition in data['conditions']:
                         # Get histologic type from code
                         code = condition.get('code', {})
@@ -1047,6 +1101,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             _cs = condition.get('clinicalStatus', {}).get('coding', [])
                             if _cs:
                                 _clinical_status_source = _cs[0].get('code')
+                        disease_from_code = _disease_from_condition_code(code)
+                        if disease_from_code:
+                            disease = disease_from_code
 
                         # Get stage and infer disease from stage text (e.g. "Breast Cancer Stage IIA")
                         stages = condition.get('stage', [])
@@ -1057,7 +1114,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 if 'Stage' in stage_text:
                                     stage = stage_text.split('Stage')[-1].strip()
                                     if not disease:
-                                        disease = stage_text.split('Stage')[0].strip() or None
+                                        stage_prefix = stage_text.split('Stage')[0].strip()
+                                        if stage_prefix.upper() not in {'ISS', 'R-ISS', 'RISS'}:
+                                            disease = stage_prefix or None
                             elif stage_summary.get('coding') and len(stage_summary['coding']) > 0:
                                 # Prefer display (e.g. "Stage 2B") over the raw code
                                 _sc = stage_summary['coding'][0]
@@ -2106,6 +2165,153 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     logger.info("TIMING patient=%s phase=measurements elapsed=%.1fs", _timing_hash, _time.monotonic() - _pt_start)
                     # PKs allocated on-demand via sequence — see next_pk() calls below.
 
+                    def _looks_like_regimen_name(name):
+                        name = (name or '').strip()
+                        if not name:
+                            return False
+                        if any(sep in name for sep in ('/', '+', '(', ')')):
+                            return True
+                        if '-' in name:
+                            return True
+                        return len(name) <= 8 and name.upper() == name and any(ch.isalpha() for ch in name)
+
+                    def _get_or_create_local_regimen_concept(name):
+                        name = (name or '').strip()
+                        if not name:
+                            return None
+                        code = 'FHIR-' + ''.join(ch.upper() if ch.isalnum() else '-' for ch in name)
+                        while '--' in code:
+                            code = code.replace('--', '-')
+                        code = code.strip('-')[:50]
+
+                        concept = Concept.objects.filter(
+                            vocabulary_id='HemOnc',
+                            concept_code=code,
+                        ).first()
+                        if concept:
+                            return concept
+
+                        domain, _ = Domain.objects.get_or_create(
+                            domain_id='Drug',
+                            defaults={'domain_name': 'Drug', 'domain_concept_id': 13},
+                        )
+                        vocabulary, _ = Vocabulary.objects.get_or_create(
+                            vocabulary_id='HemOnc',
+                            defaults={
+                                'vocabulary_name': 'HemOnc',
+                                'vocabulary_reference': 'FHIR import',
+                                'vocabulary_version': 'local',
+                                'vocabulary_concept_id': 0,
+                            },
+                        )
+                        concept_class, _ = ConceptClass.objects.get_or_create(
+                            concept_class_id='Regimen',
+                            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0},
+                        )
+                        return Concept.objects.create(
+                            concept_id=next_pk(Concept, 'concept_id'),
+                            concept_name=name[:255],
+                            domain=domain,
+                            vocabulary=vocabulary,
+                            concept_class=concept_class,
+                            standard_concept='S',
+                            concept_code=code,
+                            valid_start_date=datetime(1970, 1, 1).date(),
+                            valid_end_date=datetime(2099, 12, 31).date(),
+                        )
+
+                    def _coding_parts(codeable):
+                        codeable = codeable or {}
+                        coding = (codeable.get('coding') or [{}])[0]
+                        return (
+                            coding.get('system', ''),
+                            coding.get('code', ''),
+                            coding.get('display') or codeable.get('text') or '',
+                        )
+
+                    def _vocab_from_system(system):
+                        system = (system or '').lower()
+                        if 'rxnorm' in system:
+                            return 'RxNorm'
+                        if 'cvx' in system:
+                            return 'CVX'
+                        if 'loinc' in system:
+                            return 'LOINC'
+                        if 'snomed' in system:
+                            return 'SNOMED'
+                        return 'FHIR'
+
+                    def _get_or_create_local_concept(domain_id, vocabulary_id, concept_class_id, concept_code, concept_name):
+                        concept_code = (concept_code or concept_name or 'unknown')[:50]
+                        concept_name = (concept_name or f'{vocabulary_id} {concept_code}')[:255]
+
+                        concept = Concept.objects.filter(
+                            vocabulary_id=vocabulary_id,
+                            concept_code=concept_code,
+                        ).first()
+                        if concept:
+                            return concept
+
+                        domain, _ = Domain.objects.get_or_create(
+                            domain_id=domain_id,
+                            defaults={'domain_name': domain_id, 'domain_concept_id': 0},
+                        )
+                        vocabulary, _ = Vocabulary.objects.get_or_create(
+                            vocabulary_id=vocabulary_id,
+                            defaults={
+                                'vocabulary_name': vocabulary_id,
+                                'vocabulary_reference': 'FHIR import',
+                                'vocabulary_version': 'local',
+                                'vocabulary_concept_id': 0,
+                            },
+                        )
+                        concept_class, _ = ConceptClass.objects.get_or_create(
+                            concept_class_id=concept_class_id,
+                            defaults={'concept_class_name': concept_class_id, 'concept_class_concept_id': 0},
+                        )
+                        return Concept.objects.create(
+                            concept_id=next_pk(Concept, 'concept_id'),
+                            concept_name=concept_name,
+                            domain=domain,
+                            vocabulary=vocabulary,
+                            concept_class=concept_class,
+                            standard_concept='S',
+                            concept_code=concept_code,
+                            valid_start_date=datetime(1970, 1, 1).date(),
+                            valid_end_date=datetime(2099, 12, 31).date(),
+                        )
+
+                    def _drug_concept_from_codeable(codeable):
+                        system, code, display = _coding_parts(codeable)
+                        vocabulary_id = _vocab_from_system(system)
+                        concept = Concept.objects.filter(
+                            vocabulary_id=vocabulary_id,
+                            concept_code=code,
+                        ).first() if code else None
+                        if concept:
+                            return concept
+                        if vocabulary_id == 'RxNorm' and display:
+                            concept = Concept.objects.filter(
+                                concept_name__icontains=display,
+                                domain__domain_id='Drug',
+                            ).first()
+                            if concept:
+                                return concept
+                            try:
+                                return _rxnav_resolve_drug(display)
+                            except Exception as rxnav_exc:
+                                logger.warning(
+                                    '{"event": "rxnav_resolve_failed", "drug": "%s", "error": "%s"}',
+                                    display, rxnav_exc,
+                                )
+                        return _get_or_create_local_concept(
+                            'Drug',
+                            vocabulary_id,
+                            'Clinical Drug' if vocabulary_id == 'RxNorm' else 'Vaccine',
+                            code or display,
+                            display,
+                        )
+
                     for lot_num, lot_data in sorted(therapy_lines.items()):
                         try:
                             with transaction.atomic():
@@ -2123,11 +2329,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 if _hemonc_cid:
                                     regimen_concept = _cc_by_id(_hemonc_cid)
                                 else:
-                                    regimen_concept = Concept.objects.filter(
-                                        concept_name__icontains=regimen_name,
-                                        domain__domain_id='Drug',
-                                    ).first() if regimen_name else None
-                                    # RxNav fallback only when no HemOnc concept_id and ILIKE found nothing
+                                    if _looks_like_regimen_name(regimen_name):
+                                        regimen_concept = _get_or_create_local_regimen_concept(regimen_name)
+                                    else:
+                                        regimen_concept = Concept.objects.filter(
+                                            concept_name__icontains=regimen_name,
+                                            domain__domain_id='Drug',
+                                        ).first() if regimen_name else None
+                                    # RxNav fallback only when no HemOnc concept_id, no local
+                                    # match, and the source looks like a plain drug name.
                                     if regimen_concept is None and regimen_name:
                                         try:
                                             regimen_concept = _rxnav_resolve_drug(regimen_name)
@@ -2205,7 +2415,161 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             logger.warning('{"event": "drug_exposure_write_failed", "lot_num": %d, "error_type": "%s", "patient": "%s"}',
                                            lot_num, type(_e).__name__, _timing_hash)
 
+                    # --- Write supplemental MedicationRequest and Immunization rows ---
+                    _existing_drug_keys = {
+                        (d.drug_source_value, d.drug_exposure_start_date)
+                        for d in DrugExposure.objects.filter(person=person)
+                    }
+
+                    def _write_drug_exposure(codeable, start_str, end_str=None, sig=None):
+                        if not start_str:
+                            return
+                        try:
+                            start_date = datetime.fromisoformat(start_str[:10]).date()
+                        except (ValueError, TypeError):
+                            return
+                        end_date = None
+                        if end_str:
+                            try:
+                                end_date = datetime.fromisoformat(end_str[:10]).date()
+                            except (ValueError, TypeError):
+                                end_date = None
+                        _, code, display = _coding_parts(codeable)
+                        source_value = (code or display or 'FHIR medication')[:50]
+                        key = (source_value, start_date)
+                        if key in _existing_drug_keys:
+                            return
+                        drug_concept = _drug_concept_from_codeable(codeable)
+                        drug_type_concept = _concept_drug_type or drug_concept
+                        _de = DrugExposure(
+                            drug_exposure_id=next_pk(DrugExposure, 'drug_exposure_id'),
+                            person=person,
+                            drug_concept=drug_concept,
+                            drug_exposure_start_date=start_date,
+                            drug_exposure_end_date=end_date,
+                            drug_type_concept=drug_type_concept,
+                            drug_source_value=source_value,
+                            drug_source_concept=drug_concept,
+                            sig=(sig or '')[:255],
+                        )
+                        _de._skip_patient_record_refresh = True
+                        _de.save()
+                        _pt_drug_exposure_ids.append(_de.drug_exposure_id)
+                        _existing_drug_keys.add(key)
+                        if prov_source:
+                            _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+
+                    for _med_request in data.get('medication_requests', []):
+                        _write_drug_exposure(
+                            _med_request.get('medicationCodeableConcept'),
+                            _med_request.get('authoredOn') or (_med_request.get('effectivePeriod') or {}).get('start'),
+                            (_med_request.get('effectivePeriod') or {}).get('end'),
+                            ((_med_request.get('dosageInstruction') or [{}])[0].get('text') or ''),
+                        )
+
+                    for _immunization in data.get('immunizations', []):
+                        _write_drug_exposure(
+                            _immunization.get('vaccineCode'),
+                            _immunization.get('occurrenceDateTime') or _immunization.get('recorded'),
+                        )
+
+                    logger.info(
+                        "TIMING patient=%s phase=supplemental_drugs elapsed=%.1fs count=%d",
+                        _timing_hash, _time.monotonic() - _pt_start, len(_pt_drug_exposure_ids),
+                    )
+
+                    # --- Write DiagnosticReport rows into OMOP Observation ---
+                    _existing_report_keys = {
+                        (o.observation_source_value, o.observation_date, o.value_as_string)
+                        for o in Observation.objects.filter(person=person)
+                    }
+                    for _report in data.get('diagnostic_reports', []):
+                        _report_date_str = _report.get('effectiveDateTime') or _report.get('issued')
+                        if not _report_date_str:
+                            continue
+                        try:
+                            _report_dt = datetime.fromisoformat(_report_date_str[:10])
+                        except (ValueError, TypeError):
+                            continue
+                        _report_date = _report_dt.date()
+                        _system, _code, _display = _coding_parts(_report.get('code'))
+                        _vocab = _vocab_from_system(_system)
+                        _report_concept = _cc_by_loinc(_code) if _vocab == 'LOINC' and _code else None
+                        if _report_concept is None:
+                            _report_concept = _get_or_create_local_concept(
+                                'Observation',
+                                _vocab,
+                                'Clinical Observation',
+                                _code or _display,
+                                _display or 'FHIR DiagnosticReport',
+                            )
+                        _value = (_report.get('conclusion') or _display or 'Diagnostic report')[:60]
+                        _source = (_code or _display or 'DiagnosticReport')[:50]
+                        _report_key = (_source, _report_date, _value)
+                        if _report_key in _existing_report_keys:
+                            continue
+                        _obs = Observation(
+                            observation_id=next_pk(Observation, 'observation_id'),
+                            person=person,
+                            observation_concept=_report_concept,
+                            observation_date=_report_date,
+                            observation_datetime=timezone.make_aware(_report_dt) if _report_dt.tzinfo is None else _report_dt,
+                            observation_type_concept=_concept_ehr_type or _report_concept,
+                            value_as_string=_value,
+                            observation_source_value=_source,
+                            observation_source_concept=_report_concept,
+                        )
+                        _obs._skip_patient_record_refresh = True
+                        _obs.save()
+                        _existing_report_keys.add(_report_key)
+                        if prov_source:
+                            _record_provenance(_obs, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+
+                    logger.info(
+                        "TIMING patient=%s phase=diagnostic_reports elapsed=%.1fs count=%d",
+                        _timing_hash, _time.monotonic() - _pt_start, len(data.get('diagnostic_reports', [])),
+                    )
+
                     # --- Write ProcedureOccurrence records ---
+                    def _get_or_create_fhir_procedure_concept(vocabulary_id, concept_code, concept_name):
+                        if not concept_code:
+                            return None
+                        concept = Concept.objects.filter(
+                            vocabulary_id=vocabulary_id,
+                            concept_code=concept_code,
+                        ).first()
+                        if concept:
+                            return concept
+
+                        domain, _ = Domain.objects.get_or_create(
+                            domain_id='Procedure',
+                            defaults={'domain_name': 'Procedure', 'domain_concept_id': 10},
+                        )
+                        vocabulary, _ = Vocabulary.objects.get_or_create(
+                            vocabulary_id=vocabulary_id,
+                            defaults={
+                                'vocabulary_name': vocabulary_id,
+                                'vocabulary_reference': 'FHIR import',
+                                'vocabulary_version': 'local',
+                                'vocabulary_concept_id': 0,
+                            },
+                        )
+                        concept_class, _ = ConceptClass.objects.get_or_create(
+                            concept_class_id='Procedure',
+                            defaults={'concept_class_name': 'Procedure', 'concept_class_concept_id': 0},
+                        )
+                        return Concept.objects.create(
+                            concept_id=next_pk(Concept, 'concept_id'),
+                            concept_name=(concept_name or f'{vocabulary_id} {concept_code}')[:255],
+                            domain=domain,
+                            vocabulary=vocabulary,
+                            concept_class=concept_class,
+                            standard_concept='S',
+                            concept_code=concept_code[:50],
+                            valid_start_date=datetime(1970, 1, 1).date(),
+                            valid_end_date=datetime(2099, 12, 31).date(),
+                        )
+
                     _existing_proc_keys = {
                         (p.procedure_source_value, p.procedure_date)
                         for p in ProcedureOccurrence.objects.filter(person=person)
@@ -2241,6 +2605,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _proc_concept = None
                         if _proc_code_value and 'snomed' in _proc_system.lower():
                             _proc_concept = _cc_by_vocab('SNOMED', _proc_code_value)
+                            if _proc_concept is None:
+                                _proc_concept = _get_or_create_fhir_procedure_concept(
+                                    'SNOMED',
+                                    _proc_code_value,
+                                    _proc_display,
+                                )
                         if _proc_concept is None and _proc_display:
                             _proc_concept = Concept.objects.filter(
                                 concept_name__icontains=_proc_display,
@@ -2300,6 +2670,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _patch['date_of_birth'] = birth_date
                     if disease:
                         _patch['disease'] = disease
+                        disease_slug = _disease_slug_from_name(disease)
+                        if disease_slug:
+                            _patch['disease_slug'] = disease_slug
                     if stage:
                         _patch['stage'] = stage
                     if histologic_type:
@@ -2776,7 +3149,9 @@ def org_disease_stats(request):
     # Build {org_id: set of granting_org_ids} covering both org-to-org and domain trusts
     trusting_map = build_trusting_map(org_list)
 
-    # Batch-compute patient counts for all granting orgs in one query (avoids N+1)
+    # Batch-compute patient counts for all granting orgs in one query (avoids N+1).
+    # Disease breakdowns use this same accessible scope so direct access to an
+    # umbrella org, such as HealthTree Trust, shows diseases from trusted orgs.
     all_granting_ids = {gid for gids in trusting_map.values() for gid in gids}
     granting_counts: dict[int, int] = {}
     if all_granting_ids:
@@ -2789,14 +3164,16 @@ def org_disease_stats(request):
 
     result = []
     for org in org_list:
-        counts = _disease_counts(PatientRecord.objects.filter(organization=org))
-        owned_count = sum(d['count'] for d in counts)
+        owned_counts = _disease_counts(PatientRecord.objects.filter(organization=org))
+        owned_count = sum(d['count'] for d in owned_counts)
         accessible_count = owned_count + sum(granting_counts.get(gid, 0) for gid in trusting_map[org.id])
+        accessible_org_ids = {org.id} | trusting_map[org.id]
+        counts = _disease_counts(PatientRecord.objects.filter(organization_id__in=accessible_org_ids))
 
         result.append({
             'org_slug': org.slug,
             'org_name': org.name,
-            'total': owned_count,
+            'total': accessible_count,
             'owned_count': owned_count,
             'accessible_count': accessible_count,
             'disease_counts': counts,
