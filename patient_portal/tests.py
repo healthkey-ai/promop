@@ -6277,6 +6277,10 @@ class OrgDiseaseStatsTest(TestCase):
         org_a = next(o for o in resp.data if o['org_slug'] == 'org-a')
         self.assertEqual(org_a['owned_count'], 3)
         self.assertEqual(org_a['accessible_count'], 4)  # 3 owned + 1 from org_b
+        counts = {d['disease_slug']: d['count'] for d in org_a['disease_counts']}
+        self.assertEqual(counts['mm'], 2)
+        self.assertEqual(counts['breast-cancer'], 1)
+        self.assertEqual(counts['cll'], 1)
 
     def test_domain_trust_inflates_accessible_count(self):
         from omop_core.models import OrgTrust
@@ -6286,6 +6290,10 @@ class OrgDiseaseStatsTest(TestCase):
         org_a = next(o for o in resp.data if o['org_slug'] == 'org-a')
         self.assertEqual(org_a['owned_count'], 3)
         self.assertEqual(org_a['accessible_count'], 4)  # 3 owned + 1 from org_b via domain trust
+        counts = {d['disease_slug']: d['count'] for d in org_a['disease_counts']}
+        self.assertEqual(counts['mm'], 2)
+        self.assertEqual(counts['breast-cancer'], 1)
+        self.assertEqual(counts['cll'], 1)
 
     def test_self_trust_does_not_double_count(self):
         from omop_core.models import OrgTrust

@@ -80,6 +80,12 @@ export default function StatsPage() {
                 <td className="px-6 py-2 font-medium text-gray-700">Owned</td>
                 <td className="px-6 py-2 text-right font-medium text-gray-700">{org.owned_count}</td>
               </tr>
+              {org.accessible_count !== org.owned_count && (
+                <tr className="bg-gray-50">
+                  <td className="px-6 py-2 text-sm text-gray-500">Accessible (incl. trusted orgs)</td>
+                  <td className="px-6 py-2 text-right text-sm text-gray-500">{org.accessible_count}</td>
+                </tr>
+              )}
             </tfoot>
           </table>
         </div>

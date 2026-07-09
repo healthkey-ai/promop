@@ -2,8 +2,8 @@
 Management command: benchmark_patient_record
 
 Benchmarks reading the materialized PatientRecord table against deriving
-the same breast-cancer-relevant fields live from raw OMOP tables, for the
-breast-cancer cohort (ABC Foundation + BBC Foundation orgs by default).
+the same PatientRecord fields live from raw OMOP tables, for a scoped
+PatientRecord cohort.
 
 Why this comparison, and why it's read-only: EXACT's trial-matching cost is
 identical no matter where the patient-data dict came from — the only
@@ -13,13 +13,10 @@ queries (they return dicts; the only .save() call lives in
 refresh_patient_record itself, which this command does not call), so no
 dry-run/rollback wrapper is needed.
 
-Section functions used mirror refresh_patient_record's list minus the two
-disease-specific-to-other-cancers sections (_get_cll_data, _get_lymphoma_data).
-Behavior and wearable-aggregation sections are included — they're real
-breast-cancer eligibility signals (smoking-status exclusions, performance-
-status proxies), not decorative. See docs/porting reference in EXACT's
-trials/services/patient_info/configs.py for which fields breast-cancer
-matching actually reads.
+Section functions mirror refresh_patient_record's extractor list. That keeps
+the benchmark disease-aware in practice: PatientRecord reads the materialized
+row, and the OMOP-direct path performs the same read-only section derivation
+refresh_patient_record would perform before saving that row.
 
 Cohort selection deliberately goes through PatientRecord.organization (org
 attribution doesn't exist anywhere else — Person/OMOP tables carry no org
@@ -41,35 +38,34 @@ from omop_core.models import Person, PatientRecord
 from omop_core.services.patient_record_service import (
     _get_demographics, _get_location_data, _get_disease_data,
     _get_treatment_data, _get_vitals_data, _get_biomarker_data,
-    _get_staging_data, _get_bc_clinical_data,
-    _get_social_data, _get_behavior_data, _get_infection_data,
+    _get_staging_data, _get_social_data, _get_behavior_data, _get_infection_data,
     _get_assessment_data, _get_laboratory_data, _get_performance_data,
-    _get_genetic_mutations, _get_prior_procedures, _get_wearable_data,
+    _get_genetic_mutations, _get_cll_data, _get_lymphoma_data,
+    _get_bc_clinical_data, _get_prior_procedures, _get_wearable_data,
     _compute_derived_fields,
 )
 
-# 17 of refresh_patient_record's 19 section extractors — everything except
-# _get_cll_data/_get_lymphoma_data, which are specific to other cancers and
-# don't feed any breast-cancer trial-matching attribute.
-_BC_SECTIONS = [
+# Keep this list in sync with refresh_patient_record(), but never call
+# refresh_patient_record() itself because that saves PatientRecord.
+_REFRESH_SECTIONS = [
     _get_demographics, _get_location_data, _get_disease_data,
     _get_treatment_data, _get_vitals_data, _get_biomarker_data,
-    _get_staging_data, _get_bc_clinical_data,
+    _get_staging_data,
     _get_social_data, _get_behavior_data, _get_infection_data,
     _get_assessment_data, _get_laboratory_data, _get_performance_data,
-    _get_genetic_mutations, _get_prior_procedures, _get_wearable_data,
+    _get_genetic_mutations, _get_cll_data, _get_lymphoma_data,
+    _get_bc_clinical_data, _get_prior_procedures, _get_wearable_data,
 ]
 
 
-def _derive_bc_fields(person) -> dict:
-    """Live OMOP derivation of breast-cancer-relevant PatientRecord fields.
+def _derive_patient_record_fields(person) -> dict:
+    """Live OMOP derivation of PatientRecord fields.
 
     Read-only — never calls PatientRecord.save(). Mirrors the section-calling
-    loop in refresh_patient_record(), trimmed to the sections that feed
-    breast-cancer trial-matching attributes (see module docstring).
+    loop in refresh_patient_record().
     """
     data = {}
-    for section_fn in _BC_SECTIONS:
+    for section_fn in _REFRESH_SECTIONS:
         data.update(section_fn(person))
 
     # _compute_derived_fields mutates a PatientRecord instance in place; use
@@ -85,15 +81,17 @@ def _derive_bc_fields(person) -> dict:
     return data
 
 
-def _cohort_person_ids(org_slugs, person_ids_arg, limit):
+def _cohort_person_ids(org_slugs, person_ids_arg, disease_filter, limit):
     if person_ids_arg:
         return [int(x) for x in person_ids_arg.split(',') if x.strip()]
     qs = (
         PatientRecord.objects
-        .filter(organization__slug__in=org_slugs, disease__icontains='breast')
+        .filter(organization__slug__in=org_slugs)
         .order_by('person_id')
-        .values_list('person_id', flat=True)
     )
+    if disease_filter:
+        qs = qs.filter(disease__icontains=disease_filter)
+    qs = qs.values_list('person_id', flat=True)
     return list(qs[:limit]) if limit else list(qs)
 
 
@@ -115,7 +113,7 @@ def _stats(samples_sec):
 class Command(BaseCommand):
     help = (
         'Benchmark reading PatientRecord (materialized) vs. deriving the '
-        'same breast-cancer-relevant fields live from OMOP tables.'
+        'same PatientRecord fields live from OMOP tables.'
     )
 
     def add_arguments(self, parser):
@@ -127,6 +125,13 @@ class Command(BaseCommand):
             '--person-ids', default='',
             help='Comma-separated person_ids — overrides --org-slugs cohort selection.',
         )
+        parser.add_argument(
+            '--disease-filter', default='breast',
+            help=(
+                'Optional case-insensitive PatientRecord.disease substring filter. '
+                'Use "" to include all diseases in the scoped org/person cohort.'
+            ),
+        )
         parser.add_argument('--limit', type=int, default=None)
         parser.add_argument(
             '--repeat', type=int, default=1,
@@ -136,14 +141,19 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         org_slugs = [s.strip() for s in options['org_slugs'].split(',') if s.strip()]
-        person_ids = _cohort_person_ids(org_slugs, options['person_ids'], options['limit'])
+        person_ids = _cohort_person_ids(
+            org_slugs,
+            options['person_ids'],
+            options['disease_filter'].strip(),
+            options['limit'],
+        )
 
         if not person_ids:
             raise CommandError('No matching patients found for the given cohort.')
 
         repeat = options['repeat']
         self.stdout.write(
-            f'Benchmarking {len(person_ids)} breast-cancer patient(s), '
+            f'Benchmarking {len(person_ids)} patient(s), '
             f'{repeat} repeat pass(es) per path...'
         )
 
@@ -157,7 +167,7 @@ class Command(BaseCommand):
                 pass
             try:
                 person = Person.objects.get(person_id=pid)
-                _derive_bc_fields(person)
+                _derive_patient_record_fields(person)
             except Person.DoesNotExist:
                 pass
 
@@ -181,7 +191,7 @@ class Command(BaseCommand):
                 except Person.DoesNotExist:
                     continue
                 t0 = time.perf_counter()
-                fields = _derive_bc_fields(person)
+                fields = _derive_patient_record_fields(person)
                 omop_times.append(time.perf_counter() - t0)
                 populated = sum(1 for v in fields.values() if v not in (None, '', [], {}))
                 field_coverage.append(populated)
@@ -208,7 +218,7 @@ class Command(BaseCommand):
         if field_coverage:
             self.stdout.write(
                 f'Avg populated fields per OMOP derivation: '
-                f'{statistics.mean(field_coverage):.1f} (out of {len(_BC_SECTIONS)} sections called)'
+                f'{statistics.mean(field_coverage):.1f} (out of {len(_REFRESH_SECTIONS)} sections called)'
             )
 
         if options['output']:
@@ -218,5 +228,6 @@ class Command(BaseCommand):
                     'omop_direct': omop_stats,
                     'person_ids': person_ids,
                     'repeat': repeat,
+                    'disease_filter': options['disease_filter'],
                 }, f, indent=2)
             self.stdout.write(self.style.SUCCESS(f'\nResults written to {options["output"]}'))

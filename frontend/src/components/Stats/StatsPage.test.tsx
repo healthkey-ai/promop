@@ -15,6 +15,8 @@ const mockData = [
     org_slug: 'abc-foundation',
     org_name: 'ABC Foundation',
     total: 5,
+    owned_count: 5,
+    accessible_count: 5,
     disease_counts: [
       { disease_slug: 'mm', label: 'Multiple Myeloma', count: 3 },
       { disease_slug: 'breast-cancer', label: 'Breast Cancer', count: 2 },
