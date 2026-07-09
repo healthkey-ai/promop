@@ -171,6 +171,16 @@ class PatientRecordModelTest(_OmopBase):
         self.assertEqual(pi.alkaline_phosphatase_u_l, 95)
         self.assertEqual(pi.ldh_u_l, 180)
 
+    def test_best_response_persists(self):
+        """best_response is a real model field and survives a DB round-trip (promop#205)."""
+        pi = PatientRecord.objects.create(person=self.person, best_response='Partial Response')
+        pi.refresh_from_db()
+        self.assertEqual(pi.best_response, 'Partial Response')
+
+    def test_best_response_nullable(self):
+        pi = PatientRecord.objects.create(person=self.person)
+        self.assertIsNone(pi.best_response)
+
 
 # ===========================================================================
 # TEST-02: refresh_patient_record service unit tests
@@ -354,6 +364,40 @@ class RefreshPatientRecordLabsFromMeasurementTest(_OmopBase):
         pi = refresh_patient_record(self.person)
         # hemoglobin_g_dl is in _OMOP_DERIVED_FIELDS so it should be cleared
         self.assertIsNone(pi.hemoglobin_g_dl)
+
+
+class RefreshPatientRecordAssessmentTest(_OmopBase):
+    """best_response is derived from a SNOMED response-status Observation and
+    must actually persist to the DB (regression test for promop#205 —
+    setattr()'d onto a non-existent model field was silently dropped on save())."""
+
+    PERSON_ID = 90250
+
+    def _make_response_observation(self, oid, concept_code):
+        concept = _concept(3100000 + int(concept_code), 'Response status', self.dom_obs, self.vocab, self.cc, code=concept_code)
+        return Observation.objects.create(
+            observation_id=oid,
+            person=self.person,
+            observation_concept=concept,
+            observation_date=date(2023, 6, 1),
+            observation_type_concept=self.type_concept,
+        )
+
+    def test_complete_response_observation_sets_best_response(self):
+        self._make_response_observation(92501, '182840001')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.best_response, 'Complete Response')
+
+    def test_best_response_persists_after_reload(self):
+        """The bug: setattr() onto a field the model doesn't define is lost on save()."""
+        self._make_response_observation(92502, '182841002')
+        refresh_patient_record(self.person)
+        pi = PatientRecord.objects.get(person=self.person)
+        self.assertEqual(pi.best_response, 'Partial Response')
+
+    def test_no_response_observation_leaves_best_response_none(self):
+        pi = refresh_patient_record(self.person)
+        self.assertIsNone(pi.best_response)
 
 
 class RefreshPatientRecordComputedFieldsTest(_OmopBase):

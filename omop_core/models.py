@@ -1607,6 +1607,9 @@ class PatientRecord(models.Model):
     histologic_type = models.TextField(blank=True, null=True)
     biopsy_grade_depr = models.TextField(blank=True, null=True)
     biopsy_grade = models.IntegerField(blank=True, null=True)
+
+    # Assessment
+    best_response = models.CharField(max_length=50, blank=True, null=True, help_text="Best overall response (e.g. Complete Response, Partial Response, Stable Disease, Progressive Disease)")
     measurable_disease_by_recist_status = models.BooleanField(blank=True, null=True)
     estrogen_receptor_status = models.TextField(blank=True, null=True)
     progesterone_receptor_status = models.TextField(blank=True, null=True)
