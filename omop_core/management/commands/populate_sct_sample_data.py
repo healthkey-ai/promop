@@ -1,7 +1,7 @@
 """
 Management command: populate_sct_sample_data
 
-Seeds random SCT-related values onto all Multiple Myeloma PatientInfo records
+Seeds random SCT-related values onto all Multiple Myeloma PatientRecord records
 that currently have no SCT data.
 
 Usage:
@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from django.core.management.base import BaseCommand
 from django.db.models import Q
 
-from omop_core.models import PatientInfo, SctEligibility, StemCellTransplant
+from omop_core.models import PatientRecord, SctEligibility, StemCellTransplant
 
 SCT_TYPES_FALLBACK = ['autologous SCT', 'allogeneic SCT', 'tandem SCT']
 
@@ -31,7 +31,7 @@ def _random_sct_date():
 
 
 class Command(BaseCommand):
-    help = 'Seed random SCT data onto Multiple Myeloma PatientInfo records'
+    help = 'Seed random SCT data onto Multiple Myeloma PatientRecord records'
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -43,14 +43,14 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         overwrite = options['overwrite']
 
-        qs = PatientInfo.objects.filter(disease='Multiple Myeloma')
+        qs = PatientRecord.objects.filter(disease='Multiple Myeloma')
         if not overwrite:
             # JSONField with default=list stores [] not NULL for new rows; match both.
             qs = qs.filter(Q(stem_cell_transplant_history=[]) | Q(stem_cell_transplant_history__isnull=True))
 
         total = qs.count()
         if total == 0:
-            self.stdout.write('No eligible MM PatientInfo records found.')
+            self.stdout.write('No eligible MM PatientRecord records found.')
             return
 
         # Hoist vocab lookups outside the loop — they're immutable during this command run.
@@ -87,18 +87,18 @@ class Command(BaseCommand):
             updated += 1
 
             if len(rows_to_update) >= _BATCH:
-                PatientInfo.objects.bulk_update(
+                PatientRecord.objects.bulk_update(
                     rows_to_update,
                     ['stem_cell_transplant_history', 'sct_date', 'sct_eligibility'],
                 )
                 rows_to_update.clear()
 
         if rows_to_update:
-            PatientInfo.objects.bulk_update(
+            PatientRecord.objects.bulk_update(
                 rows_to_update,
                 ['stem_cell_transplant_history', 'sct_date', 'sct_eligibility'],
             )
 
         self.stdout.write(
-            self.style.SUCCESS(f'Updated {updated}/{total} Multiple Myeloma PatientInfo records.')
+            self.style.SUCCESS(f'Updated {updated}/{total} Multiple Myeloma PatientRecord records.')
         )

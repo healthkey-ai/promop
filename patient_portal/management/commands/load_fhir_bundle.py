@@ -21,7 +21,7 @@ from rest_framework.request import Request
 from rest_framework.test import APIRequestFactory
 
 from omop_core.models import Organization
-from patient_portal.api.views import PatientInfoViewSet
+from patient_portal.api.views import PatientRecordViewSet
 from patient_portal.models import Identity
 
 
@@ -106,7 +106,7 @@ class Command(BaseCommand):
                     "application/json", len(content), None,
                 )
 
-                # skip_refresh=true defers refresh_patient_info to the post-upload
+                # skip_refresh=true defers refresh_patient_record to the post-upload
                 # phase below, which runs it once for all patients after all OMOP
                 # writes are committed — much faster than per-patient inline refresh.
                 raw_request = factory.post(
@@ -120,7 +120,7 @@ class Command(BaseCommand):
                 # state bleeding over from a prior failed patient.
                 connection.close()
 
-                viewset = PatientInfoViewSet()
+                viewset = PatientRecordViewSet()
                 # Patch FILES and data on the Request class so DRF skips multipart parsing
                 with patch.object(type(drf_req), "FILES", new_callable=PropertyMock,
                                   return_value={"file": fake_file}), \
@@ -172,7 +172,7 @@ class Command(BaseCommand):
             pass
 
         # ── Deferred refresh pass ──────────────────────────────────────────────
-        # Now that all OMOP writes are committed, rebuild PatientInfo from OMOP
+        # Now that all OMOP writes are committed, rebuild PatientRecord from OMOP
         # data for every patient in one go.  This is far faster than the
         # per-patient inline refresh because:
         #   • The concept cache is warm (all LOINC/HemOnc concepts already loaded)
@@ -180,10 +180,10 @@ class Command(BaseCommand):
         #   • LOT inference skips immediately for patients whose Episodes already exist
         if all_person_ids:
             from omop_core.models import Person
-            from omop_core.services.patient_info_service import refresh_patient_info
+            from omop_core.services.patient_record_service import refresh_patient_record
             from omop_core.services.lot_inference_service import infer_lot_for_person
 
-            self.stdout.write(f"\nRefreshing PatientInfo for {len(all_person_ids)} patients...")
+            self.stdout.write(f"\nRefreshing PatientRecord for {len(all_person_ids)} patients...")
             refresh_start = time.monotonic()
             refresh_errors = 0
 
@@ -191,7 +191,7 @@ class Command(BaseCommand):
                 try:
                     connection.close()  # fresh connection per patient
                     person = Person.objects.get(person_id=person_id)
-                    refresh_patient_info(person)
+                    refresh_patient_record(person)
                     infer_lot_for_person(person)
                     if verbosity >= 2:
                         self.stdout.write(f"  refreshed {idx}/{len(all_person_ids)} person_id={person_id}")
@@ -207,16 +207,16 @@ class Command(BaseCommand):
             )
 
         # ── Org stamp ─────────────────────────────────────────────────────────
-        # Explicitly set organization on every PatientInfo we touched.
+        # Explicitly set organization on every PatientRecord we touched.
         # This is the authoritative stamp — it does not rely on get_request_org
         # being callable from inside upload_fhir (which returns None for
         # superusers, the identity used by this command).
         if all_person_ids:
-            from omop_core.models import PatientInfo
-            stamped = PatientInfo.objects.filter(
+            from omop_core.models import PatientRecord
+            stamped = PatientRecord.objects.filter(
                 person_id__in=all_person_ids,
             ).update(organization=org)
-            self.stdout.write(f"Stamped org='{org.name}' on {stamped} PatientInfo records")
+            self.stdout.write(f"Stamped org='{org.name}' on {stamped} PatientRecord records")
 
         self.stdout.write(
             self.style.SUCCESS(

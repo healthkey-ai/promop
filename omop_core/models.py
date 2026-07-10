@@ -120,7 +120,7 @@ class OrgInvitation(models.Model):
     ROLE = [
         ('org_admin', 'Org Admin'),
         ('doctor', 'Doctor'),
-        ('navigator', 'Navigator'),
+        ('analyst', 'Analyst'),
     ]
     org = models.ForeignKey(
         Organization, on_delete=models.CASCADE, related_name='invitations',
@@ -245,7 +245,7 @@ class GroupAccess(models.Model):
     ROLE_CHOICES = [
         ('org_admin', 'Org Admin'),
         ('doctor',    'Doctor'),
-        ('navigator', 'Navigator'),
+        ('analyst',   'Analyst'),
     ]
     identity = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
@@ -884,9 +884,9 @@ class LoincCodeClass(models.Model):
         return f"{self.loinc_num} → {self.loinc_class_id}"
 
 
-# Choice classes for PatientInfo model
+# Choice classes for PatientRecord model
 class GenderChoices(models.TextChoices):
-    """Gender choices for PatientInfo"""
+    """Gender choices for PatientRecord"""
     MALE = 'M', 'Male'
     FEMALE = 'F', 'Female'
     UNKNOWN = 'U', 'Unknown'
@@ -1207,13 +1207,13 @@ class BreastCancerLaterLineTherapy(VocabularyLookup):
 # ---------------------------------------------------------------------------
 
 
-class PatientInfo(models.Model):
+class PatientRecord(models.Model):
     """
     Comprehensive patient information model — OMOP CDM–aligned PatientRecord projection.
     Derived automatically from OMOP clinical tables via the post_save signal chain.
     """
     # Link to OMOP Person
-    person = models.OneToOneField(Person, on_delete=models.CASCADE, related_name='patient_info')
+    person = models.OneToOneField(Person, on_delete=models.CASCADE, related_name='patient_record')
     
     # General Information
     email = models.EmailField(max_length=255, null=True, blank=True, db_index=True)
@@ -1607,6 +1607,9 @@ class PatientInfo(models.Model):
     histologic_type = models.TextField(blank=True, null=True)
     biopsy_grade_depr = models.TextField(blank=True, null=True)
     biopsy_grade = models.IntegerField(blank=True, null=True)
+
+    # Assessment
+    best_response = models.CharField(max_length=50, blank=True, null=True, help_text="Best overall response (e.g. Complete Response, Partial Response, Stable Disease, Progressive Disease)")
     measurable_disease_by_recist_status = models.BooleanField(blank=True, null=True)
     estrogen_receptor_status = models.TextField(blank=True, null=True)
     progesterone_receptor_status = models.TextField(blank=True, null=True)
@@ -1701,18 +1704,18 @@ class PatientInfo(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = "patient_info"
+        db_table = "patient_record"
         indexes = [
             models.Index(fields=["person"]),
             models.Index(fields=["patient_age"]),
             models.Index(fields=["disease"]),
             models.Index(fields=["stage"]),
-            models.Index(fields=["-updated_at"], name="ix_pi_updated_at"),
-            models.Index(fields=["organization", "-updated_at"], name="ix_pi_org_updated_at"),
+            models.Index(fields=["-updated_at"], name="ix_pr_updated_at"),
+            models.Index(fields=["organization", "-updated_at"], name="ix_pr_org_updated_at"),
         ]
 
     def __str__(self):
-        return f"PatientInfo for Person {self.person.person_id} (age={self.patient_age}, gender={self.gender})"
+        return f"PatientRecord for Person {self.person.person_id} (age={self.patient_age}, gender={self.gender})"
 
     def get_languages(self):
         """Return a dictionary of languages and their skill levels"""
@@ -1852,7 +1855,7 @@ class PatientInfo(models.Model):
         
         if self.pk:
             try:
-                old_instance = PatientInfo.objects.get(pk=self.pk)
+                old_instance = PatientRecord.objects.get(pk=self.pk)
                 
                 # Compute what the prior logical default would have been
                 old_relapse = 0
@@ -1875,7 +1878,7 @@ class PatientInfo(models.Model):
                 elif self.relapse_count is None:
                      # fallback
                      self.relapse_count = computed_relapse_count
-            except PatientInfo.DoesNotExist:
+            except PatientRecord.DoesNotExist:
                 if self.relapse_count is None:
                     self.relapse_count = computed_relapse_count
         else:

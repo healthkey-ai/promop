@@ -1,5 +1,33 @@
 from django.contrib import admin
-from .models import PatientMessage, PatientConsent
+from django.contrib.auth.admin import UserAdmin
+from .models import Identity, PatientMessage, PatientConsent
+
+
+@admin.register(Identity)
+class IdentityAdmin(UserAdmin):
+    list_display = ['email', 'name', 'is_premium', 'is_staff', 'is_active', 'created_at']
+    list_filter = ['is_premium', 'is_staff', 'is_active']
+    search_fields = ['email', 'name', 'sub']
+    ordering = ['email']
+    readonly_fields = ['uid', 'issuer', 'sub', 'created_at']
+    actions = ['grant_premium', 'revoke_premium']
+
+    fieldsets = (
+        (None,          {'fields': ('uid', 'issuer', 'sub', 'email', 'name')}),
+        ('Access',      {'fields': ('is_active', 'is_staff', 'is_superuser', 'is_premium')}),
+        ('Timestamps',  {'fields': ('created_at',)}),
+    )
+    add_fieldsets = ()
+
+    @admin.action(description='Grant Premium access')
+    def grant_premium(self, request, queryset):
+        updated = queryset.update(is_premium=True)
+        self.message_user(request, f'Granted Premium to {updated} user(s).')
+
+    @admin.action(description='Revoke Premium access')
+    def revoke_premium(self, request, queryset):
+        updated = queryset.update(is_premium=False)
+        self.message_user(request, f'Revoked Premium from {updated} user(s).')
 
 @admin.register(PatientMessage)
 class PatientMessageAdmin(admin.ModelAdmin):

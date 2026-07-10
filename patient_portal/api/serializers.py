@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from patient_portal.models import Identity
 from omop_core.models import (
-    PatientInfo, Concept,
+    PatientRecord, Concept,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
     Survey, PatientSurveyResponse,
@@ -113,17 +113,19 @@ class OrgInvitationSerializer(serializers.ModelSerializer):
 
 class GroupAccessSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(source='identity.email', read_only=True)
+    name = serializers.CharField(source='identity.name', read_only=True, default='')
+    is_premium = serializers.BooleanField(source='identity.is_premium', read_only=True)
     org_slug = serializers.SlugRelatedField(source='org', slug_field='slug', read_only=True)
     group_name = serializers.CharField(source='group.name', read_only=True, default=None)
 
     class Meta:
         model = GroupAccess
         fields = [
-            'id', 'email', 'org_slug', 'group_name', 'role',
+            'id', 'email', 'name', 'is_premium', 'org_slug', 'group_name', 'role',
             'expires_at', 'granted_at',
         ]
         read_only_fields = [
-            'id', 'email', 'org_slug', 'group_name', 'role',
+            'id', 'email', 'name', 'is_premium', 'org_slug', 'group_name', 'role',
             'expires_at', 'granted_at',
         ]
 
@@ -138,7 +140,7 @@ class PatientListSerializer(serializers.ModelSerializer):
     updated_at = serializers.DateTimeField(format='%Y-%m-%d', read_only=True)
     
     class Meta:
-        model = PatientInfo
+        model = PatientRecord
         fields = [
             'id',
             'person_id',
@@ -179,7 +181,7 @@ class GenderField(serializers.CharField):
         return self.DISPLAY_TO_CODE.get(title, data)
 
 
-class PatientInfoSerializer(serializers.ModelSerializer):
+class PatientRecordSerializer(serializers.ModelSerializer):
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)
     patient_name = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
@@ -190,7 +192,7 @@ class PatientInfoSerializer(serializers.ModelSerializer):
     later_therapy_display = serializers.SerializerMethodField()
 
     class Meta:
-        model = PatientInfo
+        model = PatientRecord
         fields = '__all__'
         # organization and person must never be client-writable: they are
         # set server-side from the auth token / FHIR upload respectively.
@@ -199,6 +201,10 @@ class PatientInfoSerializer(serializers.ModelSerializer):
         read_only_fields = (
             'organization', 'person', 'created_at', 'updated_at',
             'first_line_therapy_display', 'second_line_therapy_display', 'later_therapy_display',
+            # best_response is derived from OMOP Observations by refresh_patient_record;
+            # sync_to_omop has no write-through category for it, so a client PATCH would
+            # be silently discarded on the next refresh. Read-only until that path exists.
+            'best_response',
             # Wearable summaries are written by the device-sync service, never by the client API.
             'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
             'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
@@ -216,7 +222,7 @@ class PatientInfoSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         # Bulk-fetch all Concept rows referenced by therapy_id fields in one query,
         # replacing the per-field Concept.objects.filter() calls in the display methods.
-        # NOTE: this fires one DB query per instance — do NOT use PatientInfoSerializer
+        # NOTE: this fires one DB query per instance — do NOT use PatientRecordSerializer
         # in list views (many=True) without pre-fetching therapy_id concepts, as it
         # will produce N queries for N patients. Use PatientListSerializer for lists.
         concept_ids = set()

@@ -4,7 +4,7 @@ from django.contrib.auth import authenticate, login, logout
 from django.contrib import messages
 from django.utils import timezone
 from .models import PatientUser, PatientMessage, PatientConsent
-from omop_core.models import PatientInfo, Measurement, ConditionOccurrence
+from omop_core.models import PatientRecord, Measurement, ConditionOccurrence
 
 def index(request):
     """Root view - redirect to portal or show login info"""
@@ -19,7 +19,7 @@ def dashboard(request):
     """Patient dashboard showing health summary"""
     try:
         patient_user = PatientUser.objects.get(identity=request.user)
-        patient_info = PatientInfo.objects.filter(person=patient_user.person).first()
+        patient_info = PatientRecord.objects.filter(person=patient_user.person).first()
         
         # Get recent measurements
         recent_measurements = Measurement.objects.filter(
@@ -54,7 +54,7 @@ def health_records(request):
     """View detailed health records"""
     try:
         patient_user = get_object_or_404(PatientUser, identity=request.user)
-        patient_info = PatientInfo.objects.filter(person=patient_user.person).first()
+        patient_info = PatientRecord.objects.filter(person=patient_user.person).first()
 
         # Get all measurements
         measurements = Measurement.objects.filter(
@@ -189,7 +189,7 @@ def update_health_records(request):
     
     try:
         patient_user = get_object_or_404(PatientUser, identity=request.user)
-        patient_info, created = PatientInfo.objects.get_or_create(person=patient_user.person)
+        patient_info, created = PatientRecord.objects.get_or_create(person=patient_user.person)
         
         tab = request.POST.get('tab', 'general')
         

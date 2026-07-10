@@ -1,6 +1,6 @@
 """
 backfill_therapy_concept_ids.py — Populate first_line_therapy_id, second_line_therapy_id,
-and later_therapy_ids on existing PatientInfo records by re-running the regimen
+and later_therapy_ids on existing PatientRecord records by re-running the regimen
 concept_id lookup against the stored therapy text fields.
 
 Usage:
@@ -8,7 +8,7 @@ Usage:
     DATABASE_URL="..." python manage.py backfill_therapy_concept_ids --dry-run
 """
 from django.core.management.base import BaseCommand
-from omop_core.models import PatientInfo, Concept
+from omop_core.models import PatientRecord, Concept
 from omop_core.services.lot_regimens import MYELOMA_REGIMEN_LOOKUP, MYELOMA_REGIMEN_CONCEPT_IDS
 
 
@@ -28,7 +28,7 @@ def _text_to_concept_id(therapy_text: str) -> int | None:
 
 
 class Command(BaseCommand):
-    help = "Backfill HemOnc concept_ids on PatientInfo therapy fields"
+    help = "Backfill HemOnc concept_ids on PatientRecord therapy fields"
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -43,11 +43,11 @@ class Command(BaseCommand):
         skipped = 0
         no_match = 0
 
-        qs = PatientInfo.objects.filter(
+        qs = PatientRecord.objects.filter(
             first_line_therapy__isnull=False,
-        ) | PatientInfo.objects.filter(
+        ) | PatientRecord.objects.filter(
             second_line_therapy__isnull=False,
-        ) | PatientInfo.objects.filter(
+        ) | PatientRecord.objects.filter(
             later_therapy__isnull=False,
         )
 
@@ -81,7 +81,7 @@ class Command(BaseCommand):
 
             if changed:
                 if not dry_run:
-                    PatientInfo.objects.filter(pk=pi.pk).update(**updates)
+                    PatientRecord.objects.filter(pk=pi.pk).update(**updates)
                 updated += 1
             else:
                 skipped += 1

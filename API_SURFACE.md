@@ -18,7 +18,7 @@ Client writes → OMOP tables (Measurement, ConditionOccurrence, DrugExposure, �
                      │
                      └── post_save / post_delete signal fires automatically
                                │
-                               └── refresh_patient_info(person)
+                               └── refresh_patient_record(person)
                                        re-derives PatientRecord from OMOP
                                        PatientRecord.save()
 ```
@@ -203,7 +203,7 @@ Returns **403** if patient's org ≠ caller's org.
 For every field in [`_LAB_FIELD_TO_LOINC`](#_lab_field_to_loinc-mapping) present in the request body:
 
 1. `_upsert_omop_measurement(person, field_name, value, today)` writes or updates a row in the `measurement` table.
-2. `refresh_patient_info(person)` then re-derives PatientRecord from the updated Measurement rows.
+2. `refresh_patient_record(person)` then re-derives PatientRecord from the updated Measurement rows.
 3. If `source` is present, ProvenanceRecords are created for the Measurement row(s).
 
 Fields not yet modelled in OMOP (some behavioral/socioeconomic fields) are patched directly on PatientRecord as a temporary measure until they have a proper OMOP home. This is a transitional state; those fields will move to OMOP tables over time.
@@ -252,7 +252,7 @@ Bulk-ingests one or more patients from a FHIR R4 Bundle. All data is written to 
 | `Observation` | `measurement` | person + measurement_concept + date |
 | `MedicationStatement` | `drug_exposure`, `episode`, `episode_event` | person + regimen + start_date |
 
-PatientRecord is **not** a write target. After all OMOP records are saved, `refresh_patient_info(person)` is called explicitly to rebuild PatientRecord from those records. The uploading token's org is stamped on `PatientRecord.organization` at this point.
+PatientRecord is **not** a write target. After all OMOP records are saved, `refresh_patient_record(person)` is called explicitly to rebuild PatientRecord from those records. The uploading token's org is stamped on `PatientRecord.organization` at this point.
 
 **Response 200** (HKI-FHIR-02 — OMOP record IDs returned for reconciliation)
 ```json
@@ -471,7 +471,7 @@ Writes a single lab or vital value into the OMOP `measurement` table. This is th
 2. Resolves `Concept` by `concept_code = loinc_code, vocabulary_id = 'LOINC'`. Falls back to concept_id 3000963 (generic lab result) if the LOINC Concept is not loaded.
 3. **UPDATE** if a row already exists for `(person, concept, date)`.
 4. **CREATE** otherwise; `measurement_source_value` = display name (≤ 50 chars); `unit_source_value` = unit string.
-5. Saves with `_skip_patient_info_refresh = True` — the caller is responsible for triggering `refresh_patient_info` once, rather than once per measurement row.
+5. Saves with `_skip_patient_record_refresh = True` — the caller is responsible for triggering `refresh_patient_record` once, rather than once per measurement row.
 
 Called from `PatientInfoViewSet.partial_update()` for every field in the PATCH body that has a LOINC entry.
 
@@ -569,7 +569,7 @@ FHIR Bundle
    │     → episode_event          links drug_exposure → episode
    │     → ProvenanceRecord       if source provided
    │
-   └── refresh_patient_info(person)   ← explicit call after all OMOP writes complete
+   └── refresh_patient_record(person)   ← explicit call after all OMOP writes complete
          PatientRecord re-derived entirely from the OMOP records written above.
          PatientRecord.organization stamped from the uploading token's org.
          (A small set of fields not yet modelled in OMOP are patched here
@@ -578,7 +578,7 @@ FHIR Bundle
 
 ---
 
-### refresh_patient_info signal chain
+### refresh_patient_record signal chain
 
 Every write or delete on an OMOP table automatically triggers a PatientRecord rebuild via Django signals. No caller needs to invoke this manually except immediately after a bulk write (e.g. the FHIR upload) where per-row signals are suppressed for performance.
 
@@ -586,9 +586,9 @@ Every write or delete on an OMOP table automatically triggers a PatientRecord re
 OMOP table save / delete
    │
    └── omop_core.signals._refresh_for_instance(instance)
-         skipped if instance._skip_patient_info_refresh == True
+         skipped if instance._skip_patient_record_refresh == True
          │
-         └── refresh_patient_info(person)   [omop_core/services/patient_info_service.py]
+         └── refresh_patient_record(person)   [omop_core/services/patient_record_service.py]
                1. Clears all _OMOP_DERIVED_FIELDS on PatientRecord
                2. Re-derives every field by querying OMOP tables:
                     _get_demographics        ← Person (age, gender, ethnicity, languages)

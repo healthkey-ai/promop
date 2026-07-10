@@ -17,7 +17,7 @@ authors:
 affiliations:
   - name: HealthKey AI
     index: 1
-date: 4 July 2026
+date: 2026-07-04
 bibliography: paper.bib
 ---
 

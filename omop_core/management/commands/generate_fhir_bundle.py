@@ -177,8 +177,24 @@ class Command(BaseCommand):
             
             # Generate prior therapy (medication statements)
             assigned_lines = therapy_lines[i-1] if therapy_lines else None
+            if assigned_lines is None:
+                assigned_lines = random.choices([1, 2, 3], weights=[0.6, 0.3, 0.1])[0]
             for med in self.generate_prior_therapy(i, diagnosis_date, assigned_lines):
                 bundle["entry"].append(med)
+
+            # Generate oncology procedures
+            for procedure in self.generate_oncology_procedures(i, diagnosis_date, cancer_stage):
+                bundle["entry"].append(procedure)
+
+            # Generate broader clinical resources commonly present in Synthea FHIR exports
+            for medication_request in self.generate_medication_requests(i, diagnosis_date):
+                bundle["entry"].append(medication_request)
+
+            for immunization in self.generate_immunizations(i, diagnosis_date):
+                bundle["entry"].append(immunization)
+
+            for report in self.generate_diagnostic_reports(i, diagnosis_date, cancer_stage):
+                bundle["entry"].append(report)
             
             # Generate supportive therapy
             supportive = self.generate_supportive_therapy(i, diagnosis_date)
@@ -1491,6 +1507,178 @@ class Command(BaseCommand):
                 }]
             }
         }
+
+    def generate_oncology_procedures(self, patient_id, diagnosis_date, stage):
+        """Generate breast cancer procedures useful for OMOP ProcedureOccurrence testing."""
+        procedures = []
+
+        procedure_defs = [
+            ('biopsy', '387713003', 'Surgical biopsy of breast', -14, 0),
+            ('sentinel-node-biopsy', '23426006', 'Sentinel lymph node biopsy', 7, 35),
+        ]
+        if stage == '0':
+            procedure_defs.append(('lumpectomy', '392021009', 'Lumpectomy of breast', 14, 45))
+        elif stage == 'IV':
+            procedure_defs.append(('radiation-therapy', '108290001', 'Radiation oncology procedure', 45, 120))
+        else:
+            procedure_defs.append(random.choice([
+                ('lumpectomy', '392021009', 'Lumpectomy of breast', 14, 45),
+                ('mastectomy', '172043006', 'Mastectomy', 14, 45),
+                ('radiation-therapy', '108290001', 'Radiation oncology procedure', 45, 120),
+            ]))
+
+        for key, code, display, min_days, max_days in procedure_defs:
+            procedure_date = diagnosis_date + timedelta(days=random.randint(min_days, max_days))
+            procedures.append({
+                "fullUrl": f"http://example.org/Procedure/procedure-{patient_id}-{key}",
+                "resource": {
+                    "resourceType": "Procedure",
+                    "id": f"procedure-{patient_id}-{key}",
+                    "status": "completed",
+                    "code": {
+                        "coding": [{
+                            "system": "http://snomed.info/sct",
+                            "code": code,
+                            "display": display
+                        }],
+                        "text": display
+                    },
+                    "subject": {
+                        "reference": f"Patient/{patient_id}"
+                    },
+                    "performedDateTime": procedure_date.strftime('%Y-%m-%d'),
+                    "reasonReference": [{
+                        "reference": f"Condition/condition-{patient_id}"
+                    }]
+                }
+            })
+
+        return procedures
+
+    def generate_medication_requests(self, patient_id, diagnosis_date):
+        """Generate active/supportive MedicationRequest resources like Synthea FHIR."""
+        medications = [
+            ('ondansetron', '26225', 'Ondansetron', 'Take 8 mg by mouth as needed for nausea'),
+            ('pegfilgrastim', '338036', 'Pegfilgrastim', 'Inject 6 mg once per chemotherapy cycle'),
+            ('zoledronic-acid', '77655', 'Zoledronic acid', 'Infuse 4 mg every 12 weeks'),
+        ]
+        selected = random.sample(medications, k=random.randint(2, 3))
+        requests = []
+        for idx, (key, rxnorm, display, sig) in enumerate(selected, 1):
+            authored = diagnosis_date + timedelta(days=random.randint(10, 120))
+            requests.append({
+                "fullUrl": f"http://example.org/MedicationRequest/med-request-{patient_id}-{key}",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": f"med-request-{patient_id}-{key}",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {
+                        "coding": [{
+                            "system": "http://www.nlm.nih.gov/research/umls/rxnorm",
+                            "code": rxnorm,
+                            "display": display
+                        }],
+                        "text": display
+                    },
+                    "subject": {"reference": f"Patient/{patient_id}"},
+                    "authoredOn": authored.strftime('%Y-%m-%d'),
+                    "dosageInstruction": [{"text": sig}],
+                    "priority": "routine" if idx > 1 else "urgent",
+                }
+            })
+        return requests
+
+    def generate_immunizations(self, patient_id, diagnosis_date):
+        """Generate vaccine history as FHIR Immunization resources."""
+        immunizations = [
+            ('influenza', '140', 'Influenza, seasonal, injectable'),
+            ('covid-19', '208', 'COVID-19, mRNA, LNP-S, PF'),
+            ('pneumococcal', '133', 'Pneumococcal conjugate PCV 13'),
+        ]
+        selected = random.sample(immunizations, k=random.randint(1, 2))
+        resources = []
+        for key, cvx, display in selected:
+            occurrence = diagnosis_date - timedelta(days=random.randint(30, 365))
+            resources.append({
+                "fullUrl": f"http://example.org/Immunization/immunization-{patient_id}-{key}",
+                "resource": {
+                    "resourceType": "Immunization",
+                    "id": f"immunization-{patient_id}-{key}",
+                    "status": "completed",
+                    "vaccineCode": {
+                        "coding": [{
+                            "system": "http://hl7.org/fhir/sid/cvx",
+                            "code": cvx,
+                            "display": display
+                        }],
+                        "text": display
+                    },
+                    "patient": {"reference": f"Patient/{patient_id}"},
+                    "occurrenceDateTime": occurrence.strftime('%Y-%m-%d'),
+                    "primarySource": True,
+                }
+            })
+        return resources
+
+    def generate_diagnostic_reports(self, patient_id, diagnosis_date, stage):
+        """Generate structured DiagnosticReport resources for oncology workup."""
+        report_defs = [
+            (
+                'pathology',
+                '60568-3',
+                'Pathology Synoptic report',
+                diagnosis_date + timedelta(days=random.randint(0, 14)),
+                'Invasive breast carcinoma confirmed; receptor testing reviewed.'
+            ),
+            (
+                'imaging',
+                '18748-4',
+                'Diagnostic imaging study',
+                diagnosis_date + timedelta(days=random.randint(5, 30)),
+                f'Breast imaging consistent with clinical stage {stage}; no unexpected findings.'
+            ),
+            (
+                'genomics',
+                '81247-9',
+                'Master HL7 genetic variant reporting panel',
+                diagnosis_date + timedelta(days=random.randint(14, 45)),
+                random.choice([
+                    'No pathogenic germline variant detected.',
+                    'Somatic panel reviewed; actionable alteration not detected.',
+                    'Tumor sequencing reviewed for trial eligibility.'
+                ])
+            ),
+        ]
+        reports = []
+        for key, loinc, display, effective, conclusion in report_defs:
+            reports.append({
+                "fullUrl": f"http://example.org/DiagnosticReport/diagnostic-report-{patient_id}-{key}",
+                "resource": {
+                    "resourceType": "DiagnosticReport",
+                    "id": f"diagnostic-report-{patient_id}-{key}",
+                    "status": "final",
+                    "category": [{
+                        "coding": [{
+                            "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+                            "code": "LAB" if key != 'imaging' else "RAD",
+                        }]
+                    }],
+                    "code": {
+                        "coding": [{
+                            "system": "http://loinc.org",
+                            "code": loinc,
+                            "display": display
+                        }],
+                        "text": display
+                    },
+                    "subject": {"reference": f"Patient/{patient_id}"},
+                    "effectiveDateTime": effective.strftime('%Y-%m-%d'),
+                    "issued": effective.strftime('%Y-%m-%dT12:00:00Z'),
+                    "conclusion": conclusion,
+                }
+            })
+        return reports
 
     def generate_random_date(self, start_year, end_year):
         """Generate random date between years"""

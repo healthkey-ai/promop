@@ -231,8 +231,8 @@ class SyncView(APIView):
         # Org-scope enforcement for OAuth2 service clients
         org = get_request_org(request)
         if org is not None:
-            from omop_core.models import PatientInfo
-            if not PatientInfo.objects.filter(person_id=person_id, organization=org).exists():
+            from omop_core.models import PatientRecord
+            if not PatientRecord.objects.filter(person_id=person_id, organization=org).exists():
                 return Response(
                     {'detail': 'Person not in your organization.'},
                     status=status.HTTP_403_FORBIDDEN,

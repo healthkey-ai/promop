@@ -304,7 +304,7 @@ def _sync_measurement(person, field_name: str, value, today: date) -> None:
     ).first()
     if existing:
         existing.value_as_number = value
-        existing._skip_patient_info_refresh = True
+        existing._skip_patient_record_refresh = True
         existing.save(update_fields=['value_as_number'])
     else:
         last = Measurement.objects.order_by('-measurement_id').first()
@@ -319,7 +319,7 @@ def _sync_measurement(person, field_name: str, value, today: date) -> None:
             measurement_source_value=loinc_code,
             unit_source_value=unit,
         )
-        m._skip_patient_info_refresh = True
+        m._skip_patient_record_refresh = True
         m.save()
 ```
 

@@ -201,7 +201,7 @@ requires a restart).
 
 ## PatientRecord Derivation from Measurements
 
-After FHIR ingest stores lab values as `Measurement` rows, `refresh_patient_info()` derives
+After FHIR ingest stores lab values as `Measurement` rows, `refresh_patient_record()` derives
 the PatientRecord lab fields in three lookup tiers:
 
 | Tier | Mechanism | Example |

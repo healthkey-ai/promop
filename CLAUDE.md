@@ -24,11 +24,11 @@ This file tells LLMs (Claude, Copilot, etc.) how to work on this codebase consis
 
 | Concern | File(s) |
 |---|---|
-| OMOP data model | `omop_core/models.py` — `PatientInfo`, `Person`, `PersonLanguageSkill` |
+| OMOP data model | `omop_core/models.py` — `PatientRecord`, `Person`, `PersonLanguageSkill` |
 | DB migrations | `omop_core/migrations/` — use standard Django ORM migrations (`makemigrations`) |
-| DRF serializers | `patient_portal/api/serializers.py` — `PatientInfoSerializer` (uses `fields = '__all__'`) |
-| Backend API views | `patient_portal/api/views.py` — `PatientInfoViewSet`, FHIR upload handler |
-| API URL routing | `patient_portal/api/urls.py` and `patient_portal/urls.py` |
+| DRF serializers | `patient_portal/api/serializers.py` — `PatientRecordSerializer` (uses `fields = '__all__'`) |
+| Backend API views | `patient_portal/api/views.py` — `PatientRecordViewSet`, FHIR upload handler |
+| API URL routing | `patient_portal/api/urls.py` (legacy) and `patient_portal/api/v1_urls.py` (current) |
 | TypeScript types | `frontend/src/types/patient.ts` — `PatientInfo` interface |
 | React UI tabs | `frontend/src/components/PatientInfo/` — `GeneralTab.tsx`, `LabsTab.tsx`, `MultipleMyelomaTab.tsx`, `FollicularLymphomaTab.tsx` |
 | Patient detail page | `frontend/src/components/Patient/PatientDetail.tsx` |
@@ -44,13 +44,28 @@ This file tells LLMs (Claude, Copilot, etc.) how to work on this codebase consis
 
 ---
 
+## API URL Versioning
+
+The patient record endpoint exists at two paths with different stability guarantees:
+
+| Path | Status | Use |
+|---|---|---|
+| `/api/patient-info/` | **Legacy — do not use for new work** | Retained for backwards compatibility with the federation host app (`ht-phr`) and the existing React frontend. Wire-format response keys (`patient_info`, `patient_info_id`) are also frozen. |
+| `/api/v1/patient-records/` | **Current — use for all new integrations** | New clients and any existing clients migrating off the legacy path should use this prefix. |
+
+Both paths route to `PatientRecordViewSet` and return identical data. The only difference is the URL prefix. The legacy path will remain functional until all consumers have migrated.
+
+**Rule:** New endpoints, filters, and actions go on `v1_urls.py` only. Do not extend the legacy `urls.py` registration.
+
+---
+
 ## Rule: Adding a New Patient Attribute
 
-When adding any new field to `PatientInfo`, you **must** touch ALL of the following layers. Do not skip any layer.
+When adding any new field to `PatientRecord`, you **must** touch ALL of the following layers. Do not skip any layer.
 
 ### 1. Django Model (`omop_core/models.py`)
 
-Add the field to the `PatientInfo` class with `blank=True, null=True` unless there is a specific reason for it to be required.
+Add the field to the `PatientRecord` class with `blank=True, null=True` unless there is a specific reason for it to be required.
 
 ```python
 # Example
@@ -75,14 +90,14 @@ DATABASE_URL="$STAGING_DATABASE_URL" \
 
 ### 3. DRF Serializer (`patient_portal/api/serializers.py`)
 
-`PatientInfoSerializer` uses `fields = '__all__'`, so new model fields are **automatically included** in the API response. However:
+`PatientRecordSerializer` uses `fields = '__all__'`, so new model fields are **automatically included** in the API response. However:
 
 - If the field needs **custom serialization** (e.g., computed values, nested data), add an explicit `SerializerMethodField`.
 - If the field needs **write validation**, add it to `extra_kwargs`.
 
 ### 4. FHIR Upload Loader (`patient_portal/api/views.py` → `upload_fhir_bundle`)
 
-This is the function that parses incoming FHIR Bundles and writes data into `PatientInfo`. You **must** add a mapping here for the new field or it will never be populated from FHIR uploads.
+This is the function that parses incoming FHIR Bundles and writes data into `PatientRecord`. You **must** add a mapping here for the new field or it will never be populated from FHIR uploads.
 
 **Step A — Declare an initializer** at the top of the patient-processing block (so the variable always exists even if no matching FHIR resource is found):
 
@@ -109,10 +124,10 @@ elif loinc_code == 'XXXXX-X':  # Replace with the actual LOINC code
     )
 ```
 
-**Step C — Pass the value to `PatientInfo.objects.create()`** (or the `.save()` update block):
+**Step C — Pass the value to `PatientRecord.objects.create()`** (or the `.save()` update block):
 
 ```python
-PatientInfo.objects.create(
+PatientRecord.objects.create(
     person=person,
     # ...existing fields...
     new_field=new_field_value,
@@ -121,7 +136,7 @@ PatientInfo.objects.create(
 
 > **Note:** The FHIR upload loader is ~1375 lines. Search for the comment block that matches the clinical category of the new field (e.g., `# --- Biomarkers ---`, `# --- Labs ---`, `# --- Therapy ---`) to find the right place to insert steps A–C.
 
-### 5. Backend API ViewSet (`patient_portal/api/views.py` → `PatientInfoViewSet`)
+### 5. Backend API ViewSet (`patient_portal/api/views.py` → `PatientRecordViewSet`)
 
 If the field needs special filtering, ordering, or search, add it to `filterset_fields`, `search_fields`, or `ordering_fields` in the viewset.
 
@@ -225,27 +240,27 @@ from django.test import TestCase
 from rest_framework.test import APITestCase, APIClient
 from rest_framework import status
 from django.contrib.auth.models import User
-from omop_core.models import PatientInfo, Person
+from omop_core.models import PatientRecord, Person
 
 class NewFieldModelTest(TestCase):
     """Test that new_field exists in DB and model"""
 
     def setUp(self):
         self.person = Person.objects.create(person_id=9999)
-        self.patient = PatientInfo.objects.create(
+        self.patient = PatientRecord.objects.create(
             person=self.person,
             new_field="test_value"
         )
 
     def test_new_field_saved_to_db(self):
         """Verify new_field is persisted to and retrieved from DB"""
-        p = PatientInfo.objects.get(person_id=9999)
+        p = PatientRecord.objects.get(person_id=9999)
         self.assertEqual(p.new_field, "test_value")
 
     def test_new_field_nullable(self):
         """Verify new_field can be null"""
         self.person2 = Person.objects.create(person_id=9998)
-        p = PatientInfo.objects.create(person=self.person2)
+        p = PatientRecord.objects.create(person=self.person2)
         self.assertIsNone(p.new_field)
 
 
@@ -257,7 +272,7 @@ class NewFieldAPITest(APITestCase):
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
         self.person = Person.objects.create(person_id=9997)
-        self.patient = PatientInfo.objects.create(
+        self.patient = PatientRecord.objects.create(
             person=self.person,
             new_field="api_test_value"
         )
@@ -316,7 +331,7 @@ class NewFieldAPITest(APITestCase):
         )
         self.assertIn(response.status_code, [200, 201])
         # Verify the field was stored
-        patient = PatientInfo.objects.filter(
+        patient = PatientRecord.objects.filter(
             person__family_name='Test'
         ).first()
         self.assertIsNotNone(patient)
@@ -364,6 +379,16 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
 # Frontend tests (install deps first if needed: cd frontend && npm ci)
 cd frontend && npm test -- --run
 ```
+
+### Rule: Feature Branch + PR for Every Code Change
+
+**Never commit directly to `dev` or `main`.** All fixes, enhancements, and refactors must go on a feature branch and land via a pull request.
+
+1. `git checkout -b <descriptive-branch-name>` before writing any code
+2. Commit the work on the feature branch
+3. Run the test suites (see below)
+4. Open a PR targeting `dev`
+5. Perform a code review on the PR before merging — the only exception is if a full code review was done immediately before opening the PR in the same work session (no need to review twice)
 
 ### Rule: Run Tests Before Every Push
 
@@ -430,7 +455,7 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -d promop_test
 
 ## SCT Fields — Multiple Myeloma (PR #115)
 
-Three fields were added to `PatientInfo` for stem cell transplant tracking:
+Three fields were added to `PatientRecord` for stem cell transplant tracking:
 
 | Field | Type | Vocabulary |
 |---|---|---|
@@ -469,7 +494,7 @@ Multiple transplant lines of the same type are deduplicated.
 
 ### Serializer validation
 
-`PatientInfoSerializer` enforces two rules:
+`PatientRecordSerializer` enforces two rules:
 
 - `validate_sct_date` — rejects future dates with HTTP 400
 - `validate_sct_eligibility` — rejects contradictory pairs (e.g. `eligible` + `ineligible` for the same transplant type)
@@ -477,7 +502,7 @@ Multiple transplant lines of the same type are deduplicated.
 ### Seeding sample data
 
 ```bash
-# Seed random SCT data onto MM PatientInfo records that have no SCT data yet
+# Seed random SCT data onto MM PatientRecord rows that have no SCT data yet
 DATABASE_URL="..." python manage.py populate_sct_sample_data
 
 # Overwrite existing values
@@ -564,7 +589,7 @@ Always remap existing data rows **before** truncating the vocabulary table:
 ```python
 operations = [
     migrations.RunPython(seed_new_vocabulary, reverse_seed),       # 1. add new vocab rows
-    migrations.RunPython(remap_existing_data, reverse_noop),       # 2. remap PatientInfo rows
+    migrations.RunPython(remap_existing_data, reverse_noop),       # 2. remap PatientRecord rows
     migrations.RunPython(replace_old_vocabulary, reverse_restore), # 3. truncate old vocab
 ]
 ```
@@ -588,11 +613,11 @@ To audit whether the DB and model are in sync at any time:
 DATABASE_URL="$DATABASE_URL" \
   .venv/bin/python manage.py shell -c "
 from django.db import connection
-from omop_core.models import PatientInfo
+from omop_core.models import PatientRecord
 cursor = connection.cursor()
-cursor.execute(\"SELECT column_name FROM information_schema.columns WHERE table_name='patient_info' ORDER BY column_name\")
+cursor.execute(\"SELECT column_name FROM information_schema.columns WHERE table_name='patient_record' ORDER BY column_name\")
 db_cols = set(r[0] for r in cursor.fetchall())
-model_cols = set(f.column for f in PatientInfo._meta.get_fields() if hasattr(f, 'column'))
+model_cols = set(f.column for f in PatientRecord._meta.get_fields() if hasattr(f, 'column'))
 print('MISSING from DB:', sorted(model_cols - db_cols))
 print('EXTRA in DB:', sorted(db_cols - model_cols))
 "
@@ -656,9 +681,9 @@ The FHIR upload endpoint in `patient_portal/api/views.py` (`upload_fhir_bundle`)
 3. Iterates `Observation` resources → writes each to the OMOP `Measurement` table (LOINC concept lookup, falls back to `measurement_source_value`)
 4. Iterates `Condition` resources → writes to `ConditionOccurrence`
 5. Iterates `MedicationRequest`/`MedicationStatement` → writes to `DrugExposure`, `Episode`, `EpisodeEvent`
-6. After all OMOP writes, `refresh_patient_info` is called once to rebuild the `PatientInfo` read model from OMOP data
+6. After all OMOP writes, `refresh_patient_record` is called once to rebuild the `PatientRecord` read model from OMOP data
 
-**PatientInfo is never written to directly during FHIR upload.** All clinical data goes into OMOP tables; `PatientInfo` is derived automatically via the `post_save` signal chain.
+**`PatientRecord` is never written to directly during FHIR upload.** All clinical data goes into OMOP tables; `PatientRecord` is derived automatically via the `post_save` signal chain.
 
 ---
 

@@ -107,7 +107,7 @@ Done. Imported 10 patients into org 'demo-org'.
 
 After each batch, PRomop automatically:
 1. Writes OMOP records: `Person`, `Measurement`, `DrugExposure`, `Episode`, `EpisodeEvent`
-2. Runs `refresh_patient_info` to rebuild the `PatientRecord` projection for each patient
+2. Runs `refresh_patient_record` to rebuild the `PatientRecord` projection for each patient
 3. Runs `infer_lot_for_person` to derive structured therapy lines
 
 ---

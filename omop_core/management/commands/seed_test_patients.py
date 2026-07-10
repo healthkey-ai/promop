@@ -1,7 +1,7 @@
 """
 Management command: seed_test_patients
 
-Creates a small set of fake PatientInfo records for local end-to-end testing.
+Creates a small set of fake PatientRecord records for local end-to-end testing.
 Covers all four diseases supported by exact (MM, FL, BC, CLL).
 
 Each patient is designed to match at least one of the trials created by
@@ -13,7 +13,7 @@ Usage:
 """
 from django.core.management.base import BaseCommand
 
-from omop_core.models import PatientInfo, Person
+from omop_core.models import PatientRecord, Person
 
 
 # person_id range 9001-9999 reserved for test data so it won't
@@ -235,7 +235,7 @@ TEST_PATIENTS = [
 
 
 class Command(BaseCommand):
-    help = 'Create fake test patients (Person + PatientInfo) for local end-to-end testing.'
+    help = 'Create fake test patients (Person + PatientRecord) for local end-to-end testing.'
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -249,7 +249,7 @@ class Command(BaseCommand):
             deleted, _ = Person.objects.filter(
                 person_id__gte=9001, person_id__lte=9999
             ).delete()
-            self.stdout.write(f'Deleted {deleted} existing test person records (cascade includes PatientInfo).')
+            self.stdout.write(f'Deleted {deleted} existing test person records (cascade includes PatientRecord).')
 
         created_p = updated_p = created_pi = updated_pi = 0
 
@@ -264,7 +264,7 @@ class Command(BaseCommand):
             else:
                 updated_p += 1
 
-            _, pi_created = PatientInfo.objects.update_or_create(
+            _, pi_created = PatientRecord.objects.update_or_create(
                 person=person,
                 defaults=spec['pi'],
             )
@@ -278,5 +278,5 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(
             f'\nPerson   : {created_p} created, {updated_p} updated\n'
-            f'PatientInfo: {created_pi} created, {updated_pi} updated'
+            f'PatientRecord: {created_pi} created, {updated_pi} updated'
         ))

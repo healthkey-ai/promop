@@ -2,7 +2,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
-    CurrentUserViewSet, PatientInfoViewSet, login_view, logout_view, auth_test,
+    CurrentUserViewSet, PatientRecordViewSet, login_view, logout_view, auth_test,
     PersonViewSet,
     ConditionOccurrenceViewSet, DrugExposureViewSet, MeasurementViewSet,
     ObservationViewSet, ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
@@ -23,7 +23,7 @@ from .org_views import (
 router = DefaultRouter()
 
 router.register(r'user', CurrentUserViewSet, basename='v1-user')
-router.register(r'patient-records', PatientInfoViewSet, basename='v1-patient-records')
+router.register(r'patient-records', PatientRecordViewSet, basename='v1-patient-records')
 router.register(r'persons', PersonViewSet, basename='v1-persons')
 router.register(r'conditions', ConditionOccurrenceViewSet, basename='v1-conditions')
 router.register(r'drug-exposures', DrugExposureViewSet, basename='v1-drug-exposures')

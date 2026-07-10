@@ -1,20 +1,20 @@
 """
-Django management command to populate PatientInfo from OMOP tables.
+Django management command to populate PatientRecord from OMOP tables.
 
-Calls omop_core.services.patient_info_service.refresh_patient_info() for each person,
+Calls omop_core.services.patient_record_service.refresh_patient_record() for each person,
 which is the single authoritative derivation path shared with Django signals and the
 FHIR upload endpoint.
 
 Usage:
-    python manage.py populate_patient_info
-    python manage.py populate_patient_info --person-id 4001
-    python manage.py populate_patient_info --force-update --verbose
+    python manage.py populate_patient_record
+    python manage.py populate_patient_record --person-id 4001
+    python manage.py populate_patient_record --force-update --verbose
 """
 
 from django.core.management.base import BaseCommand
 from omop_core.models import Person
-from omop_core.services.patient_info_service import (
-    refresh_patient_info,
+from omop_core.services.patient_record_service import (
+    refresh_patient_record,
     _get_demographics,
     _get_treatment_data,
     _get_cll_data,
@@ -25,7 +25,7 @@ from omop_core.services.patient_info_service import (
 
 
 class Command(BaseCommand):
-    help = 'Populate PatientInfo from OMOP tables for all persons'
+    help = 'Populate PatientRecord from OMOP tables for all persons'
 
     def get_demographics(self, person):
         return _get_demographics(person)
@@ -55,7 +55,7 @@ class Command(BaseCommand):
         parser.add_argument(
             '--force-update',
             action='store_true',
-            help='Force update (always refreshes, ignored — refresh_patient_info always upserts)',
+            help='Force update (always refreshes, ignored — refresh_patient_record always upserts)',
         )
         parser.add_argument(
             '--verbose',
@@ -82,8 +82,8 @@ class Command(BaseCommand):
 
         for person in persons:
             try:
-                existed = hasattr(person, 'patientinfo')
-                refresh_patient_info(person)
+                existed = hasattr(person, 'patient_record')
+                refresh_patient_record(person)
                 if existed:
                     updated += 1
                 else:

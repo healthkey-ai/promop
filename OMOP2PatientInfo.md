@@ -1,6 +1,6 @@
 # OMOP CDM to PatientInfo Mapping
 
-This document describes how data flows from standard OMOP CDM v6.0 tables to the comprehensive `PatientInfo` model for clinical trial eligibility screening. All data is extracted from standard OMOP tables using standardized vocabularies to ensure full OMOP compliance.
+This document describes how data flows from standard OMOP CDM v5.4 tables to the comprehensive `PatientInfo` model for clinical trial eligibility screening. All data is extracted from standard OMOP tables using standardized vocabularies to ensure full OMOP compliance.
 
 ## Overview
 
@@ -13,7 +13,7 @@ Standard OMOP Tables → Data Extraction Logic → PatientInfo Model → Clinica
 ```
 
 ### Key Principles:
-- ✅ **Full OMOP Compliance**: Only standard OMOP CDM v6.0 tables used
+- ✅ **Full OMOP Compliance**: Only standard OMOP CDM v5.4 tables used
 - ✅ **Standardized Vocabularies**: LOINC, SNOMED CT, ICD-O-3 concepts
 - ✅ **No Extension Models**: All custom extension models removed
 - ✅ **Interoperability**: Compatible with all OMOP analytical tools
@@ -250,7 +250,7 @@ is_immunotherapy = any(term in drug_name.lower() for term in immuno_terms)
 | PatientInfo Field | Source | Extraction |
 |---|---|---|
 | `languages_skills` | `PersonLanguageSkill` relation | `"Language: skill_level"` pairs joined with `, ` |
-| `status` | (to be populated externally) | Not extracted by `populate_patient_info` |
+| `status` | (to be populated externally) | Not extracted by `populate_patient_record` |
 | `later_therapies` | `DrugExposure` | JSON array of later-line drugs (see §6) |
 | `measurable_disease_imwg` | Computed | See CLL computed fields above |
 
@@ -279,9 +279,9 @@ is_immunotherapy = any(term in drug_name.lower() for term in immuno_terms)
 
 ## 🔧 Data Extraction Commands
 
-### Primary Command: `populate_patient_info`
+### Primary Command: `populate_patient_record`
 ```bash
-python manage.py populate_patient_info --force-update --verbose
+python manage.py populate_patient_record --force-update --verbose
 ```
 
 **Extraction Process:**
@@ -343,4 +343,4 @@ python manage.py migrate_vitals_to_measurement --verbose
 - **Trial-Ready Format**: Fields optimized for eligibility criteria
 - **Comprehensive Coverage**: Demographics, biomarkers, treatments, labs
 
-This architecture ensures **full OMOP CDM v6.0 compliance** while providing the research efficiency needed for rapid clinical trial patient identification and eligibility screening.
+This architecture ensures **full OMOP CDM v5.4 compliance** while providing the research efficiency needed for rapid clinical trial patient identification and eligibility screening.

@@ -11,7 +11,7 @@ from rest_framework.test import APIClient
 
 from omop_core.models import (
     CareSite, Concept, ConceptClass, Domain, LoincClass, LoincCodeClass,
-    Measurement, MeasurementOwnership, Person, PatientInfo, ProvenanceRecord,
+    Measurement, MeasurementOwnership, Person, PatientRecord, ProvenanceRecord,
     Vocabulary, VisitOccurrence,
 )
 
@@ -99,7 +99,7 @@ class SyncViewTest(TestCase):
         self.user.is_superuser = True
         self.user.save()
         self.person = Person.objects.create(person_id=1001)
-        PatientInfo.objects.create(person=self.person)
+        PatientRecord.objects.create(person=self.person)
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
 
@@ -178,7 +178,7 @@ class ResultsSummaryViewTest(TestCase):
         _setup_vocab()
         self.user = Identity.objects.create_user(email='reader@test.com', password='test')
         self.person = Person.objects.create(person_id=2001)
-        PatientInfo.objects.create(person=self.person)
+        PatientRecord.objects.create(person=self.person)
         PatientUser.objects.create(identity=self.user, person=self.person)
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
@@ -244,7 +244,7 @@ class ResultsSummaryViewTest(TestCase):
     def test_summary_resolves_person_from_email(self):
         self.user.email = 'reader_resolve@example.com'
         self.user.save()
-        PatientInfo.objects.filter(person=self.person).update(email='reader_resolve@example.com')
+        PatientRecord.objects.filter(person=self.person).update(email='reader_resolve@example.com')
         resp = self.client.get('/api/lab-results/summary/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data['results']), 1)
@@ -265,7 +265,7 @@ class ValuesViewTest(TestCase):
         _setup_vocab()
         self.user = Identity.objects.create_user(email='valreader@test.com', password='test')
         self.person = Person.objects.create(person_id=3001)
-        PatientInfo.objects.create(person=self.person)
+        PatientRecord.objects.create(person=self.person)
         PatientUser.objects.create(identity=self.user, person=self.person)
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
@@ -311,7 +311,7 @@ class ValuesViewTest(TestCase):
     def test_values_resolves_person_from_email(self):
         self.user.email = 'valreader_resolve@example.com'
         self.user.save()
-        PatientInfo.objects.filter(person=self.person).update(email='valreader_resolve@example.com')
+        PatientRecord.objects.filter(person=self.person).update(email='valreader_resolve@example.com')
         resp = self.client.get('/api/lab-results/values/', {'concept_code': '718-7'})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['count'], 3)
@@ -341,7 +341,7 @@ class MeasurementDetailViewTest(TestCase):
         # suite verifies delete behaviour, so the caller is staff.
         self.user = Identity.objects.create_user(email='measuser@test.com', password='test', is_staff=True)
         self.person = Person.objects.create(person_id=4001)
-        PatientInfo.objects.create(person=self.person)
+        PatientRecord.objects.create(person=self.person)
         PatientUser.objects.create(identity=self.user, person=self.person)
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
@@ -421,7 +421,7 @@ class MeasurementDetailViewTest(TestCase):
 
 
 class AutoProvisionTest(TestCase):
-    """Test that _get_or_create auto-provisions Person + PatientInfo."""
+    """Test that _get_or_create auto-provisions Person + PatientRecord."""
 
     def setUp(self):
         _setup_vocab()
@@ -434,7 +434,7 @@ class AutoProvisionTest(TestCase):
         )
         _ensure_person(user)
 
-        pi = PatientInfo.objects.get(email='newpatient@example.com')
+        pi = PatientRecord.objects.get(email='newpatient@example.com')
         self.assertIsNotNone(pi.person_id)
         self.assertTrue(Person.objects.filter(person_id=pi.person_id).exists())
 
@@ -442,14 +442,14 @@ class AutoProvisionTest(TestCase):
         from patient_portal.api.authentication import _ensure_person
 
         person = Person.objects.create(person_id=9001)
-        PatientInfo.objects.create(person=person, email='existing@example.com')
+        PatientRecord.objects.create(person=person, email='existing@example.com')
 
         user = Identity.objects.create_user(
             email='existing@example.com',
         )
         _ensure_person(user)
 
-        self.assertEqual(PatientInfo.objects.filter(email='existing@example.com').count(), 1)
+        self.assertEqual(PatientRecord.objects.filter(email='existing@example.com').count(), 1)
 
     def test_autoprovisioned_user_can_access_summary(self):
         from patient_portal.api.authentication import _ensure_person
@@ -473,7 +473,7 @@ class VisitDeleteViewTest(TestCase):
         # suite verifies delete behaviour, so the caller is staff.
         self.user = Identity.objects.create_user(email='visitdel@test.com', password='test', is_staff=True)
         self.person = Person.objects.create(person_id=5001)
-        PatientInfo.objects.create(person=self.person)
+        PatientRecord.objects.create(person=self.person)
         PatientUser.objects.create(identity=self.user, person=self.person)
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
@@ -738,7 +738,7 @@ class PersonalRepresentativeAccessTest(TestCase):
         )
         self.person = Person.objects.create(person_id=5001)
         PatientUser.objects.create(identity=self.patient_identity, person=self.person)
-        PatientInfo.objects.create(person=self.person, email='patient@test.com')
+        PatientRecord.objects.create(person=self.person, email='patient@test.com')
 
         type_concept = Concept.objects.get(concept_id=32883)
         hgb_concept = Concept.objects.get(concept_id=3000963)
@@ -797,7 +797,7 @@ class GroupAccessTest(TestCase):
         )
         self.doctor = Identity.objects.create_user(email='doctor@test.com', password='test')
         self.person = Person.objects.create(person_id=6001)
-        PatientInfo.objects.create(person=self.person, email='p6001@test.com')
+        PatientRecord.objects.create(person=self.person, email='p6001@test.com')
 
         PatientGroupMembership.objects.create(group=self.group, person_id=self.person.person_id)
 
@@ -864,12 +864,12 @@ class OrgScopedSyncRejectionTest(TestCase):
         ApplicationOrganization.objects.create(application=self.app, organization=self.org)
 
         self.person_in_org = Person.objects.create(person_id=7001)
-        PatientInfo.objects.create(
+        PatientRecord.objects.create(
             person=self.person_in_org, email='p7001@test.com', organization=self.org,
         )
 
         self.person_outside_org = Person.objects.create(person_id=7002)
-        PatientInfo.objects.create(person=self.person_outside_org, email='p7002@test.com')
+        PatientRecord.objects.create(person=self.person_outside_org, email='p7002@test.com')
 
         self.client = APIClient()
 
@@ -944,7 +944,7 @@ class FirebaseAuthedSyncTest(TestCase):
         self.firebase_user.save()
 
         self.person = Person.objects.create(person_id=9001)
-        PatientInfo.objects.create(person=self.person, email='patient@example.com')
+        PatientRecord.objects.create(person=self.person, email='patient@example.com')
         PatientUser.objects.create(identity=self.firebase_user, person=self.person)
 
         self.client = APIClient()
@@ -985,7 +985,7 @@ class FirebaseAuthedSyncTest(TestCase):
         self.assertEqual(m.person_id, self.person.person_id)
 
     def test_firebase_authed_sync_same_person_as_me_endpoint(self):
-        from patient_portal.api.views import PatientInfoViewSet
+        from patient_portal.api.views import PatientRecordViewSet
         resp = self.client.post(
             '/api/lab-results/sync/', self._sync_payload(), format='json',
         )
@@ -999,7 +999,7 @@ class FirebaseAuthedSyncTest(TestCase):
 
     def test_firebase_authed_with_explicit_person_id_for_other_person_denied(self):
         other_person = Person.objects.create(person_id=8888)
-        PatientInfo.objects.create(person=other_person)
+        PatientRecord.objects.create(person=other_person)
         resp = self.client.post(
             '/api/lab-results/sync/',
             self._sync_payload(person_id=other_person.person_id),
@@ -1020,7 +1020,7 @@ class FirebaseAuthedSyncTest(TestCase):
         new_user.is_staff = True  # privileged caller; see setUp note
         new_user.save()
         person2 = Person.objects.create(person_id=9002)
-        PatientInfo.objects.create(person=person2, email='emailmatch@example.com')
+        PatientRecord.objects.create(person=person2, email='emailmatch@example.com')
         self.client.force_authenticate(user=new_user)
 
         resp = self.client.post(
@@ -1048,7 +1048,7 @@ class ServiceTokenSyncFallbackTest(TestCase):
             email='patient-svc@test.com', password='test',
         )
         self.person = Person.objects.create(person_id=9010)
-        PatientInfo.objects.create(person=self.person, email='patient-svc@test.com')
+        PatientRecord.objects.create(person=self.person, email='patient-svc@test.com')
         PatientUser.objects.create(identity=self.patient, person=self.person)
 
         self.client = APIClient()
@@ -1108,7 +1108,7 @@ class SyncNonSuperuserTest(TestCase):
         _setup_vocab()
         self.user = Identity.objects.create_user(email='patient@test.com', password='test')
         self.person = Person.objects.create(person_id=2001)
-        PatientInfo.objects.create(person=self.person)
+        PatientRecord.objects.create(person=self.person)
         PatientUser.objects.create(identity=self.user, person=self.person)
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
@@ -1138,7 +1138,7 @@ class SyncNonSuperuserTest(TestCase):
     def test_sync_other_person_denied(self):
         # A patient cannot write to a person they do not own (can_access_patient).
         other = Person.objects.create(person_id=2002)
-        PatientInfo.objects.create(person=other)
+        PatientRecord.objects.create(person=other)
         resp = self.client.post('/api/lab-results/sync/', self._payload(person_id=2002), format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -1157,7 +1157,7 @@ class DedupSyncTest(TestCase):
         self.user.is_superuser = True
         self.user.save()
         self.person = Person.objects.create(person_id=3001)
-        PatientInfo.objects.create(person=self.person)
+        PatientRecord.objects.create(person=self.person)
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
 
@@ -1306,7 +1306,7 @@ class ResolvePersonIdEmailFallbackTest(TestCase):
     def setUp(self):
         _setup_vocab()
         self.person = Person.objects.create(person_id=17001)
-        self.patient = PatientInfo.objects.create(
+        self.patient = PatientRecord.objects.create(
             person=self.person, email='shared@example.com',
         )
 
@@ -1350,7 +1350,7 @@ class ResolvePersonIdEmailFallbackTest(TestCase):
         from omop_core.models import Organization
         org2 = Organization.objects.create(name='OtherOrg')
         person2 = Person.objects.create(person_id=17002)
-        PatientInfo.objects.create(
+        PatientRecord.objects.create(
             person=person2, email='shared@example.com', organization=org2,
         )
         user = self._user()
@@ -1408,11 +1408,11 @@ class ResolvePersonIdOrgBypassTest(TestCase):
 
         # Patient in org-A (accessible)
         self.person_in_a = Person.objects.create(person_id=18001)
-        PatientInfo.objects.create(person=self.person_in_a, organization=self.org_a)
+        PatientRecord.objects.create(person=self.person_in_a, organization=self.org_a)
 
         # Patient in org-B (must NOT be accessible via org-A token)
         self.person_in_b = Person.objects.create(person_id=18002)
-        PatientInfo.objects.create(person=self.person_in_b, organization=self.org_b)
+        PatientRecord.objects.create(person=self.person_in_b, organization=self.org_b)
 
         # Give the provider a GroupAccess that covers the org-B patient.
         # This simulates a cross-org group grant that must not bypass org isolation.
@@ -1424,7 +1424,7 @@ class ResolvePersonIdOrgBypassTest(TestCase):
         GroupAccess.objects.create(
             identity=self.provider,
             group=self.group,
-            role='navigator',
+            role='analyst',
         )
 
         self.client = APIClient()
@@ -1471,7 +1471,7 @@ class SyncVisitIdempotencyTest(TestCase):
         self.user.is_superuser = True
         self.user.save()
         self.person = Person.objects.create(person_id=19001)
-        PatientInfo.objects.create(person=self.person)
+        PatientRecord.objects.create(person=self.person)
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
 
@@ -1540,7 +1540,7 @@ class SyncProvenanceDedupTest(TestCase):
         self.user.is_superuser = True
         self.user.save()
         self.person = Person.objects.create(person_id=20001)
-        PatientInfo.objects.create(person=self.person)
+        PatientRecord.objects.create(person=self.person)
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
 

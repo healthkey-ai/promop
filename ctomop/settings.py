@@ -33,7 +33,7 @@ if not DEBUG:
     # app server is fully initialised (migrate, test, collectstatic, check, etc.)
     # so that Render deploys (which call `migrate` in start.sh) and CI test runs
     # are not broken when DATABASE_URL is absent at import time.
-    _management_commands = {'migrate', 'test', 'collectstatic', 'check', 'makemigrations', 'shell'}
+    _management_commands = {'migrate', 'test', 'collectstatic', 'check', 'makemigrations'}
     _running_mgmt = len(_sys.argv) > 1 and _sys.argv[1] in _management_commands
     if not _running_mgmt:
         from django.core.exceptions import ImproperlyConfigured

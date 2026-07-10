@@ -92,6 +92,7 @@ export const HR_OPTIONS = ['HR+', 'HR-', 'HR+ with low expression', 'HR+ with hi
 export const HRD_OPTIONS = ['HRD+', 'HRD-', 'Unknown'];
 export const MENOPAUSAL_OPTIONS = ['Pre-menopausal', 'Peri-menopausal', 'Post-menopausal', 'Unknown'];
 export const FLIPI_RISK_OPTIONS = ['Low', 'Intermediate', 'High'];
+export const FLIPI_FACTOR_OPTIONS = ['Age ≥ 60', 'Stage III/IV', 'Hgb < 12 g/dL', 'Nodal areas > 4', 'Elevated LDH'];
 export const GELF_OPTIONS = ['Met', 'Not Met', 'Unknown'];
 export const FL_TUMOR_GRADE_OPTIONS = [
   'Grade 1 (0–5 centroblasts/HPF)',
