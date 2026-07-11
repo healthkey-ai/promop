@@ -236,12 +236,6 @@ MYELOMA_REGIMEN_CONCEPT_IDS: dict[frozenset, int | None] = {
 }
 
 
-def get_regimen_concept_id(drug_names: frozenset) -> int | None:
-    """Return HemOnc concept_id for a frozenset of lowercased drug names, or None."""
-    key = frozenset(d.lower().strip() for d in drug_names)
-    return MYELOMA_REGIMEN_CONCEPT_IDS.get(key)
-
-
 # ---------------------------------------------------------------------------
 # Cross-disease regimen lookup (lymphoma, CLL, breast cancer)
 # ---------------------------------------------------------------------------
@@ -310,6 +304,98 @@ REGIMEN_LOOKUP: dict[frozenset, str] = {
     frozenset({'ado-trastuzumab emtansine'}):                                    'T-DM1',
     frozenset({'pembrolizumab', 'chemotherapy'}):                                'Pembrolizumab+Chemo',
 }
+
+REGIMEN_CONCEPT_IDS: dict[frozenset, int | None] = {
+    # Follicular Lymphoma / DLBCL / shared
+    frozenset({'rituximab', 'cyclophosphamide', 'doxorubicin', 'vincristine', 'prednisone'}): 35805028,
+    frozenset({'rituximab', 'cyclophosphamide', 'vincristine', 'prednisone'}): 35805630,
+    frozenset({'rituximab', 'bendamustine'}): 35804570,
+    frozenset({'obinutuzumab'}): 35804583,
+    frozenset({'rituximab'}): 35803432,
+    frozenset({'tazemetostat'}): 42542442,
+    frozenset({'mosunetuzumab'}): 37557146,
+    frozenset({'axicabtagene'}): 35805074,
+    frozenset({'glofitamab'}): 37557451,
+    frozenset({'epcoritamab'}): 37557299,
+    frozenset({'copanlisib'}): 35805647,
+    frozenset({'tisagenlecleucel'}): 35804066,
+    frozenset({'rituximab', 'gemcitabine', 'dexamethasone', 'cisplatin'}): 35805062,
+    frozenset({'rituximab', 'gemcitabine', 'oxaliplatin'}): 35805082,
+    # CLL
+    frozenset({'fludarabine', 'cyclophosphamide', 'rituximab'}): 35803441,
+    # Breast Cancer
+    frozenset({'doxorubicin', 'cyclophosphamide'}): 35101486,
+    frozenset({'paclitaxel', 'doxorubicin', 'cyclophosphamide'}): 35101507,
+    frozenset({'docetaxel', 'cyclophosphamide'}): 35804232,
+    frozenset({'paclitaxel', 'trastuzumab', 'pertuzumab'}): 1525210,
+    frozenset({'trastuzumab', 'pertuzumab', 'docetaxel'}): 35804254,
+    frozenset({'tamoxifen'}): 35804221,
+    frozenset({'trastuzumab deruxtecan'}): 42542261,
+    frozenset({'sacituzumab govitecan'}): 912024,
+    frozenset({'olaparib'}): 35804269,
+    frozenset({'capecitabine'}): 35804227,
+    frozenset({'eribulin'}): 35804265,
+    frozenset({'ado-trastuzumab emtansine'}): 35805230,
+}
+
+
+def _normalize_regimen_key(drug_names) -> frozenset:
+    return frozenset(d.lower().strip() for d in drug_names if d)
+
+
+def get_regimen_name(drug_names) -> str | None:
+    """Return a canonical regimen display name for a set of drug names, if known."""
+    key = _normalize_regimen_key(drug_names)
+    if key in MYELOMA_REGIMEN_LOOKUP:
+        return MYELOMA_REGIMEN_LOOKUP[key]
+    if key in REGIMEN_LOOKUP:
+        return REGIMEN_LOOKUP[key]
+    for lookup_key, name in {**MYELOMA_REGIMEN_LOOKUP, **REGIMEN_LOOKUP}.items():
+        if lookup_key.issubset(key):
+            return name
+    return None
+
+
+def get_regimen_concept_id(drug_names) -> int | None:
+    """Return HemOnc concept_id for a set of lowercased drug names, or None."""
+    key = _normalize_regimen_key(drug_names)
+    if key in MYELOMA_REGIMEN_CONCEPT_IDS:
+        return MYELOMA_REGIMEN_CONCEPT_IDS[key]
+    if key in REGIMEN_CONCEPT_IDS:
+        return REGIMEN_CONCEPT_IDS[key]
+    merged = {**MYELOMA_REGIMEN_CONCEPT_IDS, **REGIMEN_CONCEPT_IDS}
+    for lookup_key, concept_id in merged.items():
+        if concept_id and lookup_key.issubset(key):
+            return concept_id
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Abbreviated regimen name → HemOnc concept_id
+# Built automatically from MYELOMA_REGIMEN_LOOKUP + MYELOMA_REGIMEN_CONCEPT_IDS.
+# Enables concept_id lookup when only the abbreviated name (e.g. 'VRD', 'DaraRD')
+# is available — e.g. when read back from drug_source_value or from FHIR text.
+# ---------------------------------------------------------------------------
+
+def _build_name_to_concept_id() -> dict[str, int]:
+    """Return {normalized_regimen_name: concept_id} for all myeloma regimens."""
+    mapping: dict[str, int] = {}
+    for drug_key, name in MYELOMA_REGIMEN_LOOKUP.items():
+        cid = MYELOMA_REGIMEN_CONCEPT_IDS.get(drug_key)
+        if cid:
+            mapping[name.lower()] = cid
+    return mapping
+
+
+MYELOMA_REGIMEN_NAME_TO_CONCEPT_ID: dict[str, int] = _build_name_to_concept_id()
+
+
+def get_regimen_concept_id_by_name(regimen_name: str) -> int | None:
+    """Return HemOnc concept_id for an abbreviated regimen name (e.g. 'VRD', 'DaraRD').
+
+    Case-insensitive.  Returns None when not found.
+    """
+    return MYELOMA_REGIMEN_NAME_TO_CONCEPT_ID.get((regimen_name or '').strip().lower())
 
 # ---------------------------------------------------------------------------
 # Follicular Lymphoma — HemOnc concept IDs and LOT weights

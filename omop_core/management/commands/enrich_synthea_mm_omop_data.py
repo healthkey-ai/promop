@@ -31,6 +31,10 @@ from omop_core.models import (
     ConditionOccurrence, Concept, ConceptClass, Domain, DrugExposure, Location,
     Observation, PatientRecord, Person, ProcedureOccurrence, Vocabulary,
 )
+from omop_core.services.lot_regimens import (
+    MYELOMA_REGIMEN_CONCEPT_IDS, get_regimen_concept_id, get_regimen_name,
+    get_regimen_concept_id_by_name,
+)
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.pk import next_pk
 from omop_core.signals import suppress_patient_record_refresh
@@ -217,6 +221,7 @@ def _parse_bundle(path):
                 'patient': resource,
                 'conditions': [],
                 'procedures': [],
+                'medications': [],
             }
             patient_aliases[pid] = pid
             patient_aliases[f'Patient/{pid}'] = pid
@@ -233,8 +238,204 @@ def _parse_bundle(path):
             patient_id = _resolve_patient(resource.get('subject', {}).get('reference', ''))
             if patient_id in patient_map:
                 patient_map[patient_id]['procedures'].append(resource)
+        elif rtype == 'MedicationStatement':
+            patient_id = _resolve_patient(resource.get('subject', {}).get('reference', ''))
+            if patient_id in patient_map:
+                patient_map[patient_id]['medications'].append(resource)
 
     return patient_map
+
+
+def _extract_therapy_lines(medications):
+    """Parse MedicationStatement list and return a dict keyed by line number.
+
+    Only regimen-level entries (no 'partOf') with a 'therapy-line' extension are
+    included.  Each value is a dict with: regimen, start_date, end_date, outcome,
+    hemonc_concept_id, drugs (list of individual drug display names).
+    """
+    therapy_lines = {}
+    for med in medications:
+        if med.get('partOf'):
+            continue  # individual drug row — handled separately
+        line_num = None
+        outcome = None
+        for ext in med.get('extension', []):
+            url = ext.get('url', '')
+            if 'therapy-line' in url:
+                line_num = ext.get('valueInteger')
+            elif 'therapy-outcome' in url:
+                outcome = ext.get('valueString')
+        if line_num is None:
+            continue
+
+        codeable = med.get('medicationCodeableConcept', {})
+        regimen_name = codeable.get('text', '')
+        hemonc_cid = None
+        for coding in codeable.get('coding', []):
+            if coding.get('system') == 'http://ohdsi.org/omop/HemOnc':
+                try:
+                    hemonc_cid = int(coding['code'])
+                except (ValueError, TypeError, KeyError):
+                    pass
+
+        period = med.get('effectivePeriod', {})
+        start_str = period.get('start') or med.get('effectiveDateTime')
+        end_str = period.get('end')
+
+        therapy_lines[line_num] = {
+            'regimen': regimen_name,
+            'hemonc_concept_id': hemonc_cid,
+            'start_date': start_str,
+            'end_date': end_str,
+            'outcome': outcome,
+            'drugs': [],
+        }
+
+    # Second pass: collect individual drug names into their parent line
+    for med in medications:
+        if not med.get('partOf'):
+            continue
+        line_num = None
+        for ext in med.get('extension', []):
+            if 'therapy-line' in ext.get('url', ''):
+                line_num = ext.get('valueInteger')
+        if line_num is not None and line_num in therapy_lines:
+            drug_text = (med.get('medicationCodeableConcept') or {}).get('text', '')
+            if drug_text:
+                therapy_lines[line_num]['drugs'].append(drug_text)
+
+    return therapy_lines
+
+
+def _ensure_mm_episodes(person, therapy_lines, ehr_type, dry_run=False):
+    """Create Episode/DrugExposure/EpisodeEvent rows for a patient's therapy lines.
+
+    Idempotent: skips rows that already exist.
+    Returns a count of new Episodes created.
+    """
+    try:
+        from omop_oncology.models import Episode, EpisodeEvent
+    except ImportError:
+        return 0
+
+    created = 0
+    for lot_num, lot_data in sorted(therapy_lines.items()):
+        regimen_name = lot_data.get('regimen', '')
+        hemonc_cid = lot_data.get('hemonc_concept_id')
+
+        # Parse dates
+        lot_start = _coerce_date(lot_data.get('start_date'))
+        lot_end = _coerce_date(lot_data.get('end_date'))
+
+        # Resolve regimen concept: prefer HemOnc concept_id from FHIR, then name lookup
+        regimen_concept = None
+        resolved_cid = None
+        if hemonc_cid:
+            regimen_concept = Concept.objects.filter(concept_id=hemonc_cid).first()
+            if regimen_concept:
+                resolved_cid = hemonc_cid
+        if regimen_concept is None and regimen_name:
+            # Try abbreviated name lookup (e.g. 'VRD' → 35806260)
+            cid = get_regimen_concept_id_by_name(regimen_name)
+            if cid:
+                regimen_concept = Concept.objects.filter(concept_id=cid).first()
+                if regimen_concept:
+                    resolved_cid = cid
+        if regimen_concept is None and lot_data.get('drugs'):
+            # Normalize display names: 'Bortezomib (Velcade)' → 'bortezomib'
+            def _strip_brand(name: str) -> str:
+                return name.split('(')[0].strip().lower()
+
+            drug_key = frozenset(_strip_brand(d) for d in lot_data['drugs'] if d.strip())
+            cid = get_regimen_concept_id(drug_key)
+            if cid:
+                regimen_concept = Concept.objects.filter(concept_id=cid).first()
+                if regimen_concept:
+                    resolved_cid = cid
+
+        if dry_run:
+            created += 1
+            continue
+
+        with transaction.atomic():
+            # ── DrugExposure (regimen-level) ──────────────────────────────
+            _de = DrugExposure.objects.filter(
+                person=person,
+                drug_source_value=regimen_name[:50],
+                drug_exposure_start_date=lot_start,
+            ).first()
+            if _de is None and lot_start:
+                _de = DrugExposure(
+                    drug_exposure_id=next_pk(DrugExposure, 'drug_exposure_id'),
+                    person=person,
+                    drug_concept=regimen_concept,
+                    drug_exposure_start_date=lot_start,
+                    drug_exposure_end_date=lot_end,
+                    drug_type_concept=ehr_type,
+                    drug_source_value=regimen_name[:50],
+                    drug_source_concept=regimen_concept,
+                )
+                _de._skip_patient_record_refresh = True
+                _de.save()
+
+            # ── Individual drug DrugExposure rows ──────────────────────────
+            for drug_name in lot_data.get('drugs', []):
+                if not drug_name.strip():
+                    continue
+                drug_de = DrugExposure.objects.filter(
+                    person=person,
+                    drug_source_value=drug_name[:50],
+                    drug_exposure_start_date=lot_start,
+                ).first()
+                if drug_de is None and lot_start:
+                    # Look up RxNorm concept for the individual drug
+                    drug_concept = Concept.objects.filter(
+                        concept_name__iexact=drug_name,
+                        domain__domain_id='Drug',
+                    ).first()
+                    DrugExposure.objects.create(
+                        drug_exposure_id=next_pk(DrugExposure, 'drug_exposure_id'),
+                        person=person,
+                        drug_concept=drug_concept,
+                        drug_exposure_start_date=lot_start,
+                        drug_exposure_end_date=lot_end,
+                        drug_type_concept=ehr_type,
+                        drug_source_value=drug_name[:50],
+                    )
+
+            if _de is None:
+                continue
+
+            # ── Episode ───────────────────────────────────────────────────
+            _ep = Episode.objects.filter(
+                person=person,
+                episode_source_value=f'LOT-{lot_num}',
+            ).first()
+            if _ep is None:
+                ep_source_concept = regimen_concept if resolved_cid else None
+                _ep = Episode(
+                    episode_id=next_pk(Episode, 'episode_id'),
+                    person=person,
+                    episode_concept=ehr_type,
+                    episode_object_concept=regimen_concept,
+                    episode_type_concept=ehr_type,
+                    episode_start_date=lot_start or datetime.utcnow().date(),
+                    episode_end_date=lot_end,
+                    episode_number=lot_num,
+                    episode_source_value=f'LOT-{lot_num}',
+                    episode_source_concept=ep_source_concept,
+                )
+                _ep.save()
+                created += 1
+
+            # ── EpisodeEvent: link Episode → DrugExposure ─────────────────
+            EpisodeEvent.objects.get_or_create(
+                episode_id=_ep.episode_id,
+                event_id=_de.drug_exposure_id,
+                defaults={'episode_event_field_concept': ehr_type},
+            )
+
+    return created
 
 
 class Command(BaseCommand):
@@ -272,6 +473,12 @@ class Command(BaseCommand):
             default=MIN_PROCEDURES_PER_PATIENT,
             help='Minimum ProcedureOccurrence rows to retain per selected patient.',
         )
+        parser.add_argument(
+            '--limit',
+            type=int,
+            default=None,
+            help='Limit enrichment to the first N patients (useful for smoke tests).',
+        )
 
     def handle(self, *args, **options):
         dry_run = options['dry_run']
@@ -291,6 +498,9 @@ class Command(BaseCommand):
                 .select_related('person')
                 .order_by('person_id')
             )
+
+        if options.get('limit'):
+            cohort = cohort[:options['limit']]
 
         if not cohort:
             raise CommandError('No matching SYNTHEA-MM patients found.')
@@ -484,11 +694,18 @@ class Command(BaseCommand):
                             existing_proc_keys.add(proc_key)
                             procedure_creates += 1
 
+                # ── Step 3: Ensure Episode/EpisodeEvent for each therapy line ──
+                therapy_lines = _extract_therapy_lines(source.get('medications', []))
+                episode_creates = _ensure_mm_episodes(
+                    person, therapy_lines, ehr_type, dry_run=dry_run,
+                )
+
                 touched_person_ids.append(person.person_id)
                 self.stdout.write(
                     f'  [{idx}/{len(cohort)}] person_id={person.person_id} '
                     f'condition={"yes" if existing_condition is None else "no-op"} '
-                    f'procedures={ProcedureOccurrence.objects.filter(person=person).count() if not dry_run else len(existing_proc_keys)}'
+                    f'procedures={ProcedureOccurrence.objects.filter(person=person).count() if not dry_run else len(existing_proc_keys)} '
+                    f'episodes=+{episode_creates}'
                 )
 
         if dry_run:
@@ -511,6 +728,7 @@ class Command(BaseCommand):
             'diagnosis_date',
             'stage',
             'first_line_therapy',
+            'first_line_therapy_id',
             'stem_cell_transplant_history',
             'hemoglobin_g_dl',
             'serum_calcium_mg_dl',
@@ -519,6 +737,8 @@ class Command(BaseCommand):
             'kappa_flc',
             'lambda_flc',
             'clonal_plasma_cells',
+            'meets_crab',
+            'meets_slim',
             'ecog_performance_status',
             'smoking_status',
             'wearable_last_sync_at',

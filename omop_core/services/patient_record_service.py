@@ -8,6 +8,7 @@ Usage:
 
 import math
 import statistics
+from collections import defaultdict
 from datetime import date, timedelta
 from django.db import models
 from django.db.models import DateTimeField
@@ -23,6 +24,7 @@ from omop_core.services.mappings import (
     WEARABLE_LOINC, WEARABLE_ARTIFACT_BOUNDS, WEARABLE_MIN_VALID_DAYS,
     WEARABLE_TREND_IMPROVING_PCT, WEARABLE_TREND_DECLINING_PCT,
 )
+from omop_core.services.lot_regimens import get_regimen_concept_id, get_regimen_name, get_regimen_concept_id_by_name
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +67,7 @@ _OMOP_DERIVED_FIELDS = [
     'monoclonal_protein_serum', 'monoclonal_protein_urine',
     'kappa_flc', 'lambda_flc', 'clonal_plasma_cells',
     # MM boolean/coded fields (derived by _get_mm_specific_data)
-    'plasma_cell_leukemia', 'bone_lesions', 'meets_crab',
+    'plasma_cell_leukemia', 'bone_lesions', 'meets_crab', 'meets_slim',
     # Vitals
     'systolic_blood_pressure', 'diastolic_blood_pressure', 'heartrate',
     'weight', 'weight_units', 'height', 'height_units', 'temperature',
@@ -476,15 +478,17 @@ def _disease_name_to_slug(name: str) -> str:
 def _get_treatment_data(person: Person) -> dict:
     data = {}
 
-    drug_exposures = DrugExposure.objects.filter(person=person).order_by('-drug_exposure_start_date')
+    drug_exposures = list(
+        DrugExposure.objects
+        .filter(person=person)
+        .select_related('drug_concept')
+        .order_by('drug_exposure_start_date', 'drug_exposure_id')
+    )
 
-    if not drug_exposures.exists():
+    if not drug_exposures:
         return data
 
-    recent_drugs = drug_exposures[:10]
-
-    unique_dates = set(drug.drug_exposure_start_date for drug in drug_exposures)
-    data['therapy_lines_count'] = len(unique_dates)
+    recent_drugs = list(reversed(drug_exposures[-10:]))
 
     current_meds = []
     for drug in recent_drugs[:5]:
@@ -502,29 +506,17 @@ def _get_treatment_data(person: Person) -> dict:
     except Exception:
         pass
 
-    # Fallback: group by start date so combination regimens count as one line.
-    # Sort chronologically: earliest date = line 1.
-    from collections import defaultdict
-    date_groups = defaultdict(list)
-    for drug in drug_exposures:
-        name = drug.drug_concept.concept_name if drug.drug_concept else 'Unknown'
-        date_groups[drug.drug_exposure_start_date].append(name)
-
-    therapy_details = [
-        {
-            'drug': ' + '.join(date_groups[d]),
-            'start_date': str(d),
-            'end_date': None,
-        }
-        for d in sorted(date_groups.keys())
-    ]
+    therapy_details = _build_fallback_therapy_details(drug_exposures)
+    data['therapy_lines_count'] = len(therapy_details)
 
     if len(therapy_details) >= 1:
         data['first_line_therapy'] = therapy_details[0]['drug']
+        data['first_line_therapy_id'] = therapy_details[0]['concept_id']
         data['first_line_date'] = therapy_details[0]['start_date']
 
     if len(therapy_details) >= 2:
         data['second_line_therapy'] = therapy_details[1]['drug']
+        data['second_line_therapy_id'] = therapy_details[1]['concept_id']
         data['second_line_date'] = therapy_details[1]['start_date']
 
     if len(therapy_details) > 2:
@@ -535,8 +527,99 @@ def _get_treatment_data(person: Person) -> dict:
             {'therapy': d['drug'], 'startDate': d['start_date'], 'endDate': d['end_date']}
             for d in later_drugs
         ]
+        later_ids = [d['concept_id'] for d in later_drugs if d.get('concept_id')]
+        if later_ids:
+            data['later_therapy_ids'] = later_ids
 
     return data
+
+
+def _build_fallback_therapy_details(drug_exposures):
+    """Collapse DrugExposure rows into LOT-like regimen rows without Episode data.
+
+    The breast-cancer backfill may materialize a regimen as several nearby
+    ingredient rows (for example AC-T over 6 weeks). Try to recover a regimen
+    concept first; otherwise fall back to same-day grouping.
+    """
+    if not drug_exposures:
+        return []
+
+    REGIMEN_WINDOW_DAYS = 42
+    details = []
+    idx = 0
+    while idx < len(drug_exposures):
+        match = _match_fallback_regimen_window(drug_exposures, idx, REGIMEN_WINDOW_DAYS)
+        if match is None:
+            match = _match_same_day_therapy(drug_exposures, idx)
+        details.append(match)
+        idx = match['next_index']
+    return details
+
+
+def _match_fallback_regimen_window(drug_exposures, start_idx, window_days):
+    start_date = drug_exposures[start_idx].drug_exposure_start_date
+    if not start_date:
+        return None
+
+    best_match = None
+    names = []
+    latest_end = None
+    for idx in range(start_idx, len(drug_exposures)):
+        drug = drug_exposures[idx]
+        if not drug.drug_exposure_start_date:
+            break
+        if (drug.drug_exposure_start_date - start_date).days > window_days:
+            break
+        name = drug.drug_concept.concept_name if drug.drug_concept else (drug.drug_source_value or 'Unknown')
+        names.append(name)
+        if drug.drug_exposure_end_date:
+            latest_end = max(latest_end, drug.drug_exposure_end_date) if latest_end else drug.drug_exposure_end_date
+        concept_id = get_regimen_concept_id({n.lower().strip() for n in names})
+        regimen_name = get_regimen_name({n.lower().strip() for n in names})
+        if concept_id or regimen_name:
+            display_name = _resolve_regimen_display_name(concept_id, regimen_name, names)
+            best_match = {
+                'drug': display_name,
+                'concept_id': concept_id,
+                'start_date': str(start_date),
+                'end_date': str(latest_end) if latest_end else None,
+                'next_index': idx + 1,
+            }
+    return best_match
+
+
+def _match_same_day_therapy(drug_exposures, start_idx):
+    start_date = drug_exposures[start_idx].drug_exposure_start_date
+    same_day = []
+    idx = start_idx
+    while idx < len(drug_exposures) and drug_exposures[idx].drug_exposure_start_date == start_date:
+        same_day.append(drug_exposures[idx])
+        idx += 1
+
+    names = [
+        de.drug_concept.concept_name if de.drug_concept else (de.drug_source_value or 'Unknown')
+        for de in same_day
+    ]
+    concept_id = get_regimen_concept_id({n.lower().strip() for n in names})
+    regimen_name = get_regimen_name({n.lower().strip() for n in names})
+    latest_end = max((de.drug_exposure_end_date for de in same_day if de.drug_exposure_end_date), default=None)
+    return {
+        'drug': _resolve_regimen_display_name(concept_id, regimen_name, names),
+        'concept_id': concept_id,
+        'start_date': str(start_date) if start_date else None,
+        'end_date': str(latest_end) if latest_end else None,
+        'next_index': idx,
+    }
+
+
+def _resolve_regimen_display_name(concept_id, regimen_name, raw_names):
+    if concept_id:
+        concept = _cc_by_id(concept_id)
+        if concept:
+            return concept.concept_name
+    if regimen_name:
+        return regimen_name
+    return ' + '.join(raw_names)
 
 
 def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
@@ -575,17 +658,34 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             for de in drugs_in_episode
             if de.drug_concept
         }
+        # Drug source values (regimen names set by import handler) as fallback
+        source_value_set = {
+            de.drug_source_value.strip()
+            for de in drugs_in_episode
+            if de.drug_source_value and de.drug_source_value.strip()
+        }
 
-        # Prefer concept already joined via select_related('episode_source_concept')
+        # Prefer HemOnc concept already joined via select_related; if the attached
+        # concept is from a different vocabulary (e.g. a generic Drug domain fallback),
+        # it does not represent the MM regimen — skip it and resolve from drug names.
         concept_id = None
-        if episode.episode_source_concept_id and episode.episode_source_concept:
+        src_concept = episode.episode_source_concept
+        if (episode.episode_source_concept_id and src_concept and
+                getattr(src_concept, 'vocabulary_id', None) == 'HemOnc'):
             concept_id = episode.episode_source_concept_id
         elif drug_name_set:
             concept_id = get_regimen_concept_id(drug_name_set)
+        # Final fallback: treat each drug_source_value as an abbreviated regimen name
+        if not concept_id and source_value_set:
+            for sv in source_value_set:
+                cid = get_regimen_concept_id_by_name(sv)
+                if cid:
+                    concept_id = cid
+                    break
 
         if concept_id:
             needed_concept_ids.add(concept_id)
-        episode_rows.append((episode, drugs_in_episode, concept_id))
+        episode_rows.append((episode, drugs_in_episode, concept_id, source_value_set))
 
     # ── Bulk-fetch Concept names in one query ──────────────────────────────
     # Concept rows already loaded via select_related are re-used directly.
@@ -602,7 +702,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         )
 
     # ── Second pass: populate data dict ───────────────────────────────────
-    for episode, drugs_in_episode, concept_id in episode_rows:
+    for episode, drugs_in_episode, concept_id, source_value_set in episode_rows:
         lot = episode.episode_number
         if lot is None:
             continue
@@ -611,17 +711,24 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         if concept_id and concept_id not in concept_name_map:
             concept_id = None
 
-        drug_names = (
-            concept_name_map[concept_id]
-            if concept_id
-            else (
-                ' + '.join(
-                    de.drug_concept.concept_name
-                    for de in drugs_in_episode
-                    if de.drug_concept
-                ) or 'Unknown'
+        if concept_id:
+            drug_names = concept_name_map[concept_id]
+        else:
+            # Try regimen name resolution: drug concept names first, then source values
+            from omop_core.services.lot_regimens import get_regimen_name
+            _drug_cnames = [de.drug_concept.concept_name for de in drugs_in_episode if de.drug_concept]
+            _regimen_name = get_regimen_name({n.lower().strip() for n in _drug_cnames}) if _drug_cnames else None
+            if not _regimen_name:
+                for sv in source_value_set:
+                    _regimen_name = get_regimen_name({sv.lower()})
+                    if _regimen_name:
+                        break
+            drug_names = (
+                _regimen_name
+                or next(iter(source_value_set), None)  # raw regimen name from drug_source_value
+                or ' + '.join(_drug_cnames)
+                or 'Unknown'
             )
-        )
 
         start_date = str(episode.episode_start_date) if episode.episode_start_date else None
         end_date = str(episode.episode_end_date) if episode.episode_end_date else None
@@ -1259,6 +1366,70 @@ def _get_mm_specific_data(person: Person) -> dict:
                 data[field] = 'Present' if bool_val else 'Absent'
             else:
                 data[field] = bool_val
+
+    # ── meets_slim: derived from plasma cells and FLC ratio in OMOP ─────────
+    # SLiM = Sixty (plasma cells ≥60%), Light chain ratio ≥100, or MRI lesions
+    # (MRI lesions are not tracked in OMOP, so we check plasma cells and FLC)
+    slim_rows = (
+        Measurement.objects
+        .filter(
+            person=person,
+            measurement_source_value__in=['26098-4', '33944-8', '33945-5'],
+            value_as_number__isnull=False,
+        )
+        .values('measurement_source_value', 'value_as_number')
+    )
+    slim_vals = {}
+    for row in slim_rows:
+        slim_vals.setdefault(row['measurement_source_value'], []).append(
+            float(row['value_as_number'])
+        )
+
+    plasma_pcts = slim_vals.get('26098-4', [])
+    kappas = slim_vals.get('33944-8', [])
+    lambdas = slim_vals.get('33945-5', [])
+
+    meets_slim = False
+    # Sixty criterion: any plasma cells measurement ≥60%
+    if any(v >= 60.0 for v in plasma_pcts):
+        meets_slim = True
+    # Light-chain ratio criterion: ratio ≥100 in either direction
+    elif kappas and lambdas:
+        k = kappas[-1]
+        lam = lambdas[-1]
+        if lam > 0 and k / lam >= 100:
+            meets_slim = True
+        elif k > 0 and lam / k >= 100:
+            meets_slim = True
+
+    data['meets_slim'] = meets_slim
+
+    # ── meets_crab fallback: compute from OMOP Measurements when obs missing ─
+    if 'meets_crab' not in data:
+        crab_rows = (
+            Measurement.objects
+            .filter(
+                person=person,
+                measurement_source_value__in=['718-7', '59260-0', '17861-6', '2000-0', '2164-2', '33914-3'],
+                value_as_number__isnull=False,
+            )
+            .values('measurement_source_value', 'value_as_number')
+        )
+        crab_vals = {}
+        for row in crab_rows:
+            crab_vals.setdefault(row['measurement_source_value'], []).append(float(row['value_as_number']))
+
+        hgb_vals = crab_vals.get('718-7', []) or crab_vals.get('59260-0', [])
+        ca_vals = crab_vals.get('17861-6', []) or crab_vals.get('2000-0', [])
+        crcl_vals = crab_vals.get('2164-2', []) or crab_vals.get('33914-3', [])
+
+        crab_anemia = hgb_vals and min(hgb_vals) < 10.0
+        crab_calcium = ca_vals and max(ca_vals) > 11.0
+        crab_renal = crcl_vals and min(crcl_vals) < 40.0
+        crab_bone = data.get('bone_lesions') == 'Present'
+
+        if any([crab_anemia, crab_calcium, crab_renal, crab_bone]):
+            data['meets_crab'] = True
 
     return data
 
