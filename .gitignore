@@ -91,3 +91,6 @@ db.sqlite3.backup
 *.sqlite3
 *.db
 .gstack/
+
+# Generated Synthea export artifacts
+/synthea_bc_*.json
