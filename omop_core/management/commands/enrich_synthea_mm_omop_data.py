@@ -319,6 +319,8 @@ def _ensure_mm_episodes(person, therapy_lines, ehr_type, dry_run=False):
         return 0
 
     created = 0
+    no_match_concept = Concept.objects.filter(concept_id=0).first()
+
     for lot_num, lot_data in sorted(therapy_lines.items()):
         regimen_name = lot_data.get('regimen', '')
         hemonc_cid = lot_data.get('hemonc_concept_id')
@@ -368,7 +370,7 @@ def _ensure_mm_episodes(person, therapy_lines, ehr_type, dry_run=False):
                 _de = DrugExposure(
                     drug_exposure_id=next_pk(DrugExposure, 'drug_exposure_id'),
                     person=person,
-                    drug_concept=regimen_concept,
+                    drug_concept=regimen_concept or no_match_concept,
                     drug_exposure_start_date=lot_start,
                     drug_exposure_end_date=lot_end,
                     drug_type_concept=ehr_type,
@@ -392,7 +394,7 @@ def _ensure_mm_episodes(person, therapy_lines, ehr_type, dry_run=False):
                     drug_concept = Concept.objects.filter(
                         concept_name__iexact=drug_name,
                         domain__domain_id='Drug',
-                    ).first()
+                    ).first() or no_match_concept
                     DrugExposure.objects.create(
                         drug_exposure_id=next_pk(DrugExposure, 'drug_exposure_id'),
                         person=person,
@@ -417,7 +419,7 @@ def _ensure_mm_episodes(person, therapy_lines, ehr_type, dry_run=False):
                     episode_id=next_pk(Episode, 'episode_id'),
                     person=person,
                     episode_concept=ehr_type,
-                    episode_object_concept=regimen_concept,
+                    episode_object_concept=regimen_concept or no_match_concept,
                     episode_type_concept=ehr_type,
                     episode_start_date=lot_start or datetime.utcnow().date(),
                     episode_end_date=lot_end,
@@ -753,7 +755,7 @@ class Command(BaseCommand):
                 continue
             missing = [
                 f for f in _CRITICAL_MM_FIELDS
-                if not getattr(record, f, None)
+                if getattr(record, f, None) is None
             ]
             if missing:
                 total_missing += len(missing)

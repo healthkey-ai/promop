@@ -20,6 +20,7 @@ from django.test import RequestFactory
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.request import Request as DRFRequest
 from rest_framework.parsers import MultiPartParser, JSONParser
+from omop_core.signals import suppress_patient_record_refresh
 
 # Global socket timeout — prevents any DB operation from hanging forever.
 # This covers both connect and query hangs on the remote Render PostgreSQL.
@@ -191,7 +192,8 @@ class Command(BaseCommand):
             viewset.kwargs = {}
 
             try:
-                response = viewset.upload_fhir(request)
+                with suppress_patient_record_refresh():
+                    response = viewset.upload_fhir(request)
                 data = response.data if hasattr(response, 'data') else {}
                 created = data.get('created_count', 0) or 0
                 updated = data.get('updated_count', 0) or 0

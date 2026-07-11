@@ -906,7 +906,7 @@ class Command(BaseCommand):
         return obs
 
     def _wearable_obs(self, p, today):
-        """28 days of synthetic daily wearable readings, correlated to ECOG.
+        """7 days of synthetic daily wearable readings, correlated to ECOG.
 
         Uses the exact LOINC codes that patient_record_service WEARABLE_LOINC
         expects so _get_wearable_data() can aggregate them automatically.
@@ -950,7 +950,7 @@ class Command(BaseCommand):
              'h', 'activity'),
         ]
 
-        for day_offset in range(28, 0, -1):
+        for day_offset in range(7, 0, -1):
             if random.random() > coverage:
                 continue  # simulate missing-data day
             day_date = (today - timedelta(days=day_offset)).strftime('%Y-%m-%d')

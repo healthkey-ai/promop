@@ -24,7 +24,12 @@ from omop_core.services.mappings import (
     WEARABLE_LOINC, WEARABLE_ARTIFACT_BOUNDS, WEARABLE_MIN_VALID_DAYS,
     WEARABLE_TREND_IMPROVING_PCT, WEARABLE_TREND_DECLINING_PCT,
 )
-from omop_core.services.lot_regimens import get_regimen_concept_id, get_regimen_name, get_regimen_concept_id_by_name
+from omop_core.services.lot_regimens import (
+    get_regimen_concept_id,
+    get_regimen_name,
+    get_regimen_concept_id_by_name,
+    normalize_drug_name,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +567,8 @@ def _match_fallback_regimen_window(drug_exposures, start_idx, window_days):
         return None
 
     best_match = None
-    names = []
+    lookup_names = []   # normalized (lowercase) for regimen matching
+    display_names = []  # original concept_name for fallback display
     latest_end = None
     for idx in range(start_idx, len(drug_exposures)):
         drug = drug_exposures[idx]
@@ -570,14 +576,15 @@ def _match_fallback_regimen_window(drug_exposures, start_idx, window_days):
             break
         if (drug.drug_exposure_start_date - start_date).days > window_days:
             break
-        name = drug.drug_concept.concept_name if drug.drug_concept else (drug.drug_source_value or 'Unknown')
-        names.append(name)
+        raw_name = drug.drug_concept.concept_name if drug.drug_concept else (drug.drug_source_value or 'Unknown')
+        lookup_names.append(normalize_drug_name(raw_name))
+        display_names.append(raw_name)
         if drug.drug_exposure_end_date:
             latest_end = max(latest_end, drug.drug_exposure_end_date) if latest_end else drug.drug_exposure_end_date
-        concept_id = get_regimen_concept_id({n.lower().strip() for n in names})
-        regimen_name = get_regimen_name({n.lower().strip() for n in names})
+        concept_id = get_regimen_concept_id({n.lower().strip() for n in lookup_names})
+        regimen_name = get_regimen_name({n.lower().strip() for n in lookup_names})
         if concept_id or regimen_name:
-            display_name = _resolve_regimen_display_name(concept_id, regimen_name, names)
+            display_name = _resolve_regimen_display_name(concept_id, regimen_name, display_names)
             best_match = {
                 'drug': display_name,
                 'concept_id': concept_id,
@@ -596,15 +603,16 @@ def _match_same_day_therapy(drug_exposures, start_idx):
         same_day.append(drug_exposures[idx])
         idx += 1
 
-    names = [
+    display_names = [
         de.drug_concept.concept_name if de.drug_concept else (de.drug_source_value or 'Unknown')
         for de in same_day
     ]
-    concept_id = get_regimen_concept_id({n.lower().strip() for n in names})
-    regimen_name = get_regimen_name({n.lower().strip() for n in names})
+    lookup_names = [normalize_drug_name(n) for n in display_names]
+    concept_id = get_regimen_concept_id({n.lower().strip() for n in lookup_names})
+    regimen_name = get_regimen_name({n.lower().strip() for n in lookup_names})
     latest_end = max((de.drug_exposure_end_date for de in same_day if de.drug_exposure_end_date), default=None)
     return {
-        'drug': _resolve_regimen_display_name(concept_id, regimen_name, names),
+        'drug': _resolve_regimen_display_name(concept_id, regimen_name, display_names),
         'concept_id': concept_id,
         'start_date': str(start_date) if start_date else None,
         'end_date': str(latest_end) if latest_end else None,
@@ -612,14 +620,20 @@ def _match_same_day_therapy(drug_exposures, start_idx):
     }
 
 
-def _resolve_regimen_display_name(concept_id, regimen_name, raw_names):
+def _resolve_regimen_display_name(concept_id, regimen_name, display_names):
+    """Return a human-readable therapy name.
+
+    Priority: HemOnc concept name > canonical regimen name > joined display names.
+    ``display_names`` should be the original (un-normalized) concept names so
+    that single-drug fallbacks like 'Paclitaxel' preserve their original casing.
+    """
     if concept_id:
         concept = _cc_by_id(concept_id)
         if concept:
             return concept.concept_name
     if regimen_name:
         return regimen_name
-    return ' + '.join(raw_names)
+    return ' + '.join(display_names)
 
 
 def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
@@ -654,7 +668,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         drugs_in_episode = [de_by_id[eid] for eid in event_ids if eid in de_by_id]
 
         drug_name_set = {
-            de.drug_concept.concept_name.lower().strip()
+            normalize_drug_name(de.drug_concept.concept_name)
             for de in drugs_in_episode
             if de.drug_concept
         }
@@ -716,7 +730,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         else:
             # Try regimen name resolution: drug concept names first, then source values
             from omop_core.services.lot_regimens import get_regimen_name
-            _drug_cnames = [de.drug_concept.concept_name for de in drugs_in_episode if de.drug_concept]
+            _drug_cnames = [normalize_drug_name(de.drug_concept.concept_name) for de in drugs_in_episode if de.drug_concept]
             _regimen_name = get_regimen_name({n.lower().strip() for n in _drug_cnames}) if _drug_cnames else None
             if not _regimen_name:
                 for sv in source_value_set:
@@ -835,6 +849,11 @@ _GENETIC_MUTATION_LOINCS = {
 
 def _measurement_code(measurement):
     """Return a stable measurement code from concept mapping or FHIR source_value."""
+    if (
+        measurement.measurement_source_value
+        and measurement.measurement_source_value != getattr(measurement.measurement_concept, 'concept_code', None)
+    ):
+        return measurement.measurement_source_value
     if measurement.measurement_concept and measurement.measurement_concept.concept_code:
         return measurement.measurement_concept.concept_code
     return measurement.measurement_source_value
@@ -1504,6 +1523,12 @@ def _get_laboratory_data(person: Person) -> dict:
     for measurement in measurements:
         if not measurement.measurement_concept:
             continue
+        if (
+            measurement.measurement_source_value
+            and measurement.measurement_concept.concept_code
+            and measurement.measurement_source_value != measurement.measurement_concept.concept_code
+        ):
+            continue
         concept_name = measurement.measurement_concept.concept_name.lower()
         for lab_key, (field_name, unit_field) in legacy_lab_mappings.items():
             if field_name in data:
@@ -1515,27 +1540,15 @@ def _get_laboratory_data(person: Person) -> dict:
 
     # --- New UI fields via LOINC concept code (primary path) ---
     loinc_ms = measurements.filter(
-        measurement_concept__vocabulary_id='LOINC',
-        measurement_concept__concept_code__in=_LOINC_LAB_FIELDS.keys(),
         value_as_number__isnull=False,
     ).select_related('measurement_concept')
     for m in loinc_ms:
-        code = m.measurement_concept.concept_code
+        code = _measurement_code(m)
+        if code not in _LOINC_LAB_FIELDS:
+            continue
         field, cast = _LOINC_LAB_FIELDS[code]
         if field not in data:
             data[field] = cast(m.value_as_number)
-
-    # --- New UI fields via LOINC code stored as source_value (FHIR upload path) ---
-    unfound = {f for (f, _) in _LOINC_LAB_FIELDS.values() if f not in data}
-    if unfound:
-        loinc_sv_ms = measurements.filter(
-            measurement_source_value__in=_LOINC_LAB_FIELDS.keys(),
-            value_as_number__isnull=False,
-        )
-        for m in loinc_sv_ms:
-            field, cast = _LOINC_LAB_FIELDS[m.measurement_source_value]
-            if field not in data:
-                data[field] = cast(m.value_as_number)
 
     # --- New UI fields via display-name source_value (legacy/generator path) ---
     unfound = {f for (f, _) in _LOINC_LAB_FIELDS.values() if f not in data}

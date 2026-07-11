@@ -109,6 +109,9 @@ Staff access is provisioned via:
 python manage.py create_staff_user <email> <password>
 ```
 
+Organization deletion is centralized in `omop_core.services.organization_cleanup.delete_organization_with_patient_cascade()`.
+Use that helper for any new delete path so the org, its `PatientRecord` rows, linked `Person` rows, and OMOP clinical rows are removed together.
+
 ---
 
 ## API Reference
