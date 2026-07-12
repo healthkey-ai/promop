@@ -134,6 +134,12 @@ See [docs/sample-patient-data.md](docs/sample-patient-data.md) for instructions 
 
 ---
 
+## Reproducing Benchmark Results
+
+See **[docs/reproducing-benchmark-results.md](docs/reproducing-benchmark-results.md)** for step-by-step instructions to reproduce the trial-eligibility and full PatientRecord benchmarks from the paper using the `synthea-bc.json` Zenodo data bundle. Includes a complete reference table of every OMOP source (LOINC code, concept name filter, source-value alias) that feeds each PatientRecord column.
+
+---
+
 ## Project Structure
 
 | Directory | Purpose |

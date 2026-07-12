@@ -184,6 +184,7 @@ class GenderField(serializers.CharField):
 class PatientRecordSerializer(serializers.ModelSerializer):
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)
     patient_name = serializers.SerializerMethodField()
+    name = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
     gender = GenderField(required=False, allow_blank=True, allow_null=True)
     refractory_status = serializers.CharField(source='treatment_refractory_status', read_only=True)
@@ -218,6 +219,9 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             full_name = f"{obj.person.given_name or ''} {obj.person.family_name or ''}".strip()
             return full_name if full_name else f"Patient {obj.person.person_id}"
         return f"Patient {obj.person.person_id}"
+
+    def get_name(self, obj):
+        return self.get_patient_name(obj)
 
     def to_representation(self, instance):
         # Bulk-fetch all Concept rows referenced by therapy_id fields in one query,

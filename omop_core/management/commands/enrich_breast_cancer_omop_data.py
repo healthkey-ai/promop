@@ -45,13 +45,14 @@ from django.db.utils import InterfaceError, OperationalError
 
 from omop_core.models import (
     Person, PatientRecord, Measurement, Observation, Concept, Vocabulary,
-    Domain, ConceptClass,
+    Domain, ConceptClass, DrugExposure,
 )
 from omop_core.services.mappings import (
-    WEARABLE_LOINC, WEARABLE_MIN_VALID_DAYS, CONCEPT_EHR_TYPE,
+    WEARABLE_LOINC, WEARABLE_MIN_VALID_DAYS, CONCEPT_EHR_TYPE, CONCEPT_GENERIC_LAB,
 )
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.services.patient_record_service import refresh_patient_record
+from omop_core.services.lot_regimens import REGIMEN_CONCEPT_IDS
 from omop_core.signals import suppress_patient_record_refresh
 
 
@@ -95,6 +96,48 @@ _WEARABLE_RANGES = {
 }
 
 _WEARABLE_DAYS = 30
+
+_BC_HISTOLOGY_TYPES = [
+    'Invasive ductal carcinoma of breast',
+    'Invasive lobular carcinoma of breast',
+    'Breast carcinoma, NOS',
+]
+_BC_MUTATION_LOINCS = [
+    ('21636-6', 'BRCA1'),
+    ('21637-4', 'BRCA2'),
+    ('21667-1', 'TP53'),
+    ('62318-1', 'PIK3CA'),
+]
+_BC_BEHAVIOR_MEASUREMENTS = {
+    '72166-2': ['Never smoked tobacco', 'Ex-smoker', 'Current smoker'],
+    '63640-7': (0, 40),
+    '74013-4': ['No alcohol use', 'Occasional alcohol use', 'Heavy alcohol use'],
+    '11286-7': (0, 21),
+    '68516-4': ['Never', 'Sometimes', 'Weekly', 'Daily'],
+    '89555-7': (0, 300),
+    '88365-2': ['Balanced diet', 'Low carb', 'Mediterranean', 'Standard'],
+    '93831-6': ['Good', 'Fair', 'Poor'],
+    '73985-4': ['Low', 'Moderate', 'High'],
+    '93033-9': ['Strong', 'Moderate', 'Limited'],
+    '74165-2': ['Employed', 'Unemployed', 'Retired'],
+    '82589-3': ['High school', 'College', 'Graduate degree'],
+    '45404-1': ['Single', 'Married', 'Divorced', 'Widowed'],
+    '76513-1': ['Commercial', 'Medicaid', 'Medicare', 'Self-pay'],
+    '63512-8': (0, 6),
+    '77243-3': (25000, 220000),
+}
+_BC_THERAPY_PLANS = {
+    'early': [
+        {'drugs': ['tamoxifen'], 'duration_days': 120},
+        {'drugs': ['docetaxel', 'cyclophosphamide'], 'duration_days': 84},
+        {'drugs': ['paclitaxel', 'trastuzumab', 'pertuzumab'], 'duration_days': 84},
+    ],
+    'advanced': [
+        {'drugs': ['doxorubicin', 'cyclophosphamide', 'paclitaxel'], 'duration_days': 126},
+        {'drugs': ['trastuzumab deruxtecan'], 'duration_days': 84},
+        {'drugs': ['docetaxel', 'trastuzumab', 'pertuzumab'], 'duration_days': 84},
+    ],
+}
 
 
 def _get_or_create_snomed_vocabulary():
@@ -329,6 +372,7 @@ class Command(BaseCommand):
         self._write_progress('Initializing OMOP ID allocators...')
         measurement_ids = _IdAllocator(Measurement, 'measurement_id')
         observation_ids = _IdAllocator(Observation, 'observation_id')
+        drug_exposure_ids = _IdAllocator(DrugExposure, 'drug_exposure_id')
 
         if not dry_run:
             # Ensure the SNOMED codes _get_behavior_data/_get_assessment_data
@@ -354,7 +398,14 @@ class Command(BaseCommand):
             wearable_concepts[metric_key] = concept
 
         ehr_type_concept_id = CONCEPT_EHR_TYPE
-        counts = {'perf_backfilled': 0, 'obs_created': 0, 'wearable_rows_created': 0, 'refreshed': 0}
+        counts = {
+            'perf_backfilled': 0,
+            'obs_created': 0,
+            'wearable_rows_created': 0,
+            'bc_rows_created': 0,
+            'therapy_rows_created': 0,
+            'refreshed': 0,
+        }
         processed_persons = []
         skipped = 0
 
@@ -402,11 +453,29 @@ class Command(BaseCommand):
                             person, measurement_ids, observation_ids, ehr_type_concept_id,
                             dry_run, wearable_concepts,
                         )
+                        bc_rows_created = self._create_missing_bc_measurements(
+                            person, record, measurement_ids, ehr_type_concept_id, dry_run,
+                        )
+                        therapy_rows_created = self._create_missing_bc_therapy_rows(
+                            person, record, drug_exposure_ids, ehr_type_concept_id, dry_run,
+                        )
                         if dry_run:
                             transaction.set_rollback(True)
-                        return perf_backfilled, obs_created, wearable_rows_created
+                        return (
+                            perf_backfilled,
+                            obs_created,
+                            wearable_rows_created,
+                            bc_rows_created,
+                            therapy_rows_created,
+                        )
 
-                perf_backfilled, obs_created, wearable_rows_created = self._run_with_db_retries(
+                (
+                    perf_backfilled,
+                    obs_created,
+                    wearable_rows_created,
+                    bc_rows_created,
+                    therapy_rows_created,
+                ) = self._run_with_db_retries(
                     f'person_id={person_id}',
                     db_retries,
                     enrich_person,
@@ -414,13 +483,16 @@ class Command(BaseCommand):
                 counts['perf_backfilled'] += perf_backfilled
                 counts['obs_created'] += obs_created
                 counts['wearable_rows_created'] += wearable_rows_created
+                counts['bc_rows_created'] += bc_rows_created
+                counts['therapy_rows_created'] += therapy_rows_created
                 if not dry_run:
                     processed_persons.append(person)
 
                 person_elapsed = time.monotonic() - person_start
                 self._write_progress(
                     f'    done in {person_elapsed:.1f}s - '
-                    f'perf/stage={perf_backfilled}  obs={obs_created}  wearable={wearable_rows_created}'
+                    f'perf/stage={perf_backfilled}  obs={obs_created}  '
+                    f'wearable={wearable_rows_created}  bc={bc_rows_created}  therapy={therapy_rows_created}'
                 )
 
         phase1_elapsed = time.monotonic() - phase1_start
@@ -484,6 +556,8 @@ class Command(BaseCommand):
             f'  Perf/stage backfilled   : {counts["perf_backfilled"]}\n'
             f'  Observation rows added  : {counts["obs_created"]}\n'
             f'  Wearable rows added     : {counts["wearable_rows_created"]}\n'
+            f'  BC rows added           : {counts["bc_rows_created"]}\n'
+            f'  Therapy rows added      : {counts["therapy_rows_created"]}\n'
             f'  PatientRecords refreshed: {counts["refreshed"]}\n'
             f'{"-" * 60}'
         ))
@@ -591,6 +665,134 @@ class Command(BaseCommand):
             _make(response_code, None)
 
         return created
+
+    def _measurement_concept_for_code(self, loinc_code):
+        concept = Concept.objects.filter(concept_code=loinc_code).first()
+        if concept:
+            return concept
+        return Concept.objects.filter(concept_id=CONCEPT_GENERIC_LAB).first()
+
+    @staticmethod
+    def _bc_rng(person_id):
+        return random.Random(f'bc-enrich:{person_id}')
+
+    def _create_missing_bc_measurements(self, person, record, measurement_ids,
+                                        ehr_type_concept_id, dry_run):
+        """Backfill missing breast-cancer-specific Measurement rows.
+
+        Covers gaps confirmed on the SYNTHEA-BC cohort:
+          - histologic type
+          - mutation rows
+          - numeric Ki-67
+          - lifestyle / behavior measurements
+        """
+        rng = self._bc_rng(person.person_id)
+        created = 0
+        measurements_to_create = []
+        obs_date = record.diagnosis_date if record and record.diagnosis_date else date.today()
+
+        existing_by_code = {}
+        for code, value_num, value_str in Measurement.objects.filter(person=person).values_list(
+            'measurement_source_value', 'value_as_number', 'value_as_string'
+        ):
+            existing_by_code.setdefault(code, []).append((value_num, value_str))
+
+        def _queue_measurement(loinc_code, value_as_number=None, value_as_string=None):
+            nonlocal created
+            concept = self._measurement_concept_for_code(loinc_code)
+            if concept is None:
+                return
+            created += 1
+            if dry_run:
+                return
+            measurements_to_create.append(Measurement(
+                person=person,
+                measurement_concept=concept,
+                measurement_date=obs_date,
+                measurement_type_concept_id=ehr_type_concept_id,
+                measurement_source_value=loinc_code,
+                value_as_number=value_as_number,
+                value_as_string=value_as_string,
+            ))
+
+        if '59847-4' not in existing_by_code:
+            histology = _BC_HISTOLOGY_TYPES[person.person_id % len(_BC_HISTOLOGY_TYPES)]
+            _queue_measurement('59847-4', value_as_string=histology)
+
+        has_numeric_ki67 = any(value_num is not None for value_num, _ in existing_by_code.get('85319-2', []))
+        if not has_numeric_ki67:
+            _queue_measurement('85319-2', value_as_number=rng.randint(5, 75))
+
+        has_mutation = any(existing_by_code.get(code) for code, _gene in _BC_MUTATION_LOINCS)
+        if not has_mutation:
+            mutation_code, gene_name = _BC_MUTATION_LOINCS[person.person_id % len(_BC_MUTATION_LOINCS)]
+            variant = [
+                f'{gene_name} pathogenic variant',
+                f'{gene_name} exon deletion',
+                f'{gene_name} missense variant',
+            ][person.person_id % 3]
+            _queue_measurement(mutation_code, value_as_string=variant)
+
+        for loinc_code, choices in _BC_BEHAVIOR_MEASUREMENTS.items():
+            if loinc_code in existing_by_code:
+                continue
+            if isinstance(choices, tuple):
+                value_as_number = rng.randint(choices[0], choices[1])
+                _queue_measurement(loinc_code, value_as_number=value_as_number)
+            else:
+                value_as_string = choices[person.person_id % len(choices)]
+                _queue_measurement(loinc_code, value_as_string=value_as_string)
+
+        if measurements_to_create:
+            for measurement, measurement_id in zip(
+                measurements_to_create,
+                measurement_ids.take_batch(len(measurements_to_create)),
+            ):
+                measurement.measurement_id = measurement_id
+            Measurement.objects.bulk_create(measurements_to_create, batch_size=500)
+
+        return created
+
+    def _create_missing_bc_therapy_rows(self, person, record, drug_exposure_ids,
+                                        ehr_type_concept_id, dry_run):
+        """Backfill missing DrugExposure rows for patients with no therapies at all."""
+        if DrugExposure.objects.filter(person=person).exists():
+            return 0
+
+        rng = self._bc_rng(person.person_id)
+        stage = (record.stage or '') if record else ''
+        therapy_bucket = 'advanced' if any(s in stage for s in ('III', 'IV')) else 'early'
+        regimen = rng.choice(_BC_THERAPY_PLANS[therapy_bucket])
+        start_date = record.diagnosis_date if record and record.diagnosis_date else date.today()
+
+        regimen_key = frozenset(drug.lower().strip() for drug in regimen['drugs'])
+        concept_id = REGIMEN_CONCEPT_IDS.get(regimen_key)
+        concept = Concept.objects.filter(concept_id=concept_id).first() if concept_id else None
+        if concept is None:
+            concept = (
+                Concept.objects
+                .filter(concept_name__in=[drug.title() for drug in regimen['drugs']])
+                .order_by('concept_id')
+                .first()
+            )
+
+        if concept is None:
+            return 0
+
+        if dry_run:
+            return 1
+
+        exposure = DrugExposure(
+            drug_exposure_id=drug_exposure_ids.take(),
+            person=person,
+            drug_concept=concept,
+            drug_exposure_start_date=start_date,
+            drug_exposure_end_date=start_date + timedelta(days=regimen['duration_days']),
+            drug_type_concept_id=ehr_type_concept_id,
+            drug_source_value=concept.concept_name[:50],
+        )
+        exposure.save()
+        return 1
 
     def _create_missing_wearable_measurements(self, person, measurement_ids, observation_ids,
                                                 ehr_type_concept_id, dry_run, wearable_concepts):

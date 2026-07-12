@@ -52,6 +52,11 @@ _VOCABULARIES = [
          vocabulary_reference='OMOP generated',
          vocabulary_version='v5',
          vocabulary_concept_id=0),
+    dict(vocabulary_id='HemOnc',
+         vocabulary_name='HemOnc',
+         vocabulary_reference='https://hemonc.org',
+         vocabulary_version='2024',
+         vocabulary_concept_id=0),
 ]
 
 _DOMAINS = [
@@ -74,6 +79,7 @@ _CONCEPT_CLASSES = [
     dict(concept_class_id='Field',               concept_class_name='Field',                concept_class_concept_id=0),
     dict(concept_class_id='Treatment',           concept_class_name='Treatment',            concept_class_concept_id=0),
     dict(concept_class_id='Gender',              concept_class_name='Gender',               concept_class_concept_id=0),
+    dict(concept_class_id='Regimen',             concept_class_name='Regimen',              concept_class_concept_id=0),
 ]
 
 
@@ -214,6 +220,84 @@ _CONCEPTS = [
     # ------------------------------------------------------------------
     _c(36305384, 'ECOG Performance Status score', 'Measurement',  'LOINC', 'Clinical Observation', 'S', '89247-1'),
     _c(43054909, 'Tobacco smoking status',         'Observation',  'LOINC', 'Clinical Observation', 'S', '72166-2'),
+
+    # ------------------------------------------------------------------
+    # CBC — hemoglobin (missing from original seeder; required for CRAB)
+    # ------------------------------------------------------------------
+    _c(9001001, 'Hemoglobin [Mass/volume] in Blood',      'Measurement', 'LOINC', 'Lab Test', 'S', '718-7'),
+
+    # ------------------------------------------------------------------
+    # MM-specific disease burden labs
+    # Required for monoclonal_protein_serum, kappa_flc, lambda_flc,
+    # clonal_plasma_cells to be populated by refresh_patient_record.
+    # ------------------------------------------------------------------
+    _c(9001002, 'Protein [electrophoresis] in Serum',             'Measurement', 'LOINC', 'Lab Test', 'S', '51435-6'),  # M-spike serum
+    _c(9001003, 'Protein [electrophoresis] in Urine',             'Measurement', 'LOINC', 'Lab Test', 'S', '32730-5'),  # M-spike urine
+    _c(9001004, 'Kappa free light chains [Mass/volume] in Serum', 'Measurement', 'LOINC', 'Lab Test', 'S', '33944-8'),
+    _c(9001005, 'Lambda free light chains [Mass/volume] in Serum','Measurement', 'LOINC', 'Lab Test', 'S', '33945-5'),
+    _c(9001006, 'Plasma cells [#/volume] in Bone marrow',         'Measurement', 'LOINC', 'Lab Test', 'S', '26098-4'),
+
+    # ------------------------------------------------------------------
+    # Beta-2 microglobulin and other MM markers
+    # ------------------------------------------------------------------
+    _c(9001007, 'Beta-2 microglobulin [Mass/volume] in Serum',    'Measurement', 'LOINC', 'Lab Test', 'S', '1952-1'),
+    _c(9001008, 'C reactive protein [Mass/volume] in Serum',      'Measurement', 'LOINC', 'Lab Test', 'S', '1988-5'),
+    _c(9001009, 'Erythrocyte sedimentation rate',                 'Measurement', 'LOINC', 'Lab Test', 'S', '30341-2'),
+    _c(9001010, 'Creatinine renal clearance',                     'Measurement', 'LOINC', 'Lab Test', 'S', '2164-2'),
+    _c(9001011, 'Troponin T [Mass/volume] in Serum or Plasma',    'Measurement', 'LOINC', 'Lab Test', 'S', '10839-9'),
+    _c(9001012, 'Natriuretic peptide B [Mass/volume] in Serum',   'Measurement', 'LOINC', 'Lab Test', 'S', '42637-9'),
+    _c(9001013, 'Glucose [Mass/volume] in Serum or Plasma',       'Measurement', 'LOINC', 'Lab Test', 'S', '2345-7'),
+    _c(9001014, 'Magnesium [Mass/volume] in Blood',               'Measurement', 'LOINC', 'Lab Test', 'S', '2601-3'),
+    _c(9001015, 'Sodium [Moles/volume] in Serum or Plasma',       'Measurement', 'LOINC', 'Lab Test', 'S', '2951-2'),
+    _c(9001016, 'Potassium [Moles/volume] in Serum or Plasma',    'Measurement', 'LOINC', 'Lab Test', 'S', '2823-3'),
+    _c(9001017, 'Urea nitrogen [Mass/volume] in Serum or Plasma', 'Measurement', 'LOINC', 'Lab Test', 'S', '3094-0'),
+    _c(9001018, 'Glomerular filtration rate by CKD-EPI',          'Measurement', 'LOINC', 'Lab Test', 'S', '62238-1'),
+
+    # ------------------------------------------------------------------
+    # Wearable / remote-monitoring LOINCs
+    # Required for wearable_last_sync_at and related PatientRecord fields.
+    # patient_record_service._get_wearable_data() queries by both
+    # measurement_concept__concept_code and measurement_source_value.
+    # ------------------------------------------------------------------
+    _c(9001019, 'Number of steps in 24 hours',                    'Measurement', 'LOINC', 'Clinical Observation', 'S', '55423-8'),
+    _c(9001020, 'Moderate-vigorous physical activity duration',   'Measurement', 'LOINC', 'Clinical Observation', 'S', '77592-4'),
+    _c(9001021, 'Heart rate -- resting',                          'Measurement', 'LOINC', 'Clinical Observation', 'S', '40443-4'),
+    _c(9001022, 'Heart rate variability SDNN',                    'Measurement', 'LOINC', 'Clinical Observation', 'S', '80404-7'),
+    _c(9001023, 'Respiratory rate',                               'Measurement', 'LOINC', 'Clinical Observation', 'S', '9279-1'),
+    _c(9001024, 'Sleep duration',                                 'Measurement', 'LOINC', 'Clinical Observation', 'S', '93832-4'),
+
+    # ------------------------------------------------------------------
+    # HemOnc therapy regimen concepts — required for first_line_therapy_id
+    # and second_line_therapy_id to be populated by refresh_patient_record.
+    # concept_ids match Athena HemOnc vocabulary (verified against staging DB).
+    # ------------------------------------------------------------------
+    _c(35806260, 'RVD',          'Episode', 'HemOnc', 'Regimen', 'S', 'RVD'),           # VRd
+    _c(35806311, 'Dara-Rd',      'Episode', 'HemOnc', 'Regimen', 'S', 'Dara-Rd'),       # DaraRD / DRd
+    _c(905602,   'Dara-KRd',     'Episode', 'HemOnc', 'Regimen', 'S', 'Dara-KRd'),      # DKRd
+    _c(35806284, 'KRd',          'Episode', 'HemOnc', 'Regimen', 'S', 'KRd'),           # KRD
+    _c(35806053, 'Rd',           'Episode', 'HemOnc', 'Regimen', 'S', 'Rd'),            # Rd
+    _c(35806066, 'PomDex',       'Episode', 'HemOnc', 'Regimen', 'S', 'PomDex'),        # Pd
+    _c(35806324, 'KPd',          'Episode', 'HemOnc', 'Regimen', 'S', 'KPd'),           # KPd
+    _c(35806326, 'DaraPd',       'Episode', 'HemOnc', 'Regimen', 'S', 'DaraPd'),        # DPd
+    _c(911941,   'Isa-Pd',       'Episode', 'HemOnc', 'Regimen', 'S', 'Isa-Pd'),        # IsaPd
+    _c(35806313, 'Elo-Pd',       'Episode', 'HemOnc', 'Regimen', 'S', 'Elo-Pd'),        # EloPd
+    _c(905768,   'SVd',          'Episode', 'HemOnc', 'Regimen', 'S', 'SVd'),           # SVd
+    _c(37557075, 'Teclistamab',  'Episode', 'HemOnc', 'Regimen', 'S', 'Teclistamab'),   # Teclistamab
+    _c(911956,   'Belantamab',   'Episode', 'HemOnc', 'Regimen', 'S', 'Belantamab'),    # Belantamab mafodotin
+    _c(1525038,  'Cilta-cel',    'Episode', 'HemOnc', 'Regimen', 'S', 'Cilta-cel'),     # Ciltacabtagene
+    _c(905696,   'Ide-cel',      'Episode', 'HemOnc', 'Regimen', 'S', 'Ide-cel'),       # Idecabtagene
+    _c(911993,   'Dara-RVd',     'Episode', 'HemOnc', 'Regimen', 'S', 'Dara-RVd'),      # DaraVRd
+    _c(37557069, 'Isa-RVd',      'Episode', 'HemOnc', 'Regimen', 'S', 'Isa-RVd'),       # IsaVRd
+    _c(35806283, 'IRd',          'Episode', 'HemOnc', 'Regimen', 'S', 'IRd'),           # IxaRd
+    _c(35806314, 'Elo-Rd',       'Episode', 'HemOnc', 'Regimen', 'S', 'Elo-Rd'),        # EloRd
+    _c(35806059, 'Vd',           'Episode', 'HemOnc', 'Regimen', 'S', 'Vd'),            # Vd
+    _c(35806061, 'VDC',          'Episode', 'HemOnc', 'Regimen', 'S', 'VDC'),           # VCd/CyBorD
+    _c(35806312, 'Dara-Vd',      'Episode', 'HemOnc', 'Regimen', 'S', 'Dara-Vd'),       # DVd
+    _c(35806309, 'Kd',           'Episode', 'HemOnc', 'Regimen', 'S', 'Kd'),            # Kd
+    _c(35806268, 'TD',           'Episode', 'HemOnc', 'Regimen', 'S', 'TD'),            # Td
+    _c(35806258, 'VMP',          'Episode', 'HemOnc', 'Regimen', 'S', 'VMP'),           # VMP
+    _c(35806056, 'MP',           'Episode', 'HemOnc', 'Regimen', 'S', 'MP'),            # Melphalan+pred
+    _c(35804011, 'Melphalan',    'Episode', 'HemOnc', 'Regimen', 'S', 'Melphalan'),     # Mel200
 ]
 
 

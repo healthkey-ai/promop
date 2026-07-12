@@ -13,7 +13,7 @@ from io import StringIO
 import pytest
 from django.core.management import call_command, CommandError
 
-from omop_core.models import Measurement, Observation, PatientRecord
+from omop_core.models import DrugExposure, Measurement, Observation, PatientRecord
 from tests.factories import (
     ConceptFactory, PersonFactory, PatientRecordFactory,
     MeasurementFactory, VocabularyFactory,
@@ -183,6 +183,18 @@ class TestRefreshesPatientRecord:
 
         record = PatientRecord.objects.get(person=person)
         assert record.no_tobacco_use_status is not None or record.tobacco_use_details is not None
+
+    def test_missing_therapy_backfill_creates_regimen_concept_and_patient_record_id(self):
+        person = PersonFactory()
+        PatientRecordFactory(person=person, stage='IV')
+
+        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id), confirm=True)
+
+        record = PatientRecord.objects.get(person=person)
+        exposure = DrugExposure.objects.get(person=person)
+        assert record.first_line_therapy_id is not None
+        assert exposure.drug_concept_id == record.first_line_therapy_id
+        assert record.first_line_therapy
 
     def test_refresh_is_deferred_until_after_all_patients_are_enriched(self, monkeypatch):
         person_a = PersonFactory()

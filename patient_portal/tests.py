@@ -27,6 +27,7 @@ from omop_core.models import (
     Relationship, ConceptRelationship, ConceptAncestor,
     SctEligibility,
 )
+from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
 from omop_oncology.models import Episode, EpisodeEvent
 
 
@@ -6587,6 +6588,35 @@ def _make_org(name, slug):
     return Organization.objects.create(name=name, slug=slug)
 
 
+def _make_test_concept(concept_id, concept_name, concept_code, domain_id):
+    vocab, _ = Vocabulary.objects.get_or_create(
+        vocabulary_id='TEST-DEL',
+        defaults={
+            'vocabulary_name': 'Test Delete Vocabulary',
+            'vocabulary_concept_id': 0,
+        },
+    )
+    domain, _ = Domain.objects.get_or_create(
+        domain_id=domain_id,
+        defaults={'domain_name': domain_id, 'domain_concept_id': 0},
+    )
+    concept_class, _ = ConceptClass.objects.get_or_create(
+        concept_class_id='Clinical Finding',
+        defaults={'concept_class_name': 'Clinical Finding', 'concept_class_concept_id': 0},
+    )
+    return Concept.objects.create(
+        concept_id=concept_id,
+        concept_name=concept_name,
+        concept_code=concept_code,
+        vocabulary=vocab,
+        domain=domain,
+        concept_class=concept_class,
+        standard_concept='S',
+        valid_start_date=date.today(),
+        valid_end_date=date(2099, 12, 31),
+    )
+
+
 class OrgManagementModelTest(TestCase):
     """OrgTrust XOR constraint, OrgInvitation uniqueness."""
 
@@ -6745,6 +6775,91 @@ class OrgViewSetStaffTest(TestCase):
         resp = self.client.delete('/api/orgs/staff-org/')
         self.assertEqual(resp.status_code, 204)
         self.assertFalse(Organization.objects.filter(slug='staff-org').exists())
+
+    def test_delete_org_cascades_patient_population(self):
+        patient_org = _make_org('Patient Org', 'patient-org')
+        other_org = _make_org('Other Patient Org', 'other-patient-org')
+        person = Person.objects.create(person_id=9001)
+        other_person = Person.objects.create(person_id=9002)
+        patient = PatientRecord.objects.create(person=person, organization=patient_org)
+        other_patient = PatientRecord.objects.create(person=other_person, organization=other_org)
+
+        condition_concept = _make_test_concept(9100001, 'Test Condition', 'TCOND', 'Condition')
+        condition_type_concept = _make_test_concept(9100002, 'Test Type', 'TTYPE', 'Type Concept')
+        drug_concept = _make_test_concept(9200001, 'Test Drug', 'TDRUG', 'Drug')
+        procedure_concept = _make_test_concept(9300001, 'Test Procedure', 'TPROC', 'Procedure')
+
+        cond = ConditionOccurrence.objects.create(
+            condition_occurrence_id=9101,
+            person=person,
+            condition_concept=condition_concept,
+            condition_start_date=date.today(),
+            condition_type_concept=condition_type_concept,
+        )
+        drug = DrugExposure.objects.create(
+            drug_exposure_id=9201,
+            person=person,
+            drug_concept=drug_concept,
+            drug_exposure_start_date=date.today(),
+            drug_type_concept=condition_type_concept,
+        )
+        proc = ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=9301,
+            person=person,
+            procedure_concept=procedure_concept,
+            procedure_date=date.today(),
+            procedure_type_concept=condition_type_concept,
+        )
+
+        resp = self.client.delete('/api/orgs/patient-org/')
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Organization.objects.filter(slug='patient-org').exists())
+        self.assertFalse(PatientRecord.objects.filter(pk=patient.pk).exists())
+        self.assertFalse(Person.objects.filter(pk=person.pk).exists())
+        self.assertFalse(ConditionOccurrence.objects.filter(pk=cond.pk).exists())
+        self.assertFalse(DrugExposure.objects.filter(pk=drug.pk).exists())
+        self.assertFalse(ProcedureOccurrence.objects.filter(pk=proc.pk).exists())
+        self.assertTrue(PatientRecord.objects.filter(pk=other_patient.pk).exists())
+        self.assertTrue(Person.objects.filter(pk=other_person.pk).exists())
+
+
+class OrganizationCleanupServiceTest(TestCase):
+    """Shared org deletion helper must cascade patient data."""
+
+    def test_delete_organization_with_patient_cascade(self):
+        org = _make_org('Cleanup Org', 'cleanup-org')
+        other_org = _make_org('Survivor Org', 'survivor-org')
+        person = Person.objects.create(person_id=9101)
+        other_person = Person.objects.create(person_id=9102)
+        patient = PatientRecord.objects.create(person=person, organization=org)
+        other_patient = PatientRecord.objects.create(person=other_person, organization=other_org)
+
+        condition_concept = _make_test_concept(9400001, 'Cleanup Condition', 'CCOND', 'Condition')
+        condition_type_concept = _make_test_concept(9400002, 'Cleanup Type', 'CTYPE', 'Type Concept')
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=9401,
+            person=person,
+            procedure_concept=_make_test_concept(9400003, 'Cleanup Procedure', 'CPROC', 'Procedure'),
+            procedure_date=date.today(),
+            procedure_type_concept=condition_type_concept,
+        )
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=9402,
+            person=person,
+            condition_concept=condition_concept,
+            condition_start_date=date.today(),
+            condition_type_concept=condition_type_concept,
+        )
+
+        delete_organization_with_patient_cascade(org)
+
+        self.assertFalse(Organization.objects.filter(pk=org.pk).exists())
+        self.assertFalse(PatientRecord.objects.filter(pk=patient.pk).exists())
+        self.assertFalse(Person.objects.filter(pk=person.pk).exists())
+        self.assertFalse(ConditionOccurrence.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(ProcedureOccurrence.objects.filter(person_id=person.person_id).exists())
+        self.assertTrue(PatientRecord.objects.filter(pk=other_patient.pk).exists())
+        self.assertTrue(Person.objects.filter(pk=other_person.pk).exists())
 
 
 class OrgViewSetOrgAdminTest(TestCase):

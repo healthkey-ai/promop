@@ -83,7 +83,9 @@ def _send_invitation_email(invitation) -> None:
         raise InvitationEmailError
 
 from omop_core.models import Organization, OrgTrust, OrgInvitation, GroupAccess
+from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
 from patient_portal.models import Identity
+from omop_core.models import Person, PatientRecord
 from .permissions import IsStaffPermission, IsStaffOrOrgAdmin
 from .serializers import (
     OrganizationSerializer, OrgTrustSerializer,
@@ -200,7 +202,7 @@ class OrgDetailView(APIView):
 
     def delete(self, request, slug):
         org = _get_org(slug)
-        org.delete()
+        delete_organization_with_patient_cascade(org)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

@@ -16,7 +16,7 @@ from django.contrib.contenttypes.models import ContentType
 from omop_core.models import (
     Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
-    Observation, ProcedureOccurrence, VisitOccurrence,
+    Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location,
     PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
     # Controlled vocabulary lookup models
     Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
@@ -33,6 +33,7 @@ from omop_core.models import (
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.patient_record_service import refresh_patient_record
+from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.omop_write_service import sync_to_omop
 from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
@@ -151,28 +152,10 @@ def _delete_omop_clinical_rows(person):
     """Delete all OMOP clinical rows for a person, in FK dependency order.
 
     Must be called inside a transaction.atomic() block.
-    Does NOT delete PatientRecord, PatientGroupMembership, PatientUser/Identity,
-    or Person — callers handle those after this returns.
+    Does NOT delete PatientRecord, PatientUser/Identity, or Person — callers
+    handle those after this returns.
     """
-    episode_ids = list(Episode.objects.filter(person=person).values_list('episode_id', flat=True))
-    EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
-    Episode.objects.filter(person=person).delete()
-    visit_ids = list(VisitOccurrence.objects.filter(person=person).values_list('visit_occurrence_id', flat=True))
-    measurement_ids = list(Measurement.objects.filter(person=person).values_list('measurement_id', flat=True))
-    # Delete by both axes: visit_occurrence_id covers normal rows; measurement_id
-    # covers any ownership rows whose visit belongs to a different person (edge case
-    # where measurement_id has no DB FK so those rows would otherwise be orphaned).
-    MeasurementOwnership.objects.filter(
-        Q(visit_occurrence_id__in=visit_ids) | Q(measurement_id__in=measurement_ids)
-    ).delete()
-    Measurement.objects.filter(person=person).delete()
-    ConditionOccurrence.objects.filter(person=person).delete()
-    DrugExposure.objects.filter(person=person).delete()
-    Observation.objects.filter(person=person).delete()
-    ProcedureOccurrence.objects.filter(person=person).delete()
-    VisitOccurrence.objects.filter(person=person).delete()
-    PatientDocument.objects.filter(person=person).delete()
-    PatientTrialEnrollment.objects.filter(person=person).delete()
+    delete_omop_clinical_rows(person)
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -728,7 +711,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # by Patient/{id}, so keep aliases for both forms.
             patients_data = {}
             patient_ref_aliases = {}
-            
+            # Keyed by resource id and fullUrl — used to resolve medicationReference
+            # in MedicationRequest resources (Synthea uses this pattern instead of
+            # inline medicationCodeableConcept).
+            medication_resources: dict[str, dict] = {}
+
             def _resolve_patient_ref(ref: str) -> str:
                 """Resolve a FHIR subject reference to the local patient bucket id."""
                 ref = (ref or '').strip()
@@ -756,6 +743,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         'medication_requests': [],
                         'immunizations': [],
                         'diagnostic_reports': [],
+                        'encounters': [],
                     }
                     if patient_id:
                         patient_ref_aliases[patient_id] = patient_id
@@ -780,6 +768,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     patient_id = _resolve_patient_ref(patient_ref)
                     if patient_id in patients_data:
                         patients_data[patient_id]['medications'].append(resource)
+                elif resource_type == 'Medication':
+                    # Collect standalone Medication resources so that MedicationRequest
+                    # entries using medicationReference can resolve to a code.
+                    med_id = resource.get('id', '')
+                    if med_id:
+                        medication_resources[med_id] = resource
+                    full_url = (entry.get('fullUrl') or '').strip()
+                    if full_url:
+                        medication_resources[full_url] = resource
+                        if full_url.startswith('urn:uuid:'):
+                            medication_resources[full_url[len('urn:uuid:'):]] = resource
                 elif resource_type == 'MedicationRequest':
                     patient_ref = resource.get('subject', {}).get('reference', '')
                     patient_id = _resolve_patient_ref(patient_ref)
@@ -800,6 +799,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     patient_id = _resolve_patient_ref(patient_ref)
                     if patient_id in patients_data:
                         patients_data[patient_id]['diagnostic_reports'].append(resource)
+                elif resource_type == 'Encounter':
+                    patient_ref = resource.get('subject', {}).get('reference', '')
+                    patient_id = _resolve_patient_ref(patient_ref)
+                    if patient_id in patients_data:
+                        patients_data[patient_id]['encounters'].append(resource)
             
             # Hoist SCT vocabulary sets for FHIR upload validation (avoids N+1 per patient).
             _allowed_sct_titles = set(StemCellTransplant.objects.values_list('title', flat=True))
@@ -819,6 +823,44 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             _concept_de_field      = _cc_by_id(1147094)  # DrugExposure field
             _concept_generic_lab   = _cc_by_id(3000963)  # Generic lab
 
+            def _get_or_create_visit_concept(class_code: str, class_display: str):
+                concept_code = f'FHIR-VISIT-{class_code or "UNKNOWN"}'
+                concept_name = class_display or class_code or 'FHIR Encounter'
+                concept = Concept.objects.filter(
+                    vocabulary_id='FHIR',
+                    concept_code=concept_code,
+                ).first()
+                if concept:
+                    return concept
+                domain, _ = Domain.objects.get_or_create(
+                    domain_id='Visit',
+                    defaults={'domain_name': 'Visit', 'domain_concept_id': 0},
+                )
+                vocabulary, _ = Vocabulary.objects.get_or_create(
+                    vocabulary_id='FHIR',
+                    defaults={
+                        'vocabulary_name': 'FHIR',
+                        'vocabulary_reference': 'FHIR import',
+                        'vocabulary_version': 'local',
+                        'vocabulary_concept_id': 0,
+                    },
+                )
+                concept_class, _ = ConceptClass.objects.get_or_create(
+                    concept_class_id='Visit',
+                    defaults={'concept_class_name': 'Visit', 'concept_class_concept_id': 0},
+                )
+                return Concept.objects.create(
+                    concept_id=next_pk(Concept, 'concept_id'),
+                    concept_name=concept_name,
+                    domain=domain,
+                    vocabulary=vocabulary,
+                    concept_class=concept_class,
+                    standard_concept='S',
+                    concept_code=concept_code,
+                    valid_start_date=datetime(1970, 1, 1).date(),
+                    valid_end_date=datetime(2099, 12, 31).date(),
+                )
+
             # When skip_refresh=true the caller (e.g. load_fhir_bundle) will run
             # refresh_patient_record for all patients after the upload completes.
             # This eliminates the per-patient refresh cost during the tight write loop.
@@ -835,6 +877,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     _pt_procedure_ids = []
                     _pt_episode_ids = []
                     _pt_episode_event_ids = []
+                    _pt_visit_ids = []
 
                     patient_resource = data['patient']
 
@@ -983,6 +1026,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     # Upsert Person: match on name + full birth date to avoid duplicates on re-upload
                     person = None
                     person_is_new = False
+                    _normalize_name = lambda value: re.sub(r'\d+', '', (value or '')).strip().lower()
                     if (given_name or family_name) and year_of_birth:
                         person_match = Person.objects.filter(
                             given_name=given_name,
@@ -994,6 +1038,27 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         if day_of_birth:
                             person_match = person_match.filter(day_of_birth=day_of_birth)
                         person = person_match.first()
+                        if person is None:
+                            person_match = Person.objects.filter(
+                                year_of_birth=year_of_birth,
+                            )
+                            if month_of_birth:
+                                person_match = person_match.filter(month_of_birth=month_of_birth)
+                            if day_of_birth:
+                                person_match = person_match.filter(day_of_birth=day_of_birth)
+                            normalized_given = _normalize_name(given_name)
+                            normalized_family = _normalize_name(family_name)
+                            for candidate in person_match.select_related('patient_record'):
+                                if (
+                                    _normalize_name(candidate.given_name) == normalized_given
+                                    and _normalize_name(candidate.family_name) == normalized_family
+                                ):
+                                    person = candidate
+                                    if candidate.given_name != given_name or candidate.family_name != family_name:
+                                        candidate.given_name = given_name
+                                        candidate.family_name = family_name
+                                        candidate.save(update_fields=['given_name', 'family_name'])
+                                    break
                     if person is None:
                         from omop_core.services.pk import next_pk as _next_pk
                         person = Person.objects.create(
@@ -1018,6 +1083,85 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 'name': full_name,
                             },
                         )
+
+                    if country or region or city or postal_code:
+                        location = Location.objects.filter(
+                            country=country or None,
+                            state=region or None,
+                            city=city or None,
+                            zip=postal_code or None,
+                        ).order_by('location_id').first()
+                        if location is None:
+                            location = Location.objects.create(
+                                location_id=next_pk(Location, 'location_id'),
+                                country=country or None,
+                                state=region or None,
+                                city=city or None,
+                                zip=postal_code or None,
+                                address_1=None,
+                                address_2=None,
+                                county=None,
+                                latitude=None,
+                                longitude=None,
+                                location_source_value='|'.join(
+                                    part for part in [city, region, postal_code, country] if part
+                                )[:50],
+                            )
+                        if person.location_id != location.location_id:
+                            person.location_id = location.location_id
+                            person.save(update_fields=['location_id'])
+
+                    for encounter in data.get('encounters', []):
+                        period = encounter.get('period') or {}
+                        start_raw = period.get('start') or period.get('end')
+                        end_raw = period.get('end') or period.get('start')
+                        if not start_raw:
+                            continue
+                        try:
+                            visit_start_date = datetime.strptime(start_raw[:10], '%Y-%m-%d').date()
+                            visit_end_date = datetime.strptime((end_raw or start_raw)[:10], '%Y-%m-%d').date()
+                        except ValueError:
+                            continue
+                        visit_class = (encounter.get('class') or {}).get('code') or 'VISIT'
+                        visit_class_display = (encounter.get('class') or {}).get('display') or 'FHIR Encounter'
+                        visit_concept = _get_or_create_visit_concept(visit_class, visit_class_display)
+                        if not VisitOccurrence.objects.filter(
+                            person=person,
+                            visit_start_date=visit_start_date,
+                            visit_source_value=visit_class[:255],
+                        ).exists():
+                            visit = VisitOccurrence.objects.create(
+                                visit_occurrence_id=next_pk(VisitOccurrence, 'visit_occurrence_id'),
+                                person=person,
+                                visit_concept=visit_concept,
+                                visit_start_date=visit_start_date,
+                                visit_start_datetime=datetime.combine(visit_start_date, datetime.min.time()),
+                                visit_end_date=visit_end_date,
+                                visit_end_datetime=datetime.combine(visit_end_date, datetime.min.time()),
+                                visit_type_concept=_concept_ehr_type or visit_concept,
+                                provider_id=None,
+                                care_site_id=None,
+                                visit_source_value=visit_class[:255],
+                                visit_source_concept=visit_concept,
+                            )
+                            _pt_visit_ids.append(visit.visit_occurrence_id)
+                            VisitDetail.objects.get_or_create(
+                                person=person,
+                                visit_detail_start_date=visit_start_date,
+                                visit_detail_source_value=visit_class[:255],
+                                defaults={
+                                    'visit_detail_id': next_pk(VisitDetail, 'visit_detail_id'),
+                                    'visit_detail_concept': visit_concept,
+                                    'visit_detail_start_datetime': datetime.combine(visit_start_date, datetime.min.time()),
+                                    'visit_detail_end_date': visit_end_date,
+                                    'visit_detail_end_datetime': datetime.combine(visit_end_date, datetime.min.time()),
+                                    'visit_detail_type_concept': _concept_ehr_type or visit_concept,
+                                    'provider_id': None,
+                                    'care_site_id': None,
+                                    'visit_detail_source_concept': visit_concept,
+                                    'visit_occurrence': visit,
+                                },
+                            )
 
                     # Block analysts from updating existing patients via FHIR upload.
                     if not person_is_new and not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
@@ -1900,6 +2044,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         '21905-5',  # Primary tumor.clinical [Class] Cancer (T)
                         '21906-3',  # Regional lymph nodes.clinical [Class] Cancer (N)
                         '21901-4',  # Distant metastasis.clinical [Class] Cancer (M)
+                        '93832-4',  # Sleep duration
                     }
                     _ASSESSMENT_SNOMED = {
                         # Smoking/tobacco status
@@ -2460,8 +2605,18 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
                     for _med_request in data.get('medication_requests', []):
+                        # Prefer inline medicationCodeableConcept; fall back to
+                        # resolving a medicationReference to the linked Medication
+                        # resource (Synthea and US Core R4 use this pattern).
+                        _codeable = _med_request.get('medicationCodeableConcept')
+                        if not _codeable:
+                            _med_ref = (_med_request.get('medicationReference') or {}).get('reference', '')
+                            _bare_ref = _med_ref[len('urn:uuid:'):] if _med_ref.startswith('urn:uuid:') else _med_ref.split('/')[-1]
+                            _med_resource = medication_resources.get(_med_ref) or medication_resources.get(_bare_ref)
+                            if _med_resource:
+                                _codeable = _med_resource.get('code')
                         _write_drug_exposure(
-                            _med_request.get('medicationCodeableConcept'),
+                            _codeable,
                             _med_request.get('authoredOn') or (_med_request.get('effectivePeriod') or {}).get('start'),
                             (_med_request.get('effectivePeriod') or {}).get('end'),
                             ((_med_request.get('dosageInstruction') or [{}])[0].get('text') or ''),

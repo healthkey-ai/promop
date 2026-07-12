@@ -857,6 +857,293 @@ class CareSite(models.Model):
         return f"CareSite {self.care_site_id}: {self.care_site_name}"
 
 
+class Provider(models.Model):
+    """OMOP CDM Provider table - clinicians and organizations involved in care."""
+    provider_id = models.BigIntegerField(primary_key=True)
+    provider_name = models.CharField(max_length=255, null=True, blank=True)
+    npi = models.CharField(max_length=20, null=True, blank=True)
+    dea = models.CharField(max_length=20, null=True, blank=True)
+    specialty_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT,
+        related_name='providers', db_column='specialty_concept_id',
+        null=True, blank=True,
+    )
+    care_site = models.ForeignKey(
+        CareSite, on_delete=models.SET_NULL,
+        db_column='care_site_id', null=True, blank=True,
+    )
+    year_of_birth = models.IntegerField(null=True, blank=True)
+    gender_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT,
+        related_name='provider_gender', db_column='gender_concept_id',
+        null=True, blank=True,
+    )
+    provider_source_value = models.CharField(max_length=50, null=True, blank=True)
+    specialty_source_value = models.CharField(max_length=50, null=True, blank=True)
+    specialty_source_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT,
+        related_name='provider_specialty_source', db_column='specialty_source_concept_id',
+        null=True, blank=True,
+    )
+    gender_source_value = models.CharField(max_length=50, null=True, blank=True)
+    gender_source_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT,
+        related_name='provider_gender_source', db_column='gender_source_concept_id',
+        null=True, blank=True,
+    )
+
+    class Meta:
+        db_table = 'provider'
+
+    def __str__(self):
+        return f"Provider {self.provider_id}: {self.provider_name or self.provider_source_value or ''}"
+
+
+class VisitDetail(models.Model):
+    """OMOP CDM Visit Detail table - subordinate visit segments within a visit."""
+    visit_detail_id = models.BigIntegerField(primary_key=True)
+    person = models.ForeignKey(Person, on_delete=models.CASCADE, db_column='person_id')
+    visit_detail_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='visit_detail_occurrences',
+        db_column='visit_detail_concept_id',
+    )
+    visit_detail_start_date = models.DateField()
+    visit_detail_start_datetime = models.DateTimeField(null=True, blank=True)
+    visit_detail_end_date = models.DateField()
+    visit_detail_end_datetime = models.DateTimeField(null=True, blank=True)
+    visit_detail_type_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='visit_detail_type_occurrences',
+        db_column='visit_detail_type_concept_id',
+    )
+    provider_id = models.IntegerField(null=True, blank=True)
+    care_site_id = models.IntegerField(null=True, blank=True)
+    visit_detail_source_value = models.CharField(max_length=255, null=True, blank=True)
+    visit_detail_source_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='visit_detail_source_occurrences',
+        db_column='visit_detail_source_concept_id', null=True, blank=True,
+    )
+    admitted_from_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='visit_detail_admitted_from',
+        db_column='admitted_from_concept_id', null=True, blank=True,
+    )
+    admitted_from_source_value = models.CharField(max_length=50, null=True, blank=True)
+    discharged_to_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='visit_detail_discharged_to',
+        db_column='discharged_to_concept_id', null=True, blank=True,
+    )
+    discharged_to_source_value = models.CharField(max_length=50, null=True, blank=True)
+    preceding_visit_detail_id = models.BigIntegerField(null=True, blank=True)
+    parent_visit_detail_id = models.BigIntegerField(null=True, blank=True)
+    visit_occurrence = models.ForeignKey(
+        VisitOccurrence, on_delete=models.SET_NULL, db_column='visit_occurrence_id',
+        null=True, blank=True,
+    )
+
+    class Meta:
+        db_table = 'visit_detail'
+
+    def __str__(self):
+        return f"VisitDetail {self.visit_detail_id} for Person {self.person_id}"
+
+
+class Death(models.Model):
+    """OMOP CDM Death table - mortality information."""
+    person = models.OneToOneField(Person, on_delete=models.CASCADE, db_column='person_id', primary_key=True)
+    death_date = models.DateField()
+    death_datetime = models.DateTimeField(null=True, blank=True)
+    death_type_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='death_types',
+        db_column='death_type_concept_id',
+    )
+    cause_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='death_causes',
+        db_column='cause_concept_id', null=True, blank=True,
+    )
+    cause_source_value = models.CharField(max_length=50, null=True, blank=True)
+    cause_source_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='death_cause_sources',
+        db_column='cause_source_concept_id', null=True, blank=True,
+    )
+
+    class Meta:
+        db_table = 'death'
+
+    def __str__(self):
+        return f"Death for Person {self.person_id}"
+
+
+class Specimen(models.Model):
+    """OMOP CDM Specimen table - biospecimen inventory and source metadata."""
+    specimen_id = models.BigIntegerField(primary_key=True)
+    person = models.ForeignKey(Person, on_delete=models.CASCADE, db_column='person_id')
+    specimen_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='specimens',
+        db_column='specimen_concept_id',
+    )
+    specimen_type_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='specimen_types',
+        db_column='specimen_type_concept_id',
+    )
+    specimen_date = models.DateField()
+    specimen_datetime = models.DateTimeField(null=True, blank=True)
+    quantity = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    unit_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='specimen_units',
+        db_column='unit_concept_id', null=True, blank=True,
+    )
+    anatomic_site_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='specimen_anatomic_sites',
+        db_column='anatomic_site_concept_id', null=True, blank=True,
+    )
+    disease_status_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='specimen_disease_status',
+        db_column='disease_status_concept_id', null=True, blank=True,
+    )
+    specimen_source_id = models.CharField(max_length=50, null=True, blank=True)
+    specimen_source_value = models.CharField(max_length=50, null=True, blank=True)
+    unit_source_value = models.CharField(max_length=50, null=True, blank=True)
+    anatomic_site_source_value = models.CharField(max_length=50, null=True, blank=True)
+    disease_status_source_value = models.CharField(max_length=50, null=True, blank=True)
+
+    class Meta:
+        db_table = 'specimen'
+
+    def __str__(self):
+        return f"Specimen {self.specimen_id} for Person {self.person_id}"
+
+
+class Note(models.Model):
+    """OMOP CDM Note table - free text clinical notes."""
+    note_id = models.BigIntegerField(primary_key=True)
+    person = models.ForeignKey(Person, on_delete=models.CASCADE, db_column='person_id')
+    note_date = models.DateField()
+    note_datetime = models.DateTimeField(null=True, blank=True)
+    note_type_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='note_types',
+        db_column='note_type_concept_id',
+    )
+    note_class_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='note_classes',
+        db_column='note_class_concept_id', null=True, blank=True,
+    )
+    note_title = models.CharField(max_length=255, null=True, blank=True)
+    note_text = models.TextField()
+    encoding_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='note_encodings',
+        db_column='encoding_concept_id', null=True, blank=True,
+    )
+    language_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='note_languages',
+        db_column='language_concept_id', null=True, blank=True,
+    )
+    provider_id = models.IntegerField(null=True, blank=True)
+    visit_occurrence = models.ForeignKey(
+        VisitOccurrence, on_delete=models.SET_NULL, db_column='visit_occurrence_id',
+        null=True, blank=True,
+    )
+    visit_detail_id = models.IntegerField(null=True, blank=True)
+    note_source_value = models.CharField(max_length=50, null=True, blank=True)
+
+    class Meta:
+        db_table = 'note'
+
+    def __str__(self):
+        return f"Note {self.note_id} for Person {self.person_id}"
+
+
+class NoteNlp(models.Model):
+    """OMOP CDM Note NLP table - extracted terms from notes."""
+    note_nlp_id = models.BigIntegerField(primary_key=True)
+    note = models.ForeignKey(Note, on_delete=models.CASCADE, db_column='note_id')
+    section_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='note_nlp_sections',
+        db_column='section_concept_id', null=True, blank=True,
+    )
+    snippet = models.CharField(max_length=2500, null=True, blank=True)
+    offset = models.CharField(max_length=50, null=True, blank=True)
+    lexical_variant = models.CharField(max_length=250, null=True, blank=True)
+    note_nlp_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='note_nlp_concepts',
+        db_column='note_nlp_concept_id', null=True, blank=True,
+    )
+    note_nlp_source_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='note_nlp_source_concepts',
+        db_column='note_nlp_source_concept_id', null=True, blank=True,
+    )
+    nlp_system = models.CharField(max_length=255, null=True, blank=True)
+    nlp_date = models.DateTimeField(null=True, blank=True)
+    term_exists = models.CharField(max_length=1, null=True, blank=True)
+    term_temporal = models.CharField(max_length=50, null=True, blank=True)
+    term_modifiers = models.CharField(max_length=255, null=True, blank=True)
+
+    class Meta:
+        db_table = 'note_nlp'
+
+    def __str__(self):
+        return f"NoteNLP {self.note_nlp_id} for Note {self.note_id}"
+
+
+class ConditionEra(models.Model):
+    """OMOP CDM Condition Era table - contiguous condition episodes."""
+    condition_era_id = models.BigIntegerField(primary_key=True)
+    person = models.ForeignKey(Person, on_delete=models.CASCADE, db_column='person_id')
+    condition_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='condition_eras',
+        db_column='condition_concept_id',
+    )
+    condition_era_start_date = models.DateField()
+    condition_era_end_date = models.DateField()
+    condition_occurrence_count = models.IntegerField()
+
+    class Meta:
+        db_table = 'condition_era'
+
+    def __str__(self):
+        return f"ConditionEra {self.condition_era_id} for Person {self.person_id}"
+
+
+class DrugEra(models.Model):
+    """OMOP CDM Drug Era table - contiguous drug exposure episodes."""
+    drug_era_id = models.BigIntegerField(primary_key=True)
+    person = models.ForeignKey(Person, on_delete=models.CASCADE, db_column='person_id')
+    drug_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='drug_eras',
+        db_column='drug_concept_id',
+    )
+    drug_era_start_date = models.DateField()
+    drug_era_end_date = models.DateField()
+    drug_exposure_count = models.IntegerField()
+
+    class Meta:
+        db_table = 'drug_era'
+
+    def __str__(self):
+        return f"DrugEra {self.drug_era_id} for Person {self.person_id}"
+
+
+class DoseEra(models.Model):
+    """OMOP CDM Dose Era table - contiguous dose-specific exposure episodes."""
+    dose_era_id = models.BigIntegerField(primary_key=True)
+    person = models.ForeignKey(Person, on_delete=models.CASCADE, db_column='person_id')
+    drug_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='dose_eras',
+        db_column='drug_concept_id',
+    )
+    unit_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='dose_era_units',
+        db_column='unit_concept_id',
+    )
+    dose_value = models.DecimalField(max_digits=18, decimal_places=5)
+    dose_era_start_date = models.DateField()
+    dose_era_end_date = models.DateField()
+
+    class Meta:
+        db_table = 'dose_era'
+
+    def __str__(self):
+        return f"DoseEra {self.dose_era_id} for Person {self.person_id}"
+
+
 class LoincClass(models.Model):
     """LOINC CLASS → display name mapping from LoincClass.csv (loinc.org archive)."""
     code = models.CharField(max_length=64, primary_key=True)
