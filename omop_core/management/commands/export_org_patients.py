@@ -114,6 +114,15 @@ def _group_by_person_singular(qs):
     return groups
 
 
+def _group_note_nlp_by_person(qs):
+    """Group NoteNlp rows by the patient on the parent Note."""
+    groups = defaultdict(list)
+    for obj in qs.select_related('note'):
+        if obj.note_id and obj.note and obj.note.person_id:
+            groups[obj.note.person_id].append(obj)
+    return groups
+
+
 # ---------------------------------------------------------------------------
 # Command
 # ---------------------------------------------------------------------------
@@ -181,20 +190,20 @@ class Command(BaseCommand):
         # 3. Bulk-fetch all OMOP / related tables (one query per table)
         # ------------------------------------------------------------------
         omop_tables = [
-            ('visit_occurrences',      VisitOccurrence,         _group_by_person),
-            ('condition_occurrences',  ConditionOccurrence,     _group_by_person),
-            ('drug_exposures',         DrugExposure,            _group_by_person),
-            ('procedure_occurrences',  ProcedureOccurrence,     _group_by_person),
-            ('measurements',           Measurement,             _group_by_person),
-            ('observations',           Observation,             _group_by_person),
-            ('visit_details',          VisitDetail,             _group_by_person),
-            ('deaths',                 Death,                   _group_by_person_singular),
-            ('specimens',              Specimen,                _group_by_person),
-            ('notes',                  Note,                    _group_by_person),
-            ('note_nlp',               NoteNlp,                 _group_by_person),
-            ('condition_eras',         ConditionEra,            _group_by_person),
-            ('drug_eras',              DrugEra,                 _group_by_person),
-            ('dose_eras',              DoseEra,                 _group_by_person),
+            ('visit_occurrences',      VisitOccurrence,         _group_by_person,          {'person_id__in': person_ids}),
+            ('condition_occurrences',  ConditionOccurrence,     _group_by_person,          {'person_id__in': person_ids}),
+            ('drug_exposures',         DrugExposure,            _group_by_person,          {'person_id__in': person_ids}),
+            ('procedure_occurrences',  ProcedureOccurrence,     _group_by_person,          {'person_id__in': person_ids}),
+            ('measurements',           Measurement,             _group_by_person,          {'person_id__in': person_ids}),
+            ('observations',           Observation,             _group_by_person,          {'person_id__in': person_ids}),
+            ('visit_details',          VisitDetail,             _group_by_person,          {'person_id__in': person_ids}),
+            ('deaths',                 Death,                   _group_by_person_singular, {'person_id__in': person_ids}),
+            ('specimens',              Specimen,                _group_by_person,          {'person_id__in': person_ids}),
+            ('notes',                  Note,                    _group_by_person,          {'person_id__in': person_ids}),
+            ('note_nlp',               NoteNlp,                 _group_note_nlp_by_person, {'note__person_id__in': person_ids}),
+            ('condition_eras',         ConditionEra,            _group_by_person,          {'person_id__in': person_ids}),
+            ('drug_eras',              DrugEra,                 _group_by_person,          {'person_id__in': person_ids}),
+            ('dose_eras',              DoseEra,                 _group_by_person,          {'person_id__in': person_ids}),
         ]
         related_tables = [
             ('documents',         PatientDocument,        _group_by_person),
@@ -208,8 +217,8 @@ class Command(BaseCommand):
 
         self.stdout.write('Fetching OMOP tables:')
         total_omop_rows = 0
-        for key, Model, grouper in omop_tables:
-            qs = Model.objects.filter(person_id__in=person_ids)
+        for key, Model, grouper, filters in omop_tables:
+            qs = Model.objects.filter(**filters)
             grouped = grouper(qs)
             row_count = (
                 sum(len(v) for v in grouped.values())
