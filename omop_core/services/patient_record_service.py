@@ -390,8 +390,15 @@ def _get_location_data(person: Person) -> dict:
 # unrelated conditions pass through untouched.
 _DISEASE_ALIASES = {
     'myeloma': 'multiple myeloma',
-    'er|erbb2 breast cancer': 'Breast cancer',
-    'er|erbb2 breast cancer (disorder)': 'Breast cancer',
+    # Breast cancer — all common OMOP/SNOMED surface forms → single canonical title
+    'breast cancer': 'Breast Cancer',
+    'breast cancer (disorder)': 'Breast Cancer',
+    'malignant neoplasm of breast': 'Breast Cancer',
+    'malignant neoplasm of breast (disorder)': 'Breast Cancer',
+    'carcinoma of breast': 'Breast Cancer',
+    'carcinoma of breast (disorder)': 'Breast Cancer',
+    'er|erbb2 breast cancer': 'Breast Cancer',
+    'er|erbb2 breast cancer (disorder)': 'Breast Cancer',
 }
 
 

@@ -232,7 +232,7 @@ class RefreshPatientRecordDiseaseTest(_OmopBase):
             condition_type_concept=self.type_concept,
         )
         pi = refresh_patient_record(self.person)
-        self.assertIn('neoplasm', pi.disease.lower())
+        self.assertEqual(pi.disease, 'Breast Cancer')
 
     def test_diagnosis_date_from_condition(self):
         ConditionOccurrence.objects.create(
@@ -268,12 +268,14 @@ class CanonicalizeDiseaseTest(_OmopBase):
         self.assertEqual(_canonicalize_disease('myeloma'), 'multiple myeloma')
         self.assertEqual(_canonicalize_disease('Myeloma'), 'multiple myeloma')
         self.assertEqual(_canonicalize_disease('  MYELOMA  '), 'multiple myeloma')
-        self.assertEqual(_canonicalize_disease('ER|ERBB2 Breast cancer'), 'Breast cancer')
-        self.assertEqual(_canonicalize_disease('ER|ERBB2 Breast cancer (disorder)'), 'Breast cancer')
+        self.assertEqual(_canonicalize_disease('breast cancer'), 'Breast Cancer')
+        self.assertEqual(_canonicalize_disease('Breast cancer'), 'Breast Cancer')
+        self.assertEqual(_canonicalize_disease('Breast Cancer (disorder)'), 'Breast Cancer')
+        self.assertEqual(_canonicalize_disease('ER|ERBB2 Breast cancer'), 'Breast Cancer')
+        self.assertEqual(_canonicalize_disease('ER|ERBB2 Breast cancer (disorder)'), 'Breast Cancer')
 
     def test_canonicalize_helper_passes_through_unknown(self):
         from omop_core.services.patient_record_service import _canonicalize_disease
-        self.assertEqual(_canonicalize_disease('breast cancer'), 'breast cancer')
         self.assertEqual(_canonicalize_disease('pancreatic cancer'), 'pancreatic cancer')
         self.assertEqual(_canonicalize_disease(''), '')
         self.assertIsNone(_canonicalize_disease(None))
@@ -516,7 +518,7 @@ class ConditionSignalTest(_OmopBase):
         )
         pi = PatientRecord.objects.get(person=self.person)
         self.assertIsNotNone(pi.disease)
-        self.assertIn('neoplasm', pi.disease.lower())
+        self.assertEqual(pi.disease, 'Breast Cancer')
 
     def test_condition_delete_clears_disease(self):
         PatientRecord.objects.create(person=self.person)
