@@ -1073,7 +1073,7 @@ class ConditionToPatientRecordTest(_SignalBase):
         )
         pi = self._get_pi()
         self.assertIsNotNone(pi, 'PatientRecord not created after ConditionOccurrence save')
-        self.assertEqual(pi.disease, 'Breast Cancer')
+        self.assertEqual(pi.disease, 'Breast cancer')
 
     def test_create_cancer_condition_sets_diagnosis_date(self):
         ConditionOccurrence.objects.create(
@@ -1147,7 +1147,7 @@ class ConditionToPatientRecordTest(_SignalBase):
         cond.condition_concept = self.cancer_concept
         cond.save()
 
-        self.assertEqual(self._get_pi().disease, 'Breast Cancer')
+        self.assertEqual(self._get_pi().disease, 'Breast cancer')
 
     def test_delete_cancer_condition_clears_disease(self):
         cond = ConditionOccurrence.objects.create(
@@ -1157,7 +1157,7 @@ class ConditionToPatientRecordTest(_SignalBase):
             condition_start_date=date(2022, 1, 1),
             condition_type_concept=self.type_concept,
         )
-        self.assertEqual(self._get_pi().disease, 'Breast Cancer')
+        self.assertEqual(self._get_pi().disease, 'Breast cancer')
 
         cond.delete()
 
