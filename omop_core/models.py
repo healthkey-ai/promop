@@ -2029,6 +2029,11 @@ class PatientRecord(models.Model):
         from datetime import date
         today = date.today()
         dob = self.date_of_birth
+        if isinstance(dob, str):
+            try:
+                dob = date.fromisoformat(dob)
+            except ValueError:
+                dob = None
         if dob is None and self.person_id:
             p = self.person
             if p.year_of_birth:
