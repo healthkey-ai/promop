@@ -31,6 +31,7 @@ from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections
 from django.db.models import Q
+from django.utils import timezone
 
 from omop_core.signals import suppress_patient_record_refresh
 
@@ -168,6 +169,10 @@ def _canonical_start_date(record: PatientRecord, prefix: str):
     )
 
 
+def _midnight_aware(value: date):
+    return timezone.make_aware(datetime.combine(value, datetime.min.time()))
+
+
 def _backfill_condition_occurrence(record: PatientRecord, type_concept) -> list[str]:
     condition_date = (
         record.diagnosis_date
@@ -202,7 +207,7 @@ def _backfill_condition_occurrence(record: PatientRecord, type_concept) -> list[
         person=record.person,
         condition_concept=condition_concept,
         condition_start_date=condition_date,
-        condition_start_datetime=datetime.combine(condition_date, datetime.min.time()),
+        condition_start_datetime=_midnight_aware(condition_date),
         condition_type_concept=type_concept,
         condition_source_value=(record.disease_slug or condition_name)[:50],
         condition_source_concept=condition_concept,
@@ -248,10 +253,10 @@ def _backfill_regimen_exposures(record: PatientRecord, type_concept) -> list[str
             person=record.person,
             drug_concept=regimen_concept,
             drug_exposure_start_date=start_date,
-            drug_exposure_start_datetime=datetime.combine(start_date, datetime.min.time()),
+            drug_exposure_start_datetime=_midnight_aware(start_date),
             drug_exposure_end_date=end_date,
             drug_exposure_end_datetime=(
-                datetime.combine(end_date, datetime.min.time()) if end_date else None
+                _midnight_aware(end_date) if end_date else None
             ),
             drug_type_concept=type_concept,
             drug_source_value=regimen_name[:50],
@@ -293,12 +298,12 @@ def _backfill_best_response_observation(record: PatientRecord, type_concept) -> 
         person=record.person,
         observation_concept=response_concept,
         observation_date=obs_date,
-        observation_datetime=datetime.combine(obs_date, datetime.min.time()),
+        observation_datetime=_midnight_aware(obs_date),
         observation_type_concept=type_concept,
-        value_as_string=concept_name,
+        value_as_string=desired_response,
         observation_source_value=concept_code,
         observation_source_concept=response_concept,
-        value_source_value=concept_name[:50],
+        value_source_value=desired_response[:50],
     )
     return ['best_response_observation']
 

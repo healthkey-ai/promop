@@ -48,6 +48,7 @@ _OMOP_DERIVED_FIELDS = [
     'second_line_therapy_id',
     'later_therapy', 'later_date', 'later_start_date', 'later_end_date',
     'later_therapies', 'later_therapy_ids',
+    'therapy_lines_count', 'last_treatment',
     'concomitant_medications',
     # Legacy labs (derived via name-based Measurement lookup)
     'hemoglobin_level', 'hemoglobin_level_units',
@@ -389,8 +390,8 @@ def _get_location_data(person: Person) -> dict:
 # unrelated conditions pass through untouched.
 _DISEASE_ALIASES = {
     'myeloma': 'multiple myeloma',
-    'er|erbb2 breast cancer': 'Breast Cancer',
-    'er|erbb2 breast cancer (disorder)': 'Breast Cancer',
+    'er|erbb2 breast cancer': 'Breast cancer',
+    'er|erbb2 breast cancer (disorder)': 'Breast cancer',
 }
 
 
@@ -402,8 +403,6 @@ def _canonicalize_disease(name: str) -> str:
     if not name:
         return name
     normalized = name.strip().lower()
-    if 'breast cancer' in normalized:
-        return 'Breast Cancer'
     return _DISEASE_ALIASES.get(normalized, name)
 
 
@@ -1491,9 +1490,10 @@ def _get_assessment_data(person: Person) -> dict:
             '182843004': 'Stable Disease',
             '182842009': 'Progressive Disease',
         }
-        code = response_obs.first().observation_concept.concept_code
+        obs = response_obs.first()
+        code = obs.observation_concept.concept_code
         if code in response_map:
-            data['best_response'] = response_map[code]
+            data['best_response'] = obs.value_as_string or response_map[code]
 
     tumor_stage_obs = Observation.objects.filter(
         person=person,
@@ -1850,6 +1850,18 @@ def _get_prior_procedures(person: Person) -> dict:
 # Derived fields (must run after all sections are populated)
 # ---------------------------------------------------------------------------
 
+def _parse_date_value(v):
+    """Parse a date value that may be a date object or an ISO date string."""
+    if isinstance(v, date):
+        return v
+    if isinstance(v, str):
+        try:
+            return date.fromisoformat(v)
+        except ValueError:
+            return None
+    return None
+
+
 def _compute_derived_fields(patient_info: PatientRecord) -> None:
     """Compute fields that depend on other PatientRecord fields being set."""
     serum_mp = patient_info.monoclonal_protein_serum
@@ -1925,6 +1937,23 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
         patient_info.renal_adequacy_status = float(egfr) >= 30.0
     elif creatinine is not None:
         patient_info.renal_adequacy_status = float(creatinine) <= 1.5
+
+    # last_treatment — latest therapy end date; falls back to latest start date
+    _end_dates = [
+        _parse_date_value(patient_info.first_line_end_date),
+        _parse_date_value(patient_info.second_line_end_date),
+        _parse_date_value(patient_info.later_end_date),
+    ]
+    _start_dates = [
+        _parse_date_value(patient_info.first_line_start_date or patient_info.first_line_date),
+        _parse_date_value(patient_info.second_line_start_date or patient_info.second_line_date),
+        _parse_date_value(patient_info.later_start_date or patient_info.later_date),
+    ]
+    _valid_ends = [d for d in _end_dates if d]
+    _valid_starts = [d for d in _start_dates if d]
+    _lt_candidates = _valid_ends or _valid_starts
+    if _lt_candidates:
+        patient_info.last_treatment = max(_lt_candidates)
 
 
 def _get_wearable_data(person: Person) -> dict:
