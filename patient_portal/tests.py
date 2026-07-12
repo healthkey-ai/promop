@@ -1073,7 +1073,7 @@ class ConditionToPatientRecordTest(_SignalBase):
         )
         pi = self._get_pi()
         self.assertIsNotNone(pi, 'PatientRecord not created after ConditionOccurrence save')
-        self.assertEqual(pi.disease, 'Breast cancer')
+        self.assertEqual(pi.disease, 'Breast Cancer')
 
     def test_create_cancer_condition_sets_diagnosis_date(self):
         ConditionOccurrence.objects.create(
@@ -1147,7 +1147,7 @@ class ConditionToPatientRecordTest(_SignalBase):
         cond.condition_concept = self.cancer_concept
         cond.save()
 
-        self.assertEqual(self._get_pi().disease, 'Breast cancer')
+        self.assertEqual(self._get_pi().disease, 'Breast Cancer')
 
     def test_delete_cancer_condition_clears_disease(self):
         cond = ConditionOccurrence.objects.create(
@@ -1157,7 +1157,7 @@ class ConditionToPatientRecordTest(_SignalBase):
             condition_start_date=date(2022, 1, 1),
             condition_type_concept=self.type_concept,
         )
-        self.assertEqual(self._get_pi().disease, 'Breast cancer')
+        self.assertEqual(self._get_pi().disease, 'Breast Cancer')
 
         cond.delete()
 
@@ -3136,13 +3136,13 @@ class PatientRecordOmopSyncTest(_SmartBase):
         person = Person.objects.create(person_id=91010)
         pi = PatientRecord.objects.create(person=person, organization=self.organization)
 
-        self._patch(pi, {'disease': 'Breast cancer'})
+        self._patch(pi, {'disease': 'Breast Cancer'})
 
         self.assertEqual(
             ConditionOccurrence.objects.filter(person=person).count(), 1
         )
         co = ConditionOccurrence.objects.get(person=person)
-        self.assertEqual(co.condition_source_value, 'Breast cancer')
+        self.assertEqual(co.condition_source_value, 'Breast Cancer')
 
     def test_patch_stage_appends_condition_occurrence(self):
         """Two PATCHes of 'stage' create two separate ConditionOccurrence rows."""

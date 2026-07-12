@@ -8,11 +8,13 @@ FHIR upload endpoint.
 Usage:
     python manage.py populate_patient_record
     python manage.py populate_patient_record --person-id 4001
+    python manage.py populate_patient_record --person-ids 4001,4002
+    python manage.py populate_patient_record --org-slugs synthea-bc --limit 10
     python manage.py populate_patient_record --force-update --verbose
 """
 
 from django.core.management.base import BaseCommand
-from omop_core.models import Person
+from omop_core.models import PatientRecord, Person
 from omop_core.services.patient_record_service import (
     refresh_patient_record,
     _get_demographics,
@@ -26,6 +28,25 @@ from omop_core.services.patient_record_service import (
 
 class Command(BaseCommand):
     help = 'Populate PatientRecord from OMOP tables for all persons'
+
+    @staticmethod
+    def _cohort_persons(person_id=None, person_ids=None, org_slugs=None, limit=None):
+        if person_id is not None:
+            qs = Person.objects.filter(person_id=person_id).order_by('person_id')
+        elif person_ids:
+            qs = Person.objects.filter(person_id__in=person_ids).order_by('person_id')
+        elif org_slugs:
+            scoped_ids = list(
+                PatientRecord.objects
+                .filter(organization__slug__in=org_slugs)
+                .order_by('person_id')
+                .values_list('person_id', flat=True)
+            )
+            qs = Person.objects.filter(person_id__in=scoped_ids).order_by('person_id')
+        else:
+            qs = Person.objects.all().order_by('person_id')
+
+        return qs[:limit] if limit else qs
 
     def get_demographics(self, person):
         return _get_demographics(person)
@@ -53,6 +74,22 @@ class Command(BaseCommand):
             help='Process specific person ID only',
         )
         parser.add_argument(
+            '--person-ids',
+            default='',
+            help='Comma-separated person IDs to process',
+        )
+        parser.add_argument(
+            '--org-slugs',
+            default='',
+            help='Comma-separated organization slugs to scope the refresh to existing PatientRecords',
+        )
+        parser.add_argument(
+            '--limit',
+            type=int,
+            default=None,
+            help='Maximum number of people to process after scoping',
+        )
+        parser.add_argument(
             '--force-update',
             action='store_true',
             help='Force update (always refreshes, ignored — refresh_patient_record always upserts)',
@@ -65,15 +102,30 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         person_id = options.get('person_id')
+        person_ids_arg = options.get('person_ids', '')
+        org_slugs_arg = options.get('org_slugs', '')
+        limit = options.get('limit')
         verbose = options.get('verbose')
 
-        if person_id:
-            persons = Person.objects.filter(person_id=person_id)
-            if not persons.exists():
+        person_ids = [int(value) for value in person_ids_arg.split(',') if value.strip()]
+        org_slugs = [value.strip() for value in org_slugs_arg.split(',') if value.strip()]
+
+        if person_id is not None and person_ids:
+            self.stdout.write(self.style.ERROR('Pass either --person-id or --person-ids, not both'))
+            return
+
+        persons = self._cohort_persons(
+            person_id=person_id,
+            person_ids=person_ids,
+            org_slugs=org_slugs,
+            limit=limit,
+        )
+        if not persons.exists():
+            if person_id is not None:
                 self.stdout.write(self.style.ERROR(f'Person with ID {person_id} not found'))
-                return
-        else:
-            persons = Person.objects.all()
+            else:
+                self.stdout.write(self.style.ERROR('No matching persons found for the requested cohort'))
+            return
 
         total = persons.count()
         self.stdout.write(f'Processing {total} person(s)…')

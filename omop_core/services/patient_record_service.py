@@ -46,7 +46,9 @@ _OMOP_DERIVED_FIELDS = [
     'first_line_therapy_id',
     'second_line_therapy', 'second_line_date', 'second_line_start_date', 'second_line_end_date',
     'second_line_therapy_id',
-    'later_therapy', 'later_date', 'later_therapies', 'later_therapy_ids',
+    'later_therapy', 'later_date', 'later_start_date', 'later_end_date',
+    'later_therapies', 'later_therapy_ids',
+    'therapy_lines_count', 'last_treatment',
     'concomitant_medications',
     # Legacy labs (derived via name-based Measurement lookup)
     'hemoglobin_level', 'hemoglobin_level_units',
@@ -388,6 +390,13 @@ def _get_location_data(person: Person) -> dict:
 # unrelated conditions pass through untouched.
 _DISEASE_ALIASES = {
     'myeloma': 'multiple myeloma',
+    # Breast cancer — all common OMOP/SNOMED surface forms → single canonical title
+    'breast cancer': 'Breast Cancer',
+    'breast cancer (disorder)': 'Breast Cancer',
+    'malignant neoplasm of breast': 'Breast Cancer',
+    'malignant neoplasm of breast (disorder)': 'Breast Cancer',
+    'carcinoma of breast': 'Breast Cancer',
+    'carcinoma of breast (disorder)': 'Breast Cancer',
     'er|erbb2 breast cancer': 'Breast Cancer',
     'er|erbb2 breast cancer (disorder)': 'Breast Cancer',
 }
@@ -401,8 +410,6 @@ def _canonicalize_disease(name: str) -> str:
     if not name:
         return name
     normalized = name.strip().lower()
-    if 'breast cancer' in normalized:
-        return 'Breast Cancer'
     return _DISEASE_ALIASES.get(normalized, name)
 
 
@@ -716,10 +723,13 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         )
 
     # ── Second pass: populate data dict ───────────────────────────────────
+    therapy_line_numbers = set()
+
     for episode, drugs_in_episode, concept_id, source_value_set in episode_rows:
         lot = episode.episode_number
         if lot is None:
             continue
+        therapy_line_numbers.add(lot)
 
         # Nullify dangling FK concept_ids (not in Concept table)
         if concept_id and concept_id not in concept_name_map:
@@ -751,12 +761,14 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             data['first_line_therapy'] = drug_names
             data['first_line_therapy_id'] = concept_id
             data['first_line_date'] = start_date
+            data['first_line_start_date'] = start_date
             if end_date:
                 data['first_line_end_date'] = end_date
         elif lot == 2:
             data['second_line_therapy'] = drug_names
             data['second_line_therapy_id'] = concept_id
             data['second_line_date'] = start_date
+            data['second_line_start_date'] = start_date
             if end_date:
                 data['second_line_end_date'] = end_date
         elif lot >= 3:
@@ -771,6 +783,13 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
                 data['later_therapy'] = drug_names
             if not data.get('later_date'):
                 data['later_date'] = start_date
+            if not data.get('later_start_date'):
+                data['later_start_date'] = start_date
+            if end_date and not data.get('later_end_date'):
+                data['later_end_date'] = end_date
+
+    if therapy_line_numbers:
+        data['therapy_lines_count'] = len(therapy_line_numbers)
 
     return data
 
@@ -1478,9 +1497,10 @@ def _get_assessment_data(person: Person) -> dict:
             '182843004': 'Stable Disease',
             '182842009': 'Progressive Disease',
         }
-        code = response_obs.first().observation_concept.concept_code
+        obs = response_obs.first()
+        code = obs.observation_concept.concept_code
         if code in response_map:
-            data['best_response'] = response_map[code]
+            data['best_response'] = obs.value_as_string or response_map[code]
 
     tumor_stage_obs = Observation.objects.filter(
         person=person,
@@ -1574,19 +1594,26 @@ def _get_performance_data(person: Person) -> dict:
     observations = (
         Observation.objects.filter(person=person)
         .select_related('observation_concept')
-        .order_by('-observation_date')
+        .order_by('-observation_date', '-observation_id')
     )
 
-    for obs in observations:
-        if not obs.observation_concept:
-            continue
-        concept_name = obs.observation_concept.concept_name.lower()
-        if 'ecog' in concept_name and obs.value_as_number is not None:
-            data['ecog_performance_status'] = int(obs.value_as_number)
-            break
-        elif 'karnofsky' in concept_name and obs.value_as_number is not None:
-            data['karnofsky_performance_score'] = int(obs.value_as_number)
-            break
+    ecog = (
+        observations
+        .filter(observation_concept__concept_name__icontains='ecog')
+        .exclude(value_as_number__isnull=True)
+        .first()
+    )
+    if ecog:
+        data['ecog_performance_status'] = int(ecog.value_as_number)
+
+    karnofsky = (
+        observations
+        .filter(observation_concept__concept_name__icontains='karnofsky')
+        .exclude(value_as_number__isnull=True)
+        .first()
+    )
+    if karnofsky:
+        data['karnofsky_performance_score'] = int(karnofsky.value_as_number)
 
     return data
 
@@ -1830,6 +1857,18 @@ def _get_prior_procedures(person: Person) -> dict:
 # Derived fields (must run after all sections are populated)
 # ---------------------------------------------------------------------------
 
+def _parse_date_value(v):
+    """Parse a date value that may be a date object or an ISO date string."""
+    if isinstance(v, date):
+        return v
+    if isinstance(v, str):
+        try:
+            return date.fromisoformat(v)
+        except ValueError:
+            return None
+    return None
+
+
 def _compute_derived_fields(patient_info: PatientRecord) -> None:
     """Compute fields that depend on other PatientRecord fields being set."""
     serum_mp = patient_info.monoclonal_protein_serum
@@ -1905,6 +1944,23 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
         patient_info.renal_adequacy_status = float(egfr) >= 30.0
     elif creatinine is not None:
         patient_info.renal_adequacy_status = float(creatinine) <= 1.5
+
+    # last_treatment — latest therapy end date; falls back to latest start date
+    _end_dates = [
+        _parse_date_value(patient_info.first_line_end_date),
+        _parse_date_value(patient_info.second_line_end_date),
+        _parse_date_value(patient_info.later_end_date),
+    ]
+    _start_dates = [
+        _parse_date_value(patient_info.first_line_start_date or patient_info.first_line_date),
+        _parse_date_value(patient_info.second_line_start_date or patient_info.second_line_date),
+        _parse_date_value(patient_info.later_start_date or patient_info.later_date),
+    ]
+    _valid_ends = [d for d in _end_dates if d]
+    _valid_starts = [d for d in _start_dates if d]
+    _lt_candidates = _valid_ends or _valid_starts
+    if _lt_candidates:
+        patient_info.last_treatment = max(_lt_candidates)
 
 
 def _get_wearable_data(person: Person) -> dict:
