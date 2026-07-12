@@ -5,10 +5,17 @@ import pytest
 from omop_core.services.patient_record_service import (
     _get_biomarker_data,
     _get_genetic_mutations,
+    _get_mm_specific_data,
     _get_treatment_data,
     _get_wearable_data,
 )
-from tests.factories import ConceptFactory, DrugExposureFactory, PersonFactory
+from tests.factories import (
+    ConceptFactory,
+    DrugExposureFactory,
+    MeasurementFactory,
+    ObservationFactory,
+    PersonFactory,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -148,3 +155,23 @@ def test_treatment_fallback_normalizes_thp_product_names_to_regimen():
     assert data['first_line_therapy'] == 'THP'
     assert data['first_line_therapy_id'] == 1525210
     assert data['therapy_lines_count'] == 1
+
+
+def test_mm_specific_data_merges_measurement_and_observation_sources():
+    person = PersonFactory()
+
+    MeasurementFactory(
+        person=person,
+        measurement_source_value='24646-7',
+        value_as_number=1,
+    )
+    ObservationFactory(
+        person=person,
+        observation_source_value='47082-2',
+        value_as_number=1,
+    )
+
+    data = _get_mm_specific_data(person)
+
+    assert data['bone_lesions'] == 'Present'
+    assert data['plasma_cell_leukemia'] is True

@@ -1357,44 +1357,37 @@ def _get_mm_specific_data(person: Person) -> dict:
                 measurement_source_value__in=list(MM_LOINC_CODES.keys()))
         .order_by('measurement_date')
     )
-    for m in mm_measurements:
-        field = MM_LOINC_CODES.get(m.measurement_source_value)
-        if not field:
-            continue
-        # Value may be stored as number (1/0) or string ('True'/'False')
-        if m.value_as_number is not None:
-            bool_val = bool(m.value_as_number)
-        elif m.value_as_string:
-            bool_val = m.value_as_string.lower() in ('true', '1', 'yes', 'present')
-        else:
-            continue
+    def _coerce_mm_boolean(number_value, string_value):
+        if number_value is not None:
+            return bool(number_value)
+        if string_value:
+            return string_value.lower() in ('true', '1', 'yes', 'present')
+        return None
+
+    def _set_mm_field(field, bool_val):
+        if bool_val is None or field in data:
+            return
         if field == 'bone_lesions':
             data[field] = 'Present' if bool_val else 'Absent'
         else:
             data[field] = bool_val
 
-    # Fall back to Observation table (some environments route these there)
-    if not data:
-        mm_obs = (
-            Observation.objects
-            .filter(person=person,
-                    observation_source_value__in=list(MM_LOINC_CODES.keys()))
-            .order_by('observation_date')
-        )
-        for o in mm_obs:
-            field = MM_LOINC_CODES.get(o.observation_source_value)
-            if not field:
-                continue
-            if o.value_as_number is not None:
-                bool_val = bool(o.value_as_number)
-            elif o.value_as_string:
-                bool_val = o.value_as_string.lower() in ('true', '1', 'yes', 'present')
-            else:
-                continue
-            if field == 'bone_lesions':
-                data[field] = 'Present' if bool_val else 'Absent'
-            else:
-                data[field] = bool_val
+    for m in mm_measurements:
+        field = MM_LOINC_CODES.get(m.measurement_source_value)
+        _set_mm_field(field, _coerce_mm_boolean(m.value_as_number, m.value_as_string))
+
+    # Observation rows should supplement missing fields, not only act as an
+    # all-or-nothing fallback, because some environments split MM facts across
+    # Measurement and Observation tables.
+    mm_obs = (
+        Observation.objects
+        .filter(person=person,
+                observation_source_value__in=list(MM_LOINC_CODES.keys()))
+        .order_by('observation_date')
+    )
+    for o in mm_obs:
+        field = MM_LOINC_CODES.get(o.observation_source_value)
+        _set_mm_field(field, _coerce_mm_boolean(o.value_as_number, o.value_as_string))
 
     # ── meets_slim: derived from plasma cells and FLC ratio in OMOP ─────────
     # SLiM = Sixty (plasma cells ≥60%), Light chain ratio ≥100, or MRI lesions
