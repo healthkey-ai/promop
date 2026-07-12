@@ -19,6 +19,7 @@ import random
 from datetime import date, timedelta
 
 from django.core.management.base import BaseCommand
+from django.db.models import Q
 
 from omop_core.models import Organization, PatientRecord
 
@@ -230,6 +231,12 @@ def _build_bc_diagnostics(record: PatientRecord) -> dict:
 class Command(BaseCommand):
     help = 'Replace contaminated MM data on ABC Foundation BC patients with plausible ER+/HER2+ breast cancer data'
 
+    BC_RECORD_FILTER = (
+        Q(disease_slug='breast-cancer')
+        | Q(disease__icontains='breast')
+        | Q(disease__icontains='ERBB2')
+    )
+
     def add_arguments(self, parser):
         parser.add_argument(
             '--org-slug', default='abc-foundation',
@@ -255,8 +262,19 @@ class Command(BaseCommand):
             self.stderr.write(f"Organization '{options['org_slug']}' not found.")
             return
 
-        records = list(PatientRecord.objects.filter(organization=org))
-        self.stdout.write(f"Found {len(records)} PatientRecord(s) for {org.name}")
+        org_records = PatientRecord.objects.filter(organization=org)
+        records = list(org_records.filter(self.BC_RECORD_FILTER))
+        skipped_count = org_records.count() - len(records)
+
+        self.stdout.write(
+            f"Found {len(records)} targeted breast-cancer PatientRecord(s) for {org.name}"
+        )
+        if skipped_count:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"Skipping {skipped_count} non-breast-cancer PatientRecord(s) in the same org."
+                )
+            )
 
         if options['dry_run']:
             self.stdout.write('[DRY RUN] No changes will be written.')
