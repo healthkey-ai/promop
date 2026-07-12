@@ -847,16 +847,26 @@ _GENETIC_MUTATION_LOINCS = {
 }
 
 
+_LOINC_CODE_RE = __import__('re').compile(r'^\d+-\d+$')
+
+
 def _measurement_code(measurement):
-    """Return a stable measurement code from concept mapping or FHIR source_value."""
-    if (
-        measurement.measurement_source_value
-        and measurement.measurement_source_value != getattr(measurement.measurement_concept, 'concept_code', None)
-    ):
-        return measurement.measurement_source_value
-    if measurement.measurement_concept and measurement.measurement_concept.concept_code:
-        return measurement.measurement_concept.concept_code
-    return measurement.measurement_source_value
+    """Return a stable measurement code from concept mapping or FHIR source_value.
+
+    Prefers whichever of concept_code / measurement_source_value looks like a
+    real LOINC code (pattern: digits-digits, e.g. '718-7').  This handles two
+    common cases in imported data:
+      - concept_code='16112-5', source_value='Estrogen receptor...' → concept_code
+      - concept_code='0',       source_value='718-7'                → source_value
+    Falls back to source_value if neither matches the LOINC pattern.
+    """
+    concept_code = getattr(measurement.measurement_concept, 'concept_code', None)
+    source_value = measurement.measurement_source_value
+    if concept_code and _LOINC_CODE_RE.match(concept_code):
+        return concept_code
+    if source_value and _LOINC_CODE_RE.match(source_value):
+        return source_value
+    return source_value or concept_code
 
 
 def _observation_code(observation):
