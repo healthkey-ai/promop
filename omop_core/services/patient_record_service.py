@@ -716,10 +716,13 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         )
 
     # ── Second pass: populate data dict ───────────────────────────────────
+    therapy_line_count = 0
+
     for episode, drugs_in_episode, concept_id, source_value_set in episode_rows:
         lot = episode.episode_number
         if lot is None:
             continue
+        therapy_line_count = max(therapy_line_count, lot)
 
         # Nullify dangling FK concept_ids (not in Concept table)
         if concept_id and concept_id not in concept_name_map:
@@ -751,12 +754,14 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             data['first_line_therapy'] = drug_names
             data['first_line_therapy_id'] = concept_id
             data['first_line_date'] = start_date
+            data['first_line_start_date'] = start_date
             if end_date:
                 data['first_line_end_date'] = end_date
         elif lot == 2:
             data['second_line_therapy'] = drug_names
             data['second_line_therapy_id'] = concept_id
             data['second_line_date'] = start_date
+            data['second_line_start_date'] = start_date
             if end_date:
                 data['second_line_end_date'] = end_date
         elif lot >= 3:
@@ -771,6 +776,9 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
                 data['later_therapy'] = drug_names
             if not data.get('later_date'):
                 data['later_date'] = start_date
+
+    if therapy_line_count:
+        data['therapy_lines_count'] = therapy_line_count
 
     return data
 
@@ -1574,19 +1582,26 @@ def _get_performance_data(person: Person) -> dict:
     observations = (
         Observation.objects.filter(person=person)
         .select_related('observation_concept')
-        .order_by('-observation_date')
+        .order_by('-observation_date', '-observation_id')
     )
 
-    for obs in observations:
-        if not obs.observation_concept:
-            continue
-        concept_name = obs.observation_concept.concept_name.lower()
-        if 'ecog' in concept_name and obs.value_as_number is not None:
-            data['ecog_performance_status'] = int(obs.value_as_number)
-            break
-        elif 'karnofsky' in concept_name and obs.value_as_number is not None:
-            data['karnofsky_performance_score'] = int(obs.value_as_number)
-            break
+    ecog = (
+        observations
+        .filter(observation_concept__concept_name__icontains='ecog')
+        .exclude(value_as_number__isnull=True)
+        .first()
+    )
+    if ecog:
+        data['ecog_performance_status'] = int(ecog.value_as_number)
+
+    karnofsky = (
+        observations
+        .filter(observation_concept__concept_name__icontains='karnofsky')
+        .exclude(value_as_number__isnull=True)
+        .first()
+    )
+    if karnofsky:
+        data['karnofsky_performance_score'] = int(karnofsky.value_as_number)
 
     return data
 
