@@ -268,10 +268,13 @@ class CanonicalizeDiseaseTest(_OmopBase):
         self.assertEqual(_canonicalize_disease('myeloma'), 'multiple myeloma')
         self.assertEqual(_canonicalize_disease('Myeloma'), 'multiple myeloma')
         self.assertEqual(_canonicalize_disease('  MYELOMA  '), 'multiple myeloma')
+        self.assertEqual(_canonicalize_disease('breast cancer'), 'Breast Cancer')
+        self.assertEqual(_canonicalize_disease('Breast cancer'), 'Breast Cancer')
+        self.assertEqual(_canonicalize_disease('Breast Cancer (disorder)'), 'Breast Cancer')
 
     def test_canonicalize_helper_passes_through_unknown(self):
         from omop_core.services.patient_record_service import _canonicalize_disease
-        self.assertEqual(_canonicalize_disease('breast cancer'), 'breast cancer')
+        self.assertEqual(_canonicalize_disease('pancreatic cancer'), 'pancreatic cancer')
         self.assertEqual(_canonicalize_disease(''), '')
         self.assertIsNone(_canonicalize_disease(None))
 
