@@ -46,7 +46,8 @@ _OMOP_DERIVED_FIELDS = [
     'first_line_therapy_id',
     'second_line_therapy', 'second_line_date', 'second_line_start_date', 'second_line_end_date',
     'second_line_therapy_id',
-    'later_therapy', 'later_date', 'later_therapies', 'later_therapy_ids',
+    'later_therapy', 'later_date', 'later_start_date', 'later_end_date',
+    'later_therapies', 'later_therapy_ids',
     'concomitant_medications',
     # Legacy labs (derived via name-based Measurement lookup)
     'hemoglobin_level', 'hemoglobin_level_units',
@@ -716,13 +717,13 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         )
 
     # ── Second pass: populate data dict ───────────────────────────────────
-    therapy_line_count = 0
+    therapy_line_numbers = set()
 
     for episode, drugs_in_episode, concept_id, source_value_set in episode_rows:
         lot = episode.episode_number
         if lot is None:
             continue
-        therapy_line_count = max(therapy_line_count, lot)
+        therapy_line_numbers.add(lot)
 
         # Nullify dangling FK concept_ids (not in Concept table)
         if concept_id and concept_id not in concept_name_map:
@@ -776,9 +777,13 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
                 data['later_therapy'] = drug_names
             if not data.get('later_date'):
                 data['later_date'] = start_date
+            if not data.get('later_start_date'):
+                data['later_start_date'] = start_date
+            if end_date and not data.get('later_end_date'):
+                data['later_end_date'] = end_date
 
-    if therapy_line_count:
-        data['therapy_lines_count'] = therapy_line_count
+    if therapy_line_numbers:
+        data['therapy_lines_count'] = len(therapy_line_numbers)
 
     return data
 

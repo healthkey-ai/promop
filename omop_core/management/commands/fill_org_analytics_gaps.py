@@ -30,6 +30,9 @@ from datetime import date, datetime
 from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections
+from django.db.models import Q
+
+from omop_core.signals import suppress_patient_record_refresh
 
 from omop_core.models import (
     Concept,
@@ -61,10 +64,23 @@ _BEST_RESPONSE_RANK = {
 }
 
 _BEST_RESPONSE_TO_CODE = {
+    # Standard forms — map to the 4 SNOMED Standard concepts loaded in staging
     'Complete Response': ('182840001', 'Complete Response'),
     'Partial Response': ('182841002', 'Partial Response'),
     'Stable Disease': ('182843004', 'Stable Disease'),
     'Progressive Disease': ('182842009', 'Progressive Disease'),
+    # Parenthetical / abbreviation forms — collapsed to nearest SNOMED tier.
+    # sCR, VGPR, MR have no Standard concept IDs in the currently loaded vocab
+    # (NCIt and full SNOMED are not yet loaded; see GitHub issue #<TBD>).
+    # Update this map once NCIt is loaded and granular concept IDs are available.
+    'Complete Response (CR)': ('182840001', 'Complete Response'),
+    'Stringent Complete Response (sCR)': ('182840001', 'Complete Response'),
+    'Very Good Partial Response (VGPR)': ('182841002', 'Partial Response'),
+    'Partial Response (PR)': ('182841002', 'Partial Response'),
+    'Minor Response (MR)': ('182841002', 'Partial Response'),
+    'Minimal Response (MR)': ('182841002', 'Partial Response'),
+    'Stable Disease (SD)': ('182843004', 'Stable Disease'),
+    'Progressive Disease (PD)': ('182842009', 'Progressive Disease'),
 }
 
 
@@ -162,10 +178,18 @@ def _backfill_condition_occurrence(record: PatientRecord, type_concept) -> list[
     )
     if condition_date is None:
         return []
-    if ConditionOccurrence.objects.filter(person=record.person, condition_start_date=condition_date).exists():
-        return []
     condition_name = record.disease or record.disease_slug or 'Cancer diagnosis'
     concept_code = f'ANALYTICS-{(record.disease_slug or "generic-diagnosis").upper()[:40]}'
+    condition_source_value = (record.disease_slug or condition_name)[:50]
+    if ConditionOccurrence.objects.filter(
+        person=record.person,
+        condition_start_date=condition_date,
+    ).filter(
+        Q(condition_source_value=condition_source_value)
+        | Q(condition_concept__concept_code=concept_code)
+        | Q(condition_source_concept__concept_code=concept_code)
+    ).exists():
+        return []
     condition_concept = _get_or_create_concept(
         concept_code=concept_code,
         concept_name=condition_name,
@@ -225,8 +249,10 @@ def _backfill_regimen_exposures(record: PatientRecord, type_concept) -> list[str
             drug_concept=regimen_concept,
             drug_exposure_start_date=start_date,
             drug_exposure_start_datetime=datetime.combine(start_date, datetime.min.time()),
-            drug_exposure_end_date=end_date or start_date,
-            drug_exposure_end_datetime=datetime.combine((end_date or start_date), datetime.min.time()),
+            drug_exposure_end_date=end_date,
+            drug_exposure_end_datetime=(
+                datetime.combine(end_date, datetime.min.time()) if end_date else None
+            ),
             drug_type_concept=type_concept,
             drug_source_value=regimen_name[:50],
             drug_source_concept=regimen_concept,
@@ -240,9 +266,10 @@ def _backfill_best_response_observation(record: PatientRecord, type_concept) -> 
     desired_response = record.best_response or _best_response_from_outcomes(record)
     if desired_response not in _BEST_RESPONSE_TO_CODE:
         return []
+    concept_code, concept_name = _BEST_RESPONSE_TO_CODE[desired_response]
     if Observation.objects.filter(
         person=record.person,
-        observation_concept__concept_code__in=[code for code, _ in _BEST_RESPONSE_TO_CODE.values()],
+        observation_concept__concept_code=concept_code,
     ).exists():
         return []
     obs_date = (
@@ -254,7 +281,6 @@ def _backfill_best_response_observation(record: PatientRecord, type_concept) -> 
     )
     if obs_date is None:
         return []
-    concept_code, concept_name = _BEST_RESPONSE_TO_CODE[desired_response]
     response_concept = _get_or_create_concept(
         concept_code=concept_code,
         concept_name=concept_name,
@@ -317,10 +343,15 @@ def _apply_projection_backfills(record: PatientRecord) -> list[str]:
         record.second_line_end_date,
         record.later_end_date,
         record.supportive_therapy_end_date,
-        record.sct_date,
     ])
 
     if record.diagnosis_date is None and treatment_start_dates:
+        # NOTE: diagnosis_date is in _OMOP_DERIVED_FIELDS and will be cleared on the
+        # next refresh_patient_record call. This value is only durable if
+        # _backfill_condition_occurrence also created a ConditionOccurrence row that
+        # _get_disease_data() recognises on subsequent refreshes. If the LOCAL-vocab
+        # concept is not matched by the service, the field will revert to None after
+        # the next signal-triggered refresh.
         record.diagnosis_date = treatment_start_dates[0]
         changed_fields.append('diagnosis_date')
 
@@ -350,7 +381,13 @@ class Command(BaseCommand):
         parser.add_argument(
             '--dry-run',
             action='store_true',
-            help='Preview changes without writing them',
+            help=(
+                'Preview changes without writing them. '
+                'Note: the "would update" fields are computed against the current DB state '
+                'before any OMOP backfill or populate_patient_record refresh. '
+                'The actual --confirm run may touch different fields if the backfill '
+                'creates new OMOP rows that populate fills in first.'
+            ),
         )
         parser.add_argument(
             '--confirm',
@@ -388,42 +425,49 @@ class Command(BaseCommand):
 
         for index, record in enumerate(records, 1):
             close_old_connections()
-            if dry_run:
-                refreshed = record
-                created_sources = []
-            else:
-                created_sources = _backfill_omop_rows(record)
-                source_counter.update(created_sources)
-                call_command(
-                    'populate_patient_record',
-                    person_id=record.person_id,
-                    force_update=True,
-                )
-                refreshed = PatientRecord.objects.get(person_id=record.person_id)
-                refreshed_records += 1
-
-            changed_fields = _apply_projection_backfills(refreshed)
-            if changed_fields:
-                changed_records += 1
-                change_counter.update(changed_fields)
+            try:
                 if dry_run:
-                    self.stdout.write(
-                        f'  [{index}/{len(records)}] org={record.organization.slug} '
-                        f'person_id={record.person_id} would update: {", ".join(changed_fields)}'
-                    )
+                    refreshed = record
+                    created_sources = []
                 else:
-                    refreshed.save()
+                    with suppress_patient_record_refresh():
+                        created_sources = _backfill_omop_rows(record)
+                    source_counter.update(created_sources)
+                    call_command(
+                        'populate_patient_record',
+                        person_id=record.person_id,
+                        force_update=True,
+                    )
+                    refreshed = PatientRecord.objects.get(person_id=record.person_id)
+                    refreshed_records += 1
+
+                changed_fields = _apply_projection_backfills(refreshed)
+                if changed_fields:
+                    changed_records += 1
+                    change_counter.update(changed_fields)
+                    if dry_run:
+                        self.stdout.write(
+                            f'  [{index}/{len(records)}] org={record.organization.slug} '
+                            f'person_id={record.person_id} would update: {", ".join(changed_fields)}'
+                        )
+                    else:
+                        refreshed.save(update_fields=changed_fields)
+                        self.stdout.write(
+                            f'  [{index}/{len(records)}] org={record.organization.slug} '
+                            f'person_id={record.person_id} '
+                            f'source_rows={created_sources or ["none"]} '
+                            f'updated: {", ".join(changed_fields)}'
+                        )
+                elif dry_run:
                     self.stdout.write(
                         f'  [{index}/{len(records)}] org={record.organization.slug} '
-                        f'person_id={record.person_id} '
-                        f'source_rows={created_sources or ["none"]} '
-                        f'updated: {", ".join(changed_fields)}'
+                        f'person_id={record.person_id} no-op'
                     )
-            elif dry_run:
-                self.stdout.write(
+            except Exception as exc:
+                self.stdout.write(self.style.ERROR(
                     f'  [{index}/{len(records)}] org={record.organization.slug} '
-                    f'person_id={record.person_id} no-op'
-                )
+                    f'person_id={record.person_id} ERROR: {exc}'
+                ))
 
         summary = (
             f'Complete. refreshed={refreshed_records} changed_records={changed_records} '

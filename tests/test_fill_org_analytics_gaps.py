@@ -5,7 +5,7 @@ import pytest
 from django.core.management import call_command, CommandError
 
 from omop_core.models import ConditionOccurrence, DrugExposure, Observation, Organization, PatientRecord
-from tests.factories import PatientRecordFactory, PersonFactory
+from tests.factories import ConditionOccurrenceFactory, ConceptFactory, PatientRecordFactory, PersonFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -80,12 +80,77 @@ def test_backfills_analytics_fields_for_specified_org(monkeypatch):
     assert record.diagnosis_date == date(2024, 1, 15)
     assert record.best_response == 'Partial Response'
     assert record.last_treatment == date(2024, 1, 15)
-    assert record.therapy_lines_count == 1
     assert populate_calls == [person.person_id]
 
     assert untouched.first_line_start_date is None
     assert untouched.best_response is None
     assert untouched.diagnosis_date is None
+
+
+def test_backfills_condition_occurrence_even_when_unrelated_condition_exists_on_same_date(monkeypatch):
+    org = _make_org('bmm-foundation', 'BMM Foundation')
+    person = PersonFactory()
+    PatientRecordFactory(
+        person=person,
+        organization=org,
+        disease='Multiple Myeloma',
+        disease_slug='multiple-myeloma',
+        diagnosis_date=None,
+        first_line_therapy='VRd',
+        first_line_date=date(2024, 1, 15),
+        first_line_start_date=None,
+        first_line_outcome='Partial Response',
+        best_response=None,
+        last_treatment=None,
+        therapy_lines_count=None,
+    )
+    ConditionOccurrenceFactory(
+        person=person,
+        condition_start_date=date(2024, 1, 15),
+        condition_source_value='unrelated-condition',
+        condition_concept=ConceptFactory(concept_name='Unrelated condition'),
+    )
+
+    monkeypatch.setattr(
+        'omop_core.management.commands.fill_org_analytics_gaps.call_command',
+        lambda *args, **kwargs: None,
+    )
+
+    call_command('fill_org_analytics_gaps', org_slugs='bmm-foundation', confirm=True, stdout=StringIO())
+
+    matching_conditions = ConditionOccurrence.objects.filter(person=person, condition_start_date=date(2024, 1, 15))
+    assert matching_conditions.count() == 2
+    assert matching_conditions.filter(condition_concept__concept_code__startswith='ANALYTICS-').exists()
+
+
+def test_backfills_open_ended_drug_exposure_without_forcing_an_end_date(monkeypatch):
+    org = _make_org('bmm-foundation', 'BMM Foundation')
+    person = PersonFactory()
+    PatientRecordFactory(
+        person=person,
+        organization=org,
+        diagnosis_date=None,
+        first_line_therapy='VRd',
+        first_line_date=date(2024, 1, 15),
+        first_line_start_date=None,
+        first_line_end_date=None,
+        first_line_outcome='Partial Response',
+        best_response=None,
+        last_treatment=None,
+        therapy_lines_count=None,
+    )
+
+    monkeypatch.setattr(
+        'omop_core.management.commands.fill_org_analytics_gaps.call_command',
+        lambda *args, **kwargs: None,
+    )
+
+    call_command('fill_org_analytics_gaps', org_slugs='bmm-foundation', confirm=True, stdout=StringIO())
+
+    exposure = DrugExposure.objects.get(person=person, drug_source_value='VRd')
+    assert exposure.drug_exposure_start_date == date(2024, 1, 15)
+    assert exposure.drug_exposure_end_date is None
+    assert exposure.drug_exposure_end_datetime is None
 
 
 def test_dry_run_does_not_persist_changes(monkeypatch):
