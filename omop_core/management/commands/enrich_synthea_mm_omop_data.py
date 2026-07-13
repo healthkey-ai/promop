@@ -29,11 +29,15 @@ from django.db import close_old_connections, connection, transaction
 
 from omop_core.models import (
     ConditionOccurrence, Concept, ConceptClass, Domain, DrugExposure, Location,
-    Observation, PatientRecord, Person, ProcedureOccurrence, Vocabulary,
+    PatientRecord, Person, ProcedureOccurrence, Vocabulary,
 )
 from omop_core.services.lot_regimens import (
     MYELOMA_REGIMEN_CONCEPT_IDS, get_regimen_concept_id, get_regimen_name,
     get_regimen_concept_id_by_name,
+)
+from omop_core.services.episode_service import (
+    OUTCOME_SNOMED_CODES,
+    upsert_therapy_line_episode,
 )
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.pk import next_pk
@@ -307,35 +311,24 @@ def _extract_therapy_lines(medications):
     return therapy_lines
 
 
-_OUTCOME_CODES = {
-    'Complete Response': '182840001',
-    'Partial Response': '182841002',
-    'Stable Disease': '182843004',
-    'Progressive Disease': '182842009',
-}
-
-
 def _ensure_mm_episodes(person, therapy_lines, ehr_type, dry_run=False):
     """Create Episode/DrugExposure/EpisodeEvent rows for a patient's therapy lines.
 
-    Also persists each line's therapy-outcome extension as an Observation with
-    observation_source_value 'LOT-N-outcome', which patient_record_service reads
-    back into first/second/later_line_outcome.
+    DrugExposure rows (regimen-level + per-drug) are created here; the Episode,
+    its EpisodeEvent links, and the per-line outcome Observation are written via
+    the shared episode_service.upsert_therapy_line_episode so all LOT writers
+    agree on CDM tagging and idempotency key.
 
     Idempotent: skips rows that already exist.
     Returns a count of new Episodes created.
     """
-    try:
-        from omop_oncology.models import Episode, EpisodeEvent
-    except ImportError:
-        return 0
-
     created = 0
     no_match_concept = Concept.objects.filter(concept_id=0).first()
 
-    outcome_concepts = {}
-    for outcome_name, code in _OUTCOME_CODES.items():
-        c = _get_or_create_concept(
+    # Ensure the SNOMED outcome concepts exist so outcome Observations get a real
+    # concept rather than the no-match fallback.
+    for outcome_name, code in OUTCOME_SNOMED_CODES.items():
+        _get_or_create_concept(
             concept_code=code,
             concept_name=outcome_name,
             vocabulary_id='SNOMED',
@@ -343,8 +336,6 @@ def _ensure_mm_episodes(person, therapy_lines, ehr_type, dry_run=False):
             concept_class_id='Clinical Finding',
             create=not dry_run,
         )
-        if c:
-            outcome_concepts[outcome_name] = c
 
     for lot_num, lot_data in sorted(therapy_lines.items()):
         regimen_name = lot_data.get('regimen', '')
@@ -433,58 +424,20 @@ def _ensure_mm_episodes(person, therapy_lines, ehr_type, dry_run=False):
             if _de is None:
                 continue
 
-            # ── Episode ───────────────────────────────────────────────────
-            _ep = Episode.objects.filter(
-                person=person,
-                episode_source_value=f'LOT-{lot_num}',
-            ).first()
-            if _ep is None:
-                ep_source_concept = regimen_concept if resolved_cid else None
-                _ep = Episode(
-                    episode_id=next_pk(Episode, 'episode_id'),
-                    person=person,
-                    episode_concept=ehr_type,
-                    episode_object_concept=regimen_concept or no_match_concept,
-                    episode_type_concept=ehr_type,
-                    episode_start_date=lot_start or datetime.utcnow().date(),
-                    episode_end_date=lot_end,
-                    episode_number=lot_num,
-                    episode_source_value=f'LOT-{lot_num}',
-                    episode_source_concept=ep_source_concept,
-                )
-                _ep.save()
-                created += 1
-
-            # ── EpisodeEvent: link Episode → DrugExposure ─────────────────
-            EpisodeEvent.objects.get_or_create(
-                episode_id=_ep.episode_id,
-                event_id=_de.drug_exposure_id,
-                defaults={'episode_event_field_concept': ehr_type},
+            # ── Episode + EpisodeEvent + outcome (shared writer) ──────────
+            result = upsert_therapy_line_episode(
+                person,
+                line_number=lot_num,
+                regimen_concept=regimen_concept,
+                regimen_source_concept=regimen_concept if resolved_cid else None,
+                start_date=lot_start,
+                end_date=lot_end,
+                drug_exposure_ids=[_de.drug_exposure_id],
+                outcome=lot_data.get('outcome'),
+                today=datetime.utcnow().date(),
             )
-
-            # ── Per-line outcome Observation (LOT-N-outcome) ──────────────
-            outcome = lot_data.get('outcome')
-            if outcome:
-                src_value = f'LOT-{lot_num}-outcome'
-                already = Observation.objects.filter(
-                    person=person,
-                    observation_source_value=src_value,
-                ).exists()
-                if not already:
-                    # Outcomes without a SNOMED mapping (e.g. Very Good Partial
-                    # Response) fall back to concept 0; value_as_string carries
-                    # the exact outcome either way.
-                    outcome_concept = outcome_concepts.get(outcome) or no_match_concept
-                    if outcome_concept:
-                        Observation.objects.create(
-                            observation_id=next_pk(Observation, 'observation_id'),
-                            person=person,
-                            observation_concept=outcome_concept,
-                            observation_date=lot_end or lot_start or datetime.utcnow().date(),
-                            observation_type_concept=ehr_type,
-                            value_as_string=outcome[:60],
-                            observation_source_value=src_value,
-                        )
+            if result.created:
+                created += 1
 
     return created
 

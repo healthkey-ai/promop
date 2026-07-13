@@ -36,6 +36,7 @@ from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.omop_write_service import sync_to_omop
+from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
@@ -2520,42 +2521,24 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     if prov_source:
                                         _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
-                                # ep_source_concept reuses the same HemOnc lookup already resolved above
-                                ep_source_concept = regimen_concept if _hemonc_cid else None
-
-                                # Upsert Episode for this LOT
-                                ep_concept = _concept_tx_regimen or regimen_concept
-                                ep_obj_concept = regimen_concept
-                                ep_type_concept = _concept_ehr_type or regimen_concept
-
-                                _ep = Episode.objects.filter(
-                                    person=person,
-                                    episode_source_value=f'LOT-{lot_num}',
-                                ).first()
-                                if _ep is None:
-                                    _ep = Episode(
-                                        episode_id=next_pk(Episode, 'episode_id'),
-                                        person=person,
-                                        episode_concept=ep_concept,
-                                        episode_object_concept=ep_obj_concept,
-                                        episode_type_concept=ep_type_concept,
-                                        episode_start_date=lot_start or datetime.now().date(),
-                                        episode_end_date=lot_end,
-                                        episode_number=lot_num,
-                                        episode_source_value=f'LOT-{lot_num}',
-                                        episode_source_concept=ep_source_concept,
-                                    )
-                                    _ep.save()
-                                    _pt_episode_ids.append(_ep.episode_id)
-
-                                # Link drug exposure to episode (idempotent)
-                                ee_field_concept = _concept_de_field or regimen_concept
-                                _ee, _ = EpisodeEvent.objects.get_or_create(
-                                    episode_id=_ep.episode_id,
-                                    event_id=_de.drug_exposure_id,
-                                    defaults={'episode_event_field_concept': ee_field_concept},
+                                # Episode + EpisodeEvent via the shared LOT writer
+                                # so CDM tagging and idempotency key match every
+                                # other path. Outcome stays a direct PatientRecord
+                                # patch here (unchanged) — not written as an
+                                # Observation on this path.
+                                _ep_result = upsert_therapy_line_episode(
+                                    person,
+                                    line_number=lot_num,
+                                    regimen_concept=regimen_concept,
+                                    regimen_source_concept=regimen_concept if _hemonc_cid else None,
+                                    start_date=lot_start,
+                                    end_date=lot_end,
+                                    drug_exposure_ids=[_de.drug_exposure_id],
+                                    today=datetime.now().date(),
                                 )
-                                _pt_episode_event_ids.append(_ee.pk)
+                                if _ep_result.created:
+                                    _pt_episode_ids.append(_ep_result.episode.episode_id)
+                                _pt_episode_event_ids.extend(_ep_result.event_ids)
                         except Exception as _e:
                             logger.warning('{"event": "drug_exposure_write_failed", "lot_num": %d, "error_type": "%s", "patient": "%s"}',
                                            lot_num, type(_e).__name__, _timing_hash)

@@ -231,8 +231,12 @@ class TestEnrichSyntheaMmLotOutcomes:
     def _setup_patient(self, tmp_path):
         from tests.factories import ConceptFactory
 
-        # Standard OMOP "No matching concept" row — always present in real DBs.
+        # Standard OMOP concepts the shared Episode writer depends on (seeded in
+        # real DBs via migrations / seed_omop_concepts).
         ConceptFactory(concept_id=0, concept_name='No matching concept', concept_code='No matching concept')
+        ConceptFactory(concept_id=32531, concept_name='Treatment Regimen', concept_code='32531')
+        ConceptFactory(concept_id=32817, concept_name='EHR', concept_code='32817')
+        ConceptFactory(concept_id=1147094, concept_name='drug_exposure_id field', concept_code='1147094')
         org = Organization.objects.create(name='SYNTHEA-MM', slug='synthea-mm')
         person = PersonFactory(
             given_name='Jane',
