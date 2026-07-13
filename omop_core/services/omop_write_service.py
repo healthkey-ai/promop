@@ -235,17 +235,14 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
 
     drug_exposure_ids = list(drug_qs.values_list('drug_exposure_id', flat=True))
 
-    result = upsert_therapy_line_episode(
+    # This path stores the human therapy name in episode_source_value rather
+    # than the 'LOT-{n}' mirror.
+    upsert_therapy_line_episode(
         person,
         line_number=line_number,
         start_date=start_date,
         end_date=end_date,
         drug_exposure_ids=drug_exposure_ids,
+        source_value=therapy_name,
         today=today,
     )
-    # Preserve the therapy name in episode_source_value (this path stores the
-    # human name there rather than the 'LOT-{n}' mirror).
-    episode = result.episode
-    if episode is not None and episode.episode_source_value != therapy_name[:50]:
-        episode.episode_source_value = therapy_name[:50]
-        episode.save(update_fields=['episode_source_value'])

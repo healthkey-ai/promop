@@ -69,6 +69,7 @@ def upsert_therapy_line_episode(
     end_date=None,
     drug_exposure_ids=(),
     outcome=None,
+    source_value=None,
     today=None,
 ):
     """Upsert one line-of-therapy Episode and its links; return the Episode.
@@ -76,7 +77,7 @@ def upsert_therapy_line_episode(
     Args:
         person: OMOP Person.
         line_number: LOT number (1, 2, 3…). Becomes episode_number and the
-            'LOT-{n}' source value; the (person, line_number) idempotency key.
+            (person, line_number) idempotency key.
         regimen_concept: resolved regimen Concept (HemOnc/RxNav/local). Used as
             episode_object_concept; falls back to concept 0.
         regimen_source_concept: Concept for episode_source_concept (typically the
@@ -84,6 +85,9 @@ def upsert_therapy_line_episode(
         start_date / end_date: date objects (already parsed) or None.
         drug_exposure_ids: iterable of drug_exposure_id to link via EpisodeEvent.
         outcome: optional outcome string → LOT-{n}-outcome Observation.
+        source_value: episode_source_value to store. Defaults to 'LOT-{n}'.
+            Callers that record a human name or phase-labelled regimen
+            (reverse sync, inference) pass their own value.
         today: fallback for episode_start_date when start_date is None.
 
     Returns a TherapyLineEpisodeResult; result.episode is None if the required
@@ -104,6 +108,8 @@ def upsert_therapy_line_episode(
     # paths respectively, and ehr_type_concept is always present here.
     object_concept = regimen_concept or no_match_concept or ehr_type_concept
 
+    episode_source_value = (source_value or f'LOT-{line_number}')[:50]
+
     episode = Episode.objects.filter(person=person, episode_number=line_number).first()
     created = episode is None
     if episode is None:
@@ -116,13 +122,16 @@ def upsert_therapy_line_episode(
             episode_start_date=start_date or today,
             episode_end_date=end_date,
             episode_number=line_number,
-            episode_source_value=f'LOT-{line_number}',
+            episode_source_value=episode_source_value,
             episode_source_concept=regimen_source_concept,
         )
         episode.save()
     else:
         # Fill in fields that may have been unknown at first write.
         dirty = []
+        if episode.episode_source_value != episode_source_value:
+            episode.episode_source_value = episode_source_value
+            dirty.append('episode_source_value')
         if regimen_concept and episode.episode_object_concept_id != regimen_concept.concept_id:
             episode.episode_object_concept = regimen_concept
             dirty.append('episode_object_concept')
