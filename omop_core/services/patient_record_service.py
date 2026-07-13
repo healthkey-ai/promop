@@ -791,6 +791,45 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
     if therapy_line_numbers:
         data['therapy_lines_count'] = len(therapy_line_numbers)
 
+    # ── Per-line outcomes from LOT-N-outcome Observations ─────────────────
+    # Written by the synthetic enrichment commands (and any future ingest path
+    # that records a response assessment per line of therapy).
+    response_code_map = {
+        '182840001': 'Complete Response',
+        '182841002': 'Partial Response',
+        '182843004': 'Stable Disease',
+        '182842009': 'Progressive Disease',
+    }
+    lot_outcomes: dict = {}
+    outcome_obs = (
+        Observation.objects
+        .filter(
+            person=person,
+            observation_source_value__startswith='LOT-',
+            observation_source_value__endswith='-outcome',
+        )
+        .select_related('observation_concept')
+        .order_by('observation_date')
+    )
+    for obs in outcome_obs:
+        src = obs.observation_source_value or ''
+        try:
+            lot_n = int(src.split('-')[1])
+        except (IndexError, ValueError):
+            continue
+        concept_code = obs.observation_concept.concept_code if obs.observation_concept else None
+        outcome = obs.value_as_string or response_code_map.get(concept_code)
+        if outcome:
+            lot_outcomes[lot_n] = outcome  # ordered by date → latest assessment wins
+
+    if 1 in lot_outcomes:
+        data['first_line_outcome'] = lot_outcomes[1]
+    if 2 in lot_outcomes:
+        data['second_line_outcome'] = lot_outcomes[2]
+    later_lots = sorted(k for k in lot_outcomes if k >= 3)
+    if later_lots:
+        data['later_outcome'] = lot_outcomes[later_lots[0]]
+
     return data
 
 
