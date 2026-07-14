@@ -3849,6 +3849,11 @@ class ConceptPagination(PageNumberPagination):
 # Query params accepted as exact-match filters by both concept endpoints.
 _CONCEPT_FILTER_PARAMS = ('vocabulary_id', 'domain_id', 'concept_class_id', 'standard_concept')
 
+# Filters selective enough to bound a listing on their own. standard_concept is
+# deliberately excluded: it has ~3 distinct values and no index, so it cannot
+# stand alone against a fully loaded (multi-million-row) concept table.
+_CONCEPT_SELECTIVE_PARAMS = ('vocabulary_id', 'domain_id', 'concept_class_id')
+
 
 def _apply_concept_filters(queryset, query_params):
     for param in _CONCEPT_FILTER_PARAMS:
@@ -3871,8 +3876,11 @@ def _serialize_concept(concept):
 
 
 def _paginated_concept_response(queryset, request):
+    # Order by the pk: concept_name has only a GIN trigram index (usable for
+    # icontains, not ORDER BY), so sorting by name would force a full sort of
+    # the matched set on every page request.
     paginator = ConceptPagination()
-    page = paginator.paginate_queryset(queryset.order_by('concept_name', 'concept_id'), request)
+    page = paginator.paginate_queryset(queryset.order_by('concept_id'), request)
     return paginator.get_paginated_response([_serialize_concept(c) for c in page])
 
 
@@ -3913,19 +3921,21 @@ def concept_list(request):
     List OMOP concepts filtered by vocabulary, domain, concept class,
     or standard-concept flag.
 
-    At least one filter is required — the concept table can hold millions
-    of rows, so an unfiltered listing is rejected.
+    At least one of vocabulary_id, domain_id, or concept_class_id is
+    required — the concept table can hold millions of rows, so a listing
+    bounded only by standard_concept (or nothing) is rejected.
 
-    Query params (at least one of the first four required):
-        vocabulary_id, domain_id, concept_class_id, standard_concept
+    Query params:
+        vocabulary_id, domain_id, concept_class_id  (at least one required)
+        standard_concept  optional additional filter (S or C)
         page / page_size  pagination (page_size capped at 100)
 
     Response 200: paginated {count, next, previous, results: [concept, ...]}
     """
-    if not any(request.query_params.get(p) for p in _CONCEPT_FILTER_PARAMS):
+    if not any(request.query_params.get(p) for p in _CONCEPT_SELECTIVE_PARAMS):
         return Response(
-            {'detail': 'At least one filter is required: '
-                       + ', '.join(_CONCEPT_FILTER_PARAMS) + '.'},
+            {'detail': 'At least one of these filters is required: '
+                       + ', '.join(_CONCEPT_SELECTIVE_PARAMS) + '.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 

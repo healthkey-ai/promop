@@ -5562,8 +5562,19 @@ class _ConceptFixtureBase(_SmartBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
+        from oauth2_provider.models import AccessToken
+        from django.utils import timezone as tz
         from omop_core.models import Concept, Vocabulary, Domain, ConceptClass
         import datetime
+
+        # Token with no read scope — must be rejected by ScopedTokenPermission
+        cls.empty_scope_token = AccessToken.objects.create(
+            user=cls.foundation_user,
+            application=cls.app,
+            token='concept-empty-scope-token-444',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='',
+        )
 
         for vocab_id in ('LOINC', 'SNOMED'):
             Vocabulary.objects.get_or_create(
@@ -5617,20 +5628,30 @@ class ConceptSearchTest(_ConceptFixtureBase):
     URL = '/api/v1/concepts/search/'
 
     def test_search_by_name_substring(self):
-        resp = self.client.get(self.URL, {'q': 'creatinine'}, **self._auth())
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        data = resp.json()
-        self.assertEqual(data['count'], 3)
-        names = [r['concept_name'] for r in data['results']]
-        self.assertIn('Creatinine [Mass/volume] in Serum or Plasma', names)
-        self.assertIn('Creatinine measurement, serum', names)
-
-    def test_search_result_shape(self):
-        resp = self.client.get(self.URL, {'q': 'Type 2 diabetes'}, **self._auth())
+        # Membership assertions, not exact counts — seed migrations may add
+        # concepts whose names also match (same convention as ConceptListTest).
+        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 100}, **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         results = resp.json()['results']
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0], {
+        ids = {r['concept_id'] for r in results}
+        self.assertLessEqual(
+            {self.creatinine_serum.concept_id, self.creatinine_renal.concept_id,
+             self.creatinine_snomed.concept_id},
+            ids,
+        )
+        self.assertNotIn(self.diabetes.concept_id, ids)
+        self.assertTrue(all('creatinine' in r['concept_name'].lower() for r in results))
+
+    def test_search_result_shape(self):
+        resp = self.client.get(
+            self.URL, {'q': 'Type 2 diabetes', 'page_size': 100}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        match = next(
+            (r for r in results if r['concept_id'] == self.diabetes.concept_id), None,
+        )
+        self.assertEqual(match, {
             'concept_id': 201826,
             'concept_name': 'Type 2 diabetes mellitus',
             'vocabulary_id': 'SNOMED',
@@ -5642,21 +5663,29 @@ class ConceptSearchTest(_ConceptFixtureBase):
 
     def test_search_filtered_by_vocabulary(self):
         resp = self.client.get(
-            self.URL, {'q': 'creatinine', 'vocabulary_id': 'SNOMED'}, **self._auth(),
+            self.URL,
+            {'q': 'creatinine', 'vocabulary_id': 'SNOMED', 'page_size': 100},
+            **self._auth(),
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        data = resp.json()
-        self.assertEqual(data['count'], 1)
-        self.assertEqual(data['results'][0]['concept_id'], self.creatinine_snomed.concept_id)
+        results = resp.json()['results']
+        ids = {r['concept_id'] for r in results}
+        self.assertIn(self.creatinine_snomed.concept_id, ids)
+        self.assertNotIn(self.creatinine_serum.concept_id, ids)
+        self.assertTrue(all(r['vocabulary_id'] == 'SNOMED' for r in results))
 
     def test_search_filtered_by_standard_concept(self):
         resp = self.client.get(
-            self.URL, {'q': 'creatinine', 'standard_concept': 'S'}, **self._auth(),
+            self.URL,
+            {'q': 'creatinine', 'standard_concept': 'S', 'page_size': 100},
+            **self._auth(),
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         ids = {r['concept_id'] for r in resp.json()['results']}
         self.assertNotIn(self.creatinine_renal.concept_id, ids)
-        self.assertEqual(len(ids), 2)
+        self.assertLessEqual(
+            {self.creatinine_serum.concept_id, self.creatinine_snomed.concept_id}, ids,
+        )
 
     def test_search_no_match_returns_empty_page(self):
         resp = self.client.get(self.URL, {'q': 'zzz-no-such-concept'}, **self._auth())
@@ -5675,12 +5704,26 @@ class ConceptSearchTest(_ConceptFixtureBase):
         resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 2}, **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         data = resp.json()
-        self.assertEqual(data['count'], 3)
+        self.assertGreaterEqual(data['count'], 3)
         self.assertEqual(len(data['results']), 2)
         self.assertIsNotNone(data['next'])
 
     def test_unauthenticated_returns_401(self):
         resp = self.client.get(self.URL, {'q': 'creatinine'})
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_expired_token_rejected(self):
+        resp = self.client.get(
+            self.URL, {'q': 'creatinine'},
+            HTTP_AUTHORIZATION=f'Bearer {self.expired_token.token}',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_empty_scope_token_rejected(self):
+        resp = self.client.get(
+            self.URL, {'q': 'creatinine'},
+            HTTP_AUTHORIZATION=f'Bearer {self.empty_scope_token.token}',
+        )
         self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
 
@@ -5741,8 +5784,38 @@ class ConceptListTest(_ConceptFixtureBase):
         resp = self.client.get(self.URL, **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_list_standard_concept_alone_returns_400(self):
+        """standard_concept is too unselective to bound a listing by itself."""
+        resp = self.client.get(self.URL, {'standard_concept': 'S'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_list_standard_concept_combines_with_selective_filter(self):
+        resp = self.client.get(
+            self.URL,
+            {'concept_class_id': 'Lab Test', 'standard_concept': 'S', 'page_size': 100},
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {r['concept_id'] for r in resp.json()['results']}
+        self.assertIn(self.creatinine_serum.concept_id, ids)
+        self.assertNotIn(self.creatinine_renal.concept_id, ids)
+
     def test_unauthenticated_returns_401(self):
         resp = self.client.get(self.URL, {'domain_id': 'Condition'})
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_expired_token_rejected(self):
+        resp = self.client.get(
+            self.URL, {'domain_id': 'Condition'},
+            HTTP_AUTHORIZATION=f'Bearer {self.expired_token.token}',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_empty_scope_token_rejected(self):
+        resp = self.client.get(
+            self.URL, {'domain_id': 'Condition'},
+            HTTP_AUTHORIZATION=f'Bearer {self.empty_scope_token.token}',
+        )
         self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
 
