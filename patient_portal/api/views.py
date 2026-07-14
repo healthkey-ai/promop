@@ -3821,6 +3821,115 @@ def concept_lookup(request):
 
 
 # =============================================================================
+# OMOP concept search / browse (issue #213)
+# GET /api/v1/concepts/search/?q=creatinine&vocabulary_id=LOINC
+# GET /api/v1/concepts/?domain_id=Measurement&concept_class_id=Lab+Test
+# =============================================================================
+
+class ConceptPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+# Query params accepted as exact-match filters by both concept endpoints.
+_CONCEPT_FILTER_PARAMS = ('vocabulary_id', 'domain_id', 'concept_class_id', 'standard_concept')
+
+# Filters selective enough to bound a listing on their own. standard_concept is
+# deliberately excluded: it has ~3 distinct values and no index, so it cannot
+# stand alone against a fully loaded (multi-million-row) concept table.
+_CONCEPT_SELECTIVE_PARAMS = ('vocabulary_id', 'domain_id', 'concept_class_id')
+
+
+def _apply_concept_filters(queryset, query_params):
+    for param in _CONCEPT_FILTER_PARAMS:
+        value = query_params.get(param)
+        if value:
+            queryset = queryset.filter(**{param: value})
+    return queryset
+
+
+def _serialize_concept(concept):
+    return {
+        'concept_id': concept.concept_id,
+        'concept_name': concept.concept_name,
+        'vocabulary_id': concept.vocabulary_id,
+        'concept_code': concept.concept_code,
+        'domain_id': concept.domain_id,
+        'concept_class_id': concept.concept_class_id,
+        'standard_concept': concept.standard_concept,
+    }
+
+
+def _paginated_concept_response(queryset, request):
+    # Order by the pk: concept_name has only a GIN trigram index (usable for
+    # icontains, not ORDER BY), so sorting by name would force a full sort of
+    # the matched set on every page request.
+    paginator = ConceptPagination()
+    page = paginator.paginate_queryset(queryset.order_by('concept_id'), request)
+    return paginator.get_paginated_response([_serialize_concept(c) for c in page])
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_search(request):
+    """
+    Search OMOP concepts by name (case-insensitive substring).
+
+    Query params:
+        q                 required, minimum 2 characters
+        vocabulary_id     optional exact-match filter (e.g. LOINC, SNOMED)
+        domain_id         optional exact-match filter (e.g. Measurement)
+        concept_class_id  optional exact-match filter (e.g. Lab Test)
+        standard_concept  optional exact-match filter (S or C)
+        page / page_size  pagination (page_size capped at 100)
+
+    Response 200: paginated {count, next, previous, results: [concept, ...]}
+    """
+    query = (request.query_params.get('q') or '').strip()
+    if len(query) < 2:
+        return Response(
+            {'detail': "Query parameter 'q' is required and must be at least 2 characters."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    queryset = _apply_concept_filters(
+        Concept.objects.filter(concept_name__icontains=query),
+        request.query_params,
+    )
+    return _paginated_concept_response(queryset, request)
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_list(request):
+    """
+    List OMOP concepts filtered by vocabulary, domain, concept class,
+    or standard-concept flag.
+
+    At least one of vocabulary_id, domain_id, or concept_class_id is
+    required — the concept table can hold millions of rows, so a listing
+    bounded only by standard_concept (or nothing) is rejected.
+
+    Query params:
+        vocabulary_id, domain_id, concept_class_id  (at least one required)
+        standard_concept  optional additional filter (S or C)
+        page / page_size  pagination (page_size capped at 100)
+
+    Response 200: paginated {count, next, previous, results: [concept, ...]}
+    """
+    if not any(request.query_params.get(p) for p in _CONCEPT_SELECTIVE_PARAMS):
+        return Response(
+            {'detail': 'At least one of these filters is required: '
+                       + ', '.join(_CONCEPT_SELECTIVE_PARAMS) + '.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    queryset = _apply_concept_filters(Concept.objects.all(), request.query_params)
+    return _paginated_concept_response(queryset, request)
+
+
+# =============================================================================
 # Controlled vocabulary endpoints
 # GET /api/vocabularies/<model_name>/ → [{code, title}, ...]
 # =============================================================================
