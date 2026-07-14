@@ -5556,6 +5556,196 @@ class ConceptLookupTest(_SmartBase):
         self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
 
+class _ConceptFixtureBase(_SmartBase):
+    """Shared OMOP concept fixtures for the search/list endpoint tests (issue #213)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from omop_core.models import Concept, Vocabulary, Domain, ConceptClass
+        import datetime
+
+        for vocab_id in ('LOINC', 'SNOMED'):
+            Vocabulary.objects.get_or_create(
+                vocabulary_id=vocab_id,
+                defaults={'vocabulary_name': vocab_id, 'vocabulary_reference': '',
+                          'vocabulary_version': '', 'vocabulary_concept_id': 0},
+            )
+        for domain_id in ('Measurement', 'Condition'):
+            Domain.objects.get_or_create(
+                domain_id=domain_id,
+                defaults={'domain_name': domain_id, 'domain_concept_id': 0},
+            )
+        for class_id in ('Lab Test', 'Clinical Finding'):
+            ConceptClass.objects.get_or_create(
+                concept_class_id=class_id,
+                defaults={'concept_class_name': class_id, 'concept_class_concept_id': 0},
+            )
+
+        common = {
+            'valid_start_date': datetime.date(1970, 1, 1),
+            'valid_end_date': datetime.date(2099, 12, 31),
+        }
+        cls.creatinine_serum = Concept.objects.create(
+            concept_id=3016723, concept_name='Creatinine [Mass/volume] in Serum or Plasma',
+            vocabulary_id='LOINC', domain_id='Measurement', concept_class_id='Lab Test',
+            concept_code='2160-0', standard_concept='S', **common,
+        )
+        cls.creatinine_renal = Concept.objects.create(
+            concept_id=3016724, concept_name='Creatinine renal clearance/1.73 sq M',
+            vocabulary_id='LOINC', domain_id='Measurement', concept_class_id='Lab Test',
+            concept_code='35203-9', standard_concept=None, **common,
+        )
+        cls.creatinine_snomed = Concept.objects.create(
+            concept_id=4013964, concept_name='Creatinine measurement, serum',
+            vocabulary_id='SNOMED', domain_id='Measurement', concept_class_id='Lab Test',
+            concept_code='113075003', standard_concept='S', **common,
+        )
+        cls.diabetes = Concept.objects.create(
+            concept_id=201826, concept_name='Type 2 diabetes mellitus',
+            vocabulary_id='SNOMED', domain_id='Condition', concept_class_id='Clinical Finding',
+            concept_code='44054006', standard_concept='S', **common,
+        )
+
+    def _auth(self):
+        return {'HTTP_AUTHORIZATION': f'Bearer {self.read_token.token}'}
+
+
+class ConceptSearchTest(_ConceptFixtureBase):
+    """GET /api/v1/concepts/search/ (issue #213)"""
+
+    URL = '/api/v1/concepts/search/'
+
+    def test_search_by_name_substring(self):
+        resp = self.client.get(self.URL, {'q': 'creatinine'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.json()
+        self.assertEqual(data['count'], 3)
+        names = [r['concept_name'] for r in data['results']]
+        self.assertIn('Creatinine [Mass/volume] in Serum or Plasma', names)
+        self.assertIn('Creatinine measurement, serum', names)
+
+    def test_search_result_shape(self):
+        resp = self.client.get(self.URL, {'q': 'Type 2 diabetes'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0], {
+            'concept_id': 201826,
+            'concept_name': 'Type 2 diabetes mellitus',
+            'vocabulary_id': 'SNOMED',
+            'concept_code': '44054006',
+            'domain_id': 'Condition',
+            'concept_class_id': 'Clinical Finding',
+            'standard_concept': 'S',
+        })
+
+    def test_search_filtered_by_vocabulary(self):
+        resp = self.client.get(
+            self.URL, {'q': 'creatinine', 'vocabulary_id': 'SNOMED'}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.json()
+        self.assertEqual(data['count'], 1)
+        self.assertEqual(data['results'][0]['concept_id'], self.creatinine_snomed.concept_id)
+
+    def test_search_filtered_by_standard_concept(self):
+        resp = self.client.get(
+            self.URL, {'q': 'creatinine', 'standard_concept': 'S'}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {r['concept_id'] for r in resp.json()['results']}
+        self.assertNotIn(self.creatinine_renal.concept_id, ids)
+        self.assertEqual(len(ids), 2)
+
+    def test_search_no_match_returns_empty_page(self):
+        resp = self.client.get(self.URL, {'q': 'zzz-no-such-concept'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['count'], 0)
+
+    def test_missing_q_returns_400(self):
+        resp = self.client.get(self.URL, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_short_q_returns_400(self):
+        resp = self.client.get(self.URL, {'q': 'c'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_pagination_page_size(self):
+        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 2}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.json()
+        self.assertEqual(data['count'], 3)
+        self.assertEqual(len(data['results']), 2)
+        self.assertIsNotNone(data['next'])
+
+    def test_unauthenticated_returns_401(self):
+        resp = self.client.get(self.URL, {'q': 'creatinine'})
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
+class ConceptListTest(_ConceptFixtureBase):
+    """GET /api/v1/concepts/ (issue #213)"""
+
+    URL = '/api/v1/concepts/'
+
+    def test_list_by_domain(self):
+        # Seed migrations may pre-populate concepts, so assert membership and
+        # filter correctness rather than exact counts.
+        resp = self.client.get(
+            self.URL, {'domain_id': 'Condition', 'page_size': 100}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        self.assertIn(self.diabetes.concept_id, {r['concept_id'] for r in results})
+        self.assertTrue(all(r['domain_id'] == 'Condition' for r in results))
+
+    def test_list_by_concept_class(self):
+        resp = self.client.get(
+            self.URL, {'concept_class_id': 'Lab Test', 'page_size': 100}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        ids = {r['concept_id'] for r in results}
+        self.assertLessEqual(
+            {self.creatinine_serum.concept_id, self.creatinine_renal.concept_id,
+             self.creatinine_snomed.concept_id},
+            ids,
+        )
+        self.assertTrue(all(r['concept_class_id'] == 'Lab Test' for r in results))
+
+    def test_list_by_combined_filters(self):
+        resp = self.client.get(
+            self.URL,
+            {'vocabulary_id': 'LOINC', 'domain_id': 'Measurement', 'page_size': 100},
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        ids = {r['concept_id'] for r in results}
+        self.assertLessEqual(
+            {self.creatinine_serum.concept_id, self.creatinine_renal.concept_id}, ids,
+        )
+        self.assertNotIn(self.creatinine_snomed.concept_id, ids)
+        self.assertTrue(all(
+            r['vocabulary_id'] == 'LOINC' and r['domain_id'] == 'Measurement'
+            for r in results
+        ))
+
+    def test_list_unknown_filter_value_returns_empty_page(self):
+        resp = self.client.get(self.URL, {'domain_id': 'NoSuchDomain'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['count'], 0)
+
+    def test_list_without_filter_returns_400(self):
+        resp = self.client.get(self.URL, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_unauthenticated_returns_401(self):
+        resp = self.client.get(self.URL, {'domain_id': 'Condition'})
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
 # ---------------------------------------------------------------------------
 # IDOR: PatientRecordViewSet row-level access (issue #134)
 # ---------------------------------------------------------------------------
