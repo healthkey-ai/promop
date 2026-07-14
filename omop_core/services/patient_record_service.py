@@ -528,17 +528,24 @@ def _get_treatment_data(person: Person) -> dict:
     return data
 
 
-def _regimen_from_exposures(exposure_ids, de_name_by_id):
+def _regimen_from_exposures(exposure_ids, de_info_by_id):
     """Resolve (display_name, concept_id) from a LOT's backing DrugExposures.
 
-    Mirrors the Episode-derivation naming: prefer a HemOnc regimen concept for
-    the drug set, else the canonical regimen name, else the joined original
-    concept names (preserving their casing). Inference's own regimen_name is
-    lowercased for its episode_source_value contract, so it is not used here.
+    de_info_by_id maps drug_exposure_id -> (concept_id, vocabulary_id, name).
+
+    If an exposure's drug_concept is itself a HemOnc regimen concept (e.g. a
+    regimen-level row from BC therapy backfill), use it directly. Otherwise
+    mirror the Episode-derivation naming: a HemOnc regimen concept resolved from
+    the drug-name set, else the canonical regimen name, else the joined original
+    concept names (preserving casing).
     """
-    display_names = [de_name_by_id[e] for e in exposure_ids if e in de_name_by_id]
-    if not display_names:
+    infos = [de_info_by_id[e] for e in exposure_ids if e in de_info_by_id]
+    if not infos:
         return 'Unknown', None
+    for concept_id, vocab_id, name in infos:
+        if concept_id and vocab_id == 'HemOnc':
+            return name, concept_id
+    display_names = [name for _, _, name in infos]
     norm_key = {normalize_drug_name(n).lower().strip() for n in display_names}
     concept_id = get_regimen_concept_id(norm_key)
     if concept_id:
@@ -555,22 +562,27 @@ def _apply_inferred_lots(data: dict, lots) -> None:
     """Map in-memory inferred LOTs onto first/second/later therapy fields."""
     data['therapy_lines_count'] = len(lots)
 
-    # Bulk-resolve original-cased drug names for every exposure across all lots.
+    # Bulk-resolve (concept_id, vocabulary_id, name) for every exposure across
+    # all lots. concept.vocabulary_id is the FK's string PK — no extra join.
     exp_ids = [eid for lot in lots for eid in lot.exposure_ids]
-    de_name_by_id = {}
+    de_info_by_id = {}
     if exp_ids:
         for de in (DrugExposure.objects
                    .filter(drug_exposure_id__in=exp_ids)
                    .select_related('drug_concept')):
-            de_name_by_id[de.drug_exposure_id] = (
-                de.drug_concept.concept_name if de.drug_concept
-                else (de.drug_source_value or 'Unknown')
-            )
+            if de.drug_concept:
+                de_info_by_id[de.drug_exposure_id] = (
+                    de.drug_concept.concept_id,
+                    de.drug_concept.vocabulary_id,
+                    de.drug_concept.concept_name,
+                )
+            else:
+                de_info_by_id[de.drug_exposure_id] = (None, None, de.drug_source_value or 'Unknown')
 
     later = []
     later_ids = []
     for lot in lots:
-        name, concept_id = _regimen_from_exposures(lot.exposure_ids, de_name_by_id)
+        name, concept_id = _regimen_from_exposures(lot.exposure_ids, de_info_by_id)
         start = str(lot.start) if lot.start else None
         end = str(lot.end) if lot.end else None
         if lot.lot_number == 1:
@@ -1994,10 +2006,15 @@ def _get_wearable_data(person: Person) -> dict:
     if not measurement_rows and not observation_rows:
         return data
 
+    # Key each row by the wearable LOINC it actually carries. A row may have an
+    # unrelated concept_code (e.g. an unmapped source concept) yet a wearable
+    # measurement_source_value — prefer whichever is a known wearable code so
+    # the source_value fallback isn't shadowed by a present-but-unrelated concept.
+    _wearable_codes = set(WEARABLE_LOINC.values())
     rows_by_code: dict[str, list[tuple[date, float]]] = {}
     for concept_code, source_value, mdate, val in measurement_rows:
-        code = concept_code or source_value
-        if not code:
+        code = concept_code if concept_code in _wearable_codes else source_value
+        if code not in _wearable_codes:
             continue
         rows_by_code.setdefault(code, []).append((mdate, float(val)))
 
