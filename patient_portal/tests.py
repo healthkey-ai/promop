@@ -340,6 +340,16 @@ class FhirUploadOmopTablesTest(FhirUploadBase):
                 f'Episode {episode.episode_number} (id={episode.episode_id}) has no EpisodeEvents',
             )
 
+    def test_lot_outcome_observation_created_from_medication_statement(self):
+        """The LOT-1 therapy-outcome extension is persisted to OMOP as a
+        LOT-1-outcome Observation (source of truth for the derived outcome)."""
+        from omop_core.models import Observation
+        obs = Observation.objects.filter(
+            person=self._person, observation_source_value='LOT-1-outcome',
+        )
+        self.assertEqual(obs.count(), 1)
+        self.assertEqual(obs.first().value_as_string, 'CR')
+
 
 # ---------------------------------------------------------------------------
 # 2. PatientRecord derivation tests
@@ -3191,6 +3201,40 @@ class PatientRecordOmopSyncTest(_SmartBase):
         self.assertEqual(ep.episode_source_value, 'AC-T')
         from datetime import date
         self.assertEqual(ep.episode_start_date, date(2023, 1, 15))
+
+    def test_patch_therapy_outcome_writes_lot_outcome_observation(self):
+        """PATCHing a line's outcome persists a LOT-{n}-outcome Observation to OMOP."""
+        from omop_core.models import Observation
+        person = Person.objects.create(person_id=91035)
+        pi = PatientRecord.objects.create(person=person, organization=self.organization)
+
+        self._patch(pi, {
+            'first_line_therapy': 'AC-T',
+            'first_line_start_date': '2023-01-15',
+            'first_line_end_date': '2023-07-01',
+            'first_line_outcome': 'Partial Response',
+        })
+
+        obs = Observation.objects.filter(person=person, observation_source_value='LOT-1-outcome')
+        self.assertEqual(obs.count(), 1)
+        self.assertEqual(obs.first().value_as_string, 'Partial Response')
+
+    def test_patch_therapy_outcome_edit_updates_observation_in_place(self):
+        """Editing a line's outcome updates the existing Observation, no duplicate."""
+        from omop_core.models import Observation
+        person = Person.objects.create(person_id=91036)
+        pi = PatientRecord.objects.create(person=person, organization=self.organization)
+
+        self._patch(pi, {
+            'first_line_therapy': 'AC-T',
+            'first_line_start_date': '2023-01-15',
+            'first_line_outcome': 'Partial Response',
+        })
+        self._patch(pi, {'first_line_outcome': 'Complete Response'})
+
+        obs = Observation.objects.filter(person=person, observation_source_value='LOT-1-outcome')
+        self.assertEqual(obs.count(), 1)
+        self.assertEqual(obs.first().value_as_string, 'Complete Response')
 
     def test_patch_therapy_links_existing_drug_exposures(self):
         """DrugExposure rows in the episode date range are linked via EpisodeEvent."""

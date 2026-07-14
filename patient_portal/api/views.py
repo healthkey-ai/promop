@@ -2521,11 +2521,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     if prov_source:
                                         _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
-                                # Episode + EpisodeEvent via the shared LOT writer
-                                # so CDM tagging and idempotency key match every
-                                # other path. Outcome stays a direct PatientRecord
-                                # patch here (unchanged) — not written as an
-                                # Observation on this path.
+                                # Episode + EpisodeEvent + per-line outcome via
+                                # the shared LOT writer so CDM tagging and the
+                                # idempotency key match every other path, and the
+                                # outcome lands in OMOP (LOT-{n}-outcome
+                                # Observation) as the source of truth. The direct
+                                # PatientRecord outcome patch below is retained as
+                                # a belt-and-suspenders for the no-episode edge.
                                 _ep_result = upsert_therapy_line_episode(
                                     person,
                                     line_number=lot_num,
@@ -2534,6 +2536,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     start_date=lot_start,
                                     end_date=lot_end,
                                     drug_exposure_ids=[_de.drug_exposure_id],
+                                    outcome=lot_data.get('outcome'),
                                     today=datetime.now().date(),
                                 )
                                 if _ep_result.created:

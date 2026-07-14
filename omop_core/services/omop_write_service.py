@@ -186,6 +186,7 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
     therapy_name = getattr(patient_info, f'{prefix}_therapy', None)
     start_date = getattr(patient_info, f'{prefix}_start_date', None)
     end_date = getattr(patient_info, f'{prefix}_end_date', None)
+    outcome = getattr(patient_info, f'{prefix}_outcome', None)
 
     if not therapy_name:
         return
@@ -236,13 +237,15 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
     drug_exposure_ids = list(drug_qs.values_list('drug_exposure_id', flat=True))
 
     # This path stores the human therapy name in episode_source_value rather
-    # than the 'LOT-{n}' mirror.
+    # than the 'LOT-{n}' mirror, and persists the edited outcome to OMOP as a
+    # LOT-{n}-outcome Observation.
     upsert_therapy_line_episode(
         person,
         line_number=line_number,
         start_date=start_date,
         end_date=end_date,
         drug_exposure_ids=drug_exposure_ids,
+        outcome=outcome,
         source_value=therapy_name,
         today=today,
     )

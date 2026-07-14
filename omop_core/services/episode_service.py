@@ -165,8 +165,6 @@ def upsert_therapy_line_episode(
 
 def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_match_concept, obs_date):
     src_value = f'LOT-{line_number}-outcome'
-    if Observation.objects.filter(person=person, observation_source_value=src_value).exists():
-        return
     snomed_code = OUTCOME_SNOMED_CODES.get(outcome)
     outcome_concept = (
         Concept.objects.filter(concept_code=snomed_code, vocabulary_id='SNOMED').first()
@@ -174,13 +172,33 @@ def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_m
     ) or no_match_concept
     if outcome_concept is None or type_concept is None:
         return
+    value = outcome[:60]
+
+    existing = Observation.objects.filter(
+        person=person, observation_source_value=src_value,
+    ).first()
+    if existing:
+        # Keep OMOP authoritative when an outcome is edited (e.g. PR -> CR);
+        # a no-op when the value is unchanged (ingest re-runs stay idempotent).
+        dirty = []
+        if existing.value_as_string != value:
+            existing.value_as_string = value
+            dirty.append('value_as_string')
+        if existing.observation_concept_id != outcome_concept.concept_id:
+            existing.observation_concept = outcome_concept
+            dirty.append('observation_concept')
+        if dirty:
+            existing._skip_patient_record_refresh = True
+            existing.save(update_fields=dirty)
+        return
+
     obs = Observation(
         observation_id=next_pk(Observation, 'observation_id'),
         person=person,
         observation_concept=outcome_concept,
         observation_date=obs_date,
         observation_type_concept=type_concept,
-        value_as_string=outcome[:60],
+        value_as_string=value,
         observation_source_value=src_value,
     )
     obs._skip_patient_record_refresh = True
