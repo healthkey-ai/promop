@@ -206,18 +206,53 @@ _BC_STAGE_TO_TNM = {
     'IV': ('T4', 'N3', 'M1'),
 }
 
-_BC_THERAPY_PLANS = {
+# Regimen plans for MedicationStatement generation. Each carries the HemOnc
+# OMOP concept_id (None if not in the vocabulary) and a typical course length
+# so the emitted MedicationStatement's effectivePeriod is clinically plausible.
+_BC_REGIMEN_PLANS = {
     'early': [
-        ['tamoxifen', 'anastrozole', 'paclitaxel'],
-        ['docetaxel', 'cyclophosphamide', 'tamoxifen'],
-        ['paclitaxel', 'trastuzumab', 'pertuzumab'],
+        {'name': 'AC-T', 'drugs': ['doxorubicin', 'cyclophosphamide', 'paclitaxel'],
+         'hemonc_id': 35101507, 'duration_days': 168},
+        {'name': 'TC', 'drugs': ['docetaxel', 'cyclophosphamide'],
+         'hemonc_id': 35804232, 'duration_days': 126},
+        {'name': 'THP', 'drugs': ['paclitaxel', 'trastuzumab', 'pertuzumab'],
+         'hemonc_id': 1525210, 'duration_days': 252},
+        {'name': 'Tamoxifen monotherapy', 'drugs': ['tamoxifen'],
+         'hemonc_id': 35804221, 'duration_days': 1095},
     ],
     'advanced': [
-        ['doxorubicin', 'cyclophosphamide', 'paclitaxel'],
-        ['carboplatin', 'paclitaxel', 'trastuzumab'],
-        ['docetaxel', 'trastuzumab', 'pertuzumab'],
+        {'name': 'AC-T', 'drugs': ['doxorubicin', 'cyclophosphamide', 'paclitaxel'],
+         'hemonc_id': 35101507, 'duration_days': 168},
+        {'name': 'TCH+P', 'drugs': ['trastuzumab', 'pertuzumab', 'docetaxel'],
+         'hemonc_id': 35804254, 'duration_days': 252},
+        {'name': 'T-DXd', 'drugs': ['trastuzumab deruxtecan'],
+         'hemonc_id': 42542261, 'duration_days': 210},
+        {'name': 'Palbociclib+AI', 'drugs': ['palbociclib', 'letrozole'],
+         'hemonc_id': None, 'duration_days': 730},
     ],
 }
+
+_BC_2L_PLANS = [
+    {'name': 'T-DXd', 'drugs': ['trastuzumab deruxtecan'],
+     'hemonc_id': 42542261, 'duration_days': 210},
+    {'name': 'T-DM1', 'drugs': ['ado-trastuzumab emtansine'],
+     'hemonc_id': 35805230, 'duration_days': 180},
+    {'name': 'Capecitabine', 'drugs': ['capecitabine'],
+     'hemonc_id': 35804227, 'duration_days': 126},
+    {'name': 'Olaparib', 'drugs': ['olaparib'],
+     'hemonc_id': 35804269, 'duration_days': 240},
+    {'name': 'SG', 'drugs': ['sacituzumab govitecan'],
+     'hemonc_id': 912024, 'duration_days': 180},
+]
+
+_BC_3L_PLANS = [
+    {'name': 'Eribulin', 'drugs': ['eribulin'],
+     'hemonc_id': 35804265, 'duration_days': 126},
+    {'name': 'Capecitabine', 'drugs': ['capecitabine'],
+     'hemonc_id': 35804227, 'duration_days': 126},
+    {'name': 'SG', 'drugs': ['sacituzumab govitecan'],
+     'hemonc_id': 912024, 'duration_days': 180},
+]
 
 _BC_LABS = [
     ('718-7', 'Hemoglobin [Mass/volume] in Blood', 'g/dL'),
@@ -470,44 +505,75 @@ def _make_bc_diagnostic_report(patient_ref: str, onset: datetime, stage: str) ->
     }
 
 
-def _make_medication_request(patient_ref: str, onset: datetime, medication: str, days: int) -> dict:
-    return {
-        'resourceType': 'MedicationRequest',
-        'id': str(uuid.uuid4()),
-        'status': 'active',
-        'intent': 'order',
-        'medicationCodeableConcept': {
-            'coding': [{
-                'system': 'http://www.nlm.nih.gov/research/umls/rxnorm',
-                'code': medication,
-                'display': medication.title(),
-            }],
-            'text': medication.title(),
-        },
-        'subject': {'reference': patient_ref},
-        'authoredOn': _iso_date(onset),
-        'dosageInstruction': [{
-            'text': f'{medication.title()} daily for {days} days',
-        }],
-    }
+def _make_therapy_medication_statement(
+    patient_ref: str,
+    lot_num: int,
+    regimen_name: str,
+    hemonc_id: int | None,
+    drugs: list,
+    start_dt: datetime,
+    end_dt: datetime,
+    outcome: str,
+) -> list:
+    """Return MedicationStatement resources for one therapy line.
 
+    The first resource is the regimen-level statement carrying 'therapy-line'
+    and 'therapy-outcome' extensions plus a HemOnc coding — the FHIR import
+    handler reads these to create an Episode (via the shared LOT writer) and a
+    LOT-{n}-outcome Observation. Subsequent resources are individual drug
+    sub-statements with a 'partOf' reference back to the regimen statement.
+    """
+    regimen_id = str(uuid.uuid4())
+    coding = [{
+        'system': 'http://www.nlm.nih.gov/research/umls/rxnorm',
+        'code': regimen_name,
+        'display': regimen_name,
+    }]
+    if hemonc_id:
+        coding.append({
+            'system': 'http://ohdsi.org/omop/HemOnc',
+            'code': str(hemonc_id),
+            'display': regimen_name,
+        })
 
-def _make_medication_administration(patient_ref: str, onset: datetime, medication: str) -> dict:
-    return {
-        'resourceType': 'MedicationAdministration',
-        'id': str(uuid.uuid4()),
+    resources = [{
+        'resourceType': 'MedicationStatement',
+        'id': regimen_id,
         'status': 'completed',
-        'medicationCodeableConcept': {
-            'coding': [{
-                'system': 'http://www.nlm.nih.gov/research/umls/rxnorm',
-                'code': medication,
-                'display': medication.title(),
-            }],
-            'text': medication.title(),
-        },
+        'extension': [
+            {'url': 'http://hl7.org/fhir/StructureDefinition/therapy-line',
+             'valueInteger': lot_num},
+            {'url': 'http://hl7.org/fhir/StructureDefinition/therapy-outcome',
+             'valueString': outcome},
+        ],
+        'medicationCodeableConcept': {'coding': coding, 'text': regimen_name},
         'subject': {'reference': patient_ref},
-        'effectiveDateTime': _iso_date(onset),
-    }
+        'effectivePeriod': {'start': _iso_date(start_dt), 'end': _iso_date(end_dt)},
+    }]
+
+    for drug in drugs:
+        resources.append({
+            'resourceType': 'MedicationStatement',
+            'id': str(uuid.uuid4()),
+            'status': 'completed',
+            'partOf': [{'reference': f'urn:uuid:{regimen_id}'}],
+            'extension': [
+                {'url': 'http://hl7.org/fhir/StructureDefinition/therapy-line',
+                 'valueInteger': lot_num},
+            ],
+            'medicationCodeableConcept': {
+                'coding': [{
+                    'system': 'http://www.nlm.nih.gov/research/umls/rxnorm',
+                    'code': drug,
+                    'display': drug.title(),
+                }],
+                'text': drug.title(),
+            },
+            'subject': {'reference': patient_ref},
+            'effectivePeriod': {'start': _iso_date(start_dt), 'end': _iso_date(end_dt)},
+        })
+
+    return resources
 
 
 def _make_lab_observation(patient_ref: str, onset: datetime, code: str, display: str,
@@ -824,18 +890,48 @@ def _enrich_patient_bundle(bundle: dict, index: int) -> None:
             'resource': _make_codeable_observation(patient_ref, onset, response_code, response_display, response_display),
         })
 
-    # Therapy: ensure each patient gets an explicit treatment course so the
-    # OMOP import can populate drug exposures/eras for benchmark analysis.
+    # Therapy: multi-line MedicationStatement resources with therapy-line and
+    # therapy-outcome extensions so import_fhir_bundle builds an Episode (and a
+    # LOT-{n}-outcome Observation) per line via the shared LOT writer.
     therapy_bucket = 'advanced' if stage in {'IIIA', 'IIIB', 'IIIC', 'IV'} or deceased else 'early'
-    regimen = rng.choice(_BC_THERAPY_PLANS[therapy_bucket])
-    for offset, medication in enumerate(regimen):
-        med_onset = onset + timedelta(days=offset * 21)
-        bundle.setdefault('entry', []).append({
-            'resource': _make_medication_request(patient_ref, med_onset, medication, 21 if offset else 30),
-        })
-        bundle.setdefault('entry', []).append({
-            'resource': _make_medication_administration(patient_ref, med_onset, medication),
-        })
+    lot1_plan = rng.choice(_BC_REGIMEN_PLANS[therapy_bucket])
+    lot1_start = onset
+    lot1_end = onset + timedelta(days=lot1_plan['duration_days'])
+    lot1_outcome = rng.choices(
+        [name for _, name in _BC_RESPONSE_CODES], weights=[0.25, 0.35, 0.25, 0.15], k=1,
+    )[0]
+    for stmt in _make_therapy_medication_statement(
+        patient_ref, 1, lot1_plan['name'], lot1_plan['hemonc_id'],
+        lot1_plan['drugs'], lot1_start, lot1_end, lot1_outcome,
+    ):
+        bundle.setdefault('entry', []).append({'resource': stmt})
+
+    # ~30% of patients advance to a second line; of those, ~50% to a third.
+    if rng.random() < 0.30:
+        lot2_plan = rng.choice(_BC_2L_PLANS)
+        lot2_start = lot1_end + timedelta(days=rng.randint(30, 60))
+        lot2_end = lot2_start + timedelta(days=lot2_plan['duration_days'])
+        lot2_outcome = rng.choices(
+            [name for _, name in _BC_RESPONSE_CODES], weights=[0.15, 0.25, 0.30, 0.30], k=1,
+        )[0]
+        for stmt in _make_therapy_medication_statement(
+            patient_ref, 2, lot2_plan['name'], lot2_plan['hemonc_id'],
+            lot2_plan['drugs'], lot2_start, lot2_end, lot2_outcome,
+        ):
+            bundle.setdefault('entry', []).append({'resource': stmt})
+
+        if rng.random() < 0.50:
+            lot3_plan = rng.choice(_BC_3L_PLANS)
+            lot3_start = lot2_end + timedelta(days=rng.randint(30, 60))
+            lot3_end = lot3_start + timedelta(days=lot3_plan['duration_days'])
+            lot3_outcome = rng.choices(
+                [name for _, name in _BC_RESPONSE_CODES], weights=[0.05, 0.15, 0.30, 0.50], k=1,
+            )[0]
+            for stmt in _make_therapy_medication_statement(
+                patient_ref, 3, lot3_plan['name'], lot3_plan['hemonc_id'],
+                lot3_plan['drugs'], lot3_start, lot3_end, lot3_outcome,
+            ):
+                bundle.setdefault('entry', []).append({'resource': stmt})
 
     # Procedures: a simple surgical / local-control event for every patient.
     procedure = 'mastectomy' if stage in {'IIIB', 'IIIC', 'IV'} else 'lumpectomy'
