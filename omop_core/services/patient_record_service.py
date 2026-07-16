@@ -18,6 +18,7 @@ from django.utils import timezone
 from omop_core.models import (
     Person, PatientRecord, ConditionOccurrence, Concept,
     Measurement, Observation, DrugExposure, Location, ProcedureOccurrence,
+    Death,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
 from omop_core.services.mappings import (
@@ -40,7 +41,7 @@ from omop_core.services.lot_regimens import (
 # each refresh so deletions are reflected (not just additions).
 _OMOP_DERIVED_FIELDS = [
     # Disease / condition
-    'disease', 'diagnosis_date', 'condition_clinical_status', 'disease_slug',
+    'disease', 'diagnosis_date', 'death_date', 'condition_clinical_status', 'disease_slug',
     # Therapy lines
     'first_line_therapy', 'first_line_date', 'first_line_start_date', 'first_line_end_date',
     'first_line_therapy_id',
@@ -106,7 +107,7 @@ _OMOP_DERIVED_FIELDS = [
     # Lymphoma
     'flipi_score', 'gelf_criteria_status', 'tumor_grade',
     # Assessment
-    'best_response', 'measurable_disease_by_recist_status',
+    'measurable_disease_by_recist_status',
     # Clinical (breast cancer)
     'peripheral_neuropathy_grade', 'toxicity_grade', 'renal_adequacy_status',
     # Procedures
@@ -326,6 +327,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
 def _get_demographics(person: Person) -> dict:
     data = {}
+
+    death = Death.objects.filter(person=person).only('death_date').first()
+    if death:
+        data['death_date'] = death.death_date
 
     if person.year_of_birth:
         today = date.today()
@@ -1492,23 +1497,6 @@ def _get_assessment_data(person: Person) -> dict:
         .select_related('observation_concept')
         .order_by('-observation_date')
     )
-
-    response_obs = observations.filter(
-        observation_concept__concept_code__in=[
-            '182840001', '182841002', '182843004', '182842009',
-        ]
-    )
-    if response_obs.exists():
-        response_map = {
-            '182840001': 'Complete Response',
-            '182841002': 'Partial Response',
-            '182843004': 'Stable Disease',
-            '182842009': 'Progressive Disease',
-        }
-        obs = response_obs.first()
-        code = obs.observation_concept.concept_code
-        if code in response_map:
-            data['best_response'] = obs.value_as_string or response_map[code]
 
     tumor_stage_obs = Observation.objects.filter(
         person=person,

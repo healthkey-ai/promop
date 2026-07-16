@@ -16,7 +16,7 @@ from django.contrib.contenttypes.models import ContentType
 from omop_core.models import (
     Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
-    Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location,
+    Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
     PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
     # Controlled vocabulary lookup models
     Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
@@ -1111,6 +1111,50 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         if person.location_id != location.location_id:
                             person.location_id = location.location_id
                             person.save(update_fields=['location_id'])
+
+                    death_date = None
+                    death_datetime = None
+                    death_reason = None
+                    deceased_dt_raw = patient_resource.get('deceasedDateTime')
+                    if deceased_dt_raw:
+                        try:
+                            death_datetime = datetime.fromisoformat(
+                                deceased_dt_raw.replace('Z', '+00:00')
+                            )
+                            death_date = death_datetime.date()
+                        except ValueError:
+                            try:
+                                death_date = datetime.strptime(deceased_dt_raw[:10], '%Y-%m-%d').date()
+                            except ValueError:
+                                death_date = None
+                    elif patient_resource.get('deceasedBoolean') is True:
+                        # FHIR can indicate deceased without a date. Prefer a
+                        # real deceasedDateTime when present; otherwise record
+                        # a deterministic import-date event for downstream
+                        # survival analytics rather than dropping mortality.
+                        death_date = localdate()
+                        death_reason = (
+                            'FHIR Patient.deceasedBoolean=true had no deceasedDateTime; '
+                            'death_date inferred as import date.'
+                        )
+
+                    if death_date:
+                        death, _ = Death.objects.update_or_create(
+                            person=person,
+                            defaults={
+                                'death_date': death_date,
+                                'death_datetime': death_datetime,
+                                'death_type_concept': _concept_ehr_type or _concept_tx_regimen,
+                            },
+                        )
+                        _record_provenance(
+                            death,
+                            prov_source or 'EHR_SYNC',
+                            prov_user_id,
+                            target_patient_id=fhir_patient_id,
+                            modification_reason=death_reason or prov_reason,
+                            organization=get_request_org(request),
+                        )
 
                     for encounter in data.get('encounters', []):
                         period = encounter.get('period') or {}

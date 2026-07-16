@@ -202,10 +202,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         read_only_fields = (
             'organization', 'person', 'created_at', 'updated_at',
             'first_line_therapy_display', 'second_line_therapy_display', 'later_therapy_display',
-            # best_response is derived from OMOP Observations by refresh_patient_record;
-            # sync_to_omop has no write-through category for it, so a client PATCH would
-            # be silently discarded on the next refresh. Read-only until that path exists.
-            'best_response',
+            'death_date',
             # Wearable summaries are written by the device-sync service, never by the client API.
             'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
             'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',

@@ -138,7 +138,10 @@ def upsert_therapy_line_episode(
         if regimen_source_concept and not episode.episode_source_concept_id:
             episode.episode_source_concept = regimen_source_concept
             dirty.append('episode_source_concept')
-        if end_date and not episode.episode_end_date:
+        if start_date is not None and episode.episode_start_date != start_date:
+            episode.episode_start_date = start_date
+            dirty.append('episode_start_date')
+        if episode.episode_end_date != end_date:
             episode.episode_end_date = end_date
             dirty.append('episode_end_date')
         if dirty:
@@ -187,6 +190,9 @@ def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_m
         if existing.observation_concept_id != outcome_concept.concept_id:
             existing.observation_concept = outcome_concept
             dirty.append('observation_concept')
+        if obs_date and existing.observation_date != obs_date:
+            existing.observation_date = obs_date
+            dirty.append('observation_date')
         if dirty:
             existing._skip_patient_record_refresh = True
             existing.save(update_fields=dirty)

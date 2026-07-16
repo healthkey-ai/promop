@@ -47,6 +47,8 @@ _PK_SEQUENCES = [
     ('measurement', 'measurement_id'),
     ('visit_occurrence', 'visit_occurrence_id'),
     ('care_site', 'care_site_id'),
+    ('location', 'location_id'),
+    ('visit_detail', 'visit_detail_id'),
     ('concept', 'concept_id'),
     ('condition_occurrence', 'condition_occurrence_id'),
     ('drug_exposure', 'drug_exposure_id'),
@@ -64,7 +66,14 @@ def django_db_setup(django_db_setup, django_db_blocker):
     same name so this runs strictly after the test DB/tables exist."""
     with django_db_blocker.unblock():
         from django.db import connection
-        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+        from omop_core.models import (
+            Concept,
+            ConceptClass,
+            Domain,
+            SctEligibility,
+            StemCellTransplant,
+            Vocabulary,
+        )
 
         with connection.cursor() as cursor:
             for table, pk_field in _PK_SEQUENCES:
@@ -90,6 +99,29 @@ def django_db_setup(django_db_setup, django_db_blocker):
             concept_class_id='Type Concept',
             defaults={'concept_class_name': 'Type Concept', 'concept_class_concept_id': 0},
         )
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='None',
+            defaults={'vocabulary_name': 'None',
+                      'vocabulary_reference': '', 'vocabulary_version': '',
+                      'vocabulary_concept_id': 0},
+        )
+        Domain.objects.get_or_create(
+            domain_id='Metadata',
+            defaults={'domain_name': 'Metadata', 'domain_concept_id': 0},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Undefined',
+            defaults={'concept_class_name': 'Undefined', 'concept_class_concept_id': 0},
+        )
+        Concept.objects.get_or_create(
+            concept_id=0,
+            defaults={
+                'concept_name': 'No matching concept', 'domain_id': 'Metadata',
+                'vocabulary_id': 'None', 'concept_class_id': 'Undefined',
+                'concept_code': 'No matching concept',
+                'valid_start_date': '1970-01-01', 'valid_end_date': '2099-12-31',
+            },
+        )
         Concept.objects.get_or_create(
             concept_id=32817,
             defaults={
@@ -99,3 +131,17 @@ def django_db_setup(django_db_setup, django_db_blocker):
                 'valid_start_date': '1970-01-01', 'valid_end_date': '2099-12-31',
             },
         )
+        for code, title in [
+            ('eligibleAuto', 'eligible for autologous SCT'),
+            ('eligibleAllo', 'eligible for allogeneic SCT'),
+            ('ineligibleAuto', 'ineligible for autologous SCT'),
+            ('ineligibleAllo', 'ineligible for allogeneic SCT'),
+        ]:
+            SctEligibility.objects.get_or_create(code=code, defaults={'title': title})
+
+        for code, title in [
+            ('autologousSCT', 'autologous SCT'),
+            ('allogeneicSCT', 'allogeneic SCT'),
+            ('tandemSCT', 'tandem SCT'),
+        ]:
+            StemCellTransplant.objects.get_or_create(code=code, defaults={'title': title})

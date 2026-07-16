@@ -867,8 +867,8 @@ def _enrich_patient_bundle(bundle: dict, index: int) -> None:
             ),
         })
 
-    # Behavioral assessments and best response populate PatientRecord's
-    # tobacco / response fields.
+    # Behavioral assessments and response-status Observations populate
+    # PatientRecord tobacco fields and line-level response analytics.
     tobacco_code = rng.choice([code for code, _ in _BC_BEHAVIOR_OBS])
     if tobacco_code not in {
         ((resource.get('code') or {}).get('coding') or [{}])[0].get('code')

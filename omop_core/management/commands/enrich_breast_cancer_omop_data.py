@@ -11,8 +11,8 @@ Addresses three data gaps found while building benchmark_patient_record:
   1. ECOG / Karnofsky / "Stage group.clinical Cancer" Measurement rows exist
      for this cohort but every value column is null.
   2. Observation has zero rows at all for this cohort, so tobacco status
-     (_get_behavior_data), tumor/metastasis staging + best_response
-     (_get_assessment_data), and sleep duration (_get_wearable_data) always
+     (_get_behavior_data), tumor/metastasis staging / response-status
+     Observations, and sleep duration (_get_wearable_data) always
      return empty.
   3. None of the six wearable Measurement LOINC codes appear for this
      cohort, so _get_wearable_data's Measurement-sourced metrics (steps,
@@ -640,7 +640,7 @@ class Command(BaseCommand):
     def _create_missing_observations(self, person, record, observation_ids,
                                       ehr_type_concept_id, dry_run):
         """Insert one tobacco-status, one T/M-staging pair, and one
-        best_response Observation row per person, skipping any concept the
+        response-status Observation row per person, skipping any concept the
         person already has an Observation row for (idempotent)."""
         created = 0
         existing_concept_ids = set(

@@ -50,7 +50,7 @@ class TestBenchmarkRun:
         call_command('benchmark_patient_record', org_slugs='test-org')
 
         out = capsys.readouterr().out
-        assert 'Benchmarking 1 breast-cancer patient' in out
+        assert 'Benchmarking 1 patient(s)' in out
 
     def test_output_file_written(self, tmp_path):
         person = PersonFactory()

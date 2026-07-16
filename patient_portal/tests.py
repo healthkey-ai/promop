@@ -24,6 +24,7 @@ from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
     Person, PatientRecord, ProvenanceRecord,
     ConditionOccurrence, DrugExposure, Measurement, ProcedureOccurrence,
+    Death,
     Relationship, ConceptRelationship, ConceptAncestor,
     SctEligibility,
 )
@@ -350,6 +351,62 @@ class FhirUploadOmopTablesTest(FhirUploadBase):
         self.assertEqual(obs.count(), 1)
         self.assertEqual(obs.first().value_as_string, 'CR')
 
+    def test_deceased_patient_creates_death_row(self):
+        bundle = _make_fhir_bundle()
+        patient = next(
+            entry['resource']
+            for entry in bundle['entry']
+            if entry['resource']['resourceType'] == 'Patient'
+        )
+        patient['id'] = 'test-patient-jane-deceased'
+        patient['name'] = [{'family': 'Deceased', 'given': ['Jane']}]
+        patient['deceasedDateTime'] = '2024-04-05T12:34:00Z'
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'deceased_bundle.json'
+
+        response = self.client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+        )
+
+        self.assertIn(response.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
+        person = Person.objects.get(family_name='Deceased', given_name='Jane')
+        death = Death.objects.get(person=person)
+        self.assertEqual(death.death_date, date(2024, 4, 5))
+        provenance = ProvenanceRecord.objects.get(object_id=person.person_id, content_type__model='death')
+        self.assertEqual(provenance.source, 'EHR_SYNC')
+        self.assertIsNone(provenance.modification_reason)
+
+    def test_deceased_boolean_death_row_records_inferred_date_provenance(self):
+        bundle = _make_fhir_bundle()
+        patient = next(
+            entry['resource']
+            for entry in bundle['entry']
+            if entry['resource']['resourceType'] == 'Patient'
+        )
+        patient['id'] = 'test-patient-jane-deceased-bool'
+        patient['name'] = [{'family': 'BooleanDeceased', 'given': ['Jane']}]
+        patient['deceasedBoolean'] = True
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'deceased_boolean_bundle.json'
+
+        response = self.client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+        )
+
+        self.assertIn(response.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
+        person = Person.objects.get(family_name='BooleanDeceased', given_name='Jane')
+        death = Death.objects.get(person=person)
+        self.assertIsNotNone(death.death_date)
+        provenance = ProvenanceRecord.objects.get(object_id=person.person_id, content_type__model='death')
+        self.assertEqual(provenance.source, 'EHR_SYNC')
+        self.assertIn('deceasedBoolean=true', provenance.modification_reason)
+
 
 # ---------------------------------------------------------------------------
 # 2. PatientRecord derivation tests
@@ -404,6 +461,21 @@ class FhirUploadPatientRecordTest(FhirUploadBase):
         self.assertEqual(self._pi.second_line_start_date, date(2023, 1, 15))
         self.assertIsNone(self._pi.second_line_end_date,  'Open-ended LOT 2 should have no end date')
 
+    def test_death_date_derived_from_omop_death(self):
+        ehr_concept = Concept.objects.get(concept_id=32817)
+        Death.objects.update_or_create(
+            person=self._person,
+            defaults={
+                'death_date': date(2024, 4, 5),
+                'death_type_concept': ehr_concept,
+            },
+        )
+        from omop_core.services.patient_record_service import refresh_patient_record
+
+        refreshed = refresh_patient_record(self._person)
+
+        self.assertEqual(refreshed.death_date, date(2024, 4, 5))
+
 
 # ---------------------------------------------------------------------------
 # 3. UI API view tests — data visible through endpoints the frontend uses
@@ -445,7 +517,7 @@ class UIViewsReflectUploadedDataTest(FhirUploadBase):
                       'first_line_start_date', 'first_line_end_date',
                       'second_line_outcome', 'second_line_discontinuation_reason',
                       'later_outcome', 'later_discontinuation_reason',
-                      'treatment_refractory_status', 'relapse_count', 'best_response'):
+                      'treatment_refractory_status', 'relapse_count'):
             self.assertIn(field, record, f'Field {field!r} missing from patient-info response')
 
     def test_patient_info_endpoint_lab_values_match_observations(self):
@@ -2010,20 +2082,6 @@ class SmartPatientRecordReadOnlyTest(_SmartBase):
     def test_patient_info_read_with_write_token_succeeds(self):
         resp = self.write_client.get('/api/patient-info/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-
-    def test_patient_info_patch_ignores_best_response(self):
-        """best_response is derived-only (no sync_to_omop write-through) — PATCH must not persist it,
-        or the value would silently vanish on the next refresh_patient_record (promop#205)."""
-        PatientRecord.objects.get_or_create(person=self.person, defaults={'organization': self.organization})
-        resp = self.write_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'best_response': 'Complete Response'},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        pi = PatientRecord.objects.get(person=self.person)
-        self.assertIsNone(pi.best_response)
-
 
 class SmartFhirUploadTest(_SmartBase):
     """Service client can bulk-ingest a patient via the FHIR upload endpoint
