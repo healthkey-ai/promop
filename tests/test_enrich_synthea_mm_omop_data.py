@@ -170,3 +170,137 @@ class TestEnrichSyntheaMmOmopData:
                 bundle=str(bundle_path),
                 person_ids=str(person.person_id),
             )
+
+
+def _write_mm_bundle_with_therapy(path: Path, given_name: str, family_name: str,
+                                  birth_date: str, condition_code: str):
+    bundle = {
+        'resourceType': 'Bundle',
+        'type': 'collection',
+        'entry': [
+            {
+                'fullUrl': 'urn:uuid:patient-1',
+                'resource': {
+                    'resourceType': 'Patient',
+                    'id': '1',
+                    'name': [{'given': [given_name], 'family': family_name}],
+                    'birthDate': birth_date,
+                },
+            },
+            {
+                'fullUrl': 'urn:uuid:condition-1',
+                'resource': {
+                    'resourceType': 'Condition',
+                    'id': 'cond-1',
+                    'subject': {'reference': 'Patient/1'},
+                    'code': {
+                        'coding': [{
+                            'system': 'http://snomed.info/sct',
+                            'code': condition_code,
+                            'display': 'Multiple myeloma',
+                        }],
+                        'text': 'Multiple myeloma',
+                    },
+                    'onsetDateTime': '2020-01-10T00:00:00',
+                },
+            },
+            {
+                'fullUrl': 'urn:uuid:med-1',
+                'resource': {
+                    'resourceType': 'MedicationStatement',
+                    'id': 'med-1',
+                    'status': 'completed',
+                    'subject': {'reference': 'Patient/1'},
+                    'extension': [
+                        {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-line',
+                         'valueInteger': 1},
+                        {'url': 'https://healthkey.ai/fhir/StructureDefinition/therapy-outcome',
+                         'valueString': 'Partial Response'},
+                    ],
+                    'medicationCodeableConcept': {'text': 'VRd'},
+                    'effectivePeriod': {'start': '2020-02-01', 'end': '2020-08-01'},
+                },
+            },
+        ],
+    }
+    path.write_text(json.dumps(bundle))
+
+
+class TestEnrichSyntheaMmLotOutcomes:
+
+    def _setup_patient(self, tmp_path):
+        from tests.factories import ConceptFactory
+
+        # Standard OMOP concepts the shared Episode writer depends on (seeded in
+        # real DBs via migrations / seed_omop_concepts).
+        ConceptFactory(concept_id=0, concept_name='No matching concept', concept_code='No matching concept')
+        ConceptFactory(concept_id=32531, concept_name='Treatment Regimen', concept_code='32531')
+        ConceptFactory(concept_id=32817, concept_name='EHR', concept_code='32817')
+        ConceptFactory(concept_id=1147094, concept_name='drug_exposure_id field', concept_code='1147094')
+        org = Organization.objects.create(name='SYNTHEA-MM', slug='synthea-mm')
+        person = PersonFactory(
+            given_name='Jane',
+            family_name='Doe',
+            year_of_birth=1968,
+            month_of_birth=1,
+            day_of_birth=2,
+        )
+        PatientRecordFactory(
+            person=person,
+            organization=org,
+            disease='multiple myeloma',
+            diagnosis_date=date(2020, 1, 10),
+        )
+        bundle_path = tmp_path / 'synthea_mm_therapy.json'
+        _write_mm_bundle_with_therapy(bundle_path, 'Jane', 'Doe', '1968-01-02', 'SYNTH-MM-001')
+        return person, bundle_path
+
+    def test_writes_lot_outcome_observation(self, tmp_path):
+        from omop_core.models import Observation
+
+        person, bundle_path = self._setup_patient(tmp_path)
+
+        call_command(
+            'enrich_synthea_mm_omop_data',
+            bundle=str(bundle_path),
+            person_ids=str(person.person_id),
+            confirm=True,
+        )
+
+        outcome_obs = Observation.objects.filter(
+            person=person, observation_source_value='LOT-1-outcome',
+        )
+        assert outcome_obs.count() == 1
+        assert outcome_obs.first().value_as_string == 'Partial Response'
+
+    def test_lot_outcome_observation_idempotent(self, tmp_path):
+        from omop_core.models import Observation
+
+        person, bundle_path = self._setup_patient(tmp_path)
+
+        for _ in range(2):
+            call_command(
+                'enrich_synthea_mm_omop_data',
+                bundle=str(bundle_path),
+                person_ids=str(person.person_id),
+                confirm=True,
+            )
+
+        assert Observation.objects.filter(
+            person=person, observation_source_value='LOT-1-outcome',
+        ).count() == 1
+
+    def test_refreshed_patient_record_gets_first_line_outcome(self, tmp_path):
+        from omop_core.models import PatientRecord
+
+        person, bundle_path = self._setup_patient(tmp_path)
+
+        call_command(
+            'enrich_synthea_mm_omop_data',
+            bundle=str(bundle_path),
+            person_ids=str(person.person_id),
+            confirm=True,
+        )
+
+        record = PatientRecord.objects.get(person=person)
+        assert record.first_line_outcome == 'Partial Response'

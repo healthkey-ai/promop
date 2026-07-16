@@ -487,7 +487,6 @@ categorical fields, `value_as_number` for numeric.
 
 | PatientRecord field | OMOP table | Concept name filter |
 |---------------------|------------|-------------------|
-| `best_response` | `observation` | concept name icontains `response` / `remission` / `progression` / `best_response` |
 | `measurable_disease_by_recist_status` | `observation` | concept name icontains `measurable_disease` |
 
 ### Genetic mutations — `_get_genetic_mutations`

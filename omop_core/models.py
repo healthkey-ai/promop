@@ -1896,7 +1896,6 @@ class PatientRecord(models.Model):
     biopsy_grade = models.IntegerField(blank=True, null=True)
 
     # Assessment
-    best_response = models.CharField(max_length=50, blank=True, null=True, help_text="Best overall response (e.g. Complete Response, Partial Response, Stable Disease, Progressive Disease)")
     measurable_disease_by_recist_status = models.BooleanField(blank=True, null=True)
     estrogen_receptor_status = models.TextField(blank=True, null=True)
     progesterone_receptor_status = models.TextField(blank=True, null=True)
@@ -1967,6 +1966,7 @@ class PatientRecord(models.Model):
 
     # Core clinical fields derived from OMOP ConditionOccurrence
     diagnosis_date = models.DateField(blank=True, null=True, help_text="Date of initial diagnosis (from ConditionOccurrence)")
+    death_date = models.DateField(blank=True, null=True, help_text="Date of death (from OMOP Death)")
     condition_clinical_status = models.CharField(max_length=50, blank=True, null=True, help_text="Clinical status: active/remission/relapse")
     disease_slug = models.CharField(max_length=100, blank=True, null=True, help_text="Machine-readable disease ID e.g. 'multiple-myeloma'")
     validated = models.BooleanField(blank=True, null=True, help_text="Clinician validation flag")

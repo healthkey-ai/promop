@@ -1,9 +1,18 @@
 import factory
 from omop_core.models import (
     Concept, Vocabulary, Domain, ConceptClass,
-    Person, PatientRecord,
+    Organization, Person, PatientRecord,
     Measurement, Observation, ConditionOccurrence, DrugExposure,
 )
+
+
+class OrganizationFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = Organization
+        django_get_or_create = ('slug',)
+
+    name = factory.Sequence(lambda n: f'Org {n}')
+    slug = factory.Sequence(lambda n: f'org-{n}')
 
 
 class VocabularyFactory(factory.django.DjangoModelFactory):
@@ -72,6 +81,7 @@ class PatientRecordFactory(factory.django.DjangoModelFactory):
         model = PatientRecord
 
     person = factory.SubFactory(PersonFactory)
+    organization = factory.SubFactory(OrganizationFactory)
     disease = 'chronic lymphocytic leukemia'
     patient_age = 65
     gender = 'M'

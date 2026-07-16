@@ -84,15 +84,24 @@ def test_wearable_metrics_use_measurement_source_value_fallbacks():
 def test_treatment_fallback_derives_bc_regimen_concept_from_same_day_combo():
     person = PersonFactory()
 
+    # The TC regimen concept exists on real DBs (HemOnc-loaded); seed it so
+    # derivation can surface its full concept name, not just the 'TC' abbreviation.
+    ConceptFactory(concept_id=35804232, concept_name='Cyclophosphamide and Docetaxel (TC)')
+
+    # Same-day combination — explicit end dates so LOT inference groups the two
+    # exposures into one line (DrugExposureFactory's default end date is
+    # unrelated to these start dates).
     DrugExposureFactory(
         person=person,
         drug_concept=ConceptFactory(concept_name='docetaxel 20 MG/ML Injection [DOCETAXEL EG]'),
         drug_exposure_start_date=date(2024, 1, 1),
+        drug_exposure_end_date=date(2024, 1, 21),
     )
     DrugExposureFactory(
         person=person,
         drug_concept=ConceptFactory(concept_name='cyclophosphamide 500 MG Injection'),
         drug_exposure_start_date=date(2024, 1, 1),
+        drug_exposure_end_date=date(2024, 1, 21),
     )
 
     data = _get_treatment_data(person)
@@ -134,20 +143,26 @@ def test_treatment_fallback_collapses_staggered_bc_backfill_into_one_line():
 def test_treatment_fallback_normalizes_thp_product_names_to_regimen():
     person = PersonFactory()
 
+    # Contiguous end dates so LOT inference groups the three product-named
+    # exposures into a single line (DrugExposureFactory's default end date is
+    # unrelated to these start dates).
     DrugExposureFactory(
         person=person,
         drug_concept=ConceptFactory(concept_name='Paclitaxel 6 MG/ML Injection [Aj-Paclitaxel]'),
         drug_exposure_start_date=date(2024, 1, 1),
+        drug_exposure_end_date=date(2024, 1, 21),
     )
     DrugExposureFactory(
         person=person,
         drug_concept=ConceptFactory(concept_name='trastuzumab 150 MG Injectable Solution'),
         drug_exposure_start_date=date(2024, 1, 22),
+        drug_exposure_end_date=date(2024, 2, 11),
     )
     DrugExposureFactory(
         person=person,
         drug_concept=ConceptFactory(concept_name='pertuzumab; parenteral'),
         drug_exposure_start_date=date(2024, 2, 12),
+        drug_exposure_end_date=date(2024, 3, 4),
     )
 
     data = _get_treatment_data(person)

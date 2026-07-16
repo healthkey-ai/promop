@@ -91,12 +91,21 @@ class TestLaterTherapies:
 
     def test_three_or_more_drugs_populate_later_therapies(self):
         person = PersonFactory()
-        for i, name in enumerate(['DrugA', 'DrugB', 'DrugC', 'DrugD']):
+        # Four distinct single agents spaced a quarter apart so LOT inference
+        # segments them into four separate lines (gaps exceed the 28-day
+        # combination window), rather than merging them into one regimen.
+        starts_ends = [
+            ('DrugA', '2023-01-01', '2023-01-28'),
+            ('DrugB', '2023-04-01', '2023-04-28'),
+            ('DrugC', '2023-07-01', '2023-07-28'),
+            ('DrugD', '2023-10-01', '2023-10-28'),
+        ]
+        for name, start, end in starts_ends:
             DrugExposureFactory(
                 person=person,
                 drug_concept=ConceptFactory(concept_name=name),
-                drug_exposure_start_date=f'2023-0{i+1}-01',
-                drug_exposure_end_date=f'2023-0{i+1}-28',
+                drug_exposure_start_date=start,
+                drug_exposure_end_date=end,
             )
         data = _cmd().get_treatment_data(person)
         assert 'later_therapies' in data

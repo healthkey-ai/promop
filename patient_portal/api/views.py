@@ -16,7 +16,7 @@ from django.contrib.contenttypes.models import ContentType
 from omop_core.models import (
     Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
-    Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location,
+    Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
     PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
     # Controlled vocabulary lookup models
     Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
@@ -36,6 +36,7 @@ from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.omop_write_service import sync_to_omop
+from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
@@ -1110,6 +1111,50 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         if person.location_id != location.location_id:
                             person.location_id = location.location_id
                             person.save(update_fields=['location_id'])
+
+                    death_date = None
+                    death_datetime = None
+                    death_reason = None
+                    deceased_dt_raw = patient_resource.get('deceasedDateTime')
+                    if deceased_dt_raw:
+                        try:
+                            death_datetime = datetime.fromisoformat(
+                                deceased_dt_raw.replace('Z', '+00:00')
+                            )
+                            death_date = death_datetime.date()
+                        except ValueError:
+                            try:
+                                death_date = datetime.strptime(deceased_dt_raw[:10], '%Y-%m-%d').date()
+                            except ValueError:
+                                death_date = None
+                    elif patient_resource.get('deceasedBoolean') is True:
+                        # FHIR can indicate deceased without a date. Prefer a
+                        # real deceasedDateTime when present; otherwise record
+                        # a deterministic import-date event for downstream
+                        # survival analytics rather than dropping mortality.
+                        death_date = localdate()
+                        death_reason = (
+                            'FHIR Patient.deceasedBoolean=true had no deceasedDateTime; '
+                            'death_date inferred as import date.'
+                        )
+
+                    if death_date:
+                        death, _ = Death.objects.update_or_create(
+                            person=person,
+                            defaults={
+                                'death_date': death_date,
+                                'death_datetime': death_datetime,
+                                'death_type_concept': _concept_ehr_type or _concept_tx_regimen,
+                            },
+                        )
+                        _record_provenance(
+                            death,
+                            prov_source or 'EHR_SYNC',
+                            prov_user_id,
+                            target_patient_id=fhir_patient_id,
+                            modification_reason=death_reason or prov_reason,
+                            organization=get_request_org(request),
+                        )
 
                     for encounter in data.get('encounters', []):
                         period = encounter.get('period') or {}
@@ -2520,42 +2565,27 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     if prov_source:
                                         _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
-                                # ep_source_concept reuses the same HemOnc lookup already resolved above
-                                ep_source_concept = regimen_concept if _hemonc_cid else None
-
-                                # Upsert Episode for this LOT
-                                ep_concept = _concept_tx_regimen or regimen_concept
-                                ep_obj_concept = regimen_concept
-                                ep_type_concept = _concept_ehr_type or regimen_concept
-
-                                _ep = Episode.objects.filter(
-                                    person=person,
-                                    episode_source_value=f'LOT-{lot_num}',
-                                ).first()
-                                if _ep is None:
-                                    _ep = Episode(
-                                        episode_id=next_pk(Episode, 'episode_id'),
-                                        person=person,
-                                        episode_concept=ep_concept,
-                                        episode_object_concept=ep_obj_concept,
-                                        episode_type_concept=ep_type_concept,
-                                        episode_start_date=lot_start or datetime.now().date(),
-                                        episode_end_date=lot_end,
-                                        episode_number=lot_num,
-                                        episode_source_value=f'LOT-{lot_num}',
-                                        episode_source_concept=ep_source_concept,
-                                    )
-                                    _ep.save()
-                                    _pt_episode_ids.append(_ep.episode_id)
-
-                                # Link drug exposure to episode (idempotent)
-                                ee_field_concept = _concept_de_field or regimen_concept
-                                _ee, _ = EpisodeEvent.objects.get_or_create(
-                                    episode_id=_ep.episode_id,
-                                    event_id=_de.drug_exposure_id,
-                                    defaults={'episode_event_field_concept': ee_field_concept},
+                                # Episode + EpisodeEvent + per-line outcome via
+                                # the shared LOT writer so CDM tagging and the
+                                # idempotency key match every other path, and the
+                                # outcome lands in OMOP (LOT-{n}-outcome
+                                # Observation) as the source of truth. The direct
+                                # PatientRecord outcome patch below is retained as
+                                # a belt-and-suspenders for the no-episode edge.
+                                _ep_result = upsert_therapy_line_episode(
+                                    person,
+                                    line_number=lot_num,
+                                    regimen_concept=regimen_concept,
+                                    regimen_source_concept=regimen_concept if _hemonc_cid else None,
+                                    start_date=lot_start,
+                                    end_date=lot_end,
+                                    drug_exposure_ids=[_de.drug_exposure_id],
+                                    outcome=lot_data.get('outcome'),
+                                    today=datetime.now().date(),
                                 )
-                                _pt_episode_event_ids.append(_ee.pk)
+                                if _ep_result.created:
+                                    _pt_episode_ids.append(_ep_result.episode.episode_id)
+                                _pt_episode_event_ids.extend(_ep_result.event_ids)
                         except Exception as _e:
                             logger.warning('{"event": "drug_exposure_write_failed", "lot_num": %d, "error_type": "%s", "patient": "%s"}',
                                            lot_num, type(_e).__name__, _timing_hash)

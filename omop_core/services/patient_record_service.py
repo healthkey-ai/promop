@@ -18,6 +18,7 @@ from django.utils import timezone
 from omop_core.models import (
     Person, PatientRecord, ConditionOccurrence, Concept,
     Measurement, Observation, DrugExposure, Location, ProcedureOccurrence,
+    Death,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
 from omop_core.services.mappings import (
@@ -40,7 +41,7 @@ from omop_core.services.lot_regimens import (
 # each refresh so deletions are reflected (not just additions).
 _OMOP_DERIVED_FIELDS = [
     # Disease / condition
-    'disease', 'diagnosis_date', 'condition_clinical_status', 'disease_slug',
+    'disease', 'diagnosis_date', 'death_date', 'condition_clinical_status', 'disease_slug',
     # Therapy lines
     'first_line_therapy', 'first_line_date', 'first_line_start_date', 'first_line_end_date',
     'first_line_therapy_id',
@@ -106,7 +107,7 @@ _OMOP_DERIVED_FIELDS = [
     # Lymphoma
     'flipi_score', 'gelf_criteria_status', 'tumor_grade',
     # Assessment
-    'best_response', 'measurable_disease_by_recist_status',
+    'measurable_disease_by_recist_status',
     # Clinical (breast cancer)
     'peripheral_neuropathy_grade', 'toxicity_grade', 'renal_adequacy_status',
     # Procedures
@@ -327,6 +328,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 def _get_demographics(person: Person) -> dict:
     data = {}
 
+    death = Death.objects.filter(person=person).only('death_date').first()
+    if death:
+        data['death_date'] = death.death_date
+
     if person.year_of_birth:
         today = date.today()
         data['patient_age'] = today.year - person.year_of_birth
@@ -518,129 +523,98 @@ def _get_treatment_data(person: Person) -> dict:
     except Exception:
         pass
 
-    therapy_details = _build_fallback_therapy_details(drug_exposures)
-    data['therapy_lines_count'] = len(therapy_details)
-
-    if len(therapy_details) >= 1:
-        data['first_line_therapy'] = therapy_details[0]['drug']
-        data['first_line_therapy_id'] = therapy_details[0]['concept_id']
-        data['first_line_date'] = therapy_details[0]['start_date']
-
-    if len(therapy_details) >= 2:
-        data['second_line_therapy'] = therapy_details[1]['drug']
-        data['second_line_therapy_id'] = therapy_details[1]['concept_id']
-        data['second_line_date'] = therapy_details[1]['start_date']
-
-    if len(therapy_details) > 2:
-        later_drugs = therapy_details[2:]
-        data['later_therapy'] = later_drugs[0]['drug']
-        data['later_date'] = later_drugs[0]['start_date']
-        data['later_therapies'] = [
-            {'therapy': d['drug'], 'startDate': d['start_date'], 'endDate': d['end_date']}
-            for d in later_drugs
-        ]
-        later_ids = [d['concept_id'] for d in later_drugs if d.get('concept_id')]
-        if later_ids:
-            data['later_therapy_ids'] = later_ids
-
+    # No Episodes persisted yet — derive from the single LOT inference engine in
+    # read-only (dry_run) mode, so the same grouping algorithm the enrich/import
+    # steps use to *persist* Episodes also drives derivation. No OMOP rows are
+    # written here; refresh_patient_record stays read-only.
+    from omop_core.services.lot_inference_service import infer_lot_for_person
+    lots = infer_lot_for_person(person, dry_run=True)
+    _apply_inferred_lots(data, lots)
     return data
 
 
-def _build_fallback_therapy_details(drug_exposures):
-    """Collapse DrugExposure rows into LOT-like regimen rows without Episode data.
+def _regimen_from_exposures(exposure_ids, de_info_by_id):
+    """Resolve (display_name, concept_id) from a LOT's backing DrugExposures.
 
-    The breast-cancer backfill may materialize a regimen as several nearby
-    ingredient rows (for example AC-T over 6 weeks). Try to recover a regimen
-    concept first; otherwise fall back to same-day grouping.
+    de_info_by_id maps drug_exposure_id -> (concept_id, vocabulary_id, name).
+
+    If an exposure's drug_concept is itself a HemOnc regimen concept (e.g. a
+    regimen-level row from BC therapy backfill), use it directly. Otherwise
+    mirror the Episode-derivation naming: a HemOnc regimen concept resolved from
+    the drug-name set, else the canonical regimen name, else the joined original
+    concept names (preserving casing).
     """
-    if not drug_exposures:
-        return []
-
-    REGIMEN_WINDOW_DAYS = 42
-    details = []
-    idx = 0
-    while idx < len(drug_exposures):
-        match = _match_fallback_regimen_window(drug_exposures, idx, REGIMEN_WINDOW_DAYS)
-        if match is None:
-            match = _match_same_day_therapy(drug_exposures, idx)
-        details.append(match)
-        idx = match['next_index']
-    return details
-
-
-def _match_fallback_regimen_window(drug_exposures, start_idx, window_days):
-    start_date = drug_exposures[start_idx].drug_exposure_start_date
-    if not start_date:
-        return None
-
-    best_match = None
-    lookup_names = []   # normalized (lowercase) for regimen matching
-    display_names = []  # original concept_name for fallback display
-    latest_end = None
-    for idx in range(start_idx, len(drug_exposures)):
-        drug = drug_exposures[idx]
-        if not drug.drug_exposure_start_date:
-            break
-        if (drug.drug_exposure_start_date - start_date).days > window_days:
-            break
-        raw_name = drug.drug_concept.concept_name if drug.drug_concept else (drug.drug_source_value or 'Unknown')
-        lookup_names.append(normalize_drug_name(raw_name))
-        display_names.append(raw_name)
-        if drug.drug_exposure_end_date:
-            latest_end = max(latest_end, drug.drug_exposure_end_date) if latest_end else drug.drug_exposure_end_date
-        concept_id = get_regimen_concept_id({n.lower().strip() for n in lookup_names})
-        regimen_name = get_regimen_name({n.lower().strip() for n in lookup_names})
-        if concept_id or regimen_name:
-            display_name = _resolve_regimen_display_name(concept_id, regimen_name, display_names)
-            best_match = {
-                'drug': display_name,
-                'concept_id': concept_id,
-                'start_date': str(start_date),
-                'end_date': str(latest_end) if latest_end else None,
-                'next_index': idx + 1,
-            }
-    return best_match
-
-
-def _match_same_day_therapy(drug_exposures, start_idx):
-    start_date = drug_exposures[start_idx].drug_exposure_start_date
-    same_day = []
-    idx = start_idx
-    while idx < len(drug_exposures) and drug_exposures[idx].drug_exposure_start_date == start_date:
-        same_day.append(drug_exposures[idx])
-        idx += 1
-
-    display_names = [
-        de.drug_concept.concept_name if de.drug_concept else (de.drug_source_value or 'Unknown')
-        for de in same_day
-    ]
-    lookup_names = [normalize_drug_name(n) for n in display_names]
-    concept_id = get_regimen_concept_id({n.lower().strip() for n in lookup_names})
-    regimen_name = get_regimen_name({n.lower().strip() for n in lookup_names})
-    latest_end = max((de.drug_exposure_end_date for de in same_day if de.drug_exposure_end_date), default=None)
-    return {
-        'drug': _resolve_regimen_display_name(concept_id, regimen_name, display_names),
-        'concept_id': concept_id,
-        'start_date': str(start_date) if start_date else None,
-        'end_date': str(latest_end) if latest_end else None,
-        'next_index': idx,
-    }
-
-
-def _resolve_regimen_display_name(concept_id, regimen_name, display_names):
-    """Return a human-readable therapy name.
-
-    Priority: HemOnc concept name > canonical regimen name > joined display names.
-    ``display_names`` should be the original (un-normalized) concept names so
-    that single-drug fallbacks like 'Paclitaxel' preserve their original casing.
-    """
+    infos = [de_info_by_id[e] for e in exposure_ids if e in de_info_by_id]
+    if not infos:
+        return 'Unknown', None
+    for concept_id, vocab_id, name in infos:
+        if concept_id and vocab_id == 'HemOnc':
+            return name, concept_id
+    display_names = [name for _, _, name in infos]
+    norm_key = {normalize_drug_name(n).lower().strip() for n in display_names}
+    concept_id = get_regimen_concept_id(norm_key)
     if concept_id:
         concept = _cc_by_id(concept_id)
         if concept:
-            return concept.concept_name
+            return concept.concept_name, concept_id
+    regimen_name = get_regimen_name(norm_key)
     if regimen_name:
-        return regimen_name
-    return ' + '.join(display_names)
+        return regimen_name, concept_id
+    return ' + '.join(display_names), concept_id
+
+
+def _apply_inferred_lots(data: dict, lots) -> None:
+    """Map in-memory inferred LOTs onto first/second/later therapy fields."""
+    data['therapy_lines_count'] = len(lots)
+
+    # Bulk-resolve (concept_id, vocabulary_id, name) for every exposure across
+    # all lots. concept.vocabulary_id is the FK's string PK — no extra join.
+    exp_ids = [eid for lot in lots for eid in lot.exposure_ids]
+    de_info_by_id = {}
+    if exp_ids:
+        for de in (DrugExposure.objects
+                   .filter(drug_exposure_id__in=exp_ids)
+                   .select_related('drug_concept')):
+            if de.drug_concept:
+                de_info_by_id[de.drug_exposure_id] = (
+                    de.drug_concept.concept_id,
+                    de.drug_concept.vocabulary_id,
+                    de.drug_concept.concept_name,
+                )
+            else:
+                de_info_by_id[de.drug_exposure_id] = (None, None, de.drug_source_value or 'Unknown')
+
+    later = []
+    later_ids = []
+    for lot in lots:
+        name, concept_id = _regimen_from_exposures(lot.exposure_ids, de_info_by_id)
+        start = str(lot.start) if lot.start else None
+        end = str(lot.end) if lot.end else None
+        if lot.lot_number == 1:
+            data['first_line_therapy'] = name
+            data['first_line_therapy_id'] = concept_id
+            data['first_line_date'] = start
+            data['first_line_start_date'] = start
+            data['first_line_end_date'] = end
+        elif lot.lot_number == 2:
+            data['second_line_therapy'] = name
+            data['second_line_therapy_id'] = concept_id
+            data['second_line_date'] = start
+            data['second_line_start_date'] = start
+            data['second_line_end_date'] = end
+        else:  # lot_number >= 3
+            if not data.get('later_therapy'):
+                data['later_therapy'] = name
+                data['later_date'] = start
+                data['later_start_date'] = start
+                data['later_end_date'] = end
+            later.append({'therapy': name, 'startDate': start, 'endDate': end})
+            if concept_id:
+                later_ids.append(concept_id)
+    if later:
+        data['later_therapies'] = later
+    if later_ids:
+        data['later_therapy_ids'] = later_ids
 
 
 def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
@@ -790,6 +764,45 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
 
     if therapy_line_numbers:
         data['therapy_lines_count'] = len(therapy_line_numbers)
+
+    # ── Per-line outcomes from LOT-N-outcome Observations ─────────────────
+    # Written by the synthetic enrichment commands (and any future ingest path
+    # that records a response assessment per line of therapy).
+    response_code_map = {
+        '182840001': 'Complete Response',
+        '182841002': 'Partial Response',
+        '182843004': 'Stable Disease',
+        '182842009': 'Progressive Disease',
+    }
+    lot_outcomes: dict = {}
+    outcome_obs = (
+        Observation.objects
+        .filter(
+            person=person,
+            observation_source_value__startswith='LOT-',
+            observation_source_value__endswith='-outcome',
+        )
+        .select_related('observation_concept')
+        .order_by('observation_date')
+    )
+    for obs in outcome_obs:
+        src = obs.observation_source_value or ''
+        try:
+            lot_n = int(src.split('-')[1])
+        except (IndexError, ValueError):
+            continue
+        concept_code = obs.observation_concept.concept_code if obs.observation_concept else None
+        outcome = obs.value_as_string or response_code_map.get(concept_code)
+        if outcome:
+            lot_outcomes[lot_n] = outcome  # ordered by date → latest assessment wins
+
+    if 1 in lot_outcomes:
+        data['first_line_outcome'] = lot_outcomes[1]
+    if 2 in lot_outcomes:
+        data['second_line_outcome'] = lot_outcomes[2]
+    later_lots = sorted(k for k in lot_outcomes if k >= 3)
+    if later_lots:
+        data['later_outcome'] = lot_outcomes[later_lots[0]]
 
     return data
 
@@ -1485,23 +1498,6 @@ def _get_assessment_data(person: Person) -> dict:
         .order_by('-observation_date')
     )
 
-    response_obs = observations.filter(
-        observation_concept__concept_code__in=[
-            '182840001', '182841002', '182843004', '182842009',
-        ]
-    )
-    if response_obs.exists():
-        response_map = {
-            '182840001': 'Complete Response',
-            '182841002': 'Partial Response',
-            '182843004': 'Stable Disease',
-            '182842009': 'Progressive Disease',
-        }
-        obs = response_obs.first()
-        code = obs.observation_concept.concept_code
-        if code in response_map:
-            data['best_response'] = obs.value_as_string or response_map[code]
-
     tumor_stage_obs = Observation.objects.filter(
         person=person,
         observation_concept__concept_code__in=['21905-5'],
@@ -1998,10 +1994,15 @@ def _get_wearable_data(person: Person) -> dict:
     if not measurement_rows and not observation_rows:
         return data
 
+    # Key each row by the wearable LOINC it actually carries. A row may have an
+    # unrelated concept_code (e.g. an unmapped source concept) yet a wearable
+    # measurement_source_value — prefer whichever is a known wearable code so
+    # the source_value fallback isn't shadowed by a present-but-unrelated concept.
+    _wearable_codes = set(WEARABLE_LOINC.values())
     rows_by_code: dict[str, list[tuple[date, float]]] = {}
     for concept_code, source_value, mdate, val in measurement_rows:
-        code = concept_code or source_value
-        if not code:
+        code = concept_code if concept_code in _wearable_codes else source_value
+        if code not in _wearable_codes:
             continue
         rows_by_code.setdefault(code, []).append((mdate, float(val)))
 

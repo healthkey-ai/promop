@@ -39,6 +39,10 @@ Usage:
     python manage.py generate_import_enrich_synthea_mm --rrmm-ratio 0.90 --import-batch-size 5
 """
 
+import tempfile
+import uuid
+from pathlib import Path
+
 from django.core.management import call_command
 from django.core.management.base import BaseCommand
 
@@ -61,8 +65,12 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             '--output',
-            default='/tmp/synthea_mm_100.json',
-            help='Output path for the generated FHIR bundle (default: /tmp/synthea_mm_100.json).',
+            default=None,
+            help=(
+                'Output path for the generated FHIR bundle. Defaults to a unique file '
+                'under the system temp dir per run, so concurrent/retried invocations '
+                "don't clobber each other's bundle before the enrichment step reads it."
+            ),
         )
         parser.add_argument(
             '--org-slug',
@@ -114,6 +122,12 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         org_slug = options['org_slug']
+
+        if options['output'] is None:
+            options['output'] = str(
+                Path(tempfile.gettempdir()) / f'synthea_mm_{uuid.uuid4().hex[:12]}.json'
+            )
+        self.stdout.write(f"Using bundle file: {options['output']}")
 
         if options['wipe_existing']:
             existing_org = Organization.objects.filter(slug__iexact=org_slug).first()

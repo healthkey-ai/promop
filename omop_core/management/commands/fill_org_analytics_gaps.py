@@ -13,7 +13,7 @@ an initial focus on the gaps tracked in GitHub issue #210 for BMM Foundation:
 The command is org-scoped and idempotent. For each selected PatientRecord it:
 
   1. backfills missing OMOP source rows used by analytics-critical fields;
-  2. runs populate_patient_record so those source rows are reprojected;
+  2. runs refresh_patient_record so those source rows are reprojected;
   3. applies a narrow PatientRecord alias/fallback sync where populate does not;
   4. saves the record so computed therapy metadata stays consistent.
 
@@ -26,8 +26,8 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import date, datetime
+import random
 
-from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections
 from django.db.models import Q
@@ -45,24 +45,10 @@ from omop_core.models import (
     PatientRecord,
     Vocabulary,
 )
+from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.lot_regimens import get_regimen_concept_id_by_name
 from omop_core.services.pk import next_pk
 
-
-_BEST_RESPONSE_RANK = {
-    'Stringent Complete Response (sCR)': 6,
-    'Complete Response (CR)': 5,
-    'Complete Response': 5,
-    'Very Good Partial Response (VGPR)': 4,
-    'Partial Response (PR)': 3,
-    'Partial Response': 3,
-    'Minor Response (MR)': 2,
-    'Minor Response': 2,
-    'Stable Disease (SD)': 1,
-    'Stable Disease': 1,
-    'Progressive Disease (PD)': 0,
-    'Progressive Disease': 0,
-}
 
 _BEST_RESPONSE_TO_CODE = {
     # Standard forms — map to the 4 SNOMED Standard concepts loaded in staging
@@ -84,21 +70,23 @@ _BEST_RESPONSE_TO_CODE = {
     'Progressive Disease (PD)': ('182842009', 'Progressive Disease'),
 }
 
+_SYNTHETIC_LINE_OUTCOMES = [
+    ('Complete Response', 20),
+    ('Partial Response', 45),
+    ('Stable Disease', 25),
+    ('Progressive Disease', 10),
+]
+
+_SYNTHETIC_LAST_LINE_OUTCOMES = [
+    ('Complete Response', 25),
+    ('Partial Response', 35),
+    ('Stable Disease', 20),
+    ('Progressive Disease', 20),
+]
+
 
 def _sorted_unique_dates(values):
     return sorted({value for value in values if isinstance(value, date)})
-
-
-def _best_response_from_outcomes(record: PatientRecord):
-    outcomes = [
-        record.first_line_outcome,
-        record.second_line_outcome,
-        record.later_outcome,
-    ]
-    ranked = [(outcome, _BEST_RESPONSE_RANK[outcome]) for outcome in outcomes if outcome in _BEST_RESPONSE_RANK]
-    if not ranked:
-        return None
-    return max(ranked, key=lambda item: item[1])[0]
 
 
 def _get_or_create_vocab(vocabulary_id, vocabulary_name):
@@ -267,45 +255,77 @@ def _backfill_regimen_exposures(record: PatientRecord, type_concept) -> list[str
     return created
 
 
-def _backfill_best_response_observation(record: PatientRecord, type_concept) -> list[str]:
-    desired_response = record.best_response or _best_response_from_outcomes(record)
-    if desired_response not in _BEST_RESPONSE_TO_CODE:
+def _existing_line_outcome(record: PatientRecord, line_number: int):
+    if line_number == 1:
+        return record.first_line_outcome
+    if line_number == 2:
+        return record.second_line_outcome
+    if line_number >= 3:
+        return record.later_outcome
+    return None
+
+
+def _synthetic_line_outcome(record: PatientRecord, line_number: int, max_line_number: int) -> str:
+    existing = _existing_line_outcome(record, line_number)
+    if existing in _BEST_RESPONSE_TO_CODE:
+        return existing
+
+    choices = _SYNTHETIC_LAST_LINE_OUTCOMES if line_number == max_line_number else _SYNTHETIC_LINE_OUTCOMES
+    labels, weights = zip(*choices)
+    rng = random.Random(f'analytics-gap-outcome:{record.person_id}:{line_number}')
+    return rng.choices(labels, weights=weights, k=1)[0]
+
+
+def _backfill_lot_outcome_observations(record: PatientRecord, type_concept) -> list[str]:
+    try:
+        from omop_oncology.models import Episode
+    except ImportError:
         return []
-    concept_code, concept_name = _BEST_RESPONSE_TO_CODE[desired_response]
-    if Observation.objects.filter(
-        person=record.person,
-        observation_concept__concept_code=concept_code,
-    ).exists():
+
+    episodes = list(
+        Episode.objects
+        .filter(person=record.person, episode_number__isnull=False)
+        .order_by('episode_number', 'episode_start_date', 'episode_id')
+    )
+    if not episodes:
         return []
-    obs_date = (
-        record.last_treatment
-        or _canonical_start_date(record, 'later')
-        or _canonical_start_date(record, 'second_line')
-        or _canonical_start_date(record, 'first_line')
-        or record.diagnosis_date
-    )
-    if obs_date is None:
-        return []
-    response_concept = _get_or_create_concept(
-        concept_code=concept_code,
-        concept_name=concept_name,
-        vocabulary_id='SNOMED',
-        domain_id='Observation',
-        concept_class_id='Clinical Observation',
-    )
-    Observation.objects.create(
-        observation_id=next_pk(Observation, 'observation_id'),
-        person=record.person,
-        observation_concept=response_concept,
-        observation_date=obs_date,
-        observation_datetime=_midnight_aware(obs_date),
-        observation_type_concept=type_concept,
-        value_as_string=desired_response,
-        observation_source_value=concept_code,
-        observation_source_concept=response_concept,
-        value_source_value=desired_response[:50],
-    )
-    return ['best_response_observation']
+
+    max_line_number = max((episode.episode_number or 0) for episode in episodes)
+    created = []
+    for episode in episodes:
+        line_number = episode.episode_number
+        if not line_number:
+            continue
+        source_value = f'LOT-{line_number}-outcome'
+        if Observation.objects.filter(person=record.person, observation_source_value=source_value).exists():
+            continue
+
+        outcome = _synthetic_line_outcome(record, line_number, max_line_number)
+        concept_code, concept_name = _BEST_RESPONSE_TO_CODE[outcome]
+        response_concept = _get_or_create_concept(
+            concept_code=concept_code,
+            concept_name=concept_name,
+            vocabulary_id='SNOMED',
+            domain_id='Observation',
+            concept_class_id='Clinical Observation',
+        )
+        obs_date = episode.episode_end_date or episode.episode_start_date or record.diagnosis_date
+        if obs_date is None:
+            continue
+        Observation.objects.create(
+            observation_id=next_pk(Observation, 'observation_id'),
+            person=record.person,
+            observation_concept=response_concept,
+            observation_date=obs_date,
+            observation_datetime=_midnight_aware(obs_date),
+            observation_type_concept=type_concept,
+            value_as_string=outcome,
+            observation_source_value=source_value,
+            observation_source_concept=response_concept,
+            value_source_value=outcome[:50],
+        )
+        created.append(f'lot_{line_number}_outcome_observation')
+    return created
 
 
 def _backfill_omop_rows(record: PatientRecord) -> list[str]:
@@ -313,7 +333,7 @@ def _backfill_omop_rows(record: PatientRecord) -> list[str]:
     created = []
     created.extend(_backfill_condition_occurrence(record, type_concept))
     created.extend(_backfill_regimen_exposures(record, type_concept))
-    created.extend(_backfill_best_response_observation(record, type_concept))
+    created.extend(_backfill_lot_outcome_observations(record, type_concept))
     return created
 
 
@@ -360,12 +380,6 @@ def _apply_projection_backfills(record: PatientRecord) -> list[str]:
         record.diagnosis_date = treatment_start_dates[0]
         changed_fields.append('diagnosis_date')
 
-    if record.best_response is None:
-        derived_response = _best_response_from_outcomes(record)
-        if derived_response is not None:
-            record.best_response = derived_response
-            changed_fields.append('best_response')
-
     last_treatment_candidates = treatment_end_dates or treatment_start_dates
     if record.last_treatment is None and last_treatment_candidates:
         record.last_treatment = last_treatment_candidates[-1]
@@ -389,9 +403,9 @@ class Command(BaseCommand):
             help=(
                 'Preview changes without writing them. '
                 'Note: the "would update" fields are computed against the current DB state '
-                'before any OMOP backfill or populate_patient_record refresh. '
+                'before any OMOP backfill or refresh_patient_record refresh. '
                 'The actual --confirm run may touch different fields if the backfill '
-                'creates new OMOP rows that populate fills in first.'
+                'creates new OMOP rows that refresh_patient_record fills in first.'
             ),
         )
         parser.add_argument(
@@ -438,12 +452,7 @@ class Command(BaseCommand):
                     with suppress_patient_record_refresh():
                         created_sources = _backfill_omop_rows(record)
                     source_counter.update(created_sources)
-                    call_command(
-                        'populate_patient_record',
-                        person_id=record.person_id,
-                        force_update=True,
-                    )
-                    refreshed = PatientRecord.objects.get(person_id=record.person_id)
+                    refreshed = refresh_patient_record(record.person)
                     refreshed_records += 1
 
                 changed_fields = _apply_projection_backfills(refreshed)
