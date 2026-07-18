@@ -1106,16 +1106,18 @@ def _get_biomarker_data(person: Person) -> dict:
     return data
 
 
-_STAGING_LOINCS = frozenset({'21908-9', '21905-5', '21906-3', '21901-4'})
+# 21908-9-riss is a non-standard code the MM generator uses for R-ISS stage
+# (it mis-resolves to an unrelated concept on import, so it is matched by
+# source_value only).
+_STAGING_LOINCS = frozenset({'21908-9', '21908-9-riss', '21905-5', '21906-3', '21901-4'})
 
 
 def _get_staging_data(person: Person) -> dict:
     """Derive TNM staging and overall stage group from OMOP Measurement/Observation rows.
 
-    Reads staging data in two tiers:
-    1. OMOP Measurement with LOINC concept code (OMOP-native path)
-    2. OMOP Measurement with LOINC code as source_value (FHIR upload path)
-    3. OMOP Observation with LOINC concept code (assessment/clinical path)
+    Reads staging data by LOINC code matched on either the concept code
+    (OMOP-native path) or the source_value (FHIR upload path), across both
+    Measurement and Observation rows.
     """
     from django.db.models import Q
     data = {}
@@ -1132,7 +1134,11 @@ def _get_staging_data(person: Person) -> dict:
     )
     observations = list(
         Observation.objects
-        .filter(person=person, observation_concept__concept_code__in=_STAGING_LOINCS)
+        .filter(person=person)
+        .filter(
+            Q(observation_concept__concept_code__in=_STAGING_LOINCS)
+            | Q(observation_source_value__in=_STAGING_LOINCS)
+        )
         .select_related('observation_concept')
         .order_by('-observation_date')
     )
@@ -1154,7 +1160,7 @@ def _get_staging_data(person: Person) -> dict:
         m = next((measurement for measurement in measurements if measurement.measurement_source_value == loinc_code), None)
         if m:
             return m.value_as_string or (str(int(m.value_as_number)) if m.value_as_number is not None else None)
-        # Tertiary: Observation by concept code
+        # Tertiary: Observation by concept code, then by source_value.
         obs = next(
             (
                 observation for observation in observations
@@ -1163,12 +1169,21 @@ def _get_staging_data(person: Person) -> dict:
             ),
             None,
         )
+        if obs is None:
+            obs = next(
+                (observation for observation in observations
+                 if observation.observation_source_value == loinc_code),
+                None,
+            )
         if obs:
-            return obs.value_as_string
+            return obs.value_as_string or (
+                str(int(obs.value_as_number)) if obs.value_as_number is not None else None
+            )
         return None
 
-    # Overall clinical stage group — LOINC 21908-9
-    stage_val = _stage_value('21908-9')
+    # Overall stage group. For MM both ISS (21908-9) and R-ISS (21908-9-riss)
+    # are recorded; prefer R-ISS as it is the more current MM staging system.
+    stage_val = _stage_value('21908-9-riss') or _stage_value('21908-9')
     if stage_val:
         data['stage'] = stage_val
 
