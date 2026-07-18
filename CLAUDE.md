@@ -389,6 +389,7 @@ cd frontend && npm test -- --run
 3. Run the test suites (see below)
 4. Open a PR targeting `dev`
 5. Perform a code review on the PR before merging — the only exception is if a full code review was done immediately before opening the PR in the same work session (no need to review twice)
+6. **After the PR merges into `dev` successfully, delete the feature branch.** Prefer `gh pr merge --delete-branch`, which removes the remote branch as part of the merge. Then delete the local copy (`git branch -d <branch>`) and remove any worktree created for it (`git worktree remove <path>`). Do not leave merged feature branches lingering locally or on the remote.
 
 ### Rule: Run Tests Before Every Push
 
