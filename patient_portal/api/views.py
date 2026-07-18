@@ -1294,17 +1294,29 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         if disease_from_code:
                             disease = disease_from_code
 
-                        # Get stage and infer disease from stage text (e.g. "Breast Cancer Stage IIA")
+                        # Get stage and infer disease from stage text (e.g. "Breast Cancer Stage IIA").
+                        # When several stage entries exist (MM records both ISS and R-ISS),
+                        # prefer R-ISS as the more current MM staging system so the patched
+                        # value matches the derived one instead of overriding it with ISS.
                         stages = condition.get('stage', [])
-                        if stages and len(stages) > 0:
-                            stage_summary = stages[0].get('summary', {})
+                        _stage_entry = next(
+                            (s for s in stages
+                             if (s.get('summary', {}).get('text') or '').upper().startswith('R-ISS')),
+                            stages[0] if stages else None,
+                        )
+                        if _stage_entry is not None:
+                            stage_summary = _stage_entry.get('summary', {})
                             if stage_summary.get('text'):
                                 stage_text = stage_summary['text']
                                 if 'Stage' in stage_text:
-                                    stage = stage_text.split('Stage')[-1].strip()
-                                    if not disease:
-                                        stage_prefix = stage_text.split('Stage')[0].strip()
-                                        if stage_prefix.upper() not in {'ISS', 'R-ISS', 'RISS'}:
+                                    stage_suffix = stage_text.split('Stage')[-1].strip()
+                                    stage_prefix = stage_text.split('Stage')[0].strip()
+                                    if stage_prefix.upper() in {'ISS', 'R-ISS', 'RISS'}:
+                                        # Keep the staging system in the value, e.g. "R-ISS III".
+                                        stage = f'{stage_prefix} {stage_suffix}'.strip()
+                                    else:
+                                        stage = stage_suffix
+                                        if not disease:
                                             disease = stage_prefix or None
                             elif stage_summary.get('coding') and len(stage_summary['coding']) > 0:
                                 # Prefer display (e.g. "Stage 2B") over the raw code
@@ -1947,7 +1959,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             # FHIR string — e.g. ISS/R-ISS stage, disease progression
                             # status. Without this branch the value is dropped and
                             # downstream derivation (stage, etc.) finds an empty row.
-                            value_string = observation['valueString'][:60]
+                            value_string = str(observation['valueString'])
+
+                        # value_as_string is CharField(max_length=60); truncate whatever
+                        # source set it (valueString or valueCodeableConcept text/display).
+                        if value_string is not None:
+                            value_string = value_string[:60]
 
                         # Find measurement concept — LOINC lookup first (FHIR-06/07/08),
                         # fall back to name-based, then generic lab concept.

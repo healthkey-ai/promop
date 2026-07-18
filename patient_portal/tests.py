@@ -475,6 +475,60 @@ class FhirUploadStringLabValueTest(FhirUploadBase):
         # Both ISS and R-ISS present → R-ISS is preferred for MM.
         self.assertEqual(record.stage, 'R-ISS III')
 
+    def test_stage_with_condition_prefers_riss_end_to_end(self):
+        """Real MM bundles carry a Condition with both ISS and R-ISS stage
+        entries. The Condition.stage patch (applied after refresh) must also
+        prefer R-ISS, otherwise it overrides the derived value with ISS."""
+        pid = 'mm-cond-1'
+
+        def _obs(code, disp, val):
+            return {'resource': {
+                'resourceType': 'Observation', 'status': 'final',
+                'subject': {'reference': f'Patient/{pid}'},
+                'effectiveDateTime': '2023-05-01',
+                'category': [{'coding': [{
+                    'system': 'http://terminology.hl7.org/CodeSystem/observation-category',
+                    'code': 'laboratory'}]}],
+                'code': {'coding': [{'system': 'http://loinc.org', 'code': code,
+                                     'display': disp}], 'text': disp},
+                'valueString': val,
+            }}
+
+        bundle = {
+            'resourceType': 'Bundle', 'type': 'collection',
+            'entry': [
+                {'resource': {
+                    'resourceType': 'Patient', 'id': pid,
+                    'name': [{'family': 'Mmcond', 'given': ['Joe']}],
+                    'gender': 'male', 'birthDate': '1955-01-01',
+                }},
+                {'resource': {
+                    'resourceType': 'Condition', 'id': 'c1',
+                    'subject': {'reference': f'Patient/{pid}'},
+                    'code': {'text': 'Multiple Myeloma', 'coding': [
+                        {'system': 'http://snomed.info/sct', 'code': '55921005',
+                         'display': 'Multiple myeloma'}]},
+                    'onsetDateTime': '2023-01-01',
+                    'stage': [
+                        {'summary': {'text': 'ISS Stage II'}},
+                        {'summary': {'text': 'R-ISS Stage III'}},
+                    ],
+                }},
+                _obs('21908-9', 'ISS stage', 'ISS II'),
+                _obs('21908-9-riss', 'R-ISS stage', 'R-ISS III'),
+            ],
+        }
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'mm_cond.json'
+        resp = self.client.post(
+            '/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
+
+        record = PatientRecord.objects.get(person=Person.objects.get(family_name='Mmcond'))
+        self.assertEqual(record.stage, 'R-ISS III')
+
 
 # ---------------------------------------------------------------------------
 # 2. PatientRecord derivation tests
