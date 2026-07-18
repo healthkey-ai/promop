@@ -425,6 +425,81 @@ class RefreshPatientRecordReceptorStatusTest(_OmopBase):
         self.assertEqual(pi.her2_status, 'INDETERMINATE')
 
 
+class CdmComplianceTablesTest(_OmopBase):
+    """Standard OMOP CDM 5.4 tables added for CDM-compliance (cdm-compliance branch)."""
+
+    PERSON_ID = 90260
+
+    def test_cdm_source_seeded_as_54(self):
+        """The seed migration self-describes the instance as CDM 5.4."""
+        from omop_core.models import CdmSource
+        row = CdmSource.objects.filter(cdm_source_abbreviation='PRomop').first()
+        self.assertIsNotNone(row)
+        self.assertEqual(row.cdm_version, '5.4')
+
+    def test_vocabulary_tables_writable(self):
+        """drug_strength / concept_synonym / source_to_concept_map accept rows."""
+        from omop_core.models import ConceptSynonym, DrugStrength, SourceToConceptMap
+        lang = _concept(90261, 'English language', self.dom_meas, self.vocab, self.cc)
+        DrugStrength.objects.create(
+            drug_concept=self.drug_concept, ingredient_concept=self.drug_concept,
+            amount_value=10.0, valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        ConceptSynonym.objects.create(
+            concept=self.drug_concept, concept_synonym_name='Adriamycin', language_concept=lang,
+        )
+        SourceToConceptMap.objects.create(
+            source_code='X', source_concept=self.drug_concept, source_vocabulary_id='LOCAL',
+            target_concept=self.drug_concept, target_vocabulary_id='RxNorm',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        self.assertEqual(DrugStrength.objects.count(), 1)
+        self.assertEqual(ConceptSynonym.objects.count(), 1)
+        self.assertEqual(SourceToConceptMap.objects.count(), 1)
+
+
+class PopulateObservationPeriodTest(_OmopBase):
+    """observation_period derivation from clinical-event spans."""
+
+    PERSON_ID = 90270
+
+    def test_period_spans_earliest_to_latest_event(self):
+        from django.core.management import call_command
+        from omop_core.models import Measurement, Observation, ObservationPeriod
+        # ensure the EHR type concept exists so the command links it
+        _concept(32817, 'EHR', self.type_concept.domain, self.vocab, self.cc)
+        generic = _concept(3000963, 'Laboratory test result', self.dom_meas, self.vocab, self.cc)
+        Measurement.objects.create(
+            measurement_id=93001, person=self.person, measurement_concept=generic,
+            measurement_date=date(2021, 3, 1), measurement_type_concept=self.type_concept,
+            value_as_number=10, measurement_source_value='Hemoglobin',
+        )
+        Observation.objects.create(
+            observation_id=93002, person=self.person, observation_concept=generic,
+            observation_date=date(2023, 9, 15), observation_type_concept=self.type_concept,
+        )
+        call_command('populate_observation_period')
+        periods = ObservationPeriod.objects.filter(person=self.person)
+        self.assertEqual(periods.count(), 1)
+        p = periods.first()
+        self.assertEqual(p.observation_period_start_date, date(2021, 3, 1))
+        self.assertEqual(p.observation_period_end_date, date(2023, 9, 15))
+        self.assertEqual(p.period_type_concept_id, 32817)
+
+    def test_rerun_without_overwrite_is_idempotent(self):
+        from django.core.management import call_command
+        from omop_core.models import Measurement, ObservationPeriod
+        generic = _concept(3000963, 'Laboratory test result', self.dom_meas, self.vocab, self.cc)
+        Measurement.objects.create(
+            measurement_id=93010, person=self.person, measurement_concept=generic,
+            measurement_date=date(2022, 1, 1), measurement_type_concept=self.type_concept,
+            value_as_number=1, measurement_source_value='Hemoglobin',
+        )
+        call_command('populate_observation_period')
+        call_command('populate_observation_period')
+        self.assertEqual(ObservationPeriod.objects.filter(person=self.person).count(), 1)
+
+
 class RefreshPatientRecordComputedFieldsTest(_OmopBase):
     """_compute_derived_fields section."""
 
