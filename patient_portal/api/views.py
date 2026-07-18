@@ -1943,6 +1943,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         elif observation.get('valueBoolean') is not None:
                             # FHIR boolean — store as 1/0 in value_as_number for easy extraction
                             value_number = 1.0 if observation['valueBoolean'] else 0.0
+                        elif observation.get('valueString') is not None:
+                            # FHIR string — e.g. ISS/R-ISS stage, disease progression
+                            # status. Without this branch the value is dropped and
+                            # downstream derivation (stage, etc.) finds an empty row.
+                            value_string = observation['valueString'][:60]
 
                         # Find measurement concept — LOINC lookup first (FHIR-06/07/08),
                         # fall back to name-based, then generic lab concept.

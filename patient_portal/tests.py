@@ -408,6 +408,58 @@ class FhirUploadOmopTablesTest(FhirUploadBase):
         self.assertIn('deceasedBoolean=true', provenance.modification_reason)
 
 
+class FhirUploadStringLabValueTest(FhirUploadBase):
+    """A string-valued lab Observation (e.g. ISS stage) must keep its value on
+    import and drive derivation (regression for issue #218)."""
+
+    def _upload_stage_bundle(self):
+        bundle = {
+            'resourceType': 'Bundle',
+            'type': 'collection',
+            'entry': [
+                {'resource': {
+                    'resourceType': 'Patient',
+                    'id': 'stage-pt-1',
+                    'name': [{'family': 'Stagevalue', 'given': ['Iss']}],
+                    'gender': 'female',
+                    'birthDate': '1960-04-01',
+                }},
+                {'resource': {
+                    'resourceType': 'Observation',
+                    'status': 'final',
+                    'subject': {'reference': 'Patient/stage-pt-1'},
+                    'effectiveDateTime': '2023-05-01',
+                    'category': [{'coding': [{
+                        'system': 'http://terminology.hl7.org/CodeSystem/observation-category',
+                        'code': 'laboratory'}]}],
+                    'code': {'coding': [{'system': 'http://loinc.org', 'code': '21908-9',
+                                         'display': 'ISS stage'}], 'text': 'ISS stage'},
+                    'valueString': 'ISS II',
+                }},
+            ],
+        }
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'stage_bundle.json'
+        return self.client.post(
+            '/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart',
+        )
+
+    def test_string_lab_value_persisted_and_stage_derived(self):
+        from omop_core.models import Measurement
+        resp = self._upload_stage_bundle()
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
+
+        person = Person.objects.get(family_name='Stagevalue', given_name='Iss')
+        measurement = Measurement.objects.get(
+            person=person, measurement_source_value='21908-9',
+        )
+        self.assertEqual(measurement.value_as_string, 'ISS II')
+
+        record = PatientRecord.objects.get(person=person)
+        self.assertEqual(record.stage, 'ISS II')
+
+
 # ---------------------------------------------------------------------------
 # 2. PatientRecord derivation tests
 # ---------------------------------------------------------------------------
