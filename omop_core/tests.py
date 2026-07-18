@@ -360,6 +360,71 @@ class RefreshPatientRecordLabsFromMeasurementTest(_OmopBase):
         self.assertIsNone(pi.hemoglobin_g_dl)
 
 
+class RefreshPatientRecordReceptorStatusTest(_OmopBase):
+    """HER2/ER/PR receptor status derivation from Measurement rows (issue #220)."""
+
+    PERSON_ID = 90240
+
+    def _make_her2(self, mid, *, value_as_string=None, value_source_value=None,
+                   value_as_concept=None):
+        her2_concept = _concept(
+            9048676, 'HER2 [Interpretation] in Tissue',
+            self.dom_meas, self.vocab, self.cc, code='48676-1',
+        )
+        return Measurement.objects.create(
+            measurement_id=mid,
+            person=self.person,
+            measurement_concept=her2_concept,
+            measurement_date=date(2023, 5, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_string=value_as_string,
+            value_source_value=value_source_value,
+            value_as_concept=value_as_concept,
+            measurement_source_value='48676-1',
+        )
+
+    def test_her2_positive(self):
+        self._make_her2(92401, value_as_string='Positive')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.her2_status, 'POSITIVE')
+
+    def test_her2_negative(self):
+        self._make_her2(92402, value_as_string='Negative')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.her2_status, 'NEGATIVE')
+
+    def test_her2_equivocal_is_preserved_not_dropped(self):
+        """Regression for #220: an 'Equivocal' HER2 result must not be dropped."""
+        self._make_her2(92403, value_as_string='Equivocal')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.her2_status, 'EQUIVOCAL')
+
+    def test_her2_value_in_source_value_is_read(self):
+        """HER2 result stored only in value_source_value is still derived."""
+        self._make_her2(92404, value_source_value='Equivocal')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.her2_status, 'EQUIVOCAL')
+
+    def test_her2_missing_value_yields_none(self):
+        """No value at all still yields None (no spurious status)."""
+        self._make_her2(92405)
+        pi = refresh_patient_record(self.person)
+        self.assertIsNone(pi.her2_status)
+
+    def test_her2_value_as_concept_is_read(self):
+        """HER2 result carried in value_as_concept is derived (concept-first branch)."""
+        pos_concept = _concept(9000201, 'Positive', self.dom_meas, self.vocab, self.cc)
+        self._make_her2(92406, value_as_concept=pos_concept)
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.her2_status, 'POSITIVE')
+
+    def test_her2_nonstandard_value_preserved(self):
+        """A non-standard receptor value is preserved (upper-cased), not dropped."""
+        self._make_her2(92407, value_as_string='Indeterminate')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.her2_status, 'INDETERMINATE')
+
+
 class RefreshPatientRecordComputedFieldsTest(_OmopBase):
     """_compute_derived_fields section."""
 

@@ -946,20 +946,30 @@ def _get_biomarker_data(person: Person) -> dict:
         data['pd_l1_assay'] = pdl1_test.value_source_value
 
     def _receptor_status(measurement):
-        """Return 'POSITIVE', 'NEGATIVE', or None from a receptor Measurement row."""
+        """Return a normalized receptor status from a Measurement row.
+
+        Recognizes positive/negative/equivocal explicitly; any other non-empty
+        value is preserved (upper-cased) rather than dropped, so clinically
+        meaningful results such as a HER2 'Equivocal' (IHC 2+) reading are not
+        silently lost. Returns None only when no value is present at all.
+        """
+        raw = None
         if measurement.value_as_concept:
-            name = measurement.value_as_concept.concept_name.lower()
-            if 'positive' in name:
-                return 'POSITIVE'
-            if 'negative' in name:
-                return 'NEGATIVE'
-        if measurement.value_as_string:
-            s = measurement.value_as_string.lower()
-            if 'positive' in s:
-                return 'POSITIVE'
-            if 'negative' in s:
-                return 'NEGATIVE'
-        return None
+            raw = measurement.value_as_concept.concept_name
+        if not raw and measurement.value_as_string:
+            raw = measurement.value_as_string
+        if not raw and measurement.value_source_value:
+            raw = measurement.value_source_value
+        if not raw:
+            return None
+        s = raw.strip().lower()
+        if 'positive' in s:
+            return 'POSITIVE'
+        if 'negative' in s:
+            return 'NEGATIVE'
+        if 'equivocal' in s:
+            return 'EQUIVOCAL'
+        return raw.strip().upper()
 
     er_measurement = next((m for m in measurements if _measurement_code(m) == '16112-5'), None)
     if er_measurement:
