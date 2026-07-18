@@ -436,6 +436,18 @@ class FhirUploadStringLabValueTest(FhirUploadBase):
                                          'display': 'ISS stage'}], 'text': 'ISS stage'},
                     'valueString': 'ISS II',
                 }},
+                {'resource': {
+                    'resourceType': 'Observation',
+                    'status': 'final',
+                    'subject': {'reference': 'Patient/stage-pt-1'},
+                    'effectiveDateTime': '2023-05-01',
+                    'category': [{'coding': [{
+                        'system': 'http://terminology.hl7.org/CodeSystem/observation-category',
+                        'code': 'laboratory'}]}],
+                    'code': {'coding': [{'system': 'http://loinc.org', 'code': '21908-9-riss',
+                                         'display': 'R-ISS stage'}], 'text': 'R-ISS stage'},
+                    'valueString': 'R-ISS III',
+                }},
             ],
         }
         bundle_bytes = json.dumps(bundle).encode('utf-8')
@@ -445,7 +457,7 @@ class FhirUploadStringLabValueTest(FhirUploadBase):
             '/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart',
         )
 
-    def test_string_lab_value_persisted_and_stage_derived(self):
+    def test_string_lab_value_persisted(self):
         from omop_core.models import Measurement
         resp = self._upload_stage_bundle()
         self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
@@ -456,8 +468,12 @@ class FhirUploadStringLabValueTest(FhirUploadBase):
         )
         self.assertEqual(measurement.value_as_string, 'ISS II')
 
+    def test_stage_derivation_prefers_riss(self):
+        self._upload_stage_bundle()
+        person = Person.objects.get(family_name='Stagevalue', given_name='Iss')
         record = PatientRecord.objects.get(person=person)
-        self.assertEqual(record.stage, 'ISS II')
+        # Both ISS and R-ISS present → R-ISS is preferred for MM.
+        self.assertEqual(record.stage, 'R-ISS III')
 
 
 # ---------------------------------------------------------------------------
