@@ -411,6 +411,19 @@ class RefreshPatientRecordReceptorStatusTest(_OmopBase):
         pi = refresh_patient_record(self.person)
         self.assertIsNone(pi.her2_status)
 
+    def test_her2_value_as_concept_is_read(self):
+        """HER2 result carried in value_as_concept is derived (concept-first branch)."""
+        pos_concept = _concept(9000201, 'Positive', self.dom_meas, self.vocab, self.cc)
+        self._make_her2(92406, value_as_concept=pos_concept)
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.her2_status, 'POSITIVE')
+
+    def test_her2_nonstandard_value_preserved(self):
+        """A non-standard receptor value is preserved (upper-cased), not dropped."""
+        self._make_her2(92407, value_as_string='Indeterminate')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.her2_status, 'INDETERMINATE')
+
 
 class RefreshPatientRecordComputedFieldsTest(_OmopBase):
     """_compute_derived_fields section."""
