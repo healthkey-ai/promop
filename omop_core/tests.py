@@ -498,6 +498,7 @@ class LoadAthenaVocabExtraTablesTest(_OmopBase):
     def test_drug_strength_loads_and_nulls_unloaded_unit(self):
         from omop_core.models import DrugStrength
         _concept(950001, 'Doxorubicin', self.dom_drug, self.vocab, self.cc, code='1790')
+        _concept(950002, 'Doxorubicin 2 MG/ML', self.dom_drug, self.vocab, self.cc, code='1791')
         _concept(8576, 'milligram', self.dom_meas, self.vocab, self.cc)
         header = ['drug_concept_id', 'ingredient_concept_id', 'amount_value',
                   'amount_unit_concept_id', 'numerator_value', 'numerator_unit_concept_id',
@@ -508,7 +509,7 @@ class LoadAthenaVocabExtraTablesTest(_OmopBase):
             [
                 (950001, 950001, 10, 8576, '', '', '', '', '', '19700101', '20991231', ''),
                 (999999, 950001, 5, 8576, '', '', '', '', '', '19700101', '20991231', ''),   # drug not loaded -> skip
-                (950001, 950001, 20, 777777, '', '', '', '', '', '19700101', '20991231', ''),  # unit not loaded -> NULL
+                (950002, 950001, 20, 777777, '', '', '', '', '', '19700101', '20991231', ''),  # unit not loaded -> NULL
             ],
         )
         self.assertEqual(DrugStrength.objects.count(), 2)
@@ -516,6 +517,59 @@ class LoadAthenaVocabExtraTablesTest(_OmopBase):
         self.assertEqual(loaded_unit.amount_unit_concept_id, 8576)
         nulled_unit = DrugStrength.objects.get(amount_value=20.0)
         self.assertIsNone(nulled_unit.amount_unit_concept_id)
+
+    def test_loader_rerun_is_idempotent(self):
+        """Re-running the loaders without --replace must not duplicate rows."""
+        from omop_core.models import ConceptSynonym, DrugStrength
+        _concept(4180186, 'English language', self.dom_meas, self.vocab, self.cc)
+        _concept(950001, 'Doxorubicin', self.dom_drug, self.vocab, self.cc, code='1790')
+        self._run_loader(
+            '_load_concept_synonym', 'CONCEPT_SYNONYM.csv',
+            ['concept_id', 'concept_synonym_name', 'language_concept_id'],
+            [(950001, 'Adriamycin', 4180186)],
+        )
+        self._run_loader(
+            '_load_concept_synonym', 'CONCEPT_SYNONYM.csv',
+            ['concept_id', 'concept_synonym_name', 'language_concept_id'],
+            [(950001, 'Adriamycin', 4180186)],
+        )
+        self.assertEqual(ConceptSynonym.objects.count(), 1)
+        ds_header = ['drug_concept_id', 'ingredient_concept_id', 'amount_value',
+                     'amount_unit_concept_id', 'numerator_value', 'numerator_unit_concept_id',
+                     'denominator_value', 'denominator_unit_concept_id', 'box_size',
+                     'valid_start_date', 'valid_end_date', 'invalid_reason']
+        ds_rows = [(950001, 950001, 10, '', '', '', '', '', '', '19700101', '20991231', '')]
+        self._run_loader('_load_drug_strength', 'DRUG_STRENGTH.csv', ds_header, ds_rows)
+        self._run_loader('_load_drug_strength', 'DRUG_STRENGTH.csv', ds_header, ds_rows)
+        self.assertEqual(DrugStrength.objects.count(), 1)
+
+    def test_vocabulary_none_row_loaded_for_cdm_version(self):
+        """The out-of-scope 'None' VOCABULARY.csv row is kept so cdm_source gets a version."""
+        from omop_core.models import Vocabulary
+        self._run_loader(
+            '_load_vocabularies', 'VOCABULARY.csv',
+            ['vocabulary_id', 'vocabulary_name', 'vocabulary_reference',
+             'vocabulary_version', 'vocabulary_concept_id'],
+            [
+                ('None', 'OMOP CDM vocabulary', 'https://athena.ohdsi.org', 'v5.4 01-JAN-26', 756265),
+                ('NotInScope', 'Some vocab', '', 'v1', 1),
+            ],
+        )
+        row = Vocabulary.objects.get(vocabulary_id='None')
+        self.assertEqual(row.vocabulary_version, 'v5.4 01-JAN-26')
+        self.assertFalse(Vocabulary.objects.filter(vocabulary_id='NotInScope').exists())
+
+    def test_sync_cdm_source_recreates_missing_row(self):
+        """_sync_cdm_source_metadata re-seeds the row wiped by --replace TRUNCATE CASCADE."""
+        from io import StringIO
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        from omop_core.models import CdmSource
+        CdmSource.objects.filter(cdm_source_abbreviation='PRomop').delete()
+        self.assertFalse(CdmSource.objects.filter(cdm_source_abbreviation='PRomop').exists())
+        cmd = Command(stdout=StringIO())
+        cmd._sync_cdm_source_metadata()
+        row = CdmSource.objects.get(cdm_source_abbreviation='PRomop')
+        self.assertEqual(row.cdm_version, '5.4')
 
 
 class PopulateObservationPeriodTest(_OmopBase):

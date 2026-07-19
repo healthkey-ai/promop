@@ -11,7 +11,7 @@ from django.db import connection
 
 from omop_core.models import (
     Vocabulary, Domain, ConceptClass, Concept,
-    Relationship, ConceptRelationship, ConceptAncestor,
+    Relationship, ConceptRelationship, ConceptAncestor, CdmSource,
 )
 
 VOCAB_SCOPE = frozenset({
@@ -27,6 +27,22 @@ RXNORM_CLASS_SCOPE = frozenset({'Ingredient', 'Clinical Drug', 'Branded Drug', '
 LOINC_DOMAIN_SCOPE = frozenset({'Measurement', 'Observation'})
 BATCH = 100_000
 PROGRESS_EVERY = 500_000
+
+# Defaults for the single self-describing cdm_source row. Kept in sync with
+# migration 0112_seed_cdm_source; the command re-seeds this row because a
+# --replace TRUNCATE ... CASCADE wipes cdm_source (it FKs to concept).
+_CDM_SOURCE_DEFAULTS = {
+    'cdm_source_name': 'PRomop — Decision-Ready Longitudinal Patient Record',
+    'cdm_holder': 'HealthKey, Inc.',
+    'source_description': (
+        'PRomop longitudinal patient record on the OMOP CDM 5.4 clinical '
+        'tables with OHDSI oncology extensions and a derived PatientRecord projection.'
+    ),
+    'source_documentation_reference': 'https://github.com/healthkey-ai',
+    'cdm_etl_reference': 'https://github.com/healthkey-ai',
+    'cdm_release_date': date(2026, 1, 1),
+    'cdm_version': '5.4',
+}
 
 
 def _parse_date(s):
@@ -194,6 +210,10 @@ class Command(BaseCommand):
                 'concept, concept_class, domain, relationship, vocabulary CASCADE'
             )
         self._log(f'  Truncated all vocab tables in {time.monotonic() - t:.0f}s')
+        self._log('  NOTE: CASCADE also clears every table with a FK to concept — '
+                  'including cdm_source, observation_period, and clinical event tables. '
+                  'cdm_source is re-seeded after load; re-run populate_observation_period '
+                  'to re-derive observation periods.')
 
     def _seed_concept_zero(self):
         Vocabulary.objects.get_or_create(
@@ -267,6 +287,7 @@ class Command(BaseCommand):
         t = time.monotonic()
         count = 0
         rows = []
+        self._cdm_vocab_version = None
         try:
             f = self._open('VOCABULARY.csv')
         except CommandError:
@@ -277,15 +298,21 @@ class Command(BaseCommand):
             idx = _header_index(next(reader))
             for cols in reader:
                 vid = cols[idx['vocabulary_id']]
-                if vid not in VOCAB_SCOPE:
+                # 'None' is out of scope for concept loading but its row carries
+                # the CDM release version in vocabulary_version — keep it so
+                # cdm_source can self-describe.
+                if vid not in VOCAB_SCOPE and vid != 'None':
                     continue
                 count += 1
+                version = (cols[idx.get('vocabulary_version', -1)] if 'vocabulary_version' in idx else '')[:255] or ''
+                if vid == 'None' and version:
+                    self._cdm_vocab_version = version
                 if not dry_run:
                     rows.append((
                         vid[:20],
                         cols[idx['vocabulary_name']][:255],
                         (cols[idx.get('vocabulary_reference', -1)] if 'vocabulary_reference' in idx else '')[:255] or '',
-                        (cols[idx.get('vocabulary_version', -1)] if 'vocabulary_version' in idx else '')[:255] or '',
+                        version,
                         int(cols[idx['vocabulary_concept_id']] or 0) if 'vocabulary_concept_id' in idx else 0,
                     ))
         if not dry_run and rows:
@@ -293,6 +320,13 @@ class Command(BaseCommand):
                        ('vocabulary_id', 'vocabulary_name', 'vocabulary_reference',
                         'vocabulary_version', 'vocabulary_concept_id'),
                        rows, self._log, direct=self._direct)
+        if not dry_run and self._cdm_vocab_version:
+            # The 'None' row usually pre-exists (seeded by migration 0068 with no
+            # version), so the COPY above conflicts on the PK and no-ops — update
+            # it directly so the CDM release version actually lands.
+            Vocabulary.objects.filter(vocabulary_id='None').update(
+                vocabulary_version=self._cdm_vocab_version
+            )
         self._cleanup('VOCABULARY.csv')
         self._log(f'  VOCABULARY.csv: {count:,} rows in {time.monotonic() - t:.0f}s')
         return count
@@ -645,8 +679,18 @@ class Command(BaseCommand):
         return count
 
     def _sync_cdm_source_metadata(self):
-        """Fill cdm_source.vocabulary_version / cdm_version_concept_id from the loaded vocab."""
-        from omop_core.models import CdmSource
+        """Ensure the cdm_source row exists and fill its vocabulary metadata.
+
+        get_or_create (not just update) because --replace TRUNCATEs concept
+        CASCADE, which also wipes cdm_source via its cdm_version_concept FK —
+        the migration-0112 seed does not re-run after that.
+        """
+        row, created = CdmSource.objects.get_or_create(
+            cdm_source_abbreviation='PRomop',
+            defaults=_CDM_SOURCE_DEFAULTS,
+        )
+        if created:
+            self._log('  cdm_source: re-seeded PRomop row (was missing — e.g. cleared by --replace)')
         vocab_version = (
             Vocabulary.objects.filter(vocabulary_id='None')
             .values_list('vocabulary_version', flat=True).first()
@@ -657,5 +701,5 @@ class Command(BaseCommand):
             fields['vocabulary_version'] = vocab_version[:20]
         if version_concept_id:
             fields['cdm_version_concept_id'] = version_concept_id
-        if fields and CdmSource.objects.filter(cdm_source_abbreviation='PRomop').update(**fields):
+        if fields and CdmSource.objects.filter(pk=row.pk).update(**fields):
             self._log(f'  cdm_source: updated {fields}')

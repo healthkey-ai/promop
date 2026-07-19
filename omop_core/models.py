@@ -1235,6 +1235,13 @@ class DrugStrength(models.Model):
     class Meta:
         db_table = 'drug_strength'
         indexes = [models.Index(fields=['drug_concept'], name='ix_drug_strength_drug')]
+        # CDM natural PK — makes loader re-runs idempotent via ON CONFLICT DO NOTHING.
+        constraints = [
+            models.UniqueConstraint(
+                fields=['drug_concept', 'ingredient_concept'],
+                name='uq_drug_strength_drug_ingredient',
+            ),
+        ]
 
 
 class ConceptSynonym(models.Model):
@@ -1252,6 +1259,13 @@ class ConceptSynonym(models.Model):
     class Meta:
         db_table = 'concept_synonym'
         indexes = [models.Index(fields=['concept'], name='ix_concept_synonym_concept')]
+        # CDM natural PK — makes loader re-runs idempotent via ON CONFLICT DO NOTHING.
+        constraints = [
+            models.UniqueConstraint(
+                fields=['concept', 'concept_synonym_name', 'language_concept'],
+                name='uq_concept_synonym_natural_key',
+            ),
+        ]
 
 
 class SourceToConceptMap(models.Model):
