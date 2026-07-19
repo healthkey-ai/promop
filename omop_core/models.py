@@ -1144,6 +1144,153 @@ class DoseEra(models.Model):
         return f"DoseEra {self.dose_era_id} for Person {self.person_id}"
 
 
+# ---------------------------------------------------------------------------
+# Additional standard OMOP CDM 5.4 tables (CDM-compliance)
+# ---------------------------------------------------------------------------
+
+class ObservationPeriod(models.Model):
+    """OMOP CDM Observation Period - spans during which a person is observed.
+
+    Required by the CDM and assumed by OHDSI tooling (Achilles, DataQualityDashboard,
+    cohort/incidence methods). Populate via the populate_observation_period command.
+    """
+    observation_period_id = models.BigIntegerField(primary_key=True)
+    person = models.ForeignKey(Person, on_delete=models.CASCADE, db_column='person_id')
+    observation_period_start_date = models.DateField()
+    observation_period_end_date = models.DateField()
+    period_type_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='observation_periods',
+        db_column='period_type_concept_id',
+    )
+
+    class Meta:
+        db_table = 'observation_period'
+        indexes = [models.Index(fields=['person'], name='ix_obs_period_person')]
+
+    def __str__(self):
+        return f"ObservationPeriod {self.observation_period_id} for Person {self.person_id}"
+
+
+class CdmSource(models.Model):
+    """OMOP CDM cdm_source - self-describing metadata for this CDM instance.
+
+    The CDM DDL defines no primary key for cdm_source (it is typically a single
+    describing row); Django supplies an implicit surrogate `id`.
+    """
+    cdm_source_name = models.CharField(max_length=255)
+    cdm_source_abbreviation = models.CharField(max_length=25)
+    cdm_holder = models.CharField(max_length=255)
+    source_description = models.TextField(null=True, blank=True)
+    source_documentation_reference = models.CharField(max_length=255, null=True, blank=True)
+    cdm_etl_reference = models.CharField(max_length=255, null=True, blank=True)
+    source_release_date = models.DateField(null=True, blank=True)
+    cdm_release_date = models.DateField(null=True, blank=True)
+    cdm_version = models.CharField(max_length=10, null=True, blank=True)
+    cdm_version_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, related_name='cdm_sources',
+        db_column='cdm_version_concept_id', null=True, blank=True,
+    )
+    vocabulary_version = models.CharField(max_length=20, null=True, blank=True)
+
+    class Meta:
+        db_table = 'cdm_source'
+
+    def __str__(self):
+        return self.cdm_source_abbreviation or self.cdm_source_name
+
+
+class DrugStrength(models.Model):
+    """OMOP CDM drug_strength (vocabulary) - active-ingredient amount/concentration.
+
+    Populated by loading the OHDSI standardized vocabulary (Athena), not derived.
+    """
+    drug_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, related_name='drug_strengths',
+        db_column='drug_concept_id',
+    )
+    ingredient_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, related_name='ingredient_strengths',
+        db_column='ingredient_concept_id',
+    )
+    amount_value = models.FloatField(null=True, blank=True)
+    amount_unit_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, related_name='drug_strength_amount_units',
+        db_column='amount_unit_concept_id', null=True, blank=True,
+    )
+    numerator_value = models.FloatField(null=True, blank=True)
+    numerator_unit_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, related_name='drug_strength_numerator_units',
+        db_column='numerator_unit_concept_id', null=True, blank=True,
+    )
+    denominator_value = models.FloatField(null=True, blank=True)
+    denominator_unit_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, related_name='drug_strength_denominator_units',
+        db_column='denominator_unit_concept_id', null=True, blank=True,
+    )
+    box_size = models.IntegerField(null=True, blank=True)
+    valid_start_date = models.DateField()
+    valid_end_date = models.DateField()
+    invalid_reason = models.CharField(max_length=1, null=True, blank=True)
+
+    class Meta:
+        db_table = 'drug_strength'
+        indexes = [models.Index(fields=['drug_concept'], name='ix_drug_strength_drug')]
+        # CDM natural PK — makes loader re-runs idempotent via ON CONFLICT DO NOTHING.
+        constraints = [
+            models.UniqueConstraint(
+                fields=['drug_concept', 'ingredient_concept'],
+                name='uq_drug_strength_drug_ingredient',
+            ),
+        ]
+
+
+class ConceptSynonym(models.Model):
+    """OMOP CDM concept_synonym (vocabulary) - alternate names for concepts."""
+    concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, related_name='synonyms',
+        db_column='concept_id',
+    )
+    concept_synonym_name = models.CharField(max_length=1000)
+    language_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, related_name='concept_synonym_languages',
+        db_column='language_concept_id',
+    )
+
+    class Meta:
+        db_table = 'concept_synonym'
+        indexes = [models.Index(fields=['concept'], name='ix_concept_synonym_concept')]
+        # CDM natural PK — makes loader re-runs idempotent via ON CONFLICT DO NOTHING.
+        constraints = [
+            models.UniqueConstraint(
+                fields=['concept', 'concept_synonym_name', 'language_concept'],
+                name='uq_concept_synonym_natural_key',
+            ),
+        ]
+
+
+class SourceToConceptMap(models.Model):
+    """OMOP CDM source_to_concept_map (vocabulary) - source code → standard concept."""
+    source_code = models.CharField(max_length=50)
+    source_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, related_name='stcm_as_source',
+        db_column='source_concept_id',
+    )
+    source_vocabulary_id = models.CharField(max_length=20)
+    source_code_description = models.CharField(max_length=255, null=True, blank=True)
+    target_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, related_name='stcm_as_target',
+        db_column='target_concept_id',
+    )
+    target_vocabulary_id = models.CharField(max_length=20)
+    valid_start_date = models.DateField()
+    valid_end_date = models.DateField()
+    invalid_reason = models.CharField(max_length=1, null=True, blank=True)
+
+    class Meta:
+        db_table = 'source_to_concept_map'
+        indexes = [models.Index(fields=['source_code'], name='ix_stcm_source_code')]
+
+
 class LoincClass(models.Model):
     """LOINC CLASS → display name mapping from LoincClass.csv (loinc.org archive)."""
     code = models.CharField(max_length=64, primary_key=True)
