@@ -458,6 +458,66 @@ class CdmComplianceTablesTest(_OmopBase):
         self.assertEqual(SourceToConceptMap.objects.count(), 1)
 
 
+class LoadAthenaVocabExtraTablesTest(_OmopBase):
+    """load_athena_vocabularies loaders for concept_synonym and drug_strength (#223)."""
+
+    PERSON_ID = 90280
+
+    def _run_loader(self, method_name, filename, header, rows):
+        import os
+        import tempfile
+        from io import StringIO
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, filename), 'w', encoding='utf-8', newline='') as f:
+            f.write('\t'.join(header) + '\n')
+            for r in rows:
+                f.write('\t'.join(str(x) for x in r) + '\n')
+        cmd = Command(stdout=StringIO())
+        cmd._base = d
+        cmd._gcs_bucket = None
+        cmd._direct = False
+        return getattr(cmd, method_name)(False)
+
+    def test_concept_synonym_loads_and_filters_unloaded_refs(self):
+        from omop_core.models import ConceptSynonym
+        _concept(4180186, 'English language', self.dom_meas, self.vocab, self.cc)
+        drug = _concept(950001, 'Doxorubicin', self.dom_drug, self.vocab, self.cc, code='1790')
+        self._run_loader(
+            '_load_concept_synonym', 'CONCEPT_SYNONYM.csv',
+            ['concept_id', 'concept_synonym_name', 'language_concept_id'],
+            [
+                (950001, 'Adriamycin', 4180186),   # valid
+                (999999, 'Ghost', 4180186),         # concept not loaded -> skip
+                (950001, 'BadLang', 888888),        # language not loaded -> skip
+            ],
+        )
+        names = list(ConceptSynonym.objects.values_list('concept_synonym_name', flat=True))
+        self.assertEqual(names, ['Adriamycin'])
+
+    def test_drug_strength_loads_and_nulls_unloaded_unit(self):
+        from omop_core.models import DrugStrength
+        _concept(950001, 'Doxorubicin', self.dom_drug, self.vocab, self.cc, code='1790')
+        _concept(8576, 'milligram', self.dom_meas, self.vocab, self.cc)
+        header = ['drug_concept_id', 'ingredient_concept_id', 'amount_value',
+                  'amount_unit_concept_id', 'numerator_value', 'numerator_unit_concept_id',
+                  'denominator_value', 'denominator_unit_concept_id', 'box_size',
+                  'valid_start_date', 'valid_end_date', 'invalid_reason']
+        self._run_loader(
+            '_load_drug_strength', 'DRUG_STRENGTH.csv', header,
+            [
+                (950001, 950001, 10, 8576, '', '', '', '', '', '19700101', '20991231', ''),
+                (999999, 950001, 5, 8576, '', '', '', '', '', '19700101', '20991231', ''),   # drug not loaded -> skip
+                (950001, 950001, 20, 777777, '', '', '', '', '', '19700101', '20991231', ''),  # unit not loaded -> NULL
+            ],
+        )
+        self.assertEqual(DrugStrength.objects.count(), 2)
+        loaded_unit = DrugStrength.objects.get(amount_value=10.0)
+        self.assertEqual(loaded_unit.amount_unit_concept_id, 8576)
+        nulled_unit = DrugStrength.objects.get(amount_value=20.0)
+        self.assertIsNone(nulled_unit.amount_unit_concept_id)
+
+
 class PopulateObservationPeriodTest(_OmopBase):
     """observation_period derivation from clinical-event spans."""
 
