@@ -171,17 +171,6 @@ class PatientRecordModelTest(_OmopBase):
         self.assertEqual(pi.alkaline_phosphatase_u_l, 95)
         self.assertEqual(pi.ldh_u_l, 180)
 
-    def test_best_response_persists(self):
-        """best_response is a real model field and survives a DB round-trip (promop#205)."""
-        pi = PatientRecord.objects.create(person=self.person, best_response='Partial Response')
-        pi.refresh_from_db()
-        self.assertEqual(pi.best_response, 'Partial Response')
-
-    def test_best_response_nullable(self):
-        pi = PatientRecord.objects.create(person=self.person)
-        self.assertIsNone(pi.best_response)
-
-
 # ===========================================================================
 # TEST-02: refresh_patient_record service unit tests
 # ===========================================================================
@@ -232,7 +221,7 @@ class RefreshPatientRecordDiseaseTest(_OmopBase):
             condition_type_concept=self.type_concept,
         )
         pi = refresh_patient_record(self.person)
-        self.assertIn('neoplasm', pi.disease.lower())
+        self.assertEqual(pi.disease, 'Breast Cancer')
 
     def test_diagnosis_date_from_condition(self):
         ConditionOccurrence.objects.create(
@@ -268,10 +257,15 @@ class CanonicalizeDiseaseTest(_OmopBase):
         self.assertEqual(_canonicalize_disease('myeloma'), 'multiple myeloma')
         self.assertEqual(_canonicalize_disease('Myeloma'), 'multiple myeloma')
         self.assertEqual(_canonicalize_disease('  MYELOMA  '), 'multiple myeloma')
+        self.assertEqual(_canonicalize_disease('breast cancer'), 'Breast Cancer')
+        self.assertEqual(_canonicalize_disease('Breast cancer'), 'Breast Cancer')
+        self.assertEqual(_canonicalize_disease('Breast Cancer (disorder)'), 'Breast Cancer')
+        self.assertEqual(_canonicalize_disease('ER|ERBB2 Breast cancer'), 'Breast Cancer')
+        self.assertEqual(_canonicalize_disease('ER|ERBB2 Breast cancer (disorder)'), 'Breast Cancer')
 
     def test_canonicalize_helper_passes_through_unknown(self):
         from omop_core.services.patient_record_service import _canonicalize_disease
-        self.assertEqual(_canonicalize_disease('breast cancer'), 'breast cancer')
+        self.assertEqual(_canonicalize_disease('pancreatic cancer'), 'pancreatic cancer')
         self.assertEqual(_canonicalize_disease(''), '')
         self.assertIsNone(_canonicalize_disease(None))
 
@@ -366,38 +360,258 @@ class RefreshPatientRecordLabsFromMeasurementTest(_OmopBase):
         self.assertIsNone(pi.hemoglobin_g_dl)
 
 
-class RefreshPatientRecordAssessmentTest(_OmopBase):
-    """best_response is derived from a SNOMED response-status Observation and
-    must actually persist to the DB (regression test for promop#205 —
-    setattr()'d onto a non-existent model field was silently dropped on save())."""
+class RefreshPatientRecordReceptorStatusTest(_OmopBase):
+    """HER2/ER/PR receptor status derivation from Measurement rows (issue #220)."""
 
-    PERSON_ID = 90250
+    PERSON_ID = 90240
 
-    def _make_response_observation(self, oid, concept_code):
-        concept = _concept(3100000 + int(concept_code), 'Response status', self.dom_obs, self.vocab, self.cc, code=concept_code)
-        return Observation.objects.create(
-            observation_id=oid,
+    def _make_her2(self, mid, *, value_as_string=None, value_source_value=None,
+                   value_as_concept=None):
+        her2_concept = _concept(
+            9048676, 'HER2 [Interpretation] in Tissue',
+            self.dom_meas, self.vocab, self.cc, code='48676-1',
+        )
+        return Measurement.objects.create(
+            measurement_id=mid,
             person=self.person,
-            observation_concept=concept,
-            observation_date=date(2023, 6, 1),
-            observation_type_concept=self.type_concept,
+            measurement_concept=her2_concept,
+            measurement_date=date(2023, 5, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_string=value_as_string,
+            value_source_value=value_source_value,
+            value_as_concept=value_as_concept,
+            measurement_source_value='48676-1',
         )
 
-    def test_complete_response_observation_sets_best_response(self):
-        self._make_response_observation(92501, '182840001')
+    def test_her2_positive(self):
+        self._make_her2(92401, value_as_string='Positive')
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.best_response, 'Complete Response')
+        self.assertEqual(pi.her2_status, 'POSITIVE')
 
-    def test_best_response_persists_after_reload(self):
-        """The bug: setattr() onto a field the model doesn't define is lost on save()."""
-        self._make_response_observation(92502, '182841002')
-        refresh_patient_record(self.person)
-        pi = PatientRecord.objects.get(person=self.person)
-        self.assertEqual(pi.best_response, 'Partial Response')
-
-    def test_no_response_observation_leaves_best_response_none(self):
+    def test_her2_negative(self):
+        self._make_her2(92402, value_as_string='Negative')
         pi = refresh_patient_record(self.person)
-        self.assertIsNone(pi.best_response)
+        self.assertEqual(pi.her2_status, 'NEGATIVE')
+
+    def test_her2_equivocal_is_preserved_not_dropped(self):
+        """Regression for #220: an 'Equivocal' HER2 result must not be dropped."""
+        self._make_her2(92403, value_as_string='Equivocal')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.her2_status, 'EQUIVOCAL')
+
+    def test_her2_value_in_source_value_is_read(self):
+        """HER2 result stored only in value_source_value is still derived."""
+        self._make_her2(92404, value_source_value='Equivocal')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.her2_status, 'EQUIVOCAL')
+
+    def test_her2_missing_value_yields_none(self):
+        """No value at all still yields None (no spurious status)."""
+        self._make_her2(92405)
+        pi = refresh_patient_record(self.person)
+        self.assertIsNone(pi.her2_status)
+
+    def test_her2_value_as_concept_is_read(self):
+        """HER2 result carried in value_as_concept is derived (concept-first branch)."""
+        pos_concept = _concept(9000201, 'Positive', self.dom_meas, self.vocab, self.cc)
+        self._make_her2(92406, value_as_concept=pos_concept)
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.her2_status, 'POSITIVE')
+
+    def test_her2_nonstandard_value_preserved(self):
+        """A non-standard receptor value is preserved (upper-cased), not dropped."""
+        self._make_her2(92407, value_as_string='Indeterminate')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.her2_status, 'INDETERMINATE')
+
+
+class CdmComplianceTablesTest(_OmopBase):
+    """Standard OMOP CDM 5.4 tables added for CDM-compliance (cdm-compliance branch)."""
+
+    PERSON_ID = 90260
+
+    def test_cdm_source_seeded_as_54(self):
+        """The seed migration self-describes the instance as CDM 5.4."""
+        from omop_core.models import CdmSource
+        row = CdmSource.objects.filter(cdm_source_abbreviation='PRomop').first()
+        self.assertIsNotNone(row)
+        self.assertEqual(row.cdm_version, '5.4')
+
+    def test_vocabulary_tables_writable(self):
+        """drug_strength / concept_synonym / source_to_concept_map accept rows."""
+        from omop_core.models import ConceptSynonym, DrugStrength, SourceToConceptMap
+        lang = _concept(90261, 'English language', self.dom_meas, self.vocab, self.cc)
+        DrugStrength.objects.create(
+            drug_concept=self.drug_concept, ingredient_concept=self.drug_concept,
+            amount_value=10.0, valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        ConceptSynonym.objects.create(
+            concept=self.drug_concept, concept_synonym_name='Adriamycin', language_concept=lang,
+        )
+        SourceToConceptMap.objects.create(
+            source_code='X', source_concept=self.drug_concept, source_vocabulary_id='LOCAL',
+            target_concept=self.drug_concept, target_vocabulary_id='RxNorm',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        self.assertEqual(DrugStrength.objects.count(), 1)
+        self.assertEqual(ConceptSynonym.objects.count(), 1)
+        self.assertEqual(SourceToConceptMap.objects.count(), 1)
+
+
+class LoadAthenaVocabExtraTablesTest(_OmopBase):
+    """load_athena_vocabularies loaders for concept_synonym and drug_strength (#223)."""
+
+    PERSON_ID = 90280
+
+    def _run_loader(self, method_name, filename, header, rows):
+        import os
+        import tempfile
+        from io import StringIO
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, filename), 'w', encoding='utf-8', newline='') as f:
+            f.write('\t'.join(header) + '\n')
+            for r in rows:
+                f.write('\t'.join(str(x) for x in r) + '\n')
+        cmd = Command(stdout=StringIO())
+        cmd._base = d
+        cmd._gcs_bucket = None
+        cmd._direct = False
+        return getattr(cmd, method_name)(False)
+
+    def test_concept_synonym_loads_and_filters_unloaded_refs(self):
+        from omop_core.models import ConceptSynonym
+        _concept(4180186, 'English language', self.dom_meas, self.vocab, self.cc)
+        drug = _concept(950001, 'Doxorubicin', self.dom_drug, self.vocab, self.cc, code='1790')
+        self._run_loader(
+            '_load_concept_synonym', 'CONCEPT_SYNONYM.csv',
+            ['concept_id', 'concept_synonym_name', 'language_concept_id'],
+            [
+                (950001, 'Adriamycin', 4180186),   # valid
+                (999999, 'Ghost', 4180186),         # concept not loaded -> skip
+                (950001, 'BadLang', 888888),        # language not loaded -> skip
+            ],
+        )
+        names = list(ConceptSynonym.objects.values_list('concept_synonym_name', flat=True))
+        self.assertEqual(names, ['Adriamycin'])
+
+    def test_drug_strength_loads_and_nulls_unloaded_unit(self):
+        from omop_core.models import DrugStrength
+        _concept(950001, 'Doxorubicin', self.dom_drug, self.vocab, self.cc, code='1790')
+        _concept(950002, 'Doxorubicin 2 MG/ML', self.dom_drug, self.vocab, self.cc, code='1791')
+        _concept(8576, 'milligram', self.dom_meas, self.vocab, self.cc)
+        header = ['drug_concept_id', 'ingredient_concept_id', 'amount_value',
+                  'amount_unit_concept_id', 'numerator_value', 'numerator_unit_concept_id',
+                  'denominator_value', 'denominator_unit_concept_id', 'box_size',
+                  'valid_start_date', 'valid_end_date', 'invalid_reason']
+        self._run_loader(
+            '_load_drug_strength', 'DRUG_STRENGTH.csv', header,
+            [
+                (950001, 950001, 10, 8576, '', '', '', '', '', '19700101', '20991231', ''),
+                (999999, 950001, 5, 8576, '', '', '', '', '', '19700101', '20991231', ''),   # drug not loaded -> skip
+                (950002, 950001, 20, 777777, '', '', '', '', '', '19700101', '20991231', ''),  # unit not loaded -> NULL
+            ],
+        )
+        self.assertEqual(DrugStrength.objects.count(), 2)
+        loaded_unit = DrugStrength.objects.get(amount_value=10.0)
+        self.assertEqual(loaded_unit.amount_unit_concept_id, 8576)
+        nulled_unit = DrugStrength.objects.get(amount_value=20.0)
+        self.assertIsNone(nulled_unit.amount_unit_concept_id)
+
+    def test_loader_rerun_is_idempotent(self):
+        """Re-running the loaders without --replace must not duplicate rows."""
+        from omop_core.models import ConceptSynonym, DrugStrength
+        _concept(4180186, 'English language', self.dom_meas, self.vocab, self.cc)
+        _concept(950001, 'Doxorubicin', self.dom_drug, self.vocab, self.cc, code='1790')
+        self._run_loader(
+            '_load_concept_synonym', 'CONCEPT_SYNONYM.csv',
+            ['concept_id', 'concept_synonym_name', 'language_concept_id'],
+            [(950001, 'Adriamycin', 4180186)],
+        )
+        self._run_loader(
+            '_load_concept_synonym', 'CONCEPT_SYNONYM.csv',
+            ['concept_id', 'concept_synonym_name', 'language_concept_id'],
+            [(950001, 'Adriamycin', 4180186)],
+        )
+        self.assertEqual(ConceptSynonym.objects.count(), 1)
+        ds_header = ['drug_concept_id', 'ingredient_concept_id', 'amount_value',
+                     'amount_unit_concept_id', 'numerator_value', 'numerator_unit_concept_id',
+                     'denominator_value', 'denominator_unit_concept_id', 'box_size',
+                     'valid_start_date', 'valid_end_date', 'invalid_reason']
+        ds_rows = [(950001, 950001, 10, '', '', '', '', '', '', '19700101', '20991231', '')]
+        self._run_loader('_load_drug_strength', 'DRUG_STRENGTH.csv', ds_header, ds_rows)
+        self._run_loader('_load_drug_strength', 'DRUG_STRENGTH.csv', ds_header, ds_rows)
+        self.assertEqual(DrugStrength.objects.count(), 1)
+
+    def test_vocabulary_none_row_loaded_for_cdm_version(self):
+        """The out-of-scope 'None' VOCABULARY.csv row is kept so cdm_source gets a version."""
+        from omop_core.models import Vocabulary
+        self._run_loader(
+            '_load_vocabularies', 'VOCABULARY.csv',
+            ['vocabulary_id', 'vocabulary_name', 'vocabulary_reference',
+             'vocabulary_version', 'vocabulary_concept_id'],
+            [
+                ('None', 'OMOP CDM vocabulary', 'https://athena.ohdsi.org', 'v5.4 01-JAN-26', 756265),
+                ('NotInScope', 'Some vocab', '', 'v1', 1),
+            ],
+        )
+        row = Vocabulary.objects.get(vocabulary_id='None')
+        self.assertEqual(row.vocabulary_version, 'v5.4 01-JAN-26')
+        self.assertFalse(Vocabulary.objects.filter(vocabulary_id='NotInScope').exists())
+
+    def test_sync_cdm_source_recreates_missing_row(self):
+        """_sync_cdm_source_metadata re-seeds the row wiped by --replace TRUNCATE CASCADE."""
+        from io import StringIO
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        from omop_core.models import CdmSource
+        CdmSource.objects.filter(cdm_source_abbreviation='PRomop').delete()
+        self.assertFalse(CdmSource.objects.filter(cdm_source_abbreviation='PRomop').exists())
+        cmd = Command(stdout=StringIO())
+        cmd._sync_cdm_source_metadata()
+        row = CdmSource.objects.get(cdm_source_abbreviation='PRomop')
+        self.assertEqual(row.cdm_version, '5.4')
+
+
+class PopulateObservationPeriodTest(_OmopBase):
+    """observation_period derivation from clinical-event spans."""
+
+    PERSON_ID = 90270
+
+    def test_period_spans_earliest_to_latest_event(self):
+        from django.core.management import call_command
+        from omop_core.models import Measurement, Observation, ObservationPeriod
+        # ensure the EHR type concept exists so the command links it
+        _concept(32817, 'EHR', self.type_concept.domain, self.vocab, self.cc)
+        generic = _concept(3000963, 'Laboratory test result', self.dom_meas, self.vocab, self.cc)
+        Measurement.objects.create(
+            measurement_id=93001, person=self.person, measurement_concept=generic,
+            measurement_date=date(2021, 3, 1), measurement_type_concept=self.type_concept,
+            value_as_number=10, measurement_source_value='Hemoglobin',
+        )
+        Observation.objects.create(
+            observation_id=93002, person=self.person, observation_concept=generic,
+            observation_date=date(2023, 9, 15), observation_type_concept=self.type_concept,
+        )
+        call_command('populate_observation_period')
+        periods = ObservationPeriod.objects.filter(person=self.person)
+        self.assertEqual(periods.count(), 1)
+        p = periods.first()
+        self.assertEqual(p.observation_period_start_date, date(2021, 3, 1))
+        self.assertEqual(p.observation_period_end_date, date(2023, 9, 15))
+        self.assertEqual(p.period_type_concept_id, 32817)
+
+    def test_rerun_without_overwrite_is_idempotent(self):
+        from django.core.management import call_command
+        from omop_core.models import Measurement, ObservationPeriod
+        generic = _concept(3000963, 'Laboratory test result', self.dom_meas, self.vocab, self.cc)
+        Measurement.objects.create(
+            measurement_id=93010, person=self.person, measurement_concept=generic,
+            measurement_date=date(2022, 1, 1), measurement_type_concept=self.type_concept,
+            value_as_number=1, measurement_source_value='Hemoglobin',
+        )
+        call_command('populate_observation_period')
+        call_command('populate_observation_period')
+        self.assertEqual(ObservationPeriod.objects.filter(person=self.person).count(), 1)
 
 
 class RefreshPatientRecordComputedFieldsTest(_OmopBase):
@@ -513,7 +727,7 @@ class ConditionSignalTest(_OmopBase):
         )
         pi = PatientRecord.objects.get(person=self.person)
         self.assertIsNotNone(pi.disease)
-        self.assertIn('neoplasm', pi.disease.lower())
+        self.assertEqual(pi.disease, 'Breast Cancer')
 
     def test_condition_delete_clears_disease(self):
         PatientRecord.objects.create(person=self.person)

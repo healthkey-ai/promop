@@ -6,6 +6,7 @@ from omop_core.models import (
     Concept, Measurement, ConditionOccurrence, DrugExposure, ProcedureOccurrence,
 )
 from omop_core.services.pk import next_pk
+from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.mappings import (
     LAB_FIELD_TO_LOINC,
@@ -185,16 +186,13 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
     therapy_name = getattr(patient_info, f'{prefix}_therapy', None)
     start_date = getattr(patient_info, f'{prefix}_start_date', None)
     end_date = getattr(patient_info, f'{prefix}_end_date', None)
+    outcome = getattr(patient_info, f'{prefix}_outcome', None)
 
     if not therapy_name:
         return
 
-    episode_concept = Concept.objects.filter(concept_id=CONCEPT_TREATMENT_REGIMEN).first()
-    if episode_concept is None:
+    if Concept.objects.filter(concept_id=CONCEPT_TREATMENT_REGIMEN).first() is None:
         return
-
-    # episode_type_concept and episode_object_concept are required FKs on Episode
-    ehr_concept = Concept.objects.filter(concept_id=CONCEPT_EHR_TYPE).first() or episode_concept
 
     # Normalise start_date to a date object
     if start_date and isinstance(start_date, str):
@@ -203,42 +201,16 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
         except ValueError:
             start_date = None
 
-    # Upsert Episode: match by (person, episode_number, start_date) or just (person, episode_number)
-    episode = None
-    if start_date:
-        episode = Episode.objects.filter(
-            person=person,
-            episode_number=line_number,
-            episode_start_date=start_date,
-        ).first()
-    if episode is None:
-        episode = Episode.objects.filter(
-            person=person,
-            episode_number=line_number,
-        ).order_by('-episode_start_date').first()
+    # This reverse-sync path resolves drug links by date window rather than an
+    # explicit id list, so it selects the DrugExposure ids here and hands them
+    # to the shared Episode writer.
+    field_concept = Concept.objects.filter(concept_id=CONCEPT_DRUG_EXPOSURE_FIELD).first()
+    if field_concept is None:
+        return
 
-    if episode:
-        episode.episode_source_value = therapy_name[:50]
-        if end_date:
-            episode.episode_end_date = end_date
-        episode.save(update_fields=['episode_source_value', 'episode_end_date'])
-    else:
-        new_ep_id = next_pk(Episode, 'episode_id')
-        episode = Episode.objects.create(
-            episode_id=new_ep_id,
-            person=person,
-            episode_concept=episode_concept,
-            episode_object_concept=ehr_concept,
-            episode_type_concept=ehr_concept,
-            episode_start_date=start_date or today,
-            episode_end_date=end_date,
-            episode_number=line_number,
-            episode_source_value=therapy_name[:50],
-        )
-
-    # Link unlinked DrugExposure rows within the episode date range
-    ep_start = episode.episode_start_date
-    ep_end = episode.episode_end_date
+    existing_episode = Episode.objects.filter(person=person, episode_number=line_number).first()
+    ep_start = (existing_episode.episode_start_date if existing_episode else None) or start_date
+    ep_end = (existing_episode.episode_end_date if existing_episode else None) or end_date
 
     drug_qs = DrugExposure.objects.filter(person=person)
     if ep_start:
@@ -246,17 +218,11 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
     if ep_end:
         drug_qs = drug_qs.filter(drug_exposure_start_date__lte=ep_end)
 
-    field_concept = Concept.objects.filter(concept_id=CONCEPT_DRUG_EXPOSURE_FIELD).first()
-    if field_concept is None:
-        return
-
     # Exclude drugs already linked to a *different* episode to prevent
     # cross-episode contamination when end_date is absent.
-    # EpisodeEvent.episode_id is a plain BigIntegerField (no FK), so we
-    # resolve via two queries.
     other_person_episode_ids = list(
         Episode.objects.filter(person=person)
-        .exclude(episode_id=episode.episode_id)
+        .exclude(episode_number=line_number)
         .values_list('episode_id', flat=True)
     )
     if other_person_episode_ids:
@@ -268,17 +234,18 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
         )
         drug_qs = drug_qs.exclude(drug_exposure_id__in=other_episode_drug_ids)
 
-    existing_event_ids = set(
-        EpisodeEvent.objects.filter(
-            episode_id=episode.episode_id,
-            episode_event_field_concept=field_concept,
-        ).values_list('event_id', flat=True)
-    )
+    drug_exposure_ids = list(drug_qs.values_list('drug_exposure_id', flat=True))
 
-    for de in drug_qs:
-        if de.drug_exposure_id not in existing_event_ids:
-            EpisodeEvent.objects.get_or_create(
-                episode_id=episode.episode_id,
-                event_id=de.drug_exposure_id,
-                defaults={'episode_event_field_concept': field_concept},
-            )
+    # This path stores the human therapy name in episode_source_value rather
+    # than the 'LOT-{n}' mirror, and persists the edited outcome to OMOP as a
+    # LOT-{n}-outcome Observation.
+    upsert_therapy_line_episode(
+        person,
+        line_number=line_number,
+        start_date=start_date,
+        end_date=end_date,
+        drug_exposure_ids=drug_exposure_ids,
+        outcome=outcome,
+        source_value=therapy_name,
+        today=today,
+    )

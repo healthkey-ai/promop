@@ -8,7 +8,9 @@ Usage:
 
 import math
 import statistics
+from collections import defaultdict
 from datetime import date, timedelta
+from django.db import models
 from django.db.models import DateTimeField
 from django.db.models.functions import Cast, Coalesce
 from django.db import transaction
@@ -16,11 +18,18 @@ from django.utils import timezone
 from omop_core.models import (
     Person, PatientRecord, ConditionOccurrence, Concept,
     Measurement, Observation, DrugExposure, Location, ProcedureOccurrence,
+    Death,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
 from omop_core.services.mappings import (
     WEARABLE_LOINC, WEARABLE_ARTIFACT_BOUNDS, WEARABLE_MIN_VALID_DAYS,
     WEARABLE_TREND_IMPROVING_PCT, WEARABLE_TREND_DECLINING_PCT,
+)
+from omop_core.services.lot_regimens import (
+    get_regimen_concept_id,
+    get_regimen_name,
+    get_regimen_concept_id_by_name,
+    normalize_drug_name,
 )
 
 
@@ -32,13 +41,15 @@ from omop_core.services.mappings import (
 # each refresh so deletions are reflected (not just additions).
 _OMOP_DERIVED_FIELDS = [
     # Disease / condition
-    'disease', 'diagnosis_date', 'condition_clinical_status', 'disease_slug',
+    'disease', 'diagnosis_date', 'death_date', 'condition_clinical_status', 'disease_slug',
     # Therapy lines
     'first_line_therapy', 'first_line_date', 'first_line_start_date', 'first_line_end_date',
     'first_line_therapy_id',
     'second_line_therapy', 'second_line_date', 'second_line_start_date', 'second_line_end_date',
     'second_line_therapy_id',
-    'later_therapy', 'later_date', 'later_therapies', 'later_therapy_ids',
+    'later_therapy', 'later_date', 'later_start_date', 'later_end_date',
+    'later_therapies', 'later_therapy_ids',
+    'therapy_lines_count', 'last_treatment',
     'concomitant_medications',
     # Legacy labs (derived via name-based Measurement lookup)
     'hemoglobin_level', 'hemoglobin_level_units',
@@ -60,6 +71,11 @@ _OMOP_DERIVED_FIELDS = [
     'glucose_mg_dl', 'hba1c_percent', 'ldh_u_l',
     # Other markers (LOINC-derived)
     'beta2_microglobulin', 'c_reactive_protein', 'esr',
+    # MM disease burden (LOINC-derived)
+    'monoclonal_protein_serum', 'monoclonal_protein_urine',
+    'kappa_flc', 'lambda_flc', 'clonal_plasma_cells',
+    # MM boolean/coded fields (derived by _get_mm_specific_data)
+    'plasma_cell_leukemia', 'bone_lesions', 'meets_crab', 'meets_slim',
     # Vitals
     'systolic_blood_pressure', 'diastolic_blood_pressure', 'heartrate',
     'weight', 'weight_units', 'height', 'height_units', 'temperature',
@@ -70,6 +86,12 @@ _OMOP_DERIVED_FIELDS = [
     'pd_l1_ic_percentage', 'pd_l1_combined_positive_score', 'ki67_proliferation_index',
     'estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status', 'tnbc_status',
     'hr_status', 'hrd_status', 'menopausal_status',
+    # Behavior / lifestyle
+    'smoking_status', 'pack_years', 'alcohol_use', 'drinks_per_week',
+    'exercise_frequency', 'exercise_minutes_per_week', 'diet_type',
+    'sleep_hours_per_night', 'sleep_quality', 'stress_level', 'social_support',
+    'employment_status', 'education_level', 'marital_status', 'insurance_type',
+    'number_of_dependents', 'annual_household_income',
     # Staging
     'stage', 'tumor_stage', 'nodes_stage', 'distant_metastasis_stage', 'staging_modalities',
     'metastatic_status', 'bone_only_metastasis_status',
@@ -85,7 +107,7 @@ _OMOP_DERIVED_FIELDS = [
     # Lymphoma
     'flipi_score', 'gelf_criteria_status', 'tumor_grade',
     # Assessment
-    'best_response', 'measurable_disease_by_recist_status',
+    'measurable_disease_by_recist_status',
     # Clinical (breast cancer)
     'peripheral_neuropathy_grade', 'toxicity_grade', 'renal_adequacy_status',
     # Procedures
@@ -148,6 +170,12 @@ _LOINC_LAB_FIELDS = {
     '1952-1':  ('beta2_microglobulin',            float),
     '1988-5':  ('c_reactive_protein',             float),
     '30341-2': ('esr',                            int),
+    # MM-specific disease burden labs
+    '51435-6': ('monoclonal_protein_serum',       float),  # Serum M-spike (M-protein)
+    '32730-5': ('monoclonal_protein_urine',       float),  # Urine M-spike 24h
+    '33944-8': ('kappa_flc',                      float),  # Kappa free light chains
+    '33945-5': ('lambda_flc',                     float),  # Lambda free light chains
+    '26098-4': ('clonal_plasma_cells',            float),  # Plasma cells % in bone marrow
 }
 
 # Source-value fallback map for environments where LOINC Concepts aren't loaded.
@@ -208,6 +236,31 @@ _SOURCE_VALUE_LAB_FIELDS = {
     'Absolute Neutrophil Count':                  'anc_thousand_per_ul',
     'Absolute Lymphocyte Count':                  'alc_thousand_per_ul',
     'Absolute Monocyte Count':                    'amc_thousand_per_ul',
+    # MM-specific aliases (match display strings used by _mm_generator.py)
+    'M-protein serum spike':                      'monoclonal_protein_serum',
+    'M-protein urine 24h':                        'monoclonal_protein_urine',
+    'Kappa free light chains':                    'kappa_flc',
+    'Lambda free light chains':                   'lambda_flc',
+    'Clonal plasma cells in bone marrow (%)':     'clonal_plasma_cells',
+}
+
+_BEHAVIOR_MEASUREMENT_FIELDS = {
+    '72166-2': ('smoking_status', str),
+    '63640-7': ('pack_years', float),
+    '74013-4': ('alcohol_use', str),
+    '11286-7': ('drinks_per_week', int),
+    '68516-4': ('exercise_frequency', str),
+    '89555-7': ('exercise_minutes_per_week', int),
+    '88365-2': ('diet_type', str),
+    '93831-6': ('sleep_quality', str),
+    '73985-4': ('stress_level', str),
+    '93033-9': ('social_support', str),
+    '74165-2': ('employment_status', str),
+    '82589-3': ('education_level', str),
+    '45404-1': ('marital_status', str),
+    '76513-1': ('insurance_type', str),
+    '63512-8': ('number_of_dependents', int),
+    '77243-3': ('annual_household_income', int),
 }
 
 
@@ -258,6 +311,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             _get_bc_clinical_data,
             _get_prior_procedures,
             _get_wearable_data,
+            _get_mm_specific_data,
         ]:
             for field, value in section_fn(person).items():
                 setattr(patient_info, field, value)
@@ -273,6 +327,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
 def _get_demographics(person: Person) -> dict:
     data = {}
+
+    death = Death.objects.filter(person=person).only('death_date').first()
+    if death:
+        data['death_date'] = death.death_date
 
     if person.year_of_birth:
         today = date.today()
@@ -337,6 +395,15 @@ def _get_location_data(person: Person) -> dict:
 # unrelated conditions pass through untouched.
 _DISEASE_ALIASES = {
     'myeloma': 'multiple myeloma',
+    # Breast cancer — all common OMOP/SNOMED surface forms → single canonical title
+    'breast cancer': 'Breast Cancer',
+    'breast cancer (disorder)': 'Breast Cancer',
+    'malignant neoplasm of breast': 'Breast Cancer',
+    'malignant neoplasm of breast (disorder)': 'Breast Cancer',
+    'carcinoma of breast': 'Breast Cancer',
+    'carcinoma of breast (disorder)': 'Breast Cancer',
+    'er|erbb2 breast cancer': 'Breast Cancer',
+    'er|erbb2 breast cancer (disorder)': 'Breast Cancer',
 }
 
 
@@ -347,7 +414,8 @@ def _canonicalize_disease(name: str) -> str:
     """
     if not name:
         return name
-    return _DISEASE_ALIASES.get(name.strip().lower(), name)
+    normalized = name.strip().lower()
+    return _DISEASE_ALIASES.get(normalized, name)
 
 
 def _get_disease_data(person: Person) -> dict:
@@ -427,15 +495,17 @@ def _disease_name_to_slug(name: str) -> str:
 def _get_treatment_data(person: Person) -> dict:
     data = {}
 
-    drug_exposures = DrugExposure.objects.filter(person=person).order_by('-drug_exposure_start_date')
+    drug_exposures = list(
+        DrugExposure.objects
+        .filter(person=person)
+        .select_related('drug_concept')
+        .order_by('drug_exposure_start_date', 'drug_exposure_id')
+    )
 
-    if not drug_exposures.exists():
+    if not drug_exposures:
         return data
 
-    recent_drugs = drug_exposures[:10]
-
-    unique_dates = set(drug.drug_exposure_start_date for drug in drug_exposures)
-    data['therapy_lines_count'] = len(unique_dates)
+    recent_drugs = list(reversed(drug_exposures[-10:]))
 
     current_meds = []
     for drug in recent_drugs[:5]:
@@ -453,41 +523,98 @@ def _get_treatment_data(person: Person) -> dict:
     except Exception:
         pass
 
-    # Fallback: group by start date so combination regimens count as one line.
-    # Sort chronologically: earliest date = line 1.
-    from collections import defaultdict
-    date_groups = defaultdict(list)
-    for drug in drug_exposures:
-        name = drug.drug_concept.concept_name if drug.drug_concept else 'Unknown'
-        date_groups[drug.drug_exposure_start_date].append(name)
-
-    therapy_details = [
-        {
-            'drug': ' + '.join(date_groups[d]),
-            'start_date': str(d),
-            'end_date': None,
-        }
-        for d in sorted(date_groups.keys())
-    ]
-
-    if len(therapy_details) >= 1:
-        data['first_line_therapy'] = therapy_details[0]['drug']
-        data['first_line_date'] = therapy_details[0]['start_date']
-
-    if len(therapy_details) >= 2:
-        data['second_line_therapy'] = therapy_details[1]['drug']
-        data['second_line_date'] = therapy_details[1]['start_date']
-
-    if len(therapy_details) > 2:
-        later_drugs = therapy_details[2:]
-        data['later_therapy'] = later_drugs[0]['drug']
-        data['later_date'] = later_drugs[0]['start_date']
-        data['later_therapies'] = [
-            {'therapy': d['drug'], 'startDate': d['start_date'], 'endDate': d['end_date']}
-            for d in later_drugs
-        ]
-
+    # No Episodes persisted yet — derive from the single LOT inference engine in
+    # read-only (dry_run) mode, so the same grouping algorithm the enrich/import
+    # steps use to *persist* Episodes also drives derivation. No OMOP rows are
+    # written here; refresh_patient_record stays read-only.
+    from omop_core.services.lot_inference_service import infer_lot_for_person
+    lots = infer_lot_for_person(person, dry_run=True)
+    _apply_inferred_lots(data, lots)
     return data
+
+
+def _regimen_from_exposures(exposure_ids, de_info_by_id):
+    """Resolve (display_name, concept_id) from a LOT's backing DrugExposures.
+
+    de_info_by_id maps drug_exposure_id -> (concept_id, vocabulary_id, name).
+
+    If an exposure's drug_concept is itself a HemOnc regimen concept (e.g. a
+    regimen-level row from BC therapy backfill), use it directly. Otherwise
+    mirror the Episode-derivation naming: a HemOnc regimen concept resolved from
+    the drug-name set, else the canonical regimen name, else the joined original
+    concept names (preserving casing).
+    """
+    infos = [de_info_by_id[e] for e in exposure_ids if e in de_info_by_id]
+    if not infos:
+        return 'Unknown', None
+    for concept_id, vocab_id, name in infos:
+        if concept_id and vocab_id == 'HemOnc':
+            return name, concept_id
+    display_names = [name for _, _, name in infos]
+    norm_key = {normalize_drug_name(n).lower().strip() for n in display_names}
+    concept_id = get_regimen_concept_id(norm_key)
+    if concept_id:
+        concept = _cc_by_id(concept_id)
+        if concept:
+            return concept.concept_name, concept_id
+    regimen_name = get_regimen_name(norm_key)
+    if regimen_name:
+        return regimen_name, concept_id
+    return ' + '.join(display_names), concept_id
+
+
+def _apply_inferred_lots(data: dict, lots) -> None:
+    """Map in-memory inferred LOTs onto first/second/later therapy fields."""
+    data['therapy_lines_count'] = len(lots)
+
+    # Bulk-resolve (concept_id, vocabulary_id, name) for every exposure across
+    # all lots. concept.vocabulary_id is the FK's string PK — no extra join.
+    exp_ids = [eid for lot in lots for eid in lot.exposure_ids]
+    de_info_by_id = {}
+    if exp_ids:
+        for de in (DrugExposure.objects
+                   .filter(drug_exposure_id__in=exp_ids)
+                   .select_related('drug_concept')):
+            if de.drug_concept:
+                de_info_by_id[de.drug_exposure_id] = (
+                    de.drug_concept.concept_id,
+                    de.drug_concept.vocabulary_id,
+                    de.drug_concept.concept_name,
+                )
+            else:
+                de_info_by_id[de.drug_exposure_id] = (None, None, de.drug_source_value or 'Unknown')
+
+    later = []
+    later_ids = []
+    for lot in lots:
+        name, concept_id = _regimen_from_exposures(lot.exposure_ids, de_info_by_id)
+        start = str(lot.start) if lot.start else None
+        end = str(lot.end) if lot.end else None
+        if lot.lot_number == 1:
+            data['first_line_therapy'] = name
+            data['first_line_therapy_id'] = concept_id
+            data['first_line_date'] = start
+            data['first_line_start_date'] = start
+            data['first_line_end_date'] = end
+        elif lot.lot_number == 2:
+            data['second_line_therapy'] = name
+            data['second_line_therapy_id'] = concept_id
+            data['second_line_date'] = start
+            data['second_line_start_date'] = start
+            data['second_line_end_date'] = end
+        else:  # lot_number >= 3
+            if not data.get('later_therapy'):
+                data['later_therapy'] = name
+                data['later_date'] = start
+                data['later_start_date'] = start
+                data['later_end_date'] = end
+            later.append({'therapy': name, 'startDate': start, 'endDate': end})
+            if concept_id:
+                later_ids.append(concept_id)
+    if later:
+        data['later_therapies'] = later
+    if later_ids:
+        data['later_therapy_ids'] = later_ids
 
 
 def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
@@ -522,21 +649,38 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         drugs_in_episode = [de_by_id[eid] for eid in event_ids if eid in de_by_id]
 
         drug_name_set = {
-            de.drug_concept.concept_name.lower().strip()
+            normalize_drug_name(de.drug_concept.concept_name)
             for de in drugs_in_episode
             if de.drug_concept
         }
+        # Drug source values (regimen names set by import handler) as fallback
+        source_value_set = {
+            de.drug_source_value.strip()
+            for de in drugs_in_episode
+            if de.drug_source_value and de.drug_source_value.strip()
+        }
 
-        # Prefer concept already joined via select_related('episode_source_concept')
+        # Prefer HemOnc concept already joined via select_related; if the attached
+        # concept is from a different vocabulary (e.g. a generic Drug domain fallback),
+        # it does not represent the MM regimen — skip it and resolve from drug names.
         concept_id = None
-        if episode.episode_source_concept_id and episode.episode_source_concept:
+        src_concept = episode.episode_source_concept
+        if (episode.episode_source_concept_id and src_concept and
+                getattr(src_concept, 'vocabulary_id', None) == 'HemOnc'):
             concept_id = episode.episode_source_concept_id
         elif drug_name_set:
             concept_id = get_regimen_concept_id(drug_name_set)
+        # Final fallback: treat each drug_source_value as an abbreviated regimen name
+        if not concept_id and source_value_set:
+            for sv in source_value_set:
+                cid = get_regimen_concept_id_by_name(sv)
+                if cid:
+                    concept_id = cid
+                    break
 
         if concept_id:
             needed_concept_ids.add(concept_id)
-        episode_rows.append((episode, drugs_in_episode, concept_id))
+        episode_rows.append((episode, drugs_in_episode, concept_id, source_value_set))
 
     # ── Bulk-fetch Concept names in one query ──────────────────────────────
     # Concept rows already loaded via select_related are re-used directly.
@@ -553,26 +697,36 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         )
 
     # ── Second pass: populate data dict ───────────────────────────────────
-    for episode, drugs_in_episode, concept_id in episode_rows:
+    therapy_line_numbers = set()
+
+    for episode, drugs_in_episode, concept_id, source_value_set in episode_rows:
         lot = episode.episode_number
         if lot is None:
             continue
+        therapy_line_numbers.add(lot)
 
         # Nullify dangling FK concept_ids (not in Concept table)
         if concept_id and concept_id not in concept_name_map:
             concept_id = None
 
-        drug_names = (
-            concept_name_map[concept_id]
-            if concept_id
-            else (
-                ' + '.join(
-                    de.drug_concept.concept_name
-                    for de in drugs_in_episode
-                    if de.drug_concept
-                ) or 'Unknown'
+        if concept_id:
+            drug_names = concept_name_map[concept_id]
+        else:
+            # Try regimen name resolution: drug concept names first, then source values
+            from omop_core.services.lot_regimens import get_regimen_name
+            _drug_cnames = [normalize_drug_name(de.drug_concept.concept_name) for de in drugs_in_episode if de.drug_concept]
+            _regimen_name = get_regimen_name({n.lower().strip() for n in _drug_cnames}) if _drug_cnames else None
+            if not _regimen_name:
+                for sv in source_value_set:
+                    _regimen_name = get_regimen_name({sv.lower()})
+                    if _regimen_name:
+                        break
+            drug_names = (
+                _regimen_name
+                or next(iter(source_value_set), None)  # raw regimen name from drug_source_value
+                or ' + '.join(_drug_cnames)
+                or 'Unknown'
             )
-        )
 
         start_date = str(episode.episode_start_date) if episode.episode_start_date else None
         end_date = str(episode.episode_end_date) if episode.episode_end_date else None
@@ -581,12 +735,14 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             data['first_line_therapy'] = drug_names
             data['first_line_therapy_id'] = concept_id
             data['first_line_date'] = start_date
+            data['first_line_start_date'] = start_date
             if end_date:
                 data['first_line_end_date'] = end_date
         elif lot == 2:
             data['second_line_therapy'] = drug_names
             data['second_line_therapy_id'] = concept_id
             data['second_line_date'] = start_date
+            data['second_line_start_date'] = start_date
             if end_date:
                 data['second_line_end_date'] = end_date
         elif lot >= 3:
@@ -601,6 +757,52 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
                 data['later_therapy'] = drug_names
             if not data.get('later_date'):
                 data['later_date'] = start_date
+            if not data.get('later_start_date'):
+                data['later_start_date'] = start_date
+            if end_date and not data.get('later_end_date'):
+                data['later_end_date'] = end_date
+
+    if therapy_line_numbers:
+        data['therapy_lines_count'] = len(therapy_line_numbers)
+
+    # ── Per-line outcomes from LOT-N-outcome Observations ─────────────────
+    # Written by the synthetic enrichment commands (and any future ingest path
+    # that records a response assessment per line of therapy).
+    response_code_map = {
+        '182840001': 'Complete Response',
+        '182841002': 'Partial Response',
+        '182843004': 'Stable Disease',
+        '182842009': 'Progressive Disease',
+    }
+    lot_outcomes: dict = {}
+    outcome_obs = (
+        Observation.objects
+        .filter(
+            person=person,
+            observation_source_value__startswith='LOT-',
+            observation_source_value__endswith='-outcome',
+        )
+        .select_related('observation_concept')
+        .order_by('observation_date')
+    )
+    for obs in outcome_obs:
+        src = obs.observation_source_value or ''
+        try:
+            lot_n = int(src.split('-')[1])
+        except (IndexError, ValueError):
+            continue
+        concept_code = obs.observation_concept.concept_code if obs.observation_concept else None
+        outcome = obs.value_as_string or response_code_map.get(concept_code)
+        if outcome:
+            lot_outcomes[lot_n] = outcome  # ordered by date → latest assessment wins
+
+    if 1 in lot_outcomes:
+        data['first_line_outcome'] = lot_outcomes[1]
+    if 2 in lot_outcomes:
+        data['second_line_outcome'] = lot_outcomes[2]
+    later_lots = sorted(k for k in lot_outcomes if k >= 3)
+    if later_lots:
+        data['later_outcome'] = lot_outcomes[later_lots[0]]
 
     return data
 
@@ -666,6 +868,44 @@ _BIOMARKER_MEASUREMENT_LOINCS = frozenset({
     '76690-7',  # Menopausal status
 })
 _BIOMARKER_OBS_LOINCS = frozenset({'76690-7', '44667-4'})
+_HISTOLOGIC_TYPE_LOINCS = frozenset({'59847-4'})
+_GENETIC_MUTATION_LOINCS = {
+    '21636-6': 'BRCA1',
+    '21637-4': 'BRCA2',
+    '21667-1': 'TP53',
+    '48013-7': 'KRAS',
+    '62862-8': 'EGFR',
+    '62318-1': 'PIK3CA',
+}
+
+
+_LOINC_CODE_RE = __import__('re').compile(r'^\d+-\d+$')
+
+
+def _measurement_code(measurement):
+    """Return a stable measurement code from concept mapping or FHIR source_value.
+
+    Prefers whichever of concept_code / measurement_source_value looks like a
+    real LOINC code (pattern: digits-digits, e.g. '718-7').  This handles two
+    common cases in imported data:
+      - concept_code='16112-5', source_value='Estrogen receptor...' → concept_code
+      - concept_code='0',       source_value='718-7'                → source_value
+    Falls back to source_value if neither matches the LOINC pattern.
+    """
+    concept_code = getattr(measurement.measurement_concept, 'concept_code', None)
+    source_value = measurement.measurement_source_value
+    if concept_code and _LOINC_CODE_RE.match(concept_code):
+        return concept_code
+    if source_value and _LOINC_CODE_RE.match(source_value):
+        return source_value
+    return source_value or concept_code
+
+
+def _observation_code(observation):
+    """Return a stable observation code from concept mapping or FHIR source_value."""
+    if observation.observation_concept and observation.observation_concept.concept_code:
+        return observation.observation_concept.concept_code
+    return observation.observation_source_value
 
 
 def _get_biomarker_data(person: Person) -> dict:
@@ -677,7 +917,9 @@ def _get_biomarker_data(person: Person) -> dict:
         .filter(person=person)
         .filter(
             Q(measurement_concept__concept_code__in=_BIOMARKER_MEASUREMENT_LOINCS)
+            | Q(measurement_concept__concept_code__in=_HISTOLOGIC_TYPE_LOINCS)
             | Q(measurement_source_value__in=_BIOMARKER_MEASUREMENT_LOINCS)
+            | Q(measurement_source_value__in=_HISTOLOGIC_TYPE_LOINCS)
         )
         .select_related('measurement_concept', 'value_as_concept')
         .order_by('-measurement_date')
@@ -687,6 +929,9 @@ def _get_biomarker_data(person: Person) -> dict:
         .filter(person=person)
         .filter(
             Q(observation_concept__concept_code__in=_BIOMARKER_OBS_LOINCS)
+            | Q(observation_concept__concept_code__in=_HISTOLOGIC_TYPE_LOINCS)
+            | Q(observation_source_value__in=_BIOMARKER_OBS_LOINCS)
+            | Q(observation_source_value__in=_HISTOLOGIC_TYPE_LOINCS)
             | Q(observation_concept__concept_name__icontains='homologous recombination')
             | Q(observation_concept__concept_name__icontains='bone only metastas')
             | Q(observation_concept__concept_name__icontains='histologic')
@@ -695,32 +940,36 @@ def _get_biomarker_data(person: Person) -> dict:
         .order_by('-observation_date')
     )
 
-    def _measurement_code(measurement):
-        return measurement.measurement_concept.concept_code if measurement.measurement_concept else None
-
-    def _observation_code(observation):
-        return observation.observation_concept.concept_code if observation.observation_concept else None
-
     pdl1_test = next((m for m in measurements if _measurement_code(m) == '85337-4'), None)
     if pdl1_test:
         data['pd_l1_tumor_cells'] = int(pdl1_test.value_as_number) if pdl1_test.value_as_number else None
         data['pd_l1_assay'] = pdl1_test.value_source_value
 
     def _receptor_status(measurement):
-        """Return 'POSITIVE', 'NEGATIVE', or None from a receptor Measurement row."""
+        """Return a normalized receptor status from a Measurement row.
+
+        Recognizes positive/negative/equivocal explicitly; any other non-empty
+        value is preserved (upper-cased) rather than dropped, so clinically
+        meaningful results such as a HER2 'Equivocal' (IHC 2+) reading are not
+        silently lost. Returns None only when no value is present at all.
+        """
+        raw = None
         if measurement.value_as_concept:
-            name = measurement.value_as_concept.concept_name.lower()
-            if 'positive' in name:
-                return 'POSITIVE'
-            if 'negative' in name:
-                return 'NEGATIVE'
-        if measurement.value_as_string:
-            s = measurement.value_as_string.lower()
-            if 'positive' in s:
-                return 'POSITIVE'
-            if 'negative' in s:
-                return 'NEGATIVE'
-        return None
+            raw = measurement.value_as_concept.concept_name
+        if not raw and measurement.value_as_string:
+            raw = measurement.value_as_string
+        if not raw and measurement.value_source_value:
+            raw = measurement.value_source_value
+        if not raw:
+            return None
+        s = raw.strip().lower()
+        if 'positive' in s:
+            return 'POSITIVE'
+        if 'negative' in s:
+            return 'NEGATIVE'
+        if 'equivocal' in s:
+            return 'EQUIVOCAL'
+        return raw.strip().upper()
 
     er_measurement = next((m for m in measurements if _measurement_code(m) == '16112-5'), None)
     if er_measurement:
@@ -827,12 +1076,27 @@ def _get_biomarker_data(person: Person) -> dict:
                 data['bone_only_metastasis_status'] = False
 
     # Histologic type — Observation concept matching 'histologic' or 'histology'
+    histologic_measurement = next(
+        (
+            m for m in measurements
+            if _measurement_code(m) in _HISTOLOGIC_TYPE_LOINCS and m.value_as_string
+        ),
+        None,
+    )
+    if histologic_measurement and histologic_measurement.value_as_string:
+        data['histologic_type'] = histologic_measurement.value_as_string
+        return data
+
     histologic_obs = next(
         (
             obs for obs in observations
-            if obs.value_as_string
-            and obs.observation_concept
-            and 'histolog' in obs.observation_concept.concept_name.lower()
+            if obs.value_as_string and (
+                _observation_code(obs) in _HISTOLOGIC_TYPE_LOINCS
+                or (
+                    obs.observation_concept
+                    and 'histolog' in obs.observation_concept.concept_name.lower()
+                )
+            )
         ),
         None,
     )
@@ -842,16 +1106,18 @@ def _get_biomarker_data(person: Person) -> dict:
     return data
 
 
-_STAGING_LOINCS = frozenset({'21908-9', '21905-5', '21906-3', '21901-4'})
+# 21908-9-riss is a non-standard code the MM generator uses for R-ISS stage
+# (it mis-resolves to an unrelated concept on import, so it is matched by
+# source_value only).
+_STAGING_LOINCS = frozenset({'21908-9', '21908-9-riss', '21905-5', '21906-3', '21901-4'})
 
 
 def _get_staging_data(person: Person) -> dict:
     """Derive TNM staging and overall stage group from OMOP Measurement/Observation rows.
 
-    Reads staging data in two tiers:
-    1. OMOP Measurement with LOINC concept code (OMOP-native path)
-    2. OMOP Measurement with LOINC code as source_value (FHIR upload path)
-    3. OMOP Observation with LOINC concept code (assessment/clinical path)
+    Reads staging data by LOINC code matched on either the concept code
+    (OMOP-native path) or the source_value (FHIR upload path), across both
+    Measurement and Observation rows.
     """
     from django.db.models import Q
     data = {}
@@ -868,7 +1134,11 @@ def _get_staging_data(person: Person) -> dict:
     )
     observations = list(
         Observation.objects
-        .filter(person=person, observation_concept__concept_code__in=_STAGING_LOINCS)
+        .filter(person=person)
+        .filter(
+            Q(observation_concept__concept_code__in=_STAGING_LOINCS)
+            | Q(observation_source_value__in=_STAGING_LOINCS)
+        )
         .select_related('observation_concept')
         .order_by('-observation_date')
     )
@@ -890,7 +1160,7 @@ def _get_staging_data(person: Person) -> dict:
         m = next((measurement for measurement in measurements if measurement.measurement_source_value == loinc_code), None)
         if m:
             return m.value_as_string or (str(int(m.value_as_number)) if m.value_as_number is not None else None)
-        # Tertiary: Observation by concept code
+        # Tertiary: Observation by concept code, then by source_value.
         obs = next(
             (
                 observation for observation in observations
@@ -899,12 +1169,21 @@ def _get_staging_data(person: Person) -> dict:
             ),
             None,
         )
+        if obs is None:
+            obs = next(
+                (observation for observation in observations
+                 if observation.observation_source_value == loinc_code),
+                None,
+            )
         if obs:
-            return obs.value_as_string
+            return obs.value_as_string or (
+                str(int(obs.value_as_number)) if obs.value_as_number is not None else None
+            )
         return None
 
-    # Overall clinical stage group — LOINC 21908-9
-    stage_val = _stage_value('21908-9')
+    # Overall stage group. For MM both ISS (21908-9) and R-ISS (21908-9-riss)
+    # are recorded; prefer R-ISS as it is the more current MM staging system.
+    stage_val = _stage_value('21908-9-riss') or _stage_value('21908-9')
     if stage_val:
         data['stage'] = stage_val
 
@@ -994,6 +1273,11 @@ def _get_behavior_data(person: Person) -> dict:
     data = {}
 
     observations = Observation.objects.filter(person=person)
+    measurements = (
+        Measurement.objects.filter(person=person)
+        .select_related('measurement_concept')
+        .order_by('-measurement_date')
+    )
 
     tobacco_obs = observations.filter(
         observation_concept__concept_code__in=['266919005', '8517006', '77176002']
@@ -1011,6 +1295,30 @@ def _get_behavior_data(person: Person) -> dict:
             data['no_tobacco_use_status'] = False
             data['tobacco_use_details'] = 'Current smoker'
 
+    for measurement in measurements:
+        code = _measurement_code(measurement)
+        field_info = _BEHAVIOR_MEASUREMENT_FIELDS.get(code)
+        if not field_info:
+            continue
+        field_name, caster = field_info
+        if field_name in data:
+            continue
+
+        if measurement.value_as_string not in (None, ''):
+            if caster is str:
+                data[field_name] = measurement.value_as_string
+            else:
+                try:
+                    data[field_name] = caster(float(measurement.value_as_string))
+                except (TypeError, ValueError):
+                    continue
+            continue
+
+        if measurement.value_as_number is None:
+            continue
+        value = float(measurement.value_as_number)
+        data[field_name] = caster(value) if caster is not str else str(value)
+
     return data
 
 
@@ -1019,50 +1327,188 @@ def _get_infection_data(person: Person) -> dict:
 
     measurements = Measurement.objects.filter(person=person)
 
-    hiv_measurements = measurements.filter(
-        measurement_concept__concept_code__in=['5221-7', '7917-8']
-    )
-    for m in hiv_measurements:
+    def _infection_value(m):
+        """Return 'negative', 'positive', or None from a Measurement row."""
         if m.value_as_concept_id:
             concept = _cc_by_id(m.value_as_concept_id)
-            if not concept:
-                continue
-            if 'negative' in concept.concept_name.lower():
-                data['no_hiv_status'] = True
-                data['hiv_status'] = False
-            elif 'positive' in concept.concept_name.lower():
-                data['no_hiv_status'] = False
-                data['hiv_status'] = True
+            if concept:
+                name = concept.concept_name.lower()
+                if 'negative' in name:
+                    return 'negative'
+                if 'positive' in name:
+                    return 'positive'
+        if m.value_as_string:
+            s = m.value_as_string.lower()
+            if 'negative' in s or s in ('neg', 'n', 'non-reactive'):
+                return 'negative'
+            if 'positive' in s or s in ('pos', 'p', 'reactive', 'detected'):
+                return 'positive'
+        return None
+
+    hiv_measurements = measurements.filter(
+        measurement_concept__concept_code__in=['5221-7', '7917-8']
+    ).union(
+        measurements.filter(measurement_source_value__in=['5221-7', '7917-8'])
+    )
+    for m in hiv_measurements:
+        result = _infection_value(m)
+        if result == 'negative':
+            data['no_hiv_status'] = True
+            data['hiv_status'] = False
+        elif result == 'positive':
+            data['no_hiv_status'] = False
+            data['hiv_status'] = True
 
     hepb_measurements = measurements.filter(
         measurement_concept__concept_code__in=['5195-3']
+    ).union(
+        measurements.filter(measurement_source_value__in=['5195-3'])
     )
     for m in hepb_measurements:
-        if m.value_as_concept_id:
-            concept = _cc_by_id(m.value_as_concept_id)
-            if not concept:
-                continue
-            if 'negative' in concept.concept_name.lower():
-                data['no_hepatitis_b_status'] = True
-                data['hepatitis_b_status'] = False
-            elif 'positive' in concept.concept_name.lower():
-                data['no_hepatitis_b_status'] = False
-                data['hepatitis_b_status'] = True
+        result = _infection_value(m)
+        if result == 'negative':
+            data['no_hepatitis_b_status'] = True
+            data['hepatitis_b_status'] = False
+        elif result == 'positive':
+            data['no_hepatitis_b_status'] = False
+            data['hepatitis_b_status'] = True
 
     hepc_measurements = measurements.filter(
         measurement_concept__concept_code__in=['5196-1']
+    ).union(
+        measurements.filter(measurement_source_value__in=['5196-1'])
     )
     for m in hepc_measurements:
-        if m.value_as_concept_id:
-            concept = _cc_by_id(m.value_as_concept_id)
-            if not concept:
-                continue
-            if 'negative' in concept.concept_name.lower():
-                data['no_hepatitis_c_status'] = True
-                data['hepatitis_c_status'] = False
-            elif 'positive' in concept.concept_name.lower():
-                data['no_hepatitis_c_status'] = False
-                data['hepatitis_c_status'] = True
+        result = _infection_value(m)
+        if result == 'negative':
+            data['no_hepatitis_c_status'] = True
+            data['hepatitis_c_status'] = False
+        elif result == 'positive':
+            data['no_hepatitis_c_status'] = False
+            data['hepatitis_c_status'] = True
+
+    return data
+
+
+def _get_mm_specific_data(person: Person) -> dict:
+    """Derive MM-specific boolean and coded fields from OMOP Observation table.
+
+    Covers fields not derivable via _LOINC_LAB_FIELDS (boolean / string-valued
+    observations): plasma_cell_leukemia, bone_lesions, meets_crab.
+    Uses measurement_source_value as the LOINC lookup since Concept rows may not
+    be loaded in all environments.
+    """
+    data = {}
+
+    # Query Measurement first (upload handler routes all FHIR Obs through Measurement
+    # when they have a recognisable LOINC code).
+    MM_LOINC_CODES = {
+        '47082-2': 'plasma_cell_leukemia',   # Plasma cell leukemia status (boolean)
+        '24646-7': 'bone_lesions',            # Bone lesion presence (boolean → text)
+        '89599-5': 'meets_crab',              # CRAB criteria met (boolean)
+    }
+
+    mm_measurements = (
+        Measurement.objects
+        .filter(person=person,
+                measurement_source_value__in=list(MM_LOINC_CODES.keys()))
+        .order_by('measurement_date')
+    )
+    def _coerce_mm_boolean(number_value, string_value):
+        if number_value is not None:
+            return bool(number_value)
+        if string_value:
+            return string_value.lower() in ('true', '1', 'yes', 'present')
+        return None
+
+    def _set_mm_field(field, bool_val):
+        if bool_val is None or field in data:
+            return
+        if field == 'bone_lesions':
+            data[field] = 'Present' if bool_val else 'Absent'
+        else:
+            data[field] = bool_val
+
+    for m in mm_measurements:
+        field = MM_LOINC_CODES.get(m.measurement_source_value)
+        _set_mm_field(field, _coerce_mm_boolean(m.value_as_number, m.value_as_string))
+
+    # Observation rows should supplement missing fields, not only act as an
+    # all-or-nothing fallback, because some environments split MM facts across
+    # Measurement and Observation tables.
+    mm_obs = (
+        Observation.objects
+        .filter(person=person,
+                observation_source_value__in=list(MM_LOINC_CODES.keys()))
+        .order_by('observation_date')
+    )
+    for o in mm_obs:
+        field = MM_LOINC_CODES.get(o.observation_source_value)
+        _set_mm_field(field, _coerce_mm_boolean(o.value_as_number, o.value_as_string))
+
+    # ── meets_slim: derived from plasma cells and FLC ratio in OMOP ─────────
+    # SLiM = Sixty (plasma cells ≥60%), Light chain ratio ≥100, or MRI lesions
+    # (MRI lesions are not tracked in OMOP, so we check plasma cells and FLC)
+    slim_rows = (
+        Measurement.objects
+        .filter(
+            person=person,
+            measurement_source_value__in=['26098-4', '33944-8', '33945-5'],
+            value_as_number__isnull=False,
+        )
+        .values('measurement_source_value', 'value_as_number')
+    )
+    slim_vals = {}
+    for row in slim_rows:
+        slim_vals.setdefault(row['measurement_source_value'], []).append(
+            float(row['value_as_number'])
+        )
+
+    plasma_pcts = slim_vals.get('26098-4', [])
+    kappas = slim_vals.get('33944-8', [])
+    lambdas = slim_vals.get('33945-5', [])
+
+    meets_slim = False
+    # Sixty criterion: any plasma cells measurement ≥60%
+    if any(v >= 60.0 for v in plasma_pcts):
+        meets_slim = True
+    # Light-chain ratio criterion: ratio ≥100 in either direction
+    elif kappas and lambdas:
+        k = kappas[-1]
+        lam = lambdas[-1]
+        if lam > 0 and k / lam >= 100:
+            meets_slim = True
+        elif k > 0 and lam / k >= 100:
+            meets_slim = True
+
+    data['meets_slim'] = meets_slim
+
+    # ── meets_crab fallback: compute from OMOP Measurements when obs missing ─
+    if 'meets_crab' not in data:
+        crab_rows = (
+            Measurement.objects
+            .filter(
+                person=person,
+                measurement_source_value__in=['718-7', '59260-0', '17861-6', '2000-0', '2164-2', '33914-3'],
+                value_as_number__isnull=False,
+            )
+            .values('measurement_source_value', 'value_as_number')
+        )
+        crab_vals = {}
+        for row in crab_rows:
+            crab_vals.setdefault(row['measurement_source_value'], []).append(float(row['value_as_number']))
+
+        hgb_vals = crab_vals.get('718-7', []) or crab_vals.get('59260-0', [])
+        ca_vals = crab_vals.get('17861-6', []) or crab_vals.get('2000-0', [])
+        crcl_vals = crab_vals.get('2164-2', []) or crab_vals.get('33914-3', [])
+
+        crab_anemia = hgb_vals and min(hgb_vals) < 10.0
+        crab_calcium = ca_vals and max(ca_vals) > 11.0
+        crab_renal = crcl_vals and min(crcl_vals) < 40.0
+        crab_bone = data.get('bone_lesions') == 'Present'
+
+        if any([crab_anemia, crab_calcium, crab_renal, crab_bone]):
+            data['meets_crab'] = True
 
     return data
 
@@ -1076,22 +1522,6 @@ def _get_assessment_data(person: Person) -> dict:
         .select_related('observation_concept')
         .order_by('-observation_date')
     )
-
-    response_obs = observations.filter(
-        observation_concept__concept_code__in=[
-            '182840001', '182841002', '182843004', '182842009',
-        ]
-    )
-    if response_obs.exists():
-        response_map = {
-            '182840001': 'Complete Response',
-            '182841002': 'Partial Response',
-            '182843004': 'Stable Disease',
-            '182842009': 'Progressive Disease',
-        }
-        code = response_obs.first().observation_concept.concept_code
-        if code in response_map:
-            data['best_response'] = response_map[code]
 
     tumor_stage_obs = Observation.objects.filter(
         person=person,
@@ -1137,6 +1567,12 @@ def _get_laboratory_data(person: Person) -> dict:
     for measurement in measurements:
         if not measurement.measurement_concept:
             continue
+        if (
+            measurement.measurement_source_value
+            and measurement.measurement_concept.concept_code
+            and measurement.measurement_source_value != measurement.measurement_concept.concept_code
+        ):
+            continue
         concept_name = measurement.measurement_concept.concept_name.lower()
         for lab_key, (field_name, unit_field) in legacy_lab_mappings.items():
             if field_name in data:
@@ -1148,27 +1584,15 @@ def _get_laboratory_data(person: Person) -> dict:
 
     # --- New UI fields via LOINC concept code (primary path) ---
     loinc_ms = measurements.filter(
-        measurement_concept__vocabulary_id='LOINC',
-        measurement_concept__concept_code__in=_LOINC_LAB_FIELDS.keys(),
         value_as_number__isnull=False,
     ).select_related('measurement_concept')
     for m in loinc_ms:
-        code = m.measurement_concept.concept_code
+        code = _measurement_code(m)
+        if code not in _LOINC_LAB_FIELDS:
+            continue
         field, cast = _LOINC_LAB_FIELDS[code]
         if field not in data:
             data[field] = cast(m.value_as_number)
-
-    # --- New UI fields via LOINC code stored as source_value (FHIR upload path) ---
-    unfound = {f for (f, _) in _LOINC_LAB_FIELDS.values() if f not in data}
-    if unfound:
-        loinc_sv_ms = measurements.filter(
-            measurement_source_value__in=_LOINC_LAB_FIELDS.keys(),
-            value_as_number__isnull=False,
-        )
-        for m in loinc_sv_ms:
-            field, cast = _LOINC_LAB_FIELDS[m.measurement_source_value]
-            if field not in data:
-                data[field] = cast(m.value_as_number)
 
     # --- New UI fields via display-name source_value (legacy/generator path) ---
     unfound = {f for (f, _) in _LOINC_LAB_FIELDS.values() if f not in data}
@@ -1191,34 +1615,32 @@ def _get_performance_data(person: Person) -> dict:
     observations = (
         Observation.objects.filter(person=person)
         .select_related('observation_concept')
-        .order_by('-observation_date')
+        .order_by('-observation_date', '-observation_id')
     )
 
-    for obs in observations:
-        if not obs.observation_concept:
-            continue
-        concept_name = obs.observation_concept.concept_name.lower()
-        if 'ecog' in concept_name and obs.value_as_number is not None:
-            data['ecog_performance_status'] = int(obs.value_as_number)
-            break
-        elif 'karnofsky' in concept_name and obs.value_as_number is not None:
-            data['karnofsky_performance_score'] = int(obs.value_as_number)
-            break
+    ecog = (
+        observations
+        .filter(observation_concept__concept_name__icontains='ecog')
+        .exclude(value_as_number__isnull=True)
+        .first()
+    )
+    if ecog:
+        data['ecog_performance_status'] = int(ecog.value_as_number)
+
+    karnofsky = (
+        observations
+        .filter(observation_concept__concept_name__icontains='karnofsky')
+        .exclude(value_as_number__isnull=True)
+        .first()
+    )
+    if karnofsky:
+        data['karnofsky_performance_score'] = int(karnofsky.value_as_number)
 
     return data
 
 
 def _get_genetic_mutations(person: Person) -> dict:
     data = {}
-
-    genetic_loinc_codes = {
-        '21636-6': 'BRCA1',
-        '21637-4': 'BRCA2',
-        '21667-1': 'TP53',
-        '48013-7': 'KRAS',
-        '62862-8': 'EGFR',
-        '62318-1': 'PIK3CA',
-    }
 
     origin_concepts = {255395001: 'germline', 255461003: 'somatic'}
     interpretation_concepts = {30166007: 'pathogenic', 10828004: 'benign', 42425007: 'vus'}
@@ -1227,13 +1649,15 @@ def _get_genetic_mutations(person: Person) -> dict:
 
     genetic_measurements = Measurement.objects.filter(
         person=person,
-        measurement_concept__concept_code__in=genetic_loinc_codes.keys()
+    ).filter(
+        models.Q(measurement_concept__concept_code__in=_GENETIC_MUTATION_LOINCS.keys())
+        | models.Q(measurement_source_value__in=_GENETIC_MUTATION_LOINCS.keys())
     ).order_by('-measurement_date')
 
     for measurement in genetic_measurements:
         if not measurement.value_as_string:
             continue
-        gene = genetic_loinc_codes.get(measurement.measurement_concept.concept_code)
+        gene = _GENETIC_MUTATION_LOINCS.get(_measurement_code(measurement))
         if not gene:
             continue
 
@@ -1454,6 +1878,18 @@ def _get_prior_procedures(person: Person) -> dict:
 # Derived fields (must run after all sections are populated)
 # ---------------------------------------------------------------------------
 
+def _parse_date_value(v):
+    """Parse a date value that may be a date object or an ISO date string."""
+    if isinstance(v, date):
+        return v
+    if isinstance(v, str):
+        try:
+            return date.fromisoformat(v)
+        except ValueError:
+            return None
+    return None
+
+
 def _compute_derived_fields(patient_info: PatientRecord) -> None:
     """Compute fields that depend on other PatientRecord fields being set."""
     serum_mp = patient_info.monoclonal_protein_serum
@@ -1530,127 +1966,141 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
     elif creatinine is not None:
         patient_info.renal_adequacy_status = float(creatinine) <= 1.5
 
+    # last_treatment — latest therapy end date; falls back to latest start date
+    _end_dates = [
+        _parse_date_value(patient_info.first_line_end_date),
+        _parse_date_value(patient_info.second_line_end_date),
+        _parse_date_value(patient_info.later_end_date),
+    ]
+    _start_dates = [
+        _parse_date_value(patient_info.first_line_start_date or patient_info.first_line_date),
+        _parse_date_value(patient_info.second_line_start_date or patient_info.second_line_date),
+        _parse_date_value(patient_info.later_start_date or patient_info.later_date),
+    ]
+    _valid_ends = [d for d in _end_dates if d]
+    _valid_starts = [d for d in _start_dates if d]
+    _lt_candidates = _valid_ends or _valid_starts
+    if _lt_candidates:
+        patient_info.last_treatment = max(_lt_candidates)
+
 
 def _get_wearable_data(person: Person) -> dict:
     """Derive 30-day wearable summaries from OMOP Measurement/Observation rows."""
     data = {}
 
-    all_loinc_codes = list(WEARABLE_LOINC.values())
-
-    # Find the latest wearable sample date across Measurements and Observations.
-    # Sleep is stored in Observation by the PHR bridge; all other metrics go into Measurement.
-    latest_m = (
+    measurement_rows = list(
         Measurement.objects.filter(
             person=person,
-            measurement_concept__concept_code__in=all_loinc_codes,
             value_as_number__isnull=False,
         )
-        .annotate(
-            sample_datetime=Coalesce(
-                'measurement_datetime',
-                Cast('measurement_date', output_field=DateTimeField()),
-            )
+        .filter(
+            models.Q(measurement_concept__concept_code__in=WEARABLE_LOINC.values())
+            | models.Q(measurement_source_value__in=WEARABLE_LOINC.values())
         )
-        .order_by('-sample_datetime')
-        .first()
+        .values_list(
+            'measurement_concept__concept_code',
+            'measurement_source_value',
+            'measurement_date',
+            'value_as_number',
+        )
     )
-    latest_o = (
+    observation_rows = list(
         Observation.objects.filter(
             person=person,
-            observation_concept__concept_code=WEARABLE_LOINC['sleep_duration'],
             value_as_number__isnull=False,
         )
-        .annotate(
-            sample_datetime=Coalesce(
-                'observation_datetime',
-                Cast('observation_date', output_field=DateTimeField()),
-            )
+        .filter(
+            models.Q(observation_concept__concept_code=WEARABLE_LOINC['sleep_duration'])
+            | models.Q(observation_source_value=WEARABLE_LOINC['sleep_duration'])
         )
-        .order_by('-sample_datetime')
-        .first()
+        .values_list('observation_date', 'value_as_number')
     )
-    if not latest_m and not latest_o:
+
+    if not measurement_rows and not observation_rows:
         return data
 
-    def _to_dt(obj, dt_field, date_field):
-        dt = getattr(obj, dt_field, None)
-        if dt:
-            return dt
-        d = getattr(obj, date_field)
-        return timezone.make_aware(
-            timezone.datetime.combine(d, timezone.datetime.min.time())
-        )
+    # Key each row by the wearable LOINC it actually carries. A row may have an
+    # unrelated concept_code (e.g. an unmapped source concept) yet a wearable
+    # measurement_source_value — prefer whichever is a known wearable code so
+    # the source_value fallback isn't shadowed by a present-but-unrelated concept.
+    _wearable_codes = set(WEARABLE_LOINC.values())
+    rows_by_code: dict[str, list[tuple[date, float]]] = {}
+    for concept_code, source_value, mdate, val in measurement_rows:
+        code = concept_code if concept_code in _wearable_codes else source_value
+        if code not in _wearable_codes:
+            continue
+        rows_by_code.setdefault(code, []).append((mdate, float(val)))
 
-    candidates = []
-    if latest_m:
-        candidates.append(_to_dt(latest_m, 'measurement_datetime', 'measurement_date'))
-    if latest_o:
-        candidates.append(_to_dt(latest_o, 'observation_datetime', 'observation_date'))
-    anchor_dt = max(candidates)
-    data['wearable_last_sync_at'] = anchor_dt
-
-    window_start = anchor_dt.date() - timedelta(days=29)
-    window_end = anchor_dt.date()
-
-    measurement_rows = (
-        Measurement.objects.filter(
-            person=person,
-            measurement_concept__concept_code__in=[
-                code for key, code in WEARABLE_LOINC.items() if key != 'sleep_duration'
-            ],
-            value_as_number__isnull=False,
-            measurement_date__gte=window_start,
-            measurement_date__lte=window_end,
-        )
-        .values_list('measurement_concept__concept_code', 'measurement_date', 'value_as_number')
-    )
-    rows_by_code = {}
-    for concept_code, mdate, val in measurement_rows:
-        rows_by_code.setdefault(concept_code, []).append((mdate, val))
-
-    def _fetch_daily(metric_key):
-        """Return {date: [valid float values]} for a metric over the 30-day window.
-
-        Raises KeyError if metric_key is absent from WEARABLE_ARTIFACT_BOUNDS —
-        a missing entry means artifact filtering is silently disabled, so we fail
-        loudly instead.
-        """
+    def _metric_daily(metric_key):
         loinc_code = WEARABLE_LOINC[metric_key]
         lo, hi = WEARABLE_ARTIFACT_BOUNDS[metric_key]
         daily: dict[date, list[float]] = {}
         for mdate, val in rows_by_code.get(loinc_code, []):
-            fval = float(val)
-            if not (lo <= fval <= hi):
-                continue
-            daily.setdefault(mdate, []).append(fval)
+            if lo <= val <= hi:
+                daily.setdefault(mdate, []).append(val)
         return daily
 
-    # ---- Fetch all measurement metrics up front ----------------------
-    steps_daily  = _fetch_daily('steps')
-    active_daily = _fetch_daily('active_minutes')
-    rhr_daily    = _fetch_daily('resting_hr')
-    hrv_daily    = _fetch_daily('hrv_sdnn')
-    spo2_daily   = _fetch_daily('spo2')
-    rr_daily     = _fetch_daily('respiratory_rate')
+    steps_daily = _metric_daily('steps')
+    active_daily = _metric_daily('active_minutes')
+    rhr_daily = _metric_daily('resting_hr')
+    hrv_daily = _metric_daily('hrv_sdnn')
+    spo2_daily = _metric_daily('spo2')
+    rr_daily = _metric_daily('respiratory_rate')
 
-    steps_totals  = {d: sum(vs) for d, vs in steps_daily.items()}
-    active_totals = {d: sum(vs) for d, vs in active_daily.items()}
-
-    # Sleep comes from Observation, not Measurement (PHR bridge convention)
-    sleep_obs = Observation.objects.filter(
-        person=person,
-        observation_concept__concept_code=WEARABLE_LOINC['sleep_duration'],
-        value_as_number__isnull=False,
-        observation_date__gte=window_start,
-        observation_date__lte=window_end,
-    ).values_list('observation_date', 'value_as_number')
     sleep_daily: dict[date, list[float]] = {}
     lo_s, hi_s = WEARABLE_ARTIFACT_BOUNDS['sleep_duration']
-    for odate, val in sleep_obs:
+    for odate, val in observation_rows:
         fval = float(val)
         if lo_s <= fval <= hi_s:
             sleep_daily.setdefault(odate, []).append(fval)
+    for mdate, val in rows_by_code.get(WEARABLE_LOINC['sleep_duration'], []):
+        if lo_s <= val <= hi_s:
+            sleep_daily.setdefault(mdate, []).append(val)
 
+    all_valid_days = sorted(
+        steps_daily.keys() | active_daily.keys()
+        | rhr_daily.keys() | hrv_daily.keys()
+        | spo2_daily.keys() | rr_daily.keys()
+        | sleep_daily.keys()
+    )
+    if not all_valid_days:
+        return data
+
+    def _window_valid_day_count(anchor_date):
+        start = anchor_date - timedelta(days=29)
+        return sum(start <= day <= anchor_date for day in all_valid_days)
+
+    anchor_date = None
+    for candidate in reversed(all_valid_days):
+        if _window_valid_day_count(candidate) >= WEARABLE_MIN_VALID_DAYS:
+            anchor_date = candidate
+            break
+    if anchor_date is None:
+        anchor_date = all_valid_days[-1]
+
+    window_start = anchor_date - timedelta(days=29)
+    window_end = anchor_date
+    data['wearable_last_sync_at'] = timezone.make_aware(
+        timezone.datetime.combine(anchor_date, timezone.datetime.min.time())
+    )
+
+    def _within_window(daily_map):
+        return {
+            day: values
+            for day, values in daily_map.items()
+            if window_start <= day <= window_end
+        }
+
+    steps_daily = _within_window(steps_daily)
+    active_daily = _within_window(active_daily)
+    rhr_daily = _within_window(rhr_daily)
+    hrv_daily = _within_window(hrv_daily)
+    spo2_daily = _within_window(spo2_daily)
+    rr_daily = _within_window(rr_daily)
+    sleep_daily = _within_window(sleep_daily)
+
+    steps_totals = {d: sum(vs) for d, vs in steps_daily.items()}
+    active_totals = {d: sum(vs) for d, vs in active_daily.items()}
     sleep_nightly = {d: sum(vs) for d, vs in sleep_daily.items()}
 
     # ---- Coverage ratio (union of all wearable metric days) ----------

@@ -3,7 +3,7 @@ Tests for enrich_breast_cancer_omop_data management command.
 
 Covers:
   - Backfilling null ECOG/Karnofsky/stage Measurement values
-  - Inserting missing tobacco/staging/best_response Observation rows
+  - Inserting missing tobacco/staging/response-status Observation rows
   - Idempotency (re-running doesn't duplicate rows or re-randomize values)
   - --dry-run makes no persisted changes
   - patient_record reflects the enriched OMOP data afterwards
@@ -13,7 +13,7 @@ from io import StringIO
 import pytest
 from django.core.management import call_command, CommandError
 
-from omop_core.models import Measurement, Observation, PatientRecord
+from omop_core.models import DrugExposure, Measurement, Observation, PatientRecord
 from tests.factories import (
     ConceptFactory, PersonFactory, PatientRecordFactory,
     MeasurementFactory, VocabularyFactory,
@@ -34,7 +34,7 @@ def _seed_loinc_concepts_the_command_assumes_exist():
     directly — where these were loaded by load_athena_vocabularies.py /
     seed_omop_concepts.py). A fresh test DB has none of them, so seed the
     same set here; the command itself only creates the SNOMED concepts that
-    were confirmed missing on staging (tobacco/best_response)."""
+    were confirmed missing on staging (tobacco/response-status)."""
     codes = {
         '21905-5': 'Primary tumor.clinical [Class] Cancer',
         '21901-4': 'Distant metastases.pathology [Class] Cancer',
@@ -183,6 +183,18 @@ class TestRefreshesPatientRecord:
 
         record = PatientRecord.objects.get(person=person)
         assert record.no_tobacco_use_status is not None or record.tobacco_use_details is not None
+
+    def test_missing_therapy_backfill_creates_regimen_concept_and_patient_record_id(self):
+        person = PersonFactory()
+        PatientRecordFactory(person=person, stage='IV')
+
+        call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id), confirm=True)
+
+        record = PatientRecord.objects.get(person=person)
+        exposure = DrugExposure.objects.get(person=person)
+        assert record.first_line_therapy_id is not None
+        assert exposure.drug_concept_id == record.first_line_therapy_id
+        assert record.first_line_therapy
 
     def test_refresh_is_deferred_until_after_all_patients_are_enriched(self, monkeypatch):
         person_a = PersonFactory()

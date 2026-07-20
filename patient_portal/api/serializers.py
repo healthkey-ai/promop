@@ -184,6 +184,7 @@ class GenderField(serializers.CharField):
 class PatientRecordSerializer(serializers.ModelSerializer):
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)
     patient_name = serializers.SerializerMethodField()
+    name = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
     gender = GenderField(required=False, allow_blank=True, allow_null=True)
     refractory_status = serializers.CharField(source='treatment_refractory_status', read_only=True)
@@ -201,10 +202,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         read_only_fields = (
             'organization', 'person', 'created_at', 'updated_at',
             'first_line_therapy_display', 'second_line_therapy_display', 'later_therapy_display',
-            # best_response is derived from OMOP Observations by refresh_patient_record;
-            # sync_to_omop has no write-through category for it, so a client PATCH would
-            # be silently discarded on the next refresh. Read-only until that path exists.
-            'best_response',
+            'death_date',
             # Wearable summaries are written by the device-sync service, never by the client API.
             'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
             'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
@@ -218,6 +216,9 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             full_name = f"{obj.person.given_name or ''} {obj.person.family_name or ''}".strip()
             return full_name if full_name else f"Patient {obj.person.person_id}"
         return f"Patient {obj.person.person_id}"
+
+    def get_name(self, obj):
+        return self.get_patient_name(obj)
 
     def to_representation(self, instance):
         # Bulk-fetch all Concept rows referenced by therapy_id fields in one query,

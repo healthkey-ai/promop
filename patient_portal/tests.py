@@ -24,9 +24,11 @@ from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
     Person, PatientRecord, ProvenanceRecord,
     ConditionOccurrence, DrugExposure, Measurement, ProcedureOccurrence,
+    Death,
     Relationship, ConceptRelationship, ConceptAncestor,
     SctEligibility,
 )
+from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
 from omop_oncology.models import Episode, EpisodeEvent
 
 
@@ -339,6 +341,194 @@ class FhirUploadOmopTablesTest(FhirUploadBase):
                 f'Episode {episode.episode_number} (id={episode.episode_id}) has no EpisodeEvents',
             )
 
+    def test_lot_outcome_observation_created_from_medication_statement(self):
+        """The LOT-1 therapy-outcome extension is persisted to OMOP as a
+        LOT-1-outcome Observation (source of truth for the derived outcome)."""
+        from omop_core.models import Observation
+        obs = Observation.objects.filter(
+            person=self._person, observation_source_value='LOT-1-outcome',
+        )
+        self.assertEqual(obs.count(), 1)
+        self.assertEqual(obs.first().value_as_string, 'CR')
+
+    def test_deceased_patient_creates_death_row(self):
+        bundle = _make_fhir_bundle()
+        patient = next(
+            entry['resource']
+            for entry in bundle['entry']
+            if entry['resource']['resourceType'] == 'Patient'
+        )
+        patient['id'] = 'test-patient-jane-deceased'
+        patient['name'] = [{'family': 'Deceased', 'given': ['Jane']}]
+        patient['deceasedDateTime'] = '2024-04-05T12:34:00Z'
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'deceased_bundle.json'
+
+        response = self.client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+        )
+
+        self.assertIn(response.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
+        person = Person.objects.get(family_name='Deceased', given_name='Jane')
+        death = Death.objects.get(person=person)
+        self.assertEqual(death.death_date, date(2024, 4, 5))
+        provenance = ProvenanceRecord.objects.get(object_id=person.person_id, content_type__model='death')
+        self.assertEqual(provenance.source, 'EHR_SYNC')
+        self.assertIsNone(provenance.modification_reason)
+
+    def test_deceased_boolean_death_row_records_inferred_date_provenance(self):
+        bundle = _make_fhir_bundle()
+        patient = next(
+            entry['resource']
+            for entry in bundle['entry']
+            if entry['resource']['resourceType'] == 'Patient'
+        )
+        patient['id'] = 'test-patient-jane-deceased-bool'
+        patient['name'] = [{'family': 'BooleanDeceased', 'given': ['Jane']}]
+        patient['deceasedBoolean'] = True
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'deceased_boolean_bundle.json'
+
+        response = self.client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+        )
+
+        self.assertIn(response.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
+        person = Person.objects.get(family_name='BooleanDeceased', given_name='Jane')
+        death = Death.objects.get(person=person)
+        self.assertIsNotNone(death.death_date)
+        provenance = ProvenanceRecord.objects.get(object_id=person.person_id, content_type__model='death')
+        self.assertEqual(provenance.source, 'EHR_SYNC')
+        self.assertIn('deceasedBoolean=true', provenance.modification_reason)
+
+
+class FhirUploadStringLabValueTest(FhirUploadBase):
+    """A string-valued lab Observation (e.g. ISS stage) must keep its value on
+    import and drive derivation (regression for issue #218)."""
+
+    def _upload_stage_bundle(self):
+        bundle = {
+            'resourceType': 'Bundle',
+            'type': 'collection',
+            'entry': [
+                {'resource': {
+                    'resourceType': 'Patient',
+                    'id': 'stage-pt-1',
+                    'name': [{'family': 'Stagevalue', 'given': ['Iss']}],
+                    'gender': 'female',
+                    'birthDate': '1960-04-01',
+                }},
+                {'resource': {
+                    'resourceType': 'Observation',
+                    'status': 'final',
+                    'subject': {'reference': 'Patient/stage-pt-1'},
+                    'effectiveDateTime': '2023-05-01',
+                    'category': [{'coding': [{
+                        'system': 'http://terminology.hl7.org/CodeSystem/observation-category',
+                        'code': 'laboratory'}]}],
+                    'code': {'coding': [{'system': 'http://loinc.org', 'code': '21908-9',
+                                         'display': 'ISS stage'}], 'text': 'ISS stage'},
+                    'valueString': 'ISS II',
+                }},
+                {'resource': {
+                    'resourceType': 'Observation',
+                    'status': 'final',
+                    'subject': {'reference': 'Patient/stage-pt-1'},
+                    'effectiveDateTime': '2023-05-01',
+                    'category': [{'coding': [{
+                        'system': 'http://terminology.hl7.org/CodeSystem/observation-category',
+                        'code': 'laboratory'}]}],
+                    'code': {'coding': [{'system': 'http://loinc.org', 'code': '21908-9-riss',
+                                         'display': 'R-ISS stage'}], 'text': 'R-ISS stage'},
+                    'valueString': 'R-ISS III',
+                }},
+            ],
+        }
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'stage_bundle.json'
+        return self.client.post(
+            '/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart',
+        )
+
+    def test_string_lab_value_persisted(self):
+        from omop_core.models import Measurement
+        resp = self._upload_stage_bundle()
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
+
+        person = Person.objects.get(family_name='Stagevalue', given_name='Iss')
+        measurement = Measurement.objects.get(
+            person=person, measurement_source_value='21908-9',
+        )
+        self.assertEqual(measurement.value_as_string, 'ISS II')
+
+    def test_stage_derivation_prefers_riss(self):
+        self._upload_stage_bundle()
+        person = Person.objects.get(family_name='Stagevalue', given_name='Iss')
+        record = PatientRecord.objects.get(person=person)
+        # Both ISS and R-ISS present → R-ISS is preferred for MM.
+        self.assertEqual(record.stage, 'R-ISS III')
+
+    def test_stage_with_condition_prefers_riss_end_to_end(self):
+        """Real MM bundles carry a Condition with both ISS and R-ISS stage
+        entries. The Condition.stage patch (applied after refresh) must also
+        prefer R-ISS, otherwise it overrides the derived value with ISS."""
+        pid = 'mm-cond-1'
+
+        def _obs(code, disp, val):
+            return {'resource': {
+                'resourceType': 'Observation', 'status': 'final',
+                'subject': {'reference': f'Patient/{pid}'},
+                'effectiveDateTime': '2023-05-01',
+                'category': [{'coding': [{
+                    'system': 'http://terminology.hl7.org/CodeSystem/observation-category',
+                    'code': 'laboratory'}]}],
+                'code': {'coding': [{'system': 'http://loinc.org', 'code': code,
+                                     'display': disp}], 'text': disp},
+                'valueString': val,
+            }}
+
+        bundle = {
+            'resourceType': 'Bundle', 'type': 'collection',
+            'entry': [
+                {'resource': {
+                    'resourceType': 'Patient', 'id': pid,
+                    'name': [{'family': 'Mmcond', 'given': ['Joe']}],
+                    'gender': 'male', 'birthDate': '1955-01-01',
+                }},
+                {'resource': {
+                    'resourceType': 'Condition', 'id': 'c1',
+                    'subject': {'reference': f'Patient/{pid}'},
+                    'code': {'text': 'Multiple Myeloma', 'coding': [
+                        {'system': 'http://snomed.info/sct', 'code': '55921005',
+                         'display': 'Multiple myeloma'}]},
+                    'onsetDateTime': '2023-01-01',
+                    'stage': [
+                        {'summary': {'text': 'ISS Stage II'}},
+                        {'summary': {'text': 'R-ISS Stage III'}},
+                    ],
+                }},
+                _obs('21908-9', 'ISS stage', 'ISS II'),
+                _obs('21908-9-riss', 'R-ISS stage', 'R-ISS III'),
+            ],
+        }
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'mm_cond.json'
+        resp = self.client.post(
+            '/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
+
+        record = PatientRecord.objects.get(person=Person.objects.get(family_name='Mmcond'))
+        self.assertEqual(record.stage, 'R-ISS III')
+
 
 # ---------------------------------------------------------------------------
 # 2. PatientRecord derivation tests
@@ -393,6 +583,21 @@ class FhirUploadPatientRecordTest(FhirUploadBase):
         self.assertEqual(self._pi.second_line_start_date, date(2023, 1, 15))
         self.assertIsNone(self._pi.second_line_end_date,  'Open-ended LOT 2 should have no end date')
 
+    def test_death_date_derived_from_omop_death(self):
+        ehr_concept = Concept.objects.get(concept_id=32817)
+        Death.objects.update_or_create(
+            person=self._person,
+            defaults={
+                'death_date': date(2024, 4, 5),
+                'death_type_concept': ehr_concept,
+            },
+        )
+        from omop_core.services.patient_record_service import refresh_patient_record
+
+        refreshed = refresh_patient_record(self._person)
+
+        self.assertEqual(refreshed.death_date, date(2024, 4, 5))
+
 
 # ---------------------------------------------------------------------------
 # 3. UI API view tests — data visible through endpoints the frontend uses
@@ -434,7 +639,7 @@ class UIViewsReflectUploadedDataTest(FhirUploadBase):
                       'first_line_start_date', 'first_line_end_date',
                       'second_line_outcome', 'second_line_discontinuation_reason',
                       'later_outcome', 'later_discontinuation_reason',
-                      'treatment_refractory_status', 'relapse_count', 'best_response'):
+                      'treatment_refractory_status', 'relapse_count'):
             self.assertIn(field, record, f'Field {field!r} missing from patient-info response')
 
     def test_patient_info_endpoint_lab_values_match_observations(self):
@@ -1072,7 +1277,7 @@ class ConditionToPatientRecordTest(_SignalBase):
         )
         pi = self._get_pi()
         self.assertIsNotNone(pi, 'PatientRecord not created after ConditionOccurrence save')
-        self.assertEqual(pi.disease, 'Breast cancer')
+        self.assertEqual(pi.disease, 'Breast Cancer')
 
     def test_create_cancer_condition_sets_diagnosis_date(self):
         ConditionOccurrence.objects.create(
@@ -1146,7 +1351,7 @@ class ConditionToPatientRecordTest(_SignalBase):
         cond.condition_concept = self.cancer_concept
         cond.save()
 
-        self.assertEqual(self._get_pi().disease, 'Breast cancer')
+        self.assertEqual(self._get_pi().disease, 'Breast Cancer')
 
     def test_delete_cancer_condition_clears_disease(self):
         cond = ConditionOccurrence.objects.create(
@@ -1156,7 +1361,7 @@ class ConditionToPatientRecordTest(_SignalBase):
             condition_start_date=date(2022, 1, 1),
             condition_type_concept=self.type_concept,
         )
-        self.assertEqual(self._get_pi().disease, 'Breast cancer')
+        self.assertEqual(self._get_pi().disease, 'Breast Cancer')
 
         cond.delete()
 
@@ -1999,20 +2204,6 @@ class SmartPatientRecordReadOnlyTest(_SmartBase):
     def test_patient_info_read_with_write_token_succeeds(self):
         resp = self.write_client.get('/api/patient-info/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-
-    def test_patient_info_patch_ignores_best_response(self):
-        """best_response is derived-only (no sync_to_omop write-through) — PATCH must not persist it,
-        or the value would silently vanish on the next refresh_patient_record (promop#205)."""
-        PatientRecord.objects.get_or_create(person=self.person, defaults={'organization': self.organization})
-        resp = self.write_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'best_response': 'Complete Response'},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        pi = PatientRecord.objects.get(person=self.person)
-        self.assertIsNone(pi.best_response)
-
 
 class SmartFhirUploadTest(_SmartBase):
     """Service client can bulk-ingest a patient via the FHIR upload endpoint
@@ -3135,13 +3326,13 @@ class PatientRecordOmopSyncTest(_SmartBase):
         person = Person.objects.create(person_id=91010)
         pi = PatientRecord.objects.create(person=person, organization=self.organization)
 
-        self._patch(pi, {'disease': 'Breast cancer'})
+        self._patch(pi, {'disease': 'Breast Cancer'})
 
         self.assertEqual(
             ConditionOccurrence.objects.filter(person=person).count(), 1
         )
         co = ConditionOccurrence.objects.get(person=person)
-        self.assertEqual(co.condition_source_value, 'Breast cancer')
+        self.assertEqual(co.condition_source_value, 'Breast Cancer')
 
     def test_patch_stage_appends_condition_occurrence(self):
         """Two PATCHes of 'stage' create two separate ConditionOccurrence rows."""
@@ -3190,6 +3381,40 @@ class PatientRecordOmopSyncTest(_SmartBase):
         self.assertEqual(ep.episode_source_value, 'AC-T')
         from datetime import date
         self.assertEqual(ep.episode_start_date, date(2023, 1, 15))
+
+    def test_patch_therapy_outcome_writes_lot_outcome_observation(self):
+        """PATCHing a line's outcome persists a LOT-{n}-outcome Observation to OMOP."""
+        from omop_core.models import Observation
+        person = Person.objects.create(person_id=91035)
+        pi = PatientRecord.objects.create(person=person, organization=self.organization)
+
+        self._patch(pi, {
+            'first_line_therapy': 'AC-T',
+            'first_line_start_date': '2023-01-15',
+            'first_line_end_date': '2023-07-01',
+            'first_line_outcome': 'Partial Response',
+        })
+
+        obs = Observation.objects.filter(person=person, observation_source_value='LOT-1-outcome')
+        self.assertEqual(obs.count(), 1)
+        self.assertEqual(obs.first().value_as_string, 'Partial Response')
+
+    def test_patch_therapy_outcome_edit_updates_observation_in_place(self):
+        """Editing a line's outcome updates the existing Observation, no duplicate."""
+        from omop_core.models import Observation
+        person = Person.objects.create(person_id=91036)
+        pi = PatientRecord.objects.create(person=person, organization=self.organization)
+
+        self._patch(pi, {
+            'first_line_therapy': 'AC-T',
+            'first_line_start_date': '2023-01-15',
+            'first_line_outcome': 'Partial Response',
+        })
+        self._patch(pi, {'first_line_outcome': 'Complete Response'})
+
+        obs = Observation.objects.filter(person=person, observation_source_value='LOT-1-outcome')
+        self.assertEqual(obs.count(), 1)
+        self.assertEqual(obs.first().value_as_string, 'Complete Response')
 
     def test_patch_therapy_links_existing_drug_exposures(self):
         """DrugExposure rows in the episode date range are linked via EpisodeEvent."""
@@ -5555,6 +5780,269 @@ class ConceptLookupTest(_SmartBase):
         self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
 
+class _ConceptFixtureBase(_SmartBase):
+    """Shared OMOP concept fixtures for the search/list endpoint tests (issue #213)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from oauth2_provider.models import AccessToken
+        from django.utils import timezone as tz
+        from omop_core.models import Concept, Vocabulary, Domain, ConceptClass
+        import datetime
+
+        # Token with no read scope — must be rejected by ScopedTokenPermission
+        cls.empty_scope_token = AccessToken.objects.create(
+            user=cls.foundation_user,
+            application=cls.app,
+            token='concept-empty-scope-token-444',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='',
+        )
+
+        for vocab_id in ('LOINC', 'SNOMED'):
+            Vocabulary.objects.get_or_create(
+                vocabulary_id=vocab_id,
+                defaults={'vocabulary_name': vocab_id, 'vocabulary_reference': '',
+                          'vocabulary_version': '', 'vocabulary_concept_id': 0},
+            )
+        for domain_id in ('Measurement', 'Condition'):
+            Domain.objects.get_or_create(
+                domain_id=domain_id,
+                defaults={'domain_name': domain_id, 'domain_concept_id': 0},
+            )
+        for class_id in ('Lab Test', 'Clinical Finding'):
+            ConceptClass.objects.get_or_create(
+                concept_class_id=class_id,
+                defaults={'concept_class_name': class_id, 'concept_class_concept_id': 0},
+            )
+
+        common = {
+            'valid_start_date': datetime.date(1970, 1, 1),
+            'valid_end_date': datetime.date(2099, 12, 31),
+        }
+        cls.creatinine_serum = Concept.objects.create(
+            concept_id=3016723, concept_name='Creatinine [Mass/volume] in Serum or Plasma',
+            vocabulary_id='LOINC', domain_id='Measurement', concept_class_id='Lab Test',
+            concept_code='2160-0', standard_concept='S', **common,
+        )
+        cls.creatinine_renal = Concept.objects.create(
+            concept_id=3016724, concept_name='Creatinine renal clearance/1.73 sq M',
+            vocabulary_id='LOINC', domain_id='Measurement', concept_class_id='Lab Test',
+            concept_code='35203-9', standard_concept=None, **common,
+        )
+        cls.creatinine_snomed = Concept.objects.create(
+            concept_id=4013964, concept_name='Creatinine measurement, serum',
+            vocabulary_id='SNOMED', domain_id='Measurement', concept_class_id='Lab Test',
+            concept_code='113075003', standard_concept='S', **common,
+        )
+        cls.diabetes = Concept.objects.create(
+            concept_id=201826, concept_name='Type 2 diabetes mellitus',
+            vocabulary_id='SNOMED', domain_id='Condition', concept_class_id='Clinical Finding',
+            concept_code='44054006', standard_concept='S', **common,
+        )
+
+    def _auth(self):
+        return {'HTTP_AUTHORIZATION': f'Bearer {self.read_token.token}'}
+
+
+class ConceptSearchTest(_ConceptFixtureBase):
+    """GET /api/v1/concepts/search/ (issue #213)"""
+
+    URL = '/api/v1/concepts/search/'
+
+    def test_search_by_name_substring(self):
+        # Membership assertions, not exact counts — seed migrations may add
+        # concepts whose names also match (same convention as ConceptListTest).
+        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 100}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        ids = {r['concept_id'] for r in results}
+        self.assertLessEqual(
+            {self.creatinine_serum.concept_id, self.creatinine_renal.concept_id,
+             self.creatinine_snomed.concept_id},
+            ids,
+        )
+        self.assertNotIn(self.diabetes.concept_id, ids)
+        self.assertTrue(all('creatinine' in r['concept_name'].lower() for r in results))
+
+    def test_search_result_shape(self):
+        resp = self.client.get(
+            self.URL, {'q': 'Type 2 diabetes', 'page_size': 100}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        match = next(
+            (r for r in results if r['concept_id'] == self.diabetes.concept_id), None,
+        )
+        self.assertEqual(match, {
+            'concept_id': 201826,
+            'concept_name': 'Type 2 diabetes mellitus',
+            'vocabulary_id': 'SNOMED',
+            'concept_code': '44054006',
+            'domain_id': 'Condition',
+            'concept_class_id': 'Clinical Finding',
+            'standard_concept': 'S',
+        })
+
+    def test_search_filtered_by_vocabulary(self):
+        resp = self.client.get(
+            self.URL,
+            {'q': 'creatinine', 'vocabulary_id': 'SNOMED', 'page_size': 100},
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        ids = {r['concept_id'] for r in results}
+        self.assertIn(self.creatinine_snomed.concept_id, ids)
+        self.assertNotIn(self.creatinine_serum.concept_id, ids)
+        self.assertTrue(all(r['vocabulary_id'] == 'SNOMED' for r in results))
+
+    def test_search_filtered_by_standard_concept(self):
+        resp = self.client.get(
+            self.URL,
+            {'q': 'creatinine', 'standard_concept': 'S', 'page_size': 100},
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {r['concept_id'] for r in resp.json()['results']}
+        self.assertNotIn(self.creatinine_renal.concept_id, ids)
+        self.assertLessEqual(
+            {self.creatinine_serum.concept_id, self.creatinine_snomed.concept_id}, ids,
+        )
+
+    def test_search_no_match_returns_empty_page(self):
+        resp = self.client.get(self.URL, {'q': 'zzz-no-such-concept'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['count'], 0)
+
+    def test_missing_q_returns_400(self):
+        resp = self.client.get(self.URL, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_short_q_returns_400(self):
+        resp = self.client.get(self.URL, {'q': 'c'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_pagination_page_size(self):
+        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 2}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.json()
+        self.assertGreaterEqual(data['count'], 3)
+        self.assertEqual(len(data['results']), 2)
+        self.assertIsNotNone(data['next'])
+
+    def test_unauthenticated_returns_401(self):
+        resp = self.client.get(self.URL, {'q': 'creatinine'})
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_expired_token_rejected(self):
+        resp = self.client.get(
+            self.URL, {'q': 'creatinine'},
+            HTTP_AUTHORIZATION=f'Bearer {self.expired_token.token}',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_empty_scope_token_rejected(self):
+        resp = self.client.get(
+            self.URL, {'q': 'creatinine'},
+            HTTP_AUTHORIZATION=f'Bearer {self.empty_scope_token.token}',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
+class ConceptListTest(_ConceptFixtureBase):
+    """GET /api/v1/concepts/ (issue #213)"""
+
+    URL = '/api/v1/concepts/'
+
+    def test_list_by_domain(self):
+        # Seed migrations may pre-populate concepts, so assert membership and
+        # filter correctness rather than exact counts.
+        resp = self.client.get(
+            self.URL, {'domain_id': 'Condition', 'page_size': 100}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        self.assertIn(self.diabetes.concept_id, {r['concept_id'] for r in results})
+        self.assertTrue(all(r['domain_id'] == 'Condition' for r in results))
+
+    def test_list_by_concept_class(self):
+        resp = self.client.get(
+            self.URL, {'concept_class_id': 'Lab Test', 'page_size': 100}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        ids = {r['concept_id'] for r in results}
+        self.assertLessEqual(
+            {self.creatinine_serum.concept_id, self.creatinine_renal.concept_id,
+             self.creatinine_snomed.concept_id},
+            ids,
+        )
+        self.assertTrue(all(r['concept_class_id'] == 'Lab Test' for r in results))
+
+    def test_list_by_combined_filters(self):
+        resp = self.client.get(
+            self.URL,
+            {'vocabulary_id': 'LOINC', 'domain_id': 'Measurement', 'page_size': 100},
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        ids = {r['concept_id'] for r in results}
+        self.assertLessEqual(
+            {self.creatinine_serum.concept_id, self.creatinine_renal.concept_id}, ids,
+        )
+        self.assertNotIn(self.creatinine_snomed.concept_id, ids)
+        self.assertTrue(all(
+            r['vocabulary_id'] == 'LOINC' and r['domain_id'] == 'Measurement'
+            for r in results
+        ))
+
+    def test_list_unknown_filter_value_returns_empty_page(self):
+        resp = self.client.get(self.URL, {'domain_id': 'NoSuchDomain'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['count'], 0)
+
+    def test_list_without_filter_returns_400(self):
+        resp = self.client.get(self.URL, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_list_standard_concept_alone_returns_400(self):
+        """standard_concept is too unselective to bound a listing by itself."""
+        resp = self.client.get(self.URL, {'standard_concept': 'S'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_list_standard_concept_combines_with_selective_filter(self):
+        resp = self.client.get(
+            self.URL,
+            {'concept_class_id': 'Lab Test', 'standard_concept': 'S', 'page_size': 100},
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {r['concept_id'] for r in resp.json()['results']}
+        self.assertIn(self.creatinine_serum.concept_id, ids)
+        self.assertNotIn(self.creatinine_renal.concept_id, ids)
+
+    def test_unauthenticated_returns_401(self):
+        resp = self.client.get(self.URL, {'domain_id': 'Condition'})
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_expired_token_rejected(self):
+        resp = self.client.get(
+            self.URL, {'domain_id': 'Condition'},
+            HTTP_AUTHORIZATION=f'Bearer {self.expired_token.token}',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_empty_scope_token_rejected(self):
+        resp = self.client.get(
+            self.URL, {'domain_id': 'Condition'},
+            HTTP_AUTHORIZATION=f'Bearer {self.empty_scope_token.token}',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
 # ---------------------------------------------------------------------------
 # IDOR: PatientRecordViewSet row-level access (issue #134)
 # ---------------------------------------------------------------------------
@@ -6587,6 +7075,35 @@ def _make_org(name, slug):
     return Organization.objects.create(name=name, slug=slug)
 
 
+def _make_test_concept(concept_id, concept_name, concept_code, domain_id):
+    vocab, _ = Vocabulary.objects.get_or_create(
+        vocabulary_id='TEST-DEL',
+        defaults={
+            'vocabulary_name': 'Test Delete Vocabulary',
+            'vocabulary_concept_id': 0,
+        },
+    )
+    domain, _ = Domain.objects.get_or_create(
+        domain_id=domain_id,
+        defaults={'domain_name': domain_id, 'domain_concept_id': 0},
+    )
+    concept_class, _ = ConceptClass.objects.get_or_create(
+        concept_class_id='Clinical Finding',
+        defaults={'concept_class_name': 'Clinical Finding', 'concept_class_concept_id': 0},
+    )
+    return Concept.objects.create(
+        concept_id=concept_id,
+        concept_name=concept_name,
+        concept_code=concept_code,
+        vocabulary=vocab,
+        domain=domain,
+        concept_class=concept_class,
+        standard_concept='S',
+        valid_start_date=date.today(),
+        valid_end_date=date(2099, 12, 31),
+    )
+
+
 class OrgManagementModelTest(TestCase):
     """OrgTrust XOR constraint, OrgInvitation uniqueness."""
 
@@ -6745,6 +7262,91 @@ class OrgViewSetStaffTest(TestCase):
         resp = self.client.delete('/api/orgs/staff-org/')
         self.assertEqual(resp.status_code, 204)
         self.assertFalse(Organization.objects.filter(slug='staff-org').exists())
+
+    def test_delete_org_cascades_patient_population(self):
+        patient_org = _make_org('Patient Org', 'patient-org')
+        other_org = _make_org('Other Patient Org', 'other-patient-org')
+        person = Person.objects.create(person_id=9001)
+        other_person = Person.objects.create(person_id=9002)
+        patient = PatientRecord.objects.create(person=person, organization=patient_org)
+        other_patient = PatientRecord.objects.create(person=other_person, organization=other_org)
+
+        condition_concept = _make_test_concept(9100001, 'Test Condition', 'TCOND', 'Condition')
+        condition_type_concept = _make_test_concept(9100002, 'Test Type', 'TTYPE', 'Type Concept')
+        drug_concept = _make_test_concept(9200001, 'Test Drug', 'TDRUG', 'Drug')
+        procedure_concept = _make_test_concept(9300001, 'Test Procedure', 'TPROC', 'Procedure')
+
+        cond = ConditionOccurrence.objects.create(
+            condition_occurrence_id=9101,
+            person=person,
+            condition_concept=condition_concept,
+            condition_start_date=date.today(),
+            condition_type_concept=condition_type_concept,
+        )
+        drug = DrugExposure.objects.create(
+            drug_exposure_id=9201,
+            person=person,
+            drug_concept=drug_concept,
+            drug_exposure_start_date=date.today(),
+            drug_type_concept=condition_type_concept,
+        )
+        proc = ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=9301,
+            person=person,
+            procedure_concept=procedure_concept,
+            procedure_date=date.today(),
+            procedure_type_concept=condition_type_concept,
+        )
+
+        resp = self.client.delete('/api/orgs/patient-org/')
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Organization.objects.filter(slug='patient-org').exists())
+        self.assertFalse(PatientRecord.objects.filter(pk=patient.pk).exists())
+        self.assertFalse(Person.objects.filter(pk=person.pk).exists())
+        self.assertFalse(ConditionOccurrence.objects.filter(pk=cond.pk).exists())
+        self.assertFalse(DrugExposure.objects.filter(pk=drug.pk).exists())
+        self.assertFalse(ProcedureOccurrence.objects.filter(pk=proc.pk).exists())
+        self.assertTrue(PatientRecord.objects.filter(pk=other_patient.pk).exists())
+        self.assertTrue(Person.objects.filter(pk=other_person.pk).exists())
+
+
+class OrganizationCleanupServiceTest(TestCase):
+    """Shared org deletion helper must cascade patient data."""
+
+    def test_delete_organization_with_patient_cascade(self):
+        org = _make_org('Cleanup Org', 'cleanup-org')
+        other_org = _make_org('Survivor Org', 'survivor-org')
+        person = Person.objects.create(person_id=9101)
+        other_person = Person.objects.create(person_id=9102)
+        patient = PatientRecord.objects.create(person=person, organization=org)
+        other_patient = PatientRecord.objects.create(person=other_person, organization=other_org)
+
+        condition_concept = _make_test_concept(9400001, 'Cleanup Condition', 'CCOND', 'Condition')
+        condition_type_concept = _make_test_concept(9400002, 'Cleanup Type', 'CTYPE', 'Type Concept')
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=9401,
+            person=person,
+            procedure_concept=_make_test_concept(9400003, 'Cleanup Procedure', 'CPROC', 'Procedure'),
+            procedure_date=date.today(),
+            procedure_type_concept=condition_type_concept,
+        )
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=9402,
+            person=person,
+            condition_concept=condition_concept,
+            condition_start_date=date.today(),
+            condition_type_concept=condition_type_concept,
+        )
+
+        delete_organization_with_patient_cascade(org)
+
+        self.assertFalse(Organization.objects.filter(pk=org.pk).exists())
+        self.assertFalse(PatientRecord.objects.filter(pk=patient.pk).exists())
+        self.assertFalse(Person.objects.filter(pk=person.pk).exists())
+        self.assertFalse(ConditionOccurrence.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(ProcedureOccurrence.objects.filter(person_id=person.person_id).exists())
+        self.assertTrue(PatientRecord.objects.filter(pk=other_patient.pk).exists())
+        self.assertTrue(Person.objects.filter(pk=other_person.pk).exists())
 
 
 class OrgViewSetOrgAdminTest(TestCase):

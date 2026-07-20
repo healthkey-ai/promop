@@ -9,7 +9,7 @@ from .views import (
     PatientDocumentViewSet,
     PatientTrialEnrollmentViewSet,
     SurveyViewSet, PatientSurveyResponseViewSet,
-    vocabulary_list, concept_lookup,
+    vocabulary_list, concept_lookup, concept_search, concept_list,
     org_disease_stats,
 )
 from .org_views import (
@@ -44,6 +44,8 @@ urlpatterns = [
     path('auth/test/', auth_test, name='v1-auth-test'),
     path('vocabularies/<str:model_name>/', vocabulary_list, name='v1-vocabulary-list'),
     path('concepts/lookup/', concept_lookup, name='v1-concept-lookup'),
+    path('concepts/search/', concept_search, name='v1-concept-search'),
+    path('concepts/', concept_list, name='v1-concept-list'),
     path('stats/org-disease/', org_disease_stats, name='v1-stats-org-disease'),
     path('orgs/', OrgListCreateView.as_view(), name='v1-org-list'),
     path('orgs/confirm-invitation/', confirm_invitation, name='v1-org-confirm-invitation'),

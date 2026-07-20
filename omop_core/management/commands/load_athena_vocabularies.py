@@ -11,7 +11,7 @@ from django.db import connection
 
 from omop_core.models import (
     Vocabulary, Domain, ConceptClass, Concept,
-    Relationship, ConceptRelationship, ConceptAncestor,
+    Relationship, ConceptRelationship, ConceptAncestor, CdmSource,
 )
 
 VOCAB_SCOPE = frozenset({
@@ -27,6 +27,22 @@ RXNORM_CLASS_SCOPE = frozenset({'Ingredient', 'Clinical Drug', 'Branded Drug', '
 LOINC_DOMAIN_SCOPE = frozenset({'Measurement', 'Observation'})
 BATCH = 100_000
 PROGRESS_EVERY = 500_000
+
+# Defaults for the single self-describing cdm_source row. Kept in sync with
+# migration 0112_seed_cdm_source; the command re-seeds this row because a
+# --replace TRUNCATE ... CASCADE wipes cdm_source (it FKs to concept).
+_CDM_SOURCE_DEFAULTS = {
+    'cdm_source_name': 'PRomop — Decision-Ready Longitudinal Patient Record',
+    'cdm_holder': 'HealthKey, Inc.',
+    'source_description': (
+        'PRomop longitudinal patient record on the OMOP CDM 5.4 clinical '
+        'tables with OHDSI oncology extensions and a derived PatientRecord projection.'
+    ),
+    'source_documentation_reference': 'https://github.com/healthkey-ai',
+    'cdm_etl_reference': 'https://github.com/healthkey-ai',
+    'cdm_release_date': date(2026, 1, 1),
+    'cdm_version': '5.4',
+}
 
 
 def _parse_date(s):
@@ -144,9 +160,12 @@ class Command(BaseCommand):
             'concept':              self._load_concepts(dry_run),
             'concept_relationship': self._load_concept_relationships(dry_run),
             'concept_ancestor':     self._load_concept_ancestors(dry_run),
+            'concept_synonym':      self._load_concept_synonym(dry_run),
+            'drug_strength':        self._load_drug_strength(dry_run),
         }
         if not dry_run:
             self._seed_concept_zero()
+            self._sync_cdm_source_metadata()
         elapsed = time.monotonic() - t0
         verb = 'would load' if dry_run else 'loaded'
         total = sum(counts.values())
@@ -191,6 +210,10 @@ class Command(BaseCommand):
                 'concept, concept_class, domain, relationship, vocabulary CASCADE'
             )
         self._log(f'  Truncated all vocab tables in {time.monotonic() - t:.0f}s')
+        self._log('  NOTE: CASCADE also clears every table with a FK to concept — '
+                  'including cdm_source, observation_period, and clinical event tables. '
+                  'cdm_source is re-seeded after load; re-run populate_observation_period '
+                  'to re-derive observation periods.')
 
     def _seed_concept_zero(self):
         Vocabulary.objects.get_or_create(
@@ -264,6 +287,7 @@ class Command(BaseCommand):
         t = time.monotonic()
         count = 0
         rows = []
+        self._cdm_vocab_version = None
         try:
             f = self._open('VOCABULARY.csv')
         except CommandError:
@@ -274,15 +298,21 @@ class Command(BaseCommand):
             idx = _header_index(next(reader))
             for cols in reader:
                 vid = cols[idx['vocabulary_id']]
-                if vid not in VOCAB_SCOPE:
+                # 'None' is out of scope for concept loading but its row carries
+                # the CDM release version in vocabulary_version — keep it so
+                # cdm_source can self-describe.
+                if vid not in VOCAB_SCOPE and vid != 'None':
                     continue
                 count += 1
+                version = (cols[idx.get('vocabulary_version', -1)] if 'vocabulary_version' in idx else '')[:255] or ''
+                if vid == 'None' and version:
+                    self._cdm_vocab_version = version
                 if not dry_run:
                     rows.append((
                         vid[:20],
                         cols[idx['vocabulary_name']][:255],
                         (cols[idx.get('vocabulary_reference', -1)] if 'vocabulary_reference' in idx else '')[:255] or '',
-                        (cols[idx.get('vocabulary_version', -1)] if 'vocabulary_version' in idx else '')[:255] or '',
+                        version,
                         int(cols[idx['vocabulary_concept_id']] or 0) if 'vocabulary_concept_id' in idx else 0,
                     ))
         if not dry_run and rows:
@@ -290,6 +320,13 @@ class Command(BaseCommand):
                        ('vocabulary_id', 'vocabulary_name', 'vocabulary_reference',
                         'vocabulary_version', 'vocabulary_concept_id'),
                        rows, self._log, direct=self._direct)
+        if not dry_run and self._cdm_vocab_version:
+            # The 'None' row usually pre-exists (seeded by migration 0068 with no
+            # version), so the COPY above conflicts on the PK and no-ops — update
+            # it directly so the CDM release version actually lands.
+            Vocabulary.objects.filter(vocabulary_id='None').update(
+                vocabulary_version=self._cdm_vocab_version
+            )
         self._cleanup('VOCABULARY.csv')
         self._log(f'  VOCABULARY.csv: {count:,} rows in {time.monotonic() - t:.0f}s')
         return count
@@ -529,3 +566,140 @@ class Command(BaseCommand):
         self._cleanup('CONCEPT_ANCESTOR.csv')
         self._log(f'  ancestors: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
         return count
+
+    def _load_concept_synonym(self, dry_run):
+        self._log('Loading CONCEPT_SYNONYM.csv...')
+        t = time.monotonic()
+        try:
+            f = self._open('CONCEPT_SYNONYM.csv')
+        except CommandError:
+            self._log('  CONCEPT_SYNONYM.csv not found, skipping.')
+            return 0
+        loaded_ids = set(Concept.objects.values_list('concept_id', flat=True))
+        count = scanned = 0
+        rows = []
+        cols_out = ('concept_id', 'concept_synonym_name', 'language_concept_id')
+        with f:
+            reader = csv.reader(f, delimiter='\t')
+            idx = _header_index(next(reader))
+            i_cid, i_name, i_lang = idx['concept_id'], idx['concept_synonym_name'], idx['language_concept_id']
+            for row in reader:
+                scanned += 1
+                if scanned % PROGRESS_EVERY == 0:
+                    self._log(f'  synonyms: scanned {scanned:,}, {count:,} matched ({time.monotonic() - t:.0f}s)...')
+                try:
+                    cid, lang = int(row[i_cid]), int(row[i_lang])
+                except (ValueError, IndexError):
+                    continue
+                # both concept and language must be loaded to satisfy FK constraints
+                if cid not in loaded_ids or lang not in loaded_ids:
+                    continue
+                count += 1
+                if not dry_run:
+                    rows.append((cid, row[i_name][:1000], lang))
+                    if len(rows) >= BATCH:
+                        _copy_rows('concept_synonym', cols_out, rows, self._log, direct=self._direct)
+                        rows = []
+        if not dry_run:
+            _copy_rows('concept_synonym', cols_out, rows, self._log, direct=self._direct)
+        self._cleanup('CONCEPT_SYNONYM.csv')
+        self._log(f'  synonyms: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
+        return count
+
+    def _load_drug_strength(self, dry_run):
+        self._log('Loading DRUG_STRENGTH.csv...')
+        t = time.monotonic()
+        try:
+            f = self._open('DRUG_STRENGTH.csv')
+        except CommandError:
+            self._log('  DRUG_STRENGTH.csv not found, skipping.')
+            return 0
+        loaded_ids = set(Concept.objects.values_list('concept_id', flat=True))
+        count = scanned = 0
+        rows = []
+        cols_out = (
+            'drug_concept_id', 'ingredient_concept_id', 'amount_value', 'amount_unit_concept_id',
+            'numerator_value', 'numerator_unit_concept_id', 'denominator_value',
+            'denominator_unit_concept_id', 'box_size', 'valid_start_date', 'valid_end_date',
+            'invalid_reason',
+        )
+
+        def _fk(v):
+            """Concept id if loaded, else None — keeps optional unit FKs valid."""
+            try:
+                iv = int(v)
+            except (ValueError, TypeError):
+                return None
+            return iv if iv in loaded_ids else None
+
+        def _f(v):
+            v = (v or '').strip()
+            return float(v) if v else None
+
+        def _i(v):
+            v = (v or '').strip()
+            return int(v) if v else None
+
+        with f:
+            reader = csv.reader(f, delimiter='\t')
+            idx = _header_index(next(reader))
+            gi = idx.get
+            for row in reader:
+                scanned += 1
+                if scanned % PROGRESS_EVERY == 0:
+                    self._log(f'  drug_strength: scanned {scanned:,}, {count:,} matched ({time.monotonic() - t:.0f}s)...')
+                try:
+                    drug = int(row[idx['drug_concept_id']])
+                    ing = int(row[idx['ingredient_concept_id']])
+                except (ValueError, IndexError):
+                    continue
+                # required FKs must be loaded
+                if drug not in loaded_ids or ing not in loaded_ids:
+                    continue
+                count += 1
+                if not dry_run:
+                    inv = row[idx['invalid_reason']][:1] if row[idx['invalid_reason']] else None
+                    rows.append((
+                        drug, ing,
+                        _f(row[gi('amount_value')]), _fk(row[gi('amount_unit_concept_id')]),
+                        _f(row[gi('numerator_value')]), _fk(row[gi('numerator_unit_concept_id')]),
+                        _f(row[gi('denominator_value')]), _fk(row[gi('denominator_unit_concept_id')]),
+                        _i(row[gi('box_size')]),
+                        _parse_date(row[idx['valid_start_date']]).isoformat(),
+                        _parse_date(row[idx['valid_end_date']]).isoformat(),
+                        inv,
+                    ))
+                    if len(rows) >= BATCH:
+                        _copy_rows('drug_strength', cols_out, rows, self._log, direct=self._direct)
+                        rows = []
+        if not dry_run:
+            _copy_rows('drug_strength', cols_out, rows, self._log, direct=self._direct)
+        self._cleanup('DRUG_STRENGTH.csv')
+        self._log(f'  drug_strength: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
+        return count
+
+    def _sync_cdm_source_metadata(self):
+        """Ensure the cdm_source row exists and fill its vocabulary metadata.
+
+        get_or_create (not just update) because --replace TRUNCATEs concept
+        CASCADE, which also wipes cdm_source via its cdm_version_concept FK —
+        the migration-0112 seed does not re-run after that.
+        """
+        row, created = CdmSource.objects.get_or_create(
+            cdm_source_abbreviation='PRomop',
+            defaults=_CDM_SOURCE_DEFAULTS,
+        )
+        if created:
+            self._log('  cdm_source: re-seeded PRomop row (was missing — e.g. cleared by --replace)')
+        vocab_version = (
+            Vocabulary.objects.filter(vocabulary_id='None')
+            .values_list('vocabulary_version', flat=True).first()
+        )
+        version_concept_id = 756265 if Concept.objects.filter(concept_id=756265).exists() else None
+        fields = {}
+        if vocab_version:
+            fields['vocabulary_version'] = vocab_version[:20]
+        if version_concept_id:
+            fields['cdm_version_concept_id'] = version_concept_id
+        if fields and CdmSource.objects.filter(pk=row.pk).update(**fields):
+            self._log(f'  cdm_source: updated {fields}')

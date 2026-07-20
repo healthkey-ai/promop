@@ -256,6 +256,8 @@ class Command(BaseCommand):
 
         _entry(self._patient_resource(p))
         _entry(self._condition_resource(p, diag_date))
+        for enc in self._encounters(p, diag_date):
+            _entry(enc)
 
         for obs in self._mm_labs(p, lab_date):
             _entry(obs)
@@ -270,15 +272,28 @@ class Command(BaseCommand):
             _entry(obs)
 
         _entry(self._bone_marrow_obs(p, diag_date))
+        _entry(self._specimen_source_obs(p, diag_date))
 
         if p['sct_history'] in ('completedASCT', 'relapsedPostASCT', 'completedTandemSCT',
                                  'completedAllogeneicSCT', 'postASCT'):
             _entry(self._asct_procedure(p, diag_date))
 
+        for imm in self._immunizations(p, diag_date):
+            _entry(imm)
+
         for med in self._therapy_medications(p, diag_date):
             _entry(med)
 
         for obs in self._mm_specific_obs(p, diag_date):
+            _entry(obs)
+
+        for obs in self._behavior_obs(p, lab_date):
+            _entry(obs)
+
+        for obs in self._wearable_obs(p, datetime.now()):
+            _entry(obs)
+
+        for obs in self._infection_status_obs(p, lab_date):
             _entry(obs)
 
     # ------------------------------------------------------------------
@@ -504,6 +519,58 @@ class Command(BaseCommand):
 
         # EF
         p['ef'] = random.randint(48, 72)
+
+        # Behavior / lifestyle (correlated to disease burden and ECOG)
+        ecog = p['ecog']
+        p['smoking_status_code'] = _weighted_choice(
+            ['266919005', '8517006', '77176002'], [55, 30, 15])  # never, former, current
+        p['pack_years'] = (random.randint(1, 40)
+                           if p['smoking_status_code'] != '266919005' else 0)
+        p['alcohol_use'] = _weighted_choice(
+            ['none', 'light', 'moderate', 'heavy'], [35, 40, 20, 5])
+        p['drinks_per_week'] = {
+            'none': 0, 'light': random.randint(1, 6),
+            'moderate': random.randint(7, 13), 'heavy': random.randint(14, 28),
+        }[p['alcohol_use']]
+        if ecog <= 1:
+            p['exercise_frequency'] = _weighted_choice(
+                ['never', '1-2x/week', '3-5x/week', 'daily'], [20, 30, 35, 15])
+            p['exercise_minutes'] = random.randint(60, 300)
+        elif ecog == 2:
+            p['exercise_frequency'] = _weighted_choice(
+                ['never', '1-2x/week', '3-5x/week'], [50, 35, 15])
+            p['exercise_minutes'] = random.randint(0, 90)
+        else:
+            p['exercise_frequency'] = _weighted_choice(['never', '1-2x/week'], [80, 20])
+            p['exercise_minutes'] = random.randint(0, 30)
+        p['diet_type'] = _weighted_choice(
+            ['standard', 'low-fat', 'low-carb', 'plant-based', 'mediterranean'],
+            [50, 15, 10, 10, 15])
+        sleep_mean = max(4.5, 7.5 - ecog * 0.6)
+        p['sleep_hours'] = round(max(4.0, min(10.0, random.gauss(sleep_mean, 0.7))), 1)
+        p['sleep_quality'] = _weighted_choice(
+            ['poor', 'fair', 'good'],
+            [min(70, 15 + ecog * 15), 35, max(5, 50 - ecog * 15)])
+        p['stress_level'] = _weighted_choice(
+            ['low', 'moderate', 'high'], [max(5, 30 - ecog * 5), 45, 25 + ecog * 5])
+        p['social_support'] = _weighted_choice(['low', 'medium', 'high'], [15, 40, 45])
+        p['employment_status'] = _weighted_choice(
+            ['employed', 'retired', 'unemployed', 'disabled'], [30, 50, 10, 10])
+        p['education_level'] = _weighted_choice(
+            ['< high school', 'high school', 'some college', 'college', 'graduate'],
+            [10, 25, 20, 30, 15])
+        p['marital_status'] = _weighted_choice(
+            ['married', 'single', 'divorced', 'widowed'], [55, 15, 15, 15])
+        p['insurance_type'] = _weighted_choice(
+            ['commercial', 'medicare', 'medicaid', 'self-pay'], [35, 50, 10, 5])
+        p['dependents'] = _weighted_choice([0, 1, 2, 3, 4], [40, 20, 25, 10, 5])
+        p['annual_income'] = _weighted_choice(
+            ['<25k', '25k-50k', '50k-75k', '75k-100k', '>100k'], [15, 25, 25, 20, 15])
+
+        # Infection status (documented screening results — low prevalence for MM cohort)
+        p['hiv_positive'] = random.random() < 0.03
+        p['hbsag_positive'] = random.random() < 0.05
+        p['hcv_positive'] = random.random() < 0.07
 
         return p
 
@@ -752,6 +819,239 @@ class Command(BaseCommand):
             diag_date.strftime('%Y-%m-%d'),
         )
 
+    def _behavior_obs(self, p, lab_date):
+        """Lifestyle, socioeconomic, and behavioral LOINC observations."""
+        pid = p['id']
+        dt = lab_date.strftime('%Y-%m-%d')
+        obs = []
+
+        smoking_display = {
+            '266919005': 'Never smoker',
+            '8517006':   'Ex-smoker',
+            '77176002':  'Smoker',
+        }[p['smoking_status_code']]
+        obs.append(self._obs(
+            pid, f'obs-{pid}-smoking', '72166-2', 'Tobacco smoking status',
+            'social-history', dt, 'codeable',
+            {'coding': [{'system': 'http://snomed.info/sct',
+                          'code': p['smoking_status_code'],
+                          'display': smoking_display}],
+             'text': smoking_display},
+        ))
+        if p['pack_years'] > 0:
+            obs.append(self._q_obs(
+                pid, 'pack-years', '63640-7', 'Pack years',
+                p['pack_years'], '{PackYears}', dt, 'social-history',
+            ))
+
+        obs.append(self._obs(
+            pid, f'obs-{pid}-alcohol', '74013-4', 'Alcohol use',
+            'social-history', dt, 'string', p['alcohol_use'],
+        ))
+        obs.append(self._q_obs(
+            pid, 'drinks-wk', '11286-7', 'Alcoholic drinks per week',
+            p['drinks_per_week'], '{drinks}/wk', dt, 'social-history',
+        ))
+
+        obs.append(self._obs(
+            pid, f'obs-{pid}-exercise-freq', '68516-4', 'Exercise frequency',
+            'social-history', dt, 'string', p['exercise_frequency'],
+        ))
+        obs.append(self._q_obs(
+            pid, 'exercise-min', '89555-7', 'Exercise minutes per week',
+            p['exercise_minutes'], 'min/wk', dt, 'social-history',
+        ))
+
+        obs.append(self._obs(
+            pid, f'obs-{pid}-diet', '88365-2', 'Diet type',
+            'social-history', dt, 'string', p['diet_type'],
+        ))
+        obs.append(self._obs(
+            pid, f'obs-{pid}-sleep-quality', '93831-6', 'Sleep quality',
+            'survey', dt, 'string', p['sleep_quality'],
+        ))
+        obs.append(self._obs(
+            pid, f'obs-{pid}-stress', '73985-4', 'Stress level',
+            'survey', dt, 'string', p['stress_level'],
+        ))
+        obs.append(self._obs(
+            pid, f'obs-{pid}-social', '93033-9', 'Social support level',
+            'survey', dt, 'string', p['social_support'],
+        ))
+        obs.append(self._obs(
+            pid, f'obs-{pid}-employment', '74165-2', 'Employment status',
+            'social-history', dt, 'string', p['employment_status'],
+        ))
+        obs.append(self._obs(
+            pid, f'obs-{pid}-education', '82589-3', 'Highest education level',
+            'social-history', dt, 'string', p['education_level'],
+        ))
+        obs.append(self._obs(
+            pid, f'obs-{pid}-marital', '45404-1', 'Marital status',
+            'social-history', dt, 'string', p['marital_status'],
+        ))
+        obs.append(self._obs(
+            pid, f'obs-{pid}-insurance', '76513-1', 'Insurance type',
+            'social-history', dt, 'string', p['insurance_type'],
+        ))
+        obs.append(self._q_obs(
+            pid, 'dependents', '63512-8', 'Number of dependents',
+            p['dependents'], '{count}', dt, 'social-history',
+        ))
+        obs.append(self._obs(
+            pid, f'obs-{pid}-income', '77243-3', 'Annual household income',
+            'social-history', dt, 'string', p['annual_income'],
+        ))
+
+        return obs
+
+    def _wearable_obs(self, p, today):
+        """7 days of synthetic daily wearable readings, correlated to ECOG.
+
+        Uses the exact LOINC codes that patient_record_service WEARABLE_LOINC
+        expects so _get_wearable_data() can aggregate them automatically.
+        """
+        pid = p['id']
+        ecog = min(p['ecog'], 4)
+        obs = []
+
+        # Coverage probability per day: more active patients have better device compliance
+        coverage = [0.95, 0.92, 0.85, 0.75, 0.65][ecog]
+
+        # (loinc, display, lo_by_ecog, hi_by_ecog, unit, category)
+        metric_specs = [
+            ('55423-8', 'Steps in 24h',
+             [7000, 5500, 3000, 1500, 600],
+             [10000, 8000, 5000, 2500, 1200],
+             '{steps}', 'activity'),
+            ('77592-4', 'Moderate-vigorous physical activity',
+             [20, 10, 5, 0, 0],
+             [60, 40, 20, 10, 5],
+             'min', 'activity'),
+            ('40443-4', 'Resting heart rate',
+             [52, 60, 68, 75, 80],
+             [68, 80, 90, 98, 108],
+             '/min', 'vital-signs'),
+            ('80404-7', 'Heart rate variability SDNN',
+             [35, 25, 17, 12, 8],
+             [70, 55, 35, 25, 18],
+             'ms', 'vital-signs'),
+            ('59408-5', 'Oxygen saturation',
+             [96, 95, 93, 90, 87],
+             [99, 98, 97, 95, 93],
+             '%', 'vital-signs'),
+            ('9279-1', 'Respiratory rate',
+             [12, 13, 15, 17, 18],
+             [16, 18, 20, 22, 24],
+             '/min', 'vital-signs'),
+            ('93832-4', 'Sleep duration',
+             [6.0, 5.5, 5.0, 4.5, 4.0],
+             [8.5, 8.0, 7.5, 7.0, 6.5],
+             'h', 'activity'),
+        ]
+
+        for day_offset in range(7, 0, -1):
+            if random.random() > coverage:
+                continue  # simulate missing-data day
+            day_date = (today - timedelta(days=day_offset)).strftime('%Y-%m-%d')
+            for loinc, display, lo_list, hi_list, unit, category in metric_specs:
+                lo, hi = lo_list[ecog], hi_list[ecog]
+                key = f'wear-{loinc}-d{day_offset}-{pid}'
+                obs.append(self._q_obs(
+                    pid, key, loinc, display,
+                    round(random.uniform(lo, hi), 1), unit, day_date, category,
+                ))
+
+        return obs
+
+    def _infection_status_obs(self, p, lab_date):
+        """HIV, HBV, HCV documented screening results.
+
+        LOINC codes match the codes expected by patient_record_service._get_infection_data().
+        Values are emitted as valueString ("Positive"/"Negative") which the service
+        reads via the string-fallback branch.
+        """
+        pid = p['id']
+        dt = lab_date.strftime('%Y-%m-%d')
+        obs = []
+        for key, loinc, display, positive in [
+            # service looks for 5221-7 / 7917-8 for HIV; use 5221-7 (HIV 1 Ab)
+            ('hiv',   '5221-7',  'HIV 1 Ab [Units/volume] in Serum by Immunoassay', p['hiv_positive']),
+            # service looks for 5195-3 for HBV
+            ('hbsag', '5195-3',  'Hepatitis B core Ab [Units/volume] in Serum',     p['hbsag_positive']),
+            # service looks for 5196-1 for HCV
+            ('hcv',   '5196-1',  'Hepatitis C virus Ab [Units/volume] in Serum',    p['hcv_positive']),
+        ]:
+            obs.append(self._obs(
+                pid, f'obs-{pid}-{key}', loinc, display,
+                'laboratory', dt, 'string',
+                'Positive' if positive else 'Negative',
+            ))
+        return obs
+
+    def _encounters(self, p, diag_date):
+        pid = p['id']
+        diag = diag_date.strftime('%Y-%m-%d')
+        followup = (diag_date + timedelta(days=random.randint(28, 90))).strftime('%Y-%m-%d')
+        encounter_defs = [
+            (
+                f'enc-{pid}-diagnosis',
+                'AMB',
+                'Ambulatory',
+                diag,
+                diag,
+                'Multiple myeloma diagnosis and initial workup',
+            ),
+            (
+                f'enc-{pid}-followup',
+                'AMB',
+                'Ambulatory',
+                followup,
+                followup,
+                'Myeloma follow-up visit',
+            ),
+        ]
+        if p['sct_types']:
+            sct_date = (diag_date + timedelta(days=random.randint(180, 480))).strftime('%Y-%m-%d')
+            encounter_defs.append(
+                (
+                    f'enc-{pid}-sct',
+                    'IMP',
+                    'Inpatient',
+                    sct_date,
+                    sct_date,
+                    'Autologous stem cell transplant admission',
+                )
+            )
+
+        encounters = []
+        for enc_id, class_code, class_display, start, end, description in encounter_defs:
+            encounters.append({
+                'resourceType': 'Encounter',
+                'id': enc_id,
+                'status': 'finished',
+                'class': {
+                    'system': 'http://terminology.hl7.org/CodeSystem/v3-ActCode',
+                    'code': class_code,
+                    'display': class_display,
+                },
+                'subject': {'reference': f"Patient/{pid}"},
+                'period': {'start': start, 'end': end},
+                'reasonCode': [{
+                    'text': description,
+                }],
+                'note': [{'text': description}],
+            })
+        return encounters
+
+    def _specimen_source_obs(self, p, diag_date):
+        pid = p['id']
+        specimen = random.choice(['Bone marrow biopsy', 'Bone marrow aspirate'])
+        return self._obs(
+            pid, f"obs-{pid}-specimen-source", '31208-2', 'Specimen Source',
+            'laboratory', diag_date.strftime('%Y-%m-%d'), 'string', specimen,
+        )
+
     def _asct_procedure(self, p, diag_date):
         # ASCT typically happens ~6-12 months after diagnosis in 1st or 2nd line
         offset_days = random.randint(180, 480)
@@ -773,6 +1073,35 @@ class Command(BaseCommand):
             'performedDateTime': proc_date,
             'note': [{'text': f"SCT status: {p['sct_history']}"}],
         }
+
+    def _immunizations(self, p, diag_date):
+        pid = p['id']
+        immunizations = [
+            ('influenza', '140', 'Influenza, seasonal, injectable'),
+            ('covid-19', '208', 'COVID-19, mRNA, LNP-S, PF'),
+            ('pneumococcal', '133', 'Pneumococcal conjugate PCV 13'),
+        ]
+        selected = random.sample(immunizations, k=random.randint(1, 2))
+        resources = []
+        for key, cvx, display in selected:
+            occurrence = diag_date - timedelta(days=random.randint(30, 365))
+            resources.append({
+                'resourceType': 'Immunization',
+                'id': f"imm-{pid}-{key}",
+                'status': 'completed',
+                'vaccineCode': {
+                    'coding': [{
+                        'system': 'http://hl7.org/fhir/sid/cvx',
+                        'code': cvx,
+                        'display': display,
+                    }],
+                    'text': display,
+                },
+                'patient': {'reference': f"Patient/{pid}"},
+                'occurrenceDateTime': occurrence.strftime('%Y-%m-%d'),
+                'primarySource': True,
+            })
+        return resources
 
     def _therapy_medications(self, p, diag_date):
         """
