@@ -397,12 +397,14 @@ cd frontend && npm test -- --run
 
 ### Rule: Run Full Backend Test Suite After Every PR Merge into `dev`
 
-After merging any PR into `dev`, immediately run the full backend test suite against the staging DB to catch any integration regressions (`STAGING_DATABASE_URL` is defined in `.env`). This is an intentional exception to the local-test-only rule — post-merge integration checks run against staging to catch environment-specific issues that local PostgreSQL would miss:
+After merging any PR into `dev`, immediately run the full backend test suite against the **local test database** (`promop_test`) to catch any integration regressions:
 
 ```bash
-DATABASE_URL="$STAGING_DATABASE_URL" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 ```
+
+**Do not run the test suite against the staging DB.** That was tried and abandoned: over the network the suite takes 10+ minutes (vs ~1 minute locally), and an interrupted run leaves an orphaned `test_*` database on the staging server that blocks every future run until manually dropped (and the leftover DB may have live connections that refuse `DROP DATABASE`). Local PostgreSQL matches CI, so it is the right place for post-merge checks too.
 
 ```bash
 # One-liner to run everything from the repo root:
@@ -666,7 +668,7 @@ If `remoteEntry.js` returns 500 on staging, check that `WHITENOISE_ROOT` points 
 |---|---|
 | Running tests | `postgresql://postgres@localhost:5432/promop_test` |
 | Local development (manual testing, sync uploads, shell exploration) | `postgresql://postgres@localhost:5432/promop_dev` |
-| Staging migrations / post-merge tests | `$STAGING_DATABASE_URL` (defined in `.env`) |
+| Staging migrations | `$STAGING_DATABASE_URL` (defined in `.env`) |
 | Production (read-only checks) | `$DATABASE_URL` (defined in `.env`) |
 
 Never use the production DB for writes. Never use remote databases for running tests — use local PostgreSQL to match CI. Never write test data into `promop_dev` — use `promop_test` for automated tests.
