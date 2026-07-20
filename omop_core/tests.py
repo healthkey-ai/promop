@@ -1042,6 +1042,112 @@ class FLBundleGeneratorTest(TestCase):
             self.assertGreater(birth_year, current_year - 100,
                                f"Birth year {birth_year} seems too far in the past")
 
+    # ------------------------------------------------------------------
+    # Realistic timelines / mortality (PRism FLF Section-4 charts)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _line_periods(bundle):
+        """{patient_id: {line_num: (start_date, end_date, outcome)}} for regimen statements."""
+        from datetime import date as _date
+        lines = {}
+        for entry in bundle['entry']:
+            r = entry['resource']
+            if r['resourceType'] != 'MedicationStatement':
+                continue
+            ext = {x['url'].split('/')[-1]: x for x in r.get('extension', [])}
+            if 'therapy-outcome' not in ext:
+                continue
+            pid = r['subject']['reference'].split('/')[-1]
+            num = ext['therapy-line']['valueInteger']
+            period = r['effectivePeriod']
+            lines.setdefault(pid, {})[num] = (
+                _date.fromisoformat(period['start']),
+                _date.fromisoformat(period['end']),
+                ext['therapy-outcome']['valueString'],
+            )
+        return lines
+
+    @patch(_MOCK_TARGET, return_value=_FL_MOCK_CATALOG)
+    def test_therapy_lines_chronological_and_bounded(self, _mock):
+        """Line n+1 starts after line n ends; durations are months, not years;
+        nothing is dated in the future."""
+        from datetime import date as _date, timedelta as _td
+        from omop_core.management.commands._fl_generator import FLBundleGenerator
+        gen = FLBundleGenerator(watch_wait_ratio=0.0)
+        bundle = gen.generate_bundle(100)
+        today = _date.today()
+        saw_multi_line = False
+        for pid, lines in self._line_periods(bundle).items():
+            nums = sorted(lines)
+            for num in nums:
+                start, end, _ = lines[num]
+                self.assertLessEqual(start, end, f'{pid} line {num}: start after end')
+                self.assertLessEqual(end, today + _td(days=1), f'{pid} line {num} in the future')
+                self.assertLessEqual((end - start).days, 250,
+                                     f'{pid} line {num}: treatment duration unrealistically long')
+            for prev, nxt in zip(nums, nums[1:]):
+                self.assertGreater(lines[nxt][0], lines[prev][1],
+                                   f'{pid}: line {nxt} starts before line {prev} ends')
+                saw_multi_line = True
+        self.assertTrue(saw_multi_line, 'expected at least one multi-line patient in 100')
+
+    @patch(_MOCK_TARGET, return_value=_FL_MOCK_CATALOG)
+    def test_pod24_only_a_minority(self, _mock):
+        """Early progression (2L within 24 months of 1L) must be a minority —
+        not every multi-line patient is POD24."""
+        from omop_core.management.commands._fl_generator import FLBundleGenerator
+        gen = FLBundleGenerator(watch_wait_ratio=0.0)
+        bundle = gen.generate_bundle(200)
+        lines = self._line_periods(bundle)
+        multi = {pid: ls for pid, ls in lines.items() if 1 in ls and 2 in ls}
+        self.assertGreater(len(multi), 20, 'need a decent multi-line sample')
+        early = sum(1 for ls in multi.values()
+                    if (ls[2][0] - ls[1][0]).days <= 730)
+        frac = early / len(multi)
+        self.assertLess(frac, 0.50, f'{frac:.0%} of multi-line patients progress ≤24mo — too many')
+        self.assertGreater(frac, 0.02, f'{frac:.0%} POD24 — too few to be useful')
+
+    @patch(_MOCK_TARGET, return_value=_FL_MOCK_CATALOG)
+    def test_some_patients_deceased_and_death_after_last_event(self, _mock):
+        """A fraction of the cohort has deceasedDateTime, always after the
+        last therapy line end."""
+        from datetime import date as _date
+        from omop_core.management.commands._fl_generator import FLBundleGenerator
+        gen = FLBundleGenerator(watch_wait_ratio=0.0)
+        bundle = gen.generate_bundle(100)
+        lines = self._line_periods(bundle)
+        deaths = 0
+        for entry in bundle['entry']:
+            r = entry['resource']
+            if r['resourceType'] != 'Patient' or 'deceasedDateTime' not in r:
+                continue
+            deaths += 1
+            death = _date.fromisoformat(r['deceasedDateTime'])
+            self.assertLessEqual(death, _date.today(), 'death date in the future')
+            patient_lines = lines.get(r['id'])
+            if patient_lines:
+                last_end = max(end for _, end, _ in patient_lines.values())
+                self.assertGreaterEqual(death, last_end,
+                                        'death before the end of the last therapy line')
+        self.assertGreater(deaths, 0, 'no deceased patients in 100')
+        self.assertLess(deaths, 60, f'{deaths}/100 deceased — implausibly high')
+
+    @patch(_MOCK_TARGET, return_value=_FL_MOCK_CATALOG)
+    def test_first_line_cr_is_common(self, _mock):
+        """1L CR rate should be high (~55% by weights) so CR30 landmarks have data."""
+        from collections import Counter
+        from omop_core.management.commands._fl_generator import FLBundleGenerator
+        gen = FLBundleGenerator(watch_wait_ratio=0.0)
+        bundle = gen.generate_bundle(200)
+        outcomes = Counter(
+            ls[1][2] for ls in self._line_periods(bundle).values() if 1 in ls
+        )
+        total = sum(outcomes.values())
+        cr_frac = outcomes['Complete Response'] / total
+        self.assertGreater(cr_frac, 0.35, f'1L CR rate {cr_frac:.0%} too low')
+        self.assertLess(cr_frac, 0.75, f'1L CR rate {cr_frac:.0%} implausibly high')
+
 
 # ---------------------------------------------------------------------------
 # TEST-05: seed_omop_concepts management command
