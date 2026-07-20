@@ -38,6 +38,9 @@ export interface PatientInfo {
   flipi_score?: number;
   flipi_score_options?: string;
   tumor_grade?: string;
+  transformed_to_dlbcl?: boolean;
+  dlbcl_transformation_date?: string;
+  post_transformation_outcome?: string;
   
   // Multiple Myeloma specific
   cytogenic_markers?: string;

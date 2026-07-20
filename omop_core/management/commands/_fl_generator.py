@@ -233,11 +233,19 @@ class FLBundleGenerator:
 
         _entry(self._patient_resource(p))
         _entry(self._condition_resource(p, diag_date))
+        transformation_date = None
+        if p['transformed']:
+            # Transformation happens some years after the FL diagnosis, capped at today.
+            transformation_date = min(
+                diag_date + timedelta(days=random.randint(365, 5 * 365)),
+                datetime.now(),
+            )
+            _entry(self._dlbcl_condition_resource(p, transformation_date))
         for obs in self._fl_labs(p, lab_date):
             _entry(obs)
         for obs in self._performance_obs(p, lab_date):
             _entry(obs)
-        for obs in self._fl_specific_obs(p, diag_date):
+        for obs in self._fl_specific_obs(p, diag_date, transformation_date):
             _entry(obs)
         if not p['watch_and_wait']:
             for resource in self._therapy_resources(p, diag_date):
@@ -433,6 +441,31 @@ class FLBundleGenerator:
             )}],
         }
 
+    def _dlbcl_condition_resource(self, p, transformation_date):
+        """DLBCL Condition marking histologic transformation of the FL.
+
+        This is the primary evidence the PatientRecord projection uses to set
+        transformed_to_dlbcl / dlbcl_transformation_date.
+        """
+        return {
+            'resourceType': 'Condition',
+            'id': f"cond-dlbcl-{p['id']}",
+            'clinicalStatus': {'coding': [{'system': 'http://terminology.hl7.org/CodeSystem/condition-clinical', 'code': 'active'}]},
+            'verificationStatus': {'coding': [{'system': 'http://terminology.hl7.org/CodeSystem/condition-ver-status', 'code': 'confirmed'}]},
+            'category': [{'coding': [{'system': 'http://terminology.hl7.org/CodeSystem/condition-category', 'code': 'encounter-diagnosis'}]}],
+            'code': {
+                'coding': [
+                    {'system': 'http://hl7.org/fhir/sid/icd-10-cm', 'code': 'C83.30', 'display': 'Diffuse large B-cell lymphoma, unspecified'},
+                ],
+                'text': 'Diffuse Large B-Cell Lymphoma (transformed)',
+            },
+            'subject':       {'reference': f"Patient/{p['id']}"},
+            'onsetDateTime':  transformation_date.strftime('%Y-%m-%d'),
+            'recordedDate':   transformation_date.strftime('%Y-%m-%d'),
+            'note': [{'text': f"Histologic transformation of follicular lymphoma to DLBCL, "
+                              f"after {p['prior_lines']} prior line(s) of therapy."}],
+        }
+
     # ------------------------------------------------------------------
     # Observations
     # ------------------------------------------------------------------
@@ -491,15 +524,16 @@ class FLBundleGenerator:
             self._obs(pid, f"obs-{pid}-bp-dia", '8462-4', 'Diastolic blood pressure', 'vital-signs', dt, 'quantity', p['diastolic_bp'], 'mmHg'),
         ]
 
-    def _fl_specific_obs(self, p, diag_date):
+    def _fl_specific_obs(self, p, diag_date, transformation_date=None):
         pid, dt = p['id'], diag_date.strftime('%Y-%m-%d')
+        tx_dt = (transformation_date or diag_date).strftime('%Y-%m-%d')
         grade_text = f"Grade {p['grade']}{'b' if p['grade_3b'] else 'a' if p['grade'] == 3 else ''}"
         return [
             self._q_obs(pid, 'bm-b-cells', _L['bm_b_cells'],
                         'Clonal B lymphocytes in bone marrow biopsy (%)', p['bm_b_cells_pct'], '%', dt),
             self._obs(pid, f"obs-{pid}-prior-lines", '21861-0', 'Prior lines of therapy', 'laboratory', dt, 'integer', p['prior_lines']),
             self._obs(pid, f"obs-{pid}-fl-grade", '44648-4', 'Histologic grade', 'laboratory', dt, 'string', grade_text),
-            self._obs(pid, f"obs-{pid}-fl-transformed", 'fl-transformed-dlbcl', 'Histologic transformation to DLBCL', 'laboratory', dt, 'boolean', p['transformed']),
+            self._obs(pid, f"obs-{pid}-fl-transformed", 'fl-transformed-dlbcl', 'Histologic transformation to DLBCL', 'laboratory', tx_dt, 'boolean', p['transformed']),
             self._obs(pid, f"obs-{pid}-flipi", 'LP95826-0', 'FLIPI score', 'survey', dt, 'integer', p['flipi_score']),
             self._obs(pid, f"obs-{pid}-nodal-sites", '21912-1', 'Number of involved nodal sites', 'laboratory', dt, 'integer', p['nodal_sites']),
         ]

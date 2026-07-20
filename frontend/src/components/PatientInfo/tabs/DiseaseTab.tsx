@@ -171,6 +171,7 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
   const { source: gelfSource }    = useVocabulary('gelf-criteria', 'title');
   const { source: flipiSource }   = useVocabulary('flipi-score', 'code');
   const { source: flGradeSource } = useVocabulary('follicular-lymphoma-grade', 'title');
+  const { options: txOutcomeOptions, source: txOutcomeSource } = useVocabulary('post-transformation-outcome', 'title');
   const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
   const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
 
@@ -191,6 +192,14 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
           </div>
           <Field label="Bulky Disease" name="bulky_disease" type="select" value={formData?.bulky_disease} options={YES_NO_OPTIONS} onChange={onChange} />
           <Field label="B Symptoms" name="b_symptoms" type="select" value={formData?.b_symptoms} options={YES_NO_OPTIONS} onChange={onChange} />
+        </div>
+      </Section>
+
+      <Section title="Transformation to DLBCL">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <Field label="Transformed to DLBCL" name="transformed_to_dlbcl" type="boolean" value={formData?.transformed_to_dlbcl} onChange={onChange} />
+          <Field label="Transformation Date" name="dlbcl_transformation_date" type="date" value={formData?.dlbcl_transformation_date} onChange={onChange} />
+          <Field label="Post-Transformation Outcome" name="post_transformation_outcome" type="select" value={formData?.post_transformation_outcome} options={txOutcomeOptions.length ? txOutcomeOptions.map((o: { value: string }) => o.value) : []} onChange={onChange} vocabSource={txOutcomeSource} />
         </div>
       </Section>
 

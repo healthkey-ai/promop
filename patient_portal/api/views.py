@@ -28,7 +28,7 @@ from omop_core.models import (
     PreExistingConditionCategory,
     Disease, CancerStage, KarnofskyScore, EcogStatus, PeripheralNeuropathyGrade,
     InfectionStatus, DiseaseProgression, MeasurableDisease, GelfCriteria,
-    FlipIScore, FollicularLymphomaGrade,
+    FlipIScore, FollicularLymphomaGrade, PostTransformationOutcome,
     BreastCancerFirstLineTherapy, BreastCancerSecondLineTherapy, BreastCancerLaterLineTherapy,
 )
 from omop_oncology.models import Episode, EpisodeEvent
@@ -817,6 +817,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 Concept.objects.filter(concept_code='254837009', vocabulary_id='SNOMED').first()
                 or Concept.objects.filter(concept_name__icontains='breast cancer').first()
             )
+            _concept_fl = (
+                Concept.objects.filter(concept_code='413448000', vocabulary_id='SNOMED').first()
+                or Concept.objects.filter(concept_name__icontains='follicular lymphoma').first()
+                or Concept.objects.filter(concept_name__icontains='follicular non-hodgkin').first()
+            )
+            _concept_dlbcl = (
+                Concept.objects.filter(concept_code='C83.30', vocabulary_id='ICD10CM').first()
+                or Concept.objects.filter(concept_name__icontains='diffuse large b-cell').first()
+            )
             _concept_ehr_type      = _cc_by_id(32817)    # EHR
             _concept_lab_type      = _cc_by_id(32856)    # Lab
             _concept_drug_type     = _cc_by_id(32869)    # EHR prescription
@@ -1229,6 +1238,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     histologic_type = ''
                     condition_date = None
                     breast_cancer_onset = None  # onset from primary cancer condition
+                    fl_onset = None             # onset from FL condition
+                    dlbcl_onset = None          # onset from DLBCL (transformation) condition
                     _any_bc_condition = False   # True if any BC condition was seen in the bundle
                     _clinical_status_source = None  # FHIR Condition.clinicalStatus code for primary BC
 
@@ -1284,6 +1295,19 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             snomed_code == '254837009'
                             or any('breast' in c.get('display', '').lower() for c in coding_list)
                             or bool(histologic_type and 'breast' in histologic_type.lower())
+                        )
+                        is_fl = (
+                            # NOTE: do NOT match on snomed_code — 413448000 appears on
+                            # breast-cancer conditions in the wild (see is_breast_cancer).
+                            any('follicular' in c.get('display', '').lower()
+                                and 'lymphoma' in c.get('display', '').lower() for c in coding_list)
+                            or bool(histologic_type and 'follicular' in histologic_type.lower())
+                        )
+                        is_dlbcl = (
+                            any('diffuse large b-cell' in c.get('display', '').lower() for c in coding_list)
+                            or any(c.get('code', '').startswith('C83.3') for c in coding_list
+                                   if 'icd' in c.get('system', '').lower())
+                            or bool(histologic_type and 'diffuse large b-cell' in histologic_type.lower())
                         )
                         if is_breast_cancer:
                             _any_bc_condition = True
@@ -1342,6 +1366,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 condition_date = _parsed_date  # fallback: last wins
                                 if is_breast_cancer and _parsed_date and (breast_cancer_onset is None or _parsed_date < breast_cancer_onset):
                                     breast_cancer_onset = _parsed_date
+                                if is_fl and _parsed_date and (fl_onset is None or _parsed_date < fl_onset):
+                                    fl_onset = _parsed_date
+                                if is_dlbcl and _parsed_date and (dlbcl_onset is None or _parsed_date < dlbcl_onset):
+                                    dlbcl_onset = _parsed_date
                             except (ValueError, TypeError):
                                 pass
 
@@ -1350,42 +1378,49 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         condition_date = breast_cancer_onset
                     
                     # Upsert ConditionOccurrence for the diagnosis
+                    from omop_core.models import ConditionOccurrence
+
+                    def _upsert_condition(concept, onset, source_value, status_source):
+                        """Create one ConditionOccurrence per (person, concept, start date)."""
+                        if not concept or not onset:
+                            return
+                        type_concept = _concept_ehr_type or concept
+                        if ConditionOccurrence.objects.filter(
+                            person=person,
+                            condition_concept=concept,
+                            condition_start_date=onset.date(),
+                        ).exists():
+                            return
+                        _co = ConditionOccurrence(
+                            condition_occurrence_id=next_pk(ConditionOccurrence, 'condition_occurrence_id'),
+                            person=person,
+                            condition_concept=concept,
+                            condition_start_date=onset.date(),
+                            condition_start_datetime=onset,
+                            condition_type_concept=type_concept,
+                            condition_source_value=source_value,
+                            condition_status_source_value=status_source,
+                        )
+                        _co._skip_patient_record_refresh = True
+                        try:
+                            with transaction.atomic():
+                                _co.save()
+                                _pt_condition_ids.append(_co.condition_occurrence_id)
+                                if prov_source:
+                                    _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                        except Exception as _coex:
+                            logger.warning(
+                                '{"event": "condition_occurrence_save_failed", "error_type": "%s"}',
+                                type(_coex).__name__,
+                            )
+
                     if _any_bc_condition and condition_date:
-                        from omop_core.models import ConditionOccurrence
+                        _upsert_condition(_concept_breast_cancer, condition_date, disease, _clinical_status_source)
 
-                        # Use pre-hoisted concept lookups (computed once before the patient loop)
-                        breast_cancer_concept = _concept_breast_cancer
-
-                        if breast_cancer_concept:
-                            type_concept = _concept_ehr_type or breast_cancer_concept
-
-                            if not ConditionOccurrence.objects.filter(
-                                person=person,
-                                condition_concept=breast_cancer_concept,
-                                condition_start_date=condition_date.date(),
-                            ).exists():
-                                _co = ConditionOccurrence(
-                                    condition_occurrence_id=next_pk(ConditionOccurrence, 'condition_occurrence_id'),
-                                    person=person,
-                                    condition_concept=breast_cancer_concept,
-                                    condition_start_date=condition_date.date(),
-                                    condition_start_datetime=condition_date,
-                                    condition_type_concept=type_concept,
-                                    condition_source_value=disease,
-                                    condition_status_source_value=_clinical_status_source,
-                                )
-                                _co._skip_patient_record_refresh = True
-                                try:
-                                    with transaction.atomic():
-                                        _co.save()
-                                        _pt_condition_ids.append(_co.condition_occurrence_id)
-                                        if prov_source:
-                                            _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                                except Exception as _coex:
-                                    logger.warning(
-                                        '{"event": "condition_occurrence_save_failed", "error_type": "%s"}',
-                                        type(_coex).__name__,
-                                    )
+                    # FL diagnosis and DLBCL transformation conditions (FL → DLBCL
+                    # transformation is derived from the DLBCL ConditionOccurrence).
+                    _upsert_condition(_concept_fl, fl_onset, 'Follicular Lymphoma', None)
+                    _upsert_condition(_concept_dlbcl, dlbcl_onset, 'Diffuse Large B-Cell Lymphoma', None)
 
                     # Process observations and create Measurement records
                     _timing_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
@@ -4039,6 +4074,7 @@ _VOCABULARY_REGISTRY = {
     'gelf-criteria':                   GelfCriteria,
     'flipi-score':                     FlipIScore,
     'follicular-lymphoma-grade':             FollicularLymphomaGrade,
+    'post-transformation-outcome':           PostTransformationOutcome,
     'breast-cancer-first-line-therapy':      BreastCancerFirstLineTherapy,
     'breast-cancer-second-line-therapy':     BreastCancerSecondLineTherapy,
     'breast-cancer-later-line-therapy':      BreastCancerLaterLineTherapy,

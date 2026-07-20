@@ -265,3 +265,104 @@ describe('MyelomaSection — SCT fields', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// LymphomaSection — FL → DLBCL transformation fields
+// ---------------------------------------------------------------------------
+
+vi.mock('../controls/SelectControl', () => ({
+  // Stub the Radix-based SelectControl with a native <select> so tests can
+  // interact with it in JSDOM (same rationale as the MultiSelectControl stub).
+  default: ({
+    value,
+    options,
+    onChange,
+  }: {
+    value: unknown;
+    options: { value: unknown; label: string }[];
+    onChange: (v: unknown) => void;
+  }) => (
+    <select
+      data-testid="select-control"
+      value={value == null ? '' : String(value)}
+      onChange={(e) => onChange(e.target.value)}
+    >
+      <option value="">Select…</option>
+      {options.map((o) => (
+        <option key={String(o.value)} value={String(o.value)}>
+          {o.label}
+        </option>
+      ))}
+    </select>
+  ),
+}));
+
+const TX_OUTCOME_VOCAB = [
+  { value: 'Complete Response',   label: 'Complete Response' },
+  { value: 'Partial Response',    label: 'Partial Response' },
+  { value: 'Progressive Disease', label: 'Progressive Disease' },
+  { value: 'Deceased',            label: 'Deceased' },
+];
+
+function renderLymphoma(
+  formData: Record<string, unknown> = {},
+  onChange = vi.fn(),
+) {
+  (useVocabulary as Mock).mockImplementation((modelName: string) => {
+    if (modelName === 'post-transformation-outcome') {
+      return { options: TX_OUTCOME_VOCAB, loading: false, source: null };
+    }
+    return { options: [], loading: false, source: null };
+  });
+  return render(
+    <DiseaseTab {...BASE_PROPS} diseaseType="lymphoma" formData={formData} onChange={onChange} />,
+  );
+}
+
+describe('LymphomaSection — transformation to DLBCL fields', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('renders all three transformation field labels', () => {
+    renderLymphoma();
+    expect(screen.getByText('Transformed to DLBCL')).toBeInTheDocument();
+    expect(screen.getByText('Transformation Date')).toBeInTheDocument();
+    expect(screen.getByText('Post-Transformation Outcome')).toBeInTheDocument();
+  });
+
+  it('renders dlbcl_transformation_date value in the date input', () => {
+    renderLymphoma({ dlbcl_transformation_date: '2023-04-15' });
+    expect(screen.getByDisplayValue('2023-04-15')).toBeInTheDocument();
+  });
+
+  it('calls onChange("dlbcl_transformation_date", value) when date changes', () => {
+    const onChange = vi.fn();
+    const { container } = renderLymphoma({}, onChange);
+    const dateInput = container.querySelector('input[type="date"]')!;
+    fireEvent.change(dateInput, { target: { value: '2023-04-15' } });
+    expect(onChange).toHaveBeenCalledWith('dlbcl_transformation_date', '2023-04-15');
+  });
+
+  it('shows Yes when transformed_to_dlbcl is true and calls onChange on change', () => {
+    const onChange = vi.fn();
+    renderLymphoma({ transformed_to_dlbcl: true }, onChange);
+    const booleanSelect = screen
+      .getAllByTestId('select-control')
+      .find((el) => (el as HTMLSelectElement).value === 'true')!;
+    expect(booleanSelect).toBeInTheDocument();
+    fireEvent.change(booleanSelect, { target: { value: 'false' } });
+    expect(onChange).toHaveBeenCalledWith('transformed_to_dlbcl', false);
+  });
+
+  it('renders vocabulary-backed outcome options and calls onChange', () => {
+    const onChange = vi.fn();
+    renderLymphoma({ post_transformation_outcome: 'Complete Response' }, onChange);
+    const outcomeSelect = screen
+      .getAllByTestId('select-control')
+      .find((el) => (el as HTMLSelectElement).value === 'Complete Response')!;
+    expect(outcomeSelect).toBeInTheDocument();
+    fireEvent.change(outcomeSelect, { target: { value: 'Progressive Disease' } });
+    expect(onChange).toHaveBeenCalledWith('post_transformation_outcome', 'Progressive Disease');
+  });
+});

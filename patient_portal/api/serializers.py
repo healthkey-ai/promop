@@ -5,7 +5,7 @@ from omop_core.models import (
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
     Survey, PatientSurveyResponse,
-    StemCellTransplant, SctEligibility,
+    StemCellTransplant, SctEligibility, PostTransformationOutcome,
     Organization, OrgTrust, OrgInvitation, GroupAccess,
 )
 from omop_oncology.models import Episode, EpisodeEvent
@@ -274,6 +274,38 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         if value is not None and value > localdate():
             raise serializers.ValidationError("SCT date cannot be in the future.")
         return value
+
+    def validate_dlbcl_transformation_date(self, value):
+        if value is not None and value > localdate():
+            raise serializers.ValidationError("DLBCL transformation date cannot be in the future.")
+        return value
+
+    def validate_post_transformation_outcome(self, value):
+        if not value:
+            return value
+        allowed = set(PostTransformationOutcome.objects.values_list('title', flat=True))
+        if value not in allowed:
+            raise serializers.ValidationError(
+                f"Unrecognized post_transformation_outcome value: {value!r}. "
+                f"Allowed: {sorted(allowed)}"
+            )
+        return value
+
+    def validate(self, data):
+        # Cross-field: transformation date/outcome require the flag, on both
+        # create and PATCH (fall back to the stored value for partial updates).
+        transformed = data.get(
+            'transformed_to_dlbcl', getattr(self.instance, 'transformed_to_dlbcl', None))
+        tx_date = data.get(
+            'dlbcl_transformation_date', getattr(self.instance, 'dlbcl_transformation_date', None))
+        outcome = data.get(
+            'post_transformation_outcome', getattr(self.instance, 'post_transformation_outcome', None))
+        if not transformed and (tx_date or outcome):
+            raise serializers.ValidationError(
+                "dlbcl_transformation_date and post_transformation_outcome "
+                "require transformed_to_dlbcl to be true."
+            )
+        return data
 
     def validate_stem_cell_transplant_history(self, value):
         if not value:
