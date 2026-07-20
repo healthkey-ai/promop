@@ -1621,6 +1621,11 @@ class FollicularLymphomaGrade(VocabularyLookup):
         db_table = 'vocabulary_follicular_lymphoma_grade'
 
 
+class PostTransformationOutcome(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_post_transformation_outcome'
+
+
 class BreastCancerFirstLineTherapy(VocabularyLookup):
     class Meta:
         db_table = 'vocabulary_breast_cancer_first_line_therapy'
@@ -2079,6 +2084,14 @@ class PatientRecord(models.Model):
     flipi_score = models.IntegerField(blank=True, null=True)
     flipi_score_options = models.TextField(blank=True, null=True)
     tumor_grade = models.IntegerField(blank=True, null=True)
+    # Histologic transformation of FL to DLBCL — derived from OMOP (DLBCL
+    # ConditionOccurrence, or a transformation Observation as fallback).
+    transformed_to_dlbcl = models.BooleanField(blank=True, null=True)
+    dlbcl_transformation_date = models.DateField(blank=True, null=True)
+    post_transformation_outcome = models.TextField(
+        blank=True, null=True,
+        help_text="Vocabulary: PostTransformationOutcome",
+    )
 
     # Measurable disease
     measurable_disease_imwg = models.BooleanField(blank=True, null=True)

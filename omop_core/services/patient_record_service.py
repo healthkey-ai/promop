@@ -106,6 +106,7 @@ _OMOP_DERIVED_FIELDS = [
     'btk_inhibitor_refractory', 'bcl2_inhibitor_refractory', 'lymphocyte_doubling_time',
     # Lymphoma
     'flipi_score', 'gelf_criteria_status', 'tumor_grade',
+    'transformed_to_dlbcl', 'dlbcl_transformation_date', 'post_transformation_outcome',
     # Assessment
     'measurable_disease_by_recist_status',
     # Clinical (breast cancer)
@@ -1849,6 +1850,95 @@ def _get_lymphoma_data(person: Person) -> dict:
         cname = m.measurement_concept.concept_name.lower()
         if 'grade' in cname and m.value_as_number is not None:
             data['tumor_grade'] = int(m.value_as_number)
+
+    data.update(_get_dlbcl_transformation(person, observations))
+
+    return data
+
+
+# ---------------------------------------------------------------------------
+# FL → DLBCL histologic transformation
+# ---------------------------------------------------------------------------
+
+_DLBCL_CONDITION_TERMS = ('diffuse large b-cell', 'dlbcl')
+
+# Maps LOT-line outcome strings onto PostTransformationOutcome titles.
+# Ordered: 'stringent complete response' contains 'complete response', and
+# 'very good partial response' contains 'partial response', so substring
+# matching in this order lands on the right bucket.
+_TRANSFORMATION_OUTCOME_MAP = (
+    ('complete response', 'Complete Response'),
+    ('partial response', 'Partial Response'),
+    ('stable disease', 'Stable Disease'),
+    ('progressive', 'Progressive Disease'),
+    ('relapse', 'Progressive Disease'),
+)
+
+
+def _normalize_transformation_outcome(outcome: str) -> str:
+    low = (outcome or '').lower()
+    for term, title in _TRANSFORMATION_OUTCOME_MAP:
+        if term in low:
+            return title
+    return 'Unknown'
+
+
+def _get_dlbcl_transformation(person: Person, observations) -> dict:
+    """Derive FL → DLBCL transformation fields from OMOP.
+
+    Evidence, in order:
+      1. a DLBCL ConditionOccurrence (transformation date = its start date)
+      2. fallback: an Observation whose concept name or source value mentions
+         histologic transformation (transformation date = observation date)
+
+    Post-transformation outcome precedence: death on/after transformation →
+    'Deceased'; else the latest post-transformation LOT-line outcome
+    Observation; else None (manual entry).
+
+    `observations` is the person's Observation queryset ordered by
+    -observation_date (already fetched by _get_lymphoma_data).
+    """
+    data = {}
+
+    transformation_date = None
+    dlbcl_conditions = (
+        ConditionOccurrence.objects
+        .filter(person=person)
+        .select_related('condition_concept')
+        .order_by('condition_start_date')
+    )
+    for cond in dlbcl_conditions:
+        cname = (cond.condition_concept.concept_name or '').lower() if cond.condition_concept else ''
+        if any(term in cname for term in _DLBCL_CONDITION_TERMS):
+            transformation_date = cond.condition_start_date
+            break
+
+    if transformation_date is None:
+        for obs in observations:
+            cname = (obs.observation_concept.concept_name or '').lower() if obs.observation_concept else ''
+            src = (obs.observation_source_value or '').lower()
+            if 'transformation' in cname or 'transformed' in src:
+                transformation_date = obs.observation_date
+                break
+
+    if transformation_date is None:
+        data['transformed_to_dlbcl'] = False
+        return data
+
+    data['transformed_to_dlbcl'] = True
+    data['dlbcl_transformation_date'] = transformation_date
+
+    death = Death.objects.filter(person=person).only('death_date').first()
+    if death and death.death_date and death.death_date >= transformation_date:
+        data['post_transformation_outcome'] = 'Deceased'
+    else:
+        for obs in observations:  # -observation_date: first hit is latest
+            src = obs.observation_source_value or ''
+            if (src.startswith('LOT-') and src.endswith('-outcome')
+                    and obs.observation_date >= transformation_date
+                    and obs.value_as_string):
+                data['post_transformation_outcome'] = _normalize_transformation_outcome(obs.value_as_string)
+                break
 
     return data
 

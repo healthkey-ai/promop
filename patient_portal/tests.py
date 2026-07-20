@@ -600,6 +600,155 @@ class FhirUploadPatientRecordTest(FhirUploadBase):
 
 
 # ---------------------------------------------------------------------------
+# 2b. FL → DLBCL transformation — upload, derivation, and validation
+# ---------------------------------------------------------------------------
+
+def _make_fl_bundle():
+    """FHIR bundle for an FL patient who transformed to DLBCL."""
+    patient_id = 'test-patient-fl-001'
+    return {
+        'resourceType': 'Bundle',
+        'type': 'collection',
+        'entry': [
+            {'resource': {
+                'resourceType': 'Patient',
+                'id': patient_id,
+                'name': [{'family': 'Follic', 'given': ['Larry']}],
+                'gender': 'male',
+                'birthDate': '1960-01-01',
+            }},
+            {'resource': {
+                'resourceType': 'Condition',
+                'id': 'cond-fl-001',
+                'subject': {'reference': f'Patient/{patient_id}'},
+                'code': {'text': 'Follicular Lymphoma', 'coding': [
+                    {'system': 'http://snomed.info/sct', 'code': '413448000',
+                     'display': 'Follicular non-Hodgkin lymphoma'},
+                ]},
+                'onsetDateTime': '2020-06-01',
+            }},
+            {'resource': {
+                'resourceType': 'Condition',
+                'id': 'cond-dlbcl-001',
+                'subject': {'reference': f'Patient/{patient_id}'},
+                'code': {'text': 'Diffuse Large B-Cell Lymphoma (transformed)', 'coding': [
+                    {'system': 'http://hl7.org/fhir/sid/icd-10-cm', 'code': 'C83.30',
+                     'display': 'Diffuse large B-cell lymphoma, unspecified'},
+                ]},
+                'onsetDateTime': '2023-04-15',
+            }},
+        ],
+    }
+
+
+class FhirUploadFlDlbclTransformationTest(FhirUploadBase):
+    """FL + DLBCL Conditions upload → ConditionOccurrence rows → derived transformation fields."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        domain = Domain.objects.get(domain_id='Condition')
+        cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
+        today = date.today()
+        for cid, name in ((42542169, 'Follicular lymphoma'),
+                          (42542162, 'Diffuse large B-cell lymphoma')):
+            Concept.objects.get_or_create(
+                concept_id=cid,
+                defaults={
+                    'concept_name': name, 'domain': domain, 'vocabulary': vocab,
+                    'concept_class': cc, 'concept_code': str(cid),
+                    'valid_start_date': today, 'valid_end_date': date(2099, 12, 31),
+                },
+            )
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle_bytes = json.dumps(_make_fl_bundle()).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'fl_bundle.json'
+        cls._upload_response = _client.post(
+            '/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart'
+        )
+        cls._person = Person.objects.filter(family_name='Follic', given_name='Larry').first()
+        assert cls._person is not None, 'Setup: FL person not found after upload'
+
+    def test_upload_returns_success(self):
+        self.assertIn(self._upload_response.status_code,
+                      [status.HTTP_200_OK, status.HTTP_201_CREATED],
+                      msg=f'Upload failed: {self._upload_response.data}')
+
+    def test_fl_and_dlbcl_condition_occurrences_created(self):
+        names = set(
+            ConditionOccurrence.objects.filter(person=self._person)
+            .values_list('condition_concept__concept_name', flat=True)
+        )
+        self.assertIn('Follicular lymphoma', names)
+        self.assertIn('Diffuse large B-cell lymphoma', names)
+
+    def test_patient_record_transformation_fields_derived(self):
+        pi = PatientRecord.objects.get(person=self._person)
+        self.assertTrue(pi.transformed_to_dlbcl)
+        self.assertEqual(pi.dlbcl_transformation_date, date(2023, 4, 15))
+
+
+class TransformationFieldValidationTest(FhirUploadBase):
+    """Serializer validation for the FL → DLBCL transformation fields."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle_bytes = json.dumps(_make_fhir_bundle()).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'test_bundle.json'
+        _client.post('/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart')
+        cls._pi = PatientRecord.objects.get(person__family_name='Smith')
+
+    def _patch(self, payload):
+        return self.client.patch(
+            f'/api/v1/patient-records/{self._pi.person_id}/', payload, format='json'
+        )
+
+    def test_valid_transformation_fields_accepted(self):
+        response = self._patch({
+            'transformed_to_dlbcl': True,
+            'dlbcl_transformation_date': '2023-04-15',
+            'post_transformation_outcome': 'Complete Response',
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=f'PATCH failed: {response.data}')
+        self._pi.refresh_from_db()
+        self.assertTrue(self._pi.transformed_to_dlbcl)
+        self.assertEqual(self._pi.post_transformation_outcome, 'Complete Response')
+
+    def test_future_transformation_date_rejected(self):
+        response = self._patch({
+            'transformed_to_dlbcl': True,
+            'dlbcl_transformation_date': '2999-01-01',
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_outcome_without_flag_rejected(self):
+        response = self._patch({'post_transformation_outcome': 'Complete Response'})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_unrecognized_outcome_rejected(self):
+        response = self._patch({
+            'transformed_to_dlbcl': True,
+            'post_transformation_outcome': 'Cured Forever',
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_vocabulary_endpoint_serves_outcomes(self):
+        response = self.client.get('/api/vocabularies/post-transformation-outcome/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        titles = {row['title'] for row in response.data}
+        self.assertIn('Complete Response', titles)
+        self.assertIn('Deceased', titles)
+
+
+# ---------------------------------------------------------------------------
 # 3. UI API view tests — data visible through endpoints the frontend uses
 # ---------------------------------------------------------------------------
 
