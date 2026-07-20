@@ -17,6 +17,7 @@ from datetime import date, timedelta
 
 from patient_portal.models import Identity
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -27,9 +28,11 @@ from omop_core.models import (
     Death,
     Relationship, ConceptRelationship, ConceptAncestor,
     SctEligibility,
+    FhirConnection, FhirOauthState, Institution,
+    ObservationPeriod, PatientSurveyResponse, PersonLanguageSkill, Survey,
 )
 from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
-from omop_oncology.models import Episode, EpisodeEvent
+from omop_oncology.models import CancerModifier, Episode, EpisodeEvent, Histology, StemTable
 
 
 # ---------------------------------------------------------------------------
@@ -7487,6 +7490,60 @@ class OrganizationCleanupServiceTest(TestCase):
             condition_type_concept=condition_type_concept,
         )
 
+        # Person-FK tables that are not reached by Django's ORM cascade when
+        # Person is deleted via raw SQL — these caused FK violations on staging.
+        ObservationPeriod.objects.create(
+            observation_period_id=9403,
+            person=person,
+            observation_period_start_date=date(2020, 1, 1),
+            observation_period_end_date=date.today(),
+            period_type_concept=condition_type_concept,
+        )
+        CancerModifier.objects.create(
+            cancer_modifier_id=9404,
+            person=person,
+            cancer_modifier_concept=condition_concept,
+        )
+        Histology.objects.create(
+            histology_id=9405,
+            person=person,
+            concept=condition_concept,
+            histology_date=date.today(),
+            histology_type_concept=condition_type_concept,
+        )
+        StemTable.objects.create(
+            id=9406,
+            domain_id='Condition',
+            person=person,
+            concept=condition_concept,
+            type_concept=condition_type_concept,
+            start_date=date.today(),
+        )
+        PersonLanguageSkill.objects.create(
+            person=person,
+            language_concept=_make_test_concept(9400004, 'Cleanup Language', 'CLANG', 'Language'),
+            skill_level='both',
+        )
+        survey = Survey.objects.create(name='cleanup-survey', title='Cleanup Survey')
+        PatientSurveyResponse.objects.create(person=person, survey=survey)
+        institution = Institution.objects.create(
+            slug='cleanup-ehr', display_name='Cleanup EHR', fhir_base='https://ehr.example.com/fhir',
+        )
+        FhirOauthState.objects.create(
+            state='cleanup-state-9407',
+            person=person,
+            institution=institution,
+            code_verifier='verifier',
+            nonce='nonce',
+        )
+        FhirConnection.objects.create(
+            person=person,
+            institution=institution,
+            access_token_encrypted='enc-access',
+            refresh_token_encrypted='enc-refresh',
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+
         delete_organization_with_patient_cascade(org)
 
         self.assertFalse(Organization.objects.filter(pk=org.pk).exists())
@@ -7494,6 +7551,14 @@ class OrganizationCleanupServiceTest(TestCase):
         self.assertFalse(Person.objects.filter(pk=person.pk).exists())
         self.assertFalse(ConditionOccurrence.objects.filter(person_id=person.person_id).exists())
         self.assertFalse(ProcedureOccurrence.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(ObservationPeriod.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(CancerModifier.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(Histology.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(StemTable.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(PersonLanguageSkill.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(PatientSurveyResponse.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(FhirOauthState.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(FhirConnection.objects.filter(person_id=person.person_id).exists())
         self.assertTrue(PatientRecord.objects.filter(pk=other_patient.pk).exists())
         self.assertTrue(Person.objects.filter(pk=other_person.pk).exists())
 

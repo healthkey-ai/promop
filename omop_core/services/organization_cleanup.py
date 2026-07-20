@@ -7,25 +7,30 @@ from omop_core.models import (
     DoseEra,
     DrugExposure,
     DrugEra,
+    FhirConnection,
+    FhirOauthState,
     Measurement,
     MeasurementOwnership,
     Note,
     NoteNlp,
     Observation,
+    ObservationPeriod,
     Organization,
     PatientDocument,
     PatientGroup,
     PatientGroupMembership,
     PatientRecord,
+    PatientSurveyResponse,
     PatientTrialEnrollment,
     PersonalRepresentative,
     Person,
+    PersonLanguageSkill,
     ProcedureOccurrence,
     Specimen,
     VisitDetail,
     VisitOccurrence,
 )
-from omop_oncology.models import Episode, EpisodeEvent
+from omop_oncology.models import CancerModifier, Episode, EpisodeEvent, Histology, StemTable
 from patient_portal.models import Identity, PatientUser
 
 
@@ -78,6 +83,18 @@ def delete_organization_with_patient_cascade(org: Organization) -> None:
             f"DELETE FROM {ProcedureOccurrence._meta.db_table} WHERE person_id IN ({person_subquery})",
             f"DELETE FROM {Death._meta.db_table} WHERE person_id IN ({person_subquery})",
             f"DELETE FROM {Specimen._meta.db_table} WHERE person_id IN ({person_subquery})",
+            # Tables with person FKs that Django would normally cascade-delete;
+            # listed explicitly because Person is removed via raw SQL below.
+            f"DELETE FROM {ObservationPeriod._meta.db_table} WHERE person_id IN ({person_subquery})",
+            f"DELETE FROM {CancerModifier._meta.db_table} WHERE person_id IN ({person_subquery})",
+            f"DELETE FROM {Histology._meta.db_table} WHERE person_id IN ({person_subquery})",
+            # stem_table has an FK to visit_occurrence (no DB-level cascade),
+            # so it must go before VisitOccurrence is deleted.
+            f"DELETE FROM {StemTable._meta.db_table} WHERE person_id IN ({person_subquery})",
+            f"DELETE FROM {PersonLanguageSkill._meta.db_table} WHERE person_id IN ({person_subquery})",
+            f"DELETE FROM {PatientSurveyResponse._meta.db_table} WHERE person_id IN ({person_subquery})",
+            f"DELETE FROM {FhirConnection._meta.db_table} WHERE person_id IN ({person_subquery})",
+            f"DELETE FROM {FhirOauthState._meta.db_table} WHERE person_id IN ({person_subquery})",
             (
                 f"DELETE FROM {NoteNlp._meta.db_table} "
                 f"WHERE note_id IN (SELECT note_id FROM {Note._meta.db_table} "
