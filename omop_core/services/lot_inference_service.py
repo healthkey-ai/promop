@@ -17,11 +17,7 @@ from datetime import date, timedelta
 from typing import Optional
 
 from omop_core.models import Concept, ConceptAncestor, ConceptRelationship, DrugExposure, ProcedureOccurrence
-from omop_core.services.mappings import (
-    CONCEPT_TREATMENT_REGIMEN,
-    CONCEPT_EHR_TYPE,
-    CONCEPT_DRUG_EXPOSURE_FIELD,
-)
+from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.lot_regimens import (
     DRUG_SUBTYPE_MAP,
     HEMONC_CART_CLASSES,
@@ -33,7 +29,7 @@ from omop_core.services.lot_regimens import (
     STEROID_SUBTYPES,
 )
 from omop_core.services.patient_record_service import refresh_patient_record
-from omop_oncology.models import Episode, EpisodeEvent
+from omop_oncology.models import Episode
 
 logger = logging.getLogger('audit')
 
@@ -484,50 +480,16 @@ def _name_regimen(drugs: set) -> str:
 # ── Phase 6: Persist ──────────────────────────────────────────────────────
 
 def _persist_lots(person, lots: list[_LineOfTherapy]) -> None:
-    episode_concept = Concept.objects.filter(concept_id=CONCEPT_TREATMENT_REGIMEN).first()
-    ehr_concept = Concept.objects.filter(concept_id=CONCEPT_EHR_TYPE).first()
-    field_concept = Concept.objects.filter(concept_id=CONCEPT_DRUG_EXPOSURE_FIELD).first()
-
-    if not episode_concept or not ehr_concept or not field_concept:
-        logger.error('{"event": "lot_inference_error", "error": "required concepts missing"}')
-        return
-
     for lot in lots:
-        source_val = lot.source_value
-        # Look up an existing episode matching this person + lot_number + start date.
-        existing = Episode.objects.filter(
-            person=person,
-            episode_number=lot.lot_number,
-            episode_start_date=lot.start,
-        ).first()
-        if existing:
-            episode = existing
-            if episode.episode_source_value != source_val or episode.episode_end_date != lot.end:
-                episode.episode_source_value = source_val
-                episode.episode_end_date = lot.end
-                episode.save(update_fields=['episode_source_value', 'episode_end_date'])
-        else:
-            # Episode.episode_id is BigIntegerField(primary_key=True) — use sequence.
-            from omop_core.services.pk import next_pk
-            new_ep_id = next_pk(Episode, 'episode_id')
-            episode = Episode.objects.create(
-                episode_id=new_ep_id,
-                person=person,
-                episode_concept=episode_concept,
-                episode_object_concept=ehr_concept,
-                episode_type_concept=ehr_concept,
-                episode_number=lot.lot_number,
-                episode_start_date=lot.start,
-                episode_end_date=lot.end,
-                episode_source_value=source_val,
-            )
-
-        for exp_id in lot.exposure_ids:
-            EpisodeEvent.objects.get_or_create(
-                episode_id=episode.episode_id,
-                event_id=exp_id,
-                defaults={'episode_event_field_concept': field_concept},
-            )
+        upsert_therapy_line_episode(
+            person,
+            line_number=lot.lot_number,
+            start_date=lot.start,
+            end_date=lot.end,
+            drug_exposure_ids=lot.exposure_ids,
+            source_value=lot.source_value,
+            today=lot.start,
+        )
 
 
 # ── Public entry point ─────────────────────────────────────────────────────

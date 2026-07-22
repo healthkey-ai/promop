@@ -91,12 +91,21 @@ class TestLaterTherapies:
 
     def test_three_or_more_drugs_populate_later_therapies(self):
         person = PersonFactory()
-        for i, name in enumerate(['DrugA', 'DrugB', 'DrugC', 'DrugD']):
+        # Four distinct single agents spaced a quarter apart so LOT inference
+        # segments them into four separate lines (gaps exceed the 28-day
+        # combination window), rather than merging them into one regimen.
+        starts_ends = [
+            ('DrugA', '2023-01-01', '2023-01-28'),
+            ('DrugB', '2023-04-01', '2023-04-28'),
+            ('DrugC', '2023-07-01', '2023-07-28'),
+            ('DrugD', '2023-10-01', '2023-10-28'),
+        ]
+        for name, start, end in starts_ends:
             DrugExposureFactory(
                 person=person,
                 drug_concept=ConceptFactory(concept_name=name),
-                drug_exposure_start_date=f'2023-0{i+1}-01',
-                drug_exposure_end_date=f'2023-0{i+1}-28',
+                drug_exposure_start_date=start,
+                drug_exposure_end_date=end,
             )
         data = _cmd().get_treatment_data(person)
         assert 'later_therapies' in data
@@ -363,7 +372,116 @@ class TestLymphomaData:
     def test_no_lymphoma_data_empty_dict(self):
         person = PersonFactory()
         data = _cmd().get_lymphoma_data(person)
-        assert data == {}
+        # No transformation evidence → explicitly False (analytics denominator).
+        assert data == {'transformed_to_dlbcl': False}
+
+
+# ---------------------------------------------------------------------------
+# get_lymphoma_data — FL → DLBCL transformation
+# ---------------------------------------------------------------------------
+
+class TestLymphomaTransformation:
+
+    def test_dlbcl_condition_sets_flag_and_date(self):
+        person = PersonFactory()
+        dlbcl = ConceptFactory(concept_name='Diffuse large B-cell lymphoma')
+        ConditionOccurrenceFactory(person=person, condition_concept=dlbcl,
+                                   condition_start_date='2023-05-10')
+        data = _cmd().get_lymphoma_data(person)
+        assert data['transformed_to_dlbcl'] is True
+        assert str(data['dlbcl_transformation_date']) == '2023-05-10'
+
+    def test_earliest_dlbcl_condition_wins(self):
+        person = PersonFactory()
+        dlbcl = ConceptFactory(concept_name='Diffuse large B-cell lymphoma')
+        ConditionOccurrenceFactory(person=person, condition_concept=dlbcl,
+                                   condition_start_date='2024-01-01')
+        ConditionOccurrenceFactory(person=person, condition_concept=dlbcl,
+                                   condition_start_date='2023-06-15')
+        data = _cmd().get_lymphoma_data(person)
+        assert str(data['dlbcl_transformation_date']) == '2023-06-15'
+
+    def test_transformation_observation_fallback(self):
+        """No DLBCL condition, but a transformation observation exists."""
+        person = PersonFactory()
+        concept = ConceptFactory(concept_name='Histologic transformation to DLBCL')
+        ObservationFactory(person=person, observation_concept=concept,
+                           observation_date='2023-11-20')
+        data = _cmd().get_lymphoma_data(person)
+        assert data['transformed_to_dlbcl'] is True
+        assert str(data['dlbcl_transformation_date']) == '2023-11-20'
+
+    def test_transformation_observation_fallback_by_source_value(self):
+        """Observation matched via observation_source_value when concept is generic."""
+        person = PersonFactory()
+        concept = ConceptFactory(concept_name='Generic Lab Measurement')
+        ObservationFactory(person=person, observation_concept=concept,
+                           observation_source_value='fl-transformed-dlbcl',
+                           observation_date='2023-08-01')
+        data = _cmd().get_lymphoma_data(person)
+        assert data['transformed_to_dlbcl'] is True
+        assert str(data['dlbcl_transformation_date']) == '2023-08-01'
+
+    def test_no_evidence_means_not_transformed(self):
+        person = PersonFactory()
+        fl = ConceptFactory(concept_name='Follicular lymphoma')
+        ConditionOccurrenceFactory(person=person, condition_concept=fl,
+                                   condition_start_date='2020-01-01')
+        data = _cmd().get_lymphoma_data(person)
+        assert data['transformed_to_dlbcl'] is False
+        assert 'dlbcl_transformation_date' not in data
+        assert 'post_transformation_outcome' not in data
+
+    def test_death_after_transformation_outcome_deceased(self):
+        from omop_core.models import Death
+        person = PersonFactory()
+        dlbcl = ConceptFactory(concept_name='Diffuse large B-cell lymphoma')
+        ConditionOccurrenceFactory(person=person, condition_concept=dlbcl,
+                                   condition_start_date='2023-05-10')
+        Death.objects.create(person=person, death_date='2024-02-01',
+                             death_type_concept=ConceptFactory(concept_name='EHR'))
+        data = _cmd().get_lymphoma_data(person)
+        assert data['post_transformation_outcome'] == 'Deceased'
+
+    def test_post_transformation_line_outcome(self):
+        """Latest LOT-outcome observation on/after transformation sets the outcome."""
+        person = PersonFactory()
+        dlbcl = ConceptFactory(concept_name='Diffuse large B-cell lymphoma')
+        ConditionOccurrenceFactory(person=person, condition_concept=dlbcl,
+                                   condition_start_date='2023-05-10')
+        concept = ConceptFactory(concept_name='Response to cancer treatment')
+        # pre-transformation outcome — must be ignored
+        ObservationFactory(person=person, observation_concept=concept,
+                           observation_source_value='LOT-1-outcome',
+                           observation_date='2022-01-01', value_as_string='Progressive Disease')
+        ObservationFactory(person=person, observation_concept=concept,
+                           observation_source_value='LOT-2-outcome',
+                           observation_date='2023-09-01', value_as_string='Complete Response')
+        data = _cmd().get_lymphoma_data(person)
+        assert data['post_transformation_outcome'] == 'Complete Response'
+
+    def test_death_takes_precedence_over_line_outcome(self):
+        from omop_core.models import Death
+        person = PersonFactory()
+        dlbcl = ConceptFactory(concept_name='Diffuse large B-cell lymphoma')
+        ConditionOccurrenceFactory(person=person, condition_concept=dlbcl,
+                                   condition_start_date='2023-05-10')
+        ObservationFactory(person=person, observation_concept=ConceptFactory(concept_name='Response'),
+                           observation_source_value='LOT-2-outcome',
+                           observation_date='2023-09-01', value_as_string='Complete Response')
+        Death.objects.create(person=person, death_date='2024-01-01',
+                             death_type_concept=ConceptFactory(concept_name='EHR'))
+        data = _cmd().get_lymphoma_data(person)
+        assert data['post_transformation_outcome'] == 'Deceased'
+
+    def test_transformed_without_outcome_leaves_outcome_unset(self):
+        person = PersonFactory()
+        dlbcl = ConceptFactory(concept_name='Diffuse large B-cell lymphoma')
+        ConditionOccurrenceFactory(person=person, condition_concept=dlbcl,
+                                   condition_start_date='2023-05-10')
+        data = _cmd().get_lymphoma_data(person)
+        assert data['transformed_to_dlbcl'] is True
+        assert 'post_transformation_outcome' not in data
 
 
 # ---------------------------------------------------------------------------

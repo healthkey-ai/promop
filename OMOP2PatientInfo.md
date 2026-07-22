@@ -167,11 +167,6 @@ is_immunotherapy = any(term in drug_name.lower() for term in immuno_terms)
 #### Source: `Observation` Table (Standard OMOP) with Cancer Staging Concepts
 | PatientInfo Field | SNOMED Code | Extraction Logic |
 |------------------|-------------|------------------|
-| `best_response` | 182840001 | Complete Response |
-| - | 182841002 | Partial Response |
-| - | 182843004 | Stable Disease |
-| - | 182842009 | Progressive Disease |
-
 #### Source: `ConditionOccurrence` Table (Standard OMOP)
 | PatientInfo Field | Extraction Logic | Clinical Trial Relevance |
 |------------------|------------------|-------------------------|

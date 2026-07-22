@@ -5,7 +5,7 @@ from omop_core.models import (
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
     Survey, PatientSurveyResponse,
-    StemCellTransplant, SctEligibility,
+    StemCellTransplant, SctEligibility, PostTransformationOutcome,
     Organization, OrgTrust, OrgInvitation, GroupAccess,
 )
 from omop_oncology.models import Episode, EpisodeEvent
@@ -202,10 +202,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         read_only_fields = (
             'organization', 'person', 'created_at', 'updated_at',
             'first_line_therapy_display', 'second_line_therapy_display', 'later_therapy_display',
-            # best_response is derived from OMOP Observations by refresh_patient_record;
-            # sync_to_omop has no write-through category for it, so a client PATCH would
-            # be silently discarded on the next refresh. Read-only until that path exists.
-            'best_response',
+            'death_date',
             # Wearable summaries are written by the device-sync service, never by the client API.
             'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
             'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
@@ -277,6 +274,38 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         if value is not None and value > localdate():
             raise serializers.ValidationError("SCT date cannot be in the future.")
         return value
+
+    def validate_dlbcl_transformation_date(self, value):
+        if value is not None and value > localdate():
+            raise serializers.ValidationError("DLBCL transformation date cannot be in the future.")
+        return value
+
+    def validate_post_transformation_outcome(self, value):
+        if not value:
+            return value
+        allowed = set(PostTransformationOutcome.objects.values_list('title', flat=True))
+        if value not in allowed:
+            raise serializers.ValidationError(
+                f"Unrecognized post_transformation_outcome value: {value!r}. "
+                f"Allowed: {sorted(allowed)}"
+            )
+        return value
+
+    def validate(self, data):
+        # Cross-field: transformation date/outcome require the flag, on both
+        # create and PATCH (fall back to the stored value for partial updates).
+        transformed = data.get(
+            'transformed_to_dlbcl', getattr(self.instance, 'transformed_to_dlbcl', None))
+        tx_date = data.get(
+            'dlbcl_transformation_date', getattr(self.instance, 'dlbcl_transformation_date', None))
+        outcome = data.get(
+            'post_transformation_outcome', getattr(self.instance, 'post_transformation_outcome', None))
+        if not transformed and (tx_date or outcome):
+            raise serializers.ValidationError(
+                "dlbcl_transformation_date and post_transformation_outcome "
+                "require transformed_to_dlbcl to be true."
+            )
+        return data
 
     def validate_stem_cell_transplant_history(self, value):
         if not value:

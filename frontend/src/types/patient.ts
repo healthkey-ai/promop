@@ -38,6 +38,9 @@ export interface PatientInfo {
   flipi_score?: number;
   flipi_score_options?: string;
   tumor_grade?: string;
+  transformed_to_dlbcl?: boolean;
+  dlbcl_transformation_date?: string;
+  post_transformation_outcome?: string;
   
   // Multiple Myeloma specific
   cytogenic_markers?: string;
@@ -87,6 +90,11 @@ export interface PatientInfo {
   first_line_therapy_id?: number | null;
   second_line_therapy_id?: number | null;
   later_therapy_ids?: number[] | null;
+  // Component drug concept_ids per line (HemOnc regimen expansion ∪ exposure drugs, ingredient-leveled)
+  first_line_component_ids?: number[] | null;
+  second_line_component_ids?: number[] | null;
+  later_component_ids?: number[] | null;
+  therapy_component_ids?: number[] | null;
   first_line_therapy_display?: string | null;
   second_line_therapy_display?: string | null;
   later_therapy_display?: string[] | null;

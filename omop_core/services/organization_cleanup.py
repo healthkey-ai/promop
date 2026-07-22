@@ -7,25 +7,30 @@ from omop_core.models import (
     DoseEra,
     DrugExposure,
     DrugEra,
+    FhirConnection,
+    FhirOauthState,
     Measurement,
     MeasurementOwnership,
     Note,
     NoteNlp,
     Observation,
+    ObservationPeriod,
     Organization,
     PatientDocument,
     PatientGroup,
     PatientGroupMembership,
     PatientRecord,
+    PatientSurveyResponse,
     PatientTrialEnrollment,
     PersonalRepresentative,
     Person,
+    PersonLanguageSkill,
     ProcedureOccurrence,
     Specimen,
     VisitDetail,
     VisitOccurrence,
 )
-from omop_oncology.models import Episode, EpisodeEvent
+from omop_oncology.models import CancerModifier, Episode, EpisodeEvent, Histology, StemTable
 from patient_portal.models import Identity, PatientUser
 
 
@@ -44,6 +49,9 @@ def delete_organization_with_patient_cascade(org: Organization) -> None:
         # prevents deleting Person while PatientRecord still references it).
         person_ids = list(
             PatientRecord.objects.filter(organization=org).values_list('person_id', flat=True)
+        )
+        identity_ids = list(
+            PatientUser.objects.filter(person_id__in=person_ids).values_list('identity_id', flat=True)
         )
 
         patient_record_table = PatientRecord._meta.db_table
@@ -64,11 +72,7 @@ def delete_organization_with_patient_cascade(org: Organization) -> None:
                 f"OR measurement_id IN (SELECT measurement_id FROM {Measurement._meta.db_table} "
                 f"WHERE person_id IN ({person_subquery}))"
             ),
-            (
-                f"DELETE FROM {Identity._meta.db_table} "
-                f"WHERE id IN (SELECT identity_id FROM {PatientUser._meta.db_table} "
-                f"WHERE person_id IN ({person_subquery}))"
-            ),
+            f"DELETE FROM {PatientUser._meta.db_table} WHERE person_id IN ({person_subquery})",
             f"DELETE FROM {Episode._meta.db_table} WHERE person_id IN ({person_subquery})",
             f"DELETE FROM {ConditionOccurrence._meta.db_table} WHERE person_id IN ({person_subquery})",
             f"DELETE FROM {ConditionEra._meta.db_table} WHERE person_id IN ({person_subquery})",
@@ -79,6 +83,18 @@ def delete_organization_with_patient_cascade(org: Organization) -> None:
             f"DELETE FROM {ProcedureOccurrence._meta.db_table} WHERE person_id IN ({person_subquery})",
             f"DELETE FROM {Death._meta.db_table} WHERE person_id IN ({person_subquery})",
             f"DELETE FROM {Specimen._meta.db_table} WHERE person_id IN ({person_subquery})",
+            # Tables with person FKs that Django would normally cascade-delete;
+            # listed explicitly because Person is removed via raw SQL below.
+            f"DELETE FROM {ObservationPeriod._meta.db_table} WHERE person_id IN ({person_subquery})",
+            f"DELETE FROM {CancerModifier._meta.db_table} WHERE person_id IN ({person_subquery})",
+            f"DELETE FROM {Histology._meta.db_table} WHERE person_id IN ({person_subquery})",
+            # stem_table has an FK to visit_occurrence (no DB-level cascade),
+            # so it must go before VisitOccurrence is deleted.
+            f"DELETE FROM {StemTable._meta.db_table} WHERE person_id IN ({person_subquery})",
+            f"DELETE FROM {PersonLanguageSkill._meta.db_table} WHERE person_id IN ({person_subquery})",
+            f"DELETE FROM {PatientSurveyResponse._meta.db_table} WHERE person_id IN ({person_subquery})",
+            f"DELETE FROM {FhirConnection._meta.db_table} WHERE person_id IN ({person_subquery})",
+            f"DELETE FROM {FhirOauthState._meta.db_table} WHERE person_id IN ({person_subquery})",
             (
                 f"DELETE FROM {NoteNlp._meta.db_table} "
                 f"WHERE note_id IN (SELECT note_id FROM {Note._meta.db_table} "
@@ -101,6 +117,12 @@ def delete_organization_with_patient_cascade(org: Organization) -> None:
                 if isinstance(sql, tuple):
                     sql = sql[0]
                 cursor.execute(sql, [org.pk] * sql.count('%s'))
+
+            if identity_ids:
+                cursor.execute(
+                    f"DELETE FROM {Identity._meta.db_table} WHERE id = ANY(%s)",
+                    [identity_ids],
+                )
 
             # Delete Person rows using pre-collected IDs (subquery is now empty since
             # PatientRecord was deleted above; raw SQL bypasses Django's CASCADE).

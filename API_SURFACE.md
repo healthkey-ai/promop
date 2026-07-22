@@ -574,7 +574,7 @@ Full CRUD. Org-scoped. These do not feed into PatientRecord.
 For a full explanation of how LOINC, SNOMED, and HemOnc codes are resolved to OMOP Concept IDs,
 see [docs/concept-mapping.md](docs/concept-mapping.md).
 
-### GET /api/concepts/lookup/
+### GET /api/v1/concepts/lookup/
 
 Batch translate `(vocabulary_id, concept_code)` pairs to OMOP `concept_id`. Used by phr-etl to resolve raw clinical codes before writing OMOP records — unknown codes fall back to `concept_id = 0` on the client side.
 
@@ -582,7 +582,7 @@ Query param `lookup` is repeatable. Each value must be `VOCAB_ID:concept_code`.
 
 **Request**
 ```
-GET /api/concepts/lookup/?lookup=LOINC:2160-0&lookup=LOINC:2345-7&lookup=SNOMED:44054006
+GET /api/v1/concepts/lookup/?lookup=LOINC:2160-0&lookup=LOINC:2345-7&lookup=SNOMED:44054006
 ```
 
 **Response 200**
@@ -599,7 +599,108 @@ Unknown codes return `null`. Requires `patient/*.read` scope (read-only).
 
 ---
 
-### GET /api/vocabularies/{model_name}/
+### GET /api/v1/concepts/search/
+
+Search OMOP concepts by case-insensitive substring match on `concept_name`. Use this for
+autocomplete, terminology browsing, and finding a candidate `concept_id` when the caller has a
+clinical label but not a vocabulary code.
+
+Query params:
+
+| Param | Required | Description |
+|---|---:|---|
+| `q` | yes | Search string; minimum 2 characters after trimming |
+| `vocabulary_id` | no | Exact match filter, e.g. `LOINC`, `SNOMED`, `RxNorm`, `HemOnc` |
+| `domain_id` | no | Exact match filter, e.g. `Measurement`, `Condition`, `Drug` |
+| `concept_class_id` | no | Exact match filter, e.g. `Lab Test`, `Clinical Finding` |
+| `standard_concept` | no | Exact match filter; usually `S` for standard or `C` for classification |
+| `page` | no | 1-based page number |
+| `page_size` | no | Defaults to 25; capped at 100 |
+
+**Request**
+```
+GET /api/v1/concepts/search/?q=creatinine&vocabulary_id=LOINC&domain_id=Measurement&page_size=10
+```
+
+**Response 200**
+```json
+{
+  "count": 2,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "concept_id": 3016723,
+      "concept_name": "Creatinine [Mass/volume] in Serum or Plasma",
+      "vocabulary_id": "LOINC",
+      "concept_code": "2160-0",
+      "domain_id": "Measurement",
+      "concept_class_id": "Lab Test",
+      "standard_concept": "S"
+    }
+  ]
+}
+```
+
+Results are ordered by `concept_id` for stable pagination. Unknown search strings return an
+empty paginated result (`count: 0`). Requires `patient/*.read` or `user/*.read` scope.
+
+**Response 400** — `q` is missing or shorter than 2 characters.
+
+---
+
+### GET /api/v1/concepts/
+
+Browse OMOP concepts with exact-match filters. This is the non-text-search companion to
+`/api/v1/concepts/search/`, useful for listing all concepts in a vocabulary/domain/class.
+
+At least one selective filter is required: `vocabulary_id`, `domain_id`, or `concept_class_id`.
+`standard_concept` can narrow those results but cannot be the only filter because the full
+Athena concept table can contain millions of rows.
+
+Query params:
+
+| Param | Required | Description |
+|---|---:|---|
+| `vocabulary_id` | conditionally | Exact match filter, e.g. `LOINC`, `SNOMED`, `RxNorm`, `HemOnc` |
+| `domain_id` | conditionally | Exact match filter, e.g. `Measurement`, `Condition`, `Drug` |
+| `concept_class_id` | conditionally | Exact match filter, e.g. `Lab Test`, `Clinical Finding` |
+| `standard_concept` | no | Exact match filter; usually `S` or `C` |
+| `page` | no | 1-based page number |
+| `page_size` | no | Defaults to 25; capped at 100 |
+
+**Request**
+```
+GET /api/v1/concepts/?domain_id=Measurement&concept_class_id=Lab%20Test&page_size=25
+```
+
+**Response 200**
+```json
+{
+  "count": 1240,
+  "next": "http://localhost:8000/api/v1/concepts/?concept_class_id=Lab%20Test&domain_id=Measurement&page=2&page_size=25",
+  "previous": null,
+  "results": [
+    {
+      "concept_id": 3016723,
+      "concept_name": "Creatinine [Mass/volume] in Serum or Plasma",
+      "vocabulary_id": "LOINC",
+      "concept_code": "2160-0",
+      "domain_id": "Measurement",
+      "concept_class_id": "Lab Test",
+      "standard_concept": "S"
+    }
+  ]
+}
+```
+
+Requires `patient/*.read` or `user/*.read` scope.
+
+**Response 400** — none of `vocabulary_id`, `domain_id`, or `concept_class_id` was supplied.
+
+---
+
+### GET /api/v1/vocabularies/{model_name}/
 
 Returns every entry in a controlled vocabulary table.
 
@@ -778,7 +879,7 @@ OMOP table save / delete
                     _get_social_data         ← Observation (employment, insurance)
                     _get_behavior_data       ← Observation (tobacco use)
                     _get_infection_data      ← Measurement, LOINC 5221-7/5195-3/5196-1
-                    _get_assessment_data     ← Observation (best_response, RECIST)
+                    _get_assessment_data     ← Observation (RECIST)
                     _get_laboratory_data     ← Measurement (see below)
                     _get_performance_data    ← Observation (ECOG, Karnofsky)
                     _get_genetic_mutations   ← Measurement, LOINC 21636-6/21637-4/21667-1/…

@@ -11,8 +11,8 @@ Addresses three data gaps found while building benchmark_patient_record:
   1. ECOG / Karnofsky / "Stage group.clinical Cancer" Measurement rows exist
      for this cohort but every value column is null.
   2. Observation has zero rows at all for this cohort, so tobacco status
-     (_get_behavior_data), tumor/metastasis staging + best_response
-     (_get_assessment_data), and sleep duration (_get_wearable_data) always
+     (_get_behavior_data), tumor/metastasis staging / response-status
+     Observations, and sleep duration (_get_wearable_data) always
      return empty.
   3. None of the six wearable Measurement LOINC codes appear for this
      cohort, so _get_wearable_data's Measurement-sourced metrics (steps,
@@ -52,7 +52,7 @@ from omop_core.services.mappings import (
 )
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.services.patient_record_service import refresh_patient_record
-from omop_core.services.lot_regimens import REGIMEN_CONCEPT_IDS
+from omop_core.services.lot_regimens import REGIMEN_CONCEPT_IDS, get_regimen_name
 from omop_core.signals import suppress_patient_record_refresh
 
 
@@ -166,6 +166,44 @@ def _get_or_create_concept_class(concept_class_id):
         defaults={'concept_class_name': concept_class_id, 'concept_class_concept_id': 0},
     )
     return concept_class
+
+
+def _get_or_create_hemonc_vocabulary():
+    vocab, _ = Vocabulary.objects.get_or_create(
+        vocabulary_id='HemOnc',
+        defaults={
+            'vocabulary_name': 'HemOnc',
+            'vocabulary_reference': 'https://hemonc.org',
+            'vocabulary_version': 'HemOnc (synthetic, benchmark seed)',
+            'vocabulary_concept_id': 0,
+        },
+    )
+    return vocab
+
+
+def _get_or_create_regimen_concept(concept_id, regimen_key):
+    """Get or create the HemOnc regimen Concept for a known concept_id.
+
+    Therapy backfill resolves a regimen's HemOnc concept_id from
+    REGIMEN_CONCEPT_IDS; on a DB where that Concept row was never loaded we
+    create it so the backfilled DrugExposure references a real regimen concept
+    (and derivation can surface it as first_line_therapy_id).
+    """
+    existing = Concept.objects.filter(concept_id=concept_id).first()
+    if existing:
+        return existing
+    name = get_regimen_name(regimen_key) or ' + '.join(sorted(regimen_key)).title()
+    return Concept.objects.create(
+        concept_id=concept_id,
+        concept_name=name,
+        vocabulary=_get_or_create_hemonc_vocabulary(),
+        domain=_get_or_create_domain('Drug'),
+        concept_class=_get_or_create_concept_class('Regimen'),
+        standard_concept='S',
+        concept_code=str(concept_id),
+        valid_start_date='1970-01-01',
+        valid_end_date='2099-12-31',
+    )
 
 
 def _get_or_create_concept(concept_code, concept_name):
@@ -602,7 +640,7 @@ class Command(BaseCommand):
     def _create_missing_observations(self, person, record, observation_ids,
                                       ehr_type_concept_id, dry_run):
         """Insert one tobacco-status, one T/M-staging pair, and one
-        best_response Observation row per person, skipping any concept the
+        response-status Observation row per person, skipping any concept the
         person already has an Observation row for (idempotent)."""
         created = 0
         existing_concept_ids = set(
@@ -775,6 +813,10 @@ class Command(BaseCommand):
                 .order_by('concept_id')
                 .first()
             )
+        # Known HemOnc regimen but its Concept row isn't loaded on this DB —
+        # create it so backfill always yields a resolvable regimen concept.
+        if concept is None and concept_id:
+            concept = _get_or_create_regimen_concept(concept_id, regimen_key)
 
         if concept is None:
             return 0

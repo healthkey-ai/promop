@@ -120,8 +120,18 @@ _LAST_NAMES = [
 _ETHNICITIES       = ['Caucasian/White', 'Hispanic/Latino', 'Black/African-American', 'Asian', 'Native American']
 _ETHNICITY_WEIGHTS = [72, 10, 10, 6, 2]
 _OUTCOMES          = ['Progressive Disease', 'Stable Disease', 'Partial Response', 'Complete Response']
-_OUTCOME_W_PREV    = [65, 10, 18, 7]
-_OUTCOME_W_LAST    = [20, 20, 35, 25]
+# Per-line outcome weights [PD, SD, PR, CR]: 1L responds well (CR ~55%);
+# later lines progressively worse. Used by _build_therapy_timeline.
+_OUTCOME_WEIGHTS_BY_LINE = {
+    1: [8, 5, 32, 55],
+    2: [18, 12, 38, 32],
+    3: [28, 15, 37, 20],
+}
+_OUTCOME_WEIGHTS_LATE = [35, 15, 32, 18]
+
+# Fraction of treated patients who progress within 24 months of first-line
+# start (POD24) — real-world FL rate is ~20%.
+_POD24_RATE = 0.20
 
 
 def _wc(items, weights):
@@ -224,26 +234,108 @@ class FLBundleGenerator:
 
     def _add_patient(self, bundle, pid):
         p         = self._profile(pid)
-        diag_date = self._random_date(2015, 2023)
+        diag_date = self._random_date(2015, 2025)
         lab_date  = datetime.now() - timedelta(days=random.randint(1, 60))
 
         def _entry(resource):
             rt, rid = resource['resourceType'], resource['id']
             bundle['entry'].append({'fullUrl': f'http://example.org/{rt}/{rid}', 'resource': resource})
 
+        # Multi-year therapy timeline (PFS intervals between lines) — drives
+        # therapy resources, POD24 structure, and mortality.
+        timeline = self._build_therapy_timeline(p, diag_date)
+        transformation_date = None
+        if p['transformed']:
+            # Transformation happens some years after the FL diagnosis, capped at today.
+            transformation_date = min(
+                diag_date + timedelta(days=random.randint(365, 5 * 365)),
+                datetime.now(),
+            )
+        p['death_date'] = self._draw_death_date(p, timeline, diag_date)
+
         _entry(self._patient_resource(p))
         _entry(self._condition_resource(p, diag_date))
+        if transformation_date:
+            _entry(self._dlbcl_condition_resource(p, transformation_date))
         for obs in self._fl_labs(p, lab_date):
             _entry(obs)
         for obs in self._performance_obs(p, lab_date):
             _entry(obs)
-        for obs in self._fl_specific_obs(p, diag_date):
+        for obs in self._fl_specific_obs(p, diag_date, transformation_date):
             _entry(obs)
         if not p['watch_and_wait']:
-            for resource in self._therapy_resources(p, diag_date):
+            for resource in self._therapy_resources(p, timeline):
                 _entry(resource)
             if p['maintenance_rituximab']:
                 _entry(self._maintenance_rituximab(p, diag_date))
+
+    # ------------------------------------------------------------------
+    # Therapy timeline / mortality
+    # ------------------------------------------------------------------
+
+    def _build_therapy_timeline(self, p, diag_date):
+        """Realistic multi-year line timeline.
+
+        Line n+1 starts only after a progression-free interval following line
+        n (1L median ~6 years; later lines shorter), so recently-diagnosed or
+        slow-progressing patients end up with fewer actual lines than
+        p['prior_lines'] (natural censoring). ~20% of multi-line patients are
+        early progressors whose second line starts within 24 months of their
+        first (POD24).
+
+        Returns a list of {'num', 'start', 'end', 'outcome'} dicts (datetimes).
+        """
+        timeline = []
+        if p['watch_and_wait'] or not p['prior_lines']:
+            return timeline
+        today = datetime.now()
+        early_progressor = p['prior_lines'] > 1 and random.random() < _POD24_RATE
+        start = diag_date + timedelta(days=random.randint(14, 90))
+        for n in range(1, p['prior_lines'] + 1):
+            if start > today:
+                break
+            end = min(start + timedelta(days=random.randint(120, 240)), today)  # 4–8 months of therapy
+            weights = _OUTCOME_WEIGHTS_BY_LINE.get(n, _OUTCOME_WEIGHTS_LATE)
+            timeline.append({'num': n, 'start': start, 'end': end,
+                             'outcome': _wc(_OUTCOMES, weights)})
+            # Progression-free interval: end of line n → start of line n+1
+            if n == 1 and early_progressor:
+                pfs = random.randint(30, 400)      # POD24: relapse within ~24 months of 1L start
+            elif n == 1:
+                pfs = int(random.triangular(2 * 365, 10 * 365, 6 * 365))
+            elif n == 2:
+                pfs = int(random.triangular(180, 5 * 365, 2 * 365))
+            else:
+                pfs = int(random.triangular(90, 3 * 365, 365))
+            start = end + timedelta(days=pfs)
+        return timeline
+
+    def _draw_death_date(self, p, timeline, diag_date):
+        """Death date for a fraction of the cohort, weighted toward POD24,
+        heavily pre-treated, and transformed patients. None = alive/censored."""
+        today = datetime.now()
+        last_event = timeline[-1]['end'] if timeline else diag_date
+        pod24 = False
+        if timeline:
+            first = timeline[0]
+            pod24 = (first['outcome'] == 'Progressive Disease'
+                     and (first['end'] - first['start']).days <= 730)
+            if len(timeline) >= 2:
+                pod24 = pod24 or (timeline[1]['start'] - first['start']).days <= 730
+        if pod24:
+            risk = 0.45
+        elif len(timeline) >= 3:
+            risk = 0.20
+        elif timeline:
+            risk = 0.08
+        else:
+            risk = 0.04
+        if p['transformed']:
+            risk += 0.15
+        if random.random() >= risk:
+            return None
+        death = last_event + timedelta(days=random.randint(30, 730))
+        return death if death <= today else None
 
     # ------------------------------------------------------------------
     # Patient profile
@@ -334,7 +426,7 @@ class FLBundleGenerator:
         p['ecog'] = _wc([0, 1, 2, 3, 4], ecog_w[p['ann_arbor_stage']])
         p['kps']  = max(20, 100 - p['ecog'] * 20)
 
-        waw_eligible = (flipi <= 1 and not p['b_symptoms'] and not p['bulky_disease']
+        waw_eligible = (flipi <= 2 and not p['b_symptoms'] and not p['bulky_disease']
                         and p['grade'] <= 2)
         p['watch_and_wait'] = waw_eligible and (random.random() < self.watch_wait_ratio)
 
@@ -361,7 +453,7 @@ class FLBundleGenerator:
         birth_year = date.today().year - p['age']
         birth_date = f"{birth_year}-{random.randint(1,12):02d}-{random.randint(1,28):02d}"
         base = 'https://healthkey.ai/fhir/StructureDefinition/'
-        return {
+        resource = {
             'resourceType': 'Patient',
             'id': p['id'],
             'name': [{'use': 'official', 'family': p['last_name'], 'given': [p['first_name']]}],
@@ -398,6 +490,9 @@ class FLBundleGenerator:
                 {'url': f'{base}fl-transformed',            'valueBoolean': p['transformed']},
             ],
         }
+        if p.get('death_date'):
+            resource['deceasedDateTime'] = p['death_date'].strftime('%Y-%m-%d')
+        return resource
 
     def _condition_resource(self, p, diag_date):
         stage_suffix = p['ann_arbor_stage'] + ('B' if p['b_symptoms'] else '')
@@ -431,6 +526,31 @@ class FLBundleGenerator:
                 f"BM: {'positive' if p['bone_marrow_involvement'] else 'negative'}, "
                 f"prior lines: {p['prior_lines']}"
             )}],
+        }
+
+    def _dlbcl_condition_resource(self, p, transformation_date):
+        """DLBCL Condition marking histologic transformation of the FL.
+
+        This is the primary evidence the PatientRecord projection uses to set
+        transformed_to_dlbcl / dlbcl_transformation_date.
+        """
+        return {
+            'resourceType': 'Condition',
+            'id': f"cond-dlbcl-{p['id']}",
+            'clinicalStatus': {'coding': [{'system': 'http://terminology.hl7.org/CodeSystem/condition-clinical', 'code': 'active'}]},
+            'verificationStatus': {'coding': [{'system': 'http://terminology.hl7.org/CodeSystem/condition-ver-status', 'code': 'confirmed'}]},
+            'category': [{'coding': [{'system': 'http://terminology.hl7.org/CodeSystem/condition-category', 'code': 'encounter-diagnosis'}]}],
+            'code': {
+                'coding': [
+                    {'system': 'http://hl7.org/fhir/sid/icd-10-cm', 'code': 'C83.30', 'display': 'Diffuse large B-cell lymphoma, unspecified'},
+                ],
+                'text': 'Diffuse Large B-Cell Lymphoma (transformed)',
+            },
+            'subject':       {'reference': f"Patient/{p['id']}"},
+            'onsetDateTime':  transformation_date.strftime('%Y-%m-%d'),
+            'recordedDate':   transformation_date.strftime('%Y-%m-%d'),
+            'note': [{'text': f"Histologic transformation of follicular lymphoma to DLBCL, "
+                              f"after {p['prior_lines']} prior line(s) of therapy."}],
         }
 
     # ------------------------------------------------------------------
@@ -491,15 +611,16 @@ class FLBundleGenerator:
             self._obs(pid, f"obs-{pid}-bp-dia", '8462-4', 'Diastolic blood pressure', 'vital-signs', dt, 'quantity', p['diastolic_bp'], 'mmHg'),
         ]
 
-    def _fl_specific_obs(self, p, diag_date):
+    def _fl_specific_obs(self, p, diag_date, transformation_date=None):
         pid, dt = p['id'], diag_date.strftime('%Y-%m-%d')
+        tx_dt = (transformation_date or diag_date).strftime('%Y-%m-%d')
         grade_text = f"Grade {p['grade']}{'b' if p['grade_3b'] else 'a' if p['grade'] == 3 else ''}"
         return [
             self._q_obs(pid, 'bm-b-cells', _L['bm_b_cells'],
                         'Clonal B lymphocytes in bone marrow biopsy (%)', p['bm_b_cells_pct'], '%', dt),
             self._obs(pid, f"obs-{pid}-prior-lines", '21861-0', 'Prior lines of therapy', 'laboratory', dt, 'integer', p['prior_lines']),
             self._obs(pid, f"obs-{pid}-fl-grade", '44648-4', 'Histologic grade', 'laboratory', dt, 'string', grade_text),
-            self._obs(pid, f"obs-{pid}-fl-transformed", 'fl-transformed-dlbcl', 'Histologic transformation to DLBCL', 'laboratory', dt, 'boolean', p['transformed']),
+            self._obs(pid, f"obs-{pid}-fl-transformed", 'fl-transformed-dlbcl', 'Histologic transformation to DLBCL', 'laboratory', tx_dt, 'boolean', p['transformed']),
             self._obs(pid, f"obs-{pid}-flipi", 'LP95826-0', 'FLIPI score', 'survey', dt, 'integer', p['flipi_score']),
             self._obs(pid, f"obs-{pid}-nodal-sites", '21912-1', 'Number of involved nodal sites', 'laboratory', dt, 'integer', p['nodal_sites']),
         ]
@@ -508,18 +629,15 @@ class FLBundleGenerator:
     # Therapy resources (MedicationStatement + Procedure for radiation)
     # ------------------------------------------------------------------
 
-    def _therapy_resources(self, p, diag_date):
+    def _therapy_resources(self, p, timeline):
         resources = []
-        if p['prior_lines'] == 0:
-            return resources
-        line_start = diag_date + timedelta(days=random.randint(14, 60))
-        for line_num in range(1, p['prior_lines'] + 1):
-            is_last = line_num == p['prior_lines']
+        last_num = timeline[-1]['num'] if timeline else 0
+        for line in timeline:
+            line_num, line_start, line_end, outcome = (
+                line['num'], line['start'], line['end'], line['outcome'])
+            is_last = line_num == last_num
             regimen_list = self._first_line_regimens if line_num == 1 else self._later_line_regimens
             name, drugs, concept_id = _pick_regimen(regimen_list, early_stage=p['early_stage'])
-            duration_days = random.randint(84, 365)
-            line_end  = line_start + timedelta(days=duration_days)
-            outcome   = _wc(_OUTCOMES, _OUTCOME_W_LAST if is_last else _OUTCOME_W_PREV)
             start_str, end_str = line_start.strftime('%Y-%m-%d'), line_end.strftime('%Y-%m-%d')
 
             if name in _RADIATION_REGIMENS:
@@ -559,7 +677,6 @@ class FLBundleGenerator:
                         p, drug_key, line_num, is_last, start_str, end_str, partof=regimen_id,
                     ))
 
-            line_start = line_end + timedelta(days=random.randint(28, 84))
         return resources
 
     def _drug_med_statement(self, p, drug_key, line_num, is_last, start_str, end_str, partof=None):

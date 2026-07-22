@@ -143,6 +143,14 @@ _CONCEPTS = [
     _c(4112853, 'Malignant tumor of breast', 'Condition', 'SNOMED', 'Disorder', 'S', '254837009'),
 
     # ------------------------------------------------------------------
+    # Lymphoma conditions — FL and DLBCL (HemOnc concept_ids match Athena;
+    # verified against staging DB). DLBCL ConditionOccurrence is the primary
+    # evidence for FL → DLBCL histologic transformation.
+    # ------------------------------------------------------------------
+    _c(42542169, 'Follicular lymphoma',          'Condition', 'HemOnc', 'Disorder', None, '599'),
+    _c(42542162, 'Diffuse large B-cell lymphoma', 'Condition', 'HemOnc', 'Disorder', None, '589'),
+
+    # ------------------------------------------------------------------
     # Tumor marker biomarkers — critical for refresh_patient_record to set
     # estrogen_receptor_status, progesterone_receptor_status, her2_status.
     # ------------------------------------------------------------------

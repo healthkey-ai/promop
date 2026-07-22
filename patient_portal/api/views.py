@@ -16,7 +16,7 @@ from django.contrib.contenttypes.models import ContentType
 from omop_core.models import (
     Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
-    Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location,
+    Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
     PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
     Relationship, ConceptRelationship, ConceptAncestor,
     # Controlled vocabulary lookup models
@@ -29,7 +29,7 @@ from omop_core.models import (
     PreExistingConditionCategory,
     Disease, CancerStage, KarnofskyScore, EcogStatus, PeripheralNeuropathyGrade,
     InfectionStatus, DiseaseProgression, MeasurableDisease, GelfCriteria,
-    FlipIScore, FollicularLymphomaGrade,
+    FlipIScore, FollicularLymphomaGrade, PostTransformationOutcome,
     BreastCancerFirstLineTherapy, BreastCancerSecondLineTherapy, BreastCancerLaterLineTherapy,
 )
 from omop_oncology.models import Episode, EpisodeEvent
@@ -37,6 +37,7 @@ from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.omop_write_service import sync_to_omop
+from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
@@ -817,6 +818,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 Concept.objects.filter(concept_code='254837009', vocabulary_id='SNOMED').first()
                 or Concept.objects.filter(concept_name__icontains='breast cancer').first()
             )
+            _concept_fl = (
+                Concept.objects.filter(concept_code='413448000', vocabulary_id='SNOMED').first()
+                or Concept.objects.filter(concept_name__icontains='follicular lymphoma').first()
+                or Concept.objects.filter(concept_name__icontains='follicular non-hodgkin').first()
+            )
+            _concept_dlbcl = (
+                Concept.objects.filter(concept_code='C83.30', vocabulary_id='ICD10CM').first()
+                or Concept.objects.filter(concept_name__icontains='diffuse large b-cell').first()
+            )
             _concept_ehr_type      = _cc_by_id(32817)    # EHR
             _concept_lab_type      = _cc_by_id(32856)    # Lab
             _concept_drug_type     = _cc_by_id(32869)    # EHR prescription
@@ -1112,6 +1122,50 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             person.location_id = location.location_id
                             person.save(update_fields=['location_id'])
 
+                    death_date = None
+                    death_datetime = None
+                    death_reason = None
+                    deceased_dt_raw = patient_resource.get('deceasedDateTime')
+                    if deceased_dt_raw:
+                        try:
+                            death_datetime = datetime.fromisoformat(
+                                deceased_dt_raw.replace('Z', '+00:00')
+                            )
+                            death_date = death_datetime.date()
+                        except ValueError:
+                            try:
+                                death_date = datetime.strptime(deceased_dt_raw[:10], '%Y-%m-%d').date()
+                            except ValueError:
+                                death_date = None
+                    elif patient_resource.get('deceasedBoolean') is True:
+                        # FHIR can indicate deceased without a date. Prefer a
+                        # real deceasedDateTime when present; otherwise record
+                        # a deterministic import-date event for downstream
+                        # survival analytics rather than dropping mortality.
+                        death_date = localdate()
+                        death_reason = (
+                            'FHIR Patient.deceasedBoolean=true had no deceasedDateTime; '
+                            'death_date inferred as import date.'
+                        )
+
+                    if death_date:
+                        death, _ = Death.objects.update_or_create(
+                            person=person,
+                            defaults={
+                                'death_date': death_date,
+                                'death_datetime': death_datetime,
+                                'death_type_concept': _concept_ehr_type or _concept_tx_regimen,
+                            },
+                        )
+                        _record_provenance(
+                            death,
+                            prov_source or 'EHR_SYNC',
+                            prov_user_id,
+                            target_patient_id=fhir_patient_id,
+                            modification_reason=death_reason or prov_reason,
+                            organization=get_request_org(request),
+                        )
+
                     for encounter in data.get('encounters', []):
                         period = encounter.get('period') or {}
                         start_raw = period.get('start') or period.get('end')
@@ -1185,6 +1239,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     histologic_type = ''
                     condition_date = None
                     breast_cancer_onset = None  # onset from primary cancer condition
+                    fl_onset = None             # onset from FL condition
+                    dlbcl_onset = None          # onset from DLBCL (transformation) condition
                     _any_bc_condition = False   # True if any BC condition was seen in the bundle
                     _clinical_status_source = None  # FHIR Condition.clinicalStatus code for primary BC
 
@@ -1241,6 +1297,19 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             or any('breast' in c.get('display', '').lower() for c in coding_list)
                             or bool(histologic_type and 'breast' in histologic_type.lower())
                         )
+                        is_fl = (
+                            # NOTE: do NOT match on snomed_code — 413448000 appears on
+                            # breast-cancer conditions in the wild (see is_breast_cancer).
+                            any('follicular' in c.get('display', '').lower()
+                                and 'lymphoma' in c.get('display', '').lower() for c in coding_list)
+                            or bool(histologic_type and 'follicular' in histologic_type.lower())
+                        )
+                        is_dlbcl = (
+                            any('diffuse large b-cell' in c.get('display', '').lower() for c in coding_list)
+                            or any(c.get('code', '').startswith('C83.3') for c in coding_list
+                                   if 'icd' in c.get('system', '').lower())
+                            or bool(histologic_type and 'diffuse large b-cell' in histologic_type.lower())
+                        )
                         if is_breast_cancer:
                             _any_bc_condition = True
                             _cs = condition.get('clinicalStatus', {}).get('coding', [])
@@ -1250,17 +1319,29 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         if disease_from_code:
                             disease = disease_from_code
 
-                        # Get stage and infer disease from stage text (e.g. "Breast Cancer Stage IIA")
+                        # Get stage and infer disease from stage text (e.g. "Breast Cancer Stage IIA").
+                        # When several stage entries exist (MM records both ISS and R-ISS),
+                        # prefer R-ISS as the more current MM staging system so the patched
+                        # value matches the derived one instead of overriding it with ISS.
                         stages = condition.get('stage', [])
-                        if stages and len(stages) > 0:
-                            stage_summary = stages[0].get('summary', {})
+                        _stage_entry = next(
+                            (s for s in stages
+                             if (s.get('summary', {}).get('text') or '').upper().startswith('R-ISS')),
+                            stages[0] if stages else None,
+                        )
+                        if _stage_entry is not None:
+                            stage_summary = _stage_entry.get('summary', {})
                             if stage_summary.get('text'):
                                 stage_text = stage_summary['text']
                                 if 'Stage' in stage_text:
-                                    stage = stage_text.split('Stage')[-1].strip()
-                                    if not disease:
-                                        stage_prefix = stage_text.split('Stage')[0].strip()
-                                        if stage_prefix.upper() not in {'ISS', 'R-ISS', 'RISS'}:
+                                    stage_suffix = stage_text.split('Stage')[-1].strip()
+                                    stage_prefix = stage_text.split('Stage')[0].strip()
+                                    if stage_prefix.upper() in {'ISS', 'R-ISS', 'RISS'}:
+                                        # Keep the staging system in the value, e.g. "R-ISS III".
+                                        stage = f'{stage_prefix} {stage_suffix}'.strip()
+                                    else:
+                                        stage = stage_suffix
+                                        if not disease:
                                             disease = stage_prefix or None
                             elif stage_summary.get('coding') and len(stage_summary['coding']) > 0:
                                 # Prefer display (e.g. "Stage 2B") over the raw code
@@ -1286,6 +1367,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 condition_date = _parsed_date  # fallback: last wins
                                 if is_breast_cancer and _parsed_date and (breast_cancer_onset is None or _parsed_date < breast_cancer_onset):
                                     breast_cancer_onset = _parsed_date
+                                if is_fl and _parsed_date and (fl_onset is None or _parsed_date < fl_onset):
+                                    fl_onset = _parsed_date
+                                if is_dlbcl and _parsed_date and (dlbcl_onset is None or _parsed_date < dlbcl_onset):
+                                    dlbcl_onset = _parsed_date
                             except (ValueError, TypeError):
                                 pass
 
@@ -1294,42 +1379,49 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         condition_date = breast_cancer_onset
                     
                     # Upsert ConditionOccurrence for the diagnosis
+                    from omop_core.models import ConditionOccurrence
+
+                    def _upsert_condition(concept, onset, source_value, status_source):
+                        """Create one ConditionOccurrence per (person, concept, start date)."""
+                        if not concept or not onset:
+                            return
+                        type_concept = _concept_ehr_type or concept
+                        if ConditionOccurrence.objects.filter(
+                            person=person,
+                            condition_concept=concept,
+                            condition_start_date=onset.date(),
+                        ).exists():
+                            return
+                        _co = ConditionOccurrence(
+                            condition_occurrence_id=next_pk(ConditionOccurrence, 'condition_occurrence_id'),
+                            person=person,
+                            condition_concept=concept,
+                            condition_start_date=onset.date(),
+                            condition_start_datetime=onset,
+                            condition_type_concept=type_concept,
+                            condition_source_value=source_value,
+                            condition_status_source_value=status_source,
+                        )
+                        _co._skip_patient_record_refresh = True
+                        try:
+                            with transaction.atomic():
+                                _co.save()
+                                _pt_condition_ids.append(_co.condition_occurrence_id)
+                                if prov_source:
+                                    _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                        except Exception as _coex:
+                            logger.warning(
+                                '{"event": "condition_occurrence_save_failed", "error_type": "%s"}',
+                                type(_coex).__name__,
+                            )
+
                     if _any_bc_condition and condition_date:
-                        from omop_core.models import ConditionOccurrence
+                        _upsert_condition(_concept_breast_cancer, condition_date, disease, _clinical_status_source)
 
-                        # Use pre-hoisted concept lookups (computed once before the patient loop)
-                        breast_cancer_concept = _concept_breast_cancer
-
-                        if breast_cancer_concept:
-                            type_concept = _concept_ehr_type or breast_cancer_concept
-
-                            if not ConditionOccurrence.objects.filter(
-                                person=person,
-                                condition_concept=breast_cancer_concept,
-                                condition_start_date=condition_date.date(),
-                            ).exists():
-                                _co = ConditionOccurrence(
-                                    condition_occurrence_id=next_pk(ConditionOccurrence, 'condition_occurrence_id'),
-                                    person=person,
-                                    condition_concept=breast_cancer_concept,
-                                    condition_start_date=condition_date.date(),
-                                    condition_start_datetime=condition_date,
-                                    condition_type_concept=type_concept,
-                                    condition_source_value=disease,
-                                    condition_status_source_value=_clinical_status_source,
-                                )
-                                _co._skip_patient_record_refresh = True
-                                try:
-                                    with transaction.atomic():
-                                        _co.save()
-                                        _pt_condition_ids.append(_co.condition_occurrence_id)
-                                        if prov_source:
-                                            _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                                except Exception as _coex:
-                                    logger.warning(
-                                        '{"event": "condition_occurrence_save_failed", "error_type": "%s"}',
-                                        type(_coex).__name__,
-                                    )
+                    # FL diagnosis and DLBCL transformation conditions (FL → DLBCL
+                    # transformation is derived from the DLBCL ConditionOccurrence).
+                    _upsert_condition(_concept_fl, fl_onset, 'Follicular Lymphoma', None)
+                    _upsert_condition(_concept_dlbcl, dlbcl_onset, 'Diffuse Large B-Cell Lymphoma', None)
 
                     # Process observations and create Measurement records
                     _timing_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
@@ -1899,6 +1991,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         elif observation.get('valueBoolean') is not None:
                             # FHIR boolean — store as 1/0 in value_as_number for easy extraction
                             value_number = 1.0 if observation['valueBoolean'] else 0.0
+                        elif observation.get('valueString') is not None:
+                            # FHIR string — e.g. ISS/R-ISS stage, disease progression
+                            # status. Without this branch the value is dropped and
+                            # downstream derivation (stage, etc.) finds an empty row.
+                            value_string = str(observation['valueString'])
+
+                        # value_as_string is CharField(max_length=60); truncate whatever
+                        # source set it (valueString or valueCodeableConcept text/display).
+                        if value_string is not None:
+                            value_string = value_string[:60]
 
                         # Find measurement concept — LOINC lookup first (FHIR-06/07/08),
                         # fall back to name-based, then generic lab concept.
@@ -2521,42 +2623,27 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     if prov_source:
                                         _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
-                                # ep_source_concept reuses the same HemOnc lookup already resolved above
-                                ep_source_concept = regimen_concept if _hemonc_cid else None
-
-                                # Upsert Episode for this LOT
-                                ep_concept = _concept_tx_regimen or regimen_concept
-                                ep_obj_concept = regimen_concept
-                                ep_type_concept = _concept_ehr_type or regimen_concept
-
-                                _ep = Episode.objects.filter(
-                                    person=person,
-                                    episode_source_value=f'LOT-{lot_num}',
-                                ).first()
-                                if _ep is None:
-                                    _ep = Episode(
-                                        episode_id=next_pk(Episode, 'episode_id'),
-                                        person=person,
-                                        episode_concept=ep_concept,
-                                        episode_object_concept=ep_obj_concept,
-                                        episode_type_concept=ep_type_concept,
-                                        episode_start_date=lot_start or datetime.now().date(),
-                                        episode_end_date=lot_end,
-                                        episode_number=lot_num,
-                                        episode_source_value=f'LOT-{lot_num}',
-                                        episode_source_concept=ep_source_concept,
-                                    )
-                                    _ep.save()
-                                    _pt_episode_ids.append(_ep.episode_id)
-
-                                # Link drug exposure to episode (idempotent)
-                                ee_field_concept = _concept_de_field or regimen_concept
-                                _ee, _ = EpisodeEvent.objects.get_or_create(
-                                    episode_id=_ep.episode_id,
-                                    event_id=_de.drug_exposure_id,
-                                    defaults={'episode_event_field_concept': ee_field_concept},
+                                # Episode + EpisodeEvent + per-line outcome via
+                                # the shared LOT writer so CDM tagging and the
+                                # idempotency key match every other path, and the
+                                # outcome lands in OMOP (LOT-{n}-outcome
+                                # Observation) as the source of truth. The direct
+                                # PatientRecord outcome patch below is retained as
+                                # a belt-and-suspenders for the no-episode edge.
+                                _ep_result = upsert_therapy_line_episode(
+                                    person,
+                                    line_number=lot_num,
+                                    regimen_concept=regimen_concept,
+                                    regimen_source_concept=regimen_concept if _hemonc_cid else None,
+                                    start_date=lot_start,
+                                    end_date=lot_end,
+                                    drug_exposure_ids=[_de.drug_exposure_id],
+                                    outcome=lot_data.get('outcome'),
+                                    today=datetime.now().date(),
                                 )
-                                _pt_episode_event_ids.append(_ee.pk)
+                                if _ep_result.created:
+                                    _pt_episode_ids.append(_ep_result.episode.episode_id)
+                                _pt_episode_event_ids.extend(_ep_result.event_ids)
                         except Exception as _e:
                             logger.warning('{"event": "drug_exposure_write_failed", "lot_num": %d, "error_type": "%s", "patient": "%s"}',
                                            lot_num, type(_e).__name__, _timing_hash)
@@ -4085,6 +4172,115 @@ def concept_graph_batch(request):
 
 
 # =============================================================================
+# OMOP concept search / browse (issue #213)
+# GET /api/v1/concepts/search/?q=creatinine&vocabulary_id=LOINC
+# GET /api/v1/concepts/?domain_id=Measurement&concept_class_id=Lab+Test
+# =============================================================================
+
+class ConceptPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+# Query params accepted as exact-match filters by both concept endpoints.
+_CONCEPT_FILTER_PARAMS = ('vocabulary_id', 'domain_id', 'concept_class_id', 'standard_concept')
+
+# Filters selective enough to bound a listing on their own. standard_concept is
+# deliberately excluded: it has ~3 distinct values and no index, so it cannot
+# stand alone against a fully loaded (multi-million-row) concept table.
+_CONCEPT_SELECTIVE_PARAMS = ('vocabulary_id', 'domain_id', 'concept_class_id')
+
+
+def _apply_concept_filters(queryset, query_params):
+    for param in _CONCEPT_FILTER_PARAMS:
+        value = query_params.get(param)
+        if value:
+            queryset = queryset.filter(**{param: value})
+    return queryset
+
+
+def _serialize_concept(concept):
+    return {
+        'concept_id': concept.concept_id,
+        'concept_name': concept.concept_name,
+        'vocabulary_id': concept.vocabulary_id,
+        'concept_code': concept.concept_code,
+        'domain_id': concept.domain_id,
+        'concept_class_id': concept.concept_class_id,
+        'standard_concept': concept.standard_concept,
+    }
+
+
+def _paginated_concept_response(queryset, request):
+    # Order by the pk: concept_name has only a GIN trigram index (usable for
+    # icontains, not ORDER BY), so sorting by name would force a full sort of
+    # the matched set on every page request.
+    paginator = ConceptPagination()
+    page = paginator.paginate_queryset(queryset.order_by('concept_id'), request)
+    return paginator.get_paginated_response([_serialize_concept(c) for c in page])
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_search(request):
+    """
+    Search OMOP concepts by name (case-insensitive substring).
+
+    Query params:
+        q                 required, minimum 2 characters
+        vocabulary_id     optional exact-match filter (e.g. LOINC, SNOMED)
+        domain_id         optional exact-match filter (e.g. Measurement)
+        concept_class_id  optional exact-match filter (e.g. Lab Test)
+        standard_concept  optional exact-match filter (S or C)
+        page / page_size  pagination (page_size capped at 100)
+
+    Response 200: paginated {count, next, previous, results: [concept, ...]}
+    """
+    query = (request.query_params.get('q') or '').strip()
+    if len(query) < 2:
+        return Response(
+            {'detail': "Query parameter 'q' is required and must be at least 2 characters."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    queryset = _apply_concept_filters(
+        Concept.objects.filter(concept_name__icontains=query),
+        request.query_params,
+    )
+    return _paginated_concept_response(queryset, request)
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_list(request):
+    """
+    List OMOP concepts filtered by vocabulary, domain, concept class,
+    or standard-concept flag.
+
+    At least one of vocabulary_id, domain_id, or concept_class_id is
+    required — the concept table can hold millions of rows, so a listing
+    bounded only by standard_concept (or nothing) is rejected.
+
+    Query params:
+        vocabulary_id, domain_id, concept_class_id  (at least one required)
+        standard_concept  optional additional filter (S or C)
+        page / page_size  pagination (page_size capped at 100)
+
+    Response 200: paginated {count, next, previous, results: [concept, ...]}
+    """
+    if not any(request.query_params.get(p) for p in _CONCEPT_SELECTIVE_PARAMS):
+        return Response(
+            {'detail': 'At least one of these filters is required: '
+                       + ', '.join(_CONCEPT_SELECTIVE_PARAMS) + '.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    queryset = _apply_concept_filters(Concept.objects.all(), request.query_params)
+    return _paginated_concept_response(queryset, request)
+
+
+# =============================================================================
 # Controlled vocabulary endpoints
 # GET /api/vocabularies/<model_name>/ → [{code, title}, ...]
 # =============================================================================
@@ -4128,6 +4324,7 @@ _VOCABULARY_REGISTRY = {
     'gelf-criteria':                   GelfCriteria,
     'flipi-score':                     FlipIScore,
     'follicular-lymphoma-grade':             FollicularLymphomaGrade,
+    'post-transformation-outcome':           PostTransformationOutcome,
     'breast-cancer-first-line-therapy':      BreastCancerFirstLineTherapy,
     'breast-cancer-second-line-therapy':     BreastCancerSecondLineTherapy,
     'breast-cancer-later-line-therapy':      BreastCancerLaterLineTherapy,

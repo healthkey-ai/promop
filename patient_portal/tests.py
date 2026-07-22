@@ -17,6 +17,7 @@ from datetime import date, timedelta
 
 from patient_portal.models import Identity
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -24,11 +25,14 @@ from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
     Person, PatientRecord, ProvenanceRecord,
     ConditionOccurrence, DrugExposure, Measurement, ProcedureOccurrence,
+    Death,
     Relationship, ConceptRelationship, ConceptAncestor,
     SctEligibility,
+    FhirConnection, FhirOauthState, Institution,
+    ObservationPeriod, PatientSurveyResponse, PersonLanguageSkill, Survey,
 )
 from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
-from omop_oncology.models import Episode, EpisodeEvent
+from omop_oncology.models import CancerModifier, Episode, EpisodeEvent, Histology, StemTable
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +344,194 @@ class FhirUploadOmopTablesTest(FhirUploadBase):
                 f'Episode {episode.episode_number} (id={episode.episode_id}) has no EpisodeEvents',
             )
 
+    def test_lot_outcome_observation_created_from_medication_statement(self):
+        """The LOT-1 therapy-outcome extension is persisted to OMOP as a
+        LOT-1-outcome Observation (source of truth for the derived outcome)."""
+        from omop_core.models import Observation
+        obs = Observation.objects.filter(
+            person=self._person, observation_source_value='LOT-1-outcome',
+        )
+        self.assertEqual(obs.count(), 1)
+        self.assertEqual(obs.first().value_as_string, 'CR')
+
+    def test_deceased_patient_creates_death_row(self):
+        bundle = _make_fhir_bundle()
+        patient = next(
+            entry['resource']
+            for entry in bundle['entry']
+            if entry['resource']['resourceType'] == 'Patient'
+        )
+        patient['id'] = 'test-patient-jane-deceased'
+        patient['name'] = [{'family': 'Deceased', 'given': ['Jane']}]
+        patient['deceasedDateTime'] = '2024-04-05T12:34:00Z'
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'deceased_bundle.json'
+
+        response = self.client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+        )
+
+        self.assertIn(response.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
+        person = Person.objects.get(family_name='Deceased', given_name='Jane')
+        death = Death.objects.get(person=person)
+        self.assertEqual(death.death_date, date(2024, 4, 5))
+        provenance = ProvenanceRecord.objects.get(object_id=person.person_id, content_type__model='death')
+        self.assertEqual(provenance.source, 'EHR_SYNC')
+        self.assertIsNone(provenance.modification_reason)
+
+    def test_deceased_boolean_death_row_records_inferred_date_provenance(self):
+        bundle = _make_fhir_bundle()
+        patient = next(
+            entry['resource']
+            for entry in bundle['entry']
+            if entry['resource']['resourceType'] == 'Patient'
+        )
+        patient['id'] = 'test-patient-jane-deceased-bool'
+        patient['name'] = [{'family': 'BooleanDeceased', 'given': ['Jane']}]
+        patient['deceasedBoolean'] = True
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'deceased_boolean_bundle.json'
+
+        response = self.client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+        )
+
+        self.assertIn(response.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
+        person = Person.objects.get(family_name='BooleanDeceased', given_name='Jane')
+        death = Death.objects.get(person=person)
+        self.assertIsNotNone(death.death_date)
+        provenance = ProvenanceRecord.objects.get(object_id=person.person_id, content_type__model='death')
+        self.assertEqual(provenance.source, 'EHR_SYNC')
+        self.assertIn('deceasedBoolean=true', provenance.modification_reason)
+
+
+class FhirUploadStringLabValueTest(FhirUploadBase):
+    """A string-valued lab Observation (e.g. ISS stage) must keep its value on
+    import and drive derivation (regression for issue #218)."""
+
+    def _upload_stage_bundle(self):
+        bundle = {
+            'resourceType': 'Bundle',
+            'type': 'collection',
+            'entry': [
+                {'resource': {
+                    'resourceType': 'Patient',
+                    'id': 'stage-pt-1',
+                    'name': [{'family': 'Stagevalue', 'given': ['Iss']}],
+                    'gender': 'female',
+                    'birthDate': '1960-04-01',
+                }},
+                {'resource': {
+                    'resourceType': 'Observation',
+                    'status': 'final',
+                    'subject': {'reference': 'Patient/stage-pt-1'},
+                    'effectiveDateTime': '2023-05-01',
+                    'category': [{'coding': [{
+                        'system': 'http://terminology.hl7.org/CodeSystem/observation-category',
+                        'code': 'laboratory'}]}],
+                    'code': {'coding': [{'system': 'http://loinc.org', 'code': '21908-9',
+                                         'display': 'ISS stage'}], 'text': 'ISS stage'},
+                    'valueString': 'ISS II',
+                }},
+                {'resource': {
+                    'resourceType': 'Observation',
+                    'status': 'final',
+                    'subject': {'reference': 'Patient/stage-pt-1'},
+                    'effectiveDateTime': '2023-05-01',
+                    'category': [{'coding': [{
+                        'system': 'http://terminology.hl7.org/CodeSystem/observation-category',
+                        'code': 'laboratory'}]}],
+                    'code': {'coding': [{'system': 'http://loinc.org', 'code': '21908-9-riss',
+                                         'display': 'R-ISS stage'}], 'text': 'R-ISS stage'},
+                    'valueString': 'R-ISS III',
+                }},
+            ],
+        }
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'stage_bundle.json'
+        return self.client.post(
+            '/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart',
+        )
+
+    def test_string_lab_value_persisted(self):
+        from omop_core.models import Measurement
+        resp = self._upload_stage_bundle()
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
+
+        person = Person.objects.get(family_name='Stagevalue', given_name='Iss')
+        measurement = Measurement.objects.get(
+            person=person, measurement_source_value='21908-9',
+        )
+        self.assertEqual(measurement.value_as_string, 'ISS II')
+
+    def test_stage_derivation_prefers_riss(self):
+        self._upload_stage_bundle()
+        person = Person.objects.get(family_name='Stagevalue', given_name='Iss')
+        record = PatientRecord.objects.get(person=person)
+        # Both ISS and R-ISS present → R-ISS is preferred for MM.
+        self.assertEqual(record.stage, 'R-ISS III')
+
+    def test_stage_with_condition_prefers_riss_end_to_end(self):
+        """Real MM bundles carry a Condition with both ISS and R-ISS stage
+        entries. The Condition.stage patch (applied after refresh) must also
+        prefer R-ISS, otherwise it overrides the derived value with ISS."""
+        pid = 'mm-cond-1'
+
+        def _obs(code, disp, val):
+            return {'resource': {
+                'resourceType': 'Observation', 'status': 'final',
+                'subject': {'reference': f'Patient/{pid}'},
+                'effectiveDateTime': '2023-05-01',
+                'category': [{'coding': [{
+                    'system': 'http://terminology.hl7.org/CodeSystem/observation-category',
+                    'code': 'laboratory'}]}],
+                'code': {'coding': [{'system': 'http://loinc.org', 'code': code,
+                                     'display': disp}], 'text': disp},
+                'valueString': val,
+            }}
+
+        bundle = {
+            'resourceType': 'Bundle', 'type': 'collection',
+            'entry': [
+                {'resource': {
+                    'resourceType': 'Patient', 'id': pid,
+                    'name': [{'family': 'Mmcond', 'given': ['Joe']}],
+                    'gender': 'male', 'birthDate': '1955-01-01',
+                }},
+                {'resource': {
+                    'resourceType': 'Condition', 'id': 'c1',
+                    'subject': {'reference': f'Patient/{pid}'},
+                    'code': {'text': 'Multiple Myeloma', 'coding': [
+                        {'system': 'http://snomed.info/sct', 'code': '55921005',
+                         'display': 'Multiple myeloma'}]},
+                    'onsetDateTime': '2023-01-01',
+                    'stage': [
+                        {'summary': {'text': 'ISS Stage II'}},
+                        {'summary': {'text': 'R-ISS Stage III'}},
+                    ],
+                }},
+                _obs('21908-9', 'ISS stage', 'ISS II'),
+                _obs('21908-9-riss', 'R-ISS stage', 'R-ISS III'),
+            ],
+        }
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'mm_cond.json'
+        resp = self.client.post(
+            '/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
+
+        record = PatientRecord.objects.get(person=Person.objects.get(family_name='Mmcond'))
+        self.assertEqual(record.stage, 'R-ISS III')
+
 
 # ---------------------------------------------------------------------------
 # 2. PatientRecord derivation tests
@@ -394,6 +586,170 @@ class FhirUploadPatientRecordTest(FhirUploadBase):
         self.assertEqual(self._pi.second_line_start_date, date(2023, 1, 15))
         self.assertIsNone(self._pi.second_line_end_date,  'Open-ended LOT 2 should have no end date')
 
+    def test_death_date_derived_from_omop_death(self):
+        ehr_concept = Concept.objects.get(concept_id=32817)
+        Death.objects.update_or_create(
+            person=self._person,
+            defaults={
+                'death_date': date(2024, 4, 5),
+                'death_type_concept': ehr_concept,
+            },
+        )
+        from omop_core.services.patient_record_service import refresh_patient_record
+
+        refreshed = refresh_patient_record(self._person)
+
+        self.assertEqual(refreshed.death_date, date(2024, 4, 5))
+
+
+# ---------------------------------------------------------------------------
+# 2b. FL → DLBCL transformation — upload, derivation, and validation
+# ---------------------------------------------------------------------------
+
+def _make_fl_bundle():
+    """FHIR bundle for an FL patient who transformed to DLBCL."""
+    patient_id = 'test-patient-fl-001'
+    return {
+        'resourceType': 'Bundle',
+        'type': 'collection',
+        'entry': [
+            {'resource': {
+                'resourceType': 'Patient',
+                'id': patient_id,
+                'name': [{'family': 'Follic', 'given': ['Larry']}],
+                'gender': 'male',
+                'birthDate': '1960-01-01',
+            }},
+            {'resource': {
+                'resourceType': 'Condition',
+                'id': 'cond-fl-001',
+                'subject': {'reference': f'Patient/{patient_id}'},
+                'code': {'text': 'Follicular Lymphoma', 'coding': [
+                    {'system': 'http://snomed.info/sct', 'code': '413448000',
+                     'display': 'Follicular non-Hodgkin lymphoma'},
+                ]},
+                'onsetDateTime': '2020-06-01',
+            }},
+            {'resource': {
+                'resourceType': 'Condition',
+                'id': 'cond-dlbcl-001',
+                'subject': {'reference': f'Patient/{patient_id}'},
+                'code': {'text': 'Diffuse Large B-Cell Lymphoma (transformed)', 'coding': [
+                    {'system': 'http://hl7.org/fhir/sid/icd-10-cm', 'code': 'C83.30',
+                     'display': 'Diffuse large B-cell lymphoma, unspecified'},
+                ]},
+                'onsetDateTime': '2023-04-15',
+            }},
+        ],
+    }
+
+
+class FhirUploadFlDlbclTransformationTest(FhirUploadBase):
+    """FL + DLBCL Conditions upload → ConditionOccurrence rows → derived transformation fields."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        domain = Domain.objects.get(domain_id='Condition')
+        cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
+        today = date.today()
+        for cid, name in ((42542169, 'Follicular lymphoma'),
+                          (42542162, 'Diffuse large B-cell lymphoma')):
+            Concept.objects.get_or_create(
+                concept_id=cid,
+                defaults={
+                    'concept_name': name, 'domain': domain, 'vocabulary': vocab,
+                    'concept_class': cc, 'concept_code': str(cid),
+                    'valid_start_date': today, 'valid_end_date': date(2099, 12, 31),
+                },
+            )
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle_bytes = json.dumps(_make_fl_bundle()).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'fl_bundle.json'
+        cls._upload_response = _client.post(
+            '/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart'
+        )
+        cls._person = Person.objects.filter(family_name='Follic', given_name='Larry').first()
+        assert cls._person is not None, 'Setup: FL person not found after upload'
+
+    def test_upload_returns_success(self):
+        self.assertIn(self._upload_response.status_code,
+                      [status.HTTP_200_OK, status.HTTP_201_CREATED],
+                      msg=f'Upload failed: {self._upload_response.data}')
+
+    def test_fl_and_dlbcl_condition_occurrences_created(self):
+        names = set(
+            ConditionOccurrence.objects.filter(person=self._person)
+            .values_list('condition_concept__concept_name', flat=True)
+        )
+        self.assertIn('Follicular lymphoma', names)
+        self.assertIn('Diffuse large B-cell lymphoma', names)
+
+    def test_patient_record_transformation_fields_derived(self):
+        pi = PatientRecord.objects.get(person=self._person)
+        self.assertTrue(pi.transformed_to_dlbcl)
+        self.assertEqual(pi.dlbcl_transformation_date, date(2023, 4, 15))
+
+
+class TransformationFieldValidationTest(FhirUploadBase):
+    """Serializer validation for the FL → DLBCL transformation fields."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle_bytes = json.dumps(_make_fhir_bundle()).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'test_bundle.json'
+        _client.post('/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart')
+        cls._pi = PatientRecord.objects.get(person__family_name='Smith')
+
+    def _patch(self, payload):
+        return self.client.patch(
+            f'/api/v1/patient-records/{self._pi.person_id}/', payload, format='json'
+        )
+
+    def test_valid_transformation_fields_accepted(self):
+        response = self._patch({
+            'transformed_to_dlbcl': True,
+            'dlbcl_transformation_date': '2023-04-15',
+            'post_transformation_outcome': 'Complete Response',
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK,
+                         msg=f'PATCH failed: {response.data}')
+        self._pi.refresh_from_db()
+        self.assertTrue(self._pi.transformed_to_dlbcl)
+        self.assertEqual(self._pi.post_transformation_outcome, 'Complete Response')
+
+    def test_future_transformation_date_rejected(self):
+        response = self._patch({
+            'transformed_to_dlbcl': True,
+            'dlbcl_transformation_date': '2999-01-01',
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_outcome_without_flag_rejected(self):
+        response = self._patch({'post_transformation_outcome': 'Complete Response'})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_unrecognized_outcome_rejected(self):
+        response = self._patch({
+            'transformed_to_dlbcl': True,
+            'post_transformation_outcome': 'Cured Forever',
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_vocabulary_endpoint_serves_outcomes(self):
+        response = self.client.get('/api/vocabularies/post-transformation-outcome/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        titles = {row['title'] for row in response.data}
+        self.assertIn('Complete Response', titles)
+        self.assertIn('Deceased', titles)
+
 
 # ---------------------------------------------------------------------------
 # 3. UI API view tests — data visible through endpoints the frontend uses
@@ -435,7 +791,7 @@ class UIViewsReflectUploadedDataTest(FhirUploadBase):
                       'first_line_start_date', 'first_line_end_date',
                       'second_line_outcome', 'second_line_discontinuation_reason',
                       'later_outcome', 'later_discontinuation_reason',
-                      'treatment_refractory_status', 'relapse_count', 'best_response'):
+                      'treatment_refractory_status', 'relapse_count'):
             self.assertIn(field, record, f'Field {field!r} missing from patient-info response')
 
     def test_patient_info_endpoint_lab_values_match_observations(self):
@@ -540,7 +896,171 @@ class UIViewsReflectUploadedDataTest(FhirUploadBase):
 
 
 # ---------------------------------------------------------------------------
-# 4. Direct OMOP endpoint CRUD tests
+# 4. Therapy component concept_ids (#189/#231)
+# ---------------------------------------------------------------------------
+
+_COMPONENT_ID_FIELDS = (
+    'first_line_component_ids', 'second_line_component_ids',
+    'later_component_ids', 'therapy_component_ids',
+)
+
+
+class TherapyComponentIdsAPITest(FhirUploadBase):
+    """The component concept_id fields are exposed on both patient-record
+    endpoints and are writable via the v1 API."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle_bytes = json.dumps(_make_fhir_bundle()).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'test_bundle.json'
+        _client.post('/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart')
+        cls._person = Person.objects.filter(family_name='Smith', given_name='Jane').first()
+        assert cls._person is not None, 'Setup: person not found after upload'
+        cls._pid = cls._person.person_id
+
+    def test_component_fields_in_legacy_patient_info(self):
+        resp = self.client.get(f'/api/patient-info/{self._pid}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        for field in _COMPONENT_ID_FIELDS:
+            self.assertIn(field, resp.data['patient_info'],
+                          f'Field {field!r} missing from legacy patient-info response')
+
+    def test_component_fields_in_v1_patient_records(self):
+        resp = self.client.get(f'/api/v1/patient-records/{self._pid}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        for field in _COMPONENT_ID_FIELDS:
+            self.assertIn(field, resp.data['patient_info'],
+                          f'Field {field!r} missing from v1 patient-records response')
+
+    def test_component_fields_writable_via_patch(self):
+        resp = self.client.patch(
+            f'/api/v1/patient-records/{self._pid}/',
+            {'therapy_component_ids': [35806260, 19103793]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        record = PatientRecord.objects.get(person_id=self._pid)
+        self.assertEqual(record.therapy_component_ids, [35806260, 19103793])
+
+
+class FhirUploadComponentIdsTest(FhirUploadBase):
+    """End-to-end: a MedicationStatement carrying a HemOnc coding yields
+    component concept_ids expanded from the HemOnc regimen→component graph."""
+
+    REGIMEN_ID = 35806260   # HemOnc RVD regimen
+    COMP_A_ID = 35900001    # HemOnc drug component
+    COMP_B_ID = 35900002    # HemOnc drug component
+    RXNORM_ING_ID = 1900001  # RxNorm ingredient ('Maps to' target of COMP_A)
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls._make_hemonc_fixtures()
+
+        bundle = _make_fhir_bundle()
+        for entry in bundle['entry']:
+            resource = entry['resource']
+            if resource['resourceType'] == 'MedicationStatement' and resource['id'] == 'med-ac-t':
+                resource['medicationCodeableConcept']['coding'] = [{
+                    'system': 'http://ohdsi.org/omop/HemOnc',
+                    'code': str(cls.REGIMEN_ID),
+                    'display': 'RVD',
+                }]
+
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'test_bundle.json'
+        cls._upload_response = _client.post(
+            '/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart'
+        )
+        cls._person = Person.objects.filter(family_name='Smith', given_name='Jane').first()
+        assert cls._person is not None, 'Setup: person not found after upload'
+        cls._pid = cls._person.person_id
+
+    @classmethod
+    def _make_hemonc_fixtures(cls):
+        hemonc_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc Oncology', 'vocabulary_concept_id': 0},
+        )
+        regimen_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0},
+        )
+        drug_domain = Domain.objects.get(domain_id='Drug')
+        today = date.today()
+        far_future = date(2099, 12, 31)
+
+        def _concept(cid, name, cc):
+            return Concept.objects.create(
+                concept_id=cid, concept_name=name, concept_code=str(cid),
+                vocabulary=hemonc_vocab, domain=drug_domain, concept_class=cc,
+                standard_concept='S', valid_start_date=today, valid_end_date=far_future,
+            )
+
+        regimen = _concept(cls.REGIMEN_ID, 'RVD', regimen_class)
+        comp_a = _concept(cls.COMP_A_ID, 'bortezomib', regimen_class)
+        comp_b = _concept(cls.COMP_B_ID, 'lenalidomide', regimen_class)
+        rx_ing = _concept(cls.RXNORM_ING_ID, 'bortezomib (ingredient)', regimen_class)
+
+        for rel_id in ('Has targeted therapy', 'Has steroid tx', 'Maps to'):
+            Relationship.objects.get_or_create(
+                relationship_id=rel_id,
+                defaults={
+                    'relationship_name': rel_id, 'is_hierarchical': 0,
+                    'defines_ancestry': 0, 'reverse_relationship_id': 'rev',
+                    'relationship_concept_id': 0,
+                },
+            )
+        for c1, c2, rel in (
+            (regimen, comp_a, 'Has targeted therapy'),
+            (regimen, comp_b, 'Has steroid tx'),
+            (comp_a, rx_ing, 'Maps to'),
+        ):
+            ConceptRelationship.objects.create(
+                concept_1=c1, concept_2=c2, relationship_id=rel,
+                valid_start_date=today, valid_end_date=far_future,
+            )
+
+    def test_upload_succeeds(self):
+        self.assertIn(self._upload_response.status_code,
+                      [status.HTTP_200_OK, status.HTTP_201_CREATED],
+                      msg=f'Upload failed: {self._upload_response.data}')
+
+    def test_first_line_components_expanded_from_hemonc_graph(self):
+        record = PatientRecord.objects.get(person_id=self._pid)
+        components = set(record.first_line_component_ids or [])
+        self.assertTrue(
+            {self.COMP_A_ID, self.COMP_B_ID, self.RXNORM_ING_ID} <= components,
+            f'Expected HemOnc components + leveled ingredient in '
+            f'first_line_component_ids, got {components}',
+        )
+
+    def test_aggregate_contains_all_line_components(self):
+        record = PatientRecord.objects.get(person_id=self._pid)
+        aggregate = set(record.therapy_component_ids or [])
+        self.assertTrue(
+            {self.COMP_A_ID, self.COMP_B_ID, self.RXNORM_ING_ID} <= aggregate,
+        )
+        # aggregate covers every per-line id
+        for line_field in ('first_line_component_ids', 'second_line_component_ids'):
+            self.assertTrue(set(getattr(record, line_field) or []) <= aggregate)
+
+    def test_component_fields_served_on_api(self):
+        resp = self.client.get(f'/api/v1/patient-records/{self._pid}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        components = set(resp.data['patient_info']['first_line_component_ids'] or [])
+        self.assertTrue({self.COMP_A_ID, self.COMP_B_ID} <= components)
+
+
+# ---------------------------------------------------------------------------
+# 5. Direct OMOP endpoint CRUD tests
 # ---------------------------------------------------------------------------
 
 class OmopEndpointAuthTest(FhirUploadBase):
@@ -2001,20 +2521,6 @@ class SmartPatientRecordReadOnlyTest(_SmartBase):
         resp = self.write_client.get('/api/patient-info/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-    def test_patient_info_patch_ignores_best_response(self):
-        """best_response is derived-only (no sync_to_omop write-through) — PATCH must not persist it,
-        or the value would silently vanish on the next refresh_patient_record (promop#205)."""
-        PatientRecord.objects.get_or_create(person=self.person, defaults={'organization': self.organization})
-        resp = self.write_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'best_response': 'Complete Response'},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        pi = PatientRecord.objects.get(person=self.person)
-        self.assertIsNone(pi.best_response)
-
-
 class SmartFhirUploadTest(_SmartBase):
     """Service client can bulk-ingest a patient via the FHIR upload endpoint
     using a write-scoped Bearer token."""
@@ -3191,6 +3697,40 @@ class PatientRecordOmopSyncTest(_SmartBase):
         self.assertEqual(ep.episode_source_value, 'AC-T')
         from datetime import date
         self.assertEqual(ep.episode_start_date, date(2023, 1, 15))
+
+    def test_patch_therapy_outcome_writes_lot_outcome_observation(self):
+        """PATCHing a line's outcome persists a LOT-{n}-outcome Observation to OMOP."""
+        from omop_core.models import Observation
+        person = Person.objects.create(person_id=91035)
+        pi = PatientRecord.objects.create(person=person, organization=self.organization)
+
+        self._patch(pi, {
+            'first_line_therapy': 'AC-T',
+            'first_line_start_date': '2023-01-15',
+            'first_line_end_date': '2023-07-01',
+            'first_line_outcome': 'Partial Response',
+        })
+
+        obs = Observation.objects.filter(person=person, observation_source_value='LOT-1-outcome')
+        self.assertEqual(obs.count(), 1)
+        self.assertEqual(obs.first().value_as_string, 'Partial Response')
+
+    def test_patch_therapy_outcome_edit_updates_observation_in_place(self):
+        """Editing a line's outcome updates the existing Observation, no duplicate."""
+        from omop_core.models import Observation
+        person = Person.objects.create(person_id=91036)
+        pi = PatientRecord.objects.create(person=person, organization=self.organization)
+
+        self._patch(pi, {
+            'first_line_therapy': 'AC-T',
+            'first_line_start_date': '2023-01-15',
+            'first_line_outcome': 'Partial Response',
+        })
+        self._patch(pi, {'first_line_outcome': 'Complete Response'})
+
+        obs = Observation.objects.filter(person=person, observation_source_value='LOT-1-outcome')
+        self.assertEqual(obs.count(), 1)
+        self.assertEqual(obs.first().value_as_string, 'Complete Response')
 
     def test_patch_therapy_links_existing_drug_exposures(self):
         """DrugExposure rows in the episode date range are linked via EpisodeEvent."""
@@ -5831,6 +6371,269 @@ class ConceptGraphTest(_SmartBase):
         self.assertEqual(resp.json()['truncated'], [])
 
 
+class _ConceptFixtureBase(_SmartBase):
+    """Shared OMOP concept fixtures for the search/list endpoint tests (issue #213)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from oauth2_provider.models import AccessToken
+        from django.utils import timezone as tz
+        from omop_core.models import Concept, Vocabulary, Domain, ConceptClass
+        import datetime
+
+        # Token with no read scope — must be rejected by ScopedTokenPermission
+        cls.empty_scope_token = AccessToken.objects.create(
+            user=cls.foundation_user,
+            application=cls.app,
+            token='concept-empty-scope-token-444',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='',
+        )
+
+        for vocab_id in ('LOINC', 'SNOMED'):
+            Vocabulary.objects.get_or_create(
+                vocabulary_id=vocab_id,
+                defaults={'vocabulary_name': vocab_id, 'vocabulary_reference': '',
+                          'vocabulary_version': '', 'vocabulary_concept_id': 0},
+            )
+        for domain_id in ('Measurement', 'Condition'):
+            Domain.objects.get_or_create(
+                domain_id=domain_id,
+                defaults={'domain_name': domain_id, 'domain_concept_id': 0},
+            )
+        for class_id in ('Lab Test', 'Clinical Finding'):
+            ConceptClass.objects.get_or_create(
+                concept_class_id=class_id,
+                defaults={'concept_class_name': class_id, 'concept_class_concept_id': 0},
+            )
+
+        common = {
+            'valid_start_date': datetime.date(1970, 1, 1),
+            'valid_end_date': datetime.date(2099, 12, 31),
+        }
+        cls.creatinine_serum = Concept.objects.create(
+            concept_id=3016723, concept_name='Creatinine [Mass/volume] in Serum or Plasma',
+            vocabulary_id='LOINC', domain_id='Measurement', concept_class_id='Lab Test',
+            concept_code='2160-0', standard_concept='S', **common,
+        )
+        cls.creatinine_renal = Concept.objects.create(
+            concept_id=3016724, concept_name='Creatinine renal clearance/1.73 sq M',
+            vocabulary_id='LOINC', domain_id='Measurement', concept_class_id='Lab Test',
+            concept_code='35203-9', standard_concept=None, **common,
+        )
+        cls.creatinine_snomed = Concept.objects.create(
+            concept_id=4013964, concept_name='Creatinine measurement, serum',
+            vocabulary_id='SNOMED', domain_id='Measurement', concept_class_id='Lab Test',
+            concept_code='113075003', standard_concept='S', **common,
+        )
+        cls.diabetes = Concept.objects.create(
+            concept_id=201826, concept_name='Type 2 diabetes mellitus',
+            vocabulary_id='SNOMED', domain_id='Condition', concept_class_id='Clinical Finding',
+            concept_code='44054006', standard_concept='S', **common,
+        )
+
+    def _auth(self):
+        return {'HTTP_AUTHORIZATION': f'Bearer {self.read_token.token}'}
+
+
+class ConceptSearchTest(_ConceptFixtureBase):
+    """GET /api/v1/concepts/search/ (issue #213)"""
+
+    URL = '/api/v1/concepts/search/'
+
+    def test_search_by_name_substring(self):
+        # Membership assertions, not exact counts — seed migrations may add
+        # concepts whose names also match (same convention as ConceptListTest).
+        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 100}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        ids = {r['concept_id'] for r in results}
+        self.assertLessEqual(
+            {self.creatinine_serum.concept_id, self.creatinine_renal.concept_id,
+             self.creatinine_snomed.concept_id},
+            ids,
+        )
+        self.assertNotIn(self.diabetes.concept_id, ids)
+        self.assertTrue(all('creatinine' in r['concept_name'].lower() for r in results))
+
+    def test_search_result_shape(self):
+        resp = self.client.get(
+            self.URL, {'q': 'Type 2 diabetes', 'page_size': 100}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        match = next(
+            (r for r in results if r['concept_id'] == self.diabetes.concept_id), None,
+        )
+        self.assertEqual(match, {
+            'concept_id': 201826,
+            'concept_name': 'Type 2 diabetes mellitus',
+            'vocabulary_id': 'SNOMED',
+            'concept_code': '44054006',
+            'domain_id': 'Condition',
+            'concept_class_id': 'Clinical Finding',
+            'standard_concept': 'S',
+        })
+
+    def test_search_filtered_by_vocabulary(self):
+        resp = self.client.get(
+            self.URL,
+            {'q': 'creatinine', 'vocabulary_id': 'SNOMED', 'page_size': 100},
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        ids = {r['concept_id'] for r in results}
+        self.assertIn(self.creatinine_snomed.concept_id, ids)
+        self.assertNotIn(self.creatinine_serum.concept_id, ids)
+        self.assertTrue(all(r['vocabulary_id'] == 'SNOMED' for r in results))
+
+    def test_search_filtered_by_standard_concept(self):
+        resp = self.client.get(
+            self.URL,
+            {'q': 'creatinine', 'standard_concept': 'S', 'page_size': 100},
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {r['concept_id'] for r in resp.json()['results']}
+        self.assertNotIn(self.creatinine_renal.concept_id, ids)
+        self.assertLessEqual(
+            {self.creatinine_serum.concept_id, self.creatinine_snomed.concept_id}, ids,
+        )
+
+    def test_search_no_match_returns_empty_page(self):
+        resp = self.client.get(self.URL, {'q': 'zzz-no-such-concept'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['count'], 0)
+
+    def test_missing_q_returns_400(self):
+        resp = self.client.get(self.URL, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_short_q_returns_400(self):
+        resp = self.client.get(self.URL, {'q': 'c'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_pagination_page_size(self):
+        resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 2}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.json()
+        self.assertGreaterEqual(data['count'], 3)
+        self.assertEqual(len(data['results']), 2)
+        self.assertIsNotNone(data['next'])
+
+    def test_unauthenticated_returns_401(self):
+        resp = self.client.get(self.URL, {'q': 'creatinine'})
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_expired_token_rejected(self):
+        resp = self.client.get(
+            self.URL, {'q': 'creatinine'},
+            HTTP_AUTHORIZATION=f'Bearer {self.expired_token.token}',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_empty_scope_token_rejected(self):
+        resp = self.client.get(
+            self.URL, {'q': 'creatinine'},
+            HTTP_AUTHORIZATION=f'Bearer {self.empty_scope_token.token}',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
+class ConceptListTest(_ConceptFixtureBase):
+    """GET /api/v1/concepts/ (issue #213)"""
+
+    URL = '/api/v1/concepts/'
+
+    def test_list_by_domain(self):
+        # Seed migrations may pre-populate concepts, so assert membership and
+        # filter correctness rather than exact counts.
+        resp = self.client.get(
+            self.URL, {'domain_id': 'Condition', 'page_size': 100}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        self.assertIn(self.diabetes.concept_id, {r['concept_id'] for r in results})
+        self.assertTrue(all(r['domain_id'] == 'Condition' for r in results))
+
+    def test_list_by_concept_class(self):
+        resp = self.client.get(
+            self.URL, {'concept_class_id': 'Lab Test', 'page_size': 100}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        ids = {r['concept_id'] for r in results}
+        self.assertLessEqual(
+            {self.creatinine_serum.concept_id, self.creatinine_renal.concept_id,
+             self.creatinine_snomed.concept_id},
+            ids,
+        )
+        self.assertTrue(all(r['concept_class_id'] == 'Lab Test' for r in results))
+
+    def test_list_by_combined_filters(self):
+        resp = self.client.get(
+            self.URL,
+            {'vocabulary_id': 'LOINC', 'domain_id': 'Measurement', 'page_size': 100},
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        ids = {r['concept_id'] for r in results}
+        self.assertLessEqual(
+            {self.creatinine_serum.concept_id, self.creatinine_renal.concept_id}, ids,
+        )
+        self.assertNotIn(self.creatinine_snomed.concept_id, ids)
+        self.assertTrue(all(
+            r['vocabulary_id'] == 'LOINC' and r['domain_id'] == 'Measurement'
+            for r in results
+        ))
+
+    def test_list_unknown_filter_value_returns_empty_page(self):
+        resp = self.client.get(self.URL, {'domain_id': 'NoSuchDomain'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['count'], 0)
+
+    def test_list_without_filter_returns_400(self):
+        resp = self.client.get(self.URL, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_list_standard_concept_alone_returns_400(self):
+        """standard_concept is too unselective to bound a listing by itself."""
+        resp = self.client.get(self.URL, {'standard_concept': 'S'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_list_standard_concept_combines_with_selective_filter(self):
+        resp = self.client.get(
+            self.URL,
+            {'concept_class_id': 'Lab Test', 'standard_concept': 'S', 'page_size': 100},
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {r['concept_id'] for r in resp.json()['results']}
+        self.assertIn(self.creatinine_serum.concept_id, ids)
+        self.assertNotIn(self.creatinine_renal.concept_id, ids)
+
+    def test_unauthenticated_returns_401(self):
+        resp = self.client.get(self.URL, {'domain_id': 'Condition'})
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_expired_token_rejected(self):
+        resp = self.client.get(
+            self.URL, {'domain_id': 'Condition'},
+            HTTP_AUTHORIZATION=f'Bearer {self.expired_token.token}',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_empty_scope_token_rejected(self):
+        resp = self.client.get(
+            self.URL, {'domain_id': 'Condition'},
+            HTTP_AUTHORIZATION=f'Bearer {self.empty_scope_token.token}',
+        )
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
 # ---------------------------------------------------------------------------
 # IDOR: PatientRecordViewSet row-level access (issue #134)
 # ---------------------------------------------------------------------------
@@ -7126,6 +7929,60 @@ class OrganizationCleanupServiceTest(TestCase):
             condition_type_concept=condition_type_concept,
         )
 
+        # Person-FK tables that are not reached by Django's ORM cascade when
+        # Person is deleted via raw SQL — these caused FK violations on staging.
+        ObservationPeriod.objects.create(
+            observation_period_id=9403,
+            person=person,
+            observation_period_start_date=date(2020, 1, 1),
+            observation_period_end_date=date.today(),
+            period_type_concept=condition_type_concept,
+        )
+        CancerModifier.objects.create(
+            cancer_modifier_id=9404,
+            person=person,
+            cancer_modifier_concept=condition_concept,
+        )
+        Histology.objects.create(
+            histology_id=9405,
+            person=person,
+            concept=condition_concept,
+            histology_date=date.today(),
+            histology_type_concept=condition_type_concept,
+        )
+        StemTable.objects.create(
+            id=9406,
+            domain_id='Condition',
+            person=person,
+            concept=condition_concept,
+            type_concept=condition_type_concept,
+            start_date=date.today(),
+        )
+        PersonLanguageSkill.objects.create(
+            person=person,
+            language_concept=_make_test_concept(9400004, 'Cleanup Language', 'CLANG', 'Language'),
+            skill_level='both',
+        )
+        survey = Survey.objects.create(name='cleanup-survey', title='Cleanup Survey')
+        PatientSurveyResponse.objects.create(person=person, survey=survey)
+        institution = Institution.objects.create(
+            slug='cleanup-ehr', display_name='Cleanup EHR', fhir_base='https://ehr.example.com/fhir',
+        )
+        FhirOauthState.objects.create(
+            state='cleanup-state-9407',
+            person=person,
+            institution=institution,
+            code_verifier='verifier',
+            nonce='nonce',
+        )
+        FhirConnection.objects.create(
+            person=person,
+            institution=institution,
+            access_token_encrypted='enc-access',
+            refresh_token_encrypted='enc-refresh',
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+
         delete_organization_with_patient_cascade(org)
 
         self.assertFalse(Organization.objects.filter(pk=org.pk).exists())
@@ -7133,6 +7990,14 @@ class OrganizationCleanupServiceTest(TestCase):
         self.assertFalse(Person.objects.filter(pk=person.pk).exists())
         self.assertFalse(ConditionOccurrence.objects.filter(person_id=person.person_id).exists())
         self.assertFalse(ProcedureOccurrence.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(ObservationPeriod.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(CancerModifier.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(Histology.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(StemTable.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(PersonLanguageSkill.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(PatientSurveyResponse.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(FhirOauthState.objects.filter(person_id=person.person_id).exists())
+        self.assertFalse(FhirConnection.objects.filter(person_id=person.person_id).exists())
         self.assertTrue(PatientRecord.objects.filter(pk=other_patient.pk).exists())
         self.assertTrue(Person.objects.filter(pk=other_person.pk).exists())
 

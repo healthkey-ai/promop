@@ -1,42 +1,43 @@
 """
-Management command: generate_import_enrich_synthea_mm
+Management command: generate_import_enrich_synthea_fl
 
-Full staging pipeline for rich synthetic Multiple Myeloma cohorts:
+Full staging pipeline for rich synthetic Follicular Lymphoma cohorts:
 
-  1. Generate a FHIR bundle with clinically complete MM patients using the
-     internal MM generator (called via generate_fhir_bundle --disease mm).
+  1. Generate a FHIR bundle with clinically complete FL patients using the
+     internal FL generator (generate_fhir_bundle --disease fl):
 
-     The bundle includes:
-       - ISS / R-ISS staging, cytogenetics (del17p, t(4;14), t(14;16), 1q, hyperdiploidy, del13q)
-       - Disease burden: serum/urine M-spike, kappa/lambda FLC, bone marrow plasma cells %
-       - CRAB criteria: haemoglobin, calcium, creatinine/CrCl/eGFR, bone lesions
-       - SLiM criteria: plasma cells ≥60%, FLC ratio
-       - 20+ standard labs: CBC, CMP, LFTs, LDH, Beta-2-microglobulin, ejection fraction
-       - Performance: ECOG, Karnofsky, peripheral neuropathy grade, vital signs
-       - Multi-line therapy: 1–5 lines of MM-specific regimens (VRd, DRd, Pd, KRd, etc.)
-         with outcomes, therapy-line extensions, and individual drug RxNorm codes
-       - SCT history / eligibility / date (autologous, allogeneic, tandem)
-       - Refractory status (PI, IMiD, anti-CD38, triple-class)
-       - Cytogenetic extensions and plasma cell leukemia flag
-       - Behavior/lifestyle: smoking, alcohol, exercise, diet, sleep, stress, social support
-       - Socioeconomic: employment, education, marital status, insurance, income, dependents
-       - Wearable: 28 days of daily steps, resting HR, HRV, SpO2, respiratory rate,
-         active minutes, sleep duration — correlated to ECOG
-       - Infection status: HIV, HBV, HCV documented screening results
+       - Ann Arbor stage, tumor grade (1–3b), FLIPI score/risk, GELF criteria
+       - B symptoms, bulky disease, nodal sites, bone-marrow involvement
+       - 20+ standard labs (CBC, CMP, LDH, Beta-2-microglobulin)
+       - Performance: ECOG, Karnofsky, vital signs
+       - Watch-and-wait patients (low tumor burden)
+       - Multi-year therapy timelines with realistic PFS intervals:
+         ~20% of treated patients progress within 24 months of 1L start
+         (POD24); later lines have shorter remissions; recently-diagnosed
+         patients naturally have fewer lines
+       - Multi-line FL regimens (BR, R-CHOP, R-CVP, R², tazemetostat,
+         bispecifics, CAR-T, Pola-BR, …) with per-line outcomes
+       - Maintenance rituximab
+       - FL → DLBCL histologic transformation (DLBCL Condition)
+       - Deaths (deceasedDateTime), weighted toward POD24 / heavily
+         pre-treated / transformed patients — supports OS analyses
 
-  2. Import that bundle into OMOP under a target organisation via import_fhir_bundle.
+     The dataset is shaped to feed the PRism FLF Section-4 charts:
+     POD24 split, CR-by-landmark (CR30), OS by 1L→2L pathway, treatment
+     patterns/categories by line, treatment burden, and the disease-state
+     snapshot.
 
-  3. Run the MM OMOP enrichment pass (enrich_synthea_mm_omop_data) which:
-       - Backfills ConditionOccurrence and ProcedureOccurrence for any gaps
-       - Calls refresh_patient_record for every patient so all OMOP-derived
-         PatientRecord fields are populated
-       - Prints a completeness check across 14 critical MM fields
+  2. Import that bundle into OMOP under a target organisation via
+     import_fhir_bundle.
+
+  3. Run the FL enrichment pass (enrich_synthea_fl_omop_data):
+     refreshes PatientRecord for every patient, derives observation_period
+     rows, and prints a completeness report for the chart-critical fields.
 
 Usage:
-    python manage.py generate_import_enrich_synthea_mm
-    python manage.py generate_import_enrich_synthea_mm --count 50 --org-slug synthea-mm
-    python manage.py generate_import_enrich_synthea_mm --count 100 --wipe-existing --seed 42
-    python manage.py generate_import_enrich_synthea_mm --rrmm-ratio 0.90 --import-batch-size 5
+    python manage.py generate_import_enrich_synthea_fl
+    python manage.py generate_import_enrich_synthea_fl --count 1000 --org-slug synthea-fl
+    python manage.py generate_import_enrich_synthea_fl --count 100 --wipe-existing --seed 42
 """
 
 import tempfile
@@ -52,8 +53,8 @@ from omop_core.services.organization_cleanup import delete_organization_with_pat
 
 class Command(BaseCommand):
     help = (
-        'Generate a rich synthetic MM FHIR bundle, import it into OMOP, '
-        'and run the MM OMOP enrichment pass for a target organisation.'
+        'Generate a rich synthetic FL FHIR bundle, import it into OMOP, '
+        'and run the FL OMOP enrichment pass for a target organisation.'
     )
 
     def add_arguments(self, parser):
@@ -74,8 +75,8 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             '--org-slug',
-            default='synthea-mm',
-            help='Organisation slug to create/import into (default: synthea-mm).',
+            default='synthea-fl',
+            help='Organisation slug to create/import into (default: synthea-fl).',
         )
         parser.add_argument(
             '--seed',
@@ -84,14 +85,11 @@ class Command(BaseCommand):
             help='Random seed for reproducible patient generation.',
         )
         parser.add_argument(
-            '--rrmm-ratio',
+            '--watch-wait-ratio',
             type=float,
-            default=0.80,
-            help=(
-                'Fraction of patients with ≥1 prior line of therapy (default: 0.80). '
-                'All patients always receive at least one therapy line; this ratio '
-                'controls how many have relapsed/refractory disease.'
-            ),
+            default=None,
+            help='Fraction of eligible (low tumor burden) patients managed with '
+                 'watch-and-wait (default: generator default 0.20).',
         )
         parser.add_argument(
             '--import-batch-size',
@@ -104,12 +102,6 @@ class Command(BaseCommand):
             type=int,
             default=None,
             help='Limit the enrichment pass to the first N patients (useful for smoke tests).',
-        )
-        parser.add_argument(
-            '--min-procedures',
-            type=int,
-            default=2,
-            help='Minimum ProcedureOccurrence rows per patient (default: 2).',
         )
         parser.add_argument(
             '--wipe-existing',
@@ -125,7 +117,7 @@ class Command(BaseCommand):
 
         if options['output'] is None:
             options['output'] = str(
-                Path(tempfile.gettempdir()) / f'synthea_mm_{uuid.uuid4().hex[:12]}.json'
+                Path(tempfile.gettempdir()) / f'synthea_fl_{uuid.uuid4().hex[:12]}.json'
             )
         self.stdout.write(f"Using bundle file: {options['output']}")
 
@@ -140,15 +132,16 @@ class Command(BaseCommand):
         # ------------------------------------------------------------------
         # Step 1: Generate FHIR bundle
         # ------------------------------------------------------------------
-        self.stdout.write('Step 1/3: generating Synthea MM FHIR bundle...')
+        self.stdout.write('Step 1/3: generating Synthea FL FHIR bundle...')
         generate_kwargs = {
-            'disease': 'mm',
+            'disease': 'fl',
             'count': options['count'],
             'output': options['output'],
-            'rrmm_ratio': options['rrmm_ratio'],
         }
         if options['seed'] is not None:
             generate_kwargs['seed'] = options['seed']
+        if options['watch_wait_ratio'] is not None:
+            generate_kwargs['watch_wait_ratio'] = options['watch_wait_ratio']
         call_command('generate_fhir_bundle', **generate_kwargs)
 
         # ------------------------------------------------------------------
@@ -167,15 +160,13 @@ class Command(BaseCommand):
         # ------------------------------------------------------------------
         self.stdout.write('Step 3/3: enriching OMOP data and refreshing PatientRecord...')
         enrich_kwargs = {
-            'bundle': options['output'],
             'org_slugs': org_slug,
             'confirm': True,
-            'min_procedures': options['min_procedures'],
         }
         if options['enrich_limit'] is not None:
             enrich_kwargs['limit'] = options['enrich_limit']
-        call_command('enrich_synthea_mm_omop_data', **enrich_kwargs)
+        call_command('enrich_synthea_fl_omop_data', **enrich_kwargs)
 
         self.stdout.write(self.style.SUCCESS(
-            f'Completed MM generation, import, and enrichment for org {org_slug!r}.'
+            f'Completed FL generation, import, and enrichment for org {org_slug!r}.'
         ))
