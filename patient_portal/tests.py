@@ -896,7 +896,171 @@ class UIViewsReflectUploadedDataTest(FhirUploadBase):
 
 
 # ---------------------------------------------------------------------------
-# 4. Direct OMOP endpoint CRUD tests
+# 4. Therapy component concept_ids (#189/#231)
+# ---------------------------------------------------------------------------
+
+_COMPONENT_ID_FIELDS = (
+    'first_line_component_ids', 'second_line_component_ids',
+    'later_component_ids', 'therapy_component_ids',
+)
+
+
+class TherapyComponentIdsAPITest(FhirUploadBase):
+    """The component concept_id fields are exposed on both patient-record
+    endpoints and are writable via the v1 API."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle_bytes = json.dumps(_make_fhir_bundle()).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'test_bundle.json'
+        _client.post('/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart')
+        cls._person = Person.objects.filter(family_name='Smith', given_name='Jane').first()
+        assert cls._person is not None, 'Setup: person not found after upload'
+        cls._pid = cls._person.person_id
+
+    def test_component_fields_in_legacy_patient_info(self):
+        resp = self.client.get(f'/api/patient-info/{self._pid}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        for field in _COMPONENT_ID_FIELDS:
+            self.assertIn(field, resp.data['patient_info'],
+                          f'Field {field!r} missing from legacy patient-info response')
+
+    def test_component_fields_in_v1_patient_records(self):
+        resp = self.client.get(f'/api/v1/patient-records/{self._pid}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        for field in _COMPONENT_ID_FIELDS:
+            self.assertIn(field, resp.data['patient_info'],
+                          f'Field {field!r} missing from v1 patient-records response')
+
+    def test_component_fields_writable_via_patch(self):
+        resp = self.client.patch(
+            f'/api/v1/patient-records/{self._pid}/',
+            {'therapy_component_ids': [35806260, 19103793]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        record = PatientRecord.objects.get(person_id=self._pid)
+        self.assertEqual(record.therapy_component_ids, [35806260, 19103793])
+
+
+class FhirUploadComponentIdsTest(FhirUploadBase):
+    """End-to-end: a MedicationStatement carrying a HemOnc coding yields
+    component concept_ids expanded from the HemOnc regimen→component graph."""
+
+    REGIMEN_ID = 35806260   # HemOnc RVD regimen
+    COMP_A_ID = 35900001    # HemOnc drug component
+    COMP_B_ID = 35900002    # HemOnc drug component
+    RXNORM_ING_ID = 1900001  # RxNorm ingredient ('Maps to' target of COMP_A)
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls._make_hemonc_fixtures()
+
+        bundle = _make_fhir_bundle()
+        for entry in bundle['entry']:
+            resource = entry['resource']
+            if resource['resourceType'] == 'MedicationStatement' and resource['id'] == 'med-ac-t':
+                resource['medicationCodeableConcept']['coding'] = [{
+                    'system': 'http://ohdsi.org/omop/HemOnc',
+                    'code': str(cls.REGIMEN_ID),
+                    'display': 'RVD',
+                }]
+
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'test_bundle.json'
+        cls._upload_response = _client.post(
+            '/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart'
+        )
+        cls._person = Person.objects.filter(family_name='Smith', given_name='Jane').first()
+        assert cls._person is not None, 'Setup: person not found after upload'
+        cls._pid = cls._person.person_id
+
+    @classmethod
+    def _make_hemonc_fixtures(cls):
+        hemonc_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc Oncology', 'vocabulary_concept_id': 0},
+        )
+        regimen_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0},
+        )
+        drug_domain = Domain.objects.get(domain_id='Drug')
+        today = date.today()
+        far_future = date(2099, 12, 31)
+
+        def _concept(cid, name, cc):
+            return Concept.objects.create(
+                concept_id=cid, concept_name=name, concept_code=str(cid),
+                vocabulary=hemonc_vocab, domain=drug_domain, concept_class=cc,
+                standard_concept='S', valid_start_date=today, valid_end_date=far_future,
+            )
+
+        regimen = _concept(cls.REGIMEN_ID, 'RVD', regimen_class)
+        comp_a = _concept(cls.COMP_A_ID, 'bortezomib', regimen_class)
+        comp_b = _concept(cls.COMP_B_ID, 'lenalidomide', regimen_class)
+        rx_ing = _concept(cls.RXNORM_ING_ID, 'bortezomib (ingredient)', regimen_class)
+
+        for rel_id in ('Has targeted therapy', 'Has steroid tx', 'Maps to'):
+            Relationship.objects.get_or_create(
+                relationship_id=rel_id,
+                defaults={
+                    'relationship_name': rel_id, 'is_hierarchical': 0,
+                    'defines_ancestry': 0, 'reverse_relationship_id': 'rev',
+                    'relationship_concept_id': 0,
+                },
+            )
+        for c1, c2, rel in (
+            (regimen, comp_a, 'Has targeted therapy'),
+            (regimen, comp_b, 'Has steroid tx'),
+            (comp_a, rx_ing, 'Maps to'),
+        ):
+            ConceptRelationship.objects.create(
+                concept_1=c1, concept_2=c2, relationship_id=rel,
+                valid_start_date=today, valid_end_date=far_future,
+            )
+
+    def test_upload_succeeds(self):
+        self.assertIn(self._upload_response.status_code,
+                      [status.HTTP_200_OK, status.HTTP_201_CREATED],
+                      msg=f'Upload failed: {self._upload_response.data}')
+
+    def test_first_line_components_expanded_from_hemonc_graph(self):
+        record = PatientRecord.objects.get(person_id=self._pid)
+        components = set(record.first_line_component_ids or [])
+        self.assertTrue(
+            {self.COMP_A_ID, self.COMP_B_ID, self.RXNORM_ING_ID} <= components,
+            f'Expected HemOnc components + leveled ingredient in '
+            f'first_line_component_ids, got {components}',
+        )
+
+    def test_aggregate_contains_all_line_components(self):
+        record = PatientRecord.objects.get(person_id=self._pid)
+        aggregate = set(record.therapy_component_ids or [])
+        self.assertTrue(
+            {self.COMP_A_ID, self.COMP_B_ID, self.RXNORM_ING_ID} <= aggregate,
+        )
+        # aggregate covers every per-line id
+        for line_field in ('first_line_component_ids', 'second_line_component_ids'):
+            self.assertTrue(set(getattr(record, line_field) or []) <= aggregate)
+
+    def test_component_fields_served_on_api(self):
+        resp = self.client.get(f'/api/v1/patient-records/{self._pid}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        components = set(resp.data['patient_info']['first_line_component_ids'] or [])
+        self.assertTrue({self.COMP_A_ID, self.COMP_B_ID} <= components)
+
+
+# ---------------------------------------------------------------------------
+# 5. Direct OMOP endpoint CRUD tests
 # ---------------------------------------------------------------------------
 
 class OmopEndpointAuthTest(FhirUploadBase):

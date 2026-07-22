@@ -1759,6 +1759,30 @@ class PatientRecord(models.Model):
         null=True, blank=True, default=list,
         help_text="List of HemOnc concept_ids for later-line regimens (3L+)",
     )
+    # Component drug concept_ids per therapy line (issues #189/#231).
+    # Each line's set is the union of:
+    #   1. HemOnc regimen→component expansion via concept_relationship
+    #      ('Has cytotoxic chemo'/'Has targeted therapy'/'Has immunotherapy'/
+    #       'Has steroid tx'/'Has hormonal tx'), and
+    #   2. the line's DrugExposure drug concept_ids,
+    # leveled to ingredients by also including 'Maps to' and 'Has ingredient'
+    # targets, so consumers (EXACT/SoC) can match by plain concept_id overlap.
+    first_line_component_ids = models.JSONField(
+        null=True, blank=True, default=list,
+        help_text="Component drug concept_ids for the first-line regimen",
+    )
+    second_line_component_ids = models.JSONField(
+        null=True, blank=True, default=list,
+        help_text="Component drug concept_ids for the second-line regimen",
+    )
+    later_component_ids = models.JSONField(
+        null=True, blank=True, default=list,
+        help_text="Component drug concept_ids across all later-line (3L+) regimens",
+    )
+    therapy_component_ids = models.JSONField(
+        null=True, blank=True, default=list,
+        help_text="Aggregate union of component drug concept_ids across all therapy lines",
+    )
     later_date = models.DateField(blank=True, null=True)
     later_start_date = models.DateField(blank=True, null=True, help_text="Later Line Therapy Start Date")
     later_end_date = models.DateField(blank=True, null=True, help_text="Later Line Therapy End Date")
