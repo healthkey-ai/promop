@@ -7,7 +7,7 @@ from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
 from django.db import IntegrityError, transaction
-from django.db.models import Q
+from django.db.models import Q, F
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -18,6 +18,7 @@ from omop_core.models import (
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location,
     PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
+    Relationship, ConceptRelationship, ConceptAncestor,
     # Controlled vocabulary lookup models
     Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
     ProgesteroneReceptorStatus, Her2Status, HrStatus, HrdStatus,
@@ -3832,6 +3833,207 @@ def concept_lookup(request):
             result[v][c] = cid
 
     return Response(result)
+
+
+def _parse_positive_int(raw_value, field_name):
+    if raw_value in (None, ''):
+        return None
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        raise ValueError(f"'{field_name}' must be an integer.")
+    if value < 1:
+        raise ValueError(f"'{field_name}' must be >= 1.")
+    return value
+
+
+def _concept_graph_filters(request):
+    relationship_ids = request.query_params.getlist('relationship_id')
+    vocabulary_ids = request.query_params.getlist('vocabulary_id')
+    concept_class_ids = request.query_params.getlist('concept_class_id')
+    max_levels = _parse_positive_int(request.query_params.get('max_levels'), 'max_levels')
+    return relationship_ids, vocabulary_ids, concept_class_ids, max_levels
+
+
+def _serialize_concept_graph_node(concept, **extra):
+    payload = {
+        'concept_id': concept.concept_id,
+        'concept_name': concept.concept_name,
+        'concept_code': concept.concept_code,
+        'vocabulary_id': concept.vocabulary_id,
+        'concept_class_id': concept.concept_class_id,
+        'domain_id': concept.domain_id,
+        'standard_concept': concept.standard_concept,
+    }
+    payload.update(extra)
+    return payload
+
+
+def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids, concept_class_ids, max_levels):
+    grouped = {source_id: [] for source_id in source_ids}
+
+    if relationship_ids:
+        qs = (
+            ConceptRelationship.objects
+            .select_related('concept_1', 'concept_2', 'relationship')
+            .filter(relationship_id__in=relationship_ids)
+        )
+        if direction == 'ancestors':
+            qs = qs.filter(concept_2_id__in=source_ids)
+            if vocabulary_ids:
+                qs = qs.filter(concept_1__vocabulary_id__in=vocabulary_ids)
+            if concept_class_ids:
+                qs = qs.filter(concept_1__concept_class_id__in=concept_class_ids)
+            for edge in qs.order_by('relationship_id', 'concept_1_id'):
+                grouped[edge.concept_2_id].append(
+                    _serialize_concept_graph_node(
+                        edge.concept_1,
+                        relationship_id=edge.relationship_id,
+                        min_levels_of_separation=None,
+                        max_levels_of_separation=None,
+                    )
+                )
+        else:
+            qs = qs.filter(concept_1_id__in=source_ids)
+            if vocabulary_ids:
+                qs = qs.filter(concept_2__vocabulary_id__in=vocabulary_ids)
+            if concept_class_ids:
+                qs = qs.filter(concept_2__concept_class_id__in=concept_class_ids)
+            for edge in qs.order_by('relationship_id', 'concept_2_id'):
+                grouped[edge.concept_1_id].append(
+                    _serialize_concept_graph_node(
+                        edge.concept_2,
+                        relationship_id=edge.relationship_id,
+                        min_levels_of_separation=None,
+                        max_levels_of_separation=None,
+                    )
+                )
+        return grouped
+
+    qs = ConceptAncestor.objects.select_related('ancestor_concept', 'descendant_concept')
+    if direction == 'ancestors':
+        qs = qs.filter(descendant_concept_id__in=source_ids).exclude(
+            ancestor_concept_id=F('descendant_concept_id')
+        )
+        if vocabulary_ids:
+            qs = qs.filter(ancestor_concept__vocabulary_id__in=vocabulary_ids)
+        if concept_class_ids:
+            qs = qs.filter(ancestor_concept__concept_class_id__in=concept_class_ids)
+        if max_levels is not None:
+            qs = qs.filter(min_levels_of_separation__lte=max_levels)
+        for edge in qs.order_by('min_levels_of_separation', 'ancestor_concept_id'):
+            grouped[edge.descendant_concept_id].append(
+                _serialize_concept_graph_node(
+                    edge.ancestor_concept,
+                    relationship_id=None,
+                    min_levels_of_separation=edge.min_levels_of_separation,
+                    max_levels_of_separation=edge.max_levels_of_separation,
+                )
+            )
+    else:
+        qs = qs.filter(ancestor_concept_id__in=source_ids).exclude(
+            ancestor_concept_id=F('descendant_concept_id')
+        )
+        if vocabulary_ids:
+            qs = qs.filter(descendant_concept__vocabulary_id__in=vocabulary_ids)
+        if concept_class_ids:
+            qs = qs.filter(descendant_concept__concept_class_id__in=concept_class_ids)
+        if max_levels is not None:
+            qs = qs.filter(min_levels_of_separation__lte=max_levels)
+        for edge in qs.order_by('min_levels_of_separation', 'descendant_concept_id'):
+            grouped[edge.ancestor_concept_id].append(
+                _serialize_concept_graph_node(
+                    edge.descendant_concept,
+                    relationship_id=None,
+                    min_levels_of_separation=edge.min_levels_of_separation,
+                    max_levels_of_separation=edge.max_levels_of_separation,
+                )
+            )
+    return grouped
+
+
+def _concept_graph_single_response(request, concept_id, direction):
+    try:
+        relationship_ids, vocabulary_ids, concept_class_ids, max_levels = _concept_graph_filters(request)
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not Concept.objects.filter(concept_id=concept_id).exists():
+        return Response({'detail': 'Concept not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    results = _query_concept_graph(
+        [concept_id],
+        direction,
+        relationship_ids,
+        vocabulary_ids,
+        concept_class_ids,
+        max_levels,
+    )[concept_id]
+    return Response({
+        'concept_id': concept_id,
+        'direction': direction,
+        'count': len(results),
+        'results': results,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_ancestors(request, concept_id):
+    return _concept_graph_single_response(request, concept_id, 'ancestors')
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_descendants(request, concept_id):
+    return _concept_graph_single_response(request, concept_id, 'descendants')
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_graph_batch(request):
+    raw_ids = request.query_params.getlist('concept_id')
+    if not raw_ids:
+        return Response(
+            {'detail': 'At least one ?concept_id=<id> parameter is required.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    direction = request.query_params.get('direction', '').strip().lower()
+    if direction not in {'ancestors', 'descendants'}:
+        return Response(
+            {'detail': "'direction' must be either 'ancestors' or 'descendants'."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        concept_ids = [int(raw_id) for raw_id in raw_ids]
+    except ValueError:
+        return Response(
+            {'detail': "'concept_id' values must be integers."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        relationship_ids, vocabulary_ids, concept_class_ids, max_levels = _concept_graph_filters(request)
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    grouped = _query_concept_graph(
+        concept_ids,
+        direction,
+        relationship_ids,
+        vocabulary_ids,
+        concept_class_ids,
+        max_levels,
+    )
+    return Response({
+        'direction': direction,
+        'results': {
+            str(concept_id): grouped.get(concept_id, [])
+            for concept_id in concept_ids
+        },
+    })
 
 
 # =============================================================================

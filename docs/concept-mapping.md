@@ -47,6 +47,35 @@ CREATE INDEX ix_concept_name_trgm ON concept USING gin (concept_name gin_trgm_op
 
 ---
 
+## Concept graph API
+
+PROMOP exposes the loaded OMOP graph to API consumers:
+
+- `GET /api/v1/concepts/{concept_id}/ancestors/`
+- `GET /api/v1/concepts/{concept_id}/descendants/`
+- `GET /api/v1/concepts/graph/`
+
+Use these endpoints when a consumer needs runtime traversal instead of relying on PRomop's internal `refresh_patient_record()` expansion.
+
+Traversal rules:
+
+- If `relationship_id` is supplied, PRomop traverses direct `concept_relationship` edges.
+- Otherwise PRomop traverses `concept_ancestor` closure rows.
+- `max_levels` applies only to `concept_ancestor` traversal.
+- `vocabulary_id` and `concept_class_id` filter the returned concepts, not the source concept.
+
+Common HemOnc patterns:
+
+| Use case | Endpoint shape |
+|---|---|
+| Regimen → component drugs | `GET /api/v1/concepts/{regimen_id}/descendants/?relationship_id=Has targeted therapy` |
+| Component drug → class | `GET /api/v1/concepts/{drug_id}/ancestors/?max_levels=1&vocabulary_id=HemOnc` |
+| Batch expand multiple trial regimen ids | `GET /api/v1/concepts/graph/?direction=descendants&concept_id=...&relationship_id=...` |
+
+The canonical endpoint contract is documented in [API_SURFACE.md](../API_SURFACE.md#concept-graph-endpoints).
+
+---
+
 ## FHIR → OMOP Concept Resolution
 
 ### 1. LOINC Observation codes → `measurement_concept_id`
