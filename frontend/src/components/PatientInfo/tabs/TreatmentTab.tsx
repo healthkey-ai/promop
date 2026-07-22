@@ -24,8 +24,7 @@ interface Props {
   diseaseType: 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'other';
 }
 
-function getTherapyOptions(diseaseType: string, line: 'first' | 'second' | 'later', bcFirst: { value: string }[], bcSecond: { value: string }[], bcLater: { value: string }[]) {
-  switch (diseaseType) {
+function getTherapyOptions(diseaseType: string, line: 'first' | 'second' | 'later', bcFirst: { value: string }[], bcSecond: { value: string }[], bcLater: { value: string }[]) {  switch (diseaseType) {
     case 'breast':
       if (line === 'first') return bcFirst.length ? bcFirst.map((o) => o.value) : BREAST_CANCER_FIRST_LINE;
       if (line === 'second') return bcSecond.length ? bcSecond.map((o) => o.value) : BREAST_CANCER_SECOND_LINE;
@@ -45,6 +44,16 @@ function getTherapyOptions(diseaseType: string, line: 'first' | 'second' | 'late
     default:
       return ['Other'];
   }
+}
+
+/** Read-only display of a line's HemOnc/RxNorm component drug concept_ids (derived server-side). */
+function ComponentIds({ ids }: { ids?: number[] | null }) {
+  if (!Array.isArray(ids) || ids.length === 0) return null;
+  return (
+    <p className="sm:col-span-2 text-xs text-portal-text-secondary -mt-2">
+      Component concept IDs: {ids.join(', ')}
+    </p>
+  );
 }
 
 export default function TreatmentTab({ formData, onChange, diseaseType }: Props) {
@@ -97,6 +106,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
               onChange={onChange}
               vocabSource={breastSource ? bcFirstLineSource : null} />
           </div>
+          <ComponentIds ids={formData?.first_line_component_ids as number[] | null | undefined} />
           <Field label="First Line Start Date" name="first_line_start_date" type="date" value={formData?.first_line_start_date} onChange={onChange} />
           <Field label="First Line End Date" name="first_line_end_date" type="date" value={formData?.first_line_end_date} onChange={onChange} />
           <Field label="Therapy Intent" name="first_line_intent" type="select" value={formData?.first_line_intent} options={THERAPY_INTENT_OPTIONS} onChange={onChange} />
@@ -114,6 +124,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
               onChange={onChange}
               vocabSource={breastSource ? bcSecondLineSource : null} />
           </div>
+          <ComponentIds ids={formData?.second_line_component_ids as number[] | null | undefined} />
           <Field label="Second Line Start Date" name="second_line_start_date" type="date" value={formData?.second_line_start_date} onChange={onChange} />
           <Field label="Second Line End Date" name="second_line_end_date" type="date" value={formData?.second_line_end_date} onChange={onChange} />
           <Field label="Therapy Intent" name="second_line_intent" type="select" value={formData?.second_line_intent} options={THERAPY_INTENT_OPTIONS} onChange={onChange} />
@@ -131,6 +142,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
               onChange={onChange}
               vocabSource={breastSource ? bcLaterLineSource : null} />
           </div>
+          <ComponentIds ids={formData?.later_component_ids as number[] | null | undefined} />
           <Field label="Later Line Start Date" name="later_start_date" type="date" value={formData?.later_start_date} onChange={onChange} />
           <Field label="Later Line End Date" name="later_end_date" type="date" value={formData?.later_end_date} onChange={onChange} />
           <Field label="Therapy Intent" name="later_intent" type="select" value={formData?.later_intent} options={THERAPY_INTENT_OPTIONS} onChange={onChange} />

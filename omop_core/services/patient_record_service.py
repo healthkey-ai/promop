@@ -18,7 +18,7 @@ from django.utils import timezone
 from omop_core.models import (
     Person, PatientRecord, ConditionOccurrence, Concept,
     Measurement, Observation, DrugExposure, Location, ProcedureOccurrence,
-    Death,
+    Death, ConceptRelationship,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
 from omop_core.services.mappings import (
@@ -49,6 +49,8 @@ _OMOP_DERIVED_FIELDS = [
     'second_line_therapy_id',
     'later_therapy', 'later_date', 'later_start_date', 'later_end_date',
     'later_therapies', 'later_therapy_ids',
+    'first_line_component_ids', 'second_line_component_ids',
+    'later_component_ids', 'therapy_component_ids',
     'therapy_lines_count', 'last_treatment',
     'concomitant_medications',
     # Legacy labs (derived via name-based Measurement lookup)
@@ -269,7 +271,11 @@ def _clear_derived_fields(patient_info: PatientRecord) -> None:
     """Reset all OMOP-derived fields to None so deletions are reflected."""
     for field in _OMOP_DERIVED_FIELDS:
         if hasattr(patient_info, field):
-            default = [] if field in ('prior_procedures', 'later_therapies', 'genetic_mutations', 'later_therapy_ids') else None
+            default = [] if field in (
+                'prior_procedures', 'later_therapies', 'genetic_mutations', 'later_therapy_ids',
+                'first_line_component_ids', 'second_line_component_ids',
+                'later_component_ids', 'therapy_component_ids',
+            ) else None
             setattr(patient_info, field, default)
 
 
@@ -534,6 +540,66 @@ def _get_treatment_data(person: Person) -> dict:
     return data
 
 
+# HemOnc regimen→component relationship ids. Direction: concept_id_1 is the
+# HemOnc Regimen concept, concept_id_2 is a component drug concept.
+_COMPONENT_RELATIONSHIP_IDS = (
+    'Has cytotoxic chemo', 'Has targeted therapy', 'Has immunotherapy',
+    'Has steroid tx', 'Has hormonal tx',
+)
+
+# Relationships used to level any drug concept to its standard/ingredient
+# forms so consumers (EXACT/SoC) can match by plain concept_id overlap (#189):
+# 'Maps to' reaches the standard concept (e.g. HemOnc drug → RxNorm), and
+# 'Has ingredient' reaches ingredient granularity (clinical drug → ingredient,
+# matching EXACT's TherapyComponent.omop_concept_id leveling).
+_LEVELING_RELATIONSHIP_IDS = ('Maps to', 'Has ingredient')
+
+
+def _expand_component_ids(regimen_concept_ids, drug_concept_ids):
+    """Expand one therapy line's inputs into a set of component drug concept_ids.
+
+    regimen_concept_ids: HemOnc regimen concept_ids for the line (may be empty).
+    drug_concept_ids: concept_ids from the line's backing DrugExposure rows.
+
+    The returned set is the union of:
+      1. HemOnc components of the regimen(s) via _COMPONENT_RELATIONSHIP_IDS,
+      2. the exposure drug concept_ids themselves,
+      3. 'Maps to' / 'Has ingredient' targets of (1) and (2) — ingredient leveling,
+      4. 'Has ingredient' targets of the 'Maps to' targets from (3), covering
+         HemOnc drug → RxNorm clinical drug → ingredient.
+
+    At most 4 batched queries regardless of input size.
+    """
+    base = set()
+    regimen_ids = {int(r) for r in (regimen_concept_ids or ()) if r}
+    if regimen_ids:
+        base.update(
+            ConceptRelationship.objects.filter(
+                concept_1_id__in=regimen_ids,
+                relationship_id__in=_COMPONENT_RELATIONSHIP_IDS,
+            ).values_list('concept_2_id', flat=True)
+        )
+    base.update(int(d) for d in (drug_concept_ids or ()) if d)
+    if not base:
+        return set()
+
+    hop1 = set(
+        ConceptRelationship.objects.filter(
+            concept_1_id__in=base,
+            relationship_id__in=_LEVELING_RELATIONSHIP_IDS,
+        ).values_list('concept_2_id', flat=True)
+    )
+    hop2 = set()
+    if hop1:
+        hop2 = set(
+            ConceptRelationship.objects.filter(
+                concept_1_id__in=hop1,
+                relationship_id='Has ingredient',
+            ).values_list('concept_2_id', flat=True)
+        )
+    return base | hop1 | hop2
+
+
 def _regimen_from_exposures(exposure_ids, de_info_by_id):
     """Resolve (display_name, concept_id) from a LOT's backing DrugExposures.
 
@@ -587,23 +653,37 @@ def _apply_inferred_lots(data: dict, lots) -> None:
 
     later = []
     later_ids = []
+    later_components = set()
+    all_components = set()
     for lot in lots:
         name, concept_id = _regimen_from_exposures(lot.exposure_ids, de_info_by_id)
+        exposure_concept_ids = [
+            de_info_by_id[e][0]
+            for e in lot.exposure_ids
+            if e in de_info_by_id and de_info_by_id[e][0]
+        ]
+        components = _expand_component_ids(
+            [concept_id] if concept_id else [], exposure_concept_ids,
+        )
+        all_components |= components
         start = str(lot.start) if lot.start else None
         end = str(lot.end) if lot.end else None
         if lot.lot_number == 1:
             data['first_line_therapy'] = name
             data['first_line_therapy_id'] = concept_id
+            data['first_line_component_ids'] = sorted(components)
             data['first_line_date'] = start
             data['first_line_start_date'] = start
             data['first_line_end_date'] = end
         elif lot.lot_number == 2:
             data['second_line_therapy'] = name
             data['second_line_therapy_id'] = concept_id
+            data['second_line_component_ids'] = sorted(components)
             data['second_line_date'] = start
             data['second_line_start_date'] = start
             data['second_line_end_date'] = end
         else:  # lot_number >= 3
+            later_components |= components
             if not data.get('later_therapy'):
                 data['later_therapy'] = name
                 data['later_date'] = start
@@ -616,6 +696,10 @@ def _apply_inferred_lots(data: dict, lots) -> None:
         data['later_therapies'] = later
     if later_ids:
         data['later_therapy_ids'] = later_ids
+    if later_components:
+        data['later_component_ids'] = sorted(later_components)
+    if all_components:
+        data['therapy_component_ids'] = sorted(all_components)
 
 
 def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
@@ -699,6 +783,8 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
 
     # ── Second pass: populate data dict ───────────────────────────────────
     therapy_line_numbers = set()
+    later_components = set()
+    all_components = set()
 
     for episode, drugs_in_episode, concept_id, source_value_set in episode_rows:
         lot = episode.episode_number
@@ -709,6 +795,14 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         # Nullify dangling FK concept_ids (not in Concept table)
         if concept_id and concept_id not in concept_name_map:
             concept_id = None
+
+        # Component drug concept_ids for this line: HemOnc regimen expansion
+        # unioned with the line's exposure drug concepts, leveled to ingredients.
+        components = _expand_component_ids(
+            [concept_id] if concept_id else [],
+            [de.drug_concept_id for de in drugs_in_episode if de.drug_concept_id],
+        )
+        all_components |= components
 
         if concept_id:
             drug_names = concept_name_map[concept_id]
@@ -735,6 +829,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         if lot == 1:
             data['first_line_therapy'] = drug_names
             data['first_line_therapy_id'] = concept_id
+            data['first_line_component_ids'] = sorted(components)
             data['first_line_date'] = start_date
             data['first_line_start_date'] = start_date
             if end_date:
@@ -742,11 +837,13 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         elif lot == 2:
             data['second_line_therapy'] = drug_names
             data['second_line_therapy_id'] = concept_id
+            data['second_line_component_ids'] = sorted(components)
             data['second_line_date'] = start_date
             data['second_line_start_date'] = start_date
             if end_date:
                 data['second_line_end_date'] = end_date
         elif lot >= 3:
+            later_components |= components
             later = data.get('later_therapies', [])
             later.append({'therapy': drug_names, 'startDate': start_date, 'endDate': end_date})
             data['later_therapies'] = later
@@ -765,6 +862,10 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
 
     if therapy_line_numbers:
         data['therapy_lines_count'] = len(therapy_line_numbers)
+    if later_components:
+        data['later_component_ids'] = sorted(later_components)
+    if all_components:
+        data['therapy_component_ids'] = sorted(all_components)
 
     # ── Per-line outcomes from LOT-N-outcome Observations ─────────────────
     # Written by the synthetic enrichment commands (and any future ingest path
