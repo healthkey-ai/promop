@@ -14,7 +14,7 @@ from .views import (
     # Patient surveys
     SurveyViewSet, PatientSurveyResponseViewSet,
     # Controlled vocabulary + OMOP concept lookup
-    vocabulary_list, concept_lookup, concept_ancestors, concept_descendants, concept_graph_batch,
+    vocabulary_list, concept_lookup,
     # Stats
     org_disease_stats,
 )
@@ -64,9 +64,6 @@ urlpatterns = [
     path('auth/test/', auth_test, name='auth_test'),
     path('vocabularies/<str:model_name>/', vocabulary_list, name='vocabulary-list'),
     path('concepts/lookup/', concept_lookup, name='concept-lookup'),
-    path('concepts/<int:concept_id>/ancestors/', concept_ancestors, name='concept-ancestors'),
-    path('concepts/<int:concept_id>/descendants/', concept_descendants, name='concept-descendants'),
-    path('concepts/graph/', concept_graph_batch, name='concept-graph-batch'),
     path('stats/org-disease/', org_disease_stats, name='stats-org-disease'),
 
     # Org management

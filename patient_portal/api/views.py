@@ -3835,6 +3835,12 @@ def concept_lookup(request):
     return Response(result)
 
 
+# Caps for concept graph traversal: bound any single source concept's result
+# set and the batch fan-out so one request cannot blow up the worker.
+CONCEPT_GRAPH_MAX_RESULTS_PER_SOURCE = 1000
+CONCEPT_GRAPH_MAX_BATCH_IDS = 200
+
+
 def _parse_positive_int(raw_value, field_name):
     if raw_value in (None, ''):
         return None
@@ -3870,13 +3876,42 @@ def _serialize_concept_graph_node(concept, **extra):
 
 
 def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids, concept_class_ids, max_levels):
+    """Traverse the concept graph for the given source concepts.
+
+    Returns (grouped, truncated) where grouped maps each source id to at most
+    CONCEPT_GRAPH_MAX_RESULTS_PER_SOURCE serialized nodes, and truncated holds
+    the source ids whose full result set exceeded that cap.
+
+    Direction semantics follow the stored edge direction: in relationship mode,
+    'ancestors' returns in-neighbors (concepts with an edge pointing AT the
+    source) and 'descendants' returns out-neighbors (concepts the source points
+    TO). For OMOP hierarchical relationships like 'Is a' (authored child ->
+    parent), use the default concept_ancestor closure mode for true
+    parent/ancestor traversal instead.
+    """
     grouped = {source_id: [] for source_id in source_ids}
+    truncated = set()
+
+    def _append(source_id, node):
+        bucket = grouped[source_id]
+        if len(bucket) >= CONCEPT_GRAPH_MAX_RESULTS_PER_SOURCE:
+            truncated.add(source_id)
+            return False
+        bucket.append(node)
+        return True
+
+    def _drain(edges, source_attr, node):
+        for edge in edges.iterator():
+            source_id = getattr(edge, source_attr)
+            _append(source_id, node(edge))
+            if len(truncated) == len(grouped):
+                break
 
     if relationship_ids:
         qs = (
             ConceptRelationship.objects
-            .select_related('concept_1', 'concept_2', 'relationship')
-            .filter(relationship_id__in=relationship_ids)
+            .select_related('concept_1', 'concept_2')
+            .filter(relationship_id__in=relationship_ids, invalid_reason__isnull=True)
         )
         if direction == 'ancestors':
             qs = qs.filter(concept_2_id__in=source_ids)
@@ -3884,31 +3919,33 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
                 qs = qs.filter(concept_1__vocabulary_id__in=vocabulary_ids)
             if concept_class_ids:
                 qs = qs.filter(concept_1__concept_class_id__in=concept_class_ids)
-            for edge in qs.order_by('relationship_id', 'concept_1_id'):
-                grouped[edge.concept_2_id].append(
-                    _serialize_concept_graph_node(
-                        edge.concept_1,
-                        relationship_id=edge.relationship_id,
-                        min_levels_of_separation=None,
-                        max_levels_of_separation=None,
-                    )
-                )
+            _drain(
+                qs.order_by('relationship_id', 'concept_1_id'),
+                'concept_2_id',
+                lambda edge: _serialize_concept_graph_node(
+                    edge.concept_1,
+                    relationship_id=edge.relationship_id,
+                    min_levels_of_separation=None,
+                    max_levels_of_separation=None,
+                ),
+            )
         else:
             qs = qs.filter(concept_1_id__in=source_ids)
             if vocabulary_ids:
                 qs = qs.filter(concept_2__vocabulary_id__in=vocabulary_ids)
             if concept_class_ids:
                 qs = qs.filter(concept_2__concept_class_id__in=concept_class_ids)
-            for edge in qs.order_by('relationship_id', 'concept_2_id'):
-                grouped[edge.concept_1_id].append(
-                    _serialize_concept_graph_node(
-                        edge.concept_2,
-                        relationship_id=edge.relationship_id,
-                        min_levels_of_separation=None,
-                        max_levels_of_separation=None,
-                    )
-                )
-        return grouped
+            _drain(
+                qs.order_by('relationship_id', 'concept_2_id'),
+                'concept_1_id',
+                lambda edge: _serialize_concept_graph_node(
+                    edge.concept_2,
+                    relationship_id=edge.relationship_id,
+                    min_levels_of_separation=None,
+                    max_levels_of_separation=None,
+                ),
+            )
+        return grouped, truncated
 
     qs = ConceptAncestor.objects.select_related('ancestor_concept', 'descendant_concept')
     if direction == 'ancestors':
@@ -3921,15 +3958,16 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
             qs = qs.filter(ancestor_concept__concept_class_id__in=concept_class_ids)
         if max_levels is not None:
             qs = qs.filter(min_levels_of_separation__lte=max_levels)
-        for edge in qs.order_by('min_levels_of_separation', 'ancestor_concept_id'):
-            grouped[edge.descendant_concept_id].append(
-                _serialize_concept_graph_node(
-                    edge.ancestor_concept,
-                    relationship_id=None,
-                    min_levels_of_separation=edge.min_levels_of_separation,
-                    max_levels_of_separation=edge.max_levels_of_separation,
-                )
-            )
+        _drain(
+            qs.order_by('min_levels_of_separation', 'ancestor_concept_id'),
+            'descendant_concept_id',
+            lambda edge: _serialize_concept_graph_node(
+                edge.ancestor_concept,
+                relationship_id=None,
+                min_levels_of_separation=edge.min_levels_of_separation,
+                max_levels_of_separation=edge.max_levels_of_separation,
+            ),
+        )
     else:
         qs = qs.filter(ancestor_concept_id__in=source_ids).exclude(
             ancestor_concept_id=F('descendant_concept_id')
@@ -3940,16 +3978,17 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
             qs = qs.filter(descendant_concept__concept_class_id__in=concept_class_ids)
         if max_levels is not None:
             qs = qs.filter(min_levels_of_separation__lte=max_levels)
-        for edge in qs.order_by('min_levels_of_separation', 'descendant_concept_id'):
-            grouped[edge.ancestor_concept_id].append(
-                _serialize_concept_graph_node(
-                    edge.descendant_concept,
-                    relationship_id=None,
-                    min_levels_of_separation=edge.min_levels_of_separation,
-                    max_levels_of_separation=edge.max_levels_of_separation,
-                )
-            )
-    return grouped
+        _drain(
+            qs.order_by('min_levels_of_separation', 'descendant_concept_id'),
+            'ancestor_concept_id',
+            lambda edge: _serialize_concept_graph_node(
+                edge.descendant_concept,
+                relationship_id=None,
+                min_levels_of_separation=edge.min_levels_of_separation,
+                max_levels_of_separation=edge.max_levels_of_separation,
+            ),
+        )
+    return grouped, truncated
 
 
 def _concept_graph_single_response(request, concept_id, direction):
@@ -3961,18 +4000,20 @@ def _concept_graph_single_response(request, concept_id, direction):
     if not Concept.objects.filter(concept_id=concept_id).exists():
         return Response({'detail': 'Concept not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-    results = _query_concept_graph(
+    grouped, truncated = _query_concept_graph(
         [concept_id],
         direction,
         relationship_ids,
         vocabulary_ids,
         concept_class_ids,
         max_levels,
-    )[concept_id]
+    )
+    results = grouped[concept_id]
     return Response({
         'concept_id': concept_id,
         'direction': direction,
         'count': len(results),
+        'truncated': concept_id in truncated,
         'results': results,
     })
 
@@ -4014,12 +4055,18 @@ def concept_graph_batch(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    if len(concept_ids) > CONCEPT_GRAPH_MAX_BATCH_IDS:
+        return Response(
+            {'detail': f"At most {CONCEPT_GRAPH_MAX_BATCH_IDS} 'concept_id' values are allowed per request."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     try:
         relationship_ids, vocabulary_ids, concept_class_ids, max_levels = _concept_graph_filters(request)
     except ValueError as exc:
         return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-    grouped = _query_concept_graph(
+    grouped, truncated = _query_concept_graph(
         concept_ids,
         direction,
         relationship_ids,
@@ -4033,6 +4080,7 @@ def concept_graph_batch(request):
             str(concept_id): grouped.get(concept_id, [])
             for concept_id in concept_ids
         },
+        'truncated': sorted(truncated),
     })
 
 

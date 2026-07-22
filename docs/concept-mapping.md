@@ -59,10 +59,12 @@ Use these endpoints when a consumer needs runtime traversal instead of relying o
 
 Traversal rules:
 
-- If `relationship_id` is supplied, PRomop traverses direct `concept_relationship` edges.
+- If `relationship_id` is supplied, PRomop traverses direct `concept_relationship` edges, following stored edge direction: `ancestors` returns in-neighbors (edges pointing *at* the source), `descendants` returns out-neighbors. For OMOP hierarchical relationships authored child → parent (e.g. `Is a`), use closure mode for true ancestor traversal.
+- Edges with `invalid_reason` set are excluded from relationship-mode traversal.
 - Otherwise PRomop traverses `concept_ancestor` closure rows.
 - `max_levels` applies only to `concept_ancestor` traversal.
 - `vocabulary_id` and `concept_class_id` filter the returned concepts, not the source concept.
+- Results are capped at 1000 nodes per source concept (`truncated` flag in the response); the batch endpoint accepts at most 200 `concept_id` params.
 
 Common HemOnc patterns:
 
