@@ -64,6 +64,37 @@ concept table.
 
 ---
 
+## Concept graph API
+
+PROMOP exposes the loaded OMOP graph to API consumers:
+
+- `GET /api/v1/concepts/{concept_id}/ancestors/`
+- `GET /api/v1/concepts/{concept_id}/descendants/`
+- `GET /api/v1/concepts/graph/`
+
+Use these endpoints when a consumer needs runtime traversal instead of relying on PRomop's internal `refresh_patient_record()` expansion.
+
+Traversal rules:
+
+- If `relationship_id` is supplied, PRomop traverses direct `concept_relationship` edges, following stored edge direction: `ancestors` returns in-neighbors (edges pointing *at* the source), `descendants` returns out-neighbors. For OMOP hierarchical relationships authored child → parent (e.g. `Is a`), use closure mode for true ancestor traversal.
+- Edges with `invalid_reason` set are excluded from relationship-mode traversal.
+- Otherwise PRomop traverses `concept_ancestor` closure rows.
+- `max_levels` applies only to `concept_ancestor` traversal.
+- `vocabulary_id` and `concept_class_id` filter the returned concepts, not the source concept.
+- Results are capped at 1000 nodes per source concept (`truncated` flag in the response); the batch endpoint accepts at most 200 `concept_id` params.
+
+Common HemOnc patterns:
+
+| Use case | Endpoint shape |
+|---|---|
+| Regimen → component drugs | `GET /api/v1/concepts/{regimen_id}/descendants/?relationship_id=Has targeted therapy` |
+| Component drug → class | `GET /api/v1/concepts/{drug_id}/ancestors/?max_levels=1&vocabulary_id=HemOnc` |
+| Batch expand multiple trial regimen ids | `GET /api/v1/concepts/graph/?direction=descendants&concept_id=...&relationship_id=...` |
+
+The canonical endpoint contract is documented in [API_SURFACE.md](../API_SURFACE.md#concept-graph-endpoints).
+
+---
+
 ## FHIR → OMOP Concept Resolution
 
 ### 1. LOINC Observation codes → `measurement_concept_id`

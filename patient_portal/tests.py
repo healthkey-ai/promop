@@ -6096,6 +6096,281 @@ class ConceptLookupTest(_SmartBase):
         self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
 
+class ConceptGraphTest(_SmartBase):
+    """GET /api/v1/concepts/{id}/ancestors|descendants and /api/v1/concepts/graph/."""
+
+    def setUp(self):
+        import datetime
+
+        self.url_ancestors = '/api/v1/concepts/9901002/ancestors/'
+        self.url_descendants = '/api/v1/concepts/9901001/descendants/'
+        self.url_batch = '/api/v1/concepts/graph/'
+
+        self.hemonc_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc', 'vocabulary_reference': '', 'vocabulary_version': '', 'vocabulary_concept_id': 0},
+        )
+        self.rxnorm_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RxNorm',
+            defaults={'vocabulary_name': 'RxNorm', 'vocabulary_reference': '', 'vocabulary_version': '', 'vocabulary_concept_id': 0},
+        )
+        self.domain_drug, _ = Domain.objects.get_or_create(
+            domain_id='Drug',
+            defaults={'domain_name': 'Drug', 'domain_concept_id': 13},
+        )
+        self.cc_regimen, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0},
+        )
+        self.cc_ing, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Ingredient',
+            defaults={'concept_class_name': 'Ingredient', 'concept_class_concept_id': 0},
+        )
+        self.cc_drug_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Drug Class',
+            defaults={'concept_class_name': 'Drug Class', 'concept_class_concept_id': 0},
+        )
+        self.today = datetime.date(1970, 1, 1)
+        self.future = datetime.date(2099, 12, 31)
+
+        self.regimen = Concept.objects.create(
+            concept_id=9901001,
+            concept_name='AC-T regimen',
+            domain=self.domain_drug,
+            vocabulary=self.hemonc_vocab,
+            concept_class=self.cc_regimen,
+            concept_code='REG-AC-T',
+            valid_start_date=self.today,
+            valid_end_date=self.future,
+        )
+        self.component = Concept.objects.create(
+            concept_id=9901002,
+            concept_name='trastuzumab',
+            domain=self.domain_drug,
+            vocabulary=self.rxnorm_vocab,
+            concept_class=self.cc_ing,
+            concept_code='RX-TRAST',
+            valid_start_date=self.today,
+            valid_end_date=self.future,
+        )
+        self.drug_class = Concept.objects.create(
+            concept_id=9901003,
+            concept_name='HER2 inhibitor',
+            domain=self.domain_drug,
+            vocabulary=self.hemonc_vocab,
+            concept_class=self.cc_drug_class,
+            concept_code='CLASS-HER2',
+            valid_start_date=self.today,
+            valid_end_date=self.future,
+        )
+        self.super_class = Concept.objects.create(
+            concept_id=9901004,
+            concept_name='Targeted therapy',
+            domain=self.domain_drug,
+            vocabulary=self.hemonc_vocab,
+            concept_class=self.cc_drug_class,
+            concept_code='CLASS-TARGETED',
+            valid_start_date=self.today,
+            valid_end_date=self.future,
+        )
+
+        self.rel_targeted, _ = Relationship.objects.get_or_create(
+            relationship_id='Has targeted therapy',
+            defaults={
+                'relationship_name': 'Has targeted therapy',
+                'is_hierarchical': 0,
+                'defines_ancestry': 0,
+                'reverse_relationship_id': 'Targeted therapy of',
+                'relationship_concept_id': 0,
+            },
+        )
+        ConceptRelationship.objects.get_or_create(
+            concept_1=self.regimen,
+            concept_2=self.component,
+            relationship=self.rel_targeted,
+            defaults={'valid_start_date': self.today, 'valid_end_date': self.future},
+        )
+        ConceptAncestor.objects.get_or_create(
+            ancestor_concept=self.drug_class,
+            descendant_concept=self.component,
+            defaults={'min_levels_of_separation': 1, 'max_levels_of_separation': 1},
+        )
+        ConceptAncestor.objects.get_or_create(
+            ancestor_concept=self.super_class,
+            descendant_concept=self.component,
+            defaults={'min_levels_of_separation': 2, 'max_levels_of_separation': 2},
+        )
+
+    def _auth(self):
+        return {'HTTP_AUTHORIZATION': f'Bearer {self.read_token.token}'}
+
+    def test_descendants_relationship_filter_returns_regimen_components(self):
+        resp = self.client.get(
+            f'{self.url_descendants}?relationship_id=Has%20targeted%20therapy',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['count'], 1)
+        node = resp.json()['results'][0]
+        self.assertEqual(node['concept_id'], self.component.concept_id)
+        self.assertEqual(node['relationship_id'], 'Has targeted therapy')
+
+    def test_ancestors_uses_concept_ancestor_with_filters(self):
+        resp = self.client.get(
+            f'{self.url_ancestors}?max_levels=1&vocabulary_id=HemOnc',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['count'], 1)
+        node = resp.json()['results'][0]
+        self.assertEqual(node['concept_id'], self.drug_class.concept_id)
+        self.assertEqual(node['min_levels_of_separation'], 1)
+        self.assertEqual(node['vocabulary_id'], 'HemOnc')
+
+    def test_batch_endpoint_groups_results_by_source_concept(self):
+        resp = self.client.get(
+            f'{self.url_batch}?direction=descendants&concept_id={self.regimen.concept_id}&concept_id=999999&relationship_id=Has%20targeted%20therapy',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.json()['results']
+        self.assertEqual(len(data[str(self.regimen.concept_id)]), 1)
+        self.assertEqual(data[str(self.regimen.concept_id)][0]['concept_id'], self.component.concept_id)
+        self.assertEqual(data['999999'], [])
+
+    def test_invalid_direction_returns_400(self):
+        resp = self.client.get(
+            f'{self.url_batch}?direction=sideways&concept_id={self.regimen.concept_id}',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_unauthenticated_returns_401(self):
+        resp = self.client.get(self.url_ancestors)
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_ancestors_relationship_mode_returns_in_neighbors(self):
+        """Pin the documented edge-direction contract: relationship-mode
+        'ancestors' returns concepts with an edge pointing AT the source
+        (in-neighbors), so ancestors of the component via 'Has targeted
+        therapy' is the regimen (concept_1 -> concept_2 edge direction)."""
+        url = f'/api/v1/concepts/{self.component.concept_id}/ancestors/'
+        resp = self.client.get(
+            f'{url}?relationship_id=Has%20targeted%20therapy',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['count'], 1)
+        self.assertEqual(resp.json()['results'][0]['concept_id'], self.regimen.concept_id)
+
+    def test_unknown_concept_single_endpoint_returns_404(self):
+        resp = self.client.get('/api/v1/concepts/999999/ancestors/', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_invalid_max_levels_returns_400(self):
+        for bad in ('0', '-3', 'abc'):
+            resp = self.client.get(
+                f'{self.url_ancestors}?max_levels={bad}',
+                **self._auth(),
+            )
+            self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, bad)
+
+    def test_batch_missing_concept_id_returns_400(self):
+        resp = self.client.get(f'{self.url_batch}?direction=ancestors', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_batch_non_integer_concept_id_returns_400(self):
+        resp = self.client.get(
+            f'{self.url_batch}?direction=ancestors&concept_id=abc',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_batch_over_cap_returns_400(self):
+        from patient_portal.api.views import CONCEPT_GRAPH_MAX_BATCH_IDS
+        params = '&'.join(
+            f'concept_id={9902000 + i}' for i in range(CONCEPT_GRAPH_MAX_BATCH_IDS + 1)
+        )
+        resp = self.client.get(
+            f'{self.url_batch}?direction=ancestors&{params}',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_relationship_mode_excludes_invalid_edges(self):
+        ConceptRelationship.objects.create(
+            concept_1=self.regimen,
+            concept_2=self.drug_class,
+            relationship=self.rel_targeted,
+            valid_start_date=self.today,
+            valid_end_date=self.future,
+            invalid_reason='D',
+        )
+        resp = self.client.get(
+            f'{self.url_descendants}?relationship_id=Has%20targeted%20therapy',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        returned_ids = {n['concept_id'] for n in resp.json()['results']}
+        self.assertEqual(returned_ids, {self.component.concept_id})
+
+    def test_truncated_flag_when_results_exceed_cap(self):
+        from patient_portal.api import views as api_views
+        extra_components = [
+            Concept(
+                concept_id=9903000 + i,
+                concept_name=f'component {i}',
+                domain=self.domain_drug,
+                vocabulary=self.rxnorm_vocab,
+                concept_class=self.cc_ing,
+                concept_code=f'RX-EXTRA-{i}',
+                valid_start_date=self.today,
+                valid_end_date=self.future,
+            )
+            for i in range(3)
+        ]
+        Concept.objects.bulk_create(extra_components)
+        ConceptRelationship.objects.bulk_create([
+            ConceptRelationship(
+                concept_1=self.regimen,
+                concept_2=c,
+                relationship=self.rel_targeted,
+                valid_start_date=self.today,
+                valid_end_date=self.future,
+            )
+            for c in extra_components
+        ])
+        original = api_views.CONCEPT_GRAPH_MAX_RESULTS_PER_SOURCE
+        api_views.CONCEPT_GRAPH_MAX_RESULTS_PER_SOURCE = 2
+        try:
+            resp = self.client.get(
+                f'{self.url_descendants}?relationship_id=Has%20targeted%20therapy',
+                **self._auth(),
+            )
+        finally:
+            api_views.CONCEPT_GRAPH_MAX_RESULTS_PER_SOURCE = original
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        payload = resp.json()
+        self.assertEqual(payload['count'], 2)
+        self.assertTrue(payload['truncated'])
+
+    def test_not_truncated_flag_when_results_within_cap(self):
+        resp = self.client.get(
+            f'{self.url_descendants}?relationship_id=Has%20targeted%20therapy',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(resp.json()['truncated'])
+
+    def test_batch_response_includes_truncated_list(self):
+        resp = self.client.get(
+            f'{self.url_batch}?direction=descendants&concept_id={self.regimen.concept_id}&relationship_id=Has%20targeted%20therapy',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['truncated'], [])
+
+
 class _ConceptFixtureBase(_SmartBase):
     """Shared OMOP concept fixtures for the search/list endpoint tests (issue #213)."""
 

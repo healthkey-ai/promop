@@ -1,7 +1,7 @@
 # PRomop API Surface
 
 > **Canonical base URL:** `https://promop.onrender.com/api/v1/` (production) | `http://localhost:8000/api/v1/` (dev)
-> Last revised: 2026-07-14
+> Last revised: 2026-07-22
 
 > **Versioning note:** All new integrations should target `/api/v1/` paths. The legacy
 > unversioned `/api/` paths still work but return `Deprecation: true` / `Sunset: Tue, 01 Sep 2026 00:00:00 GMT`
@@ -49,6 +49,7 @@ appropriate OMOP table write, then the signal chain re-derives PatientRecord.
    - [Person identity endpoints](#person-identity-endpoints)
    - [Document & trial endpoints](#document--trial-endpoints)
    - [Vocabulary & concept lookup endpoints](#vocabulary--concept-lookup-endpoints)
+   - [Concept graph endpoints](#concept-graph-endpoints)
    - [OAuth2 endpoints](#oauth2-endpoints)
 5. [OMOP write internals](#omop-write-internals) — _upsert_omop_measurement, _LAB_FIELD_TO_LOINC, FHIR pipeline, signal chain
 6. [Provenance tagging](#provenance-tagging)
@@ -291,6 +292,183 @@ Deletes patients and all their OMOP records (via CASCADE). PatientRecord is remo
 ```json
 { "success": true, "deleted_count": 2, "errors": [] }
 ```
+
+---
+
+## Concept graph endpoints
+
+These endpoints expose the OMOP concept graph loaded by `load_athena_vocabularies`, so consumers can traverse:
+
+- regimen → component drugs via `concept_relationship`
+- component drug → class / superclass via `concept_ancestor`
+
+Base path: `/api/v1/concepts/...` (v1 only — these endpoints are not registered on the legacy `/api/` URLconf).
+
+All concept graph endpoints require the same OAuth/session auth as the rest of the API. Service clients typically use `patient/*.read`.
+
+Result caps: each source concept returns at most **1000** nodes; when more exist the response includes `"truncated": true` (single-concept endpoints) or lists the capped source ids in `"truncated"` (batch endpoint). The batch endpoint accepts at most **200** `concept_id` parameters.
+
+Direction semantics: without `relationship_id`, traversal uses the `concept_ancestor` closure table (true hierarchy). With `relationship_id`, traversal follows stored edge direction — `ancestors` returns in-neighbors (concepts with an edge pointing *at* the source) and `descendants` returns out-neighbors. For OMOP hierarchical relationships authored child → parent (e.g. `Is a`), use closure mode for true ancestor traversal. Edges with `invalid_reason` set are excluded from relationship-mode traversal.
+
+For background on how PRomop loads and uses `concept`, `concept_relationship`, and `concept_ancestor`, see [docs/concept-mapping.md](docs/concept-mapping.md#concept-graph-api).
+
+### GET /api/v1/concepts/{concept_id}/ancestors/
+
+Returns upstream concepts for one source concept.
+
+Default behavior:
+
+- uses `concept_ancestor`
+- excludes the self-row (`ancestor_concept_id == descendant_concept_id`)
+- orders by `min_levels_of_separation`, then `concept_id`
+
+Optional query params:
+
+| Param | Meaning |
+|---|---|
+| `max_levels` | Keep only rows with `min_levels_of_separation <= max_levels` |
+| `vocabulary_id` | Repeatable filter on returned concepts |
+| `concept_class_id` | Repeatable filter on returned concepts |
+| `relationship_id` | If present, switch to direct `concept_relationship` traversal instead of `concept_ancestor` |
+
+Example:
+
+```http
+GET /api/v1/concepts/9901002/ancestors/?max_levels=1&vocabulary_id=HemOnc
+```
+
+Response:
+
+```json
+{
+  "concept_id": 9901002,
+  "direction": "ancestors",
+  "count": 1,
+  "truncated": false,
+  "results": [
+    {
+      "concept_id": 9901003,
+      "concept_name": "HER2 inhibitor",
+      "concept_code": "CLASS-HER2",
+      "vocabulary_id": "HemOnc",
+      "concept_class_id": "Drug Class",
+      "domain_id": "Drug",
+      "standard_concept": null,
+      "relationship_id": null,
+      "min_levels_of_separation": 1,
+      "max_levels_of_separation": 1
+    }
+  ]
+}
+```
+
+### GET /api/v1/concepts/{concept_id}/descendants/
+
+Returns downstream concepts for one source concept.
+
+Default behavior:
+
+- uses `concept_ancestor`
+- excludes the self-row
+- orders by `min_levels_of_separation`, then `concept_id`
+
+If `relationship_id` is supplied, the endpoint switches to direct `concept_relationship` edges. This is the main regimen → component expansion path for HemOnc consumers.
+
+Example:
+
+```http
+GET /api/v1/concepts/9901001/descendants/?relationship_id=Has%20targeted%20therapy
+```
+
+Response:
+
+```json
+{
+  "concept_id": 9901001,
+  "direction": "descendants",
+  "count": 1,
+  "truncated": false,
+  "results": [
+    {
+      "concept_id": 9901002,
+      "concept_name": "trastuzumab",
+      "concept_code": "RX-TRAST",
+      "vocabulary_id": "RxNorm",
+      "concept_class_id": "Ingredient",
+      "domain_id": "Drug",
+      "standard_concept": null,
+      "relationship_id": "Has targeted therapy",
+      "min_levels_of_separation": null,
+      "max_levels_of_separation": null
+    }
+  ]
+}
+```
+
+### GET /api/v1/concepts/graph/
+
+Batch traversal endpoint to avoid N+1 calls from consumers.
+
+Required query params:
+
+| Param | Meaning |
+|---|---|
+| `direction` | `ancestors` or `descendants` |
+| `concept_id` | Repeatable source concept id (max 200) |
+
+Optional query params:
+
+| Param | Meaning |
+|---|---|
+| `relationship_id` | Repeatable direct-edge filter |
+| `max_levels` | Ancestor/descendant depth cap when using `concept_ancestor` |
+| `vocabulary_id` | Repeatable returned-concept filter |
+| `concept_class_id` | Repeatable returned-concept filter |
+
+Example:
+
+```http
+GET /api/v1/concepts/graph/?direction=descendants&concept_id=9901001&concept_id=999999&relationship_id=Has%20targeted%20therapy
+```
+
+Response:
+
+```json
+{
+  "direction": "descendants",
+  "results": {
+    "9901001": [
+      {
+        "concept_id": 9901002,
+        "concept_name": "trastuzumab",
+        "concept_code": "RX-TRAST",
+        "vocabulary_id": "RxNorm",
+        "concept_class_id": "Ingredient",
+        "domain_id": "Drug",
+        "standard_concept": null,
+        "relationship_id": "Has targeted therapy",
+        "min_levels_of_separation": null,
+        "max_levels_of_separation": null
+      }
+    ],
+    "999999": []
+  },
+  "truncated": []
+}
+```
+
+Unknown `concept_id` keys return empty lists (no per-key 404).
+
+### Error responses
+
+| Case | Status |
+|---|---|
+| missing `concept_id` on batch endpoint | `400` |
+| more than 200 `concept_id` params on batch endpoint | `400` |
+| invalid `direction` | `400` |
+| non-integer `concept_id` | `400` |
+| invalid `max_levels` | `400` |
+| unknown concept on single-concept endpoint | `404` |
 
 ---
 
