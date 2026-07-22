@@ -24,7 +24,8 @@ interface Props {
   diseaseType: 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'other';
 }
 
-function getTherapyOptions(diseaseType: string, line: 'first' | 'second' | 'later', bcFirst: { value: string }[], bcSecond: { value: string }[], bcLater: { value: string }[]) {  switch (diseaseType) {
+function getTherapyOptions(diseaseType: string, line: 'first' | 'second' | 'later', bcFirst: { value: string }[], bcSecond: { value: string }[], bcLater: { value: string }[]) {
+  switch (diseaseType) {
     case 'breast':
       if (line === 'first') return bcFirst.length ? bcFirst.map((o) => o.value) : BREAST_CANCER_FIRST_LINE;
       if (line === 'second') return bcSecond.length ? bcSecond.map((o) => o.value) : BREAST_CANCER_SECOND_LINE;

@@ -568,7 +568,7 @@ def _expand_component_ids(regimen_concept_ids, drug_concept_ids):
       4. 'Has ingredient' targets of the 'Maps to' targets from (3), covering
          HemOnc drug → RxNorm clinical drug → ingredient.
 
-    At most 4 batched queries regardless of input size.
+    At most 3 batched queries regardless of input size.
     """
     base = set()
     regimen_ids = {int(r) for r in (regimen_concept_ids or ()) if r}
