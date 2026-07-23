@@ -662,6 +662,73 @@ empty paginated result (`count: 0`). Requires `patient/*.read` or `user/*.read` 
 
 ---
 
+### GET /api/v1/concepts/{concept_id}/synonyms/
+
+List the synonyms (alternate names) for one concept, so a consumer mirroring promop's vocabulary can cache them.
+
+**Request**
+```
+GET /api/v1/concepts/7001/synonyms/
+```
+
+**Response 200**
+```json
+{
+  "concept_id": 7001,
+  "count": 2,
+  "results": [
+    { "concept_synonym_name": "RVD", "language_concept_id": 4180186 },
+    { "concept_synonym_name": "VRd", "language_concept_id": 4180186 }
+  ]
+}
+```
+
+**Response 404** — `concept_id` not found. Requires `patient/*.read` or `user/*.read` scope.
+
+---
+
+### GET /api/v1/concepts/synonyms/
+
+Find concepts by a synonym (alternate name) substring — the reverse of `concepts/lookup/`, for alias resolution (e.g. regimen alias `VRd` → the HemOnc concept). Backed by a GIN trigram index on `concept_synonym_name`.
+
+Query params:
+
+| Param | Required | Description |
+|---|---:|---|
+| `q` | yes | Synonym substring; minimum 3 characters (trigram) |
+| `vocabulary_id` | no | Exact-match filter on the matched concept |
+| `concept_class_id` | no | Exact-match filter on the matched concept |
+| `page` / `page_size` | no | Pagination; `page_size` capped at 100 |
+
+**Request**
+```
+GET /api/v1/concepts/synonyms/?q=VRd&vocabulary_id=HemOnc
+```
+
+**Response 200**
+```json
+{
+  "count": 1,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "concept_id": 7001,
+      "concept_name": "Bortezomib, Lenalidomide, Dexamethasone",
+      "vocabulary_id": "HemOnc",
+      "concept_code": "HO-VRD",
+      "concept_class_id": "Regimen",
+      "standard_concept": "S",
+      "concept_synonym_name": "VRd"
+    }
+  ]
+}
+```
+
+**Response 400** — `q` is missing or shorter than 3 characters. Requires `patient/*.read` or `user/*.read` scope.
+
+---
+
 ### GET /api/v1/concepts/
 
 Browse OMOP concepts with exact-match filters. This is the non-text-search companion to

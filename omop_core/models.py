@@ -4,7 +4,8 @@ from django.db import models
 from django.db.models import F, Q
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
-from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.indexes import GinIndex, OpClass
+from django.db.models.functions import Upper
 
 
 class ProvenanceRecord(models.Model):
@@ -1268,7 +1269,17 @@ class ConceptSynonym(models.Model):
 
     class Meta:
         db_table = 'concept_synonym'
-        indexes = [models.Index(fields=['concept'], name='ix_concept_synonym_concept')]
+        indexes = [
+            models.Index(fields=['concept'], name='ix_concept_synonym_concept'),
+            # Functional GIN trigram index on UPPER(name): Django compiles
+            # `__icontains` to `UPPER(col::text) LIKE UPPER(...)`, so a raw-column
+            # gin_trgm index would NOT be used — the expression must match.
+            # (pg_trgm enabled in migration 0094.)
+            GinIndex(
+                OpClass(Upper('concept_synonym_name'), name='gin_trgm_ops'),
+                name='ix_concept_synonym_name_trgm',
+            ),
+        ]
         # CDM natural PK — makes loader re-runs idempotent via ON CONFLICT DO NOTHING.
         constraints = [
             models.UniqueConstraint(
