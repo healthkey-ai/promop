@@ -9,20 +9,24 @@ is the single choke point for resolving a regimen/drug *name* to a concept:
      HemOnc Regimen?  (Used to vet inbound concept_ids.)
   2. ``match_hemonc_regimen_by_name`` — exact match against HemOnc regimen
      names and synonyms, restricted to validated rows.
-  3. ``get_or_create_quarantine_regimen`` / ``get_or_create_quarantine_drug`` —
-     mint under the local HK-Regimen / HK-Drug quarantine vocabularies
-     (``standard_concept=None``, ``source='HealthKey'``) and record a
-     ``RegimenMappingGap`` row so the unmatched name is visible for curation.
+  3. ``get_or_create_quarantine_regimen`` / ``get_or_create_quarantine_drug`` /
+     ``get_or_create_quarantine_observation`` /
+     ``get_or_create_quarantine_procedure`` — mint under the local
+     HK-Regimen / HK-Drug / HK-Observation / HK-Procedure quarantine
+     vocabularies (``standard_concept=None``, ``source='HealthKey'``) and
+     record a ``RegimenMappingGap`` row so the unmatched name is visible for
+     curation.
 
 Nothing in this module ever writes to the HemOnc vocabulary or to any other
 licensed/external vocabulary (RxNorm, CVX, LOINC, SNOMED, ...).
 """
+import hashlib
 import logging
 import re
 import unicodedata
 from datetime import date
 
-from django.db.models import Q
+from django.db.models import F, Q
 
 from omop_core.models import (
     Concept,
@@ -40,14 +44,16 @@ REGIMEN_CONCEPT_CLASS_ID = 'Regimen'
 HK_REGIMEN_VOCAB_ID = 'HK-Regimen'
 HK_DRUG_VOCAB_ID = 'HK-Drug'
 HK_OBSERVATION_VOCAB_ID = 'HK-Observation'
+HK_PROCEDURE_VOCAB_ID = 'HK-Procedure'
 SOURCE_HEALTHKEY = 'HealthKey'
 
-# HK-Regimen / HK-Drug are seeded by migration 0118; HK-Observation is created
+# HK-Regimen / HK-Drug are seeded by migration 0118; the others are created
 # here on first use (same on-demand pattern as HK-Labs in lab_results/sync.py).
 _HK_VOCAB_DEFAULTS = {
     HK_REGIMEN_VOCAB_ID: 'HealthKey local regimen quarantine',
     HK_DRUG_VOCAB_ID: 'HealthKey local drug quarantine',
     HK_OBSERVATION_VOCAB_ID: 'HealthKey local observation quarantine',
+    HK_PROCEDURE_VOCAB_ID: 'HealthKey local procedure quarantine',
 }
 
 
@@ -95,11 +101,14 @@ def _valid_hemonc_regimen_qs():
 
 def match_hemonc_regimen_by_name(name):
     """Exact (case-insensitive) match on HemOnc regimen concept_name, falling
-    back to concept_synonym rows.  Only validated regimens are eligible."""
+    back to concept_synonym rows.  Only validated regimens are eligible.
+
+    Ordered by concept_id so duplicate-name hits resolve deterministically.
+    """
     normalized = (name or '').strip()
     if not normalized:
         return None
-    qs = _valid_hemonc_regimen_qs()
+    qs = _valid_hemonc_regimen_qs().order_by('concept_id')
     concept = qs.filter(concept_name__iexact=normalized).first()
     if concept:
         return concept
@@ -113,7 +122,9 @@ def record_mapping_gap(*, source_system, source_value, matched_concept=None,
     First sighting creates the row; repeat sightings bump ``last_seen`` and
     ``occurrence_count``.  Safe to call on every unmatched ingest.
     """
-    normalized = normalize_regimen_name(source_value)
+    # normalized_name is capped at 255 chars — truncate so over-long source
+    # values fold into one row instead of raising DataError.
+    normalized = normalize_regimen_name(source_value)[:255]
     if not normalized:
         return None
     gap, created = RegimenMappingGap.objects.get_or_create(
@@ -130,7 +141,8 @@ def record_mapping_gap(*, source_system, source_value, matched_concept=None,
         return gap
 
     update_fields = ['last_seen', 'occurrence_count']
-    gap.occurrence_count = (gap.occurrence_count or 0) + 1
+    # F() keeps the increment atomic under concurrent ingest workers.
+    gap.occurrence_count = F('occurrence_count') + 1
     if matched_concept is not None and gap.matched_concept_id != matched_concept.concept_id:
         gap.matched_concept = matched_concept
         update_fields.append('matched_concept')
@@ -164,7 +176,21 @@ def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
         vocabulary_id=vocabulary_id, concept_code=concept_code,
     ).first()
     if concept is not None:
-        return concept
+        if normalize_regimen_name(concept.concept_name) == normalize_regimen_name(concept_name):
+            return concept
+        # Slug collision: a different name already owns this code (punctuation
+        # collapse / 50-char truncation can map distinct names to one slug).
+        # Disambiguate with a short hash of the normalized name so the new
+        # name gets its own stable concept row.
+        digest = hashlib.sha1(
+            normalize_regimen_name(concept_name).encode('utf-8'),
+        ).hexdigest()[:8]
+        concept_code = f'{concept_code[:41]}-{digest}'[:50]
+        concept = Concept.objects.filter(
+            vocabulary_id=vocabulary_id, concept_code=concept_code,
+        ).first()
+        if concept is not None:
+            return concept
 
     domain, _ = Domain.objects.get_or_create(
         domain_id=domain_id,
@@ -264,6 +290,35 @@ def get_or_create_quarantine_observation(*, source_vocabulary_id, concept_code,
         domain_id='Observation',
         concept_class_id='Clinical Observation',
         concept_code=_slug(raw, 'hko'),
+        concept_name=name,
+    )
+    record_mapping_gap(
+        source_system=source_system,
+        source_value=name,
+        quarantine_concept=concept,
+        status=RegimenMappingGap.STATUS_UNMATCHED,
+    )
+    return concept
+
+
+def get_or_create_quarantine_procedure(*, source_vocabulary_id, concept_code,
+                                       concept_name, source_system='fhir-upload'):
+    """Mint (or fetch) a quarantine procedure concept under HK-Procedure for a
+    procedure code/name that matched nothing in the licensed vocabularies, and
+    record the mapping gap.
+
+    NEVER mints under the source (licensed) vocabulary — SNOMED/CPT4/HCPCS
+    rows only ever come from the vocabulary loader.
+    """
+    name = (concept_name or concept_code or '').strip()
+    if not name:
+        return None
+    raw = f"{(source_vocabulary_id or 'unknown').lower()}-{(concept_code or name)}"
+    concept = _get_or_create_quarantine_concept(
+        vocabulary_id=HK_PROCEDURE_VOCAB_ID,
+        domain_id='Procedure',
+        concept_class_id='Procedure',
+        concept_code=_slug(raw, 'hkp'),
         concept_name=name,
     )
     record_mapping_gap(

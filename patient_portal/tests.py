@@ -1251,6 +1251,201 @@ class FhirUploadRegimenHygieneTest(FhirUploadBase):
             'Foreign-vocabulary concept_id supplied as HemOnc coding was persisted',
         )
 
+    # -- Review-fix coverage (issue #236 follow-ups) -------------------------
+
+    @staticmethod
+    def _add_medication_request(bundle, codeable):
+        bundle['entry'].append({'resource': {
+            'resourceType': 'MedicationRequest',
+            'id': 'medreq-extra-1',
+            'status': 'active',
+            'subject': {'reference': 'Patient/test-patient-jane-001'},
+            'medicationCodeableConcept': codeable,
+            'authoredOn': '2022-05-01',
+        }})
+
+    def test_supplemental_rxnav_miss_quarantined_not_crash(self):
+        """RxNav returning nothing for a supplemental MedicationRequest must
+        not crash the upload (drug_concept is NOT NULL) — the name is
+        quarantined under HK-Drug instead."""
+        def mutate(bundle):
+            self._add_medication_request(bundle, {
+                'coding': [{
+                    'system': 'http://www.nlm.nih.gov/research/umls/rxnorm',
+                    'code': '99999999',
+                    'display': 'Unobtainium Drug',
+                }],
+                'text': 'Unobtainium Drug',
+            })
+        resp = self._upload(mutate)
+        self.assertIn(resp.status_code, [200, 201], msg=getattr(resp, 'data', ''))
+
+        de = DrugExposure.objects.get(drug_source_value='99999999')
+        self.assertEqual(de.drug_concept.vocabulary_id, 'HK-Drug')
+        self.assertIsNone(de.drug_concept.standard_concept)
+        self.assertFalse(
+            Concept.objects.filter(
+                vocabulary_id='RxNorm', concept_code='99999999',
+            ).exists(),
+            'Unmatched supplemental drug was minted under RxNorm',
+        )
+
+    def test_empty_codeable_medication_skipped_no_crash(self):
+        """A MedicationRequest with no code and no display has nothing to
+        resolve or quarantine — it is skipped, not written with a NULL
+        drug_concept."""
+        def mutate(bundle):
+            self._add_medication_request(bundle, {})
+        resp = self._upload(mutate)
+        self.assertIn(resp.status_code, [200, 201], msg=getattr(resp, 'data', ''))
+        self.assertFalse(
+            DrugExposure.objects.filter(drug_source_value='FHIR medication').exists(),
+            'Empty codeable produced a junk DrugExposure',
+        )
+
+    def test_diagnostic_report_known_snomed_code_used(self):
+        """DiagnosticReport codes that exist in their licensed vocabulary are
+        used directly — only genuinely unmapped codes go to quarantine."""
+        from omop_core.models import Observation
+        snomed_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0},
+        )
+        obs_domain, _ = Domain.objects.get_or_create(
+            domain_id='Observation',
+            defaults={'domain_name': 'Observation', 'domain_concept_id': 0},
+        )
+        report_cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Clinical Observation',
+            defaults={'concept_class_name': 'Clinical Observation', 'concept_class_concept_id': 0},
+        )
+        known = Concept.objects.create(
+            concept_id=9760020, concept_name='Known Report',
+            domain=obs_domain,
+            vocabulary=snomed_vocab, concept_class=report_cc,
+            standard_concept='S', concept_code='12340000',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+        def mutate(bundle):
+            bundle['entry'].append({'resource': {
+                'resourceType': 'DiagnosticReport',
+                'id': 'dr-known-1',
+                'status': 'final',
+                'subject': {'reference': 'Patient/test-patient-jane-001'},
+                'effectiveDateTime': '2022-04-01',
+                'code': {'coding': [{
+                    'system': 'http://snomed.info/sct',
+                    'code': '12340000',
+                    'display': 'Known Report',
+                }]},
+                'conclusion': 'All fine',
+            }})
+        resp = self._upload(mutate)
+        self.assertIn(resp.status_code, [200, 201], msg=getattr(resp, 'data', ''))
+        self.assertTrue(
+            Observation.objects.filter(observation_concept_id=known.concept_id).exists(),
+            'Known SNOMED report code was not used as the observation concept',
+        )
+
+    def test_diagnostic_report_unknown_code_quarantined(self):
+        from omop_core.models import Observation
+
+        def mutate(bundle):
+            bundle['entry'].append({'resource': {
+                'resourceType': 'DiagnosticReport',
+                'id': 'dr-unknown-1',
+                'status': 'final',
+                'subject': {'reference': 'Patient/test-patient-jane-001'},
+                'effectiveDateTime': '2022-04-02',
+                'code': {'coding': [{
+                    'system': 'http://loinc.org',
+                    'code': '99999-9',
+                    'display': 'Mystery Panel',
+                }]},
+                'conclusion': 'Unclear',
+            }})
+        resp = self._upload(mutate)
+        self.assertIn(resp.status_code, [200, 201], msg=getattr(resp, 'data', ''))
+
+        quarantine = Concept.objects.get(
+            vocabulary_id='HK-Observation', concept_code='hko:loinc-99999-9',
+        )
+        self.assertIsNone(quarantine.standard_concept)
+        self.assertEqual(quarantine.source, 'HealthKey')
+        self.assertFalse(
+            Concept.objects.filter(
+                vocabulary_id='LOINC', concept_code='99999-9',
+            ).exists(),
+            'Unmatched DiagnosticReport code was minted under LOINC',
+        )
+        self.assertTrue(
+            Observation.objects.filter(observation_concept_id=quarantine.concept_id).exists(),
+        )
+
+    def test_procedure_unknown_snomed_quarantined_under_hk_procedure(self):
+        """The default bundle's breast-biopsy procedure (SNOMED 387713003, not
+        loaded locally) must quarantine under HK-Procedure — never mint under
+        SNOMED, never fall back to an arbitrary Procedure concept."""
+        from omop_core.models import ProcedureOccurrence, RegimenMappingGap
+        resp = self._upload()
+        self.assertIn(resp.status_code, [200, 201], msg=getattr(resp, 'data', ''))
+
+        self.assertFalse(
+            Concept.objects.filter(
+                vocabulary_id='SNOMED', concept_code='387713003',
+            ).exists(),
+            'FHIR upload minted a concept under SNOMED',
+        )
+        quarantine = Concept.objects.get(
+            vocabulary_id='HK-Procedure', concept_code='hkp:snomed-387713003',
+        )
+        self.assertIsNone(quarantine.standard_concept)
+        self.assertEqual(quarantine.source, 'HealthKey')
+        proc = ProcedureOccurrence.objects.get(procedure_source_value='387713003')
+        self.assertEqual(proc.procedure_concept_id, quarantine.concept_id)
+        self.assertTrue(RegimenMappingGap.objects.filter(
+            normalized_name='surgical biopsy of breast',
+        ).exists())
+
+    def test_episode_source_concept_only_for_validated_inbound_id(self):
+        """episode_source_concept is set only when the regimen came from a
+        validated inbound HemOnc concept_id — not for name matches or
+        quarantine rows."""
+        matched = self._make_hemonc_regimen(9760005, 'AC-T Validated Inbound')
+        resp = self._upload(lambda b: self._add_hemonc_coding(b, matched.concept_id))
+        self.assertIn(resp.status_code, [200, 201])
+        episode = Episode.objects.filter(episode_number=1).first()
+        self.assertIsNotNone(episode, 'LOT-1 episode not written')
+        self.assertEqual(episode.episode_source_concept_id, matched.concept_id)
+
+    def test_episode_source_concept_not_set_for_quarantine(self):
+        resp = self._upload()
+        self.assertIn(resp.status_code, [200, 201])
+        episode = Episode.objects.filter(episode_number=1).first()
+        self.assertIsNotNone(episode, 'LOT-1 episode not written')
+        self.assertIsNone(
+            episode.episode_source_concept_id,
+            'Quarantined regimen must not be stamped as the episode source concept',
+        )
+
+    def test_mixed_case_regimen_acronym_quarantined_as_regimen(self):
+        """Short mixed-case acronyms (VRd, KRd) are regimen names, not generic
+        drugs — they quarantine under HK-Regimen, not HK-Drug."""
+        def mutate(bundle):
+            for entry in bundle['entry']:
+                resource = entry['resource']
+                if (resource['resourceType'] == 'MedicationStatement'
+                        and resource['id'] == 'med-ac-t'):
+                    resource['medicationCodeableConcept']['text'] = 'VRd'
+        resp = self._upload(mutate)
+        self.assertIn(resp.status_code, [200, 201], msg=getattr(resp, 'data', ''))
+        quarantine = Concept.objects.get(
+            vocabulary_id='HK-Regimen', concept_code='hkr:vrd',
+        )
+        de = DrugExposure.objects.get(drug_source_value='VRd')
+        self.assertEqual(de.drug_concept_id, quarantine.concept_id)
+
 
 # ---------------------------------------------------------------------------
 # 5. Direct OMOP endpoint CRUD tests

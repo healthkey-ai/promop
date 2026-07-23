@@ -68,17 +68,22 @@ def seed_and_remediate(apps, schema_editor):
     )
 
     # 2. Remap fake HemOnc concepts into the HK-Regimen quarantine namespace.
-    fhir_minted = Concept.objects.filter(
+    # bulk_update rather than per-row save() — one UPDATE per batch, and no
+    # per-row signals fire during a data migration.
+    fhir_minted = list(Concept.objects.filter(
         vocabulary_id='HemOnc', concept_code__startswith='FHIR-',
-    )
-    for concept in fhir_minted.iterator():
+    ))
+    for concept in fhir_minted:
         concept.vocabulary_id = 'HK-Regimen'
         concept.standard_concept = None
         concept.source = 'HealthKey'
         concept.concept_code = _hkr_slug(concept.concept_name)
-        concept.save(update_fields=[
-            'vocabulary_id', 'standard_concept', 'source', 'concept_code',
-        ])
+    if fhir_minted:
+        Concept.objects.bulk_update(
+            fhir_minted,
+            ['vocabulary_id', 'standard_concept', 'source', 'concept_code'],
+            batch_size=500,
+        )
 
     # 3. Stamp provenance on the other local namespaces.
     Concept.objects.filter(

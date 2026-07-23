@@ -97,6 +97,7 @@ def _ensure_concept(concept_id):
         vocabulary_id=HK_LABS_VOCAB_ID,
         concept_class_id=concept_class_id,
         standard_concept=None,
+        source='HealthKey',
         concept_code=f'hkl:fallback-{concept_id}',
         valid_start_date=date(1970, 1, 1),
         valid_end_date=date(2099, 12, 31),
