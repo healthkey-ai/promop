@@ -467,7 +467,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = PatientRecordSerializer(patient_info, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
 
-        changed_fields = {f for f in request.data if f not in _prov_meta}
+        # Exclude read-only (derived) fields — they are not written by the
+        # serializer, so they must not drive OMOP sync or provenance either.
+        changed_fields = {f for f in request.data if f not in _prov_meta and f not in _read_only}
         try:
             with transaction.atomic():
                 serializer.save()

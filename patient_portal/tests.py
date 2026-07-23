@@ -907,7 +907,7 @@ _COMPONENT_ID_FIELDS = (
 
 class TherapyComponentIdsAPITest(FhirUploadBase):
     """The component concept_id fields are exposed on both patient-record
-    endpoints and are writable via the v1 API."""
+    endpoints but are read-only (derived from OMOP; promop#248)."""
 
     @classmethod
     def setUpTestData(cls):
@@ -936,15 +936,26 @@ class TherapyComponentIdsAPITest(FhirUploadBase):
             self.assertIn(field, resp.data['patient_info'],
                           f'Field {field!r} missing from v1 patient-records response')
 
-    def test_component_fields_writable_via_patch(self):
-        resp = self.client.patch(
-            f'/api/v1/patient-records/{self._pid}/',
-            {'therapy_component_ids': [35806260, 19103793]},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        record = PatientRecord.objects.get(person_id=self._pid)
-        self.assertEqual(record.therapy_component_ids, [35806260, 19103793])
+    def test_derived_vocab_fields_readonly_via_patch(self):
+        # All derived regimen/component fields are read-only: a PATCH is accepted
+        # (200) but does NOT change the value — it stays whatever refresh derived.
+        bogus = {
+            'first_line_therapy_id': 999999991,
+            'second_line_therapy_id': 999999992,
+            'later_therapy_ids': [999999993],
+            'first_line_component_ids': [999999994],
+            'second_line_component_ids': [999999995],
+            'later_component_ids': [999999996],
+            'therapy_component_ids': [999999997, 999999998],
+        }
+        for field, value in bogus.items():
+            before = getattr(PatientRecord.objects.get(person_id=self._pid), field)
+            resp = self.client.patch(
+                f'/api/v1/patient-records/{self._pid}/', {field: value}, format='json')
+            self.assertEqual(resp.status_code, status.HTTP_200_OK, f'{field}: {resp.data}')
+            after = getattr(PatientRecord.objects.get(person_id=self._pid), field)
+            self.assertNotEqual(after, value, f'{field} accepted a client write (must be read-only)')
+            self.assertEqual(after, before, f'{field} changed on PATCH (must be read-only)')
 
 
 class FhirUploadComponentIdsTest(FhirUploadBase):

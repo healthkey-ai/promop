@@ -203,6 +203,14 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             'organization', 'person', 'created_at', 'updated_at',
             'first_line_therapy_display', 'second_line_therapy_display', 'later_therapy_display',
             'death_date',
+            # Derived vocabulary fields — re-computed from OMOP by
+            # refresh_patient_record (regimen concept_ids + component_ids expanded
+            # from the HemOnc graph). A client PATCH would be silently overwritten
+            # on the next refresh, so reject writes rather than persist bogus data
+            # (promop#248). Provenance/typed-split tracked in #259 / P1.
+            'first_line_therapy_id', 'second_line_therapy_id', 'later_therapy_ids',
+            'first_line_component_ids', 'second_line_component_ids',
+            'later_component_ids', 'therapy_component_ids',
             # Wearable summaries are written by the device-sync service, never by the client API.
             'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
             'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
