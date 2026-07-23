@@ -907,7 +907,7 @@ _COMPONENT_ID_FIELDS = (
 
 class TherapyComponentIdsAPITest(FhirUploadBase):
     """The component concept_id fields are exposed on both patient-record
-    endpoints and are writable via the v1 API."""
+    endpoints and are READ-ONLY via the API (derived read model, issue #236)."""
 
     @classmethod
     def setUpTestData(cls):
@@ -936,15 +936,56 @@ class TherapyComponentIdsAPITest(FhirUploadBase):
             self.assertIn(field, resp.data['patient_info'],
                           f'Field {field!r} missing from v1 patient-records response')
 
-    def test_component_fields_writable_via_patch(self):
+    def test_component_fields_read_only_via_patch(self):
+        """Derived therapy-id fields are a read model (issue #236): a client
+        PATCH must not change them — only the derivation pipeline
+        (refresh_patient_record / FHIR upload) writes them."""
+        record = PatientRecord.objects.get(person_id=self._pid)
+        record.therapy_component_ids = [111]
+        record.save(update_fields=['therapy_component_ids'])
+
         resp = self.client.patch(
             f'/api/v1/patient-records/{self._pid}/',
             {'therapy_component_ids': [35806260, 19103793]},
             format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        record.refresh_from_db()
+        self.assertEqual(
+            record.therapy_component_ids, [111],
+            'Client PATCH wrote to derived read-model field therapy_component_ids',
+        )
+
+    def test_all_derived_therapy_id_fields_read_only_via_patch(self):
+        """Every derived therapy-id field + provenance ignores client PATCHes."""
+        derived = {
+            'first_line_therapy_id': 35806260,
+            'second_line_therapy_id': 35806261,
+            'later_therapy_ids': [35806262],
+            'first_line_component_ids': [1],
+            'second_line_component_ids': [2],
+            'later_component_ids': [3],
+            'therapy_component_ids': [4],
+            'therapy_ids_provenance': {'first_line_therapy_id': {'value': 1}},
+        }
         record = PatientRecord.objects.get(person_id=self._pid)
-        self.assertEqual(record.therapy_component_ids, [35806260, 19103793])
+        for field in derived:
+            setattr(record, field, None)
+        record.save(update_fields=list(derived))
+
+        resp = self.client.patch(
+            f'/api/v1/patient-records/{self._pid}/',
+            derived,
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        record.refresh_from_db()
+        for field in derived:
+            current = getattr(record, field)
+            self.assertIn(
+                current, (None, [], {}),
+                f'Client PATCH wrote to derived read-model field {field}',
+            )
 
 
 class FhirUploadComponentIdsTest(FhirUploadBase):
@@ -1057,6 +1098,158 @@ class FhirUploadComponentIdsTest(FhirUploadBase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         components = set(resp.data['patient_info']['first_line_component_ids'] or [])
         self.assertTrue({self.COMP_A_ID, self.COMP_B_ID} <= components)
+
+
+# ---------------------------------------------------------------------------
+# Issue #236 P0b — FHIR upload regimen namespace hygiene
+# ---------------------------------------------------------------------------
+
+class FhirUploadRegimenHygieneTest(FhirUploadBase):
+    """Unmatched regimen names are quarantined under HK-Regimen (never minted
+    under HemOnc), real HemOnc name matches win, and invalid inbound HemOnc
+    concept_ids are rejected rather than persisted."""
+
+    def setUp(self):
+        super().setUp()
+        from unittest.mock import patch
+        from omop_core.services.concept_cache import concept_cache_clear
+        concept_cache_clear()
+        self.addCleanup(concept_cache_clear)
+        # Keep the 'Kadcyla' plain-drug path deterministic (no network).
+        rxnav_patch = patch(
+            'omop_core.services.rxnav_service._rxnav_lookup',
+            return_value=(None, None),
+        )
+        rxnav_patch.start()
+        self.addCleanup(rxnav_patch.stop)
+
+    def _upload(self, mutate=None):
+        bundle = _make_fhir_bundle()
+        if mutate:
+            mutate(bundle)
+        bundle_bytes = json.dumps(bundle).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'test_bundle.json'
+        return self.client.post(
+            '/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart',
+        )
+
+    @staticmethod
+    def _add_hemonc_coding(bundle, code):
+        for entry in bundle['entry']:
+            resource = entry['resource']
+            if (resource['resourceType'] == 'MedicationStatement'
+                    and resource['id'] == 'med-ac-t'):
+                resource['medicationCodeableConcept']['coding'] = [{
+                    'system': 'http://ohdsi.org/omop/HemOnc',
+                    'code': str(code),
+                    'display': 'AC-T',
+                }]
+
+    def _make_hemonc_regimen(self, cid, name, **kwargs):
+        hemonc_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc', 'vocabulary_concept_id': 0},
+        )
+        regimen_cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0},
+        )
+        defaults = dict(
+            concept_name=name,
+            domain=Domain.objects.get(domain_id='Drug'),
+            vocabulary=hemonc_vocab,
+            concept_class=regimen_cc,
+            standard_concept='S',
+            concept_code=str(cid),
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        defaults.update(kwargs)
+        return Concept.objects.create(concept_id=cid, **defaults)
+
+    def test_unmatched_regimen_quarantined_not_minted_under_hemonc(self):
+        from omop_core.models import RegimenMappingGap
+        resp = self._upload()
+        self.assertIn(resp.status_code, [200, 201], msg=getattr(resp, 'data', ''))
+
+        self.assertFalse(
+            Concept.objects.filter(
+                vocabulary_id='HemOnc', concept_code__startswith='FHIR-',
+            ).exists(),
+            'FHIR upload minted a fake HemOnc concept',
+        )
+        quarantine = Concept.objects.get(
+            vocabulary_id='HK-Regimen', concept_code='hkr:ac-t',
+        )
+        self.assertIsNone(quarantine.standard_concept)
+        self.assertEqual(quarantine.source, 'HealthKey')
+
+        de = DrugExposure.objects.get(drug_source_value='AC-T')
+        self.assertEqual(de.drug_concept_id, quarantine.concept_id)
+
+        gap = RegimenMappingGap.objects.get(normalized_name='ac-t')
+        self.assertEqual(gap.quarantine_concept_id, quarantine.concept_id)
+        self.assertEqual(gap.status, RegimenMappingGap.STATUS_UNMATCHED)
+
+    def test_real_hemonc_name_match_preferred_over_quarantine(self):
+        from omop_core.models import RegimenMappingGap
+        matched = self._make_hemonc_regimen(9760001, 'AC-T')
+        resp = self._upload()
+        self.assertIn(resp.status_code, [200, 201])
+
+        de = DrugExposure.objects.get(drug_source_value='AC-T')
+        self.assertEqual(de.drug_concept_id, matched.concept_id)
+        self.assertFalse(Concept.objects.filter(
+            vocabulary_id='HK-Regimen', concept_code='hkr:ac-t',
+        ).exists())
+        self.assertFalse(RegimenMappingGap.objects.filter(
+            normalized_name='ac-t',
+        ).exists())
+
+    def test_valid_inbound_hemonc_concept_id_accepted(self):
+        matched = self._make_hemonc_regimen(9760002, 'Doxorubicin-Cyclophosphamide followed by Paclitaxel')
+        resp = self._upload(lambda b: self._add_hemonc_coding(b, matched.concept_id))
+        self.assertIn(resp.status_code, [200, 201])
+        de = DrugExposure.objects.get(drug_source_value='AC-T')
+        self.assertEqual(de.drug_concept_id, matched.concept_id)
+
+    def test_deprecated_inbound_concept_id_rejected(self):
+        from omop_core.models import RegimenMappingGap
+        stale = self._make_hemonc_regimen(9760003, 'AC-T Deprecated', invalid_reason='D')
+        resp = self._upload(lambda b: self._add_hemonc_coding(b, stale.concept_id))
+        self.assertIn(resp.status_code, [200, 201])
+        de = DrugExposure.objects.get(drug_source_value='AC-T')
+        self.assertNotEqual(
+            de.drug_concept_id, stale.concept_id,
+            'Deprecated inbound HemOnc concept_id was persisted',
+        )
+        # Falls through the ladder: no valid 'AC-T' regimen exists → quarantined.
+        self.assertTrue(RegimenMappingGap.objects.filter(normalized_name='ac-t').exists())
+
+    def test_foreign_vocabulary_concept_id_rejected(self):
+        rxnorm_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RxNorm',
+            defaults={'vocabulary_name': 'RxNorm', 'vocabulary_concept_id': 0},
+        )
+        ingredient_cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Ingredient',
+            defaults={'concept_class_name': 'Ingredient', 'concept_class_concept_id': 0},
+        )
+        foreign = Concept.objects.create(
+            concept_id=9760004, concept_name='Not A HemOnc Regimen',
+            domain=Domain.objects.get(domain_id='Drug'),
+            vocabulary=rxnorm_vocab, concept_class=ingredient_cc,
+            standard_concept='S', concept_code='9760004',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        resp = self._upload(lambda b: self._add_hemonc_coding(b, foreign.concept_id))
+        self.assertIn(resp.status_code, [200, 201])
+        de = DrugExposure.objects.get(drug_source_value='AC-T')
+        self.assertNotEqual(
+            de.drug_concept_id, foreign.concept_id,
+            'Foreign-vocabulary concept_id supplied as HemOnc coding was persisted',
+        )
 
 
 # ---------------------------------------------------------------------------

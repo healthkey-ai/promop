@@ -391,6 +391,16 @@ class Concept(models.Model):
     valid_start_date = models.DateField()
     valid_end_date = models.DateField()
     invalid_reason = models.CharField(max_length=1, null=True, blank=True)
+    # Provenance of the row. NULL = loaded from an external vocabulary release
+    # (Athena: HemOnc, RxNorm, LOINC, SNOMED, ...). 'HealthKey' = authored or
+    # minted locally (HK-* vocabularies, FHIR-upload quarantine rows, and
+    # future HealthKey-curated CSV loads). Consumers mirroring the vocabulary
+    # tables can filter on this single column regardless of which HK-*
+    # vocabulary a local row lives in.
+    source = models.CharField(
+        max_length=50, null=True, blank=True, db_index=True,
+        help_text="Provenance: NULL = external vocabulary load; 'HealthKey' = locally authored",
+    )
 
     class Meta:
         db_table = 'concept'
@@ -1291,6 +1301,68 @@ class SourceToConceptMap(models.Model):
         indexes = [models.Index(fields=['source_code'], name='ix_stcm_source_code')]
 
 
+class RegimenMappingGap(models.Model):
+    """Mapping-gap report for regimen/drug names that could not be matched to a
+    validated HemOnc (or other licensed-vocabulary) concept at ingest time.
+
+    One row per (source_system, normalized_name).  Unmatched names are
+    quarantined under a local HK-* vocabulary (never HemOnc); this table is the
+    operational queue for curation — either a future vocabulary release adds the
+    regimen upstream, or a HealthKey-authored concept is published for it.
+    """
+    STATUS_UNMATCHED = 'unmatched'
+    STATUS_MATCHED = 'matched'
+    STATUS_RESOLVED = 'resolved'
+    STATUS_CHOICES = (
+        (STATUS_UNMATCHED, 'Unmatched'),
+        (STATUS_MATCHED, 'Matched'),
+        (STATUS_RESOLVED, 'Resolved'),
+    )
+
+    source_system = models.CharField(
+        max_length=50,
+        help_text="Ingest channel that saw the name (e.g. 'fhir-upload')",
+    )
+    source_value = models.CharField(
+        max_length=255,
+        help_text="Raw name/code as received",
+    )
+    normalized_name = models.CharField(
+        max_length=255,
+        help_text="Normalized form used for matching (lowercase, whitespace-collapsed)",
+    )
+    matched_concept = models.ForeignKey(
+        Concept, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='mapping_gaps_matched',
+        db_column='matched_concept_id',
+        help_text="Validated concept the name was later matched to, if any",
+    )
+    quarantine_concept = models.ForeignKey(
+        Concept, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='mapping_gaps_quarantined',
+        db_column='quarantine_concept_id',
+        help_text="HK-* quarantine concept minted for this name, if any",
+    )
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default=STATUS_UNMATCHED, db_index=True,
+    )
+    first_seen = models.DateTimeField(auto_now_add=True)
+    last_seen = models.DateTimeField(auto_now=True)
+    occurrence_count = models.IntegerField(default=1)
+
+    class Meta:
+        db_table = 'regimen_mapping_gap'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['source_system', 'normalized_name'],
+                name='uq_regimen_gap_source_name',
+            ),
+        ]
+
+    def __str__(self):
+        return f"[{self.status}] {self.source_system}:{self.normalized_name}"
+
+
 class LoincClass(models.Model):
     """LOINC CLASS → display name mapping from LoincClass.csv (loinc.org archive)."""
     code = models.CharField(max_length=64, primary_key=True)
@@ -1782,6 +1854,15 @@ class PatientRecord(models.Model):
     therapy_component_ids = models.JSONField(
         null=True, blank=True, default=list,
         help_text="Aggregate union of component drug concept_ids across all therapy lines",
+    )
+    # Provenance for each derived therapy-id field above.  Read model only —
+    # written by the derivation pipeline (refresh_patient_record / FHIR
+    # upload), never by API clients.  Shape:
+    #   {"first_line_therapy_id": {"value": 35806260, "origin": "asserted"|"inferred",
+    #                              "release_id": "rel-20260723-a1b2c3"|null}, ...}
+    therapy_ids_provenance = models.JSONField(
+        null=True, blank=True, default=dict,
+        help_text="Per-field provenance for derived therapy concept_id fields",
     )
     later_date = models.DateField(blank=True, null=True)
     later_start_date = models.DateField(blank=True, null=True, help_text="Later Line Therapy Start Date")

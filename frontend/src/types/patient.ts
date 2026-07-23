@@ -95,6 +95,8 @@ export interface PatientInfo {
   second_line_component_ids?: number[] | null;
   later_component_ids?: number[] | null;
   therapy_component_ids?: number[] | null;
+  // Per-field provenance for the derived therapy-id fields above (read-only, written by the derivation pipeline)
+  therapy_ids_provenance?: Record<string, { value?: unknown; origin?: 'asserted' | 'inferred'; release_id?: string | null }> | null;
   first_line_therapy_display?: string | null;
   second_line_therapy_display?: string | null;
   later_therapy_display?: string[] | null;
