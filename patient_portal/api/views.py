@@ -18,7 +18,7 @@ from omop_core.models import (
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
     PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
-    Relationship, ConceptRelationship, ConceptAncestor,
+    Relationship, ConceptRelationship, ConceptAncestor, ConceptSynonym,
     # Controlled vocabulary lookup models
     Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
     ProgesteroneReceptorStatus, Her2Status, HrStatus, HrdStatus,
@@ -2427,27 +2427,69 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         name = (name or '').strip()
                         if not name:
                             return None
+
+                        # 1) Prefer a real, licensed HemOnc Regimen concept by name
+                        #    (exact concept_name, then synonym alias). Never mint a
+                        #    synthetic concept when the genuine one exists. Exclude
+                        #    locally-minted `FHIR-*` rows and invalid concepts so a
+                        #    previously-minted synthetic concept is never re-blessed
+                        #    as if it were licensed content.
+                        real = Concept.objects.filter(
+                            vocabulary_id='HemOnc',
+                            concept_class_id='Regimen',
+                            standard_concept='S',
+                            invalid_reason__isnull=True,
+                            concept_name__iexact=name,
+                        ).exclude(concept_code__startswith='FHIR-').first()
+                        if real is None:
+                            syn = ConceptSynonym.objects.filter(
+                                concept_synonym_name__iexact=name,
+                                concept__vocabulary_id='HemOnc',
+                                concept__concept_class_id='Regimen',
+                                concept__standard_concept='S',
+                                concept__invalid_reason__isnull=True,
+                            ).exclude(
+                                concept__concept_code__startswith='FHIR-'
+                            ).select_related('concept').first()
+                            real = syn.concept if syn else None
+                        if real is not None:
+                            return real
+
+                        # 2) No licensed match — quarantine under a DISTINCT local
+                        #    vocabulary id, NON-standard, so a consumer caching promop's
+                        #    HemOnc cannot mistake it for licensed Athena content. The
+                        #    unmapped name is logged for the mapping-gap report (promop#246).
                         code = 'FHIR-' + ''.join(ch.upper() if ch.isalnum() else '-' for ch in name)
                         while '--' in code:
                             code = code.replace('--', '-')
                         code = code.strip('-')[:50]
 
                         concept = Concept.objects.filter(
-                            vocabulary_id='HemOnc',
+                            vocabulary_id='PROMOP_LOCAL',
                             concept_code=code,
                         ).first()
                         if concept:
                             return concept
+
+                        # Emit valid JSON (json.dumps escapes quotes/backslashes in
+                        # the regimen name) — this line is the source for the
+                        # mapping-gap report (promop#246).
+                        logger.warning('%s', json.dumps({
+                            'event': 'regimen_unmapped_local_mint',
+                            'name': name,
+                            'vocabulary_id': 'PROMOP_LOCAL',
+                            'concept_code': code,
+                        }))
 
                         domain, _ = Domain.objects.get_or_create(
                             domain_id='Drug',
                             defaults={'domain_name': 'Drug', 'domain_concept_id': 13},
                         )
                         vocabulary, _ = Vocabulary.objects.get_or_create(
-                            vocabulary_id='HemOnc',
+                            vocabulary_id='PROMOP_LOCAL',
                             defaults={
-                                'vocabulary_name': 'HemOnc',
-                                'vocabulary_reference': 'FHIR import',
+                                'vocabulary_name': 'promop local (unmapped FHIR regimens)',
+                                'vocabulary_reference': 'FHIR import — no licensed HemOnc match',
                                 'vocabulary_version': 'local',
                                 'vocabulary_concept_id': 0,
                             },
@@ -2462,7 +2504,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             domain=domain,
                             vocabulary=vocabulary,
                             concept_class=concept_class,
-                            standard_concept='S',
+                            standard_concept=None,  # local, NOT licensed HemOnc
                             concept_code=code,
                             valid_start_date=datetime(1970, 1, 1).date(),
                             valid_end_date=datetime(2099, 12, 31).date(),

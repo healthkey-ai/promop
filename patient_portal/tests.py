@@ -9607,3 +9607,160 @@ class MCODECreatinineLoincTest(FhirUploadBase):
         self.assertIsNotNone(self._pi.serum_creatinine_mg_dl,
                              'serum_creatinine_mg_dl not populated from LOINC 38483-4')
         self.assertAlmostEqual(float(self._pi.serum_creatinine_mg_dl), 1.1, places=1)
+
+
+class FhirRegimenMintingTest(FhirUploadBase):
+    """promop#246 — FHIR import must never mint synthetic concepts under the
+    licensed ``HemOnc`` vocabulary. Unmatched regimen names are quarantined under
+    a distinct local vocabulary (non-standard); genuine HemOnc regimens are
+    reused rather than re-minted."""
+
+    def test_unmatched_regimen_not_minted_under_hemonc(self):
+        resp = self._upload_bundle()
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED],
+                      msg=f'Upload failed: {resp.data}')
+        from omop_core.models import Concept
+        # Core guard: no synthetic FHIR-* concept under licensed HemOnc.
+        self.assertFalse(
+            Concept.objects.filter(
+                vocabulary_id='HemOnc', concept_code__startswith='FHIR-'
+            ).exists(),
+            'FHIR import minted a synthetic concept under vocabulary_id=HemOnc (cache poisoning)',
+        )
+        # 'AC-T' looks like a regimen but has no licensed match → quarantined locally.
+        local = Concept.objects.filter(
+            vocabulary_id='PROMOP_LOCAL', concept_code='FHIR-AC-T'
+        ).first()
+        self.assertIsNotNone(local, 'Unmatched regimen was not quarantined under PROMOP_LOCAL')
+        self.assertIsNone(local.standard_concept, 'Quarantined local concept must be non-standard')
+
+    def test_genuine_hemonc_regimen_reused_via_synonym(self):
+        from omop_core.models import (
+            Concept, ConceptClass, Vocabulary, Domain, ConceptSynonym, DrugExposure,
+        )
+        # Seed a licensed HemOnc Regimen concept whose synonym is the bundle's 'AC-T'.
+        hemonc, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc', 'vocabulary_concept_id': 0},
+        )
+        regimen_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0},
+        )
+        drug = Domain.objects.get(domain_id='Drug')
+        real = Concept.objects.create(
+            concept_id=35800001,
+            concept_name='Doxorubicin and Cyclophosphamide followed by Paclitaxel',
+            domain=drug, vocabulary=hemonc, concept_class=regimen_class,
+            standard_concept='S', concept_code='HemOnc-ACT',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        ConceptSynonym.objects.create(
+            concept=real, concept_synonym_name='AC-T', language_concept=real,
+        )
+
+        resp = self._upload_bundle()
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED],
+                      msg=f'Upload failed: {resp.data}')
+
+        # Genuine concept reused — nothing minted locally or under HemOnc.
+        self.assertFalse(
+            Concept.objects.filter(
+                vocabulary_id='PROMOP_LOCAL', concept_code='FHIR-AC-T'
+            ).exists(),
+            'A licensed HemOnc match existed but the regimen was still minted locally',
+        )
+        self.assertFalse(
+            Concept.objects.filter(
+                vocabulary_id='HemOnc', concept_code__startswith='FHIR-'
+            ).exists(),
+        )
+        # The AC-T DrugExposure resolved to the genuine HemOnc concept.
+        person = self._get_person()
+        self.assertTrue(
+            DrugExposure.objects.filter(person=person, drug_concept=real).exists(),
+            'AC-T DrugExposure did not resolve to the genuine HemOnc concept',
+        )
+
+    def test_genuine_hemonc_regimen_reused_via_exact_name(self):
+        from omop_core.models import (
+            Concept, ConceptClass, Vocabulary, Domain, DrugExposure,
+        )
+        hemonc, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc', 'vocabulary_concept_id': 0},
+        )
+        regimen_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0},
+        )
+        drug = Domain.objects.get(domain_id='Drug')
+        real = Concept.objects.create(
+            concept_id=35800002, concept_name='AC-T',
+            domain=drug, vocabulary=hemonc, concept_class=regimen_class,
+            standard_concept='S', concept_code='HemOnc-9001',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        resp = self._upload_bundle()
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED],
+                      msg=f'Upload failed: {resp.data}')
+        self.assertFalse(
+            Concept.objects.filter(
+                vocabulary_id='PROMOP_LOCAL', concept_code='FHIR-AC-T'
+            ).exists(),
+            'Exact-name HemOnc match existed but the regimen was still minted locally',
+        )
+        person = self._get_person()
+        self.assertTrue(
+            DrugExposure.objects.filter(person=person, drug_concept=real).exists(),
+        )
+
+    def test_legacy_hemonc_fhir_row_not_treated_as_genuine(self):
+        """A pre-existing poisoned `HemOnc`/`FHIR-*` row must NOT be re-blessed as a
+        genuine match — the regimen is quarantined under PROMOP_LOCAL instead."""
+        from omop_core.models import (
+            Concept, ConceptClass, Vocabulary, Domain, DrugExposure,
+        )
+        hemonc, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc', 'vocabulary_concept_id': 0},
+        )
+        regimen_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0},
+        )
+        drug = Domain.objects.get(domain_id='Drug')
+        poisoned = Concept.objects.create(
+            concept_id=35800003, concept_name='AC-T',
+            domain=drug, vocabulary=hemonc, concept_class=regimen_class,
+            standard_concept='S', concept_code='FHIR-AC-T',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        resp = self._upload_bundle()
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED],
+                      msg=f'Upload failed: {resp.data}')
+        local = Concept.objects.filter(
+            vocabulary_id='PROMOP_LOCAL', concept_code='FHIR-AC-T'
+        ).first()
+        self.assertIsNotNone(local, 'Regimen was not quarantined despite only a poisoned match existing')
+        person = self._get_person()
+        self.assertTrue(
+            DrugExposure.objects.filter(person=person, drug_concept=local).exists(),
+            'AC-T resolved to the poisoned HemOnc row instead of the local quarantine',
+        )
+        self.assertFalse(
+            DrugExposure.objects.filter(person=person, drug_concept=poisoned).exists(),
+            'AC-T was re-blessed to the legacy poisoned HemOnc concept',
+        )
+
+    def test_reupload_does_not_duplicate_local_concept(self):
+        from omop_core.models import Concept
+        self._upload_bundle()
+        self._upload_bundle()
+        self.assertEqual(
+            Concept.objects.filter(
+                vocabulary_id='PROMOP_LOCAL', concept_code='FHIR-AC-T'
+            ).count(),
+            1,
+            'Re-upload duplicated the quarantined local concept',
+        )
