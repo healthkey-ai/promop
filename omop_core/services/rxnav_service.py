@@ -5,6 +5,7 @@ import urllib.request
 from datetime import date
 
 from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+from omop_core.services.pk import next_pk
 
 logger = logging.getLogger('audit')
 
@@ -70,7 +71,13 @@ def _rxnav_lookup(name: str):
 
 
 def _create_rxnorm_concept(rxcui: str, canonical_name: str):
-    """Create and return a minimal Concept row for an RxNav-resolved drug."""
+    """Create and return a minimal Concept row for an RxNav-resolved drug.
+
+    The RXCUI is a genuine RxNorm identifier, so the row stays under the
+    RxNorm vocabulary with standard_concept='S' — but it is locally authored
+    (not part of a governed Athena load), so it is stamped
+    source='HealthKey' to distinguish it from loader-owned rows.
+    """
     vocab, _ = Vocabulary.objects.get_or_create(
         vocabulary_id='RxNorm',
         defaults={'vocabulary_name': 'RxNorm', 'vocabulary_concept_id': 0},
@@ -83,16 +90,16 @@ def _create_rxnorm_concept(rxcui: str, canonical_name: str):
         concept_class_id='Ingredient',
         defaults={'concept_class_name': 'Ingredient', 'concept_class_concept_id': 0},
     )
-    max_id = Concept.objects.order_by('-concept_id').values_list('concept_id', flat=True).first() or 2_000_000_000
     concept, _ = Concept.objects.get_or_create(
         concept_code=str(rxcui)[:50],
         vocabulary=vocab,
         defaults={
-            'concept_id': max_id + 1,
+            'concept_id': next_pk(Concept, 'concept_id'),
             'concept_name': canonical_name[:255],
             'domain': domain,
             'concept_class': cc,
             'standard_concept': 'S',
+            'source': 'HealthKey',
             'valid_start_date': date(1970, 1, 1),
             'valid_end_date': date(2099, 12, 31),
         },

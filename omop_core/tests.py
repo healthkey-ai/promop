@@ -1201,3 +1201,283 @@ class SeedOmopConceptsTest(TestCase):
         call_command('seed_omop_concepts', verbosity=0)
         self.assertEqual(Concept.objects.filter(concept_id=8532).count(), 1,
                          'Duplicate concept created on second seed_omop_concepts run')
+
+
+# ===========================================================================
+# Issue #236 P0b — regimen resolution namespace hygiene
+# ===========================================================================
+
+class RegimenResolutionTest(TestCase):
+    """Unit tests for omop_core.services.regimen_resolution."""
+
+    def setUp(self):
+        from omop_core.models import RegimenMappingGap  # noqa: F401
+        from omop_core.services.concept_cache import concept_cache_clear
+        concept_cache_clear()
+        self.addCleanup(concept_cache_clear)
+
+        self.hemonc_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc', 'vocabulary_concept_id': 0},
+        )
+        self.regimen_cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0},
+        )
+        self.drug_domain, _ = Domain.objects.get_or_create(
+            domain_id='Drug',
+            defaults={'domain_name': 'Drug', 'domain_concept_id': 13},
+        )
+        self.concept0, _ = Concept.objects.get_or_create(
+            concept_id=0,
+            defaults={
+                'concept_name': 'No matching concept',
+                'domain': self.drug_domain,
+                'vocabulary': self.hemonc_vocab,
+                'concept_class': self.regimen_cc,
+                'concept_code': '0',
+                'valid_start_date': date(1970, 1, 1),
+                'valid_end_date': date(2099, 12, 31),
+            },
+        )
+
+        def _regimen(cid, name, **kwargs):
+            defaults = {
+                'concept_name': name,
+                'domain': self.drug_domain,
+                'vocabulary': self.hemonc_vocab,
+                'concept_class': self.regimen_cc,
+                'standard_concept': 'S',
+                'concept_code': str(cid),
+                'valid_start_date': date(1970, 1, 1),
+                'valid_end_date': date(2099, 12, 31),
+            }
+            defaults.update(kwargs)
+            obj, _ = Concept.objects.get_or_create(concept_id=cid, defaults=defaults)
+            return obj
+
+        self.valid_regimen = _regimen(9770001, 'RVD')
+        self.deprecated_regimen = _regimen(9770002, 'OldRegimen', invalid_reason='D')
+        self.nonstandard_regimen = _regimen(9770003, 'NonStdRegimen', standard_concept=None)
+
+        from omop_core.models import ConceptSynonym
+        ConceptSynonym.objects.get_or_create(
+            concept=self.valid_regimen,
+            concept_synonym_name='Revlimid-Velcade-Dex',
+            language_concept=self.concept0,
+        )
+
+    # -- validate_hemonc_regimen -------------------------------------------
+
+    def test_validate_accepts_valid_regimen(self):
+        from omop_core.services.regimen_resolution import validate_hemonc_regimen
+        self.assertTrue(validate_hemonc_regimen(self.valid_regimen))
+
+    def test_validate_rejects_none_and_bad_rows(self):
+        from omop_core.services.regimen_resolution import validate_hemonc_regimen
+        self.assertFalse(validate_hemonc_regimen(None))
+        self.assertFalse(validate_hemonc_regimen(self.deprecated_regimen))
+        self.assertFalse(validate_hemonc_regimen(self.nonstandard_regimen))
+
+    def test_validate_rejects_wrong_vocabulary(self):
+        from omop_core.services.regimen_resolution import validate_hemonc_regimen
+        rxnorm_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RxNorm',
+            defaults={'vocabulary_name': 'RxNorm', 'vocabulary_concept_id': 0},
+        )
+        foreign = Concept.objects.create(
+            concept_id=9770010, concept_name='RVD', domain=self.drug_domain,
+            vocabulary=rxnorm_vocab, concept_class=self.regimen_cc,
+            standard_concept='S', concept_code='9770010',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        self.assertFalse(validate_hemonc_regimen(foreign))
+
+    # -- match_hemonc_regimen_by_name --------------------------------------
+
+    def test_match_by_name_case_insensitive(self):
+        from omop_core.services.regimen_resolution import match_hemonc_regimen_by_name
+        self.assertEqual(
+            match_hemonc_regimen_by_name('rvd').concept_id,
+            self.valid_regimen.concept_id,
+        )
+
+    def test_match_by_synonym(self):
+        from omop_core.services.regimen_resolution import match_hemonc_regimen_by_name
+        self.assertEqual(
+            match_hemonc_regimen_by_name('revlimid-velcade-dex').concept_id,
+            self.valid_regimen.concept_id,
+        )
+
+    def test_match_skips_deprecated_and_nonstandard(self):
+        from omop_core.services.regimen_resolution import match_hemonc_regimen_by_name
+        self.assertIsNone(match_hemonc_regimen_by_name('OldRegimen'))
+        self.assertIsNone(match_hemonc_regimen_by_name('NonStdRegimen'))
+
+    def test_match_unknown_returns_none(self):
+        from omop_core.services.regimen_resolution import match_hemonc_regimen_by_name
+        self.assertIsNone(match_hemonc_regimen_by_name('ZZ-Does-Not-Exist'))
+        self.assertIsNone(match_hemonc_regimen_by_name(''))
+
+    # -- get_or_create_quarantine_regimen -----------------------------------
+
+    def test_quarantine_mints_under_hk_regimen_never_hemonc(self):
+        from omop_core.services.regimen_resolution import get_or_create_quarantine_regimen
+        hemonc_before = Concept.objects.filter(vocabulary_id='HemOnc').count()
+        concept = get_or_create_quarantine_regimen('ZZ-Novel-Regimen')
+
+        self.assertEqual(concept.vocabulary_id, 'HK-Regimen')
+        self.assertEqual(concept.concept_class_id, 'Regimen')
+        self.assertEqual(concept.concept_code, 'hkr:zz-novel-regimen')
+        self.assertIsNone(concept.standard_concept)
+        self.assertEqual(concept.source, 'HealthKey')
+        self.assertEqual(
+            Concept.objects.filter(vocabulary_id='HemOnc').count(), hemonc_before,
+            'Quarantine path wrote to the HemOnc vocabulary',
+        )
+
+    def test_quarantine_records_mapping_gap_and_bumps_count(self):
+        from omop_core.models import RegimenMappingGap
+        from omop_core.services.regimen_resolution import get_or_create_quarantine_regimen
+        first = get_or_create_quarantine_regimen('ZZ-Novel-Regimen')
+        second = get_or_create_quarantine_regimen('ZZ-Novel-Regimen')
+
+        self.assertEqual(first.concept_id, second.concept_id)
+        gap = RegimenMappingGap.objects.get(
+            source_system='fhir-upload', normalized_name='zz-novel-regimen',
+        )
+        self.assertEqual(gap.quarantine_concept_id, first.concept_id)
+        self.assertEqual(gap.status, RegimenMappingGap.STATUS_UNMATCHED)
+        self.assertEqual(gap.occurrence_count, 2)
+
+    def test_quarantine_normalizes_gap_key(self):
+        from omop_core.models import RegimenMappingGap
+        from omop_core.services.regimen_resolution import get_or_create_quarantine_regimen
+        get_or_create_quarantine_regimen('  ZZ-Novel   Regimen ')
+        self.assertTrue(RegimenMappingGap.objects.filter(
+            normalized_name='zz-novel regimen',
+        ).exists())
+
+    def test_quarantine_blank_name_returns_none(self):
+        from omop_core.services.regimen_resolution import get_or_create_quarantine_regimen
+        self.assertIsNone(get_or_create_quarantine_regimen('   '))
+
+    # -- get_or_create_quarantine_drug --------------------------------------
+
+    def test_quarantine_drug_mints_under_hk_drug(self):
+        from omop_core.services.regimen_resolution import get_or_create_quarantine_drug
+        concept = get_or_create_quarantine_drug(
+            source_vocabulary_id='RxNorm', concept_code='99999999',
+            concept_name='mystery drug',
+        )
+        self.assertEqual(concept.vocabulary_id, 'HK-Drug')
+        self.assertEqual(concept.concept_code, 'hkd:rxnorm-99999999')
+        self.assertIsNone(concept.standard_concept)
+        self.assertEqual(concept.source, 'HealthKey')
+        self.assertFalse(Concept.objects.filter(
+            vocabulary_id='RxNorm', concept_code='99999999',
+        ).exists(), 'Quarantine path minted a row under the licensed vocabulary')
+
+    def test_quarantine_observation_mints_under_hk_observation(self):
+        from omop_core.models import RegimenMappingGap
+        from omop_core.services.regimen_resolution import get_or_create_quarantine_observation
+        concept = get_or_create_quarantine_observation(
+            source_vocabulary_id='LOINC', concept_code='99999-9',
+            concept_name='mystery report',
+        )
+        self.assertEqual(concept.vocabulary_id, 'HK-Observation')
+        self.assertEqual(concept.domain_id, 'Observation')
+        self.assertEqual(concept.concept_code, 'hko:loinc-99999-9')
+        self.assertIsNone(concept.standard_concept)
+        self.assertEqual(concept.source, 'HealthKey')
+        self.assertFalse(Concept.objects.filter(
+            vocabulary_id='LOINC', concept_code='99999-9',
+        ).exists(), 'Quarantine path minted a row under the licensed vocabulary')
+        self.assertTrue(RegimenMappingGap.objects.filter(
+            normalized_name='mystery report',
+        ).exists())
+
+    def test_quarantine_procedure_mints_under_hk_procedure(self):
+        from omop_core.models import RegimenMappingGap
+        from omop_core.services.regimen_resolution import get_or_create_quarantine_procedure
+        concept = get_or_create_quarantine_procedure(
+            source_vocabulary_id='SNOMED', concept_code='999999999',
+            concept_name='mystery procedure',
+        )
+        self.assertEqual(concept.vocabulary_id, 'HK-Procedure')
+        self.assertEqual(concept.domain_id, 'Procedure')
+        self.assertEqual(concept.concept_code, 'hkp:snomed-999999999')
+        self.assertIsNone(concept.standard_concept)
+        self.assertEqual(concept.source, 'HealthKey')
+        self.assertFalse(Concept.objects.filter(
+            vocabulary_id='SNOMED', concept_code='999999999',
+        ).exists(), 'Quarantine path minted a row under the licensed vocabulary')
+        self.assertTrue(RegimenMappingGap.objects.filter(
+            normalized_name='mystery procedure',
+        ).exists())
+
+    def test_slug_collision_gets_disambiguated_concept(self):
+        """Two distinct names that slugify identically must not share a row."""
+        from omop_core.services.regimen_resolution import get_or_create_quarantine_regimen
+        first = get_or_create_quarantine_regimen('ZZ Collision (A)')
+        second = get_or_create_quarantine_regimen('ZZ Collision A?')
+        # Both slugify to 'hkr:zz-collision-a' — the second must be disambiguated.
+        self.assertNotEqual(first.concept_id, second.concept_id)
+        self.assertEqual(first.concept_code, 'hkr:zz-collision-a')
+        self.assertTrue(second.concept_code.startswith('hkr:zz-collision-a-'))
+        self.assertEqual(len(second.concept_code), len('hkr:zz-collision-a-') + 8)
+        # Repeat sightings remain idempotent per name.
+        again = get_or_create_quarantine_regimen('ZZ Collision A?')
+        self.assertEqual(again.concept_id, second.concept_id)
+
+    def test_record_mapping_gap_truncates_overlong_names(self):
+        from omop_core.models import RegimenMappingGap
+        from omop_core.services.regimen_resolution import record_mapping_gap
+        long_name = 'ZZ-' + ('x' * 400)
+        gap = record_mapping_gap(source_system='fhir-upload', source_value=long_name)
+        self.assertIsNotNone(gap)
+        self.assertLessEqual(len(gap.normalized_name), 255)
+        self.assertLessEqual(len(gap.source_value), 255)
+
+    def test_quarantine_regimen_overlong_name_does_not_raise(self):
+        from omop_core.services.regimen_resolution import get_or_create_quarantine_regimen
+        concept = get_or_create_quarantine_regimen('ZZ-' + ('y' * 400))
+        self.assertIsNotNone(concept)
+        self.assertLessEqual(len(concept.concept_name), 255)
+
+
+class ReportRegimenMappingGapsCommandTest(TestCase):
+    """The report_regimen_mapping_gaps command prints counts and a table."""
+
+    def setUp(self):
+        from omop_core.services.concept_cache import concept_cache_clear
+        concept_cache_clear()
+        self.addCleanup(concept_cache_clear)
+        Domain.objects.get_or_create(
+            domain_id='Drug',
+            defaults={'domain_name': 'Drug', 'domain_concept_id': 13},
+        )
+
+    def test_command_outputs_counts_and_rows(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from omop_core.services.regimen_resolution import get_or_create_quarantine_regimen
+
+        get_or_create_quarantine_regimen('ZZ-Report-Me')
+        get_or_create_quarantine_regimen('ZZ-Report-Me')
+
+        out = StringIO()
+        call_command('report_regimen_mapping_gaps', stdout=out)
+        text = out.getvalue()
+        self.assertIn('unmatched', text)
+        self.assertIn('ZZ-Report-Me', text)
+        self.assertIn('2', text)  # occurrence_count
+
+    def test_command_empty_table(self):
+        from io import StringIO
+        from django.core.management import call_command
+
+        out = StringIO()
+        call_command('report_regimen_mapping_gaps', stdout=out)
+        self.assertIn('No mapping gaps recorded.', out.getvalue())
+

@@ -51,6 +51,7 @@ _OMOP_DERIVED_FIELDS = [
     'later_therapies', 'later_therapy_ids',
     'first_line_component_ids', 'second_line_component_ids',
     'later_component_ids', 'therapy_component_ids',
+    'therapy_ids_provenance',
     'therapy_lines_count', 'last_treatment',
     'concomitant_medications',
     # Legacy labs (derived via name-based Measurement lookup)

@@ -41,6 +41,14 @@ from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
+from omop_core.services.regimen_resolution import (
+    get_or_create_quarantine_drug,
+    get_or_create_quarantine_observation,
+    get_or_create_quarantine_procedure,
+    get_or_create_quarantine_regimen,
+    match_hemonc_regimen_by_name,
+    validate_hemonc_regimen,
+)
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
 from omop_core.services.access import get_visible_orgs, build_trusting_map
 from datetime import datetime, timedelta
@@ -453,6 +461,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # Use {field}_id for FK fields so we get a serializable PK, not a model object.
         _prov_meta = {'source', 'source_user_id', 'modification_reason'}
         _read_only = set(PatientRecordSerializer.Meta.read_only_fields)
+        _ignored_ro = sorted((set(request.data) & _read_only) - _prov_meta)
+        if _ignored_ro:
+            # DRF silently drops read-only fields from the input — surface the
+            # attempt so API consumers learn the derived therapy-id fields are
+            # written only by the derivation pipeline (#236).
+            logger.warning(
+                '{"event": "read_only_patch_fields_ignored", "fields": "%s", "person_id": "%s"}',
+                ','.join(_ignored_ro), pk,
+            )
         def _prev_val(obj, field):
             fk_id = f'{field}_id'
             if hasattr(obj, fk_id):
@@ -867,6 +884,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     vocabulary=vocabulary,
                     concept_class=concept_class,
                     standard_concept='S',
+                    source='HealthKey',
                     concept_code=concept_code,
                     valid_start_date=datetime(1970, 1, 1).date(),
                     valid_end_date=datetime(2099, 12, 31).date(),
@@ -2421,52 +2439,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             return True
                         if '-' in name:
                             return True
-                        return len(name) <= 8 and name.upper() == name and any(ch.isalpha() for ch in name)
-
-                    def _get_or_create_local_regimen_concept(name):
-                        name = (name or '').strip()
-                        if not name:
-                            return None
-                        code = 'FHIR-' + ''.join(ch.upper() if ch.isalnum() else '-' for ch in name)
-                        while '--' in code:
-                            code = code.replace('--', '-')
-                        code = code.strip('-')[:50]
-
-                        concept = Concept.objects.filter(
-                            vocabulary_id='HemOnc',
-                            concept_code=code,
-                        ).first()
-                        if concept:
-                            return concept
-
-                        domain, _ = Domain.objects.get_or_create(
-                            domain_id='Drug',
-                            defaults={'domain_name': 'Drug', 'domain_concept_id': 13},
-                        )
-                        vocabulary, _ = Vocabulary.objects.get_or_create(
-                            vocabulary_id='HemOnc',
-                            defaults={
-                                'vocabulary_name': 'HemOnc',
-                                'vocabulary_reference': 'FHIR import',
-                                'vocabulary_version': 'local',
-                                'vocabulary_concept_id': 0,
-                            },
-                        )
-                        concept_class, _ = ConceptClass.objects.get_or_create(
-                            concept_class_id='Regimen',
-                            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0},
-                        )
-                        return Concept.objects.create(
-                            concept_id=next_pk(Concept, 'concept_id'),
-                            concept_name=name[:255],
-                            domain=domain,
-                            vocabulary=vocabulary,
-                            concept_class=concept_class,
-                            standard_concept='S',
-                            concept_code=code,
-                            valid_start_date=datetime(1970, 1, 1).date(),
-                            valid_end_date=datetime(2099, 12, 31).date(),
-                        )
+                        if len(name) <= 8 and name.upper() == name and any(ch.isalpha() for ch in name):
+                            return True
+                        # Short mixed-case acronyms (VRd, KRd, DaraRd) are
+                        # regimen names, not generic drug names.
+                        return len(name) <= 8 and sum(1 for ch in name if ch.isupper()) >= 2
 
                     def _coding_parts(codeable):
                         codeable = codeable or {}
@@ -2489,46 +2466,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             return 'SNOMED'
                         return 'FHIR'
 
-                    def _get_or_create_local_concept(domain_id, vocabulary_id, concept_class_id, concept_code, concept_name):
-                        concept_code = (concept_code or concept_name or 'unknown')[:50]
-                        concept_name = (concept_name or f'{vocabulary_id} {concept_code}')[:255]
-
-                        concept = Concept.objects.filter(
-                            vocabulary_id=vocabulary_id,
-                            concept_code=concept_code,
-                        ).first()
-                        if concept:
-                            return concept
-
-                        domain, _ = Domain.objects.get_or_create(
-                            domain_id=domain_id,
-                            defaults={'domain_name': domain_id, 'domain_concept_id': 0},
-                        )
-                        vocabulary, _ = Vocabulary.objects.get_or_create(
-                            vocabulary_id=vocabulary_id,
-                            defaults={
-                                'vocabulary_name': vocabulary_id,
-                                'vocabulary_reference': 'FHIR import',
-                                'vocabulary_version': 'local',
-                                'vocabulary_concept_id': 0,
-                            },
-                        )
-                        concept_class, _ = ConceptClass.objects.get_or_create(
-                            concept_class_id=concept_class_id,
-                            defaults={'concept_class_name': concept_class_id, 'concept_class_concept_id': 0},
-                        )
-                        return Concept.objects.create(
-                            concept_id=next_pk(Concept, 'concept_id'),
-                            concept_name=concept_name,
-                            domain=domain,
-                            vocabulary=vocabulary,
-                            concept_class=concept_class,
-                            standard_concept='S',
-                            concept_code=concept_code,
-                            valid_start_date=datetime(1970, 1, 1).date(),
-                            valid_end_date=datetime(2099, 12, 31).date(),
-                        )
-
                     def _drug_concept_from_codeable(codeable):
                         system, code, display = _coding_parts(codeable)
                         vocabulary_id = _vocab_from_system(system)
@@ -2546,18 +2483,24 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             if concept:
                                 return concept
                             try:
-                                return _rxnav_resolve_drug(display)
+                                concept = _rxnav_resolve_drug(display)
                             except Exception as rxnav_exc:
                                 logger.warning(
                                     '{"event": "rxnav_resolve_failed", "drug": "%s", "error": "%s"}',
                                     display, rxnav_exc,
                                 )
-                        return _get_or_create_local_concept(
-                            'Drug',
-                            vocabulary_id,
-                            'Clinical Drug' if vocabulary_id == 'RxNorm' else 'Vaccine',
-                            code or display,
-                            display,
+                            if concept:
+                                return concept
+                        # Never mint under the licensed source vocabulary —
+                        # quarantine under HK-Drug and record the gap (#236).
+                        # Returns None only when there is no code AND no display;
+                        # callers must skip the write in that case (drug_concept
+                        # is NOT NULL on DrugExposure).
+                        return get_or_create_quarantine_drug(
+                            source_vocabulary_id=vocabulary_id,
+                            concept_code=code,
+                            concept_name=display,
+                            source_system='fhir-upload',
                         )
 
                     for lot_num, lot_data in sorted(therapy_lines.items()):
@@ -2571,34 +2514,72 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     lot_end = datetime.strptime(lot_data['end_date'][:10], '%Y-%m-%d').date()
 
                                 regimen_name = lot_data.get('regimen', '')
-                                # Prefer HemOnc concept_id already embedded in the FHIR bundle;
-                                # only fall back to ILIKE + RxNav when it is absent.
+                                # Resolution ladder (issue #236 — namespace hygiene):
+                                #   1. Validate an inbound HemOnc concept_id — must be a
+                                #      currently-valid standard HemOnc Regimen.
+                                #   2. Match a real HemOnc regimen by name/synonym.
+                                #   3. Quarantine under HK-Regimen (never mint under HemOnc).
                                 _hemonc_cid = lot_data.get('hemonc_concept_id')
+                                regimen_concept = None
+                                _regimen_source_concept = None
                                 if _hemonc_cid:
-                                    regimen_concept = _cc_by_id(_hemonc_cid)
-                                else:
-                                    if _looks_like_regimen_name(regimen_name):
-                                        regimen_concept = _get_or_create_local_regimen_concept(regimen_name)
+                                    # Validation must hit the DB, not the
+                                    # process-level concept cache — a stale
+                                    # cached row could pass/fail validation
+                                    # against outdated invalid_reason /
+                                    # standard_concept state.
+                                    _candidate = Concept.objects.filter(
+                                        concept_id=_hemonc_cid,
+                                    ).first()
+                                    if validate_hemonc_regimen(_candidate):
+                                        regimen_concept = _candidate
+                                        _regimen_source_concept = _candidate
                                     else:
+                                        logger.warning(
+                                            '{"event": "hemonc_concept_id_rejected", "concept_id": %s, "patient": "%s"}',
+                                            _hemonc_cid, _timing_hash,
+                                        )
+                                if regimen_concept is None and regimen_name:
+                                    regimen_concept = match_hemonc_regimen_by_name(regimen_name)
+                                if regimen_concept is None and regimen_name:
+                                    if _looks_like_regimen_name(regimen_name):
+                                        regimen_concept = get_or_create_quarantine_regimen(
+                                            regimen_name, source_system='fhir-upload',
+                                        )
+                                    else:
+                                        # Plain drug name — generic drug lookup, then
+                                        # RxNav fallback.
                                         regimen_concept = Concept.objects.filter(
                                             concept_name__icontains=regimen_name,
                                             domain__domain_id='Drug',
-                                        ).first() if regimen_name else None
-                                    # RxNav fallback only when no HemOnc concept_id, no local
-                                    # match, and the source looks like a plain drug name.
-                                    if regimen_concept is None and regimen_name:
-                                        try:
-                                            regimen_concept = _rxnav_resolve_drug(regimen_name)
-                                        except Exception as rxnav_exc:
-                                            logger.warning(
-                                                '{"event": "rxnav_resolve_failed", "drug": "%s", "error": "%s"}',
-                                                regimen_name, rxnav_exc,
-                                            )
-                                # Final fallback to any Drug domain concept
+                                        ).first()
+                                        if regimen_concept is None:
+                                            try:
+                                                regimen_concept = _rxnav_resolve_drug(regimen_name)
+                                            except Exception as rxnav_exc:
+                                                logger.warning(
+                                                    '{"event": "rxnav_resolve_failed", "drug": "%s", "error": "%s"}',
+                                                    regimen_name, rxnav_exc,
+                                                )
+                                # Last resort: quarantine the unmatched name under
+                                # HK-Drug and record the gap.  Never pick an
+                                # arbitrary Drug-domain concept — that fabricates
+                                # a wrong clinical link (#236).
+                                if regimen_concept is None and regimen_name:
+                                    regimen_concept = get_or_create_quarantine_drug(
+                                        source_vocabulary_id='unknown',
+                                        concept_code='',
+                                        concept_name=regimen_name,
+                                        source_system='fhir-upload',
+                                    )
                                 if regimen_concept is None:
-                                    regimen_concept = Concept.objects.filter(
-                                        domain__domain_id='Drug'
-                                    ).first()
+                                    # No name and no valid inbound concept_id —
+                                    # nothing to resolve, quarantine, or write.
+                                    logger.warning(
+                                        '{"event": "lot_write_skipped", "reason": "unresolvable_regimen", "lot_num": %d, "patient": "%s"}',
+                                        lot_num, _timing_hash,
+                                    )
+                                    continue
                                 drug_type_concept = _concept_drug_type or regimen_concept
 
                                 # Upsert DrugExposure: skip if same person+regimen+start already exists
@@ -2634,7 +2615,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     person,
                                     line_number=lot_num,
                                     regimen_concept=regimen_concept,
-                                    regimen_source_concept=regimen_concept if _hemonc_cid else None,
+                                    regimen_source_concept=_regimen_source_concept,
                                     start_date=lot_start,
                                     end_date=lot_end,
                                     drug_exposure_ids=[_de.drug_exposure_id],
@@ -2673,6 +2654,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         if key in _existing_drug_keys:
                             return
                         drug_concept = _drug_concept_from_codeable(codeable)
+                        if drug_concept is None:
+                            # Empty codeable (no code, no display) — nothing
+                            # to resolve or quarantine; skip rather than write
+                            # a NULL drug_concept (IntegrityError).
+                            logger.warning(
+                                '{"event": "drug_exposure_write_skipped", "reason": "unresolvable_concept", "patient": "%s"}',
+                                _timing_hash,
+                            )
+                            return
                         drug_type_concept = _concept_drug_type or drug_concept
                         _de = DrugExposure(
                             drug_exposure_id=next_pk(DrugExposure, 'drug_exposure_id'),
@@ -2737,14 +2727,23 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _report_date = _report_dt.date()
                         _system, _code, _display = _coding_parts(_report.get('code'))
                         _vocab = _vocab_from_system(_system)
-                        _report_concept = _cc_by_loinc(_code) if _vocab == 'LOINC' and _code else None
+                        # Look up the reported code in its own vocabulary first
+                        # (any licensed vocab, not just LOINC) — only genuinely
+                        # unmapped codes go to quarantine.
+                        _report_concept = None
+                        if _code:
+                            if _vocab == 'LOINC':
+                                _report_concept = _cc_by_loinc(_code)
+                            else:
+                                _report_concept = _cc_by_vocab(_vocab, _code)
                         if _report_concept is None:
-                            _report_concept = _get_or_create_local_concept(
-                                'Observation',
-                                _vocab,
-                                'Clinical Observation',
-                                _code or _display,
-                                _display or 'FHIR DiagnosticReport',
+                            # Never mint under the licensed source vocabulary —
+                            # quarantine under HK-Observation and record the gap (#236).
+                            _report_concept = get_or_create_quarantine_observation(
+                                source_vocabulary_id=_vocab,
+                                concept_code=_code,
+                                concept_name=_display or 'FHIR DiagnosticReport',
+                                source_system='fhir-upload',
                             )
                         _value = (_report.get('conclusion') or _display or 'Diagnostic report')[:60]
                         _source = (_code or _display or 'DiagnosticReport')[:50]
@@ -2774,45 +2773,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     )
 
                     # --- Write ProcedureOccurrence records ---
-                    def _get_or_create_fhir_procedure_concept(vocabulary_id, concept_code, concept_name):
-                        if not concept_code:
-                            return None
-                        concept = Concept.objects.filter(
-                            vocabulary_id=vocabulary_id,
-                            concept_code=concept_code,
-                        ).first()
-                        if concept:
-                            return concept
-
-                        domain, _ = Domain.objects.get_or_create(
-                            domain_id='Procedure',
-                            defaults={'domain_name': 'Procedure', 'domain_concept_id': 10},
-                        )
-                        vocabulary, _ = Vocabulary.objects.get_or_create(
-                            vocabulary_id=vocabulary_id,
-                            defaults={
-                                'vocabulary_name': vocabulary_id,
-                                'vocabulary_reference': 'FHIR import',
-                                'vocabulary_version': 'local',
-                                'vocabulary_concept_id': 0,
-                            },
-                        )
-                        concept_class, _ = ConceptClass.objects.get_or_create(
-                            concept_class_id='Procedure',
-                            defaults={'concept_class_name': 'Procedure', 'concept_class_concept_id': 0},
-                        )
-                        return Concept.objects.create(
-                            concept_id=next_pk(Concept, 'concept_id'),
-                            concept_name=(concept_name or f'{vocabulary_id} {concept_code}')[:255],
-                            domain=domain,
-                            vocabulary=vocabulary,
-                            concept_class=concept_class,
-                            standard_concept='S',
-                            concept_code=concept_code[:50],
-                            valid_start_date=datetime(1970, 1, 1).date(),
-                            valid_end_date=datetime(2099, 12, 31).date(),
-                        )
-
                     _existing_proc_keys = {
                         (p.procedure_source_value, p.procedure_date)
                         for p in ProcedureOccurrence.objects.filter(person=person)
@@ -2848,25 +2808,24 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _proc_concept = None
                         if _proc_code_value and 'snomed' in _proc_system.lower():
                             _proc_concept = _cc_by_vocab('SNOMED', _proc_code_value)
-                            if _proc_concept is None:
-                                _proc_concept = _get_or_create_fhir_procedure_concept(
-                                    'SNOMED',
-                                    _proc_code_value,
-                                    _proc_display,
-                                )
                         if _proc_concept is None and _proc_display:
                             _proc_concept = Concept.objects.filter(
                                 concept_name__icontains=_proc_display,
                                 domain__domain_id='Procedure',
                             ).first()
                         if _proc_concept is None:
-                            _proc_concept = Concept.objects.filter(domain__domain_id='Procedure').first()
-                        if _proc_concept is None:
-                            logger.warning(
-                                '{"event": "procedure_write_skipped", "reason": "no_procedure_concept", "patient": "%s", "procedure": "%s"}',
-                                _timing_hash, _proc_display,
+                            # Never mint under SNOMED (or any licensed
+                            # vocabulary), and never pick an arbitrary
+                            # Procedure-domain concept — quarantine under
+                            # HK-Procedure and record the gap (#236).
+                            # _proc_display always falls back to a placeholder,
+                            # so this never returns None here.
+                            _proc_concept = get_or_create_quarantine_procedure(
+                                source_vocabulary_id=_vocab_from_system(_proc_system),
+                                concept_code=_proc_code_value,
+                                concept_name=_proc_display,
+                                source_system='fhir-upload',
                             )
-                            continue
 
                         _proc = ProcedureOccurrence(
                             procedure_occurrence_id=next_pk(ProcedureOccurrence, 'procedure_occurrence_id'),

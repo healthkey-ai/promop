@@ -203,6 +203,14 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             'organization', 'person', 'created_at', 'updated_at',
             'first_line_therapy_display', 'second_line_therapy_display', 'later_therapy_display',
             'death_date',
+            # Derived therapy-id read model (issue #236): written only by the
+            # derivation pipeline (refresh_patient_record / FHIR upload) from
+            # OMOP truth.  A client PATCH must never set them directly —
+            # provenance would be lost and the values would diverge from OMOP.
+            'first_line_therapy_id', 'second_line_therapy_id', 'later_therapy_ids',
+            'first_line_component_ids', 'second_line_component_ids',
+            'later_component_ids', 'therapy_component_ids',
+            'therapy_ids_provenance',
             # Wearable summaries are written by the device-sync service, never by the client API.
             'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
             'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
