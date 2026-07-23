@@ -1,7 +1,7 @@
 # HemOnc Support Roadmap
 
-**Status:** Planning document
-**Date:** 2026-07-21
+**Status:** Planning document — **revised 2026-07-22** (see Revision note)
+**Original date:** 2026-07-21
 **Audience:** promop maintainers; consumers: EXACT (`~/exact`), SoC (`~/soc`), ht-phr federation host
 
 This document lays out a prioritized roadmap for making promop's use of the HemOnc
@@ -9,11 +9,44 @@ vocabulary complete enough that downstream consumers (EXACT trial matching, SoC
 standard-of-care recommendations, FHIR/mCODE interop) can rely on promop as the
 **single governed source of coded therapy data**.
 
-The governing architectural decision (ADR 0001 in both consumer repos) is:
-**promop owns source→standard-vocabulary anchors** using OMOP `concept_relationship`
-semantics; consumers do *no* patient-side translation. Every vocabulary gap in
-promop therefore lands directly on consumers as silent eligibility/recommendation
-degradation. This roadmap is ordered by which gaps hurt consumers most.
+> **Governing decision (agreed 2026-07-22, see [ADR 0001](adr/0001-vocabulary-source-of-truth.md) — status: Proposed):**
+> **promop is the single source of truth for ALL vocabulary data** — `concept`,
+> `concept_relationship`, `concept_synonym`, `concept_ancestor`, `drug_strength`,
+> `source_to_concept_map`, and vocabulary versions. The **target** is for consumer
+> services (EXACT, SoC) to **pull vocabulary from promop and cache it locally**
+> instead of independently vendoring or curating it — **not yet implemented**: today
+> EXACT still loads its own CSV and SoC its own artifact (see §2). The **only**
+> permitted temporary exception is the `cb_code ↔ concept_id` mapping inside CB
+> (EXACT), consumer-side for the transition period and scheduled for retirement.
+> Once ratified, this ADR supersedes the "consumers do no patient-side translation /
+> each consumer keeps a vendored artifact" framing in the EXACT/SoC ADR 0001s (which
+> are not yet updated).
+
+The implication of that decision is stronger than the original framing: every
+vocabulary gap in promop no longer just degrades one consumer at request time — it
+degrades **every** consumer's cache. promop is now on the release/bootstrap/update
+path for the whole platform's coded therapy data.
+
+---
+
+## Revision note (2026-07-22)
+
+This roadmap was reviewed against the actual `dev` code plus `exact@2omop` and
+`soc@2omop`, their GitHub issues, and both ADR 0001s. Material corrections vs. the
+2026-07-21 draft:
+
+- **P0 (`therapy_component_ids`) has SHIPPED**, not "future work" — see #231/#189
+  (commit `c94c669`). Fields, refresh-time expansion, serializer exposure, and
+  tests all exist. The baseline "there is no `therapy_component_ids` field" was
+  written before that merge.
+- **The concept graph API has SHIPPED** (#232/#234): `/api/v1/concepts/{id}/ancestors/`,
+  `/descendants/`, `/concepts/graph/` (batch).
+- **The governing model changed** (source-of-truth decision above). The spine
+  re-sequences accordingly: the versioned vocabulary release/sync product (old P1)
+  is now the top priority; the shipped component field is a compatibility projection.
+- Several stale specifics fixed (see inline `~~strikethrough~~`/notes): VRd→RVD and
+  VCd are now mapped; VPd is not a lookup entry; consumer-readiness and counts were
+  overstated.
 
 ---
 
@@ -23,49 +56,72 @@ degradation. This roadmap is ordered by which gaps hurt consumers most.
 
 | Capability | Where | Notes |
 |---|---|---|
-| Full Athena HemOnc vocabulary loaded (~13.4k concepts) into `concept` / `concept_relationship` / `concept_ancestor` | `omop_core/management/commands/load_athena_vocabularies.py` | HemOnc loaded unfiltered; `concept_ancestor` restricted to HemOnc→HemOnc pairs |
-| HemOnc regimen concept_ids on the read model | `PatientRecord.first_line_therapy_id`, `second_line_therapy_id`, `later_therapy_ids` (`omop_core/models.py:1747-1761`, migration 0092/0093) | Bare integers, not FKs; display text kept alongside (Option C, `docs/therapy-fields-discussion.md`) |
+| Full Athena HemOnc vocabulary loaded (~13.4k concepts per the Athena export) into `concept` / `concept_relationship` / `concept_ancestor` | `omop_core/management/commands/load_athena_vocabularies.py` | HemOnc loaded; **`concept` is scoped to selected vocabularies/classes**, `concept_relationship` loaded only when both endpoints are present, `concept_ancestor` restricted to HemOnc→HemOnc. **This is NOT "all vocabulary data" yet** — see §3 P0(new). |
+| HemOnc regimen concept_ids on the read model | `PatientRecord.first_line_therapy_id`, `second_line_therapy_id`, `later_therapy_ids` | Bare integers, not FKs; display text kept alongside |
+| **Component concept_ids on the read model (SHIPPED, #231/#189)** | `PatientRecord.first_line_component_ids`, `second_line_component_ids`, `later_component_ids`, `therapy_component_ids` (`omop_core/models.py:1770-1785`), derived in `patient_record_service.py:558` (`_expand_component_ids`) at refresh | Union of regimen graph components + line DrugExposure concept_ids + `Maps to`/`Has ingredient` targets. **Mixed identifier levels, no type discriminator, writable via v1 PATCH — see hardening.** |
 | LOT inference classifies drugs via HemOnc | `lot_inference_service.py::_build_hemonc_map` / `_classify_drug` | RxNorm → `Maps to` HemOnc → `concept_ancestor` drug classes; string fallback |
-| Regimen episodes carry HemOnc concepts | `omop_oncology/models.py` `Episode.episode_object_concept` / `episode_source_concept` | Written by `episode_service.upsert_therapy_line_episode` |
-| FHIR round-trip of HemOnc codes | Generators emit `http://ohdsi.org/omop/HemOnc` codings on regimen MedicationStatements; importer reads them (`patient_portal/api/views.py:2274-2299`) | MM/FL/BC generators; FL catalog built from live HemOnc graph |
-| Generic concept API | `/api/v1/concepts/lookup/`, `/search/` (`API_SURFACE.md:396-500`) | `vocabulary_id=HemOnc` is just a filter; no regimen-specific endpoints |
-| HemOnc regimen→component graph traversal | `lot_regimens.load_hemonc_regimens_for_disease()` | **Only** used by the FL FHIR generator |
+| Regimen episodes carry HemOnc concepts | `omop_oncology/models.py` `Episode.episode_object_concept` / `episode_source_concept` | Written by `episode_service.upsert_therapy_line_episode`; `episode_source_concept` only set when currently empty |
+| FHIR round-trip of HemOnc codes | Generators emit `http://ohdsi.org/omop/HemOnc` codings; importer reads them | MM/FL/BC generators |
+| Generic concept API | `/api/v1/concepts/lookup/`, `/search/`, `/` (list) | `vocabulary_id=HemOnc` is just a filter |
+| **Concept graph API (SHIPPED, #232/#234)** | `/api/v1/concepts/{id}/ancestors/`, `/descendants/`, `/concepts/graph/` (batch) | Interactive traversal. Capped 1,000 results/source, 200 sources/request; **no version in response**; not a bulk export |
+| HemOnc regimen→component graph traversal | `lot_regimens.load_hemonc_regimens_for_disease()` | FL FHIR generator; **refresh-time component expansion now also traverses the graph** |
 
-### Key gaps (what HemOnc offers that promop does not use)
+### Key gaps
 
-1. **No component expansion** — promop never answers "which drugs are in regimen R?" at
-   runtime for the read model. There is no `therapy_component_ids` field. This is the
-   open **promop#189** contract that EXACT's OMOP mode and SoC's `_hemonc_medication_codes`
-   path are already wired to consume.
+Verdicts below are against `dev` as of 2026-07-22.
+
+1. ~~**No component expansion / no `therapy_component_ids` field.**~~ **DONE (#231/#189).**
+   Recast as a *hardening* item — the field exists but is untyped, mixes identifier
+   levels, carries no provenance, and is writable via the API. See §3.
 2. **Hardcoded regimen lookups drift from the vocabulary** — `lot_regimens.py`
-   (`MYELOMA_REGIMEN_LOOKUP`, `REGIMEN_LOOKUP`, `*_CONCEPT_IDS`) is a hand-maintained
-   frozenset map; many entries are `concept_id=None` ("not in HemOnc") even where HemOnc
-   has an equivalent (e.g. VRd → RVD concept 35806260 fails exact-frozenset match).
-   `ConceptSynonym` is loaded but unused for regimen alias resolution.
+   (`MYELOMA_REGIMEN_CONCEPT_IDS`, `REGIMEN_CONCEPT_IDS`) is a hand-maintained
+   frozenset map with `concept_id=None` entries (Isa-KRd, Dara-IRd, PAD, Dara-Kd,
+   VenVD, …). ~~VRd → RVD 35806260 fails~~ (now mapped, `lot_regimens.py:189`);
+   ~~VCd unmapped~~ (now mapped, `:201`). `ConceptSynonym` **is now loaded**
+   (`models.py:1247`) but still unused for alias resolution.
 3. **HemOnc Context concepts unused** — `Non-curative first-line therapy`,
-   `…first-line maintenance`, `…second-line`, `…subsequent-line` relationships are the
-   authoritative line-of-therapy context per regimen; SoC currently hand-maintains
-   `min/max_lines_of_therapy` per TreatmentOption and plans to source them from HemOnc
-   (`soc/docs/soc-plan/matview-treatment-rules.md`). promop does not expose contexts at all.
-4. **Outcomes are free text / 4-value SNOMED map** — per-line `*_outcome` is a string
-   (CR/PR/SD/PD/VGPR); `OUTCOME_SNOMED_CODES` (`episode_service.py:50-55`) covers only 4
-   values; VGPR/MRD/sCR uncoded. No RECIST categories beyond the boolean
-   `measurable_disease_by_recist_status`. HemOnc/NAACCR disease-status concepts unused.
-5. **Intent and discontinuation reason uncoded** — `*_intent`, `*_discontinuation_reason`
-   are free-text CharFields.
-6. **Treatment phases uncoded** — induction/consolidation/maintenance/bridging live as
-   text inside `episode_source_value`, not as concepts.
+   `…first-line maintenance`, `…second-line`, `…subsequent-line` are the
+   authoritative line-of-therapy context per regimen; promop surfaces no
+   line-of-therapy context projection (the raw Context concepts/edges are reachable
+   only via the generic concept/graph endpoints). **TRUE.**
+4. **Outcomes are free text / 4-value SNOMED map** — `OUTCOME_SNOMED_CODES`
+   (`omop_core/services/episode_service.py:48`) maps only CR/PR/SD/PD; VGPR/MRD/sCR
+   uncoded; other values fall back to `value_as_string`. **TRUE.**
+5. **Intent and discontinuation reason uncoded** — `*_intent`,
+   `*_discontinuation_reason` are free-text `CharField`s, no `_concept_id`. **TRUE.**
+6. **Treatment phases uncoded** — induction/consolidation/maintenance/bridging live
+   as text in `episode_source_value` (e.g. `KRd (induction)` for inferred LOTs;
+   `LOT-{n}` on FHIR import). **TRUE.**
 7. **Namespace pollution** — FHIR import mints synthetic `vocabulary_id='HemOnc'`
-   concepts with `FHIR-*` codes for unmatched regimen names (`views.py:2424-2470`),
-   blurring licensed Athena HemOnc vs local concepts.
-8. **No integrity or validation** — `*_therapy_id` are bare ints; nothing checks the id
-   is a standard HemOnc Regimen concept; no biosimilar handling outside the FL generator
-   (`Synth regimen of` exclusion exists only there).
-9. **Lossy 3L+ representation** — `later_therapy_ids` is a flat list; line↔concept
-   pairing beyond the first later line is not preserved in the read model.
-10. **Frontend ignores the coded fields** — no `.tsx` consumes `*_therapy_id`; manual
-    entry still produces unresolvable free text (the root cause in
-    `docs/therapy-fields-discussion.md`: 6/59 distinct therapy strings matched HemOnc).
+   concepts with `FHIR-*` codes (`views.py:2426`), and does so **before** trying to
+   match an existing real HemOnc regimen by name (so `RVD` can become `FHIR-RVD`
+   even when the genuine concept exists). **TRUE — now a blocker, not hygiene:** a
+   consumer caching promop's HemOnc cannot distinguish these from licensed content.
+8. **No integrity or validation** — `*_therapy_id` (and now `*_component_ids`) are
+   bare ints/JSON; nothing checks they are standard HemOnc concepts; component
+   fields are writable via v1 PATCH. **TRUE.**
+9. **Lossy 3L+ representation** — `later_therapy_ids` is a flat list and
+   `later_component_ids` is a single aggregate across all 3L+ lines; per-line
+   concept↔line pairing beyond the first later line is not preserved. **TRUE.**
+10. **Frontend partially consumes coded fields** — `TreatmentTab.tsx` renders
+    `*_component_ids` (read-only) but not `*_therapy_id` / regimen names. **PARTIAL.**
+
+**Gaps that the source-of-truth decision ADDS (new):**
+
+11. **No synonym API** — `concept_synonym` is modeled and loaded but not served by
+    any endpoint. A cache cannot mirror synonyms.
+12. **No release/version in any response** — `Vocabulary.vocabulary_version` exists
+    (`models.py:341`) but lookup/search/graph responses omit it; consumers cannot
+    pin or detect drift.
+13. **No bulk export / snapshot / delta / cache protocol** — only page-at-a-time
+    browsing (100/page) over a mutating DB. No manifest, checksum, release pointer,
+    ETag/`If-None-Match`, tombstones, or replacement records.
+14. **No atomic publication boundary** — `load_athena_vocabularies` can
+    `TRUNCATE`-and-reload (`:204`) with no staging/publish separation; a consumer
+    can sync a torn, in-progress database.
+15. **Concept/relationship state fields not served** — `valid_start_date`,
+    `valid_end_date`, `invalid_reason` exist on the models but are not in API
+    responses; a mirror cannot reason about validity.
 
 ---
 
@@ -73,174 +129,156 @@ degradation. This roadmap is ordered by which gaps hurt consumers most.
 
 ### EXACT (`~/exact`) — clinical-trial matching
 
-- Fetches patients via `GET /api/patient-info/{person_id}/` (**legacy frozen endpoint**)
-  with a service token (`trials/services/patient_info/ctomop_client.py`), plus direct DB
+- Has a client for `GET /api/patient-info/{person_id}/` (legacy endpoint,
+  `ctomop_client.py`; currently gated to local/DEBUG per `resolve.py`), plus direct DB
   reads for batch runs.
-- Feature flag `EXACT_OMOP_THERAPY` (default OFF) switches trial-side matching to OMOP
-  concept columns. Critical design rule: **EXACT does no patient-side crosswalk** — promop
-  must supply pre-resolved concept_ids.
-- Already wired to consume, but promop does not yet send:
-  - `therapy_component_ids` (`patient_info.py:95` — explicitly cites promop#189)
-  - per-line intent / discontinuation reason (silently dropped today)
-  - end dates per line (washout matching is approximate)
-- Regimen-identity fidelity: EXACT ADR 0001/#172 — VRd vs VRd Lite share a drug set, so
-  component-set expansion cannot distinguish them; source-asserted HemOnc regimen
-  concept_ids must be preserved end-to-end.
-- Outcomes mapped through a lossy string `OUTCOME_MAP`; refractory status recomputed
-  from text.
+- **Active OMOP cutover in flight** (#221→#222→#223): `omop_shadow_compare` to zero
+  drift, then flip `EXACT_OMOP_THERAPY` (default OFF, `settings.py:393`) on staging
+  then prod. Therapy + therapy_components already flipped via `TherapyMatchProfile`.
+- **Consumes components from its OWN local graph today**, not from the patient
+  payload: `therapy_graph.py:38` resolves patient regimen ids to EXACT-internal
+  `Therapy → TherapyComponent.omop_concept_id`. The patient-side intake (field
+  `patient_info.py:93-95`, citing promop#189; getter `get_user_therapy_component_ids`
+  at `:234`) is built and fail-closed-designed, but **has zero production callers** —
+  it is the receiving end for the deferred component-only scenario (#224).
+- **Direction (#232/#233):** stop storing HemOnc locally; pull concepts + the
+  regimen→component→class graph from promop's API and cache. This is the
+  source-of-truth decision applied consumer-side.
+- Regimen-identity fidelity (#172): VRd vs VRd Lite share a drug set, so component-set
+  expansion cannot distinguish them; source-asserted HemOnc regimen concept_ids must
+  be preserved end-to-end.
+- Outcomes mapped through a lossy string `OUTCOME_MAP`; refractory recomputed from text.
+- `#174` (vocabulary-bridge information-loss → can flip eligibility) is still **OPEN**.
 
 ### SoC (`~/soc`) — standard-of-care recommendations
 
-- Consumes promop as "CTOMOP" (same codebase; promop's Django package is literally
-  `ctomop`). Contract: `docs/patient-info-payload.md` maps 1:1 onto `PatientRecord`.
-- `SOC_OMOP_MEDICATIONS` (default **true**) already routes medication synthesis through
-  promop's `first/second_line_therapy_id` + `later_therapy_ids`.
-- `SOC_HEMONC_ARTIFACT` (default false) switches SoC from a 31-regimen hand table to a
-  separately-built 159-regimen MM artifact (Athena HemOnc 2024-12-19) — a **duplicate of
-  knowledge promop already has in its DB**, flagged as a clinical-safety divergence
-  surface (SoC #198).
-- Wants, per its payload contract and ADR 0001:
-  - Full `lines_of_therapy[]`: regimen HemOnc concept_id + component RxNorm codes +
-    best_response + discontinuation_reason + dates
-  - HemOnc Context → auto-populated `min/max_lines_of_therapy` gating bounds
-  - A versioned, promop-owned crosswalk artifact so SoC's `_hemonc_medication_codes.py`
-    becomes a compiled consumer view, not a source of truth
-  - Server-to-server auth (OAuth2 client_credentials against `/api/v1/patient-records/`)
-    to retire the legacy-endpoint dev harness
+- Consumes promop as "CTOMOP". Contract: `docs/patient-info-payload.md` (an
+  aspirational contract with documented gaps — **not** a 1:1 mirror of `PatientRecord`).
+- `SOC_OMOP_MEDICATIONS` (default **true**) routes medication synthesis through
+  `first/second_line_therapy_id` + `later_therapy_ids` (`_hemonc_medication_codes.py:186`).
+- `SOC_HEMONC_ARTIFACT` (default false) uses a separately-built 159-regimen MM
+  artifact (Athena HemOnc 2024-12-19). The legacy hand table has 31 entries per its
+  docstring (`_hemonc_medication_codes.py:40`).
+- Today the `SOC_HEMONC_ARTIFACT` path extracts component drug **names** and
+  synthesizes RxNorm medications; SoC **does not consume `therapy_component_ids`** on
+  any branch (SoC #207 *plans* local drug-class derivation — "no need to consume
+  PROMOP flags"). Under the source-of-truth decision, `SOC_HEMONC_ARTIFACT` becomes a
+  promop-sourced cache.
+- SoC still has a consumer-owned clinical mapping `_DRUG_TO_RXNORM`
+  (`_hemonc_medication_codes.py:95`) — a second curation surface to reconcile.
+- `#198` (silent-drop / fail-closed) is **CLOSED and landed** (`_unmapped_gate.py`,
+  `Verdict.UNMAPPED`). SoC #207 confirms the "promop stores but doesn't expose"
+  framing is out of date; `best_response` gap closed by promop#206.
 
 ### FHIR / mCODE interop
 
-- Generators already emit HemOnc codings (`system=http://ohdsi.org/omop/HemOnc`); importer
-  reads them. This is promop's best current interop surface and should be preserved as
-  the canonical way external systems assert regimen identity.
+- Generators emit HemOnc codings; importer reads them. Preserve as the canonical way
+  external systems assert regimen identity — but the inbound HemOnc `concept_id` is
+  trusted by id alone (not checked for vocabulary / Regimen class / standard / validity).
 
 ---
 
-## 3. Roadmap
+## 3. Roadmap (re-sequenced for the source-of-truth decision)
 
-Priority is driven by: (a) what consumers are already wired to consume, (b) clinical-safety
-impact of silent mapping failures, (c) contractual commitments (promop#189, both ADR 0001s).
+Priority is driven by: (a) promop being the release/bootstrap dependency for every
+consumer's cache, (b) clinical-safety impact of silent mapping/cache failures,
+(c) contractual commitments (promop#189, [ADR 0001](adr/0001-vocabulary-source-of-truth.md)).
 
-### P0 — Component expansion (`therapy_component_ids`)
+### P0 (new) — Versioned vocabulary release + sync/cache contract  ⟵ *the spine*
 
-**Unblocks:** EXACT OMOP-mode component/class matching ("no prior anti-CD38", "must have
-had a proteasome inhibitor"); SoC Stage 3 medication rules for novel agents.
+**Unblocks:** the source-of-truth decision. Turns promop from "the most central
+mutable database" into a distributable, cacheable vocabulary authority.
 
-- Expand each line's HemOnc regimen concept → component drug concept_ids via
-  `concept_relationship` (`Has cytotoxic chemo` / `Has targeted therapy` /
-  `Has immunotherapy` / `Has steroid tx` / `Has hormonal tx`) at `refresh_patient_record`
-  time.
-- Add `therapy_component_ids` (and per-line `first/second/later_therapy_component_ids`)
-  to `PatientRecord`, serializer, legacy payload, and `PatientInfo` TS type. Full
-  new-attribute checklist per CLAUDE.md applies (model, migration, FHIR loader, TS, UI).
-- Include drug-class ancestor expansion (HemOnc class hierarchy) or a documented
-  consumer-side recipe — EXACT reverse-maps components→CB categories and needs complete
-  component lists.
-- Also fixes SoC's reliance on its duplicated 31-regimen table for components.
+- **Immutable, addressable releases:** a release ID + per-vocabulary versions +
+  schema version + scope + build timestamp + checksums, published as a manifest.
+- **Bulk versioned snapshot + release-to-release deltas** with tombstones and
+  replacement records. Cover `concept`, `concept_synonym`, `concept_relationship`,
+  `concept_ancestor`, `drug_strength`, `source_to_concept_map` (not currently loaded),
+  vocabulary metadata — including `valid_start_date`/`valid_end_date`/`invalid_reason`.
+- **Serve the missing surfaces (gaps 11–15):** synonym endpoint; `vocabulary_version`
+  in every concept/graph/lookup/search response; a latest-release pointer with
+  ETag/`If-None-Match`; version pinning.
+- **Atomic publication:** stage → validate → publish; never expose a torn
+  `TRUNCATE`-in-progress DB (fix `load_athena_vocabularies` publish boundary).
+- **Corpus boundary:** the loader currently scopes concepts to selected
+  vocabularies/classes and ancestors to HemOnc→HemOnc. Either widen it to the
+  declared "all vocabulary data" or narrow the decision's scope in the ADR — do not
+  leave "all" aspirational.
+- **Consumer cache protocol:** last-known-good retention, max staleness, rollback,
+  bootstrap behavior, and the clinical fail-safe when no valid cache exists.
 
-### P1 — Versioned, promop-owned crosswalk artifact
+### P0b (new) — Release integrity & namespace hygiene  ⟵ *prerequisite, not hygiene*
 
-**Unblocks:** both ADR 0001 implementations; kills the three-way duplication of regimen
-knowledge (promop `lot_regimens.py`, SoC `hemonc_mm_artifact.json`, EXACT
-`therapy_omop_mapping.csv`).
+**Unblocks:** publishing HemOnc as an authority at all.
 
-- Management command that compiles, from the live Athena-loaded vocabulary:
-  regimen concept_id → components (with relationship type) → drug-class ancestors →
-  RxNorm `Maps to` anchors, plus per-regimen HemOnc Contexts.
-- Version-pinned to the Athena HemOnc release date; emitted as JSON with a schema
-  version; fail-closed semantics documented (`Maps to` / `Is a` / `Subsumes` / lossy /
-  no-map) so consumers never silently strengthen eligibility.
-- Use it to **reconcile and close known mapping gaps**: EXACT's 47
-  `needs_review`/`no_omop` CSV rows; promop's `concept_id=None` entries
-  (Isa-KRd, Dara-Kd, VenVD, VCd, VPd, …).
-- Long-term: replace `lot_regimens.py` hardcoded dicts with this artifact (or direct
-  graph queries), eliminating drift at the source.
+- **Stop minting `FHIR-*` pseudo-HemOnc concepts** (gap 7); match real HemOnc by name
+  first; quarantine unmatched regimens under a separate local vocabulary id and
+  surface them in a mapping-gap report. A cache must never ingest fake HemOnc rows.
+- **Validate inbound HemOnc concept_ids** (FHIR import) for vocabulary / Regimen
+  class / standard / validity before persisting.
+- **Make derived read-model fields read-only** (`*_component_ids`, `*_therapy_id`)
+  and validated; today they are writable via v1 PATCH (`serializers.py:195`,
+  `tests.py:939`). Attach provenance (asserted vs inferred; release id).
 
-### P2 — Structured per-line therapy history in the API
+### P1 — Structured per-line therapy history in the API
 
-**Unblocks:** SoC payload contract (`lines_of_therapy[]`); EXACT washout precision,
-intent/discontinuation matching; retires SoC's free-text parsing path
-(`_medication_codes.py`) and its duplicated refractory derivation.
+**Unblocks:** SoC payload contract; EXACT washout precision, intent/discontinuation;
+the durable clinical contract that the aggregate `later_component_ids` cannot provide.
 
 - Emit `lines_of_therapy[]` from `Episode`/`EpisodeEvent`/`AILineOfTherapySummary`:
-  per line — HemOnc regimen concept_id (+ source-asserted vs inferred flag), component
-  concept_ids, start/end dates, outcome, intent, discontinuation reason, phase.
-- Preserve **source-asserted regimen identity** end-to-end (FHIR HemOnc coding →
-  `episode_source_concept` → payload) so same-drug-set regimens (VRd vs VRd Lite)
-  stay distinguishable — never re-derive from drug sets when source asserted.
-- Serve on `/api/v1/patient-records/` only (legacy path stays frozen); add a documented
-  server-to-server auth path (OAuth2 client_credentials) for SoC/EXACT backends.
-- Fix 3L+ lossiness: per-line concept_ids inside `lines_of_therapy[]` supersede the
-  flat `later_therapy_ids` list (kept for backwards compat).
+  per line — HemOnc regimen concept_id (+ **source-asserted vs inferred flag**),
+  component concept_ids **typed by identifier level** (HemOnc component vs RxNorm
+  ingredient vs exposure), start/end dates, outcome, intent, discontinuation, phase.
+- Preserve source-asserted regimen identity end-to-end (never re-derive from drug
+  sets when asserted). Note the `episode_source_concept`-only-if-empty write path
+  (`episode_service.py:135`) can permanently block a corrected later assertion — fix.
+- Serve on `/api/v1/patient-records/`; add server-to-server auth for consumer backends.
+- Supersede the flat `later_therapy_ids` (kept for backwards compat).
 
-### P3 — Regimen resolution from the live HemOnc graph
-
-**Unblocks:** everything above at higher coverage; ends manual lookup maintenance.
+### P2 — Regimen resolution from the live HemOnc graph
 
 - Replace exact-frozenset matching (`get_regimen_concept_id`) with graph-based
-  resolution: component-set containment against HemOnc regimens + `ConceptSynonym`
-  alias resolution + biosimilar exclusion (`Synth regimen of`).
-- Extend HemOnc class-based drug classification beyond MM/CAR-T/steroid to FL/BC/CLL
-  (`HEMONC_*_CLASSES` generalization), retiring name-string fallbacks.
-- Generalize `load_hemonc_regimens_for_disease()` (currently FL-only) into a shared
-  service used by MM/BC/CLL generators and by a new
-  `GET /api/v1/regimens/?condition_concept_id=` endpoint (disease→indicated regimens
-  via `Curr adult indic for`, with components inline).
-- Stop minting `FHIR-*` pseudo-HemOnc concepts on import; quarantine unmatched regimens
-  under a separate local vocabulary id and surface them in a mapping-gap report instead.
+  resolution that **returns ambiguous/unresolved rather than picking the first
+  candidate**, uses the now-loaded `ConceptSynonym` for aliases (with candidate
+  ranking + source-assertion precedence), and excludes biosimilars (`Synth regimen of`).
+- Generalize `load_hemonc_regimens_for_disease()` into a shared service; optionally a
+  `GET /api/v1/regimens/?condition_concept_id=` endpoint.
+- This improves what promop *publishes* in P0/P1 and stops bad data at the source.
 
-### P4 — HemOnc Contexts for line-of-therapy semantics
+### P3 — HemOnc Contexts for line-of-therapy semantics
 
-**Unblocks:** SoC auto-populated `min/max_lines_of_therapy`; promop phase labels as
-first-class data.
+- Surface HemOnc Context concepts on regimen endpoints and in the release (P0).
+- Promote episode phase out of `episode_source_value` text into a coded field.
+- Note: Context describes a regimen's *use context*, not the patient's chronological
+  LOT — treat as vocabulary evidence, never as a replacement for observed dates.
 
-- Surface HemOnc Context concepts (`Non-curative first-line therapy`, `…first-line
-  maintenance`, `…second-line`, `…subsequent-line`) on regimen endpoints and in the
-  crosswalk artifact (P1).
-- Promote episode phase (induction/consolidation/maintenance/bridging) out of
-  `episode_source_value` text into a coded field (episode modifier or Observation),
-  validated against HemOnc contexts where a source assertion exists.
-- Feed `therapy_lines_count` and LOT gating from the same coded source SoC's Stage 2
-  already trusts.
+### P4 — Coded treatment intent and discontinuation reason
 
-### P5 — Coded treatment intent and discontinuation reason
+- Add `*_intent_concept_id`, `*_discontinuation_reason_concept_id` (SNOMED/OMOP
+  oncology-extension); keep text for display; include in P1 `lines_of_therapy[]`.
 
-**Unblocks:** EXACT criteria families that cannot be matched today ("adjuvant setting
-only", "progressed on, not discontinued for toxicity").
+### P5 — Coded treatment outcomes (deliberately lower priority)
 
-- Add coded companions to `*_intent` and `*_discontinuation_reason`
-  (`*_intent_concept_id`, `*_discontinuation_reason_concept_id`) mapped to
-  SNOMED/OMOP oncology-extension concepts; keep text for display.
-- Include both in the P2 `lines_of_therapy[]` payload.
+- Per-disease value set: RECIST 1.1 (BC/MCL), IMWG (MM incl. sCR/VGPR/MRD), Lugano
+  (FL/DLBCL), iwCLL (CLL). Extend `OUTCOME_SNOMED_CODES` (or a `VocabularyLookup` +
+  concept map); emit in the FHIR `therapy-outcome` extension. Consumers currently
+  tolerate the string values, so blast radius is bounded.
 
-### P6 — Coded treatment outcomes (deliberately lower priority)
+### P6 — Component compatibility projection (already shipped)  ⟵ *demoted*
 
-**Unblocks:** removal of EXACT's lossy `OUTCOME_MAP`; SoC refractory rules without
-free-text parsing; future outcomes-cohort work (SoC Stage 5a predicted PFS/OS).
+- The shipped `therapy_component_ids` / `*_component_ids` fields remain as a
+  convenience so consumers avoid duplicating expansion. **They are a projection of the
+  P0 release, not the contract.** Hardening lives in P0b. A consumer with the released
+  graph can derive components itself; this field cannot substitute for a cacheable
+  source. Keep it typed, provenance-tagged, and read-only.
 
-User note: this is the "list of possible treatment outcomes" example — valuable but
-**low priority** relative to P0–P5 because consumers currently tolerate the string
-values and the mapping risk is bounded to the refractory/outcome criteria families.
+### P7 — Hardening and hygiene (continuous)
 
-- Define a per-disease outcome value set aligned to the disease-appropriate criteria:
-  RECIST 1.1 (BC/MCL), IMWG (MM — incl. sCR/VGPR/MRD), Lugano (FL/DLBCL), iwCLL (CLL).
-- Extend `OUTCOME_SNOMED_CODES` (or move to a `VocabularyLookup` + concept map) to cover
-  VGPR/sCR/MRD; store `value_as_concept_id` on `LOT-{n}-outcome` Observations.
-- Emit coded outcomes in the FHIR generator's `therapy-outcome` extension
-  (valueCodeableConcept alongside valueString) and parse on import.
-
-### P7 — Hardening and hygiene (continuous / as touched)
-
-- FK or validation for `*_therapy_id` fields (must be a standard HemOnc `Regimen`
-  concept); data-quality check command reporting patients whose therapy text has no
-  concept resolution.
-- Frontend regimen picker validated against `/api/v1/regimens/` (stops new free-text
-  entropy at the source); display coded regimen names in the UI tabs.
-- Full ARTEMIS compliance (TSW sequence alignment, washout windows, observation-period
-  filtering) — explicitly out of scope of the current LOT-inference spec; revisit only
-  if a consumer needs it.
-- Migration path for EXACT/SoC off the legacy `/api/patient-info/` endpoint before its
-  sunset (2026-09-01) — P2's v1 structured payload is the landing zone.
+- Data-quality check reporting patients whose therapy text has no concept resolution.
+- Frontend regimen picker validated against the vocabulary; display coded names.
+- ARTEMIS compliance — out of scope unless a consumer needs it.
+- **Migrate EXACT/SoC off legacy `/api/patient-info/` before sunset (2026-09-01)** —
+  P1's v1 structured payload is the landing zone; both consumers are still on legacy.
 
 ---
 
@@ -248,24 +286,41 @@ values and the mapping risk is bounded to the refractory/outcome criteria famili
 
 | Phase | Deliverable | Primary beneficiary | Why this rank |
 |---|---|---|---|
-| P0 | `therapy_component_ids` component expansion | EXACT (promop#189), SoC | Contracted; consumers already wired; highest silent-failure risk |
-| P1 | Versioned crosswalk artifact | EXACT + SoC (both ADR 0001s) | Governance root; kills 3-way duplication (SoC #198 safety surface) |
-| P2 | Structured `lines_of_therapy[]` on v1 API | SoC contract, EXACT washout/intent | Retires text parsing; preserves regimen identity (#172) |
-| P3 | Graph-based regimen resolution + regimens API | All | Raises coverage of P0–P2; ends lookup drift |
-| P4 | HemOnc Contexts → LOT semantics | SoC Stage 2 gating | Authoritative line-context data promop already stores |
-| P5 | Coded intent / discontinuation | EXACT new criteria families | Data promop already captures as text |
-| P6 | Coded outcomes (RECIST/IMWG/Lugano/iwCLL) | EXACT outcome map, SoC refractory | Useful but bounded blast radius; deprioritized per user |
-| P7 | Hardening, UI picker, ARTEMIS, legacy sunset | All | Continuous hygiene |
+| **P0** | Versioned vocab release + sync/cache contract | All consumers' caches | The source-of-truth decision requires it; nothing downstream is safe without it |
+| **P0b** | Release integrity + namespace hygiene + read-only/validated fields | All | Prerequisite to publishing HemOnc as authority (cache-poisoning + provenance) |
+| **P1** | Structured `lines_of_therapy[]` on v1 API | SoC contract, EXACT washout/intent | Durable clinical contract; aggregate component fields can't answer per-line questions |
+| **P2** | Graph-based regimen resolution (ambiguity-safe) | All | Raises coverage; ends lookup drift; feeds P0/P1 |
+| **P3** | HemOnc Contexts → LOT semantics | SoC Stage 2 gating | Authoritative line-context data |
+| **P4** | Coded intent / discontinuation | EXACT criteria families | Data promop already captures as text |
+| **P5** | Coded outcomes (RECIST/IMWG/Lugano/iwCLL) | EXACT outcome map, SoC refractory | Bounded blast radius; deprioritized |
+| **P6** | Component projection (shipped) | EXACT (deferred #224), SoC (opt) | Already done; convenience over the P0 release, not the contract |
+| **P7** | Hardening, UI picker, ARTEMIS, legacy sunset | All | Continuous |
 
-## 5. Cross-references
+## 5. Open governance items
 
-- promop: `docs/concept-mapping.md`, `docs/therapy-fields-discussion.md`,
-  `docs/superpowers/specs/2026-05-16-lot-inference-design.md`,
-  `omop_core/services/lot_regimens.py`, `omop_core/services/lot_inference_service.py`,
-  `omop_oncology/models.py`, `API_SURFACE.md`
-- EXACT: `docs/adr/0001-cross-vocabulary-mapping.md`,
-  `docs/omop/mapping/therapy_omop_mapping.csv`,
-  `trials/services/patient_info/ctomop_adapter.py`, issues #172/#174/#189(promop)
-- SoC: `docs/adr/0001-cross-vocabulary-mapping.md`, `docs/patient-info-payload.md`,
-  `docs/soc-plan/matview-treatment-rules.md`, `core/pipeline/_hemonc_medication_codes.py`,
-  `scripts/build_hemonc_artifact.py`, issues #138/#198
+- **The `cb_code ↔ concept_id` CB exception is undocumented.** It is `cb_code`-keyed
+  (`TherapyOmopMapping`, `exact/trials/models.py:277`), tied to CB category semantics
+  (EXACT reverse-maps component concept_ids → CB categories at runtime), and therefore
+  **cannot be retired by "full HemOnc coverage" alone** — the CB criteria must be
+  re-authored. Document owner, exact key, version, expiry, and retirement gate.
+- **Cache-model risks** (new): staleness as a clinical input (record cache release +
+  age per match); cross-consumer version skew; promop as an update/bootstrap SPOF;
+  unsafe bare-`concept_id` migration on Athena reload (a delta must classify each id
+  retained/invalidated/replaced/ambiguous/unmapped — never rewrite blindly); ontology
+  drift changing cached expansions without any patient id changing.
+- **This roadmap embeds architectural decisions** (fail-closed semantics,
+  source-asserted identity, namespace policy, id typing) that belong in the ADR, not a
+  plan. See [ADR 0001](adr/0001-vocabulary-source-of-truth.md).
+
+## 6. Cross-references
+
+- promop: `docs/adr/0001-vocabulary-source-of-truth.md`, `docs/concept-mapping.md`,
+  `docs/therapy-fields-discussion.md`,
+  `omop_core/services/lot_regimens.py`, `omop_core/services/patient_record_service.py`,
+  `omop_core/services/episode_service.py`, `patient_portal/api/v1_urls.py`, `API_SURFACE.md`
+- EXACT: `docs/adr/0001-cross-vocabulary-mapping.md` (**superseded** by promop ADR 0001),
+  `docs/omop/mapping/therapy_omop_mapping.csv`, `trials/services/omop/therapy_graph.py`,
+  issues #172/#174/#224/#232/#233(exact), #189(promop)
+- SoC: `docs/adr/0001-cross-vocabulary-mapping.md` (**superseded**),
+  `docs/patient-info-payload.md`, `core/pipeline/_hemonc_medication_codes.py`,
+  `scripts/build_hemonc_artifact.py`, issues #198/#207(soc)
