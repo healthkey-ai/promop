@@ -3874,11 +3874,15 @@ def concept_lookup(request):
 
     Query params (repeatable):
         lookup=VOCAB_ID:concept_code
+        include_versions=1   (optional) — also return a top-level
+                             `_vocabulary_versions` map {vocab_id: version}
 
     Response 200:
         { "LOINC": { "2160-0": 3013682, "2345-7": null }, "SNOMED": { ... } }
 
     Unknown codes return null; healthkey-etl substitutes concept_id=0 downstream.
+    The default `{vocab: {code: id}}` shape is frozen; `include_versions=1` is
+    additive so consumers can pin a vocabulary release / detect drift (promop#240).
     """
     from omop_core.models import Concept as OmopConcept
 
@@ -3919,6 +3923,16 @@ def concept_lookup(request):
         if v in result and c in result[v]:
             result[v][c] = cid
 
+    # Opt-in: add a top-level `_vocabulary_versions` map so consumers can pin a
+    # release / detect drift (promop#240). Off by default to keep the frozen
+    # `{vocab: {code: id}}` shape that healthkey-etl reads.
+    if request.query_params.get('include_versions') in ('1', 'true', 'True', 'yes') \
+            and '_vocabulary_versions' not in result:
+        # Guard: never clobber a user-requested vocabulary bucket that happens to
+        # be literally named `_vocabulary_versions` (not a real OMOP vocab id).
+        version_map = _vocab_version_map()
+        result['_vocabulary_versions'] = {v: version_map.get(v) for v in by_vocab}
+
     return Response(result)
 
 
@@ -3948,12 +3962,21 @@ def _concept_graph_filters(request):
     return relationship_ids, vocabulary_ids, concept_class_ids, max_levels
 
 
-def _serialize_concept_graph_node(concept, **extra):
+def _vocab_version_map():
+    """``{vocabulary_id: vocabulary_version}`` for every vocabulary (small table,
+    one query). Lets concept responses carry the release/version each concept
+    came from, so consumers can pin a release and detect drift (promop#240)."""
+    from omop_core.models import Vocabulary
+    return dict(Vocabulary.objects.values_list('vocabulary_id', 'vocabulary_version'))
+
+
+def _serialize_concept_graph_node(concept, versions=None, **extra):
     payload = {
         'concept_id': concept.concept_id,
         'concept_name': concept.concept_name,
         'concept_code': concept.concept_code,
         'vocabulary_id': concept.vocabulary_id,
+        'vocabulary_version': (versions or {}).get(concept.vocabulary_id),
         'concept_class_id': concept.concept_class_id,
         'domain_id': concept.domain_id,
         'standard_concept': concept.standard_concept,
@@ -3978,6 +4001,7 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
     """
     grouped = {source_id: [] for source_id in source_ids}
     truncated = set()
+    versions = _vocab_version_map()
 
     def _append(source_id, node):
         bucket = grouped[source_id]
@@ -4011,6 +4035,7 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
                 'concept_2_id',
                 lambda edge: _serialize_concept_graph_node(
                     edge.concept_1,
+                    versions=versions,
                     relationship_id=edge.relationship_id,
                     min_levels_of_separation=None,
                     max_levels_of_separation=None,
@@ -4027,6 +4052,7 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
                 'concept_1_id',
                 lambda edge: _serialize_concept_graph_node(
                     edge.concept_2,
+                    versions=versions,
                     relationship_id=edge.relationship_id,
                     min_levels_of_separation=None,
                     max_levels_of_separation=None,
@@ -4050,6 +4076,7 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
             'descendant_concept_id',
             lambda edge: _serialize_concept_graph_node(
                 edge.ancestor_concept,
+                versions=versions,
                 relationship_id=None,
                 min_levels_of_separation=edge.min_levels_of_separation,
                 max_levels_of_separation=edge.max_levels_of_separation,
@@ -4070,6 +4097,7 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
             'ancestor_concept_id',
             lambda edge: _serialize_concept_graph_node(
                 edge.descendant_concept,
+                versions=versions,
                 relationship_id=None,
                 min_levels_of_separation=edge.min_levels_of_separation,
                 max_levels_of_separation=edge.max_levels_of_separation,
@@ -4200,11 +4228,12 @@ def _apply_concept_filters(queryset, query_params):
     return queryset
 
 
-def _serialize_concept(concept):
+def _serialize_concept(concept, versions=None):
     return {
         'concept_id': concept.concept_id,
         'concept_name': concept.concept_name,
         'vocabulary_id': concept.vocabulary_id,
+        'vocabulary_version': (versions or {}).get(concept.vocabulary_id),
         'concept_code': concept.concept_code,
         'domain_id': concept.domain_id,
         'concept_class_id': concept.concept_class_id,
@@ -4218,7 +4247,8 @@ def _paginated_concept_response(queryset, request):
     # the matched set on every page request.
     paginator = ConceptPagination()
     page = paginator.paginate_queryset(queryset.order_by('concept_id'), request)
-    return paginator.get_paginated_response([_serialize_concept(c) for c in page])
+    versions = _vocab_version_map()
+    return paginator.get_paginated_response([_serialize_concept(c, versions) for c in page])
 
 
 @api_view(['GET'])
