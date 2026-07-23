@@ -1,8 +1,9 @@
 # HemOnc Support Roadmap
 
-**Status:** Planning document — **revised 2026-07-22** (see Revision note)
+**Status:** Planning document — **revised 2026-07-24** (see Revision notes)
 **Original date:** 2026-07-21
 **Audience:** promop maintainers; consumers: EXACT (`~/exact`), SoC (`~/soc`), ht-phr federation host
+**Tracking:** implementation is tracked in **[#236](https://github.com/healthkey-ai/promop/issues/236)** (the P0/P0b umbrella; the earlier #238 epic was consolidated into it). Remaining P1–P7 items are individual issues linked from #236.
 
 This document lays out a prioritized roadmap for making promop's use of the HemOnc
 vocabulary complete enough that downstream consumers (EXACT trial matching, SoC
@@ -26,6 +27,36 @@ The implication of that decision is stronger than the original framing: every
 vocabulary gap in promop no longer just degrades one consumer at request time — it
 degrades **every** consumer's cache. promop is now on the release/bootstrap/update
 path for the whole platform's coded therapy data.
+
+---
+
+## Update (2026-07-24) — what has landed
+
+A large slice of **P0b (integrity / hygiene)** and the provenance/typing work shipped to
+`dev` (PR #256 for #236, migrations `0117_concept_source_...` + `0118_seed_hk_vocabularies_remap_fhir_concepts`, plus PR #260):
+
+- ✅ **Stop minting fake HemOnc concepts** — FHIR import now validates an inbound HemOnc
+  `concept_id` (`validate_hemonc_regimen`), matches a genuine regimen by name/synonym
+  (`match_hemonc_regimen_by_name`), and otherwise **quarantines** the name under `HK-*`
+  vocabularies (never under `HemOnc`), recording it in a new `RegimenMappingGap` model.
+  The **last-resort arbitrary-Drug pick was replaced** by HK-* quarantine (a name-based
+  `Drug` lookup for plain drug names still runs before quarantine). (was gap 7 / P0b)
+- ✅ **`concept.source` column** — every vocabulary row is tagged licensed-vs-HK-local. (was #259)
+- ✅ **`patientrecord.therapy_ids_provenance`** + the regimen/component fields are now
+  **read-only** in the serializer (with `_ignored_ro` handling on PATCH). (was #248)
+- ✅ **`vocabulary_version` in concept responses** (graph / search / list; opt-in on
+  `lookup`). (was #240, PR #260)
+- 🔜 **Concept synonym API** (`/concepts/{id}/synonyms/`, `/concepts/synonyms/?q=`) with a
+  functional trigram index — in review (PR #261, #239).
+- ⏭️ **Follow-up found in review:** `concepts/search/`'s `concept_name` trigram index is
+  ineffective for Django `icontains` (raw-column vs `UPPER()` mismatch) — #262.
+
+**Tracker note:** the parallel #238 epic was **closed and consolidated into #236**. The
+remaining open work is the P0 release/sync-cache contract (release manifest, snapshot +
+delta, ETag/version-pin, atomic publication, corpus boundary, `source_to_concept_map`) and
+P1–P7 (structured `lines_of_therapy[]`, graph-based resolution, contexts, coded
+intent/discontinuation, coded outcomes, ADR ratification). The consumer-side pull+cache
+adoption (EXACT/SoC) and the temporary `cb_code ↔ concept_id` exception are unchanged.
 
 ---
 
@@ -314,7 +345,8 @@ the durable clinical contract that the aggregate `later_component_ids` cannot pr
 
 ## 6. Cross-references
 
-- promop: `docs/adr/0001-vocabulary-source-of-truth.md`, `docs/concept-mapping.md`,
+- promop: **[#236](https://github.com/healthkey-ai/promop/issues/236)** (implementation tracker),
+  `docs/adr/0001-vocabulary-source-of-truth.md`, `docs/concept-mapping.md`,
   `docs/therapy-fields-discussion.md`,
   `omop_core/services/lot_regimens.py`, `omop_core/services/patient_record_service.py`,
   `omop_core/services/episode_service.py`, `patient_portal/api/v1_urls.py`, `API_SURFACE.md`
