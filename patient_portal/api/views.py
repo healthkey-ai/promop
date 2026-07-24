@@ -14,11 +14,11 @@ from django.utils import timezone
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from omop_core.models import (
-    Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
+    Person, PatientRecord, Concept, ConceptClass, ConceptSynonym, Domain, ProvenanceRecord, Vocabulary,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
     PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
-    Relationship, ConceptRelationship, ConceptAncestor,
+    Relationship, ConceptRelationship, ConceptAncestor, VocabRelease,
     # Controlled vocabulary lookup models
     Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
     ProgesteroneReceptorStatus, Her2Status, HrStatus, HrdStatus,
@@ -49,6 +49,7 @@ from omop_core.services.regimen_resolution import (
     match_hemonc_regimen_by_name,
     validate_hemonc_regimen,
 )
+from omop_core.services.vocab_release import current_release, current_release_id
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
 from omop_core.services.access import get_visible_orgs, build_trusting_map
 from datetime import datetime, timedelta
@@ -3878,7 +3879,9 @@ def concept_lookup(request):
         if v in result and c in result[v]:
             result[v][c] = cid
 
-    return Response(result)
+    # Header-only release stamp: the {vocab: {code: id}} body shape is a frozen
+    # wire format consumed by healthkey-etl — no vocabulary_release body key.
+    return _stamp_release(Response(result))
 
 
 # Caps for concept graph traversal: bound any single source concept's result
@@ -4055,13 +4058,14 @@ def _concept_graph_single_response(request, concept_id, direction):
         max_levels,
     )
     results = grouped[concept_id]
-    return Response({
+    body = {
         'concept_id': concept_id,
         'direction': direction,
         'count': len(results),
         'truncated': concept_id in truncated,
         'results': results,
-    })
+    }
+    return _stamp_release(Response(body), body=body)
 
 
 @api_view(['GET'])
@@ -4120,14 +4124,15 @@ def concept_graph_batch(request):
         concept_class_ids,
         max_levels,
     )
-    return Response({
+    body = {
         'direction': direction,
         'results': {
             str(concept_id): grouped.get(concept_id, [])
             for concept_id in concept_ids
         },
         'truncated': sorted(truncated),
-    })
+    }
+    return _stamp_release(Response(body), body=body)
 
 
 # =============================================================================
@@ -4168,16 +4173,41 @@ def _serialize_concept(concept):
         'domain_id': concept.domain_id,
         'concept_class_id': concept.concept_class_id,
         'standard_concept': concept.standard_concept,
+        # Version stamping (issue #236 gap 12): consumers cache these rows and
+        # need the validity window + source vocabulary version to reason about
+        # staleness.  `vocabulary` must be select_related'd by the caller.
+        'valid_start_date': concept.valid_start_date,
+        'valid_end_date': concept.valid_end_date,
+        'invalid_reason': concept.invalid_reason,
+        'vocabulary_version': concept.vocabulary.vocabulary_version if concept.vocabulary else None,
     }
+
+
+def _stamp_release(response, body=None):
+    """Attach the current published vocabulary release to a concept-endpoint
+    response (issue #236): the ``X-Vocabulary-Release`` header on every
+    response, and a ``vocabulary_release`` key merged into *body* when a
+    mutable dict is supplied.  A no-op when nothing has been published yet.
+    """
+    release_id = current_release_id()
+    if release_id is not None:
+        response['X-Vocabulary-Release'] = release_id
+        if body is not None:
+            body['vocabulary_release'] = release_id
+    return response
 
 
 def _paginated_concept_response(queryset, request):
     # Order by the pk: concept_name has only a GIN trigram index (usable for
     # icontains, not ORDER BY), so sorting by name would force a full sort of
-    # the matched set on every page request.
+    # the matched set on every page request.  select_related('vocabulary') —
+    # _serialize_concept emits vocabulary_version, one join beats N+1.
     paginator = ConceptPagination()
-    page = paginator.paginate_queryset(queryset.order_by('concept_id'), request)
-    return paginator.get_paginated_response([_serialize_concept(c) for c in page])
+    page = paginator.paginate_queryset(
+        queryset.order_by('concept_id').select_related('vocabulary'), request,
+    )
+    response = paginator.get_paginated_response([_serialize_concept(c) for c in page])
+    return _stamp_release(response, body=response.data)
 
 
 @api_view(['GET'])
@@ -4237,6 +4267,105 @@ def concept_list(request):
 
     queryset = _apply_concept_filters(Concept.objects.all(), request.query_params)
     return _paginated_concept_response(queryset, request)
+
+
+# =============================================================================
+# Vocabulary release manifests + concept synonyms (issue #236, ADR 0001)
+# GET /api/v1/vocab/releases/                   — list published manifests
+# GET /api/v1/vocab/releases/latest/            — current manifest (ETag)
+# GET /api/v1/vocab/releases/<release_id>/      — manifest detail
+# GET /api/v1/concepts/<concept_id>/synonyms/   — paginated synonyms
+# =============================================================================
+
+
+def _serialize_synonym(synonym):
+    return {
+        'concept_id': synonym.concept_id,
+        'concept_synonym_name': synonym.concept_synonym_name,
+        'language_concept_id': synonym.language_concept_id,
+    }
+
+
+def _serialize_release(release):
+    return {
+        'release_id': release.release_id,
+        'status': release.status,
+        'schema_version': release.schema_version,
+        'corpus_scope': release.corpus_scope,
+        'vocabulary_versions': release.vocabulary_versions,
+        'table_checksums': release.table_checksums,
+        'row_counts': release.row_counts,
+        'build_started_at': release.build_started_at,
+        'published_at': release.published_at,
+        'notes': release.notes,
+    }
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def vocab_release_list(request):
+    """List published vocabulary release manifests, newest first (paginated)."""
+    releases = VocabRelease.objects.filter(
+        status=VocabRelease.STATUS_PUBLISHED,
+    ).order_by('-published_at', '-release_id')
+    paginator = ConceptPagination()
+    page = paginator.paginate_queryset(releases, request)
+    return paginator.get_paginated_response([_serialize_release(r) for r in page])
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def vocab_release_latest(request):
+    """The current published release manifest — the one consumers pin to.
+
+    ETag is the quoted release_id; poll with If-None-Match and a matching
+    tag gets a 304 (gap 13: cheap staleness check for consumer caches).
+    """
+    release = current_release()
+    if release is None:
+        return Response(
+            {'detail': 'No vocabulary release has been published.'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    etag = f'"{release.release_id}"'
+    if_none_match = request.META.get('HTTP_IF_NONE_MATCH', '')
+    client_tags = {tag.strip() for tag in if_none_match.split(',') if tag.strip()}
+    if '*' in client_tags or etag in client_tags:
+        return Response(status=status.HTTP_304_NOT_MODIFIED, headers={'ETag': etag})
+    body = _serialize_release(release)
+    return _stamp_release(Response(body, headers={'ETag': etag}), body=body)
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def vocab_release_detail(request, release_id):
+    """Manifest for one release.  No X-Vocabulary-Release header here — that
+    header means "current release" and the requested release may be older."""
+    release = VocabRelease.objects.filter(release_id=release_id).first()
+    if release is None:
+        return Response(
+            {'detail': 'Release not found.'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    return Response(_serialize_release(release))
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_synonyms(request, concept_id):
+    """Paginated synonyms for one concept, from concept_synonym (gap 11)."""
+    if not Concept.objects.filter(concept_id=concept_id).exists():
+        return Response(
+            {'detail': 'Concept not found.'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    paginator = ConceptPagination()
+    page = paginator.paginate_queryset(
+        ConceptSynonym.objects.filter(concept_id=concept_id).order_by('id'),
+        request,
+    )
+    response = paginator.get_paginated_response([_serialize_synonym(s) for s in page])
+    return _stamp_release(response, body=response.data)
 
 
 # =============================================================================

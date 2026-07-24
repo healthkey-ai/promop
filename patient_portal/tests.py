@@ -6862,6 +6862,11 @@ class ConceptSearchTest(_ConceptFixtureBase):
             'domain_id': 'Condition',
             'concept_class_id': 'Clinical Finding',
             'standard_concept': 'S',
+            # Version-stamping fields (issue #236 gap 12)
+            'valid_start_date': '1970-01-01',
+            'valid_end_date': '2099-12-31',
+            'invalid_reason': None,
+            'vocabulary_version': '',
         })
 
     def test_search_filtered_by_vocabulary(self):
@@ -7020,6 +7025,267 @@ class ConceptListTest(_ConceptFixtureBase):
             HTTP_AUTHORIZATION=f'Bearer {self.empty_scope_token.token}',
         )
         self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary release manifests + version stamping (issue #236, ADR 0001)
+# ---------------------------------------------------------------------------
+
+class VocabReleaseApiTest(_ConceptFixtureBase):
+    """GET /api/v1/vocab/releases/ endpoints."""
+
+    URL_LIST = '/api/v1/vocab/releases/'
+    URL_LATEST = '/api/v1/vocab/releases/latest/'
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from django.utils import timezone as tz
+        import datetime
+        from omop_core.models import VocabRelease
+
+        cls.older = VocabRelease.objects.create(
+            release_id='rel-20200101-aaaaaa',
+            status=VocabRelease.STATUS_PUBLISHED,
+            corpus_scope={'loaded_vocabularies': ['SNOMED']},
+            vocabulary_versions={'SNOMED': 'v1'},
+            table_checksums={'concept': 'abc123'},
+            row_counts={'concept': 1},
+            published_at=tz.now() - datetime.timedelta(days=30),
+        )
+        cls.newer = VocabRelease.objects.create(
+            release_id='rel-20210101-bbbbbb',
+            status=VocabRelease.STATUS_PUBLISHED,
+            published_at=tz.now(),
+        )
+        cls.staging = VocabRelease.objects.create(
+            release_id='rel-20220101-cccccc',
+            status=VocabRelease.STATUS_STAGING,
+        )
+
+    def test_list_returns_published_only_newest_first(self):
+        resp = self.client.get(self.URL_LIST, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = [r['release_id'] for r in resp.json()['results']]
+        self.assertEqual(ids, [self.newer.release_id, self.older.release_id])
+
+    def test_list_manifest_shape(self):
+        resp = self.client.get(self.URL_LIST, **self._auth())
+        manifest = next(
+            r for r in resp.json()['results'] if r['release_id'] == self.older.release_id
+        )
+        self.assertEqual(manifest['status'], 'published')
+        self.assertEqual(manifest['schema_version'], '1.0')
+        self.assertEqual(manifest['corpus_scope'], {'loaded_vocabularies': ['SNOMED']})
+        self.assertEqual(manifest['vocabulary_versions'], {'SNOMED': 'v1'})
+        self.assertEqual(manifest['table_checksums'], {'concept': 'abc123'})
+        self.assertEqual(manifest['row_counts'], {'concept': 1})
+
+    def test_latest_returns_newest_published_with_etag_and_header(self):
+        resp = self.client.get(self.URL_LATEST, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['release_id'], self.newer.release_id)
+        self.assertEqual(resp['ETag'], f'"{self.newer.release_id}"')
+        self.assertEqual(resp['X-Vocabulary-Release'], self.newer.release_id)
+        self.assertEqual(resp.json()['vocabulary_release'], self.newer.release_id)
+
+    def test_latest_if_none_match_returns_304(self):
+        resp = self.client.get(
+            self.URL_LATEST,
+            HTTP_IF_NONE_MATCH=f'"{self.newer.release_id}"',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_304_NOT_MODIFIED)
+        self.assertEqual(resp.content, b'')
+        self.assertEqual(resp['ETag'], f'"{self.newer.release_id}"')
+
+    def test_latest_if_none_match_star_returns_304(self):
+        resp = self.client.get(
+            self.URL_LATEST, HTTP_IF_NONE_MATCH='*', **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_304_NOT_MODIFIED)
+
+    def test_latest_stale_etag_returns_200_with_new_manifest(self):
+        resp = self.client.get(
+            self.URL_LATEST,
+            HTTP_IF_NONE_MATCH=f'"{self.older.release_id}"',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['release_id'], self.newer.release_id)
+
+    def test_detail_returns_requested_release(self):
+        resp = self.client.get(
+            f'{self.URL_LIST}{self.older.release_id}/', **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['release_id'], self.older.release_id)
+
+    def test_detail_staging_release_is_addressable(self):
+        resp = self.client.get(
+            f'{self.URL_LIST}{self.staging.release_id}/', **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['status'], 'staging')
+
+    def test_detail_404_for_unknown_release(self):
+        resp = self.client.get(
+            f'{self.URL_LIST}rel-19990101-000000/', **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_releases_require_auth(self):
+        for url in (self.URL_LIST, self.URL_LATEST,
+                    f'{self.URL_LIST}{self.older.release_id}/'):
+            resp = self.client.get(url)
+            self.assertIn(
+                resp.status_code,
+                [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN],
+            )
+
+
+class VocabReleaseLatestEmptyTest(_ConceptFixtureBase):
+    """Latest endpoint before anything has been published."""
+
+    def test_latest_404_when_no_release_published(self):
+        resp = self.client.get('/api/v1/vocab/releases/latest/', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class ConceptSynonymsApiTest(_ConceptFixtureBase):
+    """GET /api/v1/concepts/<id>/synonyms/ (issue #236 gap 11)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from omop_core.models import Concept, ConceptSynonym
+        import datetime
+
+        cls.english = Concept.objects.create(
+            concept_id=4180186, concept_name='English',
+            vocabulary_id='SNOMED', domain_id='Condition',
+            concept_class_id='Clinical Finding', concept_code='4180186',
+            standard_concept=None,
+            valid_start_date=datetime.date(1970, 1, 1),
+            valid_end_date=datetime.date(2099, 12, 31),
+        )
+        ConceptSynonym.objects.create(
+            concept=cls.creatinine_serum,
+            concept_synonym_name='Serum creatinine',
+            language_concept=cls.english,
+        )
+        ConceptSynonym.objects.create(
+            concept=cls.creatinine_serum,
+            concept_synonym_name='Creatinine serum mass',
+            language_concept=cls.english,
+        )
+
+    def _url(self, concept_id):
+        return f'/api/v1/concepts/{concept_id}/synonyms/'
+
+    def test_synonyms_shape(self):
+        resp = self.client.get(self._url(self.creatinine_serum.concept_id), **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        payload = resp.json()
+        self.assertEqual(payload['count'], 2)
+        names = {r['concept_synonym_name'] for r in payload['results']}
+        self.assertEqual(names, {'Serum creatinine', 'Creatinine serum mass'})
+        for row in payload['results']:
+            self.assertEqual(
+                set(row.keys()),
+                {'concept_id', 'concept_synonym_name', 'language_concept_id'},
+            )
+            self.assertEqual(row['concept_id'], self.creatinine_serum.concept_id)
+            self.assertEqual(row['language_concept_id'], self.english.concept_id)
+
+    def test_synonyms_empty_for_concept_without_synonyms(self):
+        resp = self.client.get(self._url(self.diabetes.concept_id), **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['count'], 0)
+        self.assertEqual(resp.json()['results'], [])
+
+    def test_synonyms_404_for_unknown_concept(self):
+        resp = self.client.get(self._url(999999999), **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_synonyms_require_auth(self):
+        resp = self.client.get(self._url(self.creatinine_serum.concept_id))
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_no_release_stamp_when_nothing_published(self):
+        """_stamp_release is a no-op until a release exists (no header, no body key)."""
+        resp = self.client.get(self._url(self.creatinine_serum.concept_id), **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertNotIn('X-Vocabulary-Release', resp)
+        self.assertNotIn('vocabulary_release', resp.json())
+
+
+class ConceptReleaseStampTest(_ConceptFixtureBase):
+    """Every concept endpoint carries the current release id (issue #236 gap 12)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from django.utils import timezone as tz
+        from omop_core.models import VocabRelease
+
+        cls.release = VocabRelease.objects.create(
+            release_id='rel-20260101-abcdef',
+            status=VocabRelease.STATUS_PUBLISHED,
+            published_at=tz.now(),
+        )
+
+    def _assert_stamped(self, resp, body_key_expected=True):
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp['X-Vocabulary-Release'], self.release.release_id)
+        if body_key_expected:
+            self.assertEqual(resp.json()['vocabulary_release'], self.release.release_id)
+        else:
+            self.assertNotIn('vocabulary_release', resp.json())
+
+    def test_search_stamped(self):
+        resp = self.client.get(
+            '/api/v1/concepts/search/', {'q': 'creatinine'}, **self._auth(),
+        )
+        self._assert_stamped(resp)
+
+    def test_list_stamped(self):
+        resp = self.client.get(
+            '/api/v1/concepts/', {'domain_id': 'Condition'}, **self._auth(),
+        )
+        self._assert_stamped(resp)
+
+    def test_lookup_header_only(self):
+        """The {vocab: {code: id}} body is a frozen wire format — header only."""
+        resp = self.client.get(
+            '/api/v1/concepts/lookup/', {'lookup': 'LOINC:2160-0'}, **self._auth(),
+        )
+        self._assert_stamped(resp, body_key_expected=False)
+
+    def test_ancestors_stamped(self):
+        resp = self.client.get(
+            f'/api/v1/concepts/{self.diabetes.concept_id}/ancestors/', **self._auth(),
+        )
+        self._assert_stamped(resp)
+
+    def test_descendants_stamped(self):
+        resp = self.client.get(
+            f'/api/v1/concepts/{self.diabetes.concept_id}/descendants/', **self._auth(),
+        )
+        self._assert_stamped(resp)
+
+    def test_graph_batch_stamped(self):
+        resp = self.client.get(
+            f'/api/v1/concepts/graph/?direction=ancestors&concept_id={self.diabetes.concept_id}',
+            **self._auth(),
+        )
+        self._assert_stamped(resp)
+
+    def test_synonyms_stamped(self):
+        resp = self.client.get(
+            f'/api/v1/concepts/{self.diabetes.concept_id}/synonyms/', **self._auth(),
+        )
+        self._assert_stamped(resp)
 
 
 # ---------------------------------------------------------------------------

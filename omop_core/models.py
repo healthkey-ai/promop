@@ -454,6 +454,12 @@ class ConceptRelationship(models.Model):
     valid_start_date = models.DateField()
     valid_end_date = models.DateField()
     invalid_reason = models.CharField(max_length=1, null=True, blank=True)
+    source = models.CharField(
+        max_length=50, null=True, blank=True, db_index=True,
+        help_text="Provenance: NULL = external vocabulary load (Athena); "
+                  "'HealthKey' = locally authored (e.g. relationships for "
+                  "HealthKey-curated concepts). Mirrors Concept.source.",
+    )
 
     class Meta:
         db_table = 'concept_relationship'
@@ -1361,6 +1367,114 @@ class RegimenMappingGap(models.Model):
 
     def __str__(self):
         return f"[{self.status}] {self.source_system}:{self.normalized_name}"
+
+
+class VocabRelease(models.Model):
+    """A versioned manifest of the governed vocabulary corpus (ADR 0001).
+
+    promop is the source of truth for coded vocabulary data; downstream
+    consumers (EXACT, SoC) mirror the concept tables.  A VocabRelease is the
+    unit of distribution: consumers poll ``releases/latest/`` for the current
+    published release, bootstrap from its snapshot, and apply subsequent
+    deltas (``ReleaseTableChange`` rows) in order.  A release is immutable
+    once published — corrections ship as a new release.
+    """
+    STATUS_STAGING = 'staging'
+    STATUS_PUBLISHED = 'published'
+    STATUS_CHOICES = (
+        (STATUS_STAGING, 'Staging'),
+        (STATUS_PUBLISHED, 'Published'),
+    )
+
+    release_id = models.CharField(
+        max_length=32, primary_key=True,
+        help_text="Opaque id, 'rel-<yyyymmdd>-<6hex>'; also the ETag of the manifest",
+    )
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default=STATUS_STAGING, db_index=True,
+    )
+    schema_version = models.CharField(
+        max_length=20, default='1.0',
+        help_text="Manifest schema version (bump when the manifest shape changes)",
+    )
+    corpus_scope = models.JSONField(
+        default=dict, blank=True,
+        help_text="Declared corpus boundary: vocabularies + class/domain scopes "
+                  "that this release governs",
+    )
+    vocabulary_versions = models.JSONField(
+        default=dict, blank=True,
+        help_text="{vocabulary_id: vocabulary_version} captured at publish time",
+    )
+    table_checksums = models.JSONField(
+        default=dict, blank=True,
+        help_text="{table_name: sha256} over the published rows, for cache validation",
+    )
+    row_counts = models.JSONField(
+        default=dict, blank=True,
+        help_text="{table_name: row count} at publish time",
+    )
+    build_started_at = models.DateTimeField(auto_now_add=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True, default='')
+
+    class Meta:
+        db_table = 'vocab_release'
+        ordering = ('-published_at', '-build_started_at')
+
+    def __str__(self):
+        return f"{self.release_id} ({self.status})"
+
+
+class ReleaseTableChange(models.Model):
+    """One row-level change in a published vocabulary release.
+
+    Written by the vocabulary loader at publish time (issue #236 PR 3) as
+    rows — not JSON blobs — so delta consumers can page through them in
+    ``seq`` order.  ``delete`` = row removed within scope; ``tombstone``
+    carries the last-known validity window so consumers can classify the
+    removal (uniquely-replaced / ambiguous / unmapped) via the Concept
+    'Maps to' / 'replaced by' relationships.
+    """
+    OP_INSERT = 'insert'
+    OP_UPDATE = 'update'
+    OP_DELETE = 'delete'
+    OP_TOMBSTONE = 'tombstone'
+    OP_CHOICES = (
+        (OP_INSERT, 'Insert'),
+        (OP_UPDATE, 'Update'),
+        (OP_DELETE, 'Delete'),
+        (OP_TOMBSTONE, 'Tombstone'),
+    )
+
+    release = models.ForeignKey(
+        VocabRelease, on_delete=models.CASCADE,
+        related_name='changes', db_column='release_id',
+    )
+    seq = models.IntegerField(help_text="Apply order within the release")
+    table_name = models.CharField(max_length=50)
+    operation = models.CharField(max_length=20, choices=OP_CHOICES)
+    row_key = models.CharField(
+        max_length=255,
+        help_text="Natural key of the changed row (e.g. concept_id or composite)",
+    )
+    payload = models.JSONField(
+        default=dict, blank=True,
+        help_text="New row image; {old, new} for updates; validity window for tombstones",
+    )
+
+    class Meta:
+        db_table = 'release_table_change'
+        ordering = ('release', 'seq')
+        indexes = [models.Index(fields=['table_name'], name='ix_release_change_table')]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['release', 'seq'], name='uq_release_change_seq',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.release_id}#{self.seq} {self.operation} {self.table_name}:{self.row_key}"
 
 
 class LoincClass(models.Model):

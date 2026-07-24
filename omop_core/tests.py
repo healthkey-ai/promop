@@ -1481,3 +1481,76 @@ class ReportRegimenMappingGapsCommandTest(TestCase):
         call_command('report_regimen_mapping_gaps', stdout=out)
         self.assertIn('No mapping gaps recorded.', out.getvalue())
 
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary release manifests (issue #236, ADR 0001)
+# ---------------------------------------------------------------------------
+
+class VocabReleaseServiceTest(TestCase):
+    """publish_release / current_release / current_corpus_scope service tests."""
+
+    def test_new_release_id_format(self):
+        import re
+        from omop_core.services.vocab_release import new_release_id
+        rid = new_release_id()
+        self.assertRegex(rid, r'^rel-\d{8}-[0-9a-f]{6}$')
+        self.assertNotEqual(rid, new_release_id())
+
+    def test_publish_release_creates_manifest_with_scope_and_checksums(self):
+        from omop_core.models import VocabRelease
+        from omop_core.services.vocab_release import CORPUS_TABLES, publish_release
+
+        _make_vocab()
+        release = publish_release(notes='test bundle')
+
+        self.assertEqual(release.status, VocabRelease.STATUS_PUBLISHED)
+        self.assertIsNotNone(release.published_at)
+        self.assertEqual(release.schema_version, '1.0')
+        self.assertEqual(release.notes, 'test bundle')
+
+        # Corpus scope declares the boundary (loader scope + actually-loaded).
+        scope = release.corpus_scope
+        for key in ('declared_vocabularies', 'loaded_vocabularies',
+                    'hk_vocabularies', 'rxnorm_classes', 'loinc_domains'):
+            self.assertIn(key, scope)
+        self.assertIn('OMOP_TEST', scope['loaded_vocabularies'])
+        # Migration 0118 seeds the local quarantine vocabularies; they are
+        # part of the published corpus.
+        self.assertIn('HK-Regimen', scope['hk_vocabularies'])
+
+        # Per-vocabulary versions captured from Vocabulary rows.
+        self.assertIn('OMOP_TEST', release.vocabulary_versions)
+
+        # Checksums + row counts cover every corpus table.
+        self.assertEqual(set(release.table_checksums.keys()), set(CORPUS_TABLES))
+        self.assertEqual(set(release.row_counts.keys()), set(CORPUS_TABLES))
+        self.assertEqual(release.row_counts['concept'], Concept.objects.count())
+        self.assertEqual(len(release.table_checksums['concept']), 64)  # sha256 hex
+
+    def test_current_release_returns_newest_published(self):
+        from omop_core.models import VocabRelease
+        from omop_core.services.vocab_release import current_release, publish_release
+
+        self.assertIsNone(current_release())
+
+        first = publish_release()
+        second = publish_release()
+        # A staging build never becomes current.
+        VocabRelease.objects.create(
+            release_id='rel-99990101-staging', status=VocabRelease.STATUS_STAGING,
+        )
+
+        current = current_release()
+        self.assertEqual(current.release_id, second.release_id)
+        self.assertNotEqual(current.release_id, first.release_id)
+
+    def test_publish_command_runs(self):
+        from io import StringIO
+        from django.core.management import call_command
+
+        out = StringIO()
+        call_command('publish_vocab_release', notes='cmd test', stdout=out)
+        text = out.getvalue()
+        self.assertIn('Published rel-', text)
+        self.assertIn('concept', text)

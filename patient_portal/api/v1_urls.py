@@ -11,6 +11,7 @@ from .views import (
     SurveyViewSet, PatientSurveyResponseViewSet,
     vocabulary_list, concept_lookup, concept_search, concept_list,
     concept_ancestors, concept_descendants, concept_graph_batch,
+    concept_synonyms, vocab_release_list, vocab_release_latest, vocab_release_detail,
     org_disease_stats,
 )
 from .org_views import (
@@ -49,7 +50,12 @@ urlpatterns = [
     path('concepts/graph/', concept_graph_batch, name='v1-concept-graph-batch'),
     path('concepts/<int:concept_id>/ancestors/', concept_ancestors, name='v1-concept-ancestors'),
     path('concepts/<int:concept_id>/descendants/', concept_descendants, name='v1-concept-descendants'),
+    path('concepts/<int:concept_id>/synonyms/', concept_synonyms, name='v1-concept-synonyms'),
     path('concepts/', concept_list, name='v1-concept-list'),
+    # 'latest' must precede '<str:release_id>' or it would be captured as an id.
+    path('vocab/releases/', vocab_release_list, name='v1-vocab-release-list'),
+    path('vocab/releases/latest/', vocab_release_latest, name='v1-vocab-release-latest'),
+    path('vocab/releases/<str:release_id>/', vocab_release_detail, name='v1-vocab-release-detail'),
     path('stats/org-disease/', org_disease_stats, name='v1-stats-org-disease'),
     path('orgs/', OrgListCreateView.as_view(), name='v1-org-list'),
     path('orgs/confirm-invitation/', confirm_invitation, name='v1-org-confirm-invitation'),
