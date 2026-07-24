@@ -11,7 +11,9 @@ const publicApi = axios.create({
   },
 });
 
-export function redirectBrowser(url: string) {
+// Module-local (not exported): the file must export only the component so
+// react-refresh/only-export-components / Fast Refresh stays happy.
+function redirectBrowser(url: string) {
   window.location.assign(url);
 }
 
