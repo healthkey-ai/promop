@@ -1,9 +1,7 @@
-from django.db.models import Q
-from django.utils import timezone
 from rest_framework.permissions import BasePermission
 
 from .providers.base import TokenClaims
-from omop_core.models import GroupAccess, Organization
+from omop_core.services.access import has_org_admin_access
 
 # Sentinel value set by ServiceTokenAuthentication when the HMAC check passes.
 # Use is_service_token() rather than comparing this string directly.
@@ -144,21 +142,4 @@ class IsStaffOrOrgAdmin(BasePermission):
             return True
 
         slug = view.kwargs.get('slug')
-        if not slug:
-            # No slug: allow if user has any active org_admin grant (e.g., list view)
-            now = timezone.now()
-            return GroupAccess.objects.filter(
-                identity=request.user,
-                role='org_admin',
-            ).filter(
-                Q(expires_at__isnull=True) | Q(expires_at__gt=now)
-            ).exists()
-
-        now = timezone.now()
-        return GroupAccess.objects.filter(
-            identity=request.user,
-            role='org_admin',
-            org__slug=slug,
-        ).filter(
-            Q(expires_at__isnull=True) | Q(expires_at__gt=now)
-        ).exists()
+        return has_org_admin_access(request.user, slug)

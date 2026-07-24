@@ -12,6 +12,7 @@ from omop_oncology.models import Episode, EpisodeEvent
 from datetime import date
 from django.utils.timezone import localdate
 from django.utils import timezone
+from omop_core.services.access import has_org_admin_access
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -47,14 +48,7 @@ class UserSerializer(serializers.ModelSerializer):
         return person.person_id if person else None
 
     def get_is_org_admin(self, obj):
-        now = timezone.now()
-        from django.db.models import Q
-        return GroupAccess.objects.filter(
-            identity=obj,
-            role='org_admin',
-        ).filter(
-            Q(expires_at__isnull=True) | Q(expires_at__gt=now)
-        ).exists()
+        return has_org_admin_access(obj)
 
     def get_org_accesses(self, obj):
         now = timezone.now()

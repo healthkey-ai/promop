@@ -83,6 +83,7 @@ def _send_invitation_email(invitation) -> None:
 
 from omop_core.models import Organization, OrgTrust, OrgInvitation, GroupAccess
 from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
+from omop_core.services.access import get_admin_orgs
 from patient_portal.models import Identity
 from omop_core.models import Person, PatientRecord
 from .permissions import IsStaffPermission, IsStaffOrOrgAdmin
@@ -101,21 +102,8 @@ def _get_org(slug: str) -> Organization:
 
 
 def _visible_orgs(user):
-    """Return orgs the user may ADMINISTER (staff: all; org_admin: own only).
-
-    Intentionally narrower than get_visible_orgs() in services/access.py —
-    trust-based orgs (domain/org-to-org) appear in patient-data visibility but
-    NOT here, because the user holds no admin rights on those orgs.
-    """
-    if getattr(user, 'is_staff', False):
-        return Organization.objects.all()
-    now = timezone.now()
-    admin_org_ids = GroupAccess.objects.filter(
-        identity=user, role='org_admin',
-    ).filter(
-        Q(expires_at__isnull=True) | Q(expires_at__gt=now)
-    ).values_list('org_id', flat=True)
-    return Organization.objects.filter(id__in=admin_org_ids)
+    """Return orgs the user may administer, including trust-derived admin access."""
+    return get_admin_orgs(user)
 
 
 def _find_identity_by_email(email):
