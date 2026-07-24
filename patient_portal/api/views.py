@@ -49,7 +49,7 @@ from omop_core.services.regimen_resolution import (
     match_hemonc_regimen_by_name,
     validate_hemonc_regimen,
 )
-from omop_core.services.vocab_release import current_release, current_release_id
+from omop_core.services.vocab_release import current_release, current_release_id, published_releases
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
 from omop_core.services.access import get_visible_orgs, build_trusting_map
 from datetime import datetime, timedelta
@@ -4179,7 +4179,7 @@ def _serialize_concept(concept):
         'valid_start_date': concept.valid_start_date,
         'valid_end_date': concept.valid_end_date,
         'invalid_reason': concept.invalid_reason,
-        'vocabulary_version': concept.vocabulary.vocabulary_version if concept.vocabulary else None,
+        'vocabulary_version': concept.vocabulary.vocabulary_version,
     }
 
 
@@ -4305,11 +4305,8 @@ def _serialize_release(release):
 @permission_classes([ScopedTokenPermission])
 def vocab_release_list(request):
     """List published vocabulary release manifests, newest first (paginated)."""
-    releases = VocabRelease.objects.filter(
-        status=VocabRelease.STATUS_PUBLISHED,
-    ).order_by('-published_at', '-release_id')
     paginator = ConceptPagination()
-    page = paginator.paginate_queryset(releases, request)
+    page = paginator.paginate_queryset(published_releases(), request)
     return paginator.get_paginated_response([_serialize_release(r) for r in page])
 
 
@@ -4329,7 +4326,12 @@ def vocab_release_latest(request):
         )
     etag = f'"{release.release_id}"'
     if_none_match = request.META.get('HTTP_IF_NONE_MATCH', '')
-    client_tags = {tag.strip() for tag in if_none_match.split(',') if tag.strip()}
+    # RFC 7232 weak comparison: a W/ prefix still matches the strong tag.
+    client_tags = {
+        tag.strip().removeprefix('W/')
+        for tag in if_none_match.split(',')
+        if tag.strip()
+    }
     if '*' in client_tags or etag in client_tags:
         return Response(status=status.HTTP_304_NOT_MODIFIED, headers={'ETag': etag})
     body = _serialize_release(release)

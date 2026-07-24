@@ -7204,6 +7204,37 @@ class ConceptSynonymsApiTest(_ConceptFixtureBase):
         self.assertEqual(resp.json()['count'], 0)
         self.assertEqual(resp.json()['results'], [])
 
+    def test_synonyms_pagination_stable_across_pages(self):
+        from omop_core.models import ConceptSynonym
+        ConceptSynonym.objects.bulk_create(
+            ConceptSynonym(
+                concept=self.diabetes,
+                concept_synonym_name=f'DM2 synonym {i:02d}',
+                language_concept=self.english,
+            )
+            for i in range(30)
+        )
+        page1 = self.client.get(
+            self._url(self.diabetes.concept_id), {'page_size': 25}, **self._auth(),
+        )
+        self.assertEqual(page1.status_code, status.HTTP_200_OK)
+        p1 = page1.json()
+        self.assertEqual(p1['count'], 30)
+        self.assertEqual(len(p1['results']), 25)
+        self.assertIsNotNone(p1['next'])
+
+        page2 = self.client.get(
+            self._url(self.diabetes.concept_id), {'page_size': 25, 'page': 2}, **self._auth(),
+        )
+        p2 = page2.json()
+        self.assertEqual(len(p2['results']), 5)
+        self.assertIsNone(p2['next'])
+
+        # order_by('id') gives a stable continuation: no overlap between pages.
+        names1 = {r['concept_synonym_name'] for r in p1['results']}
+        names2 = {r['concept_synonym_name'] for r in p2['results']}
+        self.assertFalse(names1 & names2)
+
     def test_synonyms_404_for_unknown_concept(self):
         resp = self.client.get(self._url(999999999), **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)

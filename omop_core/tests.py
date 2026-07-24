@@ -1491,7 +1491,6 @@ class VocabReleaseServiceTest(TestCase):
     """publish_release / current_release / current_corpus_scope service tests."""
 
     def test_new_release_id_format(self):
-        import re
         from omop_core.services.vocab_release import new_release_id
         rid = new_release_id()
         self.assertRegex(rid, r'^rel-\d{8}-[0-9a-f]{6}$')
