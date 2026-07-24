@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, Check, AlertCircle } from "lucide-react";
+import { ArrowLeft, Check, AlertCircle, ChevronDown } from "lucide-react";
 import api from "@/api/axios";
 import { getActiveBranding } from "@/config/branding";
+import DeleteAccountDialog from "./DeleteAccountDialog";
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
 import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
@@ -50,6 +51,57 @@ function SaveStatusIndicator({ status, onRetry }: { status: SaveStatus; onRetry:
         </>
       )}
     </div>
+  );
+}
+
+function ProfileDropdown({ onLogout }: { onLogout: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [open]);
+
+  return (
+    <>
+      <div className="relative" ref={ref}>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="flex shrink-0 items-center gap-1 rounded-full border border-border px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground"
+        >
+          Account
+          <ChevronDown className="h-3 w-3" />
+        </button>
+        {open && (
+          <div className="absolute right-0 top-full z-40 mt-1 w-44 rounded-lg border border-border bg-background py-1 shadow-lg">
+            <button
+              onClick={() => { setOpen(false); onLogout(); }}
+              className="w-full px-4 py-2 text-left text-sm text-foreground hover:bg-muted"
+            >
+              Sign out
+            </button>
+            <button
+              onClick={() => { setOpen(false); setShowDeleteDialog(true); }}
+              className="w-full px-4 py-2 text-left text-sm text-red-600 hover:bg-red-50"
+            >
+              Delete my account
+            </button>
+          </div>
+        )}
+      </div>
+      {showDeleteDialog && (
+        <DeleteAccountDialog
+          onClose={() => setShowDeleteDialog(false)}
+          onDeleted={onLogout}
+        />
+      )}
+    </>
   );
 }
 
@@ -425,12 +477,7 @@ export default function PatientDetail({
               </div>
             )}
             {patientMode && onLogout && (
-              <button
-                onClick={onLogout}
-                className="shrink-0 rounded-full border border-border px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground"
-              >
-                Sign out
-              </button>
+              <ProfileDropdown onLogout={onLogout} />
             )}
           </div>
         </div>
