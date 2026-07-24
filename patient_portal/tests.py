@@ -7964,6 +7964,27 @@ class OrgAdminPatientListScopingTest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn('filter_options', resp.data)
 
+    def test_domain_trust_admin_sees_trusted_org_patients(self):
+        trusted_admin = Identity.objects.create_user(email='trusted@t.com', password='x')
+        OrgTrust.objects.create(granting_org=self.org_a, trusted_domain='t.com')
+        resp = self._get(trusted_admin)
+        self.assertEqual(resp.status_code, 200)
+        ids = {p['id'] for p in resp.data}
+        self.assertIn(self.pi_a1.id, ids)
+        self.assertIn(self.pi_a2.id, ids)
+        self.assertNotIn(self.pi_b.id, ids)
+
+    def test_org_to_org_trust_admin_sees_trusted_org_patients(self):
+        trusted_admin = Identity.objects.create_user(email='trusted-org-link@t.com', password='x')
+        source_org = Organization.objects.create(name='Source Org', slug='source-org-patient-scope')
+        GroupAccess.objects.create(identity=trusted_admin, org=source_org, role='doctor')
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_org=source_org)
+        resp = self._get(trusted_admin)
+        self.assertEqual(resp.status_code, 200)
+        ids = {p['id'] for p in resp.data}
+        self.assertIn(self.pi_b.id, ids)
+        self.assertNotIn(self.pi_a1.id, ids)
+
 
 # ---------------------------------------------------------------------------
 # bulk_delete_filtered Tests
