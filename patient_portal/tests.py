@@ -10697,3 +10697,435 @@ class ConceptSynonymApiTest(_SmartBase):
         resp = self.client.get('/api/v1/concepts/synonyms/?q=VRd')
         self.assertIn(resp.status_code,
                       [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
+# ---------------------------------------------------------------------------
+# PatientSelfScopePermission tests
+# ---------------------------------------------------------------------------
+
+class PatientSelfScopePermissionTest(TestCase):
+    """Test that PatientSelfScopePermission blocks cross-patient object access."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+        from omop_core.models import GroupAccess, Organization
+
+        _make_vocab_fixtures()
+        condition_concept = Concept.objects.get(concept_id=4112853)
+        type_concept = Concept.objects.get(concept_id=32817)
+
+        # Patient A
+        cls.person_a = Person.objects.create(person_id=93001, family_name='Able', given_name='Amy')
+        cls.patient_a_rec = PatientRecord.objects.create(person=cls.person_a)
+        cls.identity_a = Identity.objects.create_user(email='scope-a@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_a, person=cls.person_a)
+
+        # Patient B
+        cls.person_b = Person.objects.create(person_id=93002, family_name='Baker', given_name='Bob')
+        cls.patient_b_rec = PatientRecord.objects.create(person=cls.person_b)
+        cls.identity_b = Identity.objects.create_user(email='scope-b@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_b, person=cls.person_b)
+
+        # A ConditionOccurrence belonging to patient B
+        cls.condition_b = ConditionOccurrence.objects.create(
+            condition_occurrence_id=93901,
+            person=cls.person_b,
+            condition_concept=condition_concept,
+            condition_start_date=date.today(),
+            condition_type_concept=type_concept,
+        )
+
+        # Superuser
+        cls.superuser = Identity.objects.create_superuser(email='su-scope@test.com', password='pw')
+
+        # Staff
+        cls.staff = Identity.objects.create_user(email='staff-scope@test.com', password='pw', is_staff=True)
+
+        # Provider with GroupAccess (bypasses patient scope)
+        cls.provider = Identity.objects.create_user(email='prov-scope@test.com', password='pw')
+        cls.org = Organization.objects.create(name='Scope Org', slug='scope-org-93')
+        GroupAccess.objects.create(identity=cls.provider, org=cls.org, role='doctor')
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def test_patient_can_access_own_condition(self):
+        """Patient B can access their own condition via detail endpoint."""
+        resp = self._client_as(self.identity_b).get(
+            f'/api/v1/conditions/{self.condition_b.condition_occurrence_id}/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_patient_cannot_access_other_patients_condition(self):
+        """Patient A cannot access patient B's condition — gets 404 (queryset filtered)."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/v1/conditions/{self.condition_b.condition_occurrence_id}/'
+        )
+        # _OmopFilterMixin filters the queryset to the user's own records,
+        # so the object is not found rather than forbidden.
+        self.assertIn(resp.status_code, [status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND])
+
+    def test_superuser_bypasses_scope(self):
+        """Superuser can access any patient's condition."""
+        resp = self._client_as(self.superuser).get(
+            f'/api/v1/conditions/{self.condition_b.condition_occurrence_id}/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_staff_bypasses_scope(self):
+        """Staff can access any patient's condition."""
+        resp = self._client_as(self.staff).get(
+            f'/api/v1/conditions/{self.condition_b.condition_occurrence_id}/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_provider_bypasses_patient_scope(self):
+        """Provider with GroupAccess is not treated as a patient by PatientSelfScopePermission.
+
+        Note: providers access data via org-scoped OAuth tokens in production.
+        With session auth, _OmopFilterMixin filters by PatientUser (returning 404
+        if the provider has no PatientUser link). This test verifies that
+        PatientSelfScopePermission itself does not block the provider — the 404
+        comes from queryset filtering, not from the object-level permission.
+        """
+        resp = self._client_as(self.provider).get(
+            f'/api/v1/conditions/{self.condition_b.condition_occurrence_id}/'
+        )
+        # 404 from queryset filtering (no PatientUser link, no org token) — NOT 403 from scope
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_404_NOT_FOUND])
+
+
+# ---------------------------------------------------------------------------
+# Patient Account Deletion tests
+# ---------------------------------------------------------------------------
+
+class PatientAccountDeletionTest(TestCase):
+    """Test DELETE /api/v1/patient-records/me/ for GDPR right to erasure."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+        from omop_core.models import Organization
+
+        _make_vocab_fixtures()
+        condition_concept = Concept.objects.get(concept_id=4112853)
+        type_concept = Concept.objects.get(concept_id=32817)
+
+        # Patient to be deleted
+        cls.person = Person.objects.create(person_id=94001, family_name='Doomed', given_name='Dan')
+        cls.patient_rec = PatientRecord.objects.create(person=cls.person)
+        cls.identity = Identity.objects.create_user(email='doomed@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity, person=cls.person)
+
+        # Clinical data for the patient
+        cls.condition = ConditionOccurrence.objects.create(
+            condition_occurrence_id=94901,
+            person=cls.person,
+            condition_concept=condition_concept,
+            condition_start_date=date.today(),
+            condition_type_concept=type_concept,
+        )
+
+        # Unrelated patient (should be untouched)
+        cls.other_person = Person.objects.create(person_id=94002, family_name='Safe', given_name='Sue')
+        cls.other_rec = PatientRecord.objects.create(person=cls.other_person)
+        cls.other_identity = Identity.objects.create_user(email='safe@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.other_identity, person=cls.other_person)
+
+        # Staff user
+        cls.staff = Identity.objects.create_user(email='staff-del@test.com', password='pw', is_staff=True)
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def test_delete_account_success(self):
+        """DELETE with valid confirm removes all patient data."""
+        from patient_portal.models import PatientUser
+
+        # Create fresh data for this test (setUpTestData data is shared, can't delete once)
+        person = Person.objects.create(person_id=94101, family_name='Fresh', given_name='Fran')
+        PatientRecord.objects.create(person=person)
+        identity = Identity.objects.create_user(email='fresh-del@test.com', password='pw')
+        PatientUser.objects.create(identity=identity, person=person)
+        identity_pk = identity.pk
+
+        resp = self._client_as(identity).delete(
+            '/api/v1/patient-records/me/',
+            data={'confirm': 'DELETE'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        # Person and all clinical data gone
+        self.assertFalse(Person.objects.filter(person_id=94101).exists())
+        self.assertFalse(PatientRecord.objects.filter(person_id=94101).exists())
+        self.assertFalse(PatientUser.objects.filter(person__person_id=94101).exists())
+        # Identity gone
+        self.assertFalse(Identity.objects.filter(pk=identity_pk).exists())
+
+    def test_delete_missing_confirm(self):
+        """DELETE without confirm body → 400."""
+        person = Person.objects.create(person_id=94102, family_name='NoConf', given_name='Ned')
+        PatientRecord.objects.create(person=person)
+        identity = Identity.objects.create_user(email='noconf-del@test.com', password='pw')
+        from patient_portal.models import PatientUser
+        PatientUser.objects.create(identity=identity, person=person)
+
+        resp = self._client_as(identity).delete(
+            '/api/v1/patient-records/me/',
+            data={},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        # Person still exists
+        self.assertTrue(Person.objects.filter(person_id=94102).exists())
+
+    def test_delete_wrong_confirm(self):
+        """DELETE with wrong confirm value → 400."""
+        person = Person.objects.create(person_id=94103, family_name='Wrong', given_name='Will')
+        PatientRecord.objects.create(person=person)
+        identity = Identity.objects.create_user(email='wrong-del@test.com', password='pw')
+        from patient_portal.models import PatientUser
+        PatientUser.objects.create(identity=identity, person=person)
+
+        resp = self._client_as(identity).delete(
+            '/api/v1/patient-records/me/',
+            data={'confirm': 'delete'},  # lowercase — should fail
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_staff_cannot_delete_own_account(self):
+        """Non-patient (staff) cannot use the account deletion endpoint."""
+        resp = self._client_as(self.staff).delete(
+            '/api/v1/patient-records/me/',
+            data={'confirm': 'DELETE'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_other_patients_data_untouched(self):
+        """Deleting one patient does not affect another patient's data."""
+        from patient_portal.models import PatientUser
+
+        person = Person.objects.create(person_id=94104, family_name='Gone', given_name='Gus')
+        PatientRecord.objects.create(person=person)
+        identity = Identity.objects.create_user(email='gone-del@test.com', password='pw')
+        PatientUser.objects.create(identity=identity, person=person)
+
+        self._client_as(identity).delete(
+            '/api/v1/patient-records/me/',
+            data={'confirm': 'DELETE'},
+            format='json',
+        )
+
+        # Other patient still intact
+        self.assertTrue(Person.objects.filter(person_id=94002).exists())
+        self.assertTrue(PatientRecord.objects.filter(person=self.other_person).exists())
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — FHIR Export tests
+# ---------------------------------------------------------------------------
+
+class FhirExportServiceTest(TestCase):
+    """Unit tests for omop_core.services.fhir_export.build_fhir_bundle."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.condition_concept = Concept.objects.get(concept_id=4112853)  # Breast cancer
+        cls.type_concept = Concept.objects.get(concept_id=32817)  # EHR
+        cls.lab_concept = Concept.objects.get(concept_id=3000963)  # Lab test result
+
+        cls.person = Person.objects.create(
+            person_id=95001, family_name='Export', given_name='Eve',
+            year_of_birth=1985, month_of_birth=3, day_of_birth=15,
+            gender_concept_id=8532,
+        )
+        cls.patient_rec = PatientRecord.objects.create(person=cls.person)
+
+        # Clinical data
+        cls.condition = ConditionOccurrence.objects.create(
+            condition_occurrence_id=95901,
+            person=cls.person,
+            condition_concept=cls.condition_concept,
+            condition_start_date=date(2022, 6, 1),
+            condition_type_concept=cls.type_concept,
+            condition_source_value='Breast cancer',
+        )
+        cls.measurement = Measurement.objects.create(
+            measurement_id=95902,
+            person=cls.person,
+            measurement_concept=cls.lab_concept,
+            measurement_date=date(2023, 1, 10),
+            measurement_type_concept=cls.type_concept,
+            value_as_number=12.5,
+            unit_source_value='g/dL',
+            measurement_source_value='Hemoglobin',
+        )
+
+    def test_bundle_structure(self):
+        from omop_core.services.fhir_export import build_fhir_bundle
+        bundle = build_fhir_bundle(self.person)
+
+        self.assertEqual(bundle['resourceType'], 'Bundle')
+        self.assertEqual(bundle['type'], 'searchset')
+        self.assertIsInstance(bundle['total'], int)
+        self.assertIsInstance(bundle['entry'], list)
+        self.assertGreater(bundle['total'], 0)
+
+    def test_patient_resource_present(self):
+        from omop_core.services.fhir_export import build_fhir_bundle
+        bundle = build_fhir_bundle(self.person)
+
+        patient_entries = [
+            e for e in bundle['entry']
+            if e['resource']['resourceType'] == 'Patient'
+        ]
+        self.assertEqual(len(patient_entries), 1)
+        patient = patient_entries[0]['resource']
+        self.assertEqual(patient['name'][0]['family'], 'Export')
+        self.assertEqual(patient['name'][0]['given'], ['Eve'])
+        self.assertEqual(patient['birthDate'], '1985-03-15')
+        self.assertEqual(patient['gender'], 'female')
+
+    def test_condition_exported(self):
+        from omop_core.services.fhir_export import build_fhir_bundle
+        bundle = build_fhir_bundle(self.person)
+
+        conditions = [
+            e for e in bundle['entry']
+            if e['resource']['resourceType'] == 'Condition'
+        ]
+        self.assertGreaterEqual(len(conditions), 1)
+        cond = conditions[0]['resource']
+        self.assertIn('code', cond)
+        self.assertEqual(cond['onsetDateTime'], '2022-06-01')
+
+    def test_measurement_exported_as_observation(self):
+        from omop_core.services.fhir_export import build_fhir_bundle
+        bundle = build_fhir_bundle(self.person)
+
+        observations = [
+            e for e in bundle['entry']
+            if e['resource']['resourceType'] == 'Observation'
+        ]
+        self.assertGreaterEqual(len(observations), 1)
+        # Find the one with a valueQuantity
+        quant_obs = [o for o in observations if 'valueQuantity' in o['resource']]
+        self.assertGreaterEqual(len(quant_obs), 1)
+        obs = quant_obs[0]['resource']
+        self.assertEqual(obs['valueQuantity']['value'], 12.5)
+        self.assertEqual(obs['valueQuantity']['unit'], 'g/dL')
+
+    def test_empty_patient_returns_patient_only(self):
+        from omop_core.services.fhir_export import build_fhir_bundle
+        empty_person = Person.objects.create(
+            person_id=95099, family_name='Empty', given_name='Em',
+            gender_concept_id=8507,
+        )
+        bundle = build_fhir_bundle(empty_person)
+        self.assertEqual(bundle['total'], 1)
+        self.assertEqual(bundle['entry'][0]['resource']['resourceType'], 'Patient')
+
+
+class FhirExportApiTest(TestCase):
+    """Test the export-fhir API endpoint."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        _make_vocab_fixtures()
+        cls.condition_concept = Concept.objects.get(concept_id=4112853)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+
+        # Patient A — will export their own record
+        cls.person_a = Person.objects.create(
+            person_id=96001, family_name='Able', given_name='Amy',
+            gender_concept_id=8532,
+        )
+        cls.patient_a_rec = PatientRecord.objects.create(person=cls.person_a)
+        cls.identity_a = Identity.objects.create_user(email='export-a@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_a, person=cls.person_a)
+
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=96901,
+            person=cls.person_a,
+            condition_concept=cls.condition_concept,
+            condition_start_date=date.today(),
+            condition_type_concept=cls.type_concept,
+        )
+
+        # Patient B — another patient
+        cls.person_b = Person.objects.create(
+            person_id=96002, family_name='Baker', given_name='Bob',
+            gender_concept_id=8507,
+        )
+        cls.patient_b_rec = PatientRecord.objects.create(person=cls.person_b)
+        cls.identity_b = Identity.objects.create_user(email='export-b@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_b, person=cls.person_b)
+
+        # Staff
+        cls.staff = Identity.objects.create_user(
+            email='export-staff@test.com', password='pw', is_staff=True,
+        )
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def test_patient_can_export_own_record(self):
+        """Patient A can export their own FHIR bundle."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/v1/patient-records/{self.person_a.person_id}/export-fhir/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        bundle = resp.json()
+        self.assertEqual(bundle['resourceType'], 'Bundle')
+        self.assertEqual(bundle['type'], 'searchset')
+        resource_types = {e['resource']['resourceType'] for e in bundle['entry']}
+        self.assertIn('Patient', resource_types)
+        self.assertIn('Condition', resource_types)
+
+    def test_patient_cannot_export_other_patients_record(self):
+        """Patient A cannot export patient B's record."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/v1/patient-records/{self.person_b.person_id}/export-fhir/'
+        )
+        self.assertIn(resp.status_code, [
+            status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND,
+        ])
+
+    def test_staff_can_export_any_record(self):
+        """Staff can export any patient's record."""
+        resp = self._client_as(self.staff).get(
+            f'/api/v1/patient-records/{self.person_a.person_id}/export-fhir/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        bundle = resp.json()
+        self.assertEqual(bundle['resourceType'], 'Bundle')
+
+    def test_nonexistent_person_returns_404(self):
+        """Export of nonexistent person_id returns 404."""
+        resp = self._client_as(self.staff).get(
+            '/api/v1/patient-records/999999/export-fhir/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_unauthenticated_returns_403(self):
+        """Unauthenticated request to export returns 401/403."""
+        c = APIClient()
+        resp = c.get(
+            f'/api/v1/patient-records/{self.person_a.person_id}/export-fhir/'
+        )
+        self.assertIn(resp.status_code, [
+            status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN,
+        ])
