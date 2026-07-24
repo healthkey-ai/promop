@@ -36,7 +36,16 @@ merge. Each phase below is independently shippable.
 
 ---
 
-## Phase 1 — First-class Patient / PHR Account Holder role  ⟵ do first
+## Phase 1 — First-class Patient / PHR Account Holder role  ✅ DONE
+
+**Status:** Delivered in PR #265 (issue #264), merged to `dev` 2026-07-24; migration
+applied on staging. Shipped: the patient role surface (`patient_person_for`,
+`is_patient`/`person_id` on `/api/v1/user/`), patient-mode React SPA (role-gated routing +
+`PatientHome`), and three account-provisioning paths — staff email invite/accept
+(`/api/v1/patients/{id}/invite/`, `/patient-invitations/accept/`) and app-driven signup
+(`/api/v1/patients/signup/`). Per-patient access enforcement was already present
+(`can_access_patient` + `_OmopFilterMixin`) and is covered by existing tests. 810 backend /
+68 frontend tests green. The design detail below is retained as the as-built record.
 
 **FM:** PH.1 (PHR Account Holder Profile), TI.1 (Security / access control).
 
