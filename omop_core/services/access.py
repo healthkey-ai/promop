@@ -131,3 +131,70 @@ def get_visible_orgs(user) -> QuerySet:
         return Organization.objects.none()
 
     return Organization.objects.filter(id__in=all_ids)
+
+
+def get_admin_orgs(user) -> QuerySet:
+    """Return orgs the user may administer.
+
+    Admin access is granted via:
+      - is_staff → all orgs
+      - direct org_admin grants
+      - OrgTrust rows that match the user's email domain
+      - OrgTrust rows that trust an org the user already belongs to
+
+    Public aggregated-data visibility does not confer admin rights.
+    """
+    if getattr(user, 'is_staff', False):
+        return Organization.objects.all()
+
+    now = timezone.now()
+    active = GroupAccess.objects.filter(
+        identity=user,
+    ).filter(
+        Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+    )
+
+    admin_ids = set(
+        active.filter(role='org_admin', org__isnull=False)
+              .values_list('org_id', flat=True)
+    )
+    direct_ids = set(
+        active.filter(org__isnull=False)
+              .values_list('org_id', flat=True)
+    )
+    group_org_ids = set(
+        active.exclude(role='org_admin')
+              .values_list('group__organization_id', flat=True)
+    )
+    group_org_ids.discard(None)
+    direct_ids |= group_org_ids
+
+    trusted_by_org = set(
+        OrgTrust.objects.filter(
+            trusted_org_id__in=direct_ids,
+            granting_org__is_active=True,
+        ).values_list('granting_org_id', flat=True)
+    ) if direct_ids else set()
+
+    email = (getattr(user, 'email', '') or '')
+    user_domain = email.split('@')[1] if '@' in email else ''
+    trusted_by_domain = set(
+        OrgTrust.objects.filter(
+            trusted_domain=user_domain,
+            granting_org__is_active=True,
+        ).values_list('granting_org_id', flat=True)
+    ) if user_domain else set()
+
+    all_ids = admin_ids | trusted_by_org | trusted_by_domain
+    if not all_ids:
+        return Organization.objects.none()
+
+    return Organization.objects.filter(id__in=all_ids)
+
+
+def has_org_admin_access(user, slug: str | None = None) -> bool:
+    """Return True when the user may administer any org or a specific org slug."""
+    admin_orgs = get_admin_orgs(user)
+    if slug is None:
+        return admin_orgs.exists()
+    return admin_orgs.filter(slug=slug).exists()

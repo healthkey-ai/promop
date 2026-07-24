@@ -8212,7 +8212,7 @@ class OrgManagementModelTest(TestCase):
 
 
 class OrgTrustAccessTest(TestCase):
-    """get_visible_orgs includes trust-based orgs."""
+    """Access helpers include trust-based orgs."""
 
     def setUp(self):
         self.org_a = _make_org('Org A', 'org-a')
@@ -8256,6 +8256,19 @@ class OrgTrustAccessTest(TestCase):
     def test_staff_sees_all_orgs(self):
         staff = _make_user('staff@test.com', is_staff=True)
         orgs = get_visible_orgs(staff)
+        self.assertIn(self.org_a, orgs)
+        self.assertIn(self.org_b, orgs)
+
+    def test_domain_trust_gives_admin_access(self):
+        from omop_core.services.access import get_admin_orgs
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_domain='trusted.com')
+        orgs = get_admin_orgs(self.domain_user)
+        self.assertIn(self.org_b, orgs)
+
+    def test_org_to_org_trust_gives_admin_access(self):
+        from omop_core.services.access import get_admin_orgs
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_org=self.org_a)
+        orgs = get_admin_orgs(self.direct_user)
         self.assertIn(self.org_a, orgs)
         self.assertIn(self.org_b, orgs)
 
@@ -8477,6 +8490,35 @@ class OrgViewSetOrgAdminTest(TestCase):
     def test_cannot_access_other_org(self):
         resp = self.client.get('/api/orgs/other-org/')
         self.assertEqual(resp.status_code, 403)
+
+
+class OrgViewSetTrustedAdminTest(TestCase):
+    """Trust-based org access confers org-admin rights."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = _make_user('trusted@partner.com')
+        self.org = _make_org('Trusted Org', 'trusted-org')
+        self.client.force_authenticate(user=self.user)
+
+    def test_domain_trust_can_list_and_patch_org(self):
+        OrgTrust.objects.create(granting_org=self.org, trusted_domain='partner.com')
+        resp = self.client.get('/api/orgs/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('trusted-org', [o['slug'] for o in resp.data])
+
+        resp = self.client.patch('/api/orgs/trusted-org/', {'name': 'Renamed Trusted Org'})
+        self.assertEqual(resp.status_code, 200)
+        self.org.refresh_from_db()
+        self.assertEqual(self.org.name, 'Renamed Trusted Org')
+
+    def test_org_to_org_trust_can_access_other_org(self):
+        source_org = _make_org('Source Org', 'source-org')
+        GroupAccess.objects.create(identity=self.user, org=source_org, role='doctor')
+        OrgTrust.objects.create(granting_org=self.org, trusted_org=source_org)
+
+        resp = self.client.get('/api/orgs/trusted-org/')
+        self.assertEqual(resp.status_code, 200)
 
 
 class OrgViewSetUnauthorizedTest(TestCase):
@@ -8973,6 +9015,15 @@ class UserSerializerOrgAdminTest(TestCase):
     def test_is_org_admin_true_with_grant(self):
         GroupAccess.objects.create(identity=self.user, org=self.org, role='org_admin')
         self.client.force_authenticate(user=self.user)
+        resp = self.client.get('/api/user/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.data.get('user', resp.data)
+        self.assertTrue(data.get('is_org_admin'))
+
+    def test_is_org_admin_true_with_domain_trust(self):
+        OrgTrust.objects.create(granting_org=self.org, trusted_domain='example.com')
+        trusted_user = _make_user('trusted@example.com')
+        self.client.force_authenticate(user=trusted_user)
         resp = self.client.get('/api/user/')
         self.assertEqual(resp.status_code, 200)
         data = resp.data.get('user', resp.data)
