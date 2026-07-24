@@ -10,6 +10,10 @@ vi.mock("@/components/Patient/PatientDetail", () => ({
   ),
 }));
 
+vi.mock("@/api/axios", () => ({
+  default: { get: vi.fn() },
+}));
+
 const makeUser = (overrides: Partial<User>): User => ({
   id: 1,
   sub: "sub",
@@ -38,5 +42,22 @@ describe("PatientHome", () => {
   it("shows a no-record message when user is null", () => {
     render(<PatientHome user={null} onLogout={vi.fn()} />);
     expect(screen.getByText(/no health record is linked/i)).toBeInTheDocument();
+  });
+
+  it("renders the download FHIR button when patient has a person_id", () => {
+    render(
+      <PatientHome
+        user={makeUser({ is_patient: true, person_id: 7 })}
+        onLogout={vi.fn()}
+      />
+    );
+    const downloadBtn = screen.getByRole("button", { name: /download my record \(fhir\)/i });
+    expect(downloadBtn).toBeInTheDocument();
+    expect(downloadBtn).toBeEnabled();
+  });
+
+  it("does not render the download FHIR button when no person is linked", () => {
+    render(<PatientHome user={makeUser({ is_patient: true, person_id: null })} onLogout={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: /download my record \(fhir\)/i })).not.toBeInTheDocument();
   });
 });

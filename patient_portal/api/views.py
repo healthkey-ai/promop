@@ -59,7 +59,7 @@ import json
 import logging
 import re
 from io import StringIO
-from .permissions import ScopedTokenPermission, get_request_org, is_service_token
+from .permissions import ScopedTokenPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
@@ -171,7 +171,7 @@ def _delete_omop_clinical_rows(person):
 @method_decorator(csrf_exempt, name='dispatch')
 class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PatientRecordSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     pagination_class = PatientRecordPagination
 
     DATE_FILTERS = {
@@ -511,7 +511,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response({**serializer.data, 'previous_values': previous_values})
 
-    @action(detail=True, methods=['get'], permission_classes=[ScopedTokenPermission])
+    @action(detail=True, methods=['get'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def provenance(self, request, pk=None):
         """GET /api/patient-info/{person_id}/provenance/ — full provenance history for a patient."""
         try:
@@ -547,9 +547,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         records = ProvenanceRecord.objects.filter(q).select_related('content_type').order_by('-created_at')
         return Response(ProvenanceRecordSerializer(records, many=True).data)
 
-    @action(detail=False, methods=['get', 'patch'], permission_classes=[ScopedTokenPermission])
+    @action(detail=False, methods=['get', 'patch', 'delete'], permission_classes=[PatientDeletePermission, PatientSelfScopePermission])
     def me(self, request):
-        """GET/PATCH /api/patient-info/me/ — current user's own PatientRecord."""
+        """GET/PATCH/DELETE /api/patient-info/me/ — current user's own PatientRecord."""
+        if request.method == 'DELETE':
+            return self._delete_patient_account(request)
+
         from patient_portal.models import PatientUser
         from patient_portal.services import resolve_or_create_person
 
@@ -619,7 +622,72 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response(serializer.data)
 
-    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission])
+    def _delete_patient_account(self, request):
+        """DELETE /api/patient-info/me/ — permanently delete the patient's account and all data."""
+        from patient_portal.services import patient_person_for
+        from patient_portal.models import PatientUser
+
+        patient_person = patient_person_for(request.user)
+        if patient_person is None:
+            return Response(
+                {'detail': 'Only patients can delete their own account.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        confirm = request.data.get('confirm')
+        if confirm != 'DELETE':
+            return Response(
+                {'detail': 'Request body must include {"confirm": "DELETE"}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        person_id = patient_person.person_id
+        identity = request.user
+
+        with transaction.atomic():
+            # Delete EpisodeEvent rows — bare integer FK, not covered by CASCADE
+            episode_ids = list(
+                Episode.objects.filter(person=patient_person)
+                .values_list('episode_id', flat=True)
+            )
+            if episode_ids:
+                EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
+
+            # Delete Person — cascades to all OMOP tables, PatientRecord, PatientUser
+            patient_person.delete()
+
+            # Delete the Identity (auth credential)
+            identity.delete()
+
+        logger.info(
+            'patient_account_deleted person_id=%s identity_email=%s',
+            person_id, getattr(identity, 'email', '?'),
+        )
+
+        return Response({'detail': 'Account and all associated data have been permanently deleted.'})
+
+    @action(detail=True, methods=['get'], url_path='export-fhir',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def export_fhir(self, request, pk=None):
+        """GET /api/v1/patient-records/{person_id}/export-fhir/ — export as FHIR R4 Bundle.
+
+        ``pk`` is interpreted as ``person_id`` (consistent with ``retrieve``).
+        """
+        from omop_core.services.fhir_export import build_fhir_bundle
+
+        try:
+            person = Person.objects.get(person_id=pk)
+            patient_record = PatientRecord.objects.get(person=person)
+        except (Person.DoesNotExist, PatientRecord.DoesNotExist):
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Object-level permission check (PatientSelfScopePermission)
+        self.check_object_permissions(request, patient_record)
+
+        bundle = build_fhir_bundle(person)
+        return Response(bundle, content_type='application/fhir+json')
+
+    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def upload_csv(self, request):
         """Upload patients from CSV file"""
         if 'file' not in request.FILES:
@@ -695,7 +763,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
     
-    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission])
+    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def upload_fhir(self, request):
         """Upload patients from FHIR JSON file"""
         if 'file' not in request.FILES:
@@ -3444,7 +3512,7 @@ class PersonViewSet(viewsets.GenericViewSet):
       POST /api/persons/find_or_create/  — resolve OIDC identity to a Person row
       PATCH /api/persons/{person_id}/    — fill-if-empty demographic patch
     """
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Person.objects.all()
     lookup_field = 'person_id'
 
@@ -3660,21 +3728,21 @@ class _ProvenanceMixin:
 @method_decorator(csrf_exempt, name='dispatch')
 class ConditionOccurrenceViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ConditionOccurrenceSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = ConditionOccurrence.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class DrugExposureViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = DrugExposureSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = DrugExposure.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class MeasurementViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Measurement.objects.all()
     ordering_fields = ['measurement_date', 'measurement_id']
     ordering = ['-measurement_date']
@@ -3710,28 +3778,28 @@ class MeasurementViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewS
 @method_decorator(csrf_exempt, name='dispatch')
 class ObservationViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ObservationSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Observation.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class ProcedureOccurrenceViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ProcedureOccurrenceSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = ProcedureOccurrence.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class EpisodeViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = EpisodeSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Episode.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class EpisodeEventViewSet(viewsets.ModelViewSet):
     serializer_class = EpisodeEventSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
 
     def list(self, request, *args, **kwargs):
         if not request.query_params.get('episode_id'):
@@ -4413,7 +4481,7 @@ def vocabulary_list(request, model_name):
 @method_decorator(csrf_exempt, name='dispatch')
 class PatientDocumentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = PatientDocumentSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientDocument.objects.all()
 
 
@@ -4426,7 +4494,7 @@ class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     Filter by person: GET /api/trial-enrollments/?person_id=42
     """
     serializer_class = PatientTrialEnrollmentSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientTrialEnrollment.objects.all()
 
 
@@ -4514,7 +4582,7 @@ class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.
     PUT is disabled: values/values_dates are append-only dicts; use PATCH.
     """
     serializer_class = PatientSurveyResponseSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientSurveyResponse.objects.select_related('survey').all()
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
 

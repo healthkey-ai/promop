@@ -47,6 +47,19 @@ applied on staging. Shipped: the patient role surface (`patient_person_for`,
 (`can_access_patient` + `_OmopFilterMixin`) and is covered by existing tests. 810 backend /
 68 frontend tests green. The design detail below is retained as the as-built record.
 
+**Post-merge hardening (same PR series):**
+- **`PatientSelfScopePermission`** — centralized object-level permission
+  (`permissions.py`) applied to all OMOP viewsets as belt-and-suspenders on top of
+  queryset filtering. Uses `_resolve_person_id()` to extract `person_id` from any OMOP
+  model (including `EpisodeEvent` via its bare `episode_id` → `Episode` lookup). Bypasses
+  for service tokens, staff, superusers, and non-patient identities.
+- **Patient account deletion (GDPR right to erasure)** — `DELETE /api/v1/patient-records/me/`
+  with `{"confirm": "DELETE"}`. Hard-deletes all patient data (Person cascade + orphan
+  EpisodeEvent cleanup + Identity removal) inside `transaction.atomic()`. Frontend: profile
+  dropdown in `PatientDetail` header replaces standalone "Sign out" button; includes
+  `DeleteAccountDialog` with typed confirmation.
+- **FM:** TI.1.7 (Account Holder data deletion).
+
 **FM:** PH.1 (PHR Account Holder Profile), TI.1 (Security / access control).
 
 **Goal:** a patient can log in and **view/edit their own record** (and only their own),
@@ -136,13 +149,20 @@ and a duplicate/claim guard, so it is kept out of this phase.
 
 ---
 
-## Phase 2 — Own-record FHIR export
+## Phase 2 — Own-record FHIR export  ✅ DONE
 
 **FM:** PH.2 (Manage Historical & Current-State Data), PH.2.4 (Ad-hoc views), S.3
 (import/export).
 
+**Status:** Implemented. Export service (`omop_core/services/fhir_export.py`), API endpoint
+(`GET /api/v1/patient-records/{person_id}/export-fhir/`), management command
+(`export_fhir_bundle`), and frontend "Download my record (FHIR)" button on `PatientHome`.
+830 backend / 75 frontend tests green.
+
 *(Own-record viewing lands in Phase 1 via `PatientHome`. This phase adds the ability to
 export that record as FHIR, plus any read-only presentation refinements.)*
+
+**Detailed sub-plan:** see [`docs/phase2-fhir-export-plan.md`](phase2-fhir-export-plan.md).
 
 **Gap:** promop has three FHIR **import** paths but **no export** of a real patient's data
 (`generate_fhir_bundle` is synthetic-only; `export_org_patients` emits raw JSON, not FHIR).
@@ -181,23 +201,34 @@ boolean-per-type model is adequate for the oncology use case.
 
 ---
 
-## Phase 4 — Patient-originated data & messaging
+## Phase 4a — Patient-originated data (surveys in patient mode)
 
-**FM:** PH.6 (Manage Encounters w/ Providers), PH.2.1 (Account-Holder-Originated Data),
-PH.3.1.
+**FM:** PH.2.1 (Account-Holder-Originated Data), PH.3.1.
 
 **Existing:** Surveys/PRO capture is solid (`Survey` / `PatientSurveyResponse`,
 `omop_core/models.py:2473,2510`; viewsets `api/views.py:4124,4199`); HealthKit device sync
-(`api/fhir/sync.py`); messaging is **one-way, server-rendered, no provider recipient**
+(`api/fhir/sync.py`).
+
+- Expose surveys + responses in patient mode (self-scoped via
+  `PatientSelfScopePermission`) so patients complete PROs from the SPA.
+- Small, well-bounded: the viewsets already exist and are scoped; this phase adds the
+  patient-mode UI route and wires it to the existing API.
+- Tests: patient completes a survey (own responses only).
+
+---
+
+## Phase 4b — Bidirectional messaging
+
+**FM:** PH.6 (Manage Encounters w/ Providers).
+
+**Existing:** messaging is **one-way, server-rendered, no provider recipient**
 (`PatientMessage` `patient_portal/models.py:138`, `views.py:80`).
 
-- Expose surveys + responses in patient mode (self-scoped) so patients complete PROs from
-  the SPA.
-- Upgrade messaging to bidirectional: add a DRF endpoint under `/api/v1/`, a
-  recipient/thread concept, and read-state, replacing the template-only flow. Render in
-  patient mode.
-- Tests: patient completes a survey (own responses only); message create/list/reply
-  self-scoped.
+- Upgrade `PatientMessage` to a DRF endpoint under `/api/v1/` with threading,
+  recipient, and read-state, replacing the template-only flow. Render in patient mode.
+- Full feature requiring its own model changes (thread, recipient FK, read timestamp),
+  serializer, and UI — warranting a separate phase.
+- Tests: message create/list/reply self-scoped.
 
 ---
 
