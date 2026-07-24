@@ -40,8 +40,10 @@ merge. Each phase below is independently shippable.
 
 **FM:** PH.1 (PHR Account Holder Profile), TI.1 (Security / access control).
 
-**Goal:** a patient can log in and see/edit **only their own** record, enforced
-uniformly, and both API and frontend explicitly know "this user is a patient."
+**Goal:** a patient can log in and **view/edit their own record** (and only their own),
+enforced uniformly, with both API and frontend explicitly aware that "this user is a
+patient." Viewing the own record is delivered here — `PatientHome` is Phase 1's UI.
+Phase 2 adds *export* of that record, not the ability to see it.
 
 ### Backend
 
@@ -96,10 +98,13 @@ uniformly, and both API and frontend explicitly know "this user is a patient."
 
 ---
 
-## Phase 2 — View own record + FHIR export
+## Phase 2 — Own-record FHIR export
 
 **FM:** PH.2 (Manage Historical & Current-State Data), PH.2.4 (Ad-hoc views), S.3
 (import/export).
+
+*(Own-record viewing lands in Phase 1 via `PatientHome`. This phase adds the ability to
+export that record as FHIR, plus any read-only presentation refinements.)*
 
 **Gap:** promop has three FHIR **import** paths but **no export** of a real patient's data
 (`generate_fhir_bundle` is synthetic-only; `export_org_patients` emits raw JSON, not FHIR).
