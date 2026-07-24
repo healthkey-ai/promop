@@ -621,7 +621,7 @@ Query params:
 
 | Param | Required | Description |
 |---|---:|---|
-| `q` | yes | Search string; minimum 2 characters after trimming |
+| `q` | yes | Search string; minimum 3 characters (trigram) after trimming |
 | `vocabulary_id` | no | Exact match filter, e.g. `LOINC`, `SNOMED`, `RxNorm`, `HemOnc` |
 | `domain_id` | no | Exact match filter, e.g. `Measurement`, `Condition`, `Drug` |
 | `concept_class_id` | no | Exact match filter, e.g. `Lab Test`, `Clinical Finding` |
@@ -658,7 +658,7 @@ GET /api/v1/concepts/search/?q=creatinine&vocabulary_id=LOINC&domain_id=Measurem
 Results are ordered by `concept_id` for stable pagination. Unknown search strings return an
 empty paginated result (`count: 0`). Requires `patient/*.read` or `user/*.read` scope.
 
-**Response 400** — `q` is missing or shorter than 2 characters.
+**Response 400** — `q` is missing or shorter than 3 characters.
 
 ---
 
