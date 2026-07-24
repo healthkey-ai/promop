@@ -59,25 +59,21 @@ def _send_invitation_email(invitation) -> None:
         sent_count = send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, [invitation.email])
     except Exception as exc:
         logger.exception(
-            "Failed to send invitation email to %s via %s host=%s port=%s tls=%s from=%s: %s",
+            "Failed to send invitation email to %s via %s domain=%s from=%s: %s",
             invitation.email,
             settings.EMAIL_BACKEND,
-            getattr(settings, 'EMAIL_HOST', ''),
-            getattr(settings, 'EMAIL_PORT', ''),
-            getattr(settings, 'EMAIL_USE_TLS', ''),
+            settings.ANYMAIL.get('MAILGUN_SENDER_DOMAIN', ''),
             settings.DEFAULT_FROM_EMAIL,
             exc,
         )
         raise InvitationEmailError from exc
     if sent_count != 1:
         logger.error(
-            "Email backend reported %s invitation emails sent to %s via %s host=%s port=%s tls=%s from=%s",
+            "Email backend reported %s invitation emails sent to %s via %s domain=%s from=%s",
             sent_count,
             invitation.email,
             settings.EMAIL_BACKEND,
-            getattr(settings, 'EMAIL_HOST', ''),
-            getattr(settings, 'EMAIL_PORT', ''),
-            getattr(settings, 'EMAIL_USE_TLS', ''),
+            settings.ANYMAIL.get('MAILGUN_SENDER_DOMAIN', ''),
             settings.DEFAULT_FROM_EMAIL,
         )
         raise InvitationEmailError

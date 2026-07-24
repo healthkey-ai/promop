@@ -222,14 +222,15 @@ EMAIL_BACKEND = os.environ.get(
     'EMAIL_BACKEND',
     (
         'anymail.backends.mailgun.EmailBackend'
-        if (not DEBUG or _mailgun_configured)
+        if _mailgun_configured
         else 'django.core.mail.backends.console.EmailBackend'
     ),
 )
-ANYMAIL = {
-    'MAILGUN_API_KEY': os.environ.get('MAILGUN_API_KEY', ''),
-    'MAILGUN_SENDER_DOMAIN': os.environ.get('MAILGUN_SENDER_DOMAIN', ''),
-}
+ANYMAIL = {}
+if os.environ.get('MAILGUN_API_KEY'):
+    ANYMAIL['MAILGUN_API_KEY'] = os.environ['MAILGUN_API_KEY']
+if os.environ.get('MAILGUN_SENDER_DOMAIN'):
+    ANYMAIL['MAILGUN_SENDER_DOMAIN'] = os.environ['MAILGUN_SENDER_DOMAIN']
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'PROMOP <noreply@healthkey.ai>')
 
 # Base URL used to build invitation accept links in emails.
