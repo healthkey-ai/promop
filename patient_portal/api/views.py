@@ -50,7 +50,7 @@ from omop_core.services.regimen_resolution import (
     validate_hemonc_regimen,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
-from omop_core.services.access import get_visible_orgs, build_trusting_map
+from omop_core.services.access import get_visible_orgs, build_trusting_map, get_admin_orgs
 from datetime import datetime, timedelta
 from django.utils.timezone import localdate
 import csv
@@ -218,10 +218,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 Q(expires_at__isnull=True) | Q(expires_at__gt=now),
             )
 
-            # Org-admin grants: see all patients belonging to those orgs
-            admin_org_ids = list(
-                active_grants.filter(role='org_admin').values_list('org_id', flat=True)
-            )
+            # Org-admin access includes trust-derived admin orgs.
+            admin_org_ids = list(get_admin_orgs(self.request.user).values_list('id', flat=True))
 
             # Group grants: see patients in those groups
             actor_group_ids = list(
