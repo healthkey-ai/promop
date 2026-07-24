@@ -8528,10 +8528,32 @@ class OrgInvitationFlowTest(TestCase):
         })
         self.assertEqual(resp.status_code, 201)
         invitee = Identity.objects.get(email='placeholder@example.com', issuer='urn:local')
+        invitation = OrgInvitation.objects.get(org=self.org, email='placeholder@example.com')
+        grant = GroupAccess.objects.get(identity=invitee, org=self.org, role='analyst')
         self.assertFalse(invitee.has_usable_password())
-        self.assertTrue(
-            GroupAccess.objects.filter(identity=invitee, org=self.org, role='analyst').exists()
-        )
+        self.assertEqual(invitation.redirect_url, 'https://analytics.healthkey.ai')
+        self.assertEqual(grant.redirect_url, 'https://analytics.healthkey.ai')
+
+    def test_invite_analyst_allows_custom_redirect_url(self):
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'analyst-custom@example.com',
+            'role': 'analyst',
+            'redirect_url': 'https://analytics.healthkey.ai/tenant/acme',
+        })
+        self.assertEqual(resp.status_code, 201)
+        invitation = OrgInvitation.objects.get(org=self.org, email='analyst-custom@example.com')
+        grant = GroupAccess.objects.get(identity__email='analyst-custom@example.com', org=self.org)
+        self.assertEqual(invitation.redirect_url, 'https://analytics.healthkey.ai/tenant/acme')
+        self.assertEqual(grant.redirect_url, 'https://analytics.healthkey.ai/tenant/acme')
+
+    def test_invite_rejects_invalid_analyst_redirect_url(self):
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'analyst-invalid@example.com',
+            'role': 'analyst',
+            'redirect_url': 'not-a-url',
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.data['error'], 'redirect_url must be a valid http(s) URL.')
 
     def test_partner_auth_identity_claims_placeholder_access(self):
         placeholder = Identity.objects.create_user(email='partner@example.com', password=None)
@@ -8626,7 +8648,12 @@ class OrgInvitationFlowTest(TestCase):
 
     def test_invite_existing_user_updates_existing_org_role(self):
         invitee = Identity.objects.create_user(email='role-update@example.com', password='pass')
-        GroupAccess.objects.create(identity=invitee, org=self.org, role='analyst')
+        GroupAccess.objects.create(
+            identity=invitee,
+            org=self.org,
+            role='analyst',
+            redirect_url='https://analytics.healthkey.ai/old',
+        )
         resp = self.client.post('/api/orgs/invite-org/invite/', {
             'email': 'role-update@example.com',
             'role': 'doctor',
@@ -8635,6 +8662,7 @@ class OrgInvitationFlowTest(TestCase):
         self.assertTrue(resp.data['access_granted'])
         grant = GroupAccess.objects.get(identity=invitee, org=self.org)
         self.assertEqual(grant.role, 'doctor')
+        self.assertEqual(grant.redirect_url, '')
 
     def test_invite_existing_user_does_not_downgrade_org_admin(self):
         invitee = Identity.objects.create_user(email='admin-role@example.com', password='pass')
@@ -8680,6 +8708,25 @@ class OrgInvitationFlowTest(TestCase):
         )
         inv = OrgInvitation.objects.get(token=token)
         self.assertEqual(inv.status, OrgInvitation.STATUS_CONFIRMED)
+
+    def test_confirm_analyst_invitation_returns_redirect_url(self):
+        from django.utils import timezone
+        invitee = Identity.objects.create_user(email='analyst-invitee@example.com', password='pass')
+        token = _secrets.token_hex(32)
+        OrgInvitation.objects.create(
+            org=self.org,
+            email='analyst-invitee@example.com',
+            role='analyst',
+            redirect_url='https://analytics.healthkey.ai/org/acme',
+            token=token,
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        public_client = APIClient()
+        resp = public_client.post('/api/orgs/confirm-invitation/', {'token': token})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['redirect_url'], 'https://analytics.healthkey.ai/org/acme')
+        grant = GroupAccess.objects.get(identity=invitee, org=self.org)
+        self.assertEqual(grant.redirect_url, 'https://analytics.healthkey.ai/org/acme')
 
     def test_cancel_invitation(self):
         from django.utils import timezone
@@ -8824,11 +8871,44 @@ class OrgAccessAPITest(TestCase):
         self.assertEqual(resp.status_code, 200)
         emails = [g['email'] for g in resp.data]
         self.assertIn('grantee@example.com', emails)
+        self.assertEqual(resp.data[0]['redirect_url'], None)
+
+    def test_list_access_grants_includes_redirect_url(self):
+        self.grant.role = 'analyst'
+        self.grant.redirect_url = 'https://analytics.healthkey.ai/custom'
+        self.grant.save(update_fields=['role', 'redirect_url'])
+        resp = self.client.get('/api/orgs/access-org/access/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data[0]['redirect_url'], 'https://analytics.healthkey.ai/custom')
 
     def test_revoke_access_grant(self):
         resp = self.client.delete(f'/api/orgs/access-org/access/{self.grant.id}/')
         self.assertEqual(resp.status_code, 204)
         self.assertFalse(GroupAccess.objects.filter(id=self.grant.id).exists())
+
+    def test_patch_access_grant_sets_default_analyst_redirect_url(self):
+        resp = self.client.patch(
+            f'/api/orgs/access-org/access/{self.grant.id}/',
+            {'role': 'analyst'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.grant.refresh_from_db()
+        self.assertEqual(self.grant.role, 'analyst')
+        self.assertEqual(self.grant.redirect_url, 'https://analytics.healthkey.ai')
+
+    def test_patch_access_grant_clears_redirect_url_when_switching_to_doctor(self):
+        self.grant.role = 'analyst'
+        self.grant.redirect_url = 'https://analytics.healthkey.ai/custom'
+        self.grant.save(update_fields=['role', 'redirect_url'])
+        resp = self.client.patch(
+            f'/api/orgs/access-org/access/{self.grant.id}/',
+            {'role': 'doctor'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.grant.refresh_from_db()
+        self.assertEqual(self.grant.redirect_url, '')
 
 
 class SetupDemoCommandTest(TestCase):
