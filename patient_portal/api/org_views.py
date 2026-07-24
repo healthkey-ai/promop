@@ -17,8 +17,10 @@ import logging
 import secrets
 from django.conf import settings
 from django.core.mail import send_mail
+from django.core.validators import URLValidator
 from django.db import transaction
 from django.db.models import Q
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
 from rest_framework import status
@@ -28,6 +30,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 logger = logging.getLogger(__name__)
+DEFAULT_ANALYST_REDIRECT_URL = 'https://analytics.healthkey.ai'
 
 
 class InvitationEmailError(Exception):
@@ -135,18 +138,39 @@ def _get_or_create_invitee_identity(email):
 ROLE_RANK = {'org_admin': 3, 'doctor': 2, 'analyst': 1}
 
 
-def _grant_org_access(identity, org, role, granted_by):
+def _normalize_redirect_url(role, redirect_url):
+    if role != 'analyst':
+        return ''
+
+    candidate = (redirect_url or '').strip() or DEFAULT_ANALYST_REDIRECT_URL
+    validator = URLValidator(schemes=['http', 'https'])
+    validator(candidate)
+    return candidate
+
+
+def _grant_org_access(identity, org, role, granted_by, redirect_url=''):
+    normalized_redirect_url = _normalize_redirect_url(role, redirect_url)
     existing = GroupAccess.objects.filter(identity=identity, org=org).first()
     if existing:
+        changed_fields = []
         if ROLE_RANK.get(existing.role, 0) < ROLE_RANK.get(role, 0):
             existing.role = role
             existing.granted_by = granted_by
-            existing.save(update_fields=['role', 'granted_by'])
+            changed_fields.extend(['role', 'granted_by'])
+
+        desired_redirect_url = normalized_redirect_url if existing.role == 'analyst' else ''
+        if existing.redirect_url != desired_redirect_url:
+            existing.redirect_url = desired_redirect_url
+            changed_fields.append('redirect_url')
+
+        if changed_fields:
+            existing.save(update_fields=changed_fields)
         return existing
     return GroupAccess.objects.create(
         identity=identity,
         org=org,
         role=role,
+        redirect_url=normalized_redirect_url if role == 'analyst' else '',
         granted_by=granted_by,
     )
 
@@ -213,11 +237,19 @@ class OrgInviteView(APIView):
         org = _get_org(slug)
         email = request.data.get('email', '').strip().lower()
         role = request.data.get('role', 'doctor')
+        redirect_url = request.data.get('redirect_url', '')
 
         if not email:
             return Response({'error': 'email is required'}, status=status.HTTP_400_BAD_REQUEST)
         if role not in dict(OrgInvitation.ROLE):
             return Response({'error': f'Invalid role: {role}'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            normalized_redirect_url = _normalize_redirect_url(role, redirect_url)
+        except ValidationError:
+            return Response(
+                {'error': 'redirect_url must be a valid http(s) URL.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         with transaction.atomic():
             invitation = OrgInvitation.objects.select_for_update().filter(
@@ -229,22 +261,26 @@ class OrgInviteView(APIView):
             expires_at = timezone.now() + timezone.timedelta(days=7)
             if invitation:
                 invitation.role = role
+                invitation.redirect_url = normalized_redirect_url
                 invitation.token = token
                 invitation.invited_by = request.user
                 invitation.expires_at = expires_at
-                invitation.save(update_fields=['role', 'token', 'invited_by', 'expires_at'])
+                invitation.save(
+                    update_fields=['role', 'redirect_url', 'token', 'invited_by', 'expires_at']
+                )
             else:
                 invitation = OrgInvitation.objects.create(
                     org=org,
                     email=email,
                     role=role,
+                    redirect_url=normalized_redirect_url,
                     token=token,
                     invited_by=request.user,
                     expires_at=expires_at,
                 )
 
             identity = _get_or_create_invitee_identity(email)
-            _grant_org_access(identity, org, role, request.user)
+            _grant_org_access(identity, org, role, request.user, redirect_url=normalized_redirect_url)
 
         email_warning = None
         try:
@@ -323,12 +359,21 @@ def confirm_invitation(request):
     # silently downgrading an existing higher-privilege role (e.g. org_admin → doctor).
     # If the grant already exists, leave it unchanged; the invitation is still
     # marked confirmed so it can't be replayed.
-    _grant_org_access(identity, invitation.org, invitation.role, invitation.invited_by)
+    grant = _grant_org_access(
+        identity,
+        invitation.org,
+        invitation.role,
+        invitation.invited_by,
+        redirect_url=invitation.redirect_url,
+    )
 
     invitation.confirmed_at = timezone.now()
     invitation.save(update_fields=['confirmed_at'])
 
-    return Response({'detail': f'Invitation confirmed. Access granted to {invitation.org.name}.'})
+    response_data = {'detail': f'Invitation confirmed. Access granted to {invitation.org.name}.'}
+    if grant.redirect_url:
+        response_data['redirect_url'] = grant.redirect_url
+    return Response(response_data)
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +449,11 @@ class OrgAccessDetailView(APIView):
                 )
             grant.role = new_role
             changed_grant.append('role')
+            normalized_redirect_url = _normalize_redirect_url(new_role, grant.redirect_url)
+            desired_redirect_url = normalized_redirect_url if new_role == 'analyst' else ''
+            if grant.redirect_url != desired_redirect_url:
+                grant.redirect_url = desired_redirect_url
+                changed_grant.append('redirect_url')
 
         if 'is_premium' in request.data:
             raw = request.data['is_premium']

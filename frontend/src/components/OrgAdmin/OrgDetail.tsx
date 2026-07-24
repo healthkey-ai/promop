@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, Trash2 } from 'lucide-react';
 import api from '@/api/axios';
 
+const DEFAULT_ANALYST_REDIRECT_URL = 'https://analytics.healthkey.ai';
+
 interface OrgDetailProps {
   slug: string;
   isStaff: boolean;
@@ -30,6 +32,7 @@ interface Invitation {
   org_slug: string;
   email: string;
   role: string;
+  redirect_url: string | null;
   status: string;
   expires_at: string;
   created_at: string;
@@ -48,6 +51,7 @@ interface AccessGrant {
   org_slug: string;
   group_name: string | null;
   role: string;
+  redirect_url: string | null;
   expires_at: string | null;
   granted_at: string;
 }
@@ -98,6 +102,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   // Invite form state
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState('doctor');
+  const [inviteRedirectUrl, setInviteRedirectUrl] = useState(DEFAULT_ANALYST_REDIRECT_URL);
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteSuccess, setInviteSuccess] = useState<string | null>(null);
 
@@ -193,7 +198,11 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     try {
       setInviteError(null);
       setInviteSuccess(null);
-      const res = await api.post<InviteResponse>(`${base}/invite/`, { email: inviteEmail, role: inviteRole });
+      const payload: Record<string, string> = { email: inviteEmail, role: inviteRole };
+      if (inviteRole === 'analyst') {
+        payload.redirect_url = inviteRedirectUrl;
+      }
+      const res = await api.post<InviteResponse>(`${base}/invite/`, payload);
       if (res.data.email_warning) {
         setInviteSuccess(`User access was updated for ${inviteEmail}, but the invitation email was not sent.`);
       } else if (res.data.access_granted) {
@@ -202,6 +211,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
         setInviteSuccess(`Invitation sent to ${inviteEmail}.`);
       }
       setInviteEmail('');
+      setInviteRedirectUrl(DEFAULT_ANALYST_REDIRECT_URL);
       fetchAll();
     } catch {
       setInviteError('Failed to send invitation.');
@@ -237,7 +247,8 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   const handleUpdateGrant = async (grantId: number, patch: { role?: string; is_premium?: boolean }) => {
     setAccessGrants(prev => prev.map(g => g.id === grantId ? { ...g, ...patch } : g));
     try {
-      await api.patch(`${base}/access/${grantId}/`, patch);
+      const res = await api.patch<AccessGrant>(`${base}/access/${grantId}/`, patch);
+      setAccessGrants(prev => prev.map(g => g.id === grantId ? res.data : g));
     } catch (err) {
       console.error('Failed to update access grant:', err);
       setAccessError('Failed to update access grant. Please try again.');
@@ -252,7 +263,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     { key: 'settings', label: 'Settings' },
     { key: 'stats', label: 'Stats' },
     { key: 'trusts', label: 'Access Rules' },
-    { key: 'admins', label: 'Admins' },
+    { key: 'admins', label: 'Access Grants' },
     { key: 'invitations', label: 'Invitations' },
   ];
 
@@ -452,7 +463,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
         </div>
       )}
 
-      {/* Admins (org_admin access grants) */}
+      {/* Access grants */}
       {activeSection === 'admins' && (
         <div className="space-y-4">
           <h2 className="font-medium text-gray-900">Access Grants</h2>
@@ -460,48 +471,83 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
           {accessGrants.length === 0 ? (
             <p className="text-sm text-gray-500">No access grants.</p>
           ) : (
-            <ul className="divide-y divide-gray-100 border border-gray-200 rounded-lg overflow-hidden">
-              {accessGrants.map(g => (
-                <li key={g.id} className="flex items-center justify-between px-4 py-3 gap-3">
-                  <div className="flex flex-col gap-0.5 min-w-0">
-                    <span className="text-sm font-medium truncate">{g.name || g.email}</span>
-                    {g.name && <span className="text-xs text-gray-400 truncate">{g.email}</span>}
-                  </div>
-                  <div className="flex items-center gap-3 shrink-0">
-                    {g.role === 'org_admin' ? (
-                      <span className="text-xs px-2 py-0.5 rounded bg-purple-100 text-purple-700 font-medium">Org Admin</span>
-                    ) : (
-                      <>
-                        <select
-                          value={g.role}
-                          onChange={e => handleUpdateGrant(g.id, { role: e.target.value })}
-                          className="border border-gray-300 rounded px-2 py-1 text-xs"
+            <div className="overflow-x-auto border border-gray-200 rounded-lg">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">User</th>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">Role</th>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">Site</th>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">Premium</th>
+                    <th className="px-4 py-2 text-right font-medium text-gray-600">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {accessGrants.map(g => (
+                    <tr key={g.id} className="border-t border-gray-100 align-top">
+                      <td className="px-4 py-3">
+                        <div className="flex flex-col gap-0.5 min-w-0">
+                          <span className="text-sm font-medium truncate">{g.name || g.email}</span>
+                          {g.name && <span className="text-xs text-gray-400 truncate">{g.email}</span>}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        {g.role === 'org_admin' ? (
+                          <span className="text-xs px-2 py-0.5 rounded bg-purple-100 text-purple-700 font-medium">Org Admin</span>
+                        ) : (
+                          <select
+                            value={g.role}
+                            onChange={e => handleUpdateGrant(g.id, { role: e.target.value })}
+                            className="border border-gray-300 rounded px-2 py-1 text-xs"
+                          >
+                            <option value="doctor">Doctor</option>
+                            <option value="analyst">Analyst</option>
+                          </select>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-gray-700">
+                        {g.redirect_url ? (
+                          <a
+                            href={g.redirect_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-blue-600 hover:text-blue-800 break-all"
+                          >
+                            {g.redirect_url}
+                          </a>
+                        ) : (
+                          'PROMOP'
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        {g.role === 'org_admin' ? (
+                          <span className="text-xs text-gray-400">N/A</span>
+                        ) : (
+                          <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={g.is_premium}
+                              onChange={e => handleUpdateGrant(g.id, { is_premium: e.target.checked })}
+                              className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600"
+                            />
+                            Premium
+                          </label>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          onClick={() => handleRevokeAccess(g.id)}
+                          className="text-red-400 hover:text-red-600"
+                          title="Revoke access"
                         >
-                          <option value="doctor">Doctor</option>
-                          <option value="analyst">Analyst</option>
-                        </select>
-                        <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer select-none">
-                          <input
-                            type="checkbox"
-                            checked={g.is_premium}
-                            onChange={e => handleUpdateGrant(g.id, { is_premium: e.target.checked })}
-                            className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600"
-                          />
-                          Premium
-                        </label>
-                      </>
-                    )}
-                    <button
-                      onClick={() => handleRevokeAccess(g.id)}
-                      className="text-red-400 hover:text-red-600"
-                      title="Revoke access"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
+                          <Trash2 size={14} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
 
           {/* Invite form */}
@@ -519,7 +565,13 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
             <div className="flex gap-2">
               <select
                 value={inviteRole}
-                onChange={e => setInviteRole(e.target.value)}
+                onChange={e => {
+                  const nextRole = e.target.value;
+                  setInviteRole(nextRole);
+                  if (nextRole !== 'analyst') {
+                    setInviteRedirectUrl(DEFAULT_ANALYST_REDIRECT_URL);
+                  }
+                }}
                 className="border border-gray-300 rounded px-2 py-1.5 text-sm"
               >
                 <option value="org_admin">Org Admin</option>
@@ -533,6 +585,18 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                 Send Invite
               </button>
             </div>
+            {inviteRole === 'analyst' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Analyst redirect site</label>
+                <input
+                  type="url"
+                  placeholder={DEFAULT_ANALYST_REDIRECT_URL}
+                  value={inviteRedirectUrl}
+                  onChange={e => setInviteRedirectUrl(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                />
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -127,6 +127,7 @@ class OrgInvitation(models.Model):
     )
     email = models.EmailField()
     role = models.CharField(max_length=20, choices=ROLE, default='doctor')
+    redirect_url = models.URLField(max_length=500, blank=True, default='')
     token = models.CharField(max_length=64, unique=True)
     invited_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
@@ -260,6 +261,7 @@ class GroupAccess(models.Model):
         null=True, blank=True, related_name='access_grants',
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    redirect_url = models.URLField(max_length=500, blank=True, default='')
     expires_at = models.DateTimeField(null=True, blank=True)
     granted_at = models.DateTimeField(auto_now_add=True)
     granted_by = models.ForeignKey(
