@@ -4,12 +4,52 @@ from __future__ import annotations
 import logging
 
 from django.db import IntegrityError, transaction
+from django.db.models import Q
+from django.utils import timezone
 
-from omop_core.models import PatientRecord, Person
+from omop_core.models import GroupAccess, PatientRecord, Person
 from omop_core.services.pk import next_pk
 from patient_portal.models import PatientUser
 
 logger = logging.getLogger(__name__)
+
+
+def patient_person_for(identity):
+    """Return the Person this identity owns as a PHR Account Holder, or None.
+
+    An identity is a *patient* (PHR Account Holder, per HL7 PHR-S FM PH.1) when
+    it has a PatientUser link AND is not acting in any provider capacity —
+    i.e. it holds no active provider GroupAccess grant and is not staff/superuser.
+    Providers are scoped by org/group and are never treated as patients, even
+    if a PatientUser row happens to exist for them.
+
+    This is the canonical "is this a patient identity, and which record is
+    theirs" test used by the API (UserSerializer) and frontend routing.
+    """
+    if identity is None or not getattr(identity, 'is_authenticated', False):
+        return None
+    if getattr(identity, 'is_staff', False) or getattr(identity, 'is_superuser', False):
+        return None
+
+    pu = (
+        PatientUser.objects
+        .filter(identity=identity)
+        .select_related('person')
+        .first()
+    )
+    if pu is None:
+        return None
+
+    now = timezone.now()
+    has_provider_grant = GroupAccess.objects.filter(
+        identity=identity,
+    ).filter(
+        Q(expires_at__isnull=True) | Q(expires_at__gt=now),
+    ).exists()
+    if has_provider_grant:
+        return None
+
+    return pu.person
 
 
 def resolve_or_create_person(identity, email=None, allow_create=True):

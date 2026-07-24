@@ -9995,3 +9995,96 @@ class MCODECreatinineLoincTest(FhirUploadBase):
         self.assertIsNotNone(self._pi.serum_creatinine_mg_dl,
                              'serum_creatinine_mg_dl not populated from LOINC 38483-4')
         self.assertAlmostEqual(float(self._pi.serum_creatinine_mg_dl), 1.1, places=1)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: Patient / PHR Account Holder role surface (issue #264, FM PH.1)
+# ---------------------------------------------------------------------------
+
+class PatientRolePersonForTest(TestCase):
+    """Unit tests for patient_portal.services.patient_person_for."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+        from omop_core.models import GroupAccess, Organization
+
+        # A patient: PatientUser link, no provider grant.
+        cls.person = Person.objects.create(person_id=90101, family_name='Holder', given_name='Pat')
+        PatientRecord.objects.create(person=cls.person)
+        cls.patient_identity = Identity.objects.create_user(email='holder@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.patient_identity, person=cls.person)
+
+        # A provider: PatientUser link exists BUT also has an org_admin grant.
+        cls.person_prov = Person.objects.create(person_id=90102, family_name='Doc', given_name='Dee')
+        PatientRecord.objects.create(person=cls.person_prov)
+        cls.provider_identity = Identity.objects.create_user(email='doc@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.provider_identity, person=cls.person_prov)
+        cls.org = Organization.objects.create(name='Acme Onc', slug='acme-onc')
+        GroupAccess.objects.create(identity=cls.provider_identity, org=cls.org, role='org_admin')
+
+        # A plain identity with no PatientUser at all.
+        cls.orphan_identity = Identity.objects.create_user(email='orphan@test.com', password='pw')
+
+        # Staff/superuser with a PatientUser link should still not be a patient.
+        cls.person_staff = Person.objects.create(person_id=90103, family_name='Staff', given_name='Sam')
+        cls.staff_identity = Identity.objects.create_user(email='staff264@test.com', password='pw', is_staff=True)
+        PatientUser.objects.create(identity=cls.staff_identity, person=cls.person_staff)
+
+    def test_patient_identity_resolves_to_own_person(self):
+        from patient_portal.services import patient_person_for
+        self.assertEqual(patient_person_for(self.patient_identity), self.person)
+
+    def test_provider_with_group_access_is_not_a_patient(self):
+        from patient_portal.services import patient_person_for
+        self.assertIsNone(patient_person_for(self.provider_identity))
+
+    def test_identity_without_patient_user_is_not_a_patient(self):
+        from patient_portal.services import patient_person_for
+        self.assertIsNone(patient_person_for(self.orphan_identity))
+
+    def test_staff_is_not_a_patient(self):
+        from patient_portal.services import patient_person_for
+        self.assertIsNone(patient_person_for(self.staff_identity))
+
+    def test_none_identity_is_not_a_patient(self):
+        from patient_portal.services import patient_person_for
+        self.assertIsNone(patient_person_for(None))
+
+
+class PatientRoleUserEndpointTest(TestCase):
+    """/api/v1/user/ exposes is_patient and person_id (issue #264)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+        from omop_core.models import GroupAccess, Organization
+
+        cls.person = Person.objects.create(person_id=90201, family_name='Holder', given_name='Pat')
+        PatientRecord.objects.create(person=cls.person)
+        cls.patient_identity = Identity.objects.create_user(email='p264@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.patient_identity, person=cls.person)
+
+        cls.provider_identity = Identity.objects.create_user(email='d264@test.com', password='pw')
+        cls.org = Organization.objects.create(name='Beta Onc', slug='beta-onc')
+        GroupAccess.objects.create(identity=cls.provider_identity, org=cls.org, role='org_admin')
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def test_patient_user_endpoint_reports_is_patient_and_person_id(self):
+        resp = self._client_as(self.patient_identity).get('/api/v1/user/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        user = resp.data['user']
+        self.assertTrue(user['is_patient'])
+        self.assertEqual(user['person_id'], self.person.person_id)
+
+    def test_provider_user_endpoint_reports_not_patient(self):
+        resp = self._client_as(self.provider_identity).get('/api/v1/user/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        user = resp.data['user']
+        self.assertFalse(user['is_patient'])
+        self.assertIsNone(user['person_id'])
+        self.assertTrue(user['is_org_admin'])

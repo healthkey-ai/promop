@@ -8,7 +8,7 @@ interface OrgAccess {
   expires_at: string | null;
 }
 
-interface User {
+export interface User {
   id: number;
   sub: string;
   email: string;
@@ -17,6 +17,10 @@ interface User {
   is_superuser?: boolean;
   is_org_admin?: boolean;
   org_accesses?: OrgAccess[];
+  // PHR Account Holder (patient) role — see PHR-S FM PH.1. When is_patient is
+  // true, person_id is the patient's own record and the UI runs in patient mode.
+  is_patient?: boolean;
+  person_id?: number | null;
 }
 
 export const useAuth = () => {
