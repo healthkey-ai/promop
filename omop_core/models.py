@@ -128,6 +128,7 @@ class OrgInvitation(models.Model):
     )
     email = models.EmailField()
     role = models.CharField(max_length=20, choices=ROLE, default='doctor')
+    redirect_url = models.URLField(max_length=500, blank=True, default='')
     token = models.CharField(max_length=64, unique=True)
     invited_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
@@ -261,6 +262,7 @@ class GroupAccess(models.Model):
         null=True, blank=True, related_name='access_grants',
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    redirect_url = models.URLField(max_length=500, blank=True, default='')
     expires_at = models.DateTimeField(null=True, blank=True)
     granted_at = models.DateTimeField(auto_now_add=True)
     granted_by = models.ForeignKey(
@@ -416,7 +418,7 @@ class Concept(models.Model):
             # expression must match. (pg_trgm enabled in migration 0094; #262.)
             # Named `_upper_` (not the old `ix_concept_name_trgm`) so the concurrent
             # swap builds this one before dropping the raw one — see migrations
-            # 0120 (add) / 0121 (drop).
+            # 0121 (add) / 0122 (drop).
             GinIndex(
                 OpClass(Upper('concept_name'), name='gin_trgm_ops'),
                 name='ix_concept_name_upper_trgm',

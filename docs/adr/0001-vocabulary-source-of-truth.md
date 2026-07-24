@@ -1,6 +1,6 @@
 # ADR 0001 — promop is the vocabulary source of truth
 
-**Status:** Proposed (2026-07-22)
+**Status:** Proposed (2026-07-22; access mechanism — API + cache — folded in 2026-07-24).
 **Supersedes:** `exact/docs/adr/0001-cross-vocabulary-mapping.md`,
 `soc/docs/adr/0001-cross-vocabulary-mapping.md` (both to be marked *Superseded* with a
 link here).
@@ -28,37 +28,78 @@ institutionalises the drift and the divergence-safety surface (SoC #198, EXACT #
 1. **promop is the single source of truth for ALL vocabulary data**: `concept`,
    `concept_relationship`, `concept_synonym`, `concept_ancestor`, `drug_strength`,
    `source_to_concept_map`, and vocabulary/release versions.
-2. **Consumers (EXACT, SoC) pull vocabulary from promop and cache it locally.** Local
-   vocabulary stores become versioned **caches** of a promop release, not sources of
-   truth. Consumers do not independently vendor or curate vocabulary content.
+2. **All data clients (EXACT, SoC, and any future consumer) access promop vocabulary and
+   concept-graph data exclusively through promop's HTTP API, backed by a client-side
+   cache.** The cache is a transient performance/availability layer keyed on the promop
+   **release id**, **not** a replicated release store or a second source of truth. No
+   consumer vendors, curates, or bulk-replicates vocabulary content. (See *Access
+   mechanism* below.)
 3. **One temporary exception:** the **`cb_code ↔ concept_id`** mapping stays inside CB
    (EXACT) for the transition period only. It is `cb_code`-keyed (`TherapyOmopMapping`),
    tied to CB-specific category matching semantics, and is scheduled for retirement
    (see *CB exception* below).
 
+## Access mechanism: API + cache
+
+promop's HTTP API **is** the synchronization contract; consumers hold a transient cache, not
+a snapshot. Rejected alternatives (recorded so they are not re-litigated): (a) hourly/bulk
+**download** of a full `concept*` replica — contradicts "remove local copies," is
+disproportionate to consumer needs, and promop exposes no bulk edge export today; (b) a
+promop-published versioned **snapshot/delta artifact** — deferred; API + cache is the
+committed mechanism. This decision replaces the snapshot/delta distribution mechanism the
+original draft required; the concrete API guarantees are folded into *Consequences* below.
+
+**EXACT #233 is the first consumer to conform** (informative):
+- Patient side: promop is to pre-expand component concept_ids onto the patient record
+  (`therapy_component_ids`, promop#189) so EXACT reads them without request-path traversal.
+  **Not yet wired:** the EXACT matcher still derives components locally today, and
+  `therapy_component_ids` is not yet release-stamped.
+- Trial side: regimen→component expansion via the graph API at **backfill**, cached,
+  release-pinned, fail-closed; stored in a **dedicated** column, never unioned into authored
+  component requirements.
+- Matching: the expansion is a regimen-level **OR-alternative** evaluated by **superset**
+  (a complete patient therapy line ⊇ a per-regimen expansion group), not any-overlap;
+  **excluded** regimens are not expanded.
+- **Data-model prerequisites this exposes for promop** (resolve before EXACT Phase T ships):
+  (1) `therapy_component_ids` is today an **unstamped aggregate union across all therapy
+  lines** — superset on the aggregate mis-infers a regimen; promop must emit
+  **line/episode-scoped component groups** with completeness and release/provenance stamping;
+  (2) components are **mixed-vocabulary** (HemOnc / RxNorm / ingredient), and distinct
+  regimens can share a drug *set* (e.g. VRd vs VRd Lite), so a component-set superset alone
+  can equate different regimens. promop must supply **source-asserted regimen identity**, not
+  only the component concept set, and the expansion output and patient components must be
+  reconcilable at a common concept granularity.
+
 ## Consequences (what promop must build)
 
 The decision is not satisfied by the existing query endpoints. promop is today a
-partial vocabulary database with browse/traversal endpoints, not a distributable,
-cacheable vocabulary contract. To honour the decision, promop must provide:
+partial vocabulary database with browse/traversal endpoints, not a versioned, cacheable
+API contract. To honour the decision, promop must provide:
 
 ### Release construction & publication
-- Immutable, content-addressed **release manifests**: release ID, per-vocabulary
+- Immutable, content-addressed **release manifests**: a **release id**, per-vocabulary
   versions, schema version, corpus scope, build timestamp, checksums.
 - **Atomic publication** (stage → validate → publish). The current
   `load_athena_vocabularies` can `TRUNCATE`-and-reload (cascading clinical tables) with
-  no publish boundary; consumers must never sync an in-progress database.
+  no publish boundary; consumers must never read an in-progress database.
 - Retention of prior releases; rollback.
 
-### Distribution surface
-- **Version-addressable full snapshots** and **release-to-release deltas** with
-  tombstones and replacement records.
-- A **latest-release pointer** with `ETag`/`If-None-Match`; explicit **version pinning**.
-- Coverage of `concept` (incl. `valid_start_date`/`valid_end_date`/`invalid_reason`),
-  `concept_synonym` (no endpoint today), `concept_relationship` (incl. edge validity),
-  `concept_ancestor`, `drug_strength`, `source_to_concept_map`, and vocabulary metadata.
-- **Every concept/graph/lookup/search response carries the release/vocabulary version**
-  (`Vocabulary.vocabulary_version` exists but is not currently returned).
+### API contract (what a cache pins and validates against)
+- **Every concept / graph / lookup / search response carries the immutable promop release
+  id** (plus the per-vocabulary versions it draws on). Today only
+  `Vocabulary.vocabulary_version` exists as a model field, surfaced on some responses (e.g.
+  `include_versions` on lookup, per-node on graph, promop#240); a **release-level id, a
+  current-release pointer, and explicit version pinning are NOT yet built** — they are the
+  core of this work. A cache keyed on per-vocabulary version alone is unsafe: a graph can
+  span vocabularies and relationship state, so cache identity must be `release_id`.
+- **Version pinning**: a client can pin one release for the duration of an operation and
+  detect a release change (`ETag` / `If-None-Match`, or an explicit release parameter).
+- Batch traversal (graph endpoint, ≤200 sources / ≤1000 nodes per source) with an explicit
+  **truncation** signal that consumers treat as fail-closed, never silent.
+- API coverage of `concept` (incl. `valid_start_date`/`valid_end_date`/`invalid_reason`),
+  `concept_synonym`, `concept_relationship` (incl. edge validity), `concept_ancestor`,
+  `drug_strength`, `source_to_concept_map`, and vocabulary metadata — with source-asserted
+  identity preserved.
 
 ### Corpus boundary
 - The loader currently scopes `concept` to selected vocabularies/classes,
@@ -67,25 +108,35 @@ cacheable vocabulary contract. To honour the decision, promop must provide:
   **narrow this ADR's scope** explicitly. "All" must not remain aspirational.
 
 ### Integrity / no poisoning
-- **No locally-minted concepts inside a licensed `vocabulary_id`.** FHIR import today
-  mints `FHIR-*` rows under `vocabulary_id='HemOnc'` (before even attempting a real
-  HemOnc name match). Local/unmatched content must live under a distinct local
-  vocabulary id and be surfaced in a mapping-gap report. A cache must be able to trust
-  that "HemOnc" means licensed Athena HemOnc.
+- **No locally-minted concepts inside a licensed `vocabulary_id`.** Unmatched/local content
+  (e.g. FHIR-imported drugs with no HemOnc match) must live under a distinct local
+  vocabulary id and be surfaced in a mapping-gap report — never minted under
+  `vocabulary_id='HemOnc'`. A cache must be able to trust that "HemOnc" means licensed
+  Athena HemOnc. (Confirm the current FHIR import path already quarantines such content.)
 - Validate inbound HemOnc concept_ids (vocabulary / class / standard / validity) before
   persisting them from FHIR.
 
-### Deprecation / migration semantics
+### Migration semantics
 - Deprecation & replacement policy: whether consumers may auto-migrate.
-- A release delta must classify each referenced id as **retained / invalidated /
-  uniquely-replaced / ambiguous / unmapped**. Consumers must never blindly rewrite ids.
-- Ontology changes (a relationship retired or re-validated) change cached
-  expansions even when concept ids are unchanged — deltas must express this.
+- Via the API, each referenced id must be classifiable as **retained / invalidated /
+  uniquely-replaced / ambiguous / unmapped** across releases; consumers must never blindly
+  rewrite ids.
+- Ontology changes (a relationship retired or re-validated) change cached expansions even
+  when concept ids are unchanged — the release id must change so caches invalidate.
 
 ### Consumer conformance
+- A **shared cache**, not per-process. On Redis-less deployments (e.g. EXACT staging on
+  Cloud Run) use a **DB-backed cache** so entries are shared across instances and survive
+  recycles; a per-process `LocMemCache` is near-inert there.
+- Cache key includes the **release id**; **pin the release per operation**, and where two
+  sides are matched (e.g. patient vs trial) **assert equal release ids** — cross-side skew
+  is a correctness bug, not a nuisance.
+- **Fail-closed**: on cache miss + promop unavailable → `unknown`, never fail-open to
+  matched; a batch/backfill fails rather than persisting a partial projection.
+- **Request-scoped memoization** for repeated per-request expansions.
 - Cache freshness rules: last-known-good retention, max staleness per decision class,
   bootstrap behavior, and the **clinical fail-safe when no valid cache exists**.
-- Record the cache release id + age on every match/recommendation (staleness is a
+- Record the cache **release id + age** on every match/recommendation (staleness is a
   clinical input; cross-consumer version skew must be observable).
 - Consumer conformance tests + a release compatibility policy.
 
@@ -118,8 +169,8 @@ cacheable vocabulary contract. To honour the decision, promop must provide:
 ## Status of related decisions
 
 - EXACT #232/#233 ("don't store HemOnc locally; use promop's concept graph API") are
-  **aligned** with this ADR (they become "pull + cache" rather than "call live per
-  request"). The concept graph API is an interactive/reconciliation tool, **not** the
-  synchronization contract — the release/snapshot/delta surface above is.
+  **aligned** with this ADR: the concept graph / query API **is** the synchronization
+  contract, consumed through a release-pinned client cache (fetch-on-demand at backfill /
+  read of pre-expanded fields at request time), **not** a bulk snapshot/delta replica.
 - EXACT #174 (vocabulary-bridge information loss) and SoC #198 (silent-drop, closed)
   are the safety motivations for fail-closed cache semantics.
