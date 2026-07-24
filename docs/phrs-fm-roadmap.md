@@ -87,14 +87,43 @@ Phase 2 adds *export* of that record, not the ability to see it.
    role-neutral; no separate login endpoint needed (`login_view` already accepts
    non-provider identities, `api/views.py:3291-3323`).
 
+### Account provisioning (how a patient gets an account)
+
+Three sanctioned paths, all landing on the same `Identity → PatientUser → Person`
+link — the org is always known (from the caller's token or the record):
+
+1. **Staff invite** — `POST /api/v1/patients/{id}/invite/` emails the patient a
+   tokenised link; they set a password at `/accept-patient-invite`
+   (`patient_portal/api/patient_invitations.py`). Org derives from
+   `person → PatientRecord.organization`.
+2. **App-driven signup ("A")** — `POST /api/v1/patients/signup/`, for a trusted app
+   (org-scoped OAuth client, service token, or staff). Creates the account and stamps
+   the org (from the caller's token, or an explicit `org` slug for staff/service).
+   Accepts either OIDC keys (`actor_iss`/`actor_sub`, so the patient's later JWT login
+   matches) or `email`+`password` (`patient_portal/api/patient_signup.py`).
+3. **Legacy auto-provision** — partner-auth (patient JWT) still auto-creates on first
+   call (`authentication.py` → `resolve_or_create_person`), but assigns **no org**;
+   prefer (1) or (2) so the org is set up front.
+
+**Not required for PHR-S FM conformance:** the FM (PH.1 / TI.1) is agnostic about
+provisioning *mechanics* — it requires only that an account holder can be established,
+authenticated, and manage their record, which (1)+(2) satisfy. So "patient-JWT
+auto-provision with org" (model B) is not a conformance gap.
+
+**Deferred — direct patient self-signup** (a patient registers themselves, e.g. an
+org-gated `/org/{slug}/signup` UI): a reasonable optional capability, its own later PR.
+It needs an `Organization.allows_public_signup` flag (default off), email verification,
+and a duplicate/claim guard, so it is kept out of this phase.
+
 ### Tests
 
-- Backend (`patient_portal/tests.py`, `_SmartBase`/OAuth base): patient identity sees only
-  own PatientRecord; cross-person GET/PATCH on **every** OMOP viewset → 403/empty; provider
-  scoping unchanged; `UserSerializer` returns `is_patient`/`person_id`; SMART
-  `launch/patient` token resolves to the right Person.
-- Frontend (`PatientHome.test.tsx`, `App.test.tsx`): patient user routes to `PatientHome`;
-  provider routes redirect for patients; `useAuth` exposes new fields.
+- Backend (`patient_portal/tests.py`): patient identity sees only own PatientRecord;
+  cross-person access on the OMOP viewsets → 403/empty (pre-existing coverage);
+  `UserSerializer` returns `is_patient`/`person_id`; `patient_person_for` role logic;
+  invitation create/lookup/accept + email-editable; app-driven signup (org stamping,
+  OIDC + local, idempotency, permission gating).
+- Frontend: `App.test.tsx` (role-gated routing), `PatientHome.test.tsx`,
+  `AcceptPatientInvite.test.tsx`.
 
 ---
 

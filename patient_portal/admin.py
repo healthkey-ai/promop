@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import Identity, PatientMessage, PatientConsent
+from .models import Identity, PatientMessage, PatientConsent, PatientInvitation
 
 
 @admin.register(Identity)
@@ -51,3 +51,11 @@ class PatientConsentAdmin(admin.ModelAdmin):
     search_fields = ['patient_user__identity__email', 'consent_type']
     list_filter = ['consent_type', 'consent_date']
     readonly_fields = ['consent_date']
+
+
+@admin.register(PatientInvitation)
+class PatientInvitationAdmin(admin.ModelAdmin):
+    list_display = ['email', 'person', 'status', 'invited_by', 'created_at', 'expires_at']
+    search_fields = ['email', 'person__person_id']
+    list_filter = ['created_at']
+    readonly_fields = ['token', 'created_at', 'accepted_at']

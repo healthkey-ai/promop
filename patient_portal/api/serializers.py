@@ -17,10 +17,34 @@ from django.utils import timezone
 class UserSerializer(serializers.ModelSerializer):
     is_org_admin = serializers.SerializerMethodField()
     org_accesses = serializers.SerializerMethodField()
+    is_patient = serializers.SerializerMethodField()
+    person_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Identity
-        fields = ['id', 'sub', 'email', 'name', 'is_staff', 'is_superuser', 'is_org_admin', 'org_accesses']
+        fields = [
+            'id', 'sub', 'email', 'name', 'is_staff', 'is_superuser',
+            'is_org_admin', 'org_accesses', 'is_patient', 'person_id',
+        ]
+
+    def _patient_person(self, obj):
+        """Memoized patient-record lookup so is_patient/person_id share one query."""
+        cache = getattr(self, '_patient_person_cache', None)
+        if cache is None:
+            cache = self._patient_person_cache = {}
+        if obj.pk not in cache:
+            from patient_portal.services import patient_person_for
+            cache[obj.pk] = patient_person_for(obj)
+        return cache[obj.pk]
+
+    def get_is_patient(self, obj):
+        """True when this identity is a PHR Account Holder (patient). See PH.1."""
+        return self._patient_person(obj) is not None
+
+    def get_person_id(self, obj):
+        """The person_id of the patient's own record, or None for non-patients."""
+        person = self._patient_person(obj)
+        return person.person_id if person else None
 
     def get_is_org_admin(self, obj):
         now = timezone.now()
@@ -54,6 +78,17 @@ class OrganizationSerializer(serializers.ModelSerializer):
         model = Organization
         fields = ['id', 'name', 'slug', 'is_active', 'allows_public_aggregated_data', 'created_at']
         read_only_fields = ['id', 'created_at']
+
+
+class PatientInvitationSerializer(serializers.ModelSerializer):
+    status = serializers.CharField(read_only=True)
+    person_id = serializers.IntegerField(source='person.person_id', read_only=True)
+
+    class Meta:
+        from patient_portal.models import PatientInvitation
+        model = PatientInvitation
+        fields = ['id', 'person_id', 'email', 'status', 'created_at', 'expires_at', 'accepted_at']
+        read_only_fields = fields
 
 
 class OrgTrustSerializer(serializers.ModelSerializer):

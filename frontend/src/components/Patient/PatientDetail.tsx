@@ -93,8 +93,22 @@ function PatientDetailSkeleton() {
   );
 }
 
-export default function PatientDetail() {
-  const { personId } = useParams<{ personId: string }>();
+interface PatientDetailProps {
+  /** Override the :personId route param — used to render a fixed record (patient mode). */
+  personIdOverride?: string;
+  /** Patient (PHR Account Holder) mode: hides provider-only chrome (back-to-list, #id). */
+  patientMode?: boolean;
+  /** Logout handler shown in the header when in patient mode. */
+  onLogout?: () => void;
+}
+
+export default function PatientDetail({
+  personIdOverride,
+  patientMode = false,
+  onLogout,
+}: PatientDetailProps = {}) {
+  const params = useParams<{ personId: string }>();
+  const personId = personIdOverride ?? params.personId;
   const navigate = useNavigate();
 
   const [loading, setLoading] = useState(true);
@@ -107,6 +121,10 @@ export default function PatientDetail() {
   const [patientName, setPatientName] = useState("");
   const [editedName, setEditedName] = useState("");
   const [activeTab, setActiveTab] = useState(0);
+
+  type InviteState = "idle" | "sending" | "sent" | "error";
+  const [inviteState, setInviteState] = useState<InviteState>("idle");
+  const [inviteMsg, setInviteMsg] = useState("");
 
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveSeqRef = useRef(0);
@@ -213,6 +231,30 @@ export default function PatientDetail() {
     scheduleAutoSave(pendingDataRef.current?.info ?? editedInfoRef.current, name);
   }, [scheduleAutoSave]);
 
+  const handleInvite = useCallback(async () => {
+    if (!personId) return;
+    setInviteState("sending");
+    setInviteMsg("");
+    try {
+      const email = editedInfoRef.current?.email;
+      const body = typeof email === "string" && email.trim() ? { email: email.trim() } : {};
+      const res = await api.post(`/v1/patients/${personId}/invite/`, body);
+      setInviteState("sent");
+      setInviteMsg(
+        res.data?.email_warning
+          ? res.data.email_warning
+          : `Invitation sent to ${res.data?.email ?? "the patient"}.`
+      );
+    } catch (err) {
+      setInviteState("error");
+      const msg =
+        err && typeof err === "object" && "response" in err
+          ? (err as { response?: { data?: { error?: string } } }).response?.data?.error
+          : undefined;
+      setInviteMsg(msg || "Could not send invitation.");
+    }
+  }, [personId]);
+
   const handleMutationAdd = useCallback(() => {
     const raw = pendingDataRef.current?.info?.genetic_mutations ?? editedInfoRef.current?.genetic_mutations ?? [];
     const m = [...(raw as { gene: string; mutation: string; origin: string; interpretation: string }[])];
@@ -276,9 +318,15 @@ export default function PatientDetail() {
         <div className="w-full max-w-sm rounded-2xl bg-background p-8 text-center shadow">
           <AlertCircle className="mx-auto mb-3 h-10 w-10 text-red-400" />
           <p className="mb-6 text-sm text-red-700">{fetchError}</p>
-          <button onClick={() => navigate("/")} className="inline-flex items-center gap-2 text-sm font-medium text-portal-brand hover:underline">
-            <ArrowLeft className="h-4 w-4" /> Patient List
-          </button>
+          {patientMode ? (
+            <button onClick={() => (onLogout ? onLogout() : navigate("/login"))} className="inline-flex items-center gap-2 text-sm font-medium text-portal-brand hover:underline">
+              Sign out
+            </button>
+          ) : (
+            <button onClick={() => navigate("/")} className="inline-flex items-center gap-2 text-sm font-medium text-portal-brand hover:underline">
+              <ArrowLeft className="h-4 w-4" /> Patient List
+            </button>
+          )}
         </div>
       </div>
     );
@@ -316,13 +364,18 @@ export default function PatientDetail() {
                 <div className="h-4 w-px bg-border" />
               </>
             )}
-            <button
-              onClick={() => navigate("/")}
-              className="flex h-8 w-8 items-center justify-center rounded-full border border-border bg-[#f5f7fa] text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground"
-              aria-label="Back to patient list"
-            >
-              <ArrowLeft className="h-3.5 w-3.5" />
-            </button>
+            {!patientMode && (
+              <button
+                onClick={() => navigate("/")}
+                className="flex h-8 w-8 items-center justify-center rounded-full border border-border bg-[#f5f7fa] text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground"
+                aria-label="Back to patient list"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+              </button>
+            )}
+            {patientMode && (
+              <span className="text-sm font-semibold text-foreground">My Health Record</span>
+            )}
           </div>
 
           <div className="flex min-w-0 items-center gap-3">
@@ -334,9 +387,11 @@ export default function PatientDetail() {
             </div>
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <span className="truncate text-sm font-semibold text-foreground">{patientName}</span>
-              <span className="inline-flex shrink-0 items-center rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-indigo-600">
-                #{personId}
-              </span>
+              {!patientMode && (
+                <span className="inline-flex shrink-0 items-center rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-indigo-600">
+                  #{personId}
+                </span>
+              )}
               {typeof editedInfo?.disease === "string" && editedInfo.disease && (
                 <span className="hidden shrink-0 items-center rounded-full border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 sm:inline-flex">
                   {editedInfo.disease}
@@ -347,6 +402,36 @@ export default function PatientDetail() {
             <div className="shrink-0">
               <SaveStatusIndicator status={saveStatus} onRetry={doSave} />
             </div>
+            {!patientMode && (
+              <div className="flex shrink-0 items-center gap-2">
+                <button
+                  onClick={handleInvite}
+                  disabled={inviteState === "sending"}
+                  title="Email this patient a link to create their portal account"
+                  className="shrink-0 rounded-full border border-border px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground disabled:opacity-50"
+                >
+                  {inviteState === "sending" ? "Inviting…" : "Invite to portal"}
+                </button>
+                {inviteMsg && (
+                  <span
+                    className={[
+                      "text-[11px]",
+                      inviteState === "error" ? "text-red-600" : "text-emerald-600",
+                    ].join(" ")}
+                  >
+                    {inviteMsg}
+                  </span>
+                )}
+              </div>
+            )}
+            {patientMode && onLogout && (
+              <button
+                onClick={onLogout}
+                className="shrink-0 rounded-full border border-border px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground"
+              >
+                Sign out
+              </button>
+            )}
           </div>
         </div>
       </div>

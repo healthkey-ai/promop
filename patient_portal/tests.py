@@ -9995,3 +9995,396 @@ class MCODECreatinineLoincTest(FhirUploadBase):
         self.assertIsNotNone(self._pi.serum_creatinine_mg_dl,
                              'serum_creatinine_mg_dl not populated from LOINC 38483-4')
         self.assertAlmostEqual(float(self._pi.serum_creatinine_mg_dl), 1.1, places=1)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: Patient / PHR Account Holder role surface (issue #264, FM PH.1)
+# ---------------------------------------------------------------------------
+
+class PatientRolePersonForTest(TestCase):
+    """Unit tests for patient_portal.services.patient_person_for."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+        from omop_core.models import GroupAccess, Organization
+
+        # A patient: PatientUser link, no provider grant.
+        cls.person = Person.objects.create(person_id=90101, family_name='Holder', given_name='Pat')
+        PatientRecord.objects.create(person=cls.person)
+        cls.patient_identity = Identity.objects.create_user(email='holder@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.patient_identity, person=cls.person)
+
+        # A provider: PatientUser link exists BUT also has an org_admin grant.
+        cls.person_prov = Person.objects.create(person_id=90102, family_name='Doc', given_name='Dee')
+        PatientRecord.objects.create(person=cls.person_prov)
+        cls.provider_identity = Identity.objects.create_user(email='doc@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.provider_identity, person=cls.person_prov)
+        cls.org = Organization.objects.create(name='Acme Onc', slug='acme-onc')
+        GroupAccess.objects.create(identity=cls.provider_identity, org=cls.org, role='org_admin')
+
+        # A plain identity with no PatientUser at all.
+        cls.orphan_identity = Identity.objects.create_user(email='orphan@test.com', password='pw')
+
+        # Staff/superuser with a PatientUser link should still not be a patient.
+        cls.person_staff = Person.objects.create(person_id=90103, family_name='Staff', given_name='Sam')
+        cls.staff_identity = Identity.objects.create_user(email='staff264@test.com', password='pw', is_staff=True)
+        PatientUser.objects.create(identity=cls.staff_identity, person=cls.person_staff)
+
+    def test_patient_identity_resolves_to_own_person(self):
+        from patient_portal.services import patient_person_for
+        self.assertEqual(patient_person_for(self.patient_identity), self.person)
+
+    def test_provider_with_group_access_is_not_a_patient(self):
+        from patient_portal.services import patient_person_for
+        self.assertIsNone(patient_person_for(self.provider_identity))
+
+    def test_identity_without_patient_user_is_not_a_patient(self):
+        from patient_portal.services import patient_person_for
+        self.assertIsNone(patient_person_for(self.orphan_identity))
+
+    def test_staff_is_not_a_patient(self):
+        from patient_portal.services import patient_person_for
+        self.assertIsNone(patient_person_for(self.staff_identity))
+
+    def test_none_identity_is_not_a_patient(self):
+        from patient_portal.services import patient_person_for
+        self.assertIsNone(patient_person_for(None))
+
+
+class PatientRoleUserEndpointTest(TestCase):
+    """/api/v1/user/ exposes is_patient and person_id (issue #264)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+        from omop_core.models import GroupAccess, Organization
+
+        cls.person = Person.objects.create(person_id=90201, family_name='Holder', given_name='Pat')
+        PatientRecord.objects.create(person=cls.person)
+        cls.patient_identity = Identity.objects.create_user(email='p264@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.patient_identity, person=cls.person)
+
+        cls.provider_identity = Identity.objects.create_user(email='d264@test.com', password='pw')
+        cls.org = Organization.objects.create(name='Beta Onc', slug='beta-onc')
+        GroupAccess.objects.create(identity=cls.provider_identity, org=cls.org, role='org_admin')
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def test_patient_user_endpoint_reports_is_patient_and_person_id(self):
+        resp = self._client_as(self.patient_identity).get('/api/v1/user/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        user = resp.data['user']
+        self.assertTrue(user['is_patient'])
+        self.assertEqual(user['person_id'], self.person.person_id)
+
+    def test_provider_user_endpoint_reports_not_patient(self):
+        resp = self._client_as(self.provider_identity).get('/api/v1/user/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        user = resp.data['user']
+        self.assertFalse(user['is_patient'])
+        self.assertIsNone(user['person_id'])
+        self.assertTrue(user['is_org_admin'])
+
+
+# ---------------------------------------------------------------------------
+# Patient invitations — staff invite a patient to claim their record (#264)
+# ---------------------------------------------------------------------------
+
+from django.core import mail as _django_mail  # noqa: E402
+from django.test import override_settings  # noqa: E402
+
+
+@override_settings(
+    EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+    APP_BASE_URL='https://app.test',
+)
+class PatientInvitationTest(TestCase):
+    """Staff invite a patient; the patient sets a password and gets an account."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        cls.person = Person.objects.create(person_id=91001, family_name='Reed', given_name='Rae')
+        cls.record = PatientRecord.objects.create(person=cls.person)  # no email yet
+
+        cls.staff = Identity.objects.create_user(email='staff-inv@test.com', password='pw', is_staff=True)
+
+        # An unrelated patient (no access to cls.person) for negative tests.
+        cls.other_person = Person.objects.create(person_id=91002, family_name='Doe', given_name='Dot')
+        PatientRecord.objects.create(person=cls.other_person)
+        cls.other_patient = Identity.objects.create_user(email='other@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.other_patient, person=cls.other_person)
+
+    def setUp(self):
+        _django_mail.outbox = []
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def _invite_url(self, person):
+        return f'/api/v1/patients/{person.person_id}/invite/'
+
+    # --- Invite creation ---
+
+    def test_staff_invite_sets_email_creates_invitation_and_sends_email(self):
+        resp = self._client_as(self.staff).post(
+            self._invite_url(self.person), {'email': 'Rae@Example.com'}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        from patient_portal.models import PatientInvitation
+        inv = PatientInvitation.objects.get(person=self.person)
+        self.assertEqual(inv.status, 'pending')
+        self.assertEqual(inv.email, 'rae@example.com')
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.email, 'rae@example.com')
+        self.assertEqual(len(_django_mail.outbox), 1)
+        self.assertIn(inv.token, _django_mail.outbox[0].body)
+        self.assertIn('accept-patient-invite', _django_mail.outbox[0].body)
+
+    def test_invite_without_any_email_is_rejected(self):
+        resp = self._client_as(self.staff).post(self._invite_url(self.person), {}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_invite_uses_stored_email_when_none_provided(self):
+        self.record.email = 'stored@example.com'
+        self.record.save(update_fields=['email'])
+        resp = self._client_as(self.staff).post(self._invite_url(self.person), {}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['email'], 'stored@example.com')
+
+    def test_reinvite_refreshes_token_without_duplicating(self):
+        c = self._client_as(self.staff)
+        c.post(self._invite_url(self.person), {'email': 'rae@example.com'}, format='json')
+        c.post(self._invite_url(self.person), {'email': 'rae@example.com'}, format='json')
+        from patient_portal.models import PatientInvitation
+        self.assertEqual(PatientInvitation.objects.filter(person=self.person).count(), 1)
+
+    def test_unprivileged_user_cannot_invite(self):
+        resp = self._client_as(self.other_patient).post(
+            self._invite_url(self.person), {'email': 'rae@example.com'}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(len(_django_mail.outbox), 0)
+
+    def test_cannot_invite_patient_with_active_account(self):
+        from patient_portal.models import PatientUser
+        existing = Identity.objects.create_user(email='rae@example.com', password='pw')
+        PatientUser.objects.create(identity=existing, person=self.person, is_active=True)
+        resp = self._client_as(self.staff).post(
+            self._invite_url(self.person), {'email': 'rae@example.com'}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # --- Lookup ---
+
+    def test_lookup_returns_email_and_patient_name(self):
+        self._client_as(self.staff).post(
+            self._invite_url(self.person), {'email': 'rae@example.com'}, format='json'
+        )
+        from patient_portal.models import PatientInvitation
+        token = PatientInvitation.objects.get(person=self.person).token
+        resp = APIClient().get('/api/v1/patient-invitations/lookup/', {'token': token})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['email'], 'rae@example.com')
+        self.assertEqual(resp.data['patient_name'], 'Rae Reed')
+
+    def test_lookup_rejects_bad_token(self):
+        resp = APIClient().get('/api/v1/patient-invitations/lookup/', {'token': 'nope'})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # --- Accept ---
+
+    def _create_invite(self, email='rae@example.com'):
+        self._client_as(self.staff).post(self._invite_url(self.person), {'email': email}, format='json')
+        from patient_portal.models import PatientInvitation
+        return PatientInvitation.objects.get(person=self.person)
+
+    def test_accept_creates_account_and_links_patient_user(self):
+        from patient_portal.models import PatientUser
+        from patient_portal.services import patient_person_for
+        inv = self._create_invite()
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': inv.token, 'password': 'sup3rsecret'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        inv.refresh_from_db()
+        self.assertEqual(inv.status, 'accepted')
+        pu = PatientUser.objects.get(person=self.person)
+        self.assertTrue(pu.identity.has_usable_password())
+        self.assertTrue(pu.identity.check_password('sup3rsecret'))
+        # The new account is a first-class patient.
+        self.assertEqual(patient_person_for(pu.identity), self.person)
+
+    def test_accept_rejects_short_password(self):
+        inv = self._create_invite()
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': inv.token, 'password': 'short'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_accept_rejects_unknown_token(self):
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': 'a' * 64, 'password': 'sup3rsecret'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_accept_rejects_expired_invitation(self):
+        inv = self._create_invite()
+        inv.expires_at = timezone.now() - timedelta(days=1)
+        inv.save(update_fields=['expires_at'])
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': inv.token, 'password': 'sup3rsecret'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_accept_cannot_be_replayed(self):
+        inv = self._create_invite()
+        body = {'token': inv.token, 'password': 'sup3rsecret'}
+        APIClient().post('/api/v1/patient-invitations/accept/', body, format='json')
+        resp = APIClient().post('/api/v1/patient-invitations/accept/', body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_accept_does_not_overwrite_existing_real_account(self):
+        """A pre-existing local account with a real password must not be reset by accept."""
+        existing = Identity.objects.create_user(email='rae@example.com', password='original-pw')
+        inv = self._create_invite('rae@example.com')
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': inv.token, 'password': 'attacker-chosen'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        existing.refresh_from_db()
+        self.assertTrue(existing.check_password('original-pw'))
+        self.assertFalse(existing.check_password('attacker-chosen'))
+        inv.refresh_from_db()
+        self.assertEqual(inv.status, 'pending')  # not consumed
+
+    def test_accept_claims_placeholder_account(self):
+        """A placeholder local account (no usable password) is claimed and gets the new password."""
+        from patient_portal.models import PatientUser
+        placeholder = Identity.objects.create_user(email='rae@example.com', password=None)
+        placeholder.set_unusable_password()
+        placeholder.save(update_fields=['password'])
+        inv = self._create_invite('rae@example.com')
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': inv.token, 'password': 'sup3rsecret'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        placeholder.refresh_from_db()
+        self.assertTrue(placeholder.check_password('sup3rsecret'))
+        self.assertEqual(PatientUser.objects.get(person=self.person).identity, placeholder)
+
+    # --- Email editable (lock-in) ---
+
+    def test_email_is_editable_via_patch(self):
+        resp = self._client_as(self.staff).patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'email': 'edited@example.com'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, getattr(resp, 'data', None))
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.email, 'edited@example.com')
+
+
+# ---------------------------------------------------------------------------
+# Patient signup — a trusted app creates a patient account in an org (#264, "A")
+# ---------------------------------------------------------------------------
+
+class PatientSignupTest(TestCase):
+    """POST /api/v1/patients/signup/ — server-to-server patient account creation."""
+
+    SIGNUP_URL = '/api/v1/patients/signup/'
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Organization
+        from patient_portal.models import PatientUser
+        cls.org = Organization.objects.create(name='Acme Oncology', slug='acme-onc')
+        cls.staff = Identity.objects.create_user(email='staff-signup@test.com', password='pw', is_staff=True)
+
+        # A plain patient (not privileged) for the negative test.
+        cls.person = Person.objects.create(person_id=92001, family_name='Pat', given_name='Pat')
+        cls.patient = Identity.objects.create_user(email='pat-signup@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.patient, person=cls.person)
+
+    def _staff(self):
+        c = APIClient()
+        c.force_authenticate(user=self.staff)
+        return c
+
+    def test_staff_signup_local_creates_account_in_org(self):
+        from patient_portal.models import PatientUser
+        resp = self._staff().post(self.SIGNUP_URL, {
+            'org': 'acme-onc', 'email': 'newpt@example.com', 'password': 'sup3rsecret',
+            'given_name': 'New', 'family_name': 'Patient',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertTrue(resp.data['created'])
+        pid = resp.data['person_id']
+        pu = PatientUser.objects.get(person__person_id=pid)
+        self.assertTrue(pu.identity.has_usable_password())
+        self.assertTrue(pu.identity.check_password('sup3rsecret'))
+        record = PatientRecord.objects.get(person__person_id=pid)
+        self.assertEqual(record.organization, self.org)
+        self.assertEqual(record.email, 'newpt@example.com')
+
+    def test_staff_signup_oidc_creates_linked_identity(self):
+        resp = self._staff().post(self.SIGNUP_URL, {
+            'org': 'acme-onc',
+            'actor_iss': 'https://idp.example.com', 'actor_sub': 'oidc-123',
+            'email': 'oidc@example.com',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        identity = Identity.objects.get(issuer='https://idp.example.com', sub='oidc-123')
+        # OIDC accounts authenticate via their IdP, not a local password.
+        self.assertFalse(identity.has_usable_password())
+        record = PatientRecord.objects.get(person__person_id=resp.data['person_id'])
+        self.assertEqual(record.organization, self.org)
+
+    def test_signup_is_idempotent_on_repeat_identity(self):
+        body = {'org': 'acme-onc', 'actor_iss': 'https://idp.example.com', 'actor_sub': 'dup-1'}
+        first = self._staff().post(self.SIGNUP_URL, body, format='json')
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        second = self._staff().post(self.SIGNUP_URL, body, format='json')
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertFalse(second.data['created'])
+        self.assertEqual(first.data['person_id'], second.data['person_id'])
+        self.assertEqual(
+            Identity.objects.filter(issuer='https://idp.example.com', sub='dup-1').count(), 1
+        )
+
+    def test_signup_requires_identity_anchor(self):
+        resp = self._staff().post(self.SIGNUP_URL, {'org': 'acme-onc', 'email': 'noanchor@example.com'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_signup_rejects_short_password(self):
+        resp = self._staff().post(self.SIGNUP_URL, {
+            'org': 'acme-onc', 'email': 'shortpw@example.com', 'password': 'short',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_staff_signup_requires_org_when_none_bound(self):
+        resp = self._staff().post(self.SIGNUP_URL, {
+            'email': 'noorg@example.com', 'password': 'sup3rsecret',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_regular_patient_cannot_signup(self):
+        c = APIClient()
+        c.force_authenticate(user=self.patient)
+        resp = c.post(self.SIGNUP_URL, {
+            'org': 'acme-onc', 'email': 'x@example.com', 'password': 'sup3rsecret',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)

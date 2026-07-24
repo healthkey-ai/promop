@@ -1,7 +1,9 @@
 import { useState } from "react";
 import api from "@/api/axios";
+import { getActiveBranding } from "@/config/branding";
 
 export function Login() {
+  const branding = getActiveBranding();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -34,7 +36,7 @@ export function Login() {
       <div className="w-full max-w-md space-y-8 rounded-lg bg-background p-8 shadow-lg">
         <div>
           <h2 className="mt-6 text-center text-3xl font-extrabold text-foreground">
-            PROMOP Admin
+            {branding.appName || "PROMOP"}
           </h2>
           <p className="mt-2 text-center text-sm text-muted-foreground">
             Sign in to your account
