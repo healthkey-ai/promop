@@ -6483,6 +6483,33 @@ class ConceptLookupTest(_SmartBase):
         resp = self.client.get(f'{self.URL}?lookup=LOINC:2160-0')
         self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
+    def test_default_response_has_no_vocabulary_versions(self):
+        resp = self.client.get(self.URL, {'lookup': 'LOINC:2160-0'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertNotIn('_vocabulary_versions', resp.json())  # frozen shape for etl
+
+    def test_include_versions_adds_vocabulary_versions_map(self):
+        from omop_core.models import Vocabulary
+        Vocabulary.objects.filter(vocabulary_id='LOINC').update(vocabulary_version='LOINC 2.77')
+        resp = self.client.get(
+            self.URL, {'lookup': 'LOINC:2160-0', 'include_versions': '1'}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        body = resp.json()
+        self.assertEqual(body['LOINC']['2160-0'], 3013682)  # existing shape preserved
+        self.assertEqual(body['_vocabulary_versions'], {'LOINC': 'LOINC 2.77'})
+
+    def test_include_versions_does_not_clobber_requested_vocab(self):
+        # Pathological: a lookup for a vocab literally named `_vocabulary_versions`
+        # must keep its own bucket, not be overwritten by the meta map.
+        resp = self.client.get(
+            self.URL,
+            {'lookup': '_vocabulary_versions:x', 'include_versions': '1'},
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['_vocabulary_versions'], {'x': None})
+
 
 class ConceptGraphTest(_SmartBase):
     """GET /api/v1/concepts/{id}/ancestors|descendants and /api/v1/concepts/graph/."""
@@ -6614,6 +6641,18 @@ class ConceptGraphTest(_SmartBase):
         self.assertEqual(node['concept_id'], self.drug_class.concept_id)
         self.assertEqual(node['min_levels_of_separation'], 1)
         self.assertEqual(node['vocabulary_id'], 'HemOnc')
+
+    def test_graph_node_carries_vocabulary_version(self):
+        self.hemonc_vocab.vocabulary_version = 'HemOnc 2024-12-19'
+        self.hemonc_vocab.save(update_fields=['vocabulary_version'])
+        resp = self.client.get(
+            f'{self.url_ancestors}?max_levels=1&vocabulary_id=HemOnc',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        node = resp.json()['results'][0]
+        self.assertEqual(node['vocabulary_id'], 'HemOnc')
+        self.assertEqual(node['vocabulary_version'], 'HemOnc 2024-12-19')
 
     def test_batch_endpoint_groups_results_by_source_concept(self):
         resp = self.client.get(
@@ -6858,11 +6897,26 @@ class ConceptSearchTest(_ConceptFixtureBase):
             'concept_id': 201826,
             'concept_name': 'Type 2 diabetes mellitus',
             'vocabulary_id': 'SNOMED',
+            'vocabulary_version': '',
             'concept_code': '44054006',
             'domain_id': 'Condition',
             'concept_class_id': 'Clinical Finding',
             'standard_concept': 'S',
         })
+
+    def test_search_result_carries_vocabulary_version(self):
+        from omop_core.models import Vocabulary
+        Vocabulary.objects.filter(vocabulary_id='SNOMED').update(
+            vocabulary_version='SNOMED 2024-09-01')
+        resp = self.client.get(
+            self.URL, {'q': 'Type 2 diabetes', 'page_size': 100}, **self._auth(),
+        )
+        match = next(
+            (r for r in resp.json()['results'] if r['concept_id'] == self.diabetes.concept_id),
+            None,
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match['vocabulary_version'], 'SNOMED 2024-09-01')
 
     def test_search_filtered_by_vocabulary(self):
         resp = self.client.get(
