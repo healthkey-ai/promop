@@ -10265,3 +10265,95 @@ class PatientInvitationTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK, getattr(resp, 'data', None))
         self.record.refresh_from_db()
         self.assertEqual(self.record.email, 'edited@example.com')
+
+
+# ---------------------------------------------------------------------------
+# Patient signup — a trusted app creates a patient account in an org (#264, "A")
+# ---------------------------------------------------------------------------
+
+class PatientSignupTest(TestCase):
+    """POST /api/v1/patients/signup/ — server-to-server patient account creation."""
+
+    SIGNUP_URL = '/api/v1/patients/signup/'
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Organization
+        from patient_portal.models import PatientUser
+        cls.org = Organization.objects.create(name='Acme Oncology', slug='acme-onc')
+        cls.staff = Identity.objects.create_user(email='staff-signup@test.com', password='pw', is_staff=True)
+
+        # A plain patient (not privileged) for the negative test.
+        cls.person = Person.objects.create(person_id=92001, family_name='Pat', given_name='Pat')
+        cls.patient = Identity.objects.create_user(email='pat-signup@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.patient, person=cls.person)
+
+    def _staff(self):
+        c = APIClient()
+        c.force_authenticate(user=self.staff)
+        return c
+
+    def test_staff_signup_local_creates_account_in_org(self):
+        from patient_portal.models import PatientUser
+        resp = self._staff().post(self.SIGNUP_URL, {
+            'org': 'acme-onc', 'email': 'newpt@example.com', 'password': 'sup3rsecret',
+            'given_name': 'New', 'family_name': 'Patient',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertTrue(resp.data['created'])
+        pid = resp.data['person_id']
+        pu = PatientUser.objects.get(person__person_id=pid)
+        self.assertTrue(pu.identity.has_usable_password())
+        self.assertTrue(pu.identity.check_password('sup3rsecret'))
+        record = PatientRecord.objects.get(person__person_id=pid)
+        self.assertEqual(record.organization, self.org)
+        self.assertEqual(record.email, 'newpt@example.com')
+
+    def test_staff_signup_oidc_creates_linked_identity(self):
+        resp = self._staff().post(self.SIGNUP_URL, {
+            'org': 'acme-onc',
+            'actor_iss': 'https://idp.example.com', 'actor_sub': 'oidc-123',
+            'email': 'oidc@example.com',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        identity = Identity.objects.get(issuer='https://idp.example.com', sub='oidc-123')
+        # OIDC accounts authenticate via their IdP, not a local password.
+        self.assertFalse(identity.has_usable_password())
+        record = PatientRecord.objects.get(person__person_id=resp.data['person_id'])
+        self.assertEqual(record.organization, self.org)
+
+    def test_signup_is_idempotent_on_repeat_identity(self):
+        body = {'org': 'acme-onc', 'actor_iss': 'https://idp.example.com', 'actor_sub': 'dup-1'}
+        first = self._staff().post(self.SIGNUP_URL, body, format='json')
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        second = self._staff().post(self.SIGNUP_URL, body, format='json')
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertFalse(second.data['created'])
+        self.assertEqual(first.data['person_id'], second.data['person_id'])
+        self.assertEqual(
+            Identity.objects.filter(issuer='https://idp.example.com', sub='dup-1').count(), 1
+        )
+
+    def test_signup_requires_identity_anchor(self):
+        resp = self._staff().post(self.SIGNUP_URL, {'org': 'acme-onc', 'email': 'noanchor@example.com'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_signup_rejects_short_password(self):
+        resp = self._staff().post(self.SIGNUP_URL, {
+            'org': 'acme-onc', 'email': 'shortpw@example.com', 'password': 'short',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_staff_signup_requires_org_when_none_bound(self):
+        resp = self._staff().post(self.SIGNUP_URL, {
+            'email': 'noorg@example.com', 'password': 'sup3rsecret',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_regular_patient_cannot_signup(self):
+        c = APIClient()
+        c.force_authenticate(user=self.patient)
+        resp = c.post(self.SIGNUP_URL, {
+            'org': 'acme-onc', 'email': 'x@example.com', 'password': 'sup3rsecret',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
