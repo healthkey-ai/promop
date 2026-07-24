@@ -18,7 +18,7 @@ from omop_core.models import (
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
     PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
-    Relationship, ConceptRelationship, ConceptAncestor,
+    Relationship, ConceptRelationship, ConceptAncestor, ConceptSynonym,
     # Controlled vocabulary lookup models
     Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
     ProgesteroneReceptorStatus, Her2Status, HrStatus, HrdStatus,
@@ -4267,6 +4267,78 @@ def concept_list(request):
 
     queryset = _apply_concept_filters(Concept.objects.all(), request.query_params)
     return _paginated_concept_response(queryset, request)
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_synonyms(request, concept_id):
+    """
+    List the synonyms (alternate names) for one OMOP concept, so a consumer
+    mirroring promop's vocabulary can cache them (promop#239).
+
+    Response 200: { "concept_id": N, "count": M, "results": [
+        { "concept_synonym_name": "...", "language_concept_id": 4180186 }, ... ] }
+    Response 404: concept_id not found.
+    """
+    if not Concept.objects.filter(concept_id=concept_id).exists():
+        return Response({'detail': 'Concept not found.'}, status=status.HTTP_404_NOT_FOUND)
+    rows = list(
+        ConceptSynonym.objects
+        .filter(concept_id=concept_id)
+        .order_by('concept_synonym_name')
+        .values('concept_synonym_name', 'language_concept_id')
+    )
+    return Response({'concept_id': concept_id, 'count': len(rows), 'results': rows})
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_synonym_search(request):
+    """
+    Find concepts by a synonym (alternate name) substring — the reverse of
+    `concepts/lookup/`, for alias resolution (e.g. regimen alias 'VRd' → the
+    HemOnc concept). Backed by a GIN trigram index on `concept_synonym_name`.
+
+    Query params:
+        q                 required, minimum 3 characters
+        vocabulary_id     optional exact-match filter on the concept
+        concept_class_id  optional exact-match filter on the concept
+        page / page_size  pagination (page_size capped at 100)
+
+    Response 200: paginated {count, next, previous, results: [
+        { concept_id, concept_name, vocabulary_id, concept_code,
+          concept_class_id, standard_concept, concept_synonym_name }, ... ]}
+    """
+    # Minimum 3 chars: a pg_trgm trigram is 3 chars, so shorter queries could
+    # not use the GIN trigram index and would force a full table scan.
+    query = (request.query_params.get('q') or '').strip()
+    if len(query) < 3:
+        return Response(
+            {'detail': "Query parameter 'q' is required and must be at least 3 characters."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    qs = ConceptSynonym.objects.select_related('concept').filter(
+        concept_synonym_name__icontains=query,
+    )
+    vocabulary_id = request.query_params.get('vocabulary_id')
+    if vocabulary_id:
+        qs = qs.filter(concept__vocabulary_id=vocabulary_id)
+    concept_class_id = request.query_params.get('concept_class_id')
+    if concept_class_id:
+        qs = qs.filter(concept__concept_class_id=concept_class_id)
+
+    paginator = ConceptPagination()
+    page = paginator.paginate_queryset(qs.order_by('concept_id', 'concept_synonym_name'), request)
+    results = [{
+        'concept_id': s.concept_id,
+        'concept_name': s.concept.concept_name,
+        'vocabulary_id': s.concept.vocabulary_id,
+        'concept_code': s.concept.concept_code,
+        'concept_class_id': s.concept.concept_class_id,
+        'standard_concept': s.concept.standard_concept,
+        'concept_synonym_name': s.concept_synonym_name,
+    } for s in page]
+    return paginator.get_paginated_response(results)
 
 
 # =============================================================================

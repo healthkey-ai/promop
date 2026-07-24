@@ -10442,3 +10442,106 @@ class PatientSignupTest(TestCase):
             'org': 'acme-onc', 'email': 'x@example.com', 'password': 'sup3rsecret',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class ConceptSynonymApiTest(_SmartBase):
+    """GET /api/v1/concepts/{id}/synonyms/ and /api/v1/concepts/synonyms/ (promop#239)."""
+
+    def setUp(self):
+        from omop_core.models import Concept, ConceptSynonym, Vocabulary, Domain, ConceptClass
+        import datetime
+        today, future = datetime.date(1970, 1, 1), datetime.date(2099, 12, 31)
+        hemonc, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc', 'vocabulary_concept_id': 0},
+        )
+        rxnorm, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RxNorm',
+            defaults={'vocabulary_name': 'RxNorm', 'vocabulary_concept_id': 0},
+        )
+        drug, _ = Domain.objects.get_or_create(
+            domain_id='Drug', defaults={'domain_name': 'Drug', 'domain_concept_id': 13})
+        regimen, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0})
+        ingredient, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Ingredient',
+            defaults={'concept_class_name': 'Ingredient', 'concept_class_concept_id': 0})
+
+        def _c(cid, name, vocab, cc, code):
+            return Concept.objects.create(
+                concept_id=cid, concept_name=name, domain=drug, vocabulary=vocab,
+                concept_class=cc, standard_concept='S', concept_code=code,
+                valid_start_date=today, valid_end_date=future)
+
+        self.lang = _c(4180186, 'English language', hemonc, ingredient, 'ENG')
+        self.regimen = _c(7001, 'Bortezomib, Lenalidomide, Dexamethasone', hemonc, regimen, 'HO-VRD')
+        self.other = _c(7002, 'bortezomib', rxnorm, ingredient, 'RX-VELC')
+        for name in ('VRd', 'RVD'):
+            ConceptSynonym.objects.create(
+                concept=self.regimen, concept_synonym_name=name, language_concept=self.lang)
+        ConceptSynonym.objects.create(
+            concept=self.other, concept_synonym_name='VRd generic', language_concept=self.lang)
+
+    def _auth(self):
+        return {'HTTP_AUTHORIZATION': f'Bearer {self.read_token.token}'}
+
+    # --- per-concept synonyms ---
+    def test_per_concept_synonyms_returns_all(self):
+        resp = self.client.get('/api/v1/concepts/7001/synonyms/', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        body = resp.json()
+        self.assertEqual(body['concept_id'], 7001)
+        self.assertEqual(body['count'], 2)
+        names = {r['concept_synonym_name'] for r in body['results']}
+        self.assertEqual(names, {'VRd', 'RVD'})
+
+    def test_per_concept_synonyms_unknown_concept_404(self):
+        resp = self.client.get('/api/v1/concepts/999999/synonyms/', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_per_concept_synonyms_existing_but_empty_returns_count_zero(self):
+        # concept 4180186 exists but has no synonyms → 200 with count 0 (not 404)
+        resp = self.client.get('/api/v1/concepts/4180186/synonyms/', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['count'], 0)
+        self.assertEqual(resp.json()['results'], [])
+
+    # --- synonym search (alias -> concept) ---
+    def test_synonym_search_finds_concept_by_alias(self):
+        resp = self.client.get('/api/v1/concepts/synonyms/?q=VRd', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        match = next((r for r in results if r['concept_synonym_name'] == 'VRd'), None)
+        self.assertIsNotNone(match)
+        self.assertEqual(match['concept_id'], 7001)
+        self.assertEqual(match['vocabulary_id'], 'HemOnc')
+
+    def test_synonym_search_filtered_by_vocabulary(self):
+        # 'VRd' matches concept 7001 (HemOnc) and 'VRd generic' concept 7002 (RxNorm);
+        # the vocabulary_id filter keeps only the HemOnc match.
+        resp = self.client.get(
+            '/api/v1/concepts/synonyms/?q=VRd&vocabulary_id=HemOnc', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {r['concept_id'] for r in resp.json()['results']}
+        self.assertIn(7001, ids)
+        self.assertNotIn(7002, ids)
+        self.assertTrue(all(r['vocabulary_id'] == 'HemOnc' for r in resp.json()['results']))
+
+    def test_synonym_search_filtered_by_concept_class(self):
+        resp = self.client.get(
+            '/api/v1/concepts/synonyms/?q=VRd&concept_class_id=Regimen', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {r['concept_id'] for r in resp.json()['results']}
+        self.assertIn(7001, ids)          # Regimen
+        self.assertNotIn(7002, ids)       # Ingredient, excluded by the filter
+
+    def test_synonym_search_short_q_returns_400(self):
+        # 2 chars < 3-char trigram minimum
+        resp = self.client.get('/api/v1/concepts/synonyms/?q=vr', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_synonym_search_unauthenticated_401(self):
+        resp = self.client.get('/api/v1/concepts/synonyms/?q=VRd')
+        self.assertIn(resp.status_code,
+                      [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
