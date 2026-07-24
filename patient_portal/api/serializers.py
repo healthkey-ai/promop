@@ -226,6 +226,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
     first_line_therapy_display = serializers.SerializerMethodField()
     second_line_therapy_display = serializers.SerializerMethodField()
     later_therapy_display = serializers.SerializerMethodField()
+    lines_of_therapy = serializers.SerializerMethodField()
 
     class Meta:
         model = PatientRecord
@@ -312,6 +313,76 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             c = cache.get(cid)
             names.append(c.concept_name if c else str(cid))
         return names
+
+    def get_lines_of_therapy(self, obj):
+        """Structured per-line therapy history assembled from the flat
+        first/second/later_* read-model fields (promop#249).
+
+        Each entry: line number, regimen text + HemOnc concept_id (with its
+        asserted-vs-inferred `regimen_source` and `release_id` from
+        `therapy_ids_provenance`), component concept_ids, dates, outcome, intent,
+        and discontinuation reason. 3L+ lines are emitted one-per
+        `later_therapy_ids` entry so a per-line regimen concept_id supersedes the
+        flat list; their `component_ids`/dates/outcome remain the aggregate
+        `later_*` values (source data is not per-later-line), flagged with
+        `later_aggregate: true`.
+        """
+        prov = obj.therapy_ids_provenance if isinstance(obj.therapy_ids_provenance, dict) else {}
+
+        def _prov(field, key):
+            p = prov.get(field)
+            return p.get(key) if isinstance(p, dict) else None
+
+        def _line(n, regimen, cid, prov_field, comp, start, end,
+                  outcome, intent, disc, later_aggregate=False):
+            entry = {
+                'line': n,
+                'regimen': regimen,
+                'regimen_concept_id': cid,
+                'regimen_source': _prov(prov_field, 'origin'),
+                'release_id': _prov(prov_field, 'release_id'),
+                'component_ids': comp or [],
+                'start_date': start,
+                'end_date': end,
+                'outcome': outcome,
+                'intent': intent,
+                'discontinuation_reason': disc,
+            }
+            if later_aggregate:
+                entry['later_aggregate'] = True
+            return entry
+
+        lines = []
+        if obj.first_line_therapy or obj.first_line_therapy_id:
+            lines.append(_line(
+                1, obj.first_line_therapy, obj.first_line_therapy_id,
+                'first_line_therapy_id', obj.first_line_component_ids,
+                obj.first_line_start_date, obj.first_line_end_date,
+                obj.first_line_outcome, obj.first_line_intent,
+                obj.first_line_discontinuation_reason))
+        if obj.second_line_therapy or obj.second_line_therapy_id:
+            lines.append(_line(
+                2, obj.second_line_therapy, obj.second_line_therapy_id,
+                'second_line_therapy_id', obj.second_line_component_ids,
+                obj.second_line_start_date, obj.second_line_end_date,
+                obj.second_line_outcome, obj.second_line_intent,
+                obj.second_line_discontinuation_reason))
+
+        later_ids = obj.later_therapy_ids or []
+        if later_ids:
+            for i, cid in enumerate(later_ids):
+                lines.append(_line(
+                    3 + i, obj.later_therapy, cid, 'later_therapy_ids',
+                    obj.later_component_ids, obj.later_start_date, obj.later_end_date,
+                    obj.later_outcome, obj.later_intent,
+                    obj.later_discontinuation_reason, later_aggregate=True))
+        elif obj.later_therapy:
+            lines.append(_line(
+                3, obj.later_therapy, None, 'later_therapy_ids',
+                obj.later_component_ids, obj.later_start_date, obj.later_end_date,
+                obj.later_outcome, obj.later_intent,
+                obj.later_discontinuation_reason, later_aggregate=True))
+        return lines
 
     def validate_sct_date(self, value):
         if value is not None and value > localdate():

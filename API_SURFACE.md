@@ -133,6 +133,21 @@ All field values originate from OMOP tables and are kept current by the signal c
     "serum_creatinine_mg_dl": 0.9,
     "first_line_therapy": "AC-T",
     "first_line_start_date": "2022-03-01",
+    "lines_of_therapy": [
+      {
+        "line": 1,
+        "regimen": "AC-T",
+        "regimen_concept_id": 35806260,
+        "regimen_source": "asserted",
+        "release_id": "rel-20260723-a1b2c3",
+        "component_ids": [1790099, 1719640],
+        "start_date": "2022-03-01",
+        "end_date": "2022-09-01",
+        "outcome": "CR",
+        "intent": "Neoadjuvant",
+        "discontinuation_reason": "Completion"
+      }
+    ],
     "...": "all PatientRecord fields"
   },
   "user": {
@@ -143,6 +158,8 @@ All field values originate from OMOP tables and are kept current by the signal c
   }
 }
 ```
+
+`lines_of_therapy[]` is a read-only structured view of the flat `first/second/later_*` therapy fields. `regimen_source` is `asserted` or `inferred` (from `therapy_ids_provenance`). 3L+ lines are emitted one per `later_therapy_ids` entry (so `line` starts at 3 and may be non-contiguous if 2L is empty); their `component_ids`/dates/outcome are the aggregate `later_*` values, flagged `later_aggregate: true`.
 
 ---
 

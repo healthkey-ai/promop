@@ -10545,3 +10545,75 @@ class ConceptSynonymApiTest(_SmartBase):
         resp = self.client.get('/api/v1/concepts/synonyms/?q=VRd')
         self.assertIn(resp.status_code,
                       [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
+class LinesOfTherapyPayloadTest(TestCase):
+    """PatientRecordSerializer.lines_of_therapy assembles structured per-line
+    therapy history from the flat read-model fields (promop#249)."""
+
+    def _record(self, person_id=90249, **kwargs):
+        from omop_core.models import Person, PatientRecord
+        person = Person.objects.create(person_id=person_id)
+        return PatientRecord(person=person, **kwargs)
+
+    def _lot(self, record):
+        from patient_portal.api.serializers import PatientRecordSerializer
+        return PatientRecordSerializer(record).data['lines_of_therapy']
+
+    def test_first_and_second_line_structured(self):
+        import datetime
+        rec = self._record(
+            first_line_therapy='AC-T', first_line_therapy_id=101,
+            first_line_component_ids=[11, 12],
+            first_line_start_date=datetime.date(2022, 3, 1),
+            first_line_end_date=datetime.date(2022, 9, 1),
+            first_line_outcome='CR', first_line_intent='Neoadjuvant',
+            first_line_discontinuation_reason='Completion',
+            second_line_therapy='Kadcyla', second_line_therapy_id=202,
+            second_line_component_ids=[21], second_line_outcome='PR',
+            therapy_ids_provenance={
+                'first_line_therapy_id': {'value': 101, 'origin': 'asserted', 'release_id': 'rel-x'},
+                'second_line_therapy_id': {'value': 202, 'origin': 'inferred', 'release_id': None},
+            },
+        )
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [1, 2])
+        self.assertEqual(lot[0]['regimen'], 'AC-T')
+        self.assertEqual(lot[0]['regimen_concept_id'], 101)
+        self.assertEqual(lot[0]['component_ids'], [11, 12])
+        self.assertEqual(lot[0]['regimen_source'], 'asserted')
+        self.assertEqual(lot[0]['release_id'], 'rel-x')
+        self.assertEqual(str(lot[0]['start_date']), '2022-03-01')
+        self.assertEqual(lot[0]['outcome'], 'CR')
+        self.assertEqual(lot[0]['intent'], 'Neoadjuvant')
+        self.assertEqual(lot[0]['discontinuation_reason'], 'Completion')
+        self.assertNotIn('later_aggregate', lot[0])
+        self.assertEqual(lot[1]['regimen_source'], 'inferred')
+
+    def test_later_lines_one_entry_per_concept_id_flagged_aggregate(self):
+        rec = self._record(
+            person_id=90250,
+            first_line_therapy='X', first_line_therapy_id=1,
+            later_therapy='Pom-Dex / Dara', later_therapy_ids=[301, 302],
+            later_component_ids=[31, 32], later_outcome='PD',
+            therapy_ids_provenance={'later_therapy_ids': {'origin': 'asserted', 'release_id': None}},
+        )
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [1, 3, 4])
+        self.assertEqual(lot[1]['regimen_concept_id'], 301)
+        self.assertEqual(lot[2]['regimen_concept_id'], 302)
+        self.assertTrue(lot[1]['later_aggregate'])
+        self.assertEqual(lot[1]['component_ids'], [31, 32])  # aggregate shared across 3L+
+        self.assertEqual(lot[1]['regimen_source'], 'asserted')
+
+    def test_empty_when_no_therapy(self):
+        self.assertEqual(self._lot(self._record(person_id=90251)), [])
+
+    def test_malformed_provenance_does_not_crash(self):
+        # A non-dict therapy_ids_provenance must not 500 the payload.
+        rec = self._record(
+            person_id=90252, first_line_therapy='X', first_line_therapy_id=1,
+            therapy_ids_provenance=['not', 'a', 'dict'])
+        lot = self._lot(rec)
+        self.assertEqual(lot[0]['regimen_source'], None)
+        self.assertEqual(lot[0]['release_id'], None)
