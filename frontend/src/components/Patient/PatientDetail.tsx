@@ -122,6 +122,10 @@ export default function PatientDetail({
   const [editedName, setEditedName] = useState("");
   const [activeTab, setActiveTab] = useState(0);
 
+  type InviteState = "idle" | "sending" | "sent" | "error";
+  const [inviteState, setInviteState] = useState<InviteState>("idle");
+  const [inviteMsg, setInviteMsg] = useState("");
+
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveSeqRef = useRef(0);
    
@@ -226,6 +230,30 @@ export default function PatientDetail({
     setEditedName(name);
     scheduleAutoSave(pendingDataRef.current?.info ?? editedInfoRef.current, name);
   }, [scheduleAutoSave]);
+
+  const handleInvite = useCallback(async () => {
+    if (!personId) return;
+    setInviteState("sending");
+    setInviteMsg("");
+    try {
+      const email = editedInfoRef.current?.email;
+      const body = typeof email === "string" && email.trim() ? { email: email.trim() } : {};
+      const res = await api.post(`/v1/patients/${personId}/invite/`, body);
+      setInviteState("sent");
+      setInviteMsg(
+        res.data?.email_warning
+          ? res.data.email_warning
+          : `Invitation sent to ${res.data?.email ?? "the patient"}.`
+      );
+    } catch (err) {
+      setInviteState("error");
+      const msg =
+        err && typeof err === "object" && "response" in err
+          ? (err as { response?: { data?: { error?: string } } }).response?.data?.error
+          : undefined;
+      setInviteMsg(msg || "Could not send invitation.");
+    }
+  }, [personId]);
 
   const handleMutationAdd = useCallback(() => {
     const raw = pendingDataRef.current?.info?.genetic_mutations ?? editedInfoRef.current?.genetic_mutations ?? [];
@@ -374,6 +402,28 @@ export default function PatientDetail({
             <div className="shrink-0">
               <SaveStatusIndicator status={saveStatus} onRetry={doSave} />
             </div>
+            {!patientMode && (
+              <div className="flex shrink-0 items-center gap-2">
+                <button
+                  onClick={handleInvite}
+                  disabled={inviteState === "sending"}
+                  title="Email this patient a link to create their portal account"
+                  className="shrink-0 rounded-full border border-border px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground disabled:opacity-50"
+                >
+                  {inviteState === "sending" ? "Inviting…" : "Invite to portal"}
+                </button>
+                {inviteMsg && (
+                  <span
+                    className={[
+                      "text-[11px]",
+                      inviteState === "error" ? "text-red-600" : "text-emerald-600",
+                    ].join(" ")}
+                  >
+                    {inviteMsg}
+                  </span>
+                )}
+              </div>
+            )}
             {patientMode && onLogout && (
               <button
                 onClick={onLogout}

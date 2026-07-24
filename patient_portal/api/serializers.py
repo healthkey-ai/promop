@@ -80,6 +80,17 @@ class OrganizationSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at']
 
 
+class PatientInvitationSerializer(serializers.ModelSerializer):
+    status = serializers.CharField(read_only=True)
+    person_id = serializers.IntegerField(source='person.person_id', read_only=True)
+
+    class Meta:
+        from patient_portal.models import PatientInvitation
+        model = PatientInvitation
+        fields = ['id', 'person_id', 'email', 'status', 'created_at', 'expires_at', 'accepted_at']
+        read_only_fields = fields
+
+
 class OrgTrustSerializer(serializers.ModelSerializer):
     granting_org_slug = serializers.SlugRelatedField(
         source='granting_org', slug_field='slug', read_only=True,

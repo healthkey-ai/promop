@@ -18,6 +18,7 @@ vi.mock("@/components/User/UserProfilePage", () => ({ default: () => <div>USER_P
 vi.mock("@/components/Auth/Login", () => ({ Login: () => <div>LOGIN</div> }));
 vi.mock("@/components/Auth/AuthCallback", () => ({ AuthCallback: () => <div>AUTH_CALLBACK</div> }));
 vi.mock("@/components/Auth/AcceptInvite", () => ({ default: () => <div>ACCEPT_INVITE</div> }));
+vi.mock("@/components/Auth/AcceptPatientInvite", () => ({ default: () => <div>ACCEPT_PATIENT_INVITE</div> }));
 
 const baseAuth = { loading: false, refresh: vi.fn(), logout: vi.fn(), login: vi.fn() };
 

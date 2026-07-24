@@ -10088,3 +10088,180 @@ class PatientRoleUserEndpointTest(TestCase):
         self.assertFalse(user['is_patient'])
         self.assertIsNone(user['person_id'])
         self.assertTrue(user['is_org_admin'])
+
+
+# ---------------------------------------------------------------------------
+# Patient invitations — staff invite a patient to claim their record (#264)
+# ---------------------------------------------------------------------------
+
+from django.core import mail as _django_mail  # noqa: E402
+from django.test import override_settings  # noqa: E402
+
+
+@override_settings(
+    EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+    APP_BASE_URL='https://app.test',
+)
+class PatientInvitationTest(TestCase):
+    """Staff invite a patient; the patient sets a password and gets an account."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        cls.person = Person.objects.create(person_id=91001, family_name='Reed', given_name='Rae')
+        cls.record = PatientRecord.objects.create(person=cls.person)  # no email yet
+
+        cls.staff = Identity.objects.create_user(email='staff-inv@test.com', password='pw', is_staff=True)
+
+        # An unrelated patient (no access to cls.person) for negative tests.
+        cls.other_person = Person.objects.create(person_id=91002, family_name='Doe', given_name='Dot')
+        PatientRecord.objects.create(person=cls.other_person)
+        cls.other_patient = Identity.objects.create_user(email='other@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.other_patient, person=cls.other_person)
+
+    def setUp(self):
+        _django_mail.outbox = []
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def _invite_url(self, person):
+        return f'/api/v1/patients/{person.person_id}/invite/'
+
+    # --- Invite creation ---
+
+    def test_staff_invite_sets_email_creates_invitation_and_sends_email(self):
+        resp = self._client_as(self.staff).post(
+            self._invite_url(self.person), {'email': 'Rae@Example.com'}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        from patient_portal.models import PatientInvitation
+        inv = PatientInvitation.objects.get(person=self.person)
+        self.assertEqual(inv.status, 'pending')
+        self.assertEqual(inv.email, 'rae@example.com')
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.email, 'rae@example.com')
+        self.assertEqual(len(_django_mail.outbox), 1)
+        self.assertIn(inv.token, _django_mail.outbox[0].body)
+        self.assertIn('accept-patient-invite', _django_mail.outbox[0].body)
+
+    def test_invite_without_any_email_is_rejected(self):
+        resp = self._client_as(self.staff).post(self._invite_url(self.person), {}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_invite_uses_stored_email_when_none_provided(self):
+        self.record.email = 'stored@example.com'
+        self.record.save(update_fields=['email'])
+        resp = self._client_as(self.staff).post(self._invite_url(self.person), {}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['email'], 'stored@example.com')
+
+    def test_reinvite_refreshes_token_without_duplicating(self):
+        c = self._client_as(self.staff)
+        c.post(self._invite_url(self.person), {'email': 'rae@example.com'}, format='json')
+        c.post(self._invite_url(self.person), {'email': 'rae@example.com'}, format='json')
+        from patient_portal.models import PatientInvitation
+        self.assertEqual(PatientInvitation.objects.filter(person=self.person).count(), 1)
+
+    def test_unprivileged_user_cannot_invite(self):
+        resp = self._client_as(self.other_patient).post(
+            self._invite_url(self.person), {'email': 'rae@example.com'}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(len(_django_mail.outbox), 0)
+
+    def test_cannot_invite_patient_with_active_account(self):
+        from patient_portal.models import PatientUser
+        existing = Identity.objects.create_user(email='rae@example.com', password='pw')
+        PatientUser.objects.create(identity=existing, person=self.person, is_active=True)
+        resp = self._client_as(self.staff).post(
+            self._invite_url(self.person), {'email': 'rae@example.com'}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # --- Lookup ---
+
+    def test_lookup_returns_email_and_patient_name(self):
+        self._client_as(self.staff).post(
+            self._invite_url(self.person), {'email': 'rae@example.com'}, format='json'
+        )
+        from patient_portal.models import PatientInvitation
+        token = PatientInvitation.objects.get(person=self.person).token
+        resp = APIClient().get('/api/v1/patient-invitations/lookup/', {'token': token})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['email'], 'rae@example.com')
+        self.assertEqual(resp.data['patient_name'], 'Rae Reed')
+
+    def test_lookup_rejects_bad_token(self):
+        resp = APIClient().get('/api/v1/patient-invitations/lookup/', {'token': 'nope'})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # --- Accept ---
+
+    def _create_invite(self, email='rae@example.com'):
+        self._client_as(self.staff).post(self._invite_url(self.person), {'email': email}, format='json')
+        from patient_portal.models import PatientInvitation
+        return PatientInvitation.objects.get(person=self.person)
+
+    def test_accept_creates_account_and_links_patient_user(self):
+        from patient_portal.models import PatientUser
+        from patient_portal.services import patient_person_for
+        inv = self._create_invite()
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': inv.token, 'password': 'sup3rsecret'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        inv.refresh_from_db()
+        self.assertEqual(inv.status, 'accepted')
+        pu = PatientUser.objects.get(person=self.person)
+        self.assertTrue(pu.identity.has_usable_password())
+        self.assertTrue(pu.identity.check_password('sup3rsecret'))
+        # The new account is a first-class patient.
+        self.assertEqual(patient_person_for(pu.identity), self.person)
+
+    def test_accept_rejects_short_password(self):
+        inv = self._create_invite()
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': inv.token, 'password': 'short'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_accept_rejects_unknown_token(self):
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': 'a' * 64, 'password': 'sup3rsecret'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_accept_rejects_expired_invitation(self):
+        inv = self._create_invite()
+        inv.expires_at = timezone.now() - timedelta(days=1)
+        inv.save(update_fields=['expires_at'])
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': inv.token, 'password': 'sup3rsecret'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_accept_cannot_be_replayed(self):
+        inv = self._create_invite()
+        body = {'token': inv.token, 'password': 'sup3rsecret'}
+        APIClient().post('/api/v1/patient-invitations/accept/', body, format='json')
+        resp = APIClient().post('/api/v1/patient-invitations/accept/', body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # --- Email editable (lock-in) ---
+
+    def test_email_is_editable_via_patch(self):
+        resp = self._client_as(self.staff).patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'email': 'edited@example.com'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, getattr(resp, 'data', None))
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.email, 'edited@example.com')

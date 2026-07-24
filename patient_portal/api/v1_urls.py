@@ -20,6 +20,9 @@ from .org_views import (
     OrgAccessListView, OrgAccessDetailView,
     confirm_invitation,
 )
+from .patient_invitations import (
+    PatientInviteView, accept_patient_invitation, patient_invitation_lookup,
+)
 
 router = DefaultRouter()
 
@@ -43,6 +46,9 @@ urlpatterns = [
     path('auth/login/', login_view, name='v1-login'),
     path('auth/logout/', logout_view, name='v1-logout'),
     path('auth/test/', auth_test, name='v1-auth-test'),
+    path('patients/<int:person_id>/invite/', PatientInviteView.as_view(), name='v1-patient-invite'),
+    path('patient-invitations/lookup/', patient_invitation_lookup, name='v1-patient-invitation-lookup'),
+    path('patient-invitations/accept/', accept_patient_invitation, name='v1-patient-invitation-accept'),
     path('vocabularies/<str:model_name>/', vocabulary_list, name='v1-vocabulary-list'),
     path('concepts/lookup/', concept_lookup, name='v1-concept-lookup'),
     path('concepts/search/', concept_search, name='v1-concept-search'),

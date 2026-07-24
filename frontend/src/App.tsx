@@ -8,6 +8,7 @@ import {
 import { Login } from "@/components/Auth/Login";
 import { AuthCallback } from "@/components/Auth/AuthCallback";
 import AcceptInvite from "@/components/Auth/AcceptInvite";
+import AcceptPatientInvite from "@/components/Auth/AcceptPatientInvite";
 import PatientList from "@/components/Patient/PatientList";
 import PatientDetail from "@/components/Patient/PatientDetail";
 import PatientHome from "@/components/Patient/PatientHome";
@@ -29,7 +30,7 @@ function AppRoutes() {
     }
   }, [location.pathname, refresh]);
 
-  const publicPaths = ['/accept-invite', '/login', '/auth/callback'];
+  const publicPaths = ['/accept-invite', '/accept-patient-invite', '/login', '/auth/callback'];
   if (authLoading && !publicPaths.includes(location.pathname)) {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -53,6 +54,7 @@ function AppRoutes() {
       <Route path="/login" element={<Login />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
       <Route path="/accept-invite" element={<AcceptInvite />} />
+      <Route path="/accept-patient-invite" element={<AcceptPatientInvite />} />
 
       <Route
         path="/"
