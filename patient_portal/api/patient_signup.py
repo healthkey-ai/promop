@@ -92,6 +92,9 @@ class PatientSignupView(APIView):
             )
             if identity is None:
                 identity = Identity.objects.create_user(email=email, password=password)
+            # If a local account already exists for this email we reuse it as-is
+            # (idempotent signup) and intentionally do NOT reset its password here —
+            # credential changes go through the account's own reset flow.
             return identity, None
 
         return None, Response(

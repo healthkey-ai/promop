@@ -10255,6 +10255,37 @@ class PatientInvitationTest(TestCase):
         resp = APIClient().post('/api/v1/patient-invitations/accept/', body, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_accept_does_not_overwrite_existing_real_account(self):
+        """A pre-existing local account with a real password must not be reset by accept."""
+        existing = Identity.objects.create_user(email='rae@example.com', password='original-pw')
+        inv = self._create_invite('rae@example.com')
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': inv.token, 'password': 'attacker-chosen'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        existing.refresh_from_db()
+        self.assertTrue(existing.check_password('original-pw'))
+        self.assertFalse(existing.check_password('attacker-chosen'))
+        inv.refresh_from_db()
+        self.assertEqual(inv.status, 'pending')  # not consumed
+
+    def test_accept_claims_placeholder_account(self):
+        """A placeholder local account (no usable password) is claimed and gets the new password."""
+        from patient_portal.models import PatientUser
+        placeholder = Identity.objects.create_user(email='rae@example.com', password=None)
+        placeholder.set_unusable_password()
+        placeholder.save(update_fields=['password'])
+        inv = self._create_invite('rae@example.com')
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': inv.token, 'password': 'sup3rsecret'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        placeholder.refresh_from_db()
+        self.assertTrue(placeholder.check_password('sup3rsecret'))
+        self.assertEqual(PatientUser.objects.get(person=self.person).identity, placeholder)
+
     # --- Email editable (lock-in) ---
 
     def test_email_is_editable_via_patch(self):

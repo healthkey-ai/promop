@@ -212,10 +212,20 @@ def accept_patient_invitation(request):
             )
             if identity is None:
                 identity = Identity.objects.create_user(email=email, password=password)
-            else:
+            elif not identity.has_usable_password():
+                # Claim a placeholder local account (e.g. one created by an earlier
+                # invite with no password yet). Safe to set the chosen password.
                 identity.set_password(password)
                 identity.is_active = True
                 identity.save(update_fields=['password', 'is_active'])
+            else:
+                # A real account already exists for this email — never overwrite its
+                # credentials from a token-gated public endpoint (that email could
+                # belong to a provider/admin). Send them to sign in instead.
+                return Response(
+                    {'error': 'An account already exists for this email. Please sign in instead.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             try:
                 PatientUser.objects.update_or_create(
