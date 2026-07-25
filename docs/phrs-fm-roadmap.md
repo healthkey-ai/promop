@@ -202,19 +202,21 @@ boolean-per-type model is adequate for the oncology use case.
 
 ---
 
-## Phase 4a — Patient-originated data (surveys in patient mode)
+## Phase 4a — Patient-originated data (surveys in patient mode)  ✅ DONE
 
 **FM:** PH.2.1 (Account-Holder-Originated Data), PH.3.1.
+
+**Status:** Delivered in PR #285 (issue #284), merged to `dev` 2026-07-25. Shipped:
+`SurveyResponsePermission` allowing session-auth patients to POST (start surveys),
+`PatientSurveys` list component with status badges and start/continue/view actions,
+`SurveyForm` multi-page renderer with autosave on page navigation, progress tracking,
+and read-only completed view. Review hardening: `completed_at` validation (no re-open),
+immutable person/survey on PATCH, permission method whitelist, cross-patient POST test.
+869 backend / 103 frontend tests green.
 
 **Existing:** Surveys/PRO capture is solid (`Survey` / `PatientSurveyResponse`,
 `omop_core/models.py:2473,2510`; viewsets `api/views.py:4124,4199`); HealthKit device sync
 (`api/fhir/sync.py`).
-
-- Expose surveys + responses in patient mode (self-scoped via
-  `PatientSelfScopePermission`) so patients complete PROs from the SPA.
-- Small, well-bounded: the viewsets already exist and are scoped; this phase adds the
-  patient-mode UI route and wires it to the existing API.
-- Tests: patient completes a survey (own responses only).
 
 ---
 

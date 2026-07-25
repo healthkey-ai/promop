@@ -193,10 +193,19 @@ class PatientConsent(models.Model):
 class PatientMessage(models.Model):
     """Messages between patients and healthcare providers"""
     patient_user = models.ForeignKey(PatientUser, on_delete=models.CASCADE, related_name='messages')
+    parent = models.ForeignKey(
+        'self', on_delete=models.CASCADE, null=True, blank=True, related_name='replies',
+        help_text='Parent message for threading (null = top-level message)',
+    )
+    sender = models.ForeignKey(
+        Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='sent_messages',
+        help_text='Identity of the sender',
+    )
     subject = models.CharField(max_length=200)
     message = models.TextField()
     sender_is_patient = models.BooleanField(default=True)
     is_read = models.BooleanField(default=False)
+    read_at = models.DateTimeField(null=True, blank=True, help_text='When the message was read')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

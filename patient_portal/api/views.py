@@ -69,6 +69,7 @@ from .serializers import (
     PatientDocumentSerializer, PatientTrialEnrollmentSerializer,
     SurveySerializer, PatientSurveyResponseSerializer,
     PatientConsentSerializer,
+    PatientMessageSerializer,
 )
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
@@ -4655,3 +4656,83 @@ class PatientConsentViewSet(viewsets.ModelViewSet):
                     defaults={'consent_granted': False},
                 )
         return super().list(request, *args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Patient messages — bidirectional messaging (PHR-S FM Phase 4b)
+# ---------------------------------------------------------------------------
+
+class PatientMessageViewSet(viewsets.ModelViewSet):
+    """Bidirectional patient–provider messaging with threading.
+
+    GET   /api/v1/messages/               → list (patients see only their own)
+    POST  /api/v1/messages/               → create a new message or reply
+    PATCH /api/v1/messages/{id}/           → update (subject/message text only)
+    PATCH /api/v1/messages/{id}/mark-read/ → mark a message as read
+
+    Query params:
+      - parent=null       → top-level threads only
+      - parent={id}       → replies to a specific message
+      - is_read=false     → unread messages only
+      - is_read=true      → read messages only
+    """
+    serializer_class = PatientMessageSerializer
+    permission_classes = [SurveyResponsePermission, PatientSelfScopePermission]
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+
+    def get_queryset(self):
+        from patient_portal.models import PatientMessage
+        from patient_portal.services import patient_person_for
+
+        qs = PatientMessage.objects.select_related(
+            'sender', 'parent', 'patient_user',
+        )
+        person = patient_person_for(self.request.user)
+        if person is not None:
+            qs = qs.filter(patient_user__person=person)
+
+        # Optional filters
+        parent = self.request.query_params.get('parent')
+        if parent == 'null':
+            qs = qs.filter(parent__isnull=True)  # Top-level threads only
+        elif parent:
+            qs = qs.filter(parent_id=parent)  # Replies to specific message
+
+        is_read = self.request.query_params.get('is_read')
+        if is_read is not None:
+            qs = qs.filter(read_at__isnull=(is_read.lower() == 'false'))
+
+        return qs
+
+    def perform_create(self, serializer):
+        from patient_portal.models import PatientUser
+        from patient_portal.services import patient_person_for
+
+        user = self.request.user
+        person = patient_person_for(user)
+
+        # Auto-set sender and sender_is_patient
+        kwargs = {
+            'sender': user,
+            'sender_is_patient': person is not None,
+        }
+        # If patient, enforce they can only create for their own patient_user
+        if person is not None:
+            try:
+                pu = PatientUser.objects.get(identity=user, person=person)
+            except PatientUser.DoesNotExist:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied('No patient record linked to this account.')
+            kwargs['patient_user'] = pu
+
+        serializer.save(**kwargs)
+
+    @action(detail=True, methods=['patch'], url_path='mark-read')
+    def mark_read(self, request, pk=None):
+        msg = self.get_object()
+        if msg.read_at is None:
+            msg.read_at = timezone.now()
+            msg.is_read = True  # Keep legacy field in sync
+            msg.save(update_fields=['read_at', 'is_read'])
+        serializer = self.get_serializer(msg)
+        return Response(serializer.data)
