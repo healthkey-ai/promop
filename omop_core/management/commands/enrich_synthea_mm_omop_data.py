@@ -719,14 +719,21 @@ class Command(BaseCommand):
             return
 
         self.stdout.write(f'\nRefreshing PatientRecord for {len(touched_person_ids)} patients...')
+        refresh_failed = 0
         for person_id in touched_person_ids:
             # Recycling connections inside an outer transaction (e.g. a test
             # case) would kill that transaction; only do it when standalone.
             if not connection.in_atomic_block:
                 close_old_connections()
-            person = Person.objects.get(person_id=person_id)
-            refresh_patient_record(person)
-            refreshed += 1
+            try:
+                person = Person.objects.get(person_id=person_id)
+                refresh_patient_record(person)
+                refreshed += 1
+            except Exception as exc:
+                refresh_failed += 1
+                self.stderr.write(self.style.WARNING(f'  person_id={person_id} refresh failed: {exc}'))
+        if refresh_failed:
+            self.stderr.write(self.style.WARNING(f'{refresh_failed} patient(s) failed to refresh.'))
 
         # ----------------------------------------------------------------
         # Completeness validation: report null critical fields per patient
