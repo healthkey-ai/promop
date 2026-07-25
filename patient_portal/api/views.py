@@ -2380,7 +2380,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     therapy_lines[therapy_line]['start_date'] = start_date
                                 if end_date:
                                     therapy_lines[therapy_line]['end_date'] = end_date
-                                therapy_lines[therapy_line]['outcome'] = therapy_outcome
+                                if therapy_outcome is not None:
+                                    therapy_lines[therapy_line]['outcome'] = therapy_outcome
                                 if hemonc_concept_id:
                                     therapy_lines[therapy_line]['hemonc_concept_id'] = hemonc_concept_id
                     

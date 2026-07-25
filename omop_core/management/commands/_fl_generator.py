@@ -267,7 +267,7 @@ class FLBundleGenerator:
             for resource in self._therapy_resources(p, timeline):
                 _entry(resource)
             if p['maintenance_rituximab']:
-                _entry(self._maintenance_rituximab(p, diag_date))
+                _entry(self._maintenance_rituximab(p, diag_date, timeline))
 
     # ------------------------------------------------------------------
     # Therapy timeline / mortality
@@ -722,10 +722,13 @@ class FLBundleGenerator:
             'note': [{'text': f"Line {line_num}: {regimen_name} — {outcome}"}],
         }
 
-    def _maintenance_rituximab(self, p, diag_date):
+    def _maintenance_rituximab(self, p, diag_date, timeline):
         maint_start = diag_date + timedelta(days=random.randint(180, 300))
         maint_end   = maint_start + timedelta(days=random.randint(540, 730))
-        return {
+        # partOf references the 1L regimen so the importer treats this as a
+        # sub-resource and does NOT overwrite the 1L outcome with None.
+        first_line_id = f"med-{p['id']}-line1-regimen" if timeline else None
+        resource = {
             'resourceType': 'MedicationStatement',
             'id': f"med-{p['id']}-maintenance-rituximab",
             'status': 'completed',
@@ -741,6 +744,9 @@ class FLBundleGenerator:
             ],
             'note': [{'text': 'Rituximab maintenance post first-line induction'}],
         }
+        if first_line_id:
+            resource['partOf'] = [{'reference': f"MedicationStatement/{first_line_id}"}]
+        return resource
 
     @staticmethod
     def _random_date(year_from, year_to):
