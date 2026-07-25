@@ -108,11 +108,15 @@ export default function PatientSurveys({ user }: { user: User | null }) {
   }, [user]);
 
   useEffect(() => {
-    if (user && user.person_id != null) {
-      fetchData();
-    } else {
-      setLoading(false);
-    }
+    // No synchronous setState in the effect body (react-hooks/set-state-in-effect)
+    // — both branches live in the async IIFE, matching the #269 pattern.
+    (async () => {
+      if (user && user.person_id != null) {
+        await fetchData();
+      } else {
+        setLoading(false);
+      }
+    })();
   }, [user, fetchData]);
 
   const getResponseForSurvey = (surveyId: number): SurveyResponse | undefined =>
