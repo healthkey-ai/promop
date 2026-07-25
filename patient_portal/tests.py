@@ -11402,3 +11402,231 @@ class PatientSurveySessionAuthTest(TestCase):
             format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+# ---------------------------------------------------------------------------
+# Patient messaging — bidirectional messaging (PHR-S FM Phase 4b)
+# ---------------------------------------------------------------------------
+
+class PatientMessageViewSetTest(TestCase):
+    """Test PatientMessageViewSet — threading, mark-read, and self-scoping."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser, PatientMessage
+
+        _make_vocab_fixtures()
+
+        # Patient A
+        cls.person_a = Person.objects.create(
+            person_id=98001, family_name='MsgAlpha', given_name='Alice',
+        )
+        cls.patient_a_rec = PatientRecord.objects.create(person=cls.person_a)
+        cls.identity_a = Identity.objects.create_user(
+            email='msg-a@test.com', password='pw',
+        )
+        cls.pu_a = PatientUser.objects.create(
+            identity=cls.identity_a, person=cls.person_a,
+        )
+
+        # Patient B
+        cls.person_b = Person.objects.create(
+            person_id=98002, family_name='MsgBravo', given_name='Bob',
+        )
+        cls.patient_b_rec = PatientRecord.objects.create(person=cls.person_b)
+        cls.identity_b = Identity.objects.create_user(
+            email='msg-b@test.com', password='pw',
+        )
+        cls.pu_b = PatientUser.objects.create(
+            identity=cls.identity_b, person=cls.person_b,
+        )
+
+        # Staff user
+        cls.staff = Identity.objects.create_user(
+            email='msg-staff@test.com', password='pw', is_staff=True,
+        )
+
+        # Pre-create messages for A
+        cls.msg_a1 = PatientMessage.objects.create(
+            patient_user=cls.pu_a,
+            sender=cls.identity_a,
+            subject='Question from A',
+            message='Hello doctor',
+            sender_is_patient=True,
+        )
+        cls.msg_a2 = PatientMessage.objects.create(
+            patient_user=cls.pu_a,
+            sender=cls.staff,
+            subject='Reply from staff',
+            message='Hi Alice',
+            sender_is_patient=False,
+        )
+
+        # Pre-create message for B
+        cls.msg_b1 = PatientMessage.objects.create(
+            patient_user=cls.pu_b,
+            sender=cls.identity_b,
+            subject='Question from B',
+            message='Hello from Bob',
+            sender_is_patient=True,
+        )
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    # ---- 1. List own messages ----
+    def test_patient_can_list_own_messages(self):
+        """GET /api/v1/messages/ returns only the patient's own messages."""
+        resp = self._client_as(self.identity_a).get('/api/v1/messages/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.json()['results']
+        self.assertEqual(len(data), 2)
+        ids = {m['id'] for m in data}
+        self.assertIn(self.msg_a1.pk, ids)
+        self.assertIn(self.msg_a2.pk, ids)
+        # B's message should NOT be present
+        self.assertNotIn(self.msg_b1.pk, ids)
+
+    # ---- 2. Create message ----
+    def test_patient_can_create_message(self):
+        """POST /api/v1/messages/ creates a message with sender auto-set."""
+        resp = self._client_as(self.identity_a).post(
+            '/api/v1/messages/',
+            {'subject': 'New question', 'message': 'What about my labs?'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        data = resp.json()
+        self.assertEqual(data['subject'], 'New question')
+        self.assertTrue(data['sender_is_patient'])
+        self.assertEqual(data['sender'], self.identity_a.pk)
+        self.assertEqual(data['patient_user'], self.pu_a.pk)
+        self.assertIsNone(data['parent'])
+
+    # ---- 3. Reply (threading) ----
+    def test_patient_can_reply(self):
+        """POST with parent FK creates a threaded reply."""
+        resp = self._client_as(self.identity_a).post(
+            '/api/v1/messages/',
+            {
+                'parent': self.msg_a1.pk,
+                'subject': 'Re: Question from A',
+                'message': 'Follow-up question',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        data = resp.json()
+        self.assertEqual(data['parent'], self.msg_a1.pk)
+
+        # Verify reply_count on parent
+        resp2 = self._client_as(self.identity_a).get(
+            f'/api/v1/messages/{self.msg_a1.pk}/',
+        )
+        self.assertEqual(resp2.json()['reply_count'], 1)
+
+    # ---- 4. Mark as read ----
+    def test_patient_can_mark_as_read(self):
+        """PATCH /api/v1/messages/{id}/mark-read/ sets read_at."""
+        resp = self._client_as(self.identity_a).patch(
+            f'/api/v1/messages/{self.msg_a2.pk}/mark-read/',
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.json()
+        self.assertIsNotNone(data['read_at'])
+        self.assertTrue(data['is_read'])
+
+    # ---- 5. Cross-patient isolation ----
+    def test_cross_patient_isolation(self):
+        """Patient A cannot see patient B's messages."""
+        resp = self._client_as(self.identity_a).get('/api/v1/messages/')
+        ids = {m['id'] for m in resp.json()['results']}
+        self.assertNotIn(self.msg_b1.pk, ids)
+
+    def test_cross_patient_detail_blocked(self):
+        """Patient A cannot GET patient B's message detail — 404."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/v1/messages/{self.msg_b1.pk}/',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    # ---- 6. Cross-patient create blocked ----
+    def test_cross_patient_create_blocked(self):
+        """Patient A cannot create a message for patient B's patient_user.
+
+        perform_create auto-sets patient_user to the requesting patient's own,
+        so the patient_user field in the request body is ignored for patients.
+        """
+        resp = self._client_as(self.identity_a).post(
+            '/api/v1/messages/',
+            {
+                'patient_user': self.pu_b.pk,
+                'subject': 'Sneaky',
+                'message': 'This should fail',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.json()['patient_user'], self.pu_a.pk)
+
+    # ---- 7. Filter top-level threads ----
+    def test_filter_top_level_threads(self):
+        """GET ?parent=null returns only top-level messages."""
+        # Create a reply first
+        self._client_as(self.identity_a).post(
+            '/api/v1/messages/',
+            {
+                'parent': self.msg_a1.pk,
+                'subject': 'Re: thread test',
+                'message': 'Reply body',
+            },
+            format='json',
+        )
+        resp = self._client_as(self.identity_a).get(
+            '/api/v1/messages/?parent=null',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        for m in resp.json()['results']:
+            self.assertIsNone(m['parent'])
+
+    # ---- 8. Filter unread ----
+    def test_filter_unread(self):
+        """GET ?is_read=false returns only unread messages."""
+        # Mark one as read first
+        self._client_as(self.identity_a).patch(
+            f'/api/v1/messages/{self.msg_a1.pk}/mark-read/',
+            format='json',
+        )
+        resp = self._client_as(self.identity_a).get(
+            '/api/v1/messages/?is_read=false',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        for m in resp.json()['results']:
+            self.assertIsNone(m['read_at'])
+            # The marked-as-read message should not appear
+            self.assertNotEqual(m['id'], self.msg_a1.pk)
+
+    # ---- 9. Unauthenticated ----
+    def test_cross_patient_reply_blocked(self):
+        """Patient A cannot reply to patient B's message."""
+        resp = self._client_as(self.identity_a).post(
+            '/api/v1/messages/',
+            {
+                'parent': self.msg_b1.pk,
+                'subject': 'Cross-patient reply',
+                'message': 'This should fail',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unauthenticated_returns_403(self):
+        """Unauthenticated request returns 401 or 403."""
+        c = APIClient()
+        resp = c.get('/api/v1/messages/')
+        self.assertIn(resp.status_code, [
+            status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN,
+        ])

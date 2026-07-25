@@ -4,6 +4,7 @@ import type { User } from "@/hooks/useAuth";
 import PatientDetail from "@/components/Patient/PatientDetail";
 import PatientConsents from "@/components/Patient/PatientConsents";
 import PatientSurveys from "@/components/Patient/PatientSurveys";
+import PatientMessages from "@/components/Patient/PatientMessages";
 import api from "@/api/axios";
 
 /**
@@ -83,6 +84,9 @@ export default function PatientHome({
       </div>
       <div className="mx-auto max-w-5xl px-6 py-4">
         <PatientSurveys user={user} />
+      </div>
+      <div className="mx-auto max-w-5xl px-6 py-4">
+        <PatientMessages user={user} />
       </div>
       <PatientDetail
         personIdOverride={String(user.person_id)}

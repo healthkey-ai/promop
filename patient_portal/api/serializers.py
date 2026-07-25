@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from patient_portal.models import Identity, PatientConsent
+from patient_portal.models import Identity, PatientConsent, PatientMessage
 from omop_core.models import (
     PatientRecord, Concept,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
@@ -576,3 +576,37 @@ class PatientConsentSerializer(serializers.ModelSerializer):
         model = PatientConsent
         fields = ['id', 'consent_type', 'consent_granted', 'consent_date', 'consent_document']
         read_only_fields = ['id', 'consent_type', 'consent_date', 'consent_document']
+
+
+# ---------------------------------------------------------------------------
+# Patient message serializer (bidirectional messaging — Phase 4b)
+# ---------------------------------------------------------------------------
+
+class PatientMessageSerializer(serializers.ModelSerializer):
+    sender_name = serializers.SerializerMethodField()
+    reply_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PatientMessage
+        fields = ['id', 'patient_user', 'parent', 'sender', 'sender_name',
+                  'subject', 'message', 'sender_is_patient', 'is_read',
+                  'read_at', 'reply_count', 'created_at']
+        read_only_fields = ['id', 'sender', 'sender_is_patient', 'is_read',
+                            'read_at', 'sender_name', 'reply_count',
+                            'created_at']
+        extra_kwargs = {
+            'patient_user': {'required': False},  # Auto-set by perform_create for patients
+        }
+
+    def get_sender_name(self, obj):
+        if obj.sender:
+            return obj.sender.name or obj.sender.email or str(obj.sender)
+        return "Patient" if obj.sender_is_patient else "Provider"
+
+    def get_reply_count(self, obj):
+        if hasattr(obj, '_reply_count'):
+            return obj._reply_count
+        return obj.replies.count()
+
+    # Cross-thread reply validation is in PatientMessageViewSet.perform_create
+    # where the resolved patient_user is known (not in self.initial_data).
