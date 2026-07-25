@@ -2347,8 +2347,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         if therapy_line is None:
                             continue
                         
-                        # Check if this is a regimen (parent) or individual drug (partOf)
-                        if not medication.get('partOf'):
+                        # Check if this is a regimen (parent) or individual drug (partOf).
+                        # Only treat as sub-resource when partOf references a MedicationStatement;
+                        # a Procedure/ reference (radiation 1L + maintenance) should NOT suppress
+                        # processing of the maintenance MedicationStatement.
+                        _part_of = medication.get('partOf', [])
+                        _is_med_sub_resource = any(
+                            ref.get('reference', '').startswith('MedicationStatement/')
+                            for ref in _part_of
+                        )
+                        if not _is_med_sub_resource:
                             # This is the named regimen
                             regimen_name = medication.get('medicationCodeableConcept', {}).get('text', '')
                             effective_period = medication.get('effectivePeriod', {})
@@ -2371,9 +2379,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     'regimen': regimen_name,
                                     'start_date': start_date,
                                     'end_date': end_date,
-                                    'outcome': therapy_outcome,
                                     'hemonc_concept_id': hemonc_concept_id,
                                 }
+                                if therapy_outcome is not None:
+                                    therapy_lines[therapy_line]['outcome'] = therapy_outcome
                             else:
                                 therapy_lines[therapy_line]['regimen'] = regimen_name
                                 if start_date:

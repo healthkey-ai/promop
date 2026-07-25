@@ -117,31 +117,44 @@ class Command(BaseCommand):
             ))
             return
 
+        # Pre-fetch the set of person_ids that already have a LOT-1-outcome observation
+        # so the write loop and refresh loop each need only one batch query instead of
+        # N individual EXISTS queries.
+        candidate_person_ids = [rec.person_id for rec in candidates]
+        already_obs_ids = set(
+            Observation.objects
+            .filter(person_id__in=candidate_person_ids, observation_source_value='LOT-1-outcome')
+            .values_list('person_id', flat=True)
+        )
+
         written = skipped = already_has = 0
         cr_count = pr_count = 0
 
         for rec in candidates:
             person = rec.person
 
-            # Double-check: skip if an observation already exists (race guard).
-            if Observation.objects.filter(
-                person=person, observation_source_value='LOT-1-outcome'
-            ).exists():
+            # Skip if an observation already exists.
+            if rec.person_id in already_obs_ids:
                 already_has += 1
                 continue
 
             outcome  = _pick_outcome(rec.pk)
             obs_date = _lot1_obs_date(person)
 
+            if obs_date is None:
+                skipped += 1
+                self.stderr.write(self.style.WARNING(
+                    f'  rec_pk={rec.pk} no obs_date derivable — skipping'
+                ))
+                continue
+
             if dry_run:
                 self.stdout.write(
-                    f'  [DRY] person_id={person.person_id}  outcome={outcome}  obs_date={obs_date}'
+                    f'  [DRY] rec_pk={rec.pk}  outcome={outcome}  obs_date={obs_date}'
                 )
                 written += 1
-                if outcome == 'Complete Response':
-                    cr_count += 1
-                else:
-                    pr_count += 1
+                cr_count += outcome == 'Complete Response'
+                pr_count += outcome == 'Partial Response'
                 continue
 
             try:
@@ -151,14 +164,13 @@ class Command(BaseCommand):
                     obs_date,
                 )
                 written += 1
-                if outcome == 'Complete Response':
-                    cr_count += 1
-                else:
-                    pr_count += 1
+                cr_count += outcome == 'Complete Response'
+                pr_count += outcome == 'Partial Response'
+                already_obs_ids.add(rec.person_id)  # keep set current for refresh loop
             except Exception as exc:
                 skipped += 1
                 self.stderr.write(self.style.WARNING(
-                    f'  person_id={person.person_id} observation write failed: {exc}'
+                    f'  rec_pk={rec.pk} observation write failed: {exc}'
                 ))
 
         self.stdout.write(
@@ -171,22 +183,23 @@ class Command(BaseCommand):
             return
 
         # Refresh PatientRecord so first_line_outcome is populated.
-        # Refresh anyone who now has an observation — either just-written or pre-existing.
+        # Use the already_obs_ids set (updated during the write loop) — no extra DB round-trip.
         needs_refresh = written + already_has
         self.stdout.write(f'Refreshing PatientRecord for {needs_refresh} patient(s)...')
         refresh_ok = refresh_fail = 0
+        # suppress_patient_record_refresh prevents cascading re-refreshes triggered by
+        # incidental OMOP saves within refresh_patient_record; it does NOT suppress
+        # the PatientRecord write itself.
         with suppress_patient_record_refresh():
             for rec in candidates:
-                if Observation.objects.filter(
-                    person=rec.person, observation_source_value='LOT-1-outcome'
-                ).exists():
+                if rec.person_id in already_obs_ids:
                     try:
                         refresh_patient_record(rec.person)
                         refresh_ok += 1
                     except Exception as exc:
                         refresh_fail += 1
                         self.stderr.write(self.style.WARNING(
-                            f'  person_id={rec.person_id} refresh failed: {exc}'
+                            f'  rec_pk={rec.pk} refresh failed: {exc}'
                         ))
 
         self.stdout.write(

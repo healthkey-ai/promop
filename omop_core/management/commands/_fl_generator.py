@@ -648,8 +648,15 @@ class FLBundleGenerator:
                         p, 'rituximab', line_num, is_last, start_str, end_str,
                         partof=f"proc-rt-{p['id']}-line{line_num}",
                     ))
+                if line_num == 1:
+                    # Record so _maintenance_rituximab can build the correct partOf reference.
+                    p['_line1_resource_type'] = 'Procedure'
+                    p['_line1_resource_id']   = f"proc-rt-{p['id']}-line1"
             else:
                 regimen_id = f"med-{p['id']}-line{line_num}-regimen"
+                if line_num == 1:
+                    p['_line1_resource_type'] = 'MedicationStatement'
+                    p['_line1_resource_id']   = regimen_id
                 codings = [{'system': 'https://healthkey.ai/fhir/fl-regimen', 'code': name}]
                 if concept_id:
                     codings.append({
@@ -727,7 +734,11 @@ class FLBundleGenerator:
         maint_end   = maint_start + timedelta(days=random.randint(540, 730))
         # partOf references the 1L regimen so the importer treats this as a
         # sub-resource and does NOT overwrite the 1L outcome with None.
-        first_line_id = f"med-{p['id']}-line1-regimen" if timeline else None
+        # _line1_resource_type/_id are set by _therapy_resources() — use them
+        # so the reference is correct whether line 1 was a MedicationStatement
+        # (standard chemo) or a Procedure (radiation regimen).
+        line1_type = p.get('_line1_resource_type') if timeline else None
+        line1_id   = p.get('_line1_resource_id')   if timeline else None
         resource = {
             'resourceType': 'MedicationStatement',
             'id': f"med-{p['id']}-maintenance-rituximab",
@@ -744,8 +755,8 @@ class FLBundleGenerator:
             ],
             'note': [{'text': 'Rituximab maintenance post first-line induction'}],
         }
-        if first_line_id:
-            resource['partOf'] = [{'reference': f"MedicationStatement/{first_line_id}"}]
+        if line1_type and line1_id:
+            resource['partOf'] = [{'reference': f"{line1_type}/{line1_id}"}]
         return resource
 
     @staticmethod
