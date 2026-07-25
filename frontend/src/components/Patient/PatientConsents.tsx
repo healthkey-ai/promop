@@ -49,11 +49,15 @@ export default function PatientConsents({ user }: { user: User | null }) {
   }, []);
 
   useEffect(() => {
-    if (user && user.person_id != null) {
-      fetchConsents();
-    } else {
-      setLoading(false);
-    }
+    // No synchronous setState in the effect body (react-hooks/set-state-in-effect)
+    // — the no-user branch lives in the async IIFE, matching the #269 pattern.
+    (async () => {
+      if (user && user.person_id != null) {
+        await fetchConsents();
+      } else {
+        setLoading(false);
+      }
+    })();
   }, [user, fetchConsents]);
 
   const handleToggle = async (consent: Consent) => {
