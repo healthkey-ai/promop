@@ -11,7 +11,8 @@ from .views import (
     SurveyViewSet, PatientSurveyResponseViewSet,
     vocabulary_list, concept_lookup, concept_search, concept_list,
     concept_ancestors, concept_descendants, concept_graph_batch,
-    concept_synonyms, vocab_release_list, vocab_release_latest, vocab_release_detail,
+    concept_synonyms, concept_synonym_search,
+    vocab_release_list, vocab_release_latest, vocab_release_detail,
     org_disease_stats,
 )
 from .org_views import (
@@ -21,6 +22,10 @@ from .org_views import (
     OrgAccessListView, OrgAccessDetailView,
     confirm_invitation,
 )
+from .patient_invitations import (
+    PatientInviteView, accept_patient_invitation, patient_invitation_lookup,
+)
+from .patient_signup import PatientSignupView
 
 router = DefaultRouter()
 
@@ -44,9 +49,14 @@ urlpatterns = [
     path('auth/login/', login_view, name='v1-login'),
     path('auth/logout/', logout_view, name='v1-logout'),
     path('auth/test/', auth_test, name='v1-auth-test'),
+    path('patients/signup/', PatientSignupView.as_view(), name='v1-patient-signup'),
+    path('patients/<int:person_id>/invite/', PatientInviteView.as_view(), name='v1-patient-invite'),
+    path('patient-invitations/lookup/', patient_invitation_lookup, name='v1-patient-invitation-lookup'),
+    path('patient-invitations/accept/', accept_patient_invitation, name='v1-patient-invitation-accept'),
     path('vocabularies/<str:model_name>/', vocabulary_list, name='v1-vocabulary-list'),
     path('concepts/lookup/', concept_lookup, name='v1-concept-lookup'),
     path('concepts/search/', concept_search, name='v1-concept-search'),
+    path('concepts/synonyms/', concept_synonym_search, name='v1-concept-synonym-search'),
     path('concepts/graph/', concept_graph_batch, name='v1-concept-graph-batch'),
     path('concepts/<int:concept_id>/ancestors/', concept_ancestors, name='v1-concept-ancestors'),
     path('concepts/<int:concept_id>/descendants/', concept_descendants, name='v1-concept-descendants'),

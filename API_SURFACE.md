@@ -351,6 +351,7 @@ Response:
       "concept_name": "HER2 inhibitor",
       "concept_code": "CLASS-HER2",
       "vocabulary_id": "HemOnc",
+      "vocabulary_version": "HemOnc 2024-12-19",
       "concept_class_id": "Drug Class",
       "domain_id": "Drug",
       "standard_concept": null,
@@ -394,6 +395,7 @@ Response:
       "concept_name": "trastuzumab",
       "concept_code": "RX-TRAST",
       "vocabulary_id": "RxNorm",
+      "vocabulary_version": "RxNorm 2024-09-03",
       "concept_class_id": "Ingredient",
       "domain_id": "Drug",
       "standard_concept": null,
@@ -443,6 +445,7 @@ Response:
         "concept_name": "trastuzumab",
         "concept_code": "RX-TRAST",
         "vocabulary_id": "RxNorm",
+        "vocabulary_version": "RxNorm 2024-09-03",
         "concept_class_id": "Ingredient",
         "domain_id": "Drug",
         "standard_concept": null,
@@ -595,6 +598,15 @@ GET /api/v1/concepts/lookup/?lookup=LOINC:2160-0&lookup=LOINC:2345-7&lookup=SNOM
 
 Unknown codes return `null`. Requires `patient/*.read` scope (read-only).
 
+**Opt-in `?include_versions=1`** — adds a top-level `_vocabulary_versions` map (release/version per requested vocabulary) so consumers can pin a release and detect drift. The default `{vocab: {code: id}}` shape is unchanged (phr-etl reads `result[vocab][code]`), so this is additive and off by default.
+```json
+{
+  "LOINC":  { "2160-0": 3013682 },
+  "SNOMED": { "44054006": 201826 },
+  "_vocabulary_versions": { "LOINC": "LOINC 2.77", "SNOMED": "SNOMED 2024-09-01" }
+}
+```
+
 **Response 400** — no `lookup` params supplied, or a param is missing the `:` separator.
 
 ---
@@ -628,15 +640,20 @@ GET /api/v1/concepts/search/?q=creatinine&vocabulary_id=LOINC&domain_id=Measurem
   "count": 2,
   "next": null,
   "previous": null,
+  "vocabulary_release": "rel-20260724-a1b2c3",
   "results": [
     {
       "concept_id": 3016723,
       "concept_name": "Creatinine [Mass/volume] in Serum or Plasma",
       "vocabulary_id": "LOINC",
+      "vocabulary_version": "LOINC 2.77",
       "concept_code": "2160-0",
       "domain_id": "Measurement",
       "concept_class_id": "Lab Test",
-      "standard_concept": "S"
+      "standard_concept": "S",
+      "valid_start_date": "2024-01-01",
+      "valid_end_date": "2099-12-31",
+      "invalid_reason": null
     }
   ]
 }
@@ -646,6 +663,73 @@ Results are ordered by `concept_id` for stable pagination. Unknown search string
 empty paginated result (`count: 0`). Requires `patient/*.read` or `user/*.read` scope.
 
 **Response 400** — `q` is missing or shorter than 2 characters.
+
+---
+
+### GET /api/v1/concepts/{concept_id}/synonyms/
+
+List the synonyms (alternate names) for one concept, so a consumer mirroring promop's vocabulary can cache them.
+
+**Request**
+```
+GET /api/v1/concepts/7001/synonyms/
+```
+
+**Response 200**
+```json
+{
+  "concept_id": 7001,
+  "count": 2,
+  "results": [
+    { "concept_synonym_name": "RVD", "language_concept_id": 4180186 },
+    { "concept_synonym_name": "VRd", "language_concept_id": 4180186 }
+  ]
+}
+```
+
+**Response 404** — `concept_id` not found. Requires `patient/*.read` or `user/*.read` scope.
+
+---
+
+### GET /api/v1/concepts/synonyms/
+
+Find concepts by a synonym (alternate name) substring — the reverse of `concepts/lookup/`, for alias resolution (e.g. regimen alias `VRd` → the HemOnc concept). Backed by a GIN trigram index on `concept_synonym_name`.
+
+Query params:
+
+| Param | Required | Description |
+|---|---:|---|
+| `q` | yes | Synonym substring; minimum 3 characters (trigram) |
+| `vocabulary_id` | no | Exact-match filter on the matched concept |
+| `concept_class_id` | no | Exact-match filter on the matched concept |
+| `page` / `page_size` | no | Pagination; `page_size` capped at 100 |
+
+**Request**
+```
+GET /api/v1/concepts/synonyms/?q=VRd&vocabulary_id=HemOnc
+```
+
+**Response 200**
+```json
+{
+  "count": 1,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "concept_id": 7001,
+      "concept_name": "Bortezomib, Lenalidomide, Dexamethasone",
+      "vocabulary_id": "HemOnc",
+      "concept_code": "HO-VRD",
+      "concept_class_id": "Regimen",
+      "standard_concept": "S",
+      "concept_synonym_name": "VRd"
+    }
+  ]
+}
+```
+
+**Response 400** — `q` is missing or shorter than 3 characters. Requires `patient/*.read` or `user/*.read` scope.
 
 ---
 
@@ -685,6 +769,7 @@ GET /api/v1/concepts/?domain_id=Measurement&concept_class_id=Lab%20Test&page_siz
       "concept_id": 3016723,
       "concept_name": "Creatinine [Mass/volume] in Serum or Plasma",
       "vocabulary_id": "LOINC",
+      "vocabulary_version": "LOINC 2.77",
       "concept_code": "2160-0",
       "domain_id": "Measurement",
       "concept_class_id": "Lab Test",
@@ -697,6 +782,74 @@ GET /api/v1/concepts/?domain_id=Measurement&concept_class_id=Lab%20Test&page_siz
 Requires `patient/*.read` or `user/*.read` scope.
 
 **Response 400** — none of `vocabulary_id`, `domain_id`, or `concept_class_id` was supplied.
+
+---
+
+### Release stamping (all concept endpoints)
+
+Every concept-endpoint response (lookup, search, list, synonyms, synonym search, ancestors, descendants, graph) carries the current published vocabulary release so consumer caches can detect staleness:
+
+- `X-Vocabulary-Release` response header — the current `release_id` (e.g. `rel-20260724-a1b2c3`).
+- `vocabulary_release` top-level body key — same value, on every body except the frozen `concepts/lookup/` `{vocab: {code: id}}` wire format (header-only there).
+
+Both are omitted when no release has been published yet. Search/list rows additionally carry `valid_start_date`, `valid_end_date`, and `invalid_reason` (the OMOP validity window) plus `vocabulary_version`.
+
+---
+
+### GET /api/v1/vocab/releases/
+
+List published vocabulary release manifests, newest first (paginated with the same `page` / `page_size` params as concept search).
+
+**Response 200**
+```json
+{
+  "count": 1,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "release_id": "rel-20260724-a1b2c3",
+      "status": "published",
+      "schema_version": "1.0",
+      "corpus_scope": {
+        "declared_vocabularies": ["LOINC", "SNOMED", "RxNorm", "..."],
+        "loaded_vocabularies": ["HK-Labs", "HK-Regimen", "LOINC", "..."],
+        "hk_vocabularies": ["HK-Labs", "HK-Regimen"],
+        "rxnorm_classes": ["..."],
+        "loinc_domains": ["..."]
+      },
+      "vocabulary_versions": { "LOINC": "LOINC 2.77", "SNOMED": "SNOMED 2024-09-01" },
+      "table_checksums": { "concept": "sha256…", "concept_synonym": "sha256…" },
+      "row_counts": { "concept": 512345, "concept_synonym": 120456 },
+      "build_started_at": "2026-07-24T09:00:00Z",
+      "published_at": "2026-07-24T09:04:12Z",
+      "notes": ""
+    }
+  ]
+}
+```
+
+`table_checksums` / `row_counts` cover the ten distributable corpus tables (`concept`, `concept_synonym`, `concept_relationship`, `concept_ancestor`, `drug_strength`, `source_to_concept_map`, `vocabulary`, `concept_class`, `domain`, `relationship`). Requires `patient/*.read` or `user/*.read` scope.
+
+---
+
+### GET /api/v1/vocab/releases/latest/
+
+The current published manifest — the one consumers should pin to. `ETag` is the quoted `release_id`; poll with `If-None-Match` and a matching tag (weak `W/` prefixes are honored per RFC 7232) gets a `304 Not Modified`, making this a cheap staleness check for consumer caches.
+
+**Response 200** — manifest body (same shape as the list rows above), with `ETag: "rel-20260724-a1b2c3"` and the `X-Vocabulary-Release` header.
+
+**Response 304** — `If-None-Match` matched the current release; nothing changed.
+
+**Response 404** — no release has been published yet.
+
+---
+
+### GET /api/v1/vocab/releases/{release_id}/
+
+Manifest detail for one release (including older releases, for history/diffing). No `X-Vocabulary-Release` header — that header always means *current* release.
+
+**Response 404** — unknown `release_id`.
 
 ---
 

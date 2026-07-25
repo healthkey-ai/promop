@@ -2,6 +2,7 @@ import uuid
 
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
+from django.db.models import Q
 
 
 class IdentityManager(BaseUserManager):
@@ -113,6 +114,60 @@ class PatientUser(models.Model):
 
     def __str__(self):
         return f"{self.identity} - Person {self.person.person_id}"
+
+
+class PatientInvitation(models.Model):
+    """An email invitation for a patient to claim (sign up for) their own record.
+
+    Created by staff/providers against a Person. The patient receives a link,
+    sets a password, and on acceptance a local Identity is created (or reused)
+    and bound to the Person via a PatientUser — turning them into a first-class
+    PHR Account Holder (PHR-S FM PH.1). Mirrors OrgInvitation, but the invitee
+    sets their own password instead of requiring pre-approved account creation.
+    """
+    STATUS_PENDING = 'pending'
+    STATUS_ACCEPTED = 'accepted'
+    STATUS_EXPIRED = 'expired'
+    STATUS_CANCELLED = 'cancelled'
+
+    person = models.ForeignKey(
+        'omop_core.Person', on_delete=models.CASCADE,
+        related_name='patient_invitations',
+    )
+    email = models.EmailField()
+    token = models.CharField(max_length=64, unique=True)
+    invited_by = models.ForeignKey(
+        Identity, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'patient_invitation'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['person'],
+                condition=Q(accepted_at__isnull=True, cancelled_at__isnull=True),
+                name='uq_patient_invitation_pending',
+            ),
+        ]
+
+    @property
+    def status(self):
+        from django.utils import timezone
+        if self.accepted_at:
+            return self.STATUS_ACCEPTED
+        if self.cancelled_at:
+            return self.STATUS_CANCELLED
+        if timezone.now() > self.expires_at:
+            return self.STATUS_EXPIRED
+        return self.STATUS_PENDING
+
+    def __str__(self):
+        return f"Invite Person {self.person_id} ({self.email})"
 
 
 class PatientConsent(models.Model):

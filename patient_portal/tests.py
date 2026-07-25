@@ -6483,6 +6483,33 @@ class ConceptLookupTest(_SmartBase):
         resp = self.client.get(f'{self.URL}?lookup=LOINC:2160-0')
         self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
+    def test_default_response_has_no_vocabulary_versions(self):
+        resp = self.client.get(self.URL, {'lookup': 'LOINC:2160-0'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertNotIn('_vocabulary_versions', resp.json())  # frozen shape for etl
+
+    def test_include_versions_adds_vocabulary_versions_map(self):
+        from omop_core.models import Vocabulary
+        Vocabulary.objects.filter(vocabulary_id='LOINC').update(vocabulary_version='LOINC 2.77')
+        resp = self.client.get(
+            self.URL, {'lookup': 'LOINC:2160-0', 'include_versions': '1'}, **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        body = resp.json()
+        self.assertEqual(body['LOINC']['2160-0'], 3013682)  # existing shape preserved
+        self.assertEqual(body['_vocabulary_versions'], {'LOINC': 'LOINC 2.77'})
+
+    def test_include_versions_does_not_clobber_requested_vocab(self):
+        # Pathological: a lookup for a vocab literally named `_vocabulary_versions`
+        # must keep its own bucket, not be overwritten by the meta map.
+        resp = self.client.get(
+            self.URL,
+            {'lookup': '_vocabulary_versions:x', 'include_versions': '1'},
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['_vocabulary_versions'], {'x': None})
+
 
 class ConceptGraphTest(_SmartBase):
     """GET /api/v1/concepts/{id}/ancestors|descendants and /api/v1/concepts/graph/."""
@@ -6614,6 +6641,18 @@ class ConceptGraphTest(_SmartBase):
         self.assertEqual(node['concept_id'], self.drug_class.concept_id)
         self.assertEqual(node['min_levels_of_separation'], 1)
         self.assertEqual(node['vocabulary_id'], 'HemOnc')
+
+    def test_graph_node_carries_vocabulary_version(self):
+        self.hemonc_vocab.vocabulary_version = 'HemOnc 2024-12-19'
+        self.hemonc_vocab.save(update_fields=['vocabulary_version'])
+        resp = self.client.get(
+            f'{self.url_ancestors}?max_levels=1&vocabulary_id=HemOnc',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        node = resp.json()['results'][0]
+        self.assertEqual(node['vocabulary_id'], 'HemOnc')
+        self.assertEqual(node['vocabulary_version'], 'HemOnc 2024-12-19')
 
     def test_batch_endpoint_groups_results_by_source_concept(self):
         resp = self.client.get(
@@ -6858,6 +6897,7 @@ class ConceptSearchTest(_ConceptFixtureBase):
             'concept_id': 201826,
             'concept_name': 'Type 2 diabetes mellitus',
             'vocabulary_id': 'SNOMED',
+            'vocabulary_version': '',
             'concept_code': '44054006',
             'domain_id': 'Condition',
             'concept_class_id': 'Clinical Finding',
@@ -6866,8 +6906,21 @@ class ConceptSearchTest(_ConceptFixtureBase):
             'valid_start_date': '1970-01-01',
             'valid_end_date': '2099-12-31',
             'invalid_reason': None,
-            'vocabulary_version': '',
         })
+
+    def test_search_result_carries_vocabulary_version(self):
+        from omop_core.models import Vocabulary
+        Vocabulary.objects.filter(vocabulary_id='SNOMED').update(
+            vocabulary_version='SNOMED 2024-09-01')
+        resp = self.client.get(
+            self.URL, {'q': 'Type 2 diabetes', 'page_size': 100}, **self._auth(),
+        )
+        match = next(
+            (r for r in resp.json()['results'] if r['concept_id'] == self.diabetes.concept_id),
+            None,
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match['vocabulary_version'], 'SNOMED 2024-09-01')
 
     def test_search_filtered_by_vocabulary(self):
         resp = self.client.get(
@@ -7153,7 +7206,9 @@ class VocabReleaseLatestEmptyTest(_ConceptFixtureBase):
 
 
 class ConceptSynonymsApiTest(_ConceptFixtureBase):
-    """GET /api/v1/concepts/<id>/synonyms/ (issue #236 gap 11)."""
+    """GET /api/v1/concepts/<id>/synonyms/ — exact shape + release stamping
+    (issue #236 gap 11).  Behavioural coverage (404, empty, search filters)
+    lives in ConceptSynonymApiTest (promop#239)."""
 
     @classmethod
     def setUpTestData(cls):
@@ -7187,57 +7242,19 @@ class ConceptSynonymsApiTest(_ConceptFixtureBase):
         resp = self.client.get(self._url(self.creatinine_serum.concept_id), **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         payload = resp.json()
+        # Shipped consumer contract (promop#239): unpaginated, rows carry only
+        # the synonym name + language.
+        self.assertEqual(set(payload.keys()), {'concept_id', 'count', 'results'})
+        self.assertEqual(payload['concept_id'], self.creatinine_serum.concept_id)
         self.assertEqual(payload['count'], 2)
         names = {r['concept_synonym_name'] for r in payload['results']}
         self.assertEqual(names, {'Serum creatinine', 'Creatinine serum mass'})
         for row in payload['results']:
             self.assertEqual(
                 set(row.keys()),
-                {'concept_id', 'concept_synonym_name', 'language_concept_id'},
+                {'concept_synonym_name', 'language_concept_id'},
             )
-            self.assertEqual(row['concept_id'], self.creatinine_serum.concept_id)
             self.assertEqual(row['language_concept_id'], self.english.concept_id)
-
-    def test_synonyms_empty_for_concept_without_synonyms(self):
-        resp = self.client.get(self._url(self.diabetes.concept_id), **self._auth())
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.json()['count'], 0)
-        self.assertEqual(resp.json()['results'], [])
-
-    def test_synonyms_pagination_stable_across_pages(self):
-        from omop_core.models import ConceptSynonym
-        ConceptSynonym.objects.bulk_create(
-            ConceptSynonym(
-                concept=self.diabetes,
-                concept_synonym_name=f'DM2 synonym {i:02d}',
-                language_concept=self.english,
-            )
-            for i in range(30)
-        )
-        page1 = self.client.get(
-            self._url(self.diabetes.concept_id), {'page_size': 25}, **self._auth(),
-        )
-        self.assertEqual(page1.status_code, status.HTTP_200_OK)
-        p1 = page1.json()
-        self.assertEqual(p1['count'], 30)
-        self.assertEqual(len(p1['results']), 25)
-        self.assertIsNotNone(p1['next'])
-
-        page2 = self.client.get(
-            self._url(self.diabetes.concept_id), {'page_size': 25, 'page': 2}, **self._auth(),
-        )
-        p2 = page2.json()
-        self.assertEqual(len(p2['results']), 5)
-        self.assertIsNone(p2['next'])
-
-        # order_by('id') gives a stable continuation: no overlap between pages.
-        names1 = {r['concept_synonym_name'] for r in p1['results']}
-        names2 = {r['concept_synonym_name'] for r in p2['results']}
-        self.assertFalse(names1 & names2)
-
-    def test_synonyms_404_for_unknown_concept(self):
-        resp = self.client.get(self._url(999999999), **self._auth())
-        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_synonyms_require_auth(self):
         resp = self.client.get(self._url(self.creatinine_serum.concept_id))
@@ -7315,6 +7332,12 @@ class ConceptReleaseStampTest(_ConceptFixtureBase):
     def test_synonyms_stamped(self):
         resp = self.client.get(
             f'/api/v1/concepts/{self.diabetes.concept_id}/synonyms/', **self._auth(),
+        )
+        self._assert_stamped(resp)
+
+    def test_synonym_search_stamped(self):
+        resp = self.client.get(
+            '/api/v1/concepts/synonyms/', {'q': 'creatinine'}, **self._auth(),
         )
         self._assert_stamped(resp)
 
@@ -8207,6 +8230,27 @@ class OrgAdminPatientListScopingTest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn('filter_options', resp.data)
 
+    def test_domain_trust_admin_sees_trusted_org_patients(self):
+        trusted_admin = Identity.objects.create_user(email='trusted@t.com', password='x')
+        OrgTrust.objects.create(granting_org=self.org_a, trusted_domain='t.com')
+        resp = self._get(trusted_admin)
+        self.assertEqual(resp.status_code, 200)
+        ids = {p['id'] for p in resp.data}
+        self.assertIn(self.pi_a1.id, ids)
+        self.assertIn(self.pi_a2.id, ids)
+        self.assertNotIn(self.pi_b.id, ids)
+
+    def test_org_to_org_trust_admin_sees_trusted_org_patients(self):
+        trusted_admin = Identity.objects.create_user(email='trusted-org-link@t.com', password='x')
+        source_org = Organization.objects.create(name='Source Org', slug='source-org-patient-scope')
+        GroupAccess.objects.create(identity=trusted_admin, org=source_org, role='doctor')
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_org=source_org)
+        resp = self._get(trusted_admin)
+        self.assertEqual(resp.status_code, 200)
+        ids = {p['id'] for p in resp.data}
+        self.assertIn(self.pi_b.id, ids)
+        self.assertNotIn(self.pi_a1.id, ids)
+
 
 # ---------------------------------------------------------------------------
 # bulk_delete_filtered Tests
@@ -8455,7 +8499,7 @@ class OrgManagementModelTest(TestCase):
 
 
 class OrgTrustAccessTest(TestCase):
-    """get_visible_orgs includes trust-based orgs."""
+    """Access helpers include trust-based orgs."""
 
     def setUp(self):
         self.org_a = _make_org('Org A', 'org-a')
@@ -8499,6 +8543,19 @@ class OrgTrustAccessTest(TestCase):
     def test_staff_sees_all_orgs(self):
         staff = _make_user('staff@test.com', is_staff=True)
         orgs = get_visible_orgs(staff)
+        self.assertIn(self.org_a, orgs)
+        self.assertIn(self.org_b, orgs)
+
+    def test_domain_trust_gives_admin_access(self):
+        from omop_core.services.access import get_admin_orgs
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_domain='trusted.com')
+        orgs = get_admin_orgs(self.domain_user)
+        self.assertIn(self.org_b, orgs)
+
+    def test_org_to_org_trust_gives_admin_access(self):
+        from omop_core.services.access import get_admin_orgs
+        OrgTrust.objects.create(granting_org=self.org_b, trusted_org=self.org_a)
+        orgs = get_admin_orgs(self.direct_user)
         self.assertIn(self.org_a, orgs)
         self.assertIn(self.org_b, orgs)
 
@@ -8722,6 +8779,35 @@ class OrgViewSetOrgAdminTest(TestCase):
         self.assertEqual(resp.status_code, 403)
 
 
+class OrgViewSetTrustedAdminTest(TestCase):
+    """Trust-based org access confers org-admin rights."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = _make_user('trusted@partner.com')
+        self.org = _make_org('Trusted Org', 'trusted-org')
+        self.client.force_authenticate(user=self.user)
+
+    def test_domain_trust_can_list_and_patch_org(self):
+        OrgTrust.objects.create(granting_org=self.org, trusted_domain='partner.com')
+        resp = self.client.get('/api/orgs/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('trusted-org', [o['slug'] for o in resp.data])
+
+        resp = self.client.patch('/api/orgs/trusted-org/', {'name': 'Renamed Trusted Org'})
+        self.assertEqual(resp.status_code, 200)
+        self.org.refresh_from_db()
+        self.assertEqual(self.org.name, 'Renamed Trusted Org')
+
+    def test_org_to_org_trust_can_access_other_org(self):
+        source_org = _make_org('Source Org', 'source-org')
+        GroupAccess.objects.create(identity=self.user, org=source_org, role='doctor')
+        OrgTrust.objects.create(granting_org=self.org, trusted_org=source_org)
+
+        resp = self.client.get('/api/orgs/trusted-org/')
+        self.assertEqual(resp.status_code, 200)
+
+
 class OrgViewSetUnauthorizedTest(TestCase):
     """Non-admin gets 403."""
 
@@ -8771,10 +8857,32 @@ class OrgInvitationFlowTest(TestCase):
         })
         self.assertEqual(resp.status_code, 201)
         invitee = Identity.objects.get(email='placeholder@example.com', issuer='urn:local')
+        invitation = OrgInvitation.objects.get(org=self.org, email='placeholder@example.com')
+        grant = GroupAccess.objects.get(identity=invitee, org=self.org, role='analyst')
         self.assertFalse(invitee.has_usable_password())
-        self.assertTrue(
-            GroupAccess.objects.filter(identity=invitee, org=self.org, role='analyst').exists()
-        )
+        self.assertEqual(invitation.redirect_url, 'https://analytics.healthkey.ai')
+        self.assertEqual(grant.redirect_url, 'https://analytics.healthkey.ai')
+
+    def test_invite_analyst_allows_custom_redirect_url(self):
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'analyst-custom@example.com',
+            'role': 'analyst',
+            'redirect_url': 'https://analytics.healthkey.ai/tenant/acme',
+        })
+        self.assertEqual(resp.status_code, 201)
+        invitation = OrgInvitation.objects.get(org=self.org, email='analyst-custom@example.com')
+        grant = GroupAccess.objects.get(identity__email='analyst-custom@example.com', org=self.org)
+        self.assertEqual(invitation.redirect_url, 'https://analytics.healthkey.ai/tenant/acme')
+        self.assertEqual(grant.redirect_url, 'https://analytics.healthkey.ai/tenant/acme')
+
+    def test_invite_rejects_invalid_analyst_redirect_url(self):
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'analyst-invalid@example.com',
+            'role': 'analyst',
+            'redirect_url': 'not-a-url',
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.data['error'], 'redirect_url must be a valid http(s) URL.')
 
     def test_partner_auth_identity_claims_placeholder_access(self):
         placeholder = Identity.objects.create_user(email='partner@example.com', password=None)
@@ -8869,7 +8977,12 @@ class OrgInvitationFlowTest(TestCase):
 
     def test_invite_existing_user_updates_existing_org_role(self):
         invitee = Identity.objects.create_user(email='role-update@example.com', password='pass')
-        GroupAccess.objects.create(identity=invitee, org=self.org, role='analyst')
+        GroupAccess.objects.create(
+            identity=invitee,
+            org=self.org,
+            role='analyst',
+            redirect_url='https://analytics.healthkey.ai/old',
+        )
         resp = self.client.post('/api/orgs/invite-org/invite/', {
             'email': 'role-update@example.com',
             'role': 'doctor',
@@ -8878,6 +8991,7 @@ class OrgInvitationFlowTest(TestCase):
         self.assertTrue(resp.data['access_granted'])
         grant = GroupAccess.objects.get(identity=invitee, org=self.org)
         self.assertEqual(grant.role, 'doctor')
+        self.assertEqual(grant.redirect_url, '')
 
     def test_invite_existing_user_does_not_downgrade_org_admin(self):
         invitee = Identity.objects.create_user(email='admin-role@example.com', password='pass')
@@ -8923,6 +9037,25 @@ class OrgInvitationFlowTest(TestCase):
         )
         inv = OrgInvitation.objects.get(token=token)
         self.assertEqual(inv.status, OrgInvitation.STATUS_CONFIRMED)
+
+    def test_confirm_analyst_invitation_returns_redirect_url(self):
+        from django.utils import timezone
+        invitee = Identity.objects.create_user(email='analyst-invitee@example.com', password='pass')
+        token = _secrets.token_hex(32)
+        OrgInvitation.objects.create(
+            org=self.org,
+            email='analyst-invitee@example.com',
+            role='analyst',
+            redirect_url='https://analytics.healthkey.ai/org/acme',
+            token=token,
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        public_client = APIClient()
+        resp = public_client.post('/api/orgs/confirm-invitation/', {'token': token})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['redirect_url'], 'https://analytics.healthkey.ai/org/acme')
+        grant = GroupAccess.objects.get(identity=invitee, org=self.org)
+        self.assertEqual(grant.redirect_url, 'https://analytics.healthkey.ai/org/acme')
 
     def test_cancel_invitation(self):
         from django.utils import timezone
@@ -9067,11 +9200,44 @@ class OrgAccessAPITest(TestCase):
         self.assertEqual(resp.status_code, 200)
         emails = [g['email'] for g in resp.data]
         self.assertIn('grantee@example.com', emails)
+        self.assertEqual(resp.data[0]['redirect_url'], None)
+
+    def test_list_access_grants_includes_redirect_url(self):
+        self.grant.role = 'analyst'
+        self.grant.redirect_url = 'https://analytics.healthkey.ai/custom'
+        self.grant.save(update_fields=['role', 'redirect_url'])
+        resp = self.client.get('/api/orgs/access-org/access/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data[0]['redirect_url'], 'https://analytics.healthkey.ai/custom')
 
     def test_revoke_access_grant(self):
         resp = self.client.delete(f'/api/orgs/access-org/access/{self.grant.id}/')
         self.assertEqual(resp.status_code, 204)
         self.assertFalse(GroupAccess.objects.filter(id=self.grant.id).exists())
+
+    def test_patch_access_grant_sets_default_analyst_redirect_url(self):
+        resp = self.client.patch(
+            f'/api/orgs/access-org/access/{self.grant.id}/',
+            {'role': 'analyst'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.grant.refresh_from_db()
+        self.assertEqual(self.grant.role, 'analyst')
+        self.assertEqual(self.grant.redirect_url, 'https://analytics.healthkey.ai')
+
+    def test_patch_access_grant_clears_redirect_url_when_switching_to_doctor(self):
+        self.grant.role = 'analyst'
+        self.grant.redirect_url = 'https://analytics.healthkey.ai/custom'
+        self.grant.save(update_fields=['role', 'redirect_url'])
+        resp = self.client.patch(
+            f'/api/orgs/access-org/access/{self.grant.id}/',
+            {'role': 'doctor'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.grant.refresh_from_db()
+        self.assertEqual(self.grant.redirect_url, '')
 
 
 class SetupDemoCommandTest(TestCase):
@@ -9136,6 +9302,15 @@ class UserSerializerOrgAdminTest(TestCase):
     def test_is_org_admin_true_with_grant(self):
         GroupAccess.objects.create(identity=self.user, org=self.org, role='org_admin')
         self.client.force_authenticate(user=self.user)
+        resp = self.client.get('/api/user/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.data.get('user', resp.data)
+        self.assertTrue(data.get('is_org_admin'))
+
+    def test_is_org_admin_true_with_domain_trust(self):
+        OrgTrust.objects.create(granting_org=self.org, trusted_domain='example.com')
+        trusted_user = _make_user('trusted@example.com')
+        self.client.force_authenticate(user=trusted_user)
         resp = self.client.get('/api/user/')
         self.assertEqual(resp.status_code, 200)
         data = resp.data.get('user', resp.data)
@@ -10292,3 +10467,931 @@ class MCODECreatinineLoincTest(FhirUploadBase):
         self.assertIsNotNone(self._pi.serum_creatinine_mg_dl,
                              'serum_creatinine_mg_dl not populated from LOINC 38483-4')
         self.assertAlmostEqual(float(self._pi.serum_creatinine_mg_dl), 1.1, places=1)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: Patient / PHR Account Holder role surface (issue #264, FM PH.1)
+# ---------------------------------------------------------------------------
+
+class PatientRolePersonForTest(TestCase):
+    """Unit tests for patient_portal.services.patient_person_for."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+        from omop_core.models import GroupAccess, Organization
+
+        # A patient: PatientUser link, no provider grant.
+        cls.person = Person.objects.create(person_id=90101, family_name='Holder', given_name='Pat')
+        PatientRecord.objects.create(person=cls.person)
+        cls.patient_identity = Identity.objects.create_user(email='holder@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.patient_identity, person=cls.person)
+
+        # A provider: PatientUser link exists BUT also has an org_admin grant.
+        cls.person_prov = Person.objects.create(person_id=90102, family_name='Doc', given_name='Dee')
+        PatientRecord.objects.create(person=cls.person_prov)
+        cls.provider_identity = Identity.objects.create_user(email='doc@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.provider_identity, person=cls.person_prov)
+        cls.org = Organization.objects.create(name='Acme Onc', slug='acme-onc')
+        GroupAccess.objects.create(identity=cls.provider_identity, org=cls.org, role='org_admin')
+
+        # A plain identity with no PatientUser at all.
+        cls.orphan_identity = Identity.objects.create_user(email='orphan@test.com', password='pw')
+
+        # Staff/superuser with a PatientUser link should still not be a patient.
+        cls.person_staff = Person.objects.create(person_id=90103, family_name='Staff', given_name='Sam')
+        cls.staff_identity = Identity.objects.create_user(email='staff264@test.com', password='pw', is_staff=True)
+        PatientUser.objects.create(identity=cls.staff_identity, person=cls.person_staff)
+
+    def test_patient_identity_resolves_to_own_person(self):
+        from patient_portal.services import patient_person_for
+        self.assertEqual(patient_person_for(self.patient_identity), self.person)
+
+    def test_provider_with_group_access_is_not_a_patient(self):
+        from patient_portal.services import patient_person_for
+        self.assertIsNone(patient_person_for(self.provider_identity))
+
+    def test_identity_without_patient_user_is_not_a_patient(self):
+        from patient_portal.services import patient_person_for
+        self.assertIsNone(patient_person_for(self.orphan_identity))
+
+    def test_staff_is_not_a_patient(self):
+        from patient_portal.services import patient_person_for
+        self.assertIsNone(patient_person_for(self.staff_identity))
+
+    def test_none_identity_is_not_a_patient(self):
+        from patient_portal.services import patient_person_for
+        self.assertIsNone(patient_person_for(None))
+
+
+class PatientRoleUserEndpointTest(TestCase):
+    """/api/v1/user/ exposes is_patient and person_id (issue #264)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+        from omop_core.models import GroupAccess, Organization
+
+        cls.person = Person.objects.create(person_id=90201, family_name='Holder', given_name='Pat')
+        PatientRecord.objects.create(person=cls.person)
+        cls.patient_identity = Identity.objects.create_user(email='p264@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.patient_identity, person=cls.person)
+
+        cls.provider_identity = Identity.objects.create_user(email='d264@test.com', password='pw')
+        cls.org = Organization.objects.create(name='Beta Onc', slug='beta-onc')
+        GroupAccess.objects.create(identity=cls.provider_identity, org=cls.org, role='org_admin')
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def test_patient_user_endpoint_reports_is_patient_and_person_id(self):
+        resp = self._client_as(self.patient_identity).get('/api/v1/user/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        user = resp.data['user']
+        self.assertTrue(user['is_patient'])
+        self.assertEqual(user['person_id'], self.person.person_id)
+
+    def test_provider_user_endpoint_reports_not_patient(self):
+        resp = self._client_as(self.provider_identity).get('/api/v1/user/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        user = resp.data['user']
+        self.assertFalse(user['is_patient'])
+        self.assertIsNone(user['person_id'])
+        self.assertTrue(user['is_org_admin'])
+
+
+# ---------------------------------------------------------------------------
+# Patient invitations — staff invite a patient to claim their record (#264)
+# ---------------------------------------------------------------------------
+
+from django.core import mail as _django_mail  # noqa: E402
+from django.test import override_settings  # noqa: E402
+
+
+@override_settings(
+    EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+    APP_BASE_URL='https://app.test',
+)
+class PatientInvitationTest(TestCase):
+    """Staff invite a patient; the patient sets a password and gets an account."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        cls.person = Person.objects.create(person_id=91001, family_name='Reed', given_name='Rae')
+        cls.record = PatientRecord.objects.create(person=cls.person)  # no email yet
+
+        cls.staff = Identity.objects.create_user(email='staff-inv@test.com', password='pw', is_staff=True)
+
+        # An unrelated patient (no access to cls.person) for negative tests.
+        cls.other_person = Person.objects.create(person_id=91002, family_name='Doe', given_name='Dot')
+        PatientRecord.objects.create(person=cls.other_person)
+        cls.other_patient = Identity.objects.create_user(email='other@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.other_patient, person=cls.other_person)
+
+    def setUp(self):
+        _django_mail.outbox = []
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def _invite_url(self, person):
+        return f'/api/v1/patients/{person.person_id}/invite/'
+
+    # --- Invite creation ---
+
+    def test_staff_invite_sets_email_creates_invitation_and_sends_email(self):
+        resp = self._client_as(self.staff).post(
+            self._invite_url(self.person), {'email': 'Rae@Example.com'}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        from patient_portal.models import PatientInvitation
+        inv = PatientInvitation.objects.get(person=self.person)
+        self.assertEqual(inv.status, 'pending')
+        self.assertEqual(inv.email, 'rae@example.com')
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.email, 'rae@example.com')
+        self.assertEqual(len(_django_mail.outbox), 1)
+        self.assertIn(inv.token, _django_mail.outbox[0].body)
+        self.assertIn('accept-patient-invite', _django_mail.outbox[0].body)
+
+    def test_invite_without_any_email_is_rejected(self):
+        resp = self._client_as(self.staff).post(self._invite_url(self.person), {}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_invite_uses_stored_email_when_none_provided(self):
+        self.record.email = 'stored@example.com'
+        self.record.save(update_fields=['email'])
+        resp = self._client_as(self.staff).post(self._invite_url(self.person), {}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['email'], 'stored@example.com')
+
+    def test_reinvite_refreshes_token_without_duplicating(self):
+        c = self._client_as(self.staff)
+        c.post(self._invite_url(self.person), {'email': 'rae@example.com'}, format='json')
+        c.post(self._invite_url(self.person), {'email': 'rae@example.com'}, format='json')
+        from patient_portal.models import PatientInvitation
+        self.assertEqual(PatientInvitation.objects.filter(person=self.person).count(), 1)
+
+    def test_unprivileged_user_cannot_invite(self):
+        resp = self._client_as(self.other_patient).post(
+            self._invite_url(self.person), {'email': 'rae@example.com'}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(len(_django_mail.outbox), 0)
+
+    def test_cannot_invite_patient_with_active_account(self):
+        from patient_portal.models import PatientUser
+        existing = Identity.objects.create_user(email='rae@example.com', password='pw')
+        PatientUser.objects.create(identity=existing, person=self.person, is_active=True)
+        resp = self._client_as(self.staff).post(
+            self._invite_url(self.person), {'email': 'rae@example.com'}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # --- Lookup ---
+
+    def test_lookup_returns_email_and_patient_name(self):
+        self._client_as(self.staff).post(
+            self._invite_url(self.person), {'email': 'rae@example.com'}, format='json'
+        )
+        from patient_portal.models import PatientInvitation
+        token = PatientInvitation.objects.get(person=self.person).token
+        resp = APIClient().get('/api/v1/patient-invitations/lookup/', {'token': token})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['email'], 'rae@example.com')
+        self.assertEqual(resp.data['patient_name'], 'Rae Reed')
+
+    def test_lookup_rejects_bad_token(self):
+        resp = APIClient().get('/api/v1/patient-invitations/lookup/', {'token': 'nope'})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # --- Accept ---
+
+    def _create_invite(self, email='rae@example.com'):
+        self._client_as(self.staff).post(self._invite_url(self.person), {'email': email}, format='json')
+        from patient_portal.models import PatientInvitation
+        return PatientInvitation.objects.get(person=self.person)
+
+    def test_accept_creates_account_and_links_patient_user(self):
+        from patient_portal.models import PatientUser
+        from patient_portal.services import patient_person_for
+        inv = self._create_invite()
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': inv.token, 'password': 'sup3rsecret'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        inv.refresh_from_db()
+        self.assertEqual(inv.status, 'accepted')
+        pu = PatientUser.objects.get(person=self.person)
+        self.assertTrue(pu.identity.has_usable_password())
+        self.assertTrue(pu.identity.check_password('sup3rsecret'))
+        # The new account is a first-class patient.
+        self.assertEqual(patient_person_for(pu.identity), self.person)
+
+    def test_accept_rejects_short_password(self):
+        inv = self._create_invite()
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': inv.token, 'password': 'short'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_accept_rejects_unknown_token(self):
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': 'a' * 64, 'password': 'sup3rsecret'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_accept_rejects_expired_invitation(self):
+        inv = self._create_invite()
+        inv.expires_at = timezone.now() - timedelta(days=1)
+        inv.save(update_fields=['expires_at'])
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': inv.token, 'password': 'sup3rsecret'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_accept_cannot_be_replayed(self):
+        inv = self._create_invite()
+        body = {'token': inv.token, 'password': 'sup3rsecret'}
+        APIClient().post('/api/v1/patient-invitations/accept/', body, format='json')
+        resp = APIClient().post('/api/v1/patient-invitations/accept/', body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_accept_does_not_overwrite_existing_real_account(self):
+        """A pre-existing local account with a real password must not be reset by accept."""
+        existing = Identity.objects.create_user(email='rae@example.com', password='original-pw')
+        inv = self._create_invite('rae@example.com')
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': inv.token, 'password': 'attacker-chosen'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        existing.refresh_from_db()
+        self.assertTrue(existing.check_password('original-pw'))
+        self.assertFalse(existing.check_password('attacker-chosen'))
+        inv.refresh_from_db()
+        self.assertEqual(inv.status, 'pending')  # not consumed
+
+    def test_accept_claims_placeholder_account(self):
+        """A placeholder local account (no usable password) is claimed and gets the new password."""
+        from patient_portal.models import PatientUser
+        placeholder = Identity.objects.create_user(email='rae@example.com', password=None)
+        placeholder.set_unusable_password()
+        placeholder.save(update_fields=['password'])
+        inv = self._create_invite('rae@example.com')
+        resp = APIClient().post(
+            '/api/v1/patient-invitations/accept/',
+            {'token': inv.token, 'password': 'sup3rsecret'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        placeholder.refresh_from_db()
+        self.assertTrue(placeholder.check_password('sup3rsecret'))
+        self.assertEqual(PatientUser.objects.get(person=self.person).identity, placeholder)
+
+    # --- Email editable (lock-in) ---
+
+    def test_email_is_editable_via_patch(self):
+        resp = self._client_as(self.staff).patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'email': 'edited@example.com'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, getattr(resp, 'data', None))
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.email, 'edited@example.com')
+
+
+# ---------------------------------------------------------------------------
+# Patient signup — a trusted app creates a patient account in an org (#264, "A")
+# ---------------------------------------------------------------------------
+
+class PatientSignupTest(TestCase):
+    """POST /api/v1/patients/signup/ — server-to-server patient account creation."""
+
+    SIGNUP_URL = '/api/v1/patients/signup/'
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Organization
+        from patient_portal.models import PatientUser
+        cls.org = Organization.objects.create(name='Acme Oncology', slug='acme-onc')
+        cls.staff = Identity.objects.create_user(email='staff-signup@test.com', password='pw', is_staff=True)
+
+        # A plain patient (not privileged) for the negative test.
+        cls.person = Person.objects.create(person_id=92001, family_name='Pat', given_name='Pat')
+        cls.patient = Identity.objects.create_user(email='pat-signup@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.patient, person=cls.person)
+
+    def _staff(self):
+        c = APIClient()
+        c.force_authenticate(user=self.staff)
+        return c
+
+    def test_staff_signup_local_creates_account_in_org(self):
+        from patient_portal.models import PatientUser
+        resp = self._staff().post(self.SIGNUP_URL, {
+            'org': 'acme-onc', 'email': 'newpt@example.com', 'password': 'sup3rsecret',
+            'given_name': 'New', 'family_name': 'Patient',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertTrue(resp.data['created'])
+        pid = resp.data['person_id']
+        pu = PatientUser.objects.get(person__person_id=pid)
+        self.assertTrue(pu.identity.has_usable_password())
+        self.assertTrue(pu.identity.check_password('sup3rsecret'))
+        record = PatientRecord.objects.get(person__person_id=pid)
+        self.assertEqual(record.organization, self.org)
+        self.assertEqual(record.email, 'newpt@example.com')
+
+    def test_staff_signup_oidc_creates_linked_identity(self):
+        resp = self._staff().post(self.SIGNUP_URL, {
+            'org': 'acme-onc',
+            'actor_iss': 'https://idp.example.com', 'actor_sub': 'oidc-123',
+            'email': 'oidc@example.com',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        identity = Identity.objects.get(issuer='https://idp.example.com', sub='oidc-123')
+        # OIDC accounts authenticate via their IdP, not a local password.
+        self.assertFalse(identity.has_usable_password())
+        record = PatientRecord.objects.get(person__person_id=resp.data['person_id'])
+        self.assertEqual(record.organization, self.org)
+
+    def test_signup_is_idempotent_on_repeat_identity(self):
+        body = {'org': 'acme-onc', 'actor_iss': 'https://idp.example.com', 'actor_sub': 'dup-1'}
+        first = self._staff().post(self.SIGNUP_URL, body, format='json')
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        second = self._staff().post(self.SIGNUP_URL, body, format='json')
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertFalse(second.data['created'])
+        self.assertEqual(first.data['person_id'], second.data['person_id'])
+        self.assertEqual(
+            Identity.objects.filter(issuer='https://idp.example.com', sub='dup-1').count(), 1
+        )
+
+    def test_signup_requires_identity_anchor(self):
+        resp = self._staff().post(self.SIGNUP_URL, {'org': 'acme-onc', 'email': 'noanchor@example.com'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_signup_rejects_short_password(self):
+        resp = self._staff().post(self.SIGNUP_URL, {
+            'org': 'acme-onc', 'email': 'shortpw@example.com', 'password': 'short',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_staff_signup_requires_org_when_none_bound(self):
+        resp = self._staff().post(self.SIGNUP_URL, {
+            'email': 'noorg@example.com', 'password': 'sup3rsecret',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_regular_patient_cannot_signup(self):
+        c = APIClient()
+        c.force_authenticate(user=self.patient)
+        resp = c.post(self.SIGNUP_URL, {
+            'org': 'acme-onc', 'email': 'x@example.com', 'password': 'sup3rsecret',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class ConceptSynonymApiTest(_SmartBase):
+    """GET /api/v1/concepts/{id}/synonyms/ and /api/v1/concepts/synonyms/ (promop#239)."""
+
+    def setUp(self):
+        from omop_core.models import Concept, ConceptSynonym, Vocabulary, Domain, ConceptClass
+        import datetime
+        today, future = datetime.date(1970, 1, 1), datetime.date(2099, 12, 31)
+        hemonc, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc', 'vocabulary_concept_id': 0},
+        )
+        rxnorm, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RxNorm',
+            defaults={'vocabulary_name': 'RxNorm', 'vocabulary_concept_id': 0},
+        )
+        drug, _ = Domain.objects.get_or_create(
+            domain_id='Drug', defaults={'domain_name': 'Drug', 'domain_concept_id': 13})
+        regimen, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0})
+        ingredient, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Ingredient',
+            defaults={'concept_class_name': 'Ingredient', 'concept_class_concept_id': 0})
+
+        def _c(cid, name, vocab, cc, code):
+            return Concept.objects.create(
+                concept_id=cid, concept_name=name, domain=drug, vocabulary=vocab,
+                concept_class=cc, standard_concept='S', concept_code=code,
+                valid_start_date=today, valid_end_date=future)
+
+        self.lang = _c(4180186, 'English language', hemonc, ingredient, 'ENG')
+        self.regimen = _c(7001, 'Bortezomib, Lenalidomide, Dexamethasone', hemonc, regimen, 'HO-VRD')
+        self.other = _c(7002, 'bortezomib', rxnorm, ingredient, 'RX-VELC')
+        for name in ('VRd', 'RVD'):
+            ConceptSynonym.objects.create(
+                concept=self.regimen, concept_synonym_name=name, language_concept=self.lang)
+        ConceptSynonym.objects.create(
+            concept=self.other, concept_synonym_name='VRd generic', language_concept=self.lang)
+
+    def _auth(self):
+        return {'HTTP_AUTHORIZATION': f'Bearer {self.read_token.token}'}
+
+    # --- per-concept synonyms ---
+    def test_per_concept_synonyms_returns_all(self):
+        resp = self.client.get('/api/v1/concepts/7001/synonyms/', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        body = resp.json()
+        self.assertEqual(body['concept_id'], 7001)
+        self.assertEqual(body['count'], 2)
+        names = {r['concept_synonym_name'] for r in body['results']}
+        self.assertEqual(names, {'VRd', 'RVD'})
+
+    def test_per_concept_synonyms_unknown_concept_404(self):
+        resp = self.client.get('/api/v1/concepts/999999/synonyms/', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_per_concept_synonyms_existing_but_empty_returns_count_zero(self):
+        # concept 4180186 exists but has no synonyms → 200 with count 0 (not 404)
+        resp = self.client.get('/api/v1/concepts/4180186/synonyms/', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['count'], 0)
+        self.assertEqual(resp.json()['results'], [])
+
+    # --- synonym search (alias -> concept) ---
+    def test_synonym_search_finds_concept_by_alias(self):
+        resp = self.client.get('/api/v1/concepts/synonyms/?q=VRd', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.json()['results']
+        match = next((r for r in results if r['concept_synonym_name'] == 'VRd'), None)
+        self.assertIsNotNone(match)
+        self.assertEqual(match['concept_id'], 7001)
+        self.assertEqual(match['vocabulary_id'], 'HemOnc')
+
+    def test_synonym_search_filtered_by_vocabulary(self):
+        # 'VRd' matches concept 7001 (HemOnc) and 'VRd generic' concept 7002 (RxNorm);
+        # the vocabulary_id filter keeps only the HemOnc match.
+        resp = self.client.get(
+            '/api/v1/concepts/synonyms/?q=VRd&vocabulary_id=HemOnc', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {r['concept_id'] for r in resp.json()['results']}
+        self.assertIn(7001, ids)
+        self.assertNotIn(7002, ids)
+        self.assertTrue(all(r['vocabulary_id'] == 'HemOnc' for r in resp.json()['results']))
+
+    def test_synonym_search_filtered_by_concept_class(self):
+        resp = self.client.get(
+            '/api/v1/concepts/synonyms/?q=VRd&concept_class_id=Regimen', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {r['concept_id'] for r in resp.json()['results']}
+        self.assertIn(7001, ids)          # Regimen
+        self.assertNotIn(7002, ids)       # Ingredient, excluded by the filter
+
+    def test_synonym_search_short_q_returns_400(self):
+        # 2 chars < 3-char trigram minimum
+        resp = self.client.get('/api/v1/concepts/synonyms/?q=vr', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_synonym_search_unauthenticated_401(self):
+        resp = self.client.get('/api/v1/concepts/synonyms/?q=VRd')
+        self.assertIn(resp.status_code,
+                      [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
+# ---------------------------------------------------------------------------
+# PatientSelfScopePermission tests
+# ---------------------------------------------------------------------------
+
+class PatientSelfScopePermissionTest(TestCase):
+    """Test that PatientSelfScopePermission blocks cross-patient object access."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+        from omop_core.models import GroupAccess, Organization
+
+        _make_vocab_fixtures()
+        condition_concept = Concept.objects.get(concept_id=4112853)
+        type_concept = Concept.objects.get(concept_id=32817)
+
+        # Patient A
+        cls.person_a = Person.objects.create(person_id=93001, family_name='Able', given_name='Amy')
+        cls.patient_a_rec = PatientRecord.objects.create(person=cls.person_a)
+        cls.identity_a = Identity.objects.create_user(email='scope-a@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_a, person=cls.person_a)
+
+        # Patient B
+        cls.person_b = Person.objects.create(person_id=93002, family_name='Baker', given_name='Bob')
+        cls.patient_b_rec = PatientRecord.objects.create(person=cls.person_b)
+        cls.identity_b = Identity.objects.create_user(email='scope-b@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_b, person=cls.person_b)
+
+        # A ConditionOccurrence belonging to patient B
+        cls.condition_b = ConditionOccurrence.objects.create(
+            condition_occurrence_id=93901,
+            person=cls.person_b,
+            condition_concept=condition_concept,
+            condition_start_date=date.today(),
+            condition_type_concept=type_concept,
+        )
+
+        # Superuser
+        cls.superuser = Identity.objects.create_superuser(email='su-scope@test.com', password='pw')
+
+        # Staff
+        cls.staff = Identity.objects.create_user(email='staff-scope@test.com', password='pw', is_staff=True)
+
+        # Provider with GroupAccess (bypasses patient scope)
+        cls.provider = Identity.objects.create_user(email='prov-scope@test.com', password='pw')
+        cls.org = Organization.objects.create(name='Scope Org', slug='scope-org-93')
+        GroupAccess.objects.create(identity=cls.provider, org=cls.org, role='doctor')
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def test_patient_can_access_own_condition(self):
+        """Patient B can access their own condition via detail endpoint."""
+        resp = self._client_as(self.identity_b).get(
+            f'/api/v1/conditions/{self.condition_b.condition_occurrence_id}/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_patient_cannot_access_other_patients_condition(self):
+        """Patient A cannot access patient B's condition — gets 404 (queryset filtered)."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/v1/conditions/{self.condition_b.condition_occurrence_id}/'
+        )
+        # _OmopFilterMixin filters the queryset to the user's own records,
+        # so the object is not found rather than forbidden.
+        self.assertIn(resp.status_code, [status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND])
+
+    def test_superuser_bypasses_scope(self):
+        """Superuser can access any patient's condition."""
+        resp = self._client_as(self.superuser).get(
+            f'/api/v1/conditions/{self.condition_b.condition_occurrence_id}/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_staff_bypasses_scope(self):
+        """Staff can access any patient's condition."""
+        resp = self._client_as(self.staff).get(
+            f'/api/v1/conditions/{self.condition_b.condition_occurrence_id}/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_provider_bypasses_patient_scope(self):
+        """Provider with GroupAccess is not treated as a patient by PatientSelfScopePermission.
+
+        Note: providers access data via org-scoped OAuth tokens in production.
+        With session auth, _OmopFilterMixin filters by PatientUser (returning 404
+        if the provider has no PatientUser link). This test verifies that
+        PatientSelfScopePermission itself does not block the provider — the 404
+        comes from queryset filtering, not from the object-level permission.
+        """
+        resp = self._client_as(self.provider).get(
+            f'/api/v1/conditions/{self.condition_b.condition_occurrence_id}/'
+        )
+        # 404 from queryset filtering (no PatientUser link, no org token) — NOT 403 from scope
+        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_404_NOT_FOUND])
+
+
+# ---------------------------------------------------------------------------
+# Patient Account Deletion tests
+# ---------------------------------------------------------------------------
+
+class PatientAccountDeletionTest(TestCase):
+    """Test DELETE /api/v1/patient-records/me/ for GDPR right to erasure."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+        from omop_core.models import Organization
+
+        _make_vocab_fixtures()
+        condition_concept = Concept.objects.get(concept_id=4112853)
+        type_concept = Concept.objects.get(concept_id=32817)
+
+        # Patient to be deleted
+        cls.person = Person.objects.create(person_id=94001, family_name='Doomed', given_name='Dan')
+        cls.patient_rec = PatientRecord.objects.create(person=cls.person)
+        cls.identity = Identity.objects.create_user(email='doomed@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity, person=cls.person)
+
+        # Clinical data for the patient
+        cls.condition = ConditionOccurrence.objects.create(
+            condition_occurrence_id=94901,
+            person=cls.person,
+            condition_concept=condition_concept,
+            condition_start_date=date.today(),
+            condition_type_concept=type_concept,
+        )
+
+        # Unrelated patient (should be untouched)
+        cls.other_person = Person.objects.create(person_id=94002, family_name='Safe', given_name='Sue')
+        cls.other_rec = PatientRecord.objects.create(person=cls.other_person)
+        cls.other_identity = Identity.objects.create_user(email='safe@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.other_identity, person=cls.other_person)
+
+        # Staff user
+        cls.staff = Identity.objects.create_user(email='staff-del@test.com', password='pw', is_staff=True)
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def test_delete_account_success(self):
+        """DELETE with valid confirm removes all patient data."""
+        from patient_portal.models import PatientUser
+
+        # Create fresh data for this test (setUpTestData data is shared, can't delete once)
+        person = Person.objects.create(person_id=94101, family_name='Fresh', given_name='Fran')
+        PatientRecord.objects.create(person=person)
+        identity = Identity.objects.create_user(email='fresh-del@test.com', password='pw')
+        PatientUser.objects.create(identity=identity, person=person)
+        identity_pk = identity.pk
+
+        resp = self._client_as(identity).delete(
+            '/api/v1/patient-records/me/',
+            data={'confirm': 'DELETE'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        # Person and all clinical data gone
+        self.assertFalse(Person.objects.filter(person_id=94101).exists())
+        self.assertFalse(PatientRecord.objects.filter(person_id=94101).exists())
+        self.assertFalse(PatientUser.objects.filter(person__person_id=94101).exists())
+        # Identity gone
+        self.assertFalse(Identity.objects.filter(pk=identity_pk).exists())
+
+    def test_delete_missing_confirm(self):
+        """DELETE without confirm body → 400."""
+        person = Person.objects.create(person_id=94102, family_name='NoConf', given_name='Ned')
+        PatientRecord.objects.create(person=person)
+        identity = Identity.objects.create_user(email='noconf-del@test.com', password='pw')
+        from patient_portal.models import PatientUser
+        PatientUser.objects.create(identity=identity, person=person)
+
+        resp = self._client_as(identity).delete(
+            '/api/v1/patient-records/me/',
+            data={},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        # Person still exists
+        self.assertTrue(Person.objects.filter(person_id=94102).exists())
+
+    def test_delete_wrong_confirm(self):
+        """DELETE with wrong confirm value → 400."""
+        person = Person.objects.create(person_id=94103, family_name='Wrong', given_name='Will')
+        PatientRecord.objects.create(person=person)
+        identity = Identity.objects.create_user(email='wrong-del@test.com', password='pw')
+        from patient_portal.models import PatientUser
+        PatientUser.objects.create(identity=identity, person=person)
+
+        resp = self._client_as(identity).delete(
+            '/api/v1/patient-records/me/',
+            data={'confirm': 'delete'},  # lowercase — should fail
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_staff_cannot_delete_own_account(self):
+        """Non-patient (staff) cannot use the account deletion endpoint."""
+        resp = self._client_as(self.staff).delete(
+            '/api/v1/patient-records/me/',
+            data={'confirm': 'DELETE'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_other_patients_data_untouched(self):
+        """Deleting one patient does not affect another patient's data."""
+        from patient_portal.models import PatientUser
+
+        person = Person.objects.create(person_id=94104, family_name='Gone', given_name='Gus')
+        PatientRecord.objects.create(person=person)
+        identity = Identity.objects.create_user(email='gone-del@test.com', password='pw')
+        PatientUser.objects.create(identity=identity, person=person)
+
+        self._client_as(identity).delete(
+            '/api/v1/patient-records/me/',
+            data={'confirm': 'DELETE'},
+            format='json',
+        )
+
+        # Other patient still intact
+        self.assertTrue(Person.objects.filter(person_id=94002).exists())
+        self.assertTrue(PatientRecord.objects.filter(person=self.other_person).exists())
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — FHIR Export tests
+# ---------------------------------------------------------------------------
+
+class FhirExportServiceTest(TestCase):
+    """Unit tests for omop_core.services.fhir_export.build_fhir_bundle."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.condition_concept = Concept.objects.get(concept_id=4112853)  # Breast cancer
+        cls.type_concept = Concept.objects.get(concept_id=32817)  # EHR
+        cls.lab_concept = Concept.objects.get(concept_id=3000963)  # Lab test result
+
+        cls.person = Person.objects.create(
+            person_id=95001, family_name='Export', given_name='Eve',
+            year_of_birth=1985, month_of_birth=3, day_of_birth=15,
+            gender_concept_id=8532,
+        )
+        cls.patient_rec = PatientRecord.objects.create(person=cls.person)
+
+        # Clinical data
+        cls.condition = ConditionOccurrence.objects.create(
+            condition_occurrence_id=95901,
+            person=cls.person,
+            condition_concept=cls.condition_concept,
+            condition_start_date=date(2022, 6, 1),
+            condition_type_concept=cls.type_concept,
+            condition_source_value='Breast cancer',
+        )
+        cls.measurement = Measurement.objects.create(
+            measurement_id=95902,
+            person=cls.person,
+            measurement_concept=cls.lab_concept,
+            measurement_date=date(2023, 1, 10),
+            measurement_type_concept=cls.type_concept,
+            value_as_number=12.5,
+            unit_source_value='g/dL',
+            measurement_source_value='Hemoglobin',
+        )
+
+    def test_bundle_structure(self):
+        from omop_core.services.fhir_export import build_fhir_bundle
+        bundle = build_fhir_bundle(self.person)
+
+        self.assertEqual(bundle['resourceType'], 'Bundle')
+        self.assertEqual(bundle['type'], 'searchset')
+        self.assertIsInstance(bundle['total'], int)
+        self.assertIsInstance(bundle['entry'], list)
+        self.assertGreater(bundle['total'], 0)
+
+    def test_patient_resource_present(self):
+        from omop_core.services.fhir_export import build_fhir_bundle
+        bundle = build_fhir_bundle(self.person)
+
+        patient_entries = [
+            e for e in bundle['entry']
+            if e['resource']['resourceType'] == 'Patient'
+        ]
+        self.assertEqual(len(patient_entries), 1)
+        patient = patient_entries[0]['resource']
+        self.assertEqual(patient['name'][0]['family'], 'Export')
+        self.assertEqual(patient['name'][0]['given'], ['Eve'])
+        self.assertEqual(patient['birthDate'], '1985-03-15')
+        self.assertEqual(patient['gender'], 'female')
+
+    def test_condition_exported(self):
+        from omop_core.services.fhir_export import build_fhir_bundle
+        bundle = build_fhir_bundle(self.person)
+
+        conditions = [
+            e for e in bundle['entry']
+            if e['resource']['resourceType'] == 'Condition'
+        ]
+        self.assertGreaterEqual(len(conditions), 1)
+        cond = conditions[0]['resource']
+        self.assertIn('code', cond)
+        self.assertEqual(cond['onsetDateTime'], '2022-06-01')
+
+    def test_measurement_exported_as_observation(self):
+        from omop_core.services.fhir_export import build_fhir_bundle
+        bundle = build_fhir_bundle(self.person)
+
+        observations = [
+            e for e in bundle['entry']
+            if e['resource']['resourceType'] == 'Observation'
+        ]
+        self.assertGreaterEqual(len(observations), 1)
+        # Find the one with a valueQuantity
+        quant_obs = [o for o in observations if 'valueQuantity' in o['resource']]
+        self.assertGreaterEqual(len(quant_obs), 1)
+        obs = quant_obs[0]['resource']
+        self.assertEqual(obs['valueQuantity']['value'], 12.5)
+        self.assertEqual(obs['valueQuantity']['unit'], 'g/dL')
+
+    def test_empty_patient_returns_patient_only(self):
+        from omop_core.services.fhir_export import build_fhir_bundle
+        empty_person = Person.objects.create(
+            person_id=95099, family_name='Empty', given_name='Em',
+            gender_concept_id=8507,
+        )
+        bundle = build_fhir_bundle(empty_person)
+        self.assertEqual(bundle['total'], 1)
+        self.assertEqual(bundle['entry'][0]['resource']['resourceType'], 'Patient')
+
+
+class FhirExportApiTest(TestCase):
+    """Test the export-fhir API endpoint."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        _make_vocab_fixtures()
+        cls.condition_concept = Concept.objects.get(concept_id=4112853)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+
+        # Patient A — will export their own record
+        cls.person_a = Person.objects.create(
+            person_id=96001, family_name='Able', given_name='Amy',
+            gender_concept_id=8532,
+        )
+        cls.patient_a_rec = PatientRecord.objects.create(person=cls.person_a)
+        cls.identity_a = Identity.objects.create_user(email='export-a@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_a, person=cls.person_a)
+
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=96901,
+            person=cls.person_a,
+            condition_concept=cls.condition_concept,
+            condition_start_date=date.today(),
+            condition_type_concept=cls.type_concept,
+        )
+
+        # Patient B — another patient
+        cls.person_b = Person.objects.create(
+            person_id=96002, family_name='Baker', given_name='Bob',
+            gender_concept_id=8507,
+        )
+        cls.patient_b_rec = PatientRecord.objects.create(person=cls.person_b)
+        cls.identity_b = Identity.objects.create_user(email='export-b@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_b, person=cls.person_b)
+
+        # Staff
+        cls.staff = Identity.objects.create_user(
+            email='export-staff@test.com', password='pw', is_staff=True,
+        )
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def test_patient_can_export_own_record(self):
+        """Patient A can export their own FHIR bundle."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/v1/patient-records/{self.person_a.person_id}/export-fhir/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        bundle = resp.json()
+        self.assertEqual(bundle['resourceType'], 'Bundle')
+        self.assertEqual(bundle['type'], 'searchset')
+        resource_types = {e['resource']['resourceType'] for e in bundle['entry']}
+        self.assertIn('Patient', resource_types)
+        self.assertIn('Condition', resource_types)
+
+    def test_patient_cannot_export_other_patients_record(self):
+        """Patient A cannot export patient B's record."""
+        resp = self._client_as(self.identity_a).get(
+            f'/api/v1/patient-records/{self.person_b.person_id}/export-fhir/'
+        )
+        self.assertIn(resp.status_code, [
+            status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND,
+        ])
+
+    def test_staff_can_export_any_record(self):
+        """Staff can export any patient's record."""
+        resp = self._client_as(self.staff).get(
+            f'/api/v1/patient-records/{self.person_a.person_id}/export-fhir/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        bundle = resp.json()
+        self.assertEqual(bundle['resourceType'], 'Bundle')
+
+    def test_nonexistent_person_returns_404(self):
+        """Export of nonexistent person_id returns 404."""
+        resp = self._client_as(self.staff).get(
+            '/api/v1/patient-records/999999/export-fhir/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_unauthenticated_returns_403(self):
+        """Unauthenticated request to export returns 401/403."""
+        c = APIClient()
+        resp = c.get(
+            f'/api/v1/patient-records/{self.person_a.person_id}/export-fhir/'
+        )
+        self.assertIn(resp.status_code, [
+            status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN,
+        ])

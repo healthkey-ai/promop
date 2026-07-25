@@ -4,7 +4,8 @@ from django.db import models
 from django.db.models import F, Q
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
-from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.indexes import GinIndex, OpClass
+from django.db.models.functions import Upper
 
 
 class ProvenanceRecord(models.Model):
@@ -127,6 +128,7 @@ class OrgInvitation(models.Model):
     )
     email = models.EmailField()
     role = models.CharField(max_length=20, choices=ROLE, default='doctor')
+    redirect_url = models.URLField(max_length=500, blank=True, default='')
     token = models.CharField(max_length=64, unique=True)
     invited_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
@@ -260,6 +262,7 @@ class GroupAccess(models.Model):
         null=True, blank=True, related_name='access_grants',
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    redirect_url = models.URLField(max_length=500, blank=True, default='')
     expires_at = models.DateTimeField(null=True, blank=True)
     granted_at = models.DateTimeField(auto_now_add=True)
     granted_by = models.ForeignKey(
@@ -1274,7 +1277,17 @@ class ConceptSynonym(models.Model):
 
     class Meta:
         db_table = 'concept_synonym'
-        indexes = [models.Index(fields=['concept'], name='ix_concept_synonym_concept')]
+        indexes = [
+            models.Index(fields=['concept'], name='ix_concept_synonym_concept'),
+            # Functional GIN trigram index on UPPER(name): Django compiles
+            # `__icontains` to `UPPER(col::text) LIKE UPPER(...)`, so a raw-column
+            # gin_trgm index would NOT be used — the expression must match.
+            # (pg_trgm enabled in migration 0094.)
+            GinIndex(
+                OpClass(Upper('concept_synonym_name'), name='gin_trgm_ops'),
+                name='ix_concept_synonym_name_trgm',
+            ),
+        ]
         # CDM natural PK — makes loader re-runs idempotent via ON CONFLICT DO NOTHING.
         constraints = [
             models.UniqueConstraint(

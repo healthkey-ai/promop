@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, type ReactNode } from "react";
 import {
   Routes,
   Route,
@@ -8,8 +8,10 @@ import {
 import { Login } from "@/components/Auth/Login";
 import { AuthCallback } from "@/components/Auth/AuthCallback";
 import AcceptInvite from "@/components/Auth/AcceptInvite";
+import AcceptPatientInvite from "@/components/Auth/AcceptPatientInvite";
 import PatientList from "@/components/Patient/PatientList";
 import PatientDetail from "@/components/Patient/PatientDetail";
+import PatientHome from "@/components/Patient/PatientHome";
 import UploadFHIR from "@/components/Patient/UploadFHIR";
 import UploadCSV from "@/components/Patient/UploadCSV";
 import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
@@ -17,7 +19,7 @@ import UserProfilePage from "@/components/User/UserProfilePage";
 import { useAuth } from "@/hooks/useAuth";
 
 function AppRoutes() {
-  const { currentUser, loading: authLoading, refresh } = useAuth();
+  const { currentUser, loading: authLoading, refresh, logout } = useAuth();
   const location = useLocation();
 
   useEffect(() => {
@@ -28,7 +30,7 @@ function AppRoutes() {
     }
   }, [location.pathname, refresh]);
 
-  const publicPaths = ['/accept-invite', '/login', '/auth/callback'];
+  const publicPaths = ['/accept-invite', '/accept-patient-invite', '/login', '/auth/callback'];
   if (authLoading && !publicPaths.includes(location.pathname)) {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -37,43 +39,42 @@ function AppRoutes() {
     );
   }
 
+  const isPatient = !!currentUser?.is_patient;
+
+  // Provider-only routes: require a signed-in provider. Signed-in patients are
+  // redirected home (their own record); logged-out users go to login.
+  const providerRoute = (element: ReactNode) => {
+    if (!currentUser) return <Navigate to="/login" replace />;
+    if (isPatient) return <Navigate to="/" replace />;
+    return element;
+  };
+
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
       <Route path="/accept-invite" element={<AcceptInvite />} />
+      <Route path="/accept-patient-invite" element={<AcceptPatientInvite />} />
 
       <Route
         path="/"
         element={
-          currentUser ? <PatientList /> : <Navigate to="/login" replace />
+          currentUser ? (
+            isPatient ? (
+              <PatientHome user={currentUser} onLogout={logout} />
+            ) : (
+              <PatientList />
+            )
+          ) : (
+            <Navigate to="/login" replace />
+          )
         }
       />
-      <Route
-        path="/patient/:personId"
-        element={
-          currentUser ? <PatientDetail /> : <Navigate to="/login" replace />
-        }
-      />
-      <Route
-        path="/upload-fhir"
-        element={
-          currentUser ? <UploadFHIR /> : <Navigate to="/login" replace />
-        }
-      />
-      <Route
-        path="/upload-csv"
-        element={
-          currentUser ? <UploadCSV /> : <Navigate to="/login" replace />
-        }
-      />
+      <Route path="/patient/:personId" element={providerRoute(<PatientDetail />)} />
+      <Route path="/upload-fhir" element={providerRoute(<UploadFHIR />)} />
+      <Route path="/upload-csv" element={providerRoute(<UploadCSV />)} />
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
-      <Route
-        path="/org-admin"
-        element={
-          currentUser ? <OrgAdminPage /> : <Navigate to="/login" replace />
-        }
-      />
+      <Route path="/org-admin" element={providerRoute(<OrgAdminPage />)} />
       <Route
         path="/profile"
         element={

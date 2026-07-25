@@ -51,7 +51,7 @@ from omop_core.services.regimen_resolution import (
 )
 from omop_core.services.vocab_release import current_release, current_release_id, published_releases
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
-from omop_core.services.access import get_visible_orgs, build_trusting_map
+from omop_core.services.access import get_visible_orgs, build_trusting_map, get_admin_orgs
 from datetime import datetime, timedelta
 from django.utils.timezone import localdate
 import csv
@@ -60,7 +60,7 @@ import json
 import logging
 import re
 from io import StringIO
-from .permissions import ScopedTokenPermission, get_request_org, is_service_token
+from .permissions import ScopedTokenPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
@@ -172,7 +172,7 @@ def _delete_omop_clinical_rows(person):
 @method_decorator(csrf_exempt, name='dispatch')
 class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PatientRecordSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     pagination_class = PatientRecordPagination
 
     DATE_FILTERS = {
@@ -219,10 +219,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 Q(expires_at__isnull=True) | Q(expires_at__gt=now),
             )
 
-            # Org-admin grants: see all patients belonging to those orgs
-            admin_org_ids = list(
-                active_grants.filter(role='org_admin').values_list('org_id', flat=True)
-            )
+            # Org-admin access includes trust-derived admin orgs.
+            admin_org_ids = list(get_admin_orgs(self.request.user).values_list('id', flat=True))
 
             # Group grants: see patients in those groups
             actor_group_ids = list(
@@ -514,7 +512,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response({**serializer.data, 'previous_values': previous_values})
 
-    @action(detail=True, methods=['get'], permission_classes=[ScopedTokenPermission])
+    @action(detail=True, methods=['get'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def provenance(self, request, pk=None):
         """GET /api/patient-info/{person_id}/provenance/ — full provenance history for a patient."""
         try:
@@ -550,9 +548,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         records = ProvenanceRecord.objects.filter(q).select_related('content_type').order_by('-created_at')
         return Response(ProvenanceRecordSerializer(records, many=True).data)
 
-    @action(detail=False, methods=['get', 'patch'], permission_classes=[ScopedTokenPermission])
+    @action(detail=False, methods=['get', 'patch', 'delete'], permission_classes=[PatientDeletePermission, PatientSelfScopePermission])
     def me(self, request):
-        """GET/PATCH /api/patient-info/me/ — current user's own PatientRecord."""
+        """GET/PATCH/DELETE /api/patient-info/me/ — current user's own PatientRecord."""
+        if request.method == 'DELETE':
+            return self._delete_patient_account(request)
+
         from patient_portal.models import PatientUser
         from patient_portal.services import resolve_or_create_person
 
@@ -622,7 +623,72 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response(serializer.data)
 
-    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission])
+    def _delete_patient_account(self, request):
+        """DELETE /api/patient-info/me/ — permanently delete the patient's account and all data."""
+        from patient_portal.services import patient_person_for
+        from patient_portal.models import PatientUser
+
+        patient_person = patient_person_for(request.user)
+        if patient_person is None:
+            return Response(
+                {'detail': 'Only patients can delete their own account.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        confirm = request.data.get('confirm')
+        if confirm != 'DELETE':
+            return Response(
+                {'detail': 'Request body must include {"confirm": "DELETE"}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        person_id = patient_person.person_id
+        identity = request.user
+
+        with transaction.atomic():
+            # Delete EpisodeEvent rows — bare integer FK, not covered by CASCADE
+            episode_ids = list(
+                Episode.objects.filter(person=patient_person)
+                .values_list('episode_id', flat=True)
+            )
+            if episode_ids:
+                EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
+
+            # Delete Person — cascades to all OMOP tables, PatientRecord, PatientUser
+            patient_person.delete()
+
+            # Delete the Identity (auth credential)
+            identity.delete()
+
+        logger.info(
+            'patient_account_deleted person_id=%s identity_email=%s',
+            person_id, getattr(identity, 'email', '?'),
+        )
+
+        return Response({'detail': 'Account and all associated data have been permanently deleted.'})
+
+    @action(detail=True, methods=['get'], url_path='export-fhir',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def export_fhir(self, request, pk=None):
+        """GET /api/v1/patient-records/{person_id}/export-fhir/ — export as FHIR R4 Bundle.
+
+        ``pk`` is interpreted as ``person_id`` (consistent with ``retrieve``).
+        """
+        from omop_core.services.fhir_export import build_fhir_bundle
+
+        try:
+            person = Person.objects.get(person_id=pk)
+            patient_record = PatientRecord.objects.get(person=person)
+        except (Person.DoesNotExist, PatientRecord.DoesNotExist):
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Object-level permission check (PatientSelfScopePermission)
+        self.check_object_permissions(request, patient_record)
+
+        bundle = build_fhir_bundle(person)
+        return Response(bundle, content_type='application/fhir+json')
+
+    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def upload_csv(self, request):
         """Upload patients from CSV file"""
         if 'file' not in request.FILES:
@@ -698,7 +764,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
     
-    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission])
+    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def upload_fhir(self, request):
         """Upload patients from FHIR JSON file"""
         if 'file' not in request.FILES:
@@ -3447,7 +3513,7 @@ class PersonViewSet(viewsets.GenericViewSet):
       POST /api/persons/find_or_create/  — resolve OIDC identity to a Person row
       PATCH /api/persons/{person_id}/    — fill-if-empty demographic patch
     """
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Person.objects.all()
     lookup_field = 'person_id'
 
@@ -3663,21 +3729,21 @@ class _ProvenanceMixin:
 @method_decorator(csrf_exempt, name='dispatch')
 class ConditionOccurrenceViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ConditionOccurrenceSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = ConditionOccurrence.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class DrugExposureViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = DrugExposureSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = DrugExposure.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class MeasurementViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Measurement.objects.all()
     ordering_fields = ['measurement_date', 'measurement_id']
     ordering = ['-measurement_date']
@@ -3713,28 +3779,28 @@ class MeasurementViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewS
 @method_decorator(csrf_exempt, name='dispatch')
 class ObservationViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ObservationSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Observation.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class ProcedureOccurrenceViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ProcedureOccurrenceSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = ProcedureOccurrence.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class EpisodeViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = EpisodeSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Episode.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class EpisodeEventViewSet(viewsets.ModelViewSet):
     serializer_class = EpisodeEventSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
 
     def list(self, request, *args, **kwargs):
         if not request.query_params.get('episode_id'):
@@ -3834,11 +3900,15 @@ def concept_lookup(request):
 
     Query params (repeatable):
         lookup=VOCAB_ID:concept_code
+        include_versions=1   (optional) — also return a top-level
+                             `_vocabulary_versions` map {vocab_id: version}
 
     Response 200:
         { "LOINC": { "2160-0": 3013682, "2345-7": null }, "SNOMED": { ... } }
 
     Unknown codes return null; healthkey-etl substitutes concept_id=0 downstream.
+    The default `{vocab: {code: id}}` shape is frozen; `include_versions=1` is
+    additive so consumers can pin a vocabulary release / detect drift (promop#240).
     """
     from omop_core.models import Concept as OmopConcept
 
@@ -3879,6 +3949,16 @@ def concept_lookup(request):
         if v in result and c in result[v]:
             result[v][c] = cid
 
+    # Opt-in: add a top-level `_vocabulary_versions` map so consumers can pin a
+    # release / detect drift (promop#240). Off by default to keep the frozen
+    # `{vocab: {code: id}}` shape that healthkey-etl reads.
+    if request.query_params.get('include_versions') in ('1', 'true', 'True', 'yes') \
+            and '_vocabulary_versions' not in result:
+        # Guard: never clobber a user-requested vocabulary bucket that happens to
+        # be literally named `_vocabulary_versions` (not a real OMOP vocab id).
+        version_map = _vocab_version_map()
+        result['_vocabulary_versions'] = {v: version_map.get(v) for v in by_vocab}
+
     # Header-only release stamp: the {vocab: {code: id}} body shape is a frozen
     # wire format consumed by healthkey-etl — no vocabulary_release body key.
     return _stamp_release(Response(result))
@@ -3910,12 +3990,21 @@ def _concept_graph_filters(request):
     return relationship_ids, vocabulary_ids, concept_class_ids, max_levels
 
 
-def _serialize_concept_graph_node(concept, **extra):
+def _vocab_version_map():
+    """``{vocabulary_id: vocabulary_version}`` for every vocabulary (small table,
+    one query). Lets concept responses carry the release/version each concept
+    came from, so consumers can pin a release and detect drift (promop#240)."""
+    from omop_core.models import Vocabulary
+    return dict(Vocabulary.objects.values_list('vocabulary_id', 'vocabulary_version'))
+
+
+def _serialize_concept_graph_node(concept, versions=None, **extra):
     payload = {
         'concept_id': concept.concept_id,
         'concept_name': concept.concept_name,
         'concept_code': concept.concept_code,
         'vocabulary_id': concept.vocabulary_id,
+        'vocabulary_version': (versions or {}).get(concept.vocabulary_id),
         'concept_class_id': concept.concept_class_id,
         'domain_id': concept.domain_id,
         'standard_concept': concept.standard_concept,
@@ -3940,6 +4029,7 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
     """
     grouped = {source_id: [] for source_id in source_ids}
     truncated = set()
+    versions = _vocab_version_map()
 
     def _append(source_id, node):
         bucket = grouped[source_id]
@@ -3973,6 +4063,7 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
                 'concept_2_id',
                 lambda edge: _serialize_concept_graph_node(
                     edge.concept_1,
+                    versions=versions,
                     relationship_id=edge.relationship_id,
                     min_levels_of_separation=None,
                     max_levels_of_separation=None,
@@ -3989,6 +4080,7 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
                 'concept_1_id',
                 lambda edge: _serialize_concept_graph_node(
                     edge.concept_2,
+                    versions=versions,
                     relationship_id=edge.relationship_id,
                     min_levels_of_separation=None,
                     max_levels_of_separation=None,
@@ -4012,6 +4104,7 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
             'descendant_concept_id',
             lambda edge: _serialize_concept_graph_node(
                 edge.ancestor_concept,
+                versions=versions,
                 relationship_id=None,
                 min_levels_of_separation=edge.min_levels_of_separation,
                 max_levels_of_separation=edge.max_levels_of_separation,
@@ -4032,6 +4125,7 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
             'ancestor_concept_id',
             lambda edge: _serialize_concept_graph_node(
                 edge.descendant_concept,
+                versions=versions,
                 relationship_id=None,
                 min_levels_of_separation=edge.min_levels_of_separation,
                 max_levels_of_separation=edge.max_levels_of_separation,
@@ -4164,22 +4258,24 @@ def _apply_concept_filters(queryset, query_params):
     return queryset
 
 
-def _serialize_concept(concept):
+def _serialize_concept(concept, versions=None):
+    # Version stamping (issue #236 gap 12 / promop#240): consumers cache these
+    # rows and need the validity window + source vocabulary version to reason
+    # about staleness.  `versions` is the {vocabulary_id: vocabulary_version}
+    # map from _vocab_version_map() — one query per request beats a join per
+    # row.
     return {
         'concept_id': concept.concept_id,
         'concept_name': concept.concept_name,
         'vocabulary_id': concept.vocabulary_id,
+        'vocabulary_version': (versions or {}).get(concept.vocabulary_id),
         'concept_code': concept.concept_code,
         'domain_id': concept.domain_id,
         'concept_class_id': concept.concept_class_id,
         'standard_concept': concept.standard_concept,
-        # Version stamping (issue #236 gap 12): consumers cache these rows and
-        # need the validity window + source vocabulary version to reason about
-        # staleness.  `vocabulary` must be select_related'd by the caller.
         'valid_start_date': concept.valid_start_date,
         'valid_end_date': concept.valid_end_date,
         'invalid_reason': concept.invalid_reason,
-        'vocabulary_version': concept.vocabulary.vocabulary_version,
     }
 
 
@@ -4200,13 +4296,11 @@ def _stamp_release(response, body=None):
 def _paginated_concept_response(queryset, request):
     # Order by the pk: concept_name has only a GIN trigram index (usable for
     # icontains, not ORDER BY), so sorting by name would force a full sort of
-    # the matched set on every page request.  select_related('vocabulary') —
-    # _serialize_concept emits vocabulary_version, one join beats N+1.
+    # the matched set on every page request.
     paginator = ConceptPagination()
-    page = paginator.paginate_queryset(
-        queryset.order_by('concept_id').select_related('vocabulary'), request,
-    )
-    response = paginator.get_paginated_response([_serialize_concept(c) for c in page])
+    page = paginator.paginate_queryset(queryset.order_by('concept_id'), request)
+    versions = _vocab_version_map()
+    response = paginator.get_paginated_response([_serialize_concept(c, versions) for c in page])
     return _stamp_release(response, body=response.data)
 
 
@@ -4269,21 +4363,86 @@ def concept_list(request):
     return _paginated_concept_response(queryset, request)
 
 
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_synonyms(request, concept_id):
+    """
+    List the synonyms (alternate names) for one OMOP concept, so a consumer
+    mirroring promop's vocabulary can cache them (promop#239).
+
+    Response 200: { "concept_id": N, "count": M, "results": [
+        { "concept_synonym_name": "...", "language_concept_id": 4180186 }, ... ] }
+    Response 404: concept_id not found.
+    """
+    if not Concept.objects.filter(concept_id=concept_id).exists():
+        return Response({'detail': 'Concept not found.'}, status=status.HTTP_404_NOT_FOUND)
+    rows = list(
+        ConceptSynonym.objects
+        .filter(concept_id=concept_id)
+        .order_by('concept_synonym_name')
+        .values('concept_synonym_name', 'language_concept_id')
+    )
+    body = {'concept_id': concept_id, 'count': len(rows), 'results': rows}
+    return _stamp_release(Response(body), body=body)
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_synonym_search(request):
+    """
+    Find concepts by a synonym (alternate name) substring — the reverse of
+    `concepts/lookup/`, for alias resolution (e.g. regimen alias 'VRd' → the
+    HemOnc concept). Backed by a GIN trigram index on `concept_synonym_name`.
+
+    Query params:
+        q                 required, minimum 3 characters
+        vocabulary_id     optional exact-match filter on the concept
+        concept_class_id  optional exact-match filter on the concept
+        page / page_size  pagination (page_size capped at 100)
+
+    Response 200: paginated {count, next, previous, results: [
+        { concept_id, concept_name, vocabulary_id, concept_code,
+          concept_class_id, standard_concept, concept_synonym_name }, ... ]}
+    """
+    # Minimum 3 chars: a pg_trgm trigram is 3 chars, so shorter queries could
+    # not use the GIN trigram index and would force a full table scan.
+    query = (request.query_params.get('q') or '').strip()
+    if len(query) < 3:
+        return Response(
+            {'detail': "Query parameter 'q' is required and must be at least 3 characters."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    qs = ConceptSynonym.objects.select_related('concept').filter(
+        concept_synonym_name__icontains=query,
+    )
+    vocabulary_id = request.query_params.get('vocabulary_id')
+    if vocabulary_id:
+        qs = qs.filter(concept__vocabulary_id=vocabulary_id)
+    concept_class_id = request.query_params.get('concept_class_id')
+    if concept_class_id:
+        qs = qs.filter(concept__concept_class_id=concept_class_id)
+
+    paginator = ConceptPagination()
+    page = paginator.paginate_queryset(qs.order_by('concept_id', 'concept_synonym_name'), request)
+    results = [{
+        'concept_id': s.concept_id,
+        'concept_name': s.concept.concept_name,
+        'vocabulary_id': s.concept.vocabulary_id,
+        'concept_code': s.concept.concept_code,
+        'concept_class_id': s.concept.concept_class_id,
+        'standard_concept': s.concept.standard_concept,
+        'concept_synonym_name': s.concept_synonym_name,
+    } for s in page]
+    response = paginator.get_paginated_response(results)
+    return _stamp_release(response, body=response.data)
+
+
 # =============================================================================
-# Vocabulary release manifests + concept synonyms (issue #236, ADR 0001)
+# Vocabulary release manifests (issue #236, ADR 0001)
 # GET /api/v1/vocab/releases/                   — list published manifests
 # GET /api/v1/vocab/releases/latest/            — current manifest (ETag)
 # GET /api/v1/vocab/releases/<release_id>/      — manifest detail
-# GET /api/v1/concepts/<concept_id>/synonyms/   — paginated synonyms
 # =============================================================================
-
-
-def _serialize_synonym(synonym):
-    return {
-        'concept_id': synonym.concept_id,
-        'concept_synonym_name': synonym.concept_synonym_name,
-        'language_concept_id': synonym.language_concept_id,
-    }
 
 
 def _serialize_release(release):
@@ -4350,24 +4509,6 @@ def vocab_release_detail(request, release_id):
             status=status.HTTP_404_NOT_FOUND,
         )
     return Response(_serialize_release(release))
-
-
-@api_view(['GET'])
-@permission_classes([ScopedTokenPermission])
-def concept_synonyms(request, concept_id):
-    """Paginated synonyms for one concept, from concept_synonym (gap 11)."""
-    if not Concept.objects.filter(concept_id=concept_id).exists():
-        return Response(
-            {'detail': 'Concept not found.'},
-            status=status.HTTP_404_NOT_FOUND,
-        )
-    paginator = ConceptPagination()
-    page = paginator.paginate_queryset(
-        ConceptSynonym.objects.filter(concept_id=concept_id).order_by('id'),
-        request,
-    )
-    response = paginator.get_paginated_response([_serialize_synonym(s) for s in page])
-    return _stamp_release(response, body=response.data)
 
 
 # =============================================================================
@@ -4444,7 +4585,7 @@ def vocabulary_list(request, model_name):
 @method_decorator(csrf_exempt, name='dispatch')
 class PatientDocumentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = PatientDocumentSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientDocument.objects.all()
 
 
@@ -4457,7 +4598,7 @@ class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     Filter by person: GET /api/trial-enrollments/?person_id=42
     """
     serializer_class = PatientTrialEnrollmentSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientTrialEnrollment.objects.all()
 
 
@@ -4545,7 +4686,7 @@ class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.
     PUT is disabled: values/values_dates are append-only dicts; use PATCH.
     """
     serializer_class = PatientSurveyResponseSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientSurveyResponse.objects.select_related('survey').all()
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
 

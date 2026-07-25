@@ -12,25 +12,43 @@ from omop_oncology.models import Episode, EpisodeEvent
 from datetime import date
 from django.utils.timezone import localdate
 from django.utils import timezone
+from omop_core.services.access import has_org_admin_access
 
 
 class UserSerializer(serializers.ModelSerializer):
     is_org_admin = serializers.SerializerMethodField()
     org_accesses = serializers.SerializerMethodField()
+    is_patient = serializers.SerializerMethodField()
+    person_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Identity
-        fields = ['id', 'sub', 'email', 'name', 'is_staff', 'is_superuser', 'is_org_admin', 'org_accesses']
+        fields = [
+            'id', 'sub', 'email', 'name', 'is_staff', 'is_superuser',
+            'is_org_admin', 'org_accesses', 'is_patient', 'person_id',
+        ]
+
+    def _patient_person(self, obj):
+        """Memoized patient-record lookup so is_patient/person_id share one query."""
+        cache = getattr(self, '_patient_person_cache', None)
+        if cache is None:
+            cache = self._patient_person_cache = {}
+        if obj.pk not in cache:
+            from patient_portal.services import patient_person_for
+            cache[obj.pk] = patient_person_for(obj)
+        return cache[obj.pk]
+
+    def get_is_patient(self, obj):
+        """True when this identity is a PHR Account Holder (patient). See PH.1."""
+        return self._patient_person(obj) is not None
+
+    def get_person_id(self, obj):
+        """The person_id of the patient's own record, or None for non-patients."""
+        person = self._patient_person(obj)
+        return person.person_id if person else None
 
     def get_is_org_admin(self, obj):
-        now = timezone.now()
-        from django.db.models import Q
-        return GroupAccess.objects.filter(
-            identity=obj,
-            role='org_admin',
-        ).filter(
-            Q(expires_at__isnull=True) | Q(expires_at__gt=now)
-        ).exists()
+        return has_org_admin_access(obj)
 
     def get_org_accesses(self, obj):
         now = timezone.now()
@@ -54,6 +72,17 @@ class OrganizationSerializer(serializers.ModelSerializer):
         model = Organization
         fields = ['id', 'name', 'slug', 'is_active', 'allows_public_aggregated_data', 'created_at']
         read_only_fields = ['id', 'created_at']
+
+
+class PatientInvitationSerializer(serializers.ModelSerializer):
+    status = serializers.CharField(read_only=True)
+    person_id = serializers.IntegerField(source='person.person_id', read_only=True)
+
+    class Meta:
+        from patient_portal.models import PatientInvitation
+        model = PatientInvitation
+        fields = ['id', 'person_id', 'email', 'status', 'created_at', 'expires_at', 'accepted_at']
+        read_only_fields = fields
 
 
 class OrgTrustSerializer(serializers.ModelSerializer):
@@ -98,17 +127,21 @@ class OrgTrustSerializer(serializers.ModelSerializer):
 class OrgInvitationSerializer(serializers.ModelSerializer):
     status = serializers.SerializerMethodField()
     org_slug = serializers.SlugRelatedField(source='org', slug_field='slug', read_only=True)
+    redirect_url = serializers.SerializerMethodField()
 
     class Meta:
         model = OrgInvitation
         fields = [
-            'id', 'org_slug', 'email', 'role', 'status',
+            'id', 'org_slug', 'email', 'role', 'redirect_url', 'status',
             'expires_at', 'created_at',
         ]
-        read_only_fields = ['id', 'org_slug', 'status', 'expires_at', 'created_at']
+        read_only_fields = ['id', 'org_slug', 'redirect_url', 'status', 'expires_at', 'created_at']
 
     def get_status(self, obj):
         return obj.status
+
+    def get_redirect_url(self, obj):
+        return obj.redirect_url or None
 
 
 class GroupAccessSerializer(serializers.ModelSerializer):
@@ -117,17 +150,21 @@ class GroupAccessSerializer(serializers.ModelSerializer):
     is_premium = serializers.BooleanField(source='identity.is_premium', read_only=True)
     org_slug = serializers.SlugRelatedField(source='org', slug_field='slug', read_only=True)
     group_name = serializers.CharField(source='group.name', read_only=True, default=None)
+    redirect_url = serializers.SerializerMethodField()
 
     class Meta:
         model = GroupAccess
         fields = [
             'id', 'email', 'name', 'is_premium', 'org_slug', 'group_name', 'role',
-            'expires_at', 'granted_at',
+            'redirect_url', 'expires_at', 'granted_at',
         ]
         read_only_fields = [
             'id', 'email', 'name', 'is_premium', 'org_slug', 'group_name', 'role',
-            'expires_at', 'granted_at',
+            'redirect_url', 'expires_at', 'granted_at',
         ]
+
+    def get_redirect_url(self, obj):
+        return obj.redirect_url or None
 
 
 class PatientListSerializer(serializers.ModelSerializer):
