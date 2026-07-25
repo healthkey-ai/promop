@@ -11251,3 +11251,145 @@ class PatientConsentViewSetTest(TestCase):
         self.assertIn(resp.status_code, [
             status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN,
         ])
+
+
+# ---------------------------------------------------------------------------
+# Patient Survey — session-auth patient tests (PHR-S FM Phase 4a)
+# ---------------------------------------------------------------------------
+
+class PatientSurveySessionAuthTest(TestCase):
+    """Test that session-auth patients can list surveys, create responses,
+    autosave via PATCH, and are self-scoped (cannot see other patients' data).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        _make_vocab_fixtures()
+
+        # Patient A
+        cls.person_a = Person.objects.create(person_id=97001, family_name='SurvAlpha', given_name='Alice')
+        cls.patient_a_rec = PatientRecord.objects.create(person=cls.person_a)
+        cls.identity_a = Identity.objects.create_user(email='survey-a@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_a, person=cls.person_a)
+
+        # Patient B
+        cls.person_b = Person.objects.create(person_id=97002, family_name='SurvBravo', given_name='Bob')
+        cls.patient_b_rec = PatientRecord.objects.create(person=cls.person_b)
+        cls.identity_b = Identity.objects.create_user(email='survey-b@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_b, person=cls.person_b)
+
+        # Survey
+        cls.survey = Survey.objects.create(
+            name='test-survey-phase4a',
+            title='Test Survey',
+            description='A test survey for Phase 4a',
+            status=Survey.STATUS_ACTIVE,
+            pages=[
+                {
+                    'name': 'page1',
+                    'title': 'Page 1',
+                    'inputs': [
+                        {'name': 'q1', 'type': 'text', 'label': 'Question 1'},
+                        {'name': 'q2', 'type': 'text', 'label': 'Question 2'},
+                    ],
+                }
+            ],
+        )
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def test_patient_can_list_surveys(self):
+        """GET /api/v1/surveys/ returns available surveys for a patient."""
+        resp = self._client_as(self.identity_a).get('/api/v1/surveys/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.json()
+        # Should contain at least the survey we created
+        names = [s['name'] for s in data]
+        self.assertIn('test-survey-phase4a', names)
+
+    def test_patient_can_create_survey_response(self):
+        """POST /api/v1/survey-responses/ creates a new response (201)."""
+        resp = self._client_as(self.identity_a).post(
+            '/api/v1/survey-responses/',
+            {
+                'person': self.person_a.person_id,
+                'survey': self.survey.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        data = resp.json()
+        self.assertEqual(data['survey'], self.survey.pk)
+        self.assertEqual(data['person'], self.person_a.person_id)
+        self.assertEqual(data['values'], {})
+        self.assertEqual(data['percent_complete'], 0)
+
+    def test_patient_can_patch_own_response(self):
+        """PATCH /api/v1/survey-responses/{id}/ merges values (autosave)."""
+        client = self._client_as(self.identity_a)
+        # Create
+        resp = client.post(
+            '/api/v1/survey-responses/',
+            {'person': self.person_a.person_id, 'survey': self.survey.pk},
+            format='json',
+        )
+        response_id = resp.json()['id']
+
+        # Autosave first answer
+        resp = client.patch(
+            f'/api/v1/survey-responses/{response_id}/',
+            {'values': {'q1': 'answer-one'}, 'percent_complete': 50},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.json()
+        self.assertEqual(data['values']['q1'], 'answer-one')
+        self.assertEqual(data['percent_complete'], 50)
+
+    def test_patient_cannot_access_other_patients_response(self):
+        """Patient A cannot GET patient B's survey response — returns 404."""
+        # Create a response for patient B
+        client_b = self._client_as(self.identity_b)
+        resp = client_b.post(
+            '/api/v1/survey-responses/',
+            {'person': self.person_b.person_id, 'survey': self.survey.pk},
+            format='json',
+        )
+        response_b_id = resp.json()['id']
+
+        # Patient A tries to access it
+        client_a = self._client_as(self.identity_a)
+        resp = client_a.get(f'/api/v1/survey-responses/{response_b_id}/')
+        self.assertIn(resp.status_code, [
+            status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND,
+        ])
+
+    def test_patient_list_is_self_scoped(self):
+        """GET /api/v1/survey-responses/?person_id={own} returns only own responses."""
+        client_a = self._client_as(self.identity_a)
+        client_b = self._client_as(self.identity_b)
+
+        # Ensure both patients have responses
+        client_a.post(
+            '/api/v1/survey-responses/',
+            {'person': self.person_a.person_id, 'survey': self.survey.pk},
+            format='json',
+        )
+        client_b.post(
+            '/api/v1/survey-responses/',
+            {'person': self.person_b.person_id, 'survey': self.survey.pk},
+            format='json',
+        )
+
+        # Patient A lists their own
+        resp = client_a.get(f'/api/v1/survey-responses/?person_id={self.person_a.person_id}')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.json()
+        # All returned responses belong to patient A
+        for entry in data:
+            self.assertEqual(entry['person'], self.person_a.person_id)

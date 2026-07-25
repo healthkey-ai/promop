@@ -59,7 +59,7 @@ import json
 import logging
 import re
 from io import StringIO
-from .permissions import ScopedTokenPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
+from .permissions import ScopedTokenPermission, SurveyResponsePermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
@@ -4583,7 +4583,7 @@ class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.
     PUT is disabled: values/values_dates are append-only dicts; use PATCH.
     """
     serializer_class = PatientSurveyResponseSerializer
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [SurveyResponsePermission, PatientSelfScopePermission]
     queryset = PatientSurveyResponse.objects.select_related('survey').all()
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
 

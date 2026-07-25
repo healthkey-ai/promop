@@ -125,6 +125,24 @@ class LabSyncPermission(ScopedTokenPermission):
         return super().has_permission(request, view)
 
 
+class SurveyResponsePermission(ScopedTokenPermission):
+    """ScopedTokenPermission that also allows POST for patient survey responses.
+
+    Patients need to create survey responses (start a survey). The viewset
+    enforces per-person authorization via _OmopFilterMixin and
+    PatientSelfScopePermission, so allowing POST here is safe.
+
+    Service tokens and OAuth2 SMART scopes are handled exactly as in the
+    base class.
+    """
+
+    def has_permission(self, request, view):
+        token = request.auth
+        if token is None or isinstance(token, TokenClaims):
+            return bool(request.user and request.user.is_authenticated)
+        return super().has_permission(request, view)
+
+
 class IsStaffPermission(BasePermission):
     """Allow access only to staff users (is_staff=True)."""
 
