@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from patient_portal.models import Identity
+from patient_portal.models import Identity, PatientConsent
 from omop_core.models import (
     PatientRecord, Concept,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
@@ -550,10 +550,29 @@ class PatientSurveyResponseSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('values_dates must be a dict.')
         return value
 
+    def validate_completed_at(self, value):
+        if self.instance and self.instance.completed_at is not None and value is None:
+            raise serializers.ValidationError('Cannot re-open a completed survey.')
+        return value
+
     def update(self, instance, validated_data):
+        # Strip immutable identity fields — person and survey are set on create only.
+        validated_data.pop('person', None)
+        validated_data.pop('survey', None)
         # Merge incoming values/values_dates into existing dicts (autosave support).
         for field in ('values', 'values_dates'):
             if field in validated_data:
                 current = getattr(instance, field) or {}
                 validated_data[field] = {**current, **validated_data[field]}
         return super().update(instance, validated_data)
+
+
+# ---------------------------------------------------------------------------
+# Patient consent serializer
+# ---------------------------------------------------------------------------
+
+class PatientConsentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PatientConsent
+        fields = ['id', 'consent_type', 'consent_granted', 'consent_date', 'consent_document']
+        read_only_fields = ['id', 'consent_type', 'consent_date', 'consent_document']

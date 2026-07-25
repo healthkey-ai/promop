@@ -60,7 +60,7 @@ import json
 import logging
 import re
 from io import StringIO
-from .permissions import ScopedTokenPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
+from .permissions import ScopedTokenPermission, SurveyResponsePermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
@@ -69,6 +69,7 @@ from .serializers import (
     EpisodeSerializer, EpisodeEventSerializer,
     PatientDocumentSerializer, PatientTrialEnrollmentSerializer,
     SurveySerializer, PatientSurveyResponseSerializer,
+    PatientConsentSerializer,
 )
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
@@ -4686,7 +4687,7 @@ class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.
     PUT is disabled: values/values_dates are append-only dicts; use PATCH.
     """
     serializer_class = PatientSurveyResponseSerializer
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [SurveyResponsePermission, PatientSelfScopePermission]
     queryset = PatientSurveyResponse.objects.select_related('survey').all()
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
@@ -4709,3 +4710,52 @@ class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.
     def partial_update(self, request, *args, **kwargs):
         kwargs['partial'] = True
         return self.update(request, *args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Patient Consent management (PHR-S FM Phase 3)
+# ---------------------------------------------------------------------------
+
+class PatientConsentViewSet(viewsets.ModelViewSet):
+    """Patient consent grants — auto-created for each consent type.
+
+    Patients toggle ``consent_granted`` via PATCH; consents are never
+    created or deleted by patients directly.
+
+    GET  /api/v1/consents/         → list (auto-creates missing types)
+    PATCH /api/v1/consents/{id}/   → toggle consent_granted
+    """
+    serializer_class = PatientConsentSerializer
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    CONSENT_TYPES = ['data_sharing', 'clinical_trial', 'research']
+
+    def get_queryset(self):
+        from patient_portal.models import PatientConsent
+        from patient_portal.services import patient_person_for
+
+        person = patient_person_for(self.request.user)
+        if person is not None:
+            return PatientConsent.objects.filter(patient_user__person=person)
+        # Staff / superuser — return all consents
+        return PatientConsent.objects.all()
+
+    def list(self, request, *args, **kwargs):
+        from patient_portal.models import PatientConsent, PatientUser
+        from patient_portal.services import patient_person_for
+
+        person = patient_person_for(request.user)
+        if person is not None:
+            try:
+                patient_user = PatientUser.objects.get(person=person)
+            except PatientUser.DoesNotExist:
+                return Response([], status=status.HTTP_200_OK)
+            # Auto-create missing consent types
+            for consent_type in self.CONSENT_TYPES:
+                PatientConsent.objects.get_or_create(
+                    patient_user=patient_user,
+                    consent_type=consent_type,
+                    defaults={'consent_granted': False},
+                )
+        return super().list(request, *args, **kwargs)

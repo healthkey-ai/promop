@@ -181,20 +181,21 @@ export that record as FHIR, plus any read-only presentation refinements.)*
 
 ---
 
-## Phase 3 — Consent grants
+## Phase 3 — Consent grants  ✅ DONE
 
 **FM:** PH.1.5 (Manage Consents and Authorizations).
 
-**Existing:** `PatientConsent` (`patient_portal/models.py:118`, keyed to `PatientUser`,
-boolean-per-type), `consent_management` server view (`views.py:114`), and
-`FhirPatientConsentView` (`api/fhir/sync.py:790`).
+**Status:** Delivered in PR #283 (issue #278), merged to `dev` 2026-07-25. Shipped:
+`PatientConsentViewSet` at `/api/v1/consents/` (list + PATCH toggle), auto-creates all 3
+consent types on first list, queryset self-scoped to the authenticated patient.
+`_resolve_person_id` extended with `patient_user_id` pattern for `PatientSelfScopePermission`.
+Frontend `PatientConsents` component with toggle switches on `PatientHome`. `consent_date`
+changed to `auto_now=True` so timestamp reflects actual consent decision time.
+863 backend / 81 frontend tests green.
 
-- Promote consent to a first-class DRF resource under `/api/v1/`: list/grant/revoke the
-  patient's own consents (self-scoped via the Phase-1 guard), with `consent_type`, granted
-  flag, timestamp, and optional scope note. Reuse the existing `PatientConsent` model;
-  types data_sharing / clinical_trial / research already seeded.
-- Frontend: a Consents view in patient mode (reuse `FormField`/`Select` primitives).
-- Tests: grant/revoke, self-scope enforcement, uniqueness per type.
+**Existing:** `PatientConsent` (`patient_portal/models.py:173`, keyed to `PatientUser`,
+boolean-per-type), `consent_management` server view (`views.py:113`), and
+`FhirPatientConsentView` (`api/fhir/sync.py:791`).
 
 *Stretch (deferred):* represent grants as FHIR `Consent` resources. The current
 boolean-per-type model is adequate for the oncology use case.
