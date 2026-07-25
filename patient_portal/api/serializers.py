@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from patient_portal.models import Identity
+from patient_portal.models import Identity, PatientConsent
 from omop_core.models import (
     PatientRecord, Concept,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
@@ -557,3 +557,14 @@ class PatientSurveyResponseSerializer(serializers.ModelSerializer):
                 current = getattr(instance, field) or {}
                 validated_data[field] = {**current, **validated_data[field]}
         return super().update(instance, validated_data)
+
+
+# ---------------------------------------------------------------------------
+# Patient consent serializer
+# ---------------------------------------------------------------------------
+
+class PatientConsentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PatientConsent
+        fields = ['id', 'consent_type', 'consent_granted', 'consent_date', 'consent_document']
+        read_only_fields = ['id', 'consent_type', 'consent_date', 'consent_document']

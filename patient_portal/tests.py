@@ -11129,3 +11129,125 @@ class FhirExportApiTest(TestCase):
         self.assertIn(resp.status_code, [
             status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN,
         ])
+
+
+# ---------------------------------------------------------------------------
+# Patient Consent ViewSet tests (PHR-S FM Phase 3)
+# ---------------------------------------------------------------------------
+
+class PatientConsentViewSetTest(TestCase):
+    """Test PatientConsentViewSet — auto-create, toggle, and self-scoping."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        _make_vocab_fixtures()
+
+        # Patient A
+        cls.person_a = Person.objects.create(person_id=96001, family_name='Alpha', given_name='Ann')
+        cls.patient_a_rec = PatientRecord.objects.create(person=cls.person_a)
+        cls.identity_a = Identity.objects.create_user(email='consent-a@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_a, person=cls.person_a)
+
+        # Patient B
+        cls.person_b = Person.objects.create(person_id=96002, family_name='Bravo', given_name='Ben')
+        cls.patient_b_rec = PatientRecord.objects.create(person=cls.person_b)
+        cls.identity_b = Identity.objects.create_user(email='consent-b@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity_b, person=cls.person_b)
+
+        # Staff user
+        cls.staff = Identity.objects.create_user(email='consent-staff@test.com', password='pw', is_staff=True)
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def test_list_creates_all_consent_types(self):
+        """GET /api/v1/consents/ auto-creates all 3 consent types, all granted=False."""
+        resp = self._client_as(self.identity_a).get('/api/v1/consents/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.json()
+        self.assertEqual(len(data), 3)
+        types = {c['consent_type'] for c in data}
+        self.assertEqual(types, {'data_sharing', 'clinical_trial', 'research'})
+        for c in data:
+            self.assertFalse(c['consent_granted'])
+
+    def test_list_returns_only_own_consents(self):
+        """Patient A only sees their own 3 consents, not patient B's."""
+        # Ensure both patients have consents auto-created
+        self._client_as(self.identity_a).get('/api/v1/consents/')
+        self._client_as(self.identity_b).get('/api/v1/consents/')
+
+        resp = self._client_as(self.identity_a).get('/api/v1/consents/')
+        data = resp.json()
+        self.assertEqual(len(data), 3)
+
+    def test_grant_consent(self):
+        """PATCH with consent_granted=true updates the consent."""
+        from patient_portal.models import PatientConsent
+
+        # Auto-create consents
+        resp = self._client_as(self.identity_a).get('/api/v1/consents/')
+        consent_id = resp.json()[0]['id']
+
+        resp = self._client_as(self.identity_a).patch(
+            f'/api/v1/consents/{consent_id}/',
+            {'consent_granted': True},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(PatientConsent.objects.get(pk=consent_id).consent_granted)
+
+    def test_revoke_consent(self):
+        """Grant then revoke — toggle works both ways."""
+        from patient_portal.models import PatientConsent
+
+        resp = self._client_as(self.identity_a).get('/api/v1/consents/')
+        consent_id = resp.json()[0]['id']
+
+        client = self._client_as(self.identity_a)
+        client.patch(f'/api/v1/consents/{consent_id}/', {'consent_granted': True}, format='json')
+        self.assertTrue(PatientConsent.objects.get(pk=consent_id).consent_granted)
+
+        client.patch(f'/api/v1/consents/{consent_id}/', {'consent_granted': False}, format='json')
+        self.assertFalse(PatientConsent.objects.get(pk=consent_id).consent_granted)
+
+    def test_cannot_patch_other_patients_consent(self):
+        """Patient A cannot PATCH patient B's consent — 404 from queryset filtering."""
+        from patient_portal.models import PatientConsent
+
+        # Auto-create B's consents
+        self._client_as(self.identity_b).get('/api/v1/consents/')
+        b_consent = PatientConsent.objects.filter(
+            patient_user__person=self.person_b,
+        ).first()
+
+        resp = self._client_as(self.identity_a).patch(
+            f'/api/v1/consents/{b_consent.pk}/',
+            {'consent_granted': True},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_staff_can_list_all_consents(self):
+        """Staff user sees all consents across patients."""
+        # Ensure both patients have consents
+        self._client_as(self.identity_a).get('/api/v1/consents/')
+        self._client_as(self.identity_b).get('/api/v1/consents/')
+
+        resp = self._client_as(self.staff).get('/api/v1/consents/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.json()
+        # Staff sees at least both patients' consents (3 each = 6+)
+        self.assertGreaterEqual(len(data), 6)
+
+    def test_unauthenticated_returns_403(self):
+        """Unauthenticated request returns 401 or 403."""
+        c = APIClient()
+        resp = c.get('/api/v1/consents/')
+        self.assertIn(resp.status_code, [
+            status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN,
+        ])
