@@ -4662,12 +4662,16 @@ class PatientConsentViewSet(viewsets.ModelViewSet):
 # Patient messages — bidirectional messaging (PHR-S FM Phase 4b)
 # ---------------------------------------------------------------------------
 
+class MessagePagination(PageNumberPagination):
+    page_size = 50
+
+
 class PatientMessageViewSet(viewsets.ModelViewSet):
     """Bidirectional patient–provider messaging with threading.
 
     GET   /api/v1/messages/               → list (patients see only their own)
     POST  /api/v1/messages/               → create a new message or reply
-    PATCH /api/v1/messages/{id}/           → update (subject/message text only)
+    PATCH /api/v1/messages/{id}/           → edit own message text
     PATCH /api/v1/messages/{id}/mark-read/ → mark a message as read
 
     Query params:
@@ -4678,15 +4682,17 @@ class PatientMessageViewSet(viewsets.ModelViewSet):
     """
     serializer_class = PatientMessageSerializer
     permission_classes = [SurveyResponsePermission, PatientSelfScopePermission]
+    pagination_class = MessagePagination
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
     def get_queryset(self):
         from patient_portal.models import PatientMessage
         from patient_portal.services import patient_person_for
 
+        from django.db.models import Count
         qs = PatientMessage.objects.select_related(
             'sender', 'parent', 'patient_user',
-        )
+        ).annotate(_reply_count=Count('replies')).order_by('-created_at')
         person = patient_person_for(self.request.user)
         if person is not None:
             qs = qs.filter(patient_user__person=person)
@@ -4696,7 +4702,10 @@ class PatientMessageViewSet(viewsets.ModelViewSet):
         if parent == 'null':
             qs = qs.filter(parent__isnull=True)  # Top-level threads only
         elif parent:
-            qs = qs.filter(parent_id=parent)  # Replies to specific message
+            try:
+                qs = qs.filter(parent_id=int(parent))
+            except (ValueError, TypeError):
+                qs = qs.none()
 
         is_read = self.request.query_params.get('is_read')
         if is_read is not None:
@@ -4707,6 +4716,7 @@ class PatientMessageViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         from patient_portal.models import PatientUser
         from patient_portal.services import patient_person_for
+        from rest_framework.exceptions import PermissionDenied, ValidationError
 
         user = self.request.user
         person = patient_person_for(user)
@@ -4716,16 +4726,42 @@ class PatientMessageViewSet(viewsets.ModelViewSet):
             'sender': user,
             'sender_is_patient': person is not None,
         }
-        # If patient, enforce they can only create for their own patient_user
+
         if person is not None:
+            # Patient: force patient_user to their own record
             try:
                 pu = PatientUser.objects.get(identity=user, person=person)
             except PatientUser.DoesNotExist:
-                from rest_framework.exceptions import PermissionDenied
                 raise PermissionDenied('No patient record linked to this account.')
             kwargs['patient_user'] = pu
+        else:
+            # Staff: inherit patient_user from parent on reply, require on new thread
+            parent = serializer.validated_data.get('parent')
+            if parent:
+                kwargs['patient_user'] = parent.patient_user
+            elif not serializer.validated_data.get('patient_user'):
+                raise ValidationError({'patient_user': 'Staff must specify patient_user when starting a new thread.'})
+
+        # Validate parent belongs to the same patient thread
+        parent = serializer.validated_data.get('parent')
+        resolved_pu = kwargs.get('patient_user') or serializer.validated_data.get('patient_user')
+        if parent and resolved_pu:
+            if parent.patient_user_id != resolved_pu.pk:
+                raise PermissionDenied('Cannot reply to another patient\'s message.')
 
         serializer.save(**kwargs)
+
+    def perform_update(self, serializer):
+        from rest_framework.exceptions import PermissionDenied
+        # Only the sender can edit message text; prevent patients from altering
+        # provider messages.
+        obj = serializer.instance
+        if obj.sender_id != self.request.user.pk:
+            raise PermissionDenied('You can only edit your own messages.')
+        # Strip immutable fields on update
+        for field in ('patient_user', 'parent', 'subject'):
+            serializer.validated_data.pop(field, None)
+        serializer.save()
 
     @action(detail=True, methods=['patch'], url_path='mark-read')
     def mark_read(self, request, pk=None):

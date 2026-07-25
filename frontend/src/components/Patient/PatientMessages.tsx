@@ -79,11 +79,13 @@ export default function PatientMessages({ user }: { user: User | null }) {
   }, []);
 
   useEffect(() => {
-    if (user && user.person_id != null) {
-      fetchThreads();
-    } else {
-      setLoading(false);
-    }
+    (async () => {
+      if (user && user.person_id != null) {
+        await fetchThreads();
+      } else {
+        setLoading(false);
+      }
+    })();
   }, [user, fetchThreads]);
 
   const openThread = async (thread: Message) => {

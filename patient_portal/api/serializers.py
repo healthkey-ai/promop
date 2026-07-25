@@ -604,13 +604,9 @@ class PatientMessageSerializer(serializers.ModelSerializer):
         return "Patient" if obj.sender_is_patient else "Provider"
 
     def get_reply_count(self, obj):
-        return obj.replies.count() if hasattr(obj, 'replies') else 0
+        if hasattr(obj, '_reply_count'):
+            return obj._reply_count
+        return obj.replies.count()
 
-    def validate_parent(self, value):
-        # Replies must belong to the same patient_user thread
-        if value and self.initial_data.get('patient_user'):
-            if value.patient_user_id != int(self.initial_data['patient_user']):
-                raise serializers.ValidationError(
-                    'Reply must belong to the same patient thread.'
-                )
-        return value
+    # Cross-thread reply validation is in PatientMessageViewSet.perform_create
+    # where the resolved patient_user is known (not in self.initial_data).

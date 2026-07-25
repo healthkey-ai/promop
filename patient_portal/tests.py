@@ -11481,7 +11481,7 @@ class PatientMessageViewSetTest(TestCase):
         """GET /api/v1/messages/ returns only the patient's own messages."""
         resp = self._client_as(self.identity_a).get('/api/v1/messages/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        data = resp.json()
+        data = resp.json()['results']
         self.assertEqual(len(data), 2)
         ids = {m['id'] for m in data}
         self.assertIn(self.msg_a1.pk, ids)
@@ -11543,7 +11543,7 @@ class PatientMessageViewSetTest(TestCase):
     def test_cross_patient_isolation(self):
         """Patient A cannot see patient B's messages."""
         resp = self._client_as(self.identity_a).get('/api/v1/messages/')
-        ids = {m['id'] for m in resp.json()}
+        ids = {m['id'] for m in resp.json()['results']}
         self.assertNotIn(self.msg_b1.pk, ids)
 
     def test_cross_patient_detail_blocked(self):
@@ -11555,7 +11555,11 @@ class PatientMessageViewSetTest(TestCase):
 
     # ---- 6. Cross-patient create blocked ----
     def test_cross_patient_create_blocked(self):
-        """Patient A cannot create a message for patient B's patient_user."""
+        """Patient A cannot create a message for patient B's patient_user.
+
+        perform_create auto-sets patient_user to the requesting patient's own,
+        so the patient_user field in the request body is ignored for patients.
+        """
         resp = self._client_as(self.identity_a).post(
             '/api/v1/messages/',
             {
@@ -11565,16 +11569,8 @@ class PatientMessageViewSetTest(TestCase):
             },
             format='json',
         )
-        # The viewset auto-sets patient_user to the requesting patient's own,
-        # so the patient_user field in the request body is ignored for patients.
-        # The message is created for patient A, not B.
-        if resp.status_code == status.HTTP_201_CREATED:
-            self.assertEqual(resp.json()['patient_user'], self.pu_a.pk)
-        else:
-            # If it's rejected, that's also acceptable
-            self.assertIn(resp.status_code, [
-                status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN,
-            ])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.json()['patient_user'], self.pu_a.pk)
 
     # ---- 7. Filter top-level threads ----
     def test_filter_top_level_threads(self):
@@ -11593,7 +11589,7 @@ class PatientMessageViewSetTest(TestCase):
             '/api/v1/messages/?parent=null',
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        for m in resp.json():
+        for m in resp.json()['results']:
             self.assertIsNone(m['parent'])
 
     # ---- 8. Filter unread ----
@@ -11608,12 +11604,25 @@ class PatientMessageViewSetTest(TestCase):
             '/api/v1/messages/?is_read=false',
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        for m in resp.json():
+        for m in resp.json()['results']:
             self.assertIsNone(m['read_at'])
             # The marked-as-read message should not appear
             self.assertNotEqual(m['id'], self.msg_a1.pk)
 
     # ---- 9. Unauthenticated ----
+    def test_cross_patient_reply_blocked(self):
+        """Patient A cannot reply to patient B's message."""
+        resp = self._client_as(self.identity_a).post(
+            '/api/v1/messages/',
+            {
+                'parent': self.msg_b1.pk,
+                'subject': 'Cross-patient reply',
+                'message': 'This should fail',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
     def test_unauthenticated_returns_403(self):
         """Unauthenticated request returns 401 or 403."""
         c = APIClient()
