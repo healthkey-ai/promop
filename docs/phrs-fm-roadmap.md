@@ -220,18 +220,21 @@ immutable person/survey on PATCH, permission method whitelist, cross-patient POS
 
 ---
 
-## Phase 4b — Bidirectional messaging
+## Phase 4b — Bidirectional messaging ✅ DONE
 
 **FM:** PH.6 (Manage Encounters w/ Providers).
 
-**Existing:** messaging is **one-way, server-rendered, no provider recipient**
-(`PatientMessage` `patient_portal/models.py:138`, `views.py:80`).
+**As-built (PR #289):**
 
-- Upgrade `PatientMessage` to a DRF endpoint under `/api/v1/` with threading,
-  recipient, and read-state, replacing the template-only flow. Render in patient mode.
-- Full feature requiring its own model changes (thread, recipient FK, read timestamp),
-  serializer, and UI — warranting a separate phase.
-- Tests: message create/list/reply self-scoped.
+- Added `parent` (self-FK for threading), `sender` (Identity FK), `read_at` fields to `PatientMessage`
+- `PatientMessageViewSet` under `/api/v1/messages/` with threading, read-state, and self-scoping
+- `perform_create` auto-sets sender/patient_user; cross-patient reply guard; sender-only edits
+- `MessagePagination` (page_size=50, `-created_at` ordering)
+- N+1 prevention via `Count('replies')` annotation
+- `mark-read` custom action
+- Frontend `PatientMessages.tsx`: thread list, conversation view, compose, chat-bubble UI
+- 11 backend tests (isolation, threading, cross-patient blocks, filters)
+- 8 frontend tests
 
 ---
 
