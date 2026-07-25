@@ -2431,7 +2431,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 first_line_end_date = datetime.strptime(therapy_lines[1]['end_date'][:10], '%Y-%m-%d').date()
                             except:
                                 pass
-                        first_line_outcome = therapy_lines[1]['outcome']
+                        first_line_outcome = therapy_lines[1].get('outcome')
                     
                     if 2 in therapy_lines:
                         second_line_therapy = therapy_lines[2]['regimen']
@@ -2446,7 +2446,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 second_line_end_date = datetime.strptime(therapy_lines[2]['end_date'][:10], '%Y-%m-%d').date()
                             except:
                                 pass
-                        second_line_outcome = therapy_lines[2]['outcome']
+                        second_line_outcome = therapy_lines[2].get('outcome')
                     
                     # Map line 3 and 4 to "later" field (prioritize most recent)
                     if 4 in therapy_lines:
@@ -2462,7 +2462,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 later_end_date = datetime.strptime(therapy_lines[4]['end_date'][:10], '%Y-%m-%d').date()
                             except:
                                 pass
-                        later_outcome = therapy_lines[4]['outcome']
+                        later_outcome = therapy_lines[4].get('outcome')
                     elif 3 in therapy_lines:
                         later_therapy = therapy_lines[3]['regimen']
                         if therapy_lines[3].get('start_date'):
@@ -2476,7 +2476,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 later_end_date = datetime.strptime(therapy_lines[3]['end_date'][:10], '%Y-%m-%d').date()
                             except:
                                 pass
-                        later_outcome = therapy_lines[3]['outcome']
+                        later_outcome = therapy_lines[3].get('outcome')
                     
                     # Match therapy intent and discontinuation observations to therapy lines by date
                     for intent_obs in therapy_intent_observations:
