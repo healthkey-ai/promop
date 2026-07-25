@@ -550,7 +550,15 @@ class PatientSurveyResponseSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('values_dates must be a dict.')
         return value
 
+    def validate_completed_at(self, value):
+        if self.instance and self.instance.completed_at is not None and value is None:
+            raise serializers.ValidationError('Cannot re-open a completed survey.')
+        return value
+
     def update(self, instance, validated_data):
+        # Strip immutable identity fields — person and survey are set on create only.
+        validated_data.pop('person', None)
+        validated_data.pop('survey', None)
         # Merge incoming values/values_dates into existing dicts (autosave support).
         for field in ('values', 'values_dates'):
             if field in validated_data:
