@@ -11393,3 +11393,12 @@ class PatientSurveySessionAuthTest(TestCase):
         # All returned responses belong to patient A
         for entry in data:
             self.assertEqual(entry['person'], self.person_a.person_id)
+
+    def test_patient_cannot_create_response_for_other_patient(self):
+        """POST with person=other patient's person_id is rejected (403)."""
+        resp = self._client_as(self.identity_a).post(
+            '/api/v1/survey-responses/',
+            {'person': self.person_b.person_id, 'survey': self.survey.pk},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)

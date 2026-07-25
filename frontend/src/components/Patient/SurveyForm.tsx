@@ -63,6 +63,9 @@ export default function SurveyForm({
     try {
       const pct = computePercentComplete(valuesRef.current, survey);
       await onSave(valuesRef.current, pct);
+    } catch {
+      // Page-navigation autosave failure is non-blocking; retry on next page change.
+      // Completion flow calls onSave directly and will surface errors.
     } finally {
       setSaving(false);
     }

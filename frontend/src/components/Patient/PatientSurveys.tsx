@@ -42,6 +42,8 @@ export interface SurveyResponse {
   percent_complete: number;
   started_at: string | null;
   completed_at: string | null;
+  consent_date: string | null;
+  consent_signature: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -149,19 +151,15 @@ export default function PatientSurveys({ user }: { user: User | null }) {
 
   const handleSave = async (values: Record<string, unknown>, percentComplete: number) => {
     if (!activeResponse) return;
-    try {
-      const res = await api.patch(`/v1/survey-responses/${activeResponse.id}/`, {
-        values,
-        percent_complete: percentComplete,
-      });
-      const updated: SurveyResponse = res.data;
-      setActiveResponse(updated);
-      setResponses((prev) =>
-        prev.map((r) => (r.id === updated.id ? updated : r))
-      );
-    } catch {
-      // Autosave failure is non-blocking; user can retry on next page change
-    }
+    const res = await api.patch(`/v1/survey-responses/${activeResponse.id}/`, {
+      values,
+      percent_complete: percentComplete,
+    });
+    const updated: SurveyResponse = res.data;
+    setActiveResponse(updated);
+    setResponses((prev) =>
+      prev.map((r) => (r.id === updated.id ? updated : r))
+    );
   };
 
   const handleComplete = async () => {
@@ -176,11 +174,11 @@ export default function PatientSurveys({ user }: { user: User | null }) {
       setResponses((prev) =>
         prev.map((r) => (r.id === updated.id ? updated : r))
       );
+      setActiveSurvey(null);
+      setActiveResponse(null);
     } catch {
       setError("Failed to complete survey. Please try again.");
     }
-    setActiveSurvey(null);
-    setActiveResponse(null);
   };
 
   const handleBack = () => {
