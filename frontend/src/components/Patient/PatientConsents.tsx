@@ -58,6 +58,7 @@ export default function PatientConsents({ user }: { user: User | null }) {
 
   const handleToggle = async (consent: Consent) => {
     setTogglingId(consent.id);
+    setError(null);
     try {
       const res = await api.patch(`/v1/consents/${consent.id}/`, {
         consent_granted: !consent.consent_granted,
