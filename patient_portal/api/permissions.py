@@ -141,10 +141,12 @@ def _resolve_person_id(obj):
 
     Returns the person_id (int) or None if it cannot be determined.
 
-    Handles two patterns:
+    Handles three patterns:
     - Direct FK: obj.person_id (covers Person, PatientRecord, ConditionOccurrence,
       DrugExposure, Measurement, Observation, ProcedureOccurrence, Episode,
       PatientDocument, PatientTrialEnrollment, PatientSurveyResponse)
+    - PatientConsent/PatientMessage: has patient_user_id FK. Resolves via
+      PatientUser.objects.values_list('person_id', ...).
     - EpisodeEvent: has a bare episode_id (BigIntegerField, not a FK). Resolves
       via Episode.objects.values_list('person_id', ...).
     """
@@ -153,7 +155,16 @@ def _resolve_person_id(obj):
     if pid is not None:
         return pid
 
-    # Pattern 2: EpisodeEvent — resolve via Episode table
+    # Pattern 2: PatientConsent — resolve via PatientUser.person_id
+    patient_user_id = getattr(obj, 'patient_user_id', None)
+    if patient_user_id is not None:
+        from patient_portal.models import PatientUser
+        try:
+            return PatientUser.objects.values_list('person_id', flat=True).get(pk=patient_user_id)
+        except PatientUser.DoesNotExist:
+            return None
+
+    # Pattern 3: EpisodeEvent — resolve via Episode table
     episode_id = getattr(obj, 'episode_id', None)
     if episode_id is not None:
         from omop_oncology.models import Episode

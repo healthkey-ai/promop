@@ -2,6 +2,7 @@ import { useState } from "react";
 import { AlertCircle, Download } from "lucide-react";
 import type { User } from "@/hooks/useAuth";
 import PatientDetail from "@/components/Patient/PatientDetail";
+import PatientConsents from "@/components/Patient/PatientConsents";
 import api from "@/api/axios";
 
 /**
@@ -76,6 +77,9 @@ export default function PatientHome({
           <p className="text-sm text-red-600">{downloadError}</p>
         </div>
       )}
+      <div className="mx-auto max-w-5xl px-6 py-4">
+        <PatientConsents user={user} />
+      </div>
       <PatientDetail
         personIdOverride={String(user.person_id)}
         patientMode

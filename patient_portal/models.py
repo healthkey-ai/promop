@@ -179,7 +179,7 @@ class PatientConsent(models.Model):
         ('research', 'Research Use'),
     ])
     consent_granted = models.BooleanField(default=False)
-    consent_date = models.DateTimeField(auto_now_add=True)
+    consent_date = models.DateTimeField(auto_now=True)
     consent_document = models.TextField(blank=True, null=True)
 
     class Meta:
