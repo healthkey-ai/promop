@@ -24,8 +24,8 @@ from rest_framework.test import APIClient
 from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
     Person, PatientRecord, ProvenanceRecord,
-    ConditionOccurrence, DrugExposure, Measurement, ProcedureOccurrence,
-    Death,
+    ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
+    Death, PatientDocument,
     Relationship, ConceptRelationship, ConceptAncestor,
     SctEligibility,
     FhirConnection, FhirOauthState, Institution,
@@ -11630,3 +11630,270 @@ class PatientMessageViewSetTest(TestCase):
         self.assertIn(resp.status_code, [
             status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN,
         ])
+
+
+# ---------------------------------------------------------------------------
+# 10. Phase 5 — Clinical Lists (Advance Directives, Immunizations, Allergies)
+# ---------------------------------------------------------------------------
+
+class AdvanceDirectiveTest(TestCase):
+    """Test ADVANCE_DIRECTIVE doc_type on PatientDocumentViewSet."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.admin = Identity.objects.create_superuser(
+            email='ad_admin@test.com', password='testpass',
+        )
+        cls.person = Person.objects.create(
+            person_id=80001, given_name='Ada', family_name='Directive',
+            year_of_birth=1960, gender_source_value='female',
+            race_source_value='unknown', ethnicity_source_value='unknown',
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def test_create_advance_directive(self):
+        """Can create a document with doc_type=ADVANCE_DIRECTIVE."""
+        resp = self.client.post('/api/v1/documents/', {
+            'person': self.person.person_id,
+            'doc_type': 'ADVANCE_DIRECTIVE',
+            'title': 'Living Will',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['doc_type'], 'ADVANCE_DIRECTIVE')
+
+    def test_filter_by_doc_type(self):
+        """Filtering by doc_type=ADVANCE_DIRECTIVE returns only ADs."""
+        PatientDocument.objects.create(
+            person=self.person, doc_type='ADVANCE_DIRECTIVE', title='AD Doc',
+        )
+        PatientDocument.objects.create(
+            person=self.person, doc_type='OTHER', title='Other Doc',
+        )
+        resp = self.client.get('/api/v1/documents/', {'doc_type': 'ADVANCE_DIRECTIVE'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.data if isinstance(resp.data, list) else resp.data.get('results', [])
+        self.assertTrue(all(d['doc_type'] == 'ADVANCE_DIRECTIVE' for d in results))
+
+
+class ImmunizationListTest(TestCase):
+    """Test the immunization list endpoint (route_source_value='VACCINE')."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.admin = Identity.objects.create_superuser(
+            email='imm_admin@test.com', password='testpass',
+        )
+        cls.person = Person.objects.create(
+            person_id=80002, given_name='Ivy', family_name='Vaccine',
+            year_of_birth=1985, gender_source_value='female',
+            race_source_value='unknown', ethnicity_source_value='unknown',
+        )
+        drug_concept = Concept.objects.get(concept_id=19136160)
+        type_concept = Concept.objects.get(concept_id=32817)
+
+        from omop_core.services.pk import next_pk
+        # Immunization (tagged)
+        cls.imm_de = DrugExposure.objects.create(
+            drug_exposure_id=next_pk(DrugExposure, 'drug_exposure_id'),
+            person=cls.person,
+            drug_concept=drug_concept,
+            drug_exposure_start_date=date(2024, 3, 15),
+            drug_type_concept=type_concept,
+            drug_source_value='COVID-19 Vaccine',
+            route_source_value='VACCINE',
+            lot_number='LOT-ABC-123',
+        )
+        # Therapeutic drug (not tagged)
+        cls.drug_de = DrugExposure.objects.create(
+            drug_exposure_id=next_pk(DrugExposure, 'drug_exposure_id'),
+            person=cls.person,
+            drug_concept=drug_concept,
+            drug_exposure_start_date=date(2024, 1, 10),
+            drug_type_concept=type_concept,
+            drug_source_value='Rituximab',
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def test_immunization_endpoint_returns_vaccines_only(self):
+        """GET /v1/immunizations/ returns only VACCINE-tagged DrugExposures."""
+        resp = self.client.get('/api/v1/immunizations/', {'person_id': self.person.person_id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.data if isinstance(resp.data, list) else resp.data.get('results', [])
+        ids = [r['drug_exposure_id'] for r in results]
+        self.assertIn(self.imm_de.drug_exposure_id, ids)
+        self.assertNotIn(self.drug_de.drug_exposure_id, ids)
+
+    def test_immunization_serializer_fields(self):
+        """Response includes vaccine_name, date, lot_number."""
+        resp = self.client.get('/api/v1/immunizations/', {'person_id': self.person.person_id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.data if isinstance(resp.data, list) else resp.data.get('results', [])
+        self.assertGreater(len(results), 0)
+        item = results[0]
+        self.assertIn('vaccine_name', item)
+        self.assertIn('date', item)
+        self.assertIn('lot_number', item)
+        self.assertEqual(item['lot_number'], 'LOT-ABC-123')
+
+    def test_therapeutic_drug_excluded(self):
+        """Non-vaccine DrugExposure does not appear at /v1/immunizations/."""
+        resp = self.client.get('/api/v1/immunizations/', {'person_id': self.person.person_id})
+        results = resp.data if isinstance(resp.data, list) else resp.data.get('results', [])
+        for r in results:
+            self.assertNotEqual(r['drug_exposure_id'], self.drug_de.drug_exposure_id)
+
+
+class AllergyListTest(TestCase):
+    """Test the allergy list endpoint (qualifier_source_value='ALLERGY')."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.admin = Identity.objects.create_superuser(
+            email='allergy_admin@test.com', password='testpass',
+        )
+        cls.person = Person.objects.create(
+            person_id=80003, given_name='Alma', family_name='Allergen',
+            year_of_birth=1990, gender_source_value='female',
+            race_source_value='unknown', ethnicity_source_value='unknown',
+        )
+        obs_domain, _ = Domain.objects.get_or_create(
+            domain_id='Observation',
+            defaults={'domain_name': 'Observation', 'domain_concept_id': 27},
+        )
+        obs_cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Clinical Obs',
+            defaults={'concept_class_name': 'Clinical Observation', 'concept_class_concept_id': 0},
+        )
+        vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        cls.allergy_concept, _ = Concept.objects.get_or_create(
+            concept_id=90001,
+            defaults={
+                'concept_name': 'Penicillin allergy',
+                'domain': obs_domain,
+                'vocabulary': vocab,
+                'concept_class': obs_cc,
+                'concept_code': '90001',
+                'valid_start_date': date.today(),
+                'valid_end_date': date(2099, 12, 31),
+            },
+        )
+        type_concept = Concept.objects.get(concept_id=32817)
+
+        from omop_core.services.pk import next_pk
+        # Allergy observation (tagged)
+        cls.allergy_obs = Observation.objects.create(
+            observation_id=next_pk(Observation, 'observation_id'),
+            person=cls.person,
+            observation_concept=cls.allergy_concept,
+            observation_date=date(2023, 6, 1),
+            observation_type_concept=type_concept,
+            value_as_string='high',
+            observation_source_value='Penicillin',
+            qualifier_source_value='ALLERGY',
+            value_source_value='active',
+        )
+        # Non-allergy observation (not tagged)
+        cls.other_obs = Observation.objects.create(
+            observation_id=next_pk(Observation, 'observation_id'),
+            person=cls.person,
+            observation_concept=cls.allergy_concept,
+            observation_date=date(2023, 7, 1),
+            observation_type_concept=type_concept,
+            value_as_string='some diagnostic',
+            observation_source_value='DiagReport',
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def test_allergy_endpoint_returns_allergies_only(self):
+        """GET /v1/allergies/ returns only ALLERGY-tagged Observations."""
+        resp = self.client.get('/api/v1/allergies/', {'person_id': self.person.person_id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.data if isinstance(resp.data, list) else resp.data.get('results', [])
+        ids = [r['observation_id'] for r in results]
+        self.assertIn(self.allergy_obs.observation_id, ids)
+        self.assertNotIn(self.other_obs.observation_id, ids)
+
+    def test_allergy_serializer_fields(self):
+        """Response includes allergen_name, criticality, clinical_status, recorded_date."""
+        resp = self.client.get('/api/v1/allergies/', {'person_id': self.person.person_id})
+        results = resp.data if isinstance(resp.data, list) else resp.data.get('results', [])
+        self.assertGreater(len(results), 0)
+        item = results[0]
+        self.assertIn('allergen_name', item)
+        self.assertIn('criticality', item)
+        self.assertIn('clinical_status', item)
+        self.assertIn('recorded_date', item)
+        self.assertEqual(item['criticality'], 'high')
+        self.assertEqual(item['clinical_status'], 'active')
+
+    def test_non_allergy_observation_excluded(self):
+        """Non-allergy Observations do not appear at /v1/allergies/."""
+        resp = self.client.get('/api/v1/allergies/', {'person_id': self.person.person_id})
+        results = resp.data if isinstance(resp.data, list) else resp.data.get('results', [])
+        for r in results:
+            self.assertNotEqual(r['observation_id'], self.other_obs.observation_id)
+
+    def test_legacy_fhir_upload_creates_allergy(self):
+        """FHIR bundle with AllergyIntolerance creates tagged Observation."""
+        bundle = {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {
+                    "resource": {
+                        "resourceType": "Patient",
+                        "id": "allergy-test-pt-1",
+                        "name": [{"family": "AllergyTest", "given": ["Pat"]}],
+                        "gender": "female",
+                        "birthDate": "1980-05-20",
+                    }
+                },
+                {
+                    "resource": {
+                        "resourceType": "AllergyIntolerance",
+                        "patient": {"reference": "Patient/allergy-test-pt-1"},
+                        "code": {
+                            "coding": [{"system": "http://snomed.info/sct", "code": "91936005", "display": "Penicillin allergy"}],
+                            "text": "Penicillin allergy",
+                        },
+                        "criticality": "high",
+                        "clinicalStatus": {
+                            "coding": [{"code": "active"}],
+                            "text": "Active",
+                        },
+                        "recordedDate": "2023-01-15",
+                    }
+                },
+            ],
+        }
+        import io
+        fhir_file = io.BytesIO(json.dumps(bundle).encode('utf-8'))
+        fhir_file.name = 'allergy_test.json'
+        resp = self.client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+        )
+        self.assertIn(resp.status_code, [200, 201], msg=f'Upload failed: {resp.data}')
+        # Find the person created by the upload
+        person = Person.objects.filter(family_name='AllergyTest').first()
+        self.assertIsNotNone(person, 'Person not created from allergy upload')
+        # Check that an ALLERGY-tagged observation was created
+        allergy_obs = Observation.objects.filter(
+            person=person, qualifier_source_value='ALLERGY',
+        )
+        self.assertGreater(allergy_obs.count(), 0, 'No ALLERGY-tagged observation created')
+        obs = allergy_obs.first()
+        self.assertEqual(obs.value_as_string, 'high')

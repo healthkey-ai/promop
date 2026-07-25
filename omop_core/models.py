@@ -2474,6 +2474,7 @@ class PatientDocument(models.Model):
         ('BONE_MARROW', 'Bone Marrow'),
         ('CONSENT', 'Consent'),
         ('IMAGING', 'Imaging'),
+        ('ADVANCE_DIRECTIVE', 'Advance Directive'),
         ('OTHER', 'Other'),
     ]
     person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='documents')

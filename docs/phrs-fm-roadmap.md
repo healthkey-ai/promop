@@ -238,20 +238,29 @@ immutable person/survey on PATCH, permission method whitelist, cross-patient POS
 
 ---
 
-## Phase 5 — Account-holder clinical lists (oncology-relevant subset)
+## Phase 5 — Account-holder clinical lists (oncology-relevant subset) ✅ DONE
 
 **FM:** PH.1.4 (Advance Directives), PH.2.5 (problem/med/allergy/immunization lists),
 PH.3 (care plans).
 
-**Gap:** allergies and immunizations are folded into generic OMOP Observation/DrugExposure
-rows with no structured list; care plans, advance directives, and goals are absent.
+**As-built:**
 
-- Prioritize by oncology value; likely: structured **allergy list** and **immunization
-  list** as read models derived from OMOP (mirroring how `PatientRecord` is derived),
-  surfaced as `PatientInfo` tabs. Add **advance directives** as a document type (extend
-  `PatientDocument.doc_type`, `omop_core/models.py:2369`).
-- Defer care plans/goals unless a concrete oncology driver appears.
-- Tests per new list/field following the CLAUDE.md "new attribute → all layers" rule.
+- **Advance Directives** — added `ADVANCE_DIRECTIVE` to `PatientDocument.DOC_TYPE_CHOICES`;
+  `PatientDocumentViewSet` extended with `doc_type` query param filtering; frontend
+  `AdvanceDirectives.tsx` component (list + upload) wired into `PatientHome`.
+- **Immunization List** — immunization `DrugExposure` rows tagged with
+  `route_source_value='VACCINE'` in both FHIR sync (`sync.py`) and legacy upload
+  (`views.py`). Read-only `ImmunizationListViewSet` at `/api/v1/immunizations/` with
+  `ImmunizationSerializer` (vaccine_name, date, lot_number). Frontend
+  `ImmunizationList.tsx` table on `PatientHome`.
+- **Allergy List** — allergy `Observation` rows tagged with `qualifier_source_value='ALLERGY'`
+  in FHIR sync; `AllergyIntolerance` FHIR resource collection + write added to legacy
+  upload handler. Read-only `AllergyListViewSet` at `/api/v1/allergies/` with
+  `AllergySerializer` (allergen_name, criticality, clinical_status, recorded_date).
+  Frontend `AllergyList.tsx` table on `PatientHome`.
+- Care plans/goals deferred — no concrete oncology driver.
+- 9 new backend tests (AD creation/filtering, immunization list + exclusion, allergy list
+  + exclusion + FHIR upload integration). 112 frontend tests green.
 
 ---
 

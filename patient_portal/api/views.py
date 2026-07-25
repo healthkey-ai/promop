@@ -70,6 +70,7 @@ from .serializers import (
     SurveySerializer, PatientSurveyResponseSerializer,
     PatientConsentSerializer,
     PatientMessageSerializer,
+    ImmunizationSerializer, AllergySerializer,
 )
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
@@ -830,6 +831,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         'medication_requests': [],
                         'immunizations': [],
                         'diagnostic_reports': [],
+                        'allergy_intolerances': [],
                         'encounters': [],
                     }
                     if patient_id:
@@ -886,6 +888,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     patient_id = _resolve_patient_ref(patient_ref)
                     if patient_id in patients_data:
                         patients_data[patient_id]['diagnostic_reports'].append(resource)
+                elif resource_type == 'AllergyIntolerance':
+                    patient_ref = resource.get('patient', {}).get('reference', '')
+                    patient_id = _resolve_patient_ref(patient_ref)
+                    if patient_id in patients_data:
+                        patients_data[patient_id]['allergy_intolerances'].append(resource)
                 elif resource_type == 'Encounter':
                     patient_ref = resource.get('subject', {}).get('reference', '')
                     patient_id = _resolve_patient_ref(patient_ref)
@@ -2713,7 +2720,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         for d in DrugExposure.objects.filter(person=person)
                     }
 
-                    def _write_drug_exposure(codeable, start_str, end_str=None, sig=None):
+                    def _write_drug_exposure(codeable, start_str, end_str=None, sig=None, route_source_value=None):
                         if not start_str:
                             return
                         try:
@@ -2752,6 +2759,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             drug_source_value=source_value,
                             drug_source_concept=drug_concept,
                             sig=(sig or '')[:255],
+                            route_source_value=route_source_value,
                         )
                         _de._skip_patient_record_refresh = True
                         _de.save()
@@ -2782,6 +2790,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _write_drug_exposure(
                             _immunization.get('vaccineCode'),
                             _immunization.get('occurrenceDateTime') or _immunization.get('recorded'),
+                            route_source_value='VACCINE',
                         )
 
                     logger.info(
@@ -2849,6 +2858,59 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         "TIMING patient=%s phase=diagnostic_reports elapsed=%.1fs count=%d",
                         _timing_hash, _time.monotonic() - _pt_start, len(data.get('diagnostic_reports', [])),
                     )
+
+                    # --- Write AllergyIntolerance rows into OMOP Observation ---
+                    # Tagged with qualifier_source_value='ALLERGY' for the allergy
+                    # list endpoint (PHR-S FM PH.2.5).
+                    for _allergy in data.get('allergy_intolerances', []):
+                        _allergy_date_str = _allergy.get('recordedDate') or _allergy.get('onsetDateTime')
+                        if not _allergy_date_str:
+                            continue
+                        try:
+                            _allergy_dt = datetime.fromisoformat(_allergy_date_str[:10])
+                        except (ValueError, TypeError):
+                            continue
+                        _allergy_date = _allergy_dt.date()
+                        _system, _code, _display = _coding_parts(_allergy.get('code'))
+                        _vocab = _vocab_from_system(_system)
+                        _allergy_concept = None
+                        if _code:
+                            if _vocab == 'LOINC':
+                                _allergy_concept = _cc_by_loinc(_code)
+                            else:
+                                _allergy_concept = _cc_by_vocab(_vocab, _code)
+                        if _allergy_concept is None:
+                            _allergy_concept = get_or_create_quarantine_observation(
+                                source_vocabulary_id=_vocab,
+                                concept_code=_code,
+                                concept_name=_display or 'FHIR AllergyIntolerance',
+                                source_system='fhir-upload',
+                            )
+                        _criticality = (_allergy.get('criticality') or '')[:60]
+                        _, _cs_code, _cs_display = _coding_parts(_allergy.get('clinicalStatus'))
+                        _clinical_status = (_cs_display or _cs_code or '')[:50]
+                        _allergy_source = (_code or _display or 'AllergyIntolerance')[:50]
+                        _allergy_key = (_allergy_source, _allergy_date, _criticality)
+                        if _allergy_key in _existing_report_keys:
+                            continue
+                        _obs = Observation(
+                            observation_id=next_pk(Observation, 'observation_id'),
+                            person=person,
+                            observation_concept=_allergy_concept,
+                            observation_date=_allergy_date,
+                            observation_datetime=timezone.make_aware(_allergy_dt) if _allergy_dt.tzinfo is None else _allergy_dt,
+                            observation_type_concept=_concept_ehr_type or _allergy_concept,
+                            value_as_string=_criticality,
+                            observation_source_value=_allergy_source,
+                            observation_source_concept=_allergy_concept,
+                            qualifier_source_value='ALLERGY',
+                            value_source_value=_clinical_status,
+                        )
+                        _obs._skip_patient_record_refresh = True
+                        _obs.save()
+                        _existing_report_keys.add(_allergy_key)
+                        if prov_source:
+                            _record_provenance(_obs, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
                     # --- Write ProcedureOccurrence records ---
                     _existing_proc_keys = {
@@ -4495,6 +4557,39 @@ class PatientDocumentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = PatientDocumentSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientDocument.objects.all()
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        doc_type = self.request.query_params.get('doc_type')
+        if doc_type:
+            qs = qs.filter(doc_type=doc_type)
+        return qs
+
+
+class ImmunizationListViewSet(_OmopFilterMixin, viewsets.ReadOnlyModelViewSet):
+    """Read-only list of immunization records (PHR-S FM PH.2.5).
+
+    Immunizations are stored as DrugExposure rows tagged with
+    route_source_value='VACCINE'. Filter by person: GET /v1/immunizations/?person_id=42
+    """
+    serializer_class = ImmunizationSerializer
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    queryset = DrugExposure.objects.filter(
+        route_source_value='VACCINE',
+    ).select_related('drug_concept')
+
+
+class AllergyListViewSet(_OmopFilterMixin, viewsets.ReadOnlyModelViewSet):
+    """Read-only list of allergy records (PHR-S FM PH.2.5).
+
+    Allergies are stored as Observation rows tagged with
+    qualifier_source_value='ALLERGY'. Filter by person: GET /v1/allergies/?person_id=42
+    """
+    serializer_class = AllergySerializer
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    queryset = Observation.objects.filter(
+        qualifier_source_value='ALLERGY',
+    ).select_related('observation_concept')
 
 
 class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):

@@ -5,6 +5,9 @@ import PatientDetail from "@/components/Patient/PatientDetail";
 import PatientConsents from "@/components/Patient/PatientConsents";
 import PatientSurveys from "@/components/Patient/PatientSurveys";
 import PatientMessages from "@/components/Patient/PatientMessages";
+import AdvanceDirectives from "@/components/Patient/AdvanceDirectives";
+import ImmunizationList from "@/components/Patient/ImmunizationList";
+import AllergyList from "@/components/Patient/AllergyList";
 import api from "@/api/axios";
 
 /**
@@ -87,6 +90,15 @@ export default function PatientHome({
       </div>
       <div className="mx-auto max-w-5xl px-6 py-4">
         <PatientMessages user={user} />
+      </div>
+      <div className="mx-auto max-w-5xl px-6 py-4">
+        <AllergyList user={user} />
+      </div>
+      <div className="mx-auto max-w-5xl px-6 py-4">
+        <ImmunizationList user={user} />
+      </div>
+      <div className="mx-auto max-w-5xl px-6 py-4">
+        <AdvanceDirectives user={user} />
       </div>
       <PatientDetail
         personIdOverride={String(user.person_id)}

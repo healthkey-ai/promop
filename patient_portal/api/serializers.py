@@ -610,3 +610,35 @@ class PatientMessageSerializer(serializers.ModelSerializer):
 
     # Cross-thread reply validation is in PatientMessageViewSet.perform_create
     # where the resolved patient_user is known (not in self.initial_data).
+
+
+class ImmunizationSerializer(serializers.ModelSerializer):
+    """Read-only serializer for immunization DrugExposure rows (route_source_value='VACCINE')."""
+    vaccine_name = serializers.SerializerMethodField()
+    date = serializers.DateField(source='drug_exposure_start_date')
+
+    class Meta:
+        model = DrugExposure
+        fields = ['drug_exposure_id', 'vaccine_name', 'date', 'lot_number']
+
+    def get_vaccine_name(self, obj):
+        if obj.drug_concept and obj.drug_concept.concept_name:
+            return obj.drug_concept.concept_name
+        return obj.drug_source_value or 'Unknown vaccine'
+
+
+class AllergySerializer(serializers.ModelSerializer):
+    """Read-only serializer for allergy Observation rows (qualifier_source_value='ALLERGY')."""
+    allergen_name = serializers.SerializerMethodField()
+    criticality = serializers.CharField(source='value_as_string', default='')
+    clinical_status = serializers.CharField(source='value_source_value', default='')
+    recorded_date = serializers.DateField(source='observation_date')
+
+    class Meta:
+        model = Observation
+        fields = ['observation_id', 'allergen_name', 'criticality', 'clinical_status', 'recorded_date']
+
+    def get_allergen_name(self, obj):
+        if obj.observation_concept and obj.observation_concept.concept_name:
+            return obj.observation_concept.concept_name
+        return obj.observation_source_value or 'Unknown allergen'
