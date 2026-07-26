@@ -30,7 +30,6 @@ from .serializers import PatientInvitationSerializer
 logger = logging.getLogger(__name__)
 
 INVITE_TTL_DAYS = 7
-MIN_PASSWORD_LENGTH = 8
 
 
 class PatientInvitationEmailError(Exception):
@@ -198,9 +197,11 @@ def accept_patient_invitation(request):
     if err is not None:
         return err
 
-    if len(password) < MIN_PASSWORD_LENGTH:
+    from patient_portal.services import password_validation_errors
+    pw_errors = password_validation_errors(password, email=invitation.email)
+    if pw_errors:
         return Response(
-            {'error': f'Password must be at least {MIN_PASSWORD_LENGTH} characters.'},
+            {'error': ' '.join(pw_errors)},
             status=status.HTTP_400_BAD_REQUEST,
         )
 

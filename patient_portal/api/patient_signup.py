@@ -33,8 +33,6 @@ from .permissions import ScopedTokenPermission, get_request_org, is_service_toke
 
 logger = logging.getLogger(__name__)
 
-MIN_PASSWORD_LENGTH = 8
-
 
 class PatientSignupView(APIView):
     permission_classes = [ScopedTokenPermission]
@@ -82,9 +80,11 @@ class PatientSignupView(APIView):
             return identity, None
 
         if email and password:
-            if len(password) < MIN_PASSWORD_LENGTH:
+            from patient_portal.services import password_validation_errors
+            pw_errors = password_validation_errors(password, email=email)
+            if pw_errors:
                 return None, Response(
-                    {'error': f'Password must be at least {MIN_PASSWORD_LENGTH} characters.'},
+                    {'error': ' '.join(pw_errors)},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             identity = (

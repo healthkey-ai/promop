@@ -12215,3 +12215,135 @@ class AuditRetentionTest(TestCase):
             self._run()
         self.assertFalse(AuditEvent.objects.filter(pk=old.pk).exists())
         self.assertTrue(AuditEvent.objects.filter(pk=recent.pk).exists())
+
+
+# ---------------------------------------------------------------------------
+# WS0 conformance fixes: password validators (#301) + proxy-auth render (#308)
+# ---------------------------------------------------------------------------
+
+class WS0PasswordValidationTest(TestCase):
+    """Self-service password-set paths enforce AUTH_PASSWORD_VALIDATORS (PHR-S FM TI.1.1#06, #301)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Organization
+        cls.org = Organization.objects.create(name='WS0 Org', slug='ws0-org')
+        cls.staff = Identity.objects.create_user(email='ws0-staff@test.com', password='pw', is_staff=True)
+        cls.person = Person.objects.create(person_id=93001, family_name='Doe', given_name='Ada')
+        PatientRecord.objects.create(person=cls.person, email='ws0pt@example.com')
+
+    def _staff(self):
+        c = APIClient()
+        c.force_authenticate(user=self.staff)
+        return c
+
+    # --- signup ---
+
+    def test_signup_rejects_common_password(self):
+        resp = self._staff().post('/api/v1/patients/signup/', {
+            'org': 'ws0-org', 'email': 'newpt@example.com', 'password': 'password',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_signup_rejects_all_numeric_password(self):
+        resp = self._staff().post('/api/v1/patients/signup/', {
+            'org': 'ws0-org', 'email': 'newpt2@example.com', 'password': '48815762',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_signup_accepts_strong_password(self):
+        resp = self._staff().post('/api/v1/patients/signup/', {
+            'org': 'ws0-org', 'email': 'strongpt@example.com', 'password': 'Zr7-quokka-vale',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+    # --- invite accept ---
+
+    def _make_invite(self):
+        self._staff().post(f'/api/v1/patients/{self.person.person_id}/invite/',
+                           {'email': 'ws0pt@example.com'}, format='json')
+        from patient_portal.models import PatientInvitation
+        return PatientInvitation.objects.get(person=self.person)
+
+    def test_invite_accept_rejects_common_password(self):
+        inv = self._make_invite()
+        resp = APIClient().post('/api/v1/patient-invitations/accept/',
+                                {'token': inv.token, 'password': 'password'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_invite_accept_accepts_strong_password(self):
+        inv = self._make_invite()
+        resp = APIClient().post('/api/v1/patient-invitations/accept/',
+                                {'token': inv.token, 'password': 'Zr7-quokka-vale'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+
+class PersonalRepresentativeApiTest(TestCase):
+    """Read-only proxy-authorization render endpoint (PHR-S FM PH.6.3#04, #308)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+        from omop_core.models import PersonalRepresentative
+
+        # Account holder A and their linked identity.
+        cls.person_a = Person.objects.create(person_id=94001, family_name='Alpha', given_name='Ann')
+        PatientRecord.objects.create(person=cls.person_a)
+        cls.holder_a = Identity.objects.create_user(email='holder-a@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.holder_a, person=cls.person_a)
+
+        # Unrelated account holder B.
+        cls.person_b = Person.objects.create(person_id=94002, family_name='Beta', given_name='Bob')
+        PatientRecord.objects.create(person=cls.person_b)
+        cls.holder_b = Identity.objects.create_user(email='holder-b@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.holder_b, person=cls.person_b)
+
+        # Representative R authorized over person A.
+        cls.rep = Identity.objects.create_user(email='rep@test.com', password='pw')
+        cls.grant = PersonalRepresentative.objects.create(
+            representative=cls.rep, person_id=cls.person_a.person_id,
+            relationship='caregiver', verification_status='VERIFIED',
+        )
+        cls.staff = Identity.objects.create_user(email='rep-staff@test.com', password='pw', is_staff=True)
+
+    def _as(self, identity):
+        c = APIClient()
+        if identity is not None:
+            c.force_authenticate(user=identity)
+        return c
+
+    def _rows(self, resp):
+        return resp.data['results'] if isinstance(resp.data, dict) and 'results' in resp.data else resp.data
+
+    def test_account_holder_sees_grants_over_own_record(self):
+        resp = self._as(self.holder_a).get('/api/v1/personal-representatives/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        rows = self._rows(resp)
+        self.assertEqual([r['id'] for r in rows], [self.grant.id])
+
+    def test_representative_sees_own_grant(self):
+        resp = self._as(self.rep).get('/api/v1/personal-representatives/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        rows = self._rows(resp)
+        self.assertEqual([r['id'] for r in rows], [self.grant.id])
+        self.assertEqual(rows[0]['representative_email'], 'rep@test.com')
+
+    def test_unrelated_holder_sees_nothing(self):
+        resp = self._as(self.holder_b).get('/api/v1/personal-representatives/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(self._rows(resp)), 0)
+
+    def test_staff_sees_all(self):
+        resp = self._as(self.staff).get('/api/v1/personal-representatives/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertGreaterEqual(len(self._rows(resp)), 1)
+
+    def test_unauthenticated_denied(self):
+        resp = self._as(None).get('/api/v1/personal-representatives/')
+        self.assertIn(resp.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_endpoint_is_read_only(self):
+        resp = self._as(self.staff).post('/api/v1/personal-representatives/', {
+            'representative': self.rep.pk, 'person_id': self.person_b.person_id, 'relationship': 'other',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
