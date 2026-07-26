@@ -2800,7 +2800,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
                     # --- Write DiagnosticReport rows into OMOP Observation ---
                     _existing_report_keys = {
-                        (o.observation_source_value, o.observation_date, o.value_as_string)
+                        (o.observation_source_value, o.observation_date, o.value_as_string, o.qualifier_source_value)
                         for o in Observation.objects.filter(person=person)
                     }
                     for _report in data.get('diagnostic_reports', []):
@@ -2834,7 +2834,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             )
                         _value = (_report.get('conclusion') or _display or 'Diagnostic report')[:60]
                         _source = (_code or _display or 'DiagnosticReport')[:50]
-                        _report_key = (_source, _report_date, _value)
+                        _report_key = (_source, _report_date, _value, None)
                         if _report_key in _existing_report_keys:
                             continue
                         _obs = Observation(
@@ -2890,7 +2890,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _, _cs_code, _cs_display = _coding_parts(_allergy.get('clinicalStatus'))
                         _clinical_status = (_cs_display or _cs_code or '')[:50]
                         _allergy_source = (_code or _display or 'AllergyIntolerance')[:50]
-                        _allergy_key = (_allergy_source, _allergy_date, _criticality)
+                        _allergy_key = (_allergy_source, _allergy_date, _criticality, 'ALLERGY')
                         if _allergy_key in _existing_report_keys:
                             continue
                         _obs = Observation(
@@ -4574,6 +4574,7 @@ class ImmunizationListViewSet(_OmopFilterMixin, viewsets.ReadOnlyModelViewSet):
     """
     serializer_class = ImmunizationSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    pagination_class = PatientRecordPagination
     queryset = DrugExposure.objects.filter(
         route_source_value='VACCINE',
     ).select_related('drug_concept')
@@ -4587,6 +4588,7 @@ class AllergyListViewSet(_OmopFilterMixin, viewsets.ReadOnlyModelViewSet):
     """
     serializer_class = AllergySerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    pagination_class = PatientRecordPagination
     queryset = Observation.objects.filter(
         qualifier_source_value='ALLERGY',
     ).select_related('observation_concept')

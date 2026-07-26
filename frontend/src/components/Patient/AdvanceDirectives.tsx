@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { AlertCircle, FileText, Upload } from "lucide-react";
 import type { User } from "@/hooks/useAuth";
 import api from "@/api/axios";
+import { formatDate } from "@/utils/date";
 
 interface Document {
   id: number;
@@ -11,19 +12,6 @@ interface Document {
   file_name: string | null;
   verified: boolean;
   uploaded_at: string;
-}
-
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "";
-  try {
-    return new Date(dateStr).toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  } catch {
-    return dateStr;
-  }
 }
 
 export default function AdvanceDirectives({ user }: { user: User | null }) {
@@ -38,7 +26,7 @@ export default function AdvanceDirectives({ user }: { user: User | null }) {
     setError(null);
     try {
       const res = await api.get("/v1/documents/", {
-        params: { doc_type: "ADVANCE_DIRECTIVE" },
+        params: { doc_type: "ADVANCE_DIRECTIVE", person_id: user!.person_id },
       });
       setDocuments(Array.isArray(res.data) ? res.data : res.data.results ?? []);
     } catch {

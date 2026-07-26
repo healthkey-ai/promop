@@ -544,7 +544,7 @@ class FhirSyncView(APIView):
         items = [
             {'code': a.get('code'),
              'effective': a.get('recordedDate') or a.get('onsetDateTime'),
-             'value': a.get('criticality') or _source_text(a.get('clinicalStatus')),
+             'value': a.get('criticality') or '',
              'qualifier': 'ALLERGY',
              'value_source': _source_text(a.get('clinicalStatus'))[:50]}
             for a in allergies

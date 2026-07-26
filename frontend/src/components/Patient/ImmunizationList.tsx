@@ -2,25 +2,13 @@ import { useState, useEffect, useCallback } from "react";
 import { AlertCircle, Syringe } from "lucide-react";
 import type { User } from "@/hooks/useAuth";
 import api from "@/api/axios";
+import { formatDate } from "@/utils/date";
 
 interface Immunization {
   drug_exposure_id: number;
   vaccine_name: string;
   date: string | null;
   lot_number: string | null;
-}
-
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "";
-  try {
-    return new Date(dateStr).toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  } catch {
-    return dateStr;
-  }
 }
 
 export default function ImmunizationList({ user }: { user: User | null }) {
@@ -32,7 +20,9 @@ export default function ImmunizationList({ user }: { user: User | null }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.get("/v1/immunizations/");
+      const res = await api.get("/v1/immunizations/", {
+        params: { person_id: user!.person_id },
+      });
       setImmunizations(Array.isArray(res.data) ? res.data : res.data.results ?? []);
     } catch {
       setError("Failed to load immunization records.");

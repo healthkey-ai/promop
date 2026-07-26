@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { AlertCircle, ShieldAlert } from "lucide-react";
 import type { User } from "@/hooks/useAuth";
 import api from "@/api/axios";
+import { formatDate } from "@/utils/date";
 
 interface Allergy {
   observation_id: number;
@@ -17,19 +18,6 @@ const CRITICALITY_STYLES: Record<string, string> = {
   "unable-to-assess": "bg-gray-100 text-gray-700",
 };
 
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "";
-  try {
-    return new Date(dateStr).toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  } catch {
-    return dateStr;
-  }
-}
-
 export default function AllergyList({ user }: { user: User | null }) {
   const [allergies, setAllergies] = useState<Allergy[]>([]);
   const [loading, setLoading] = useState(true);
@@ -39,7 +27,9 @@ export default function AllergyList({ user }: { user: User | null }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.get("/v1/allergies/");
+      const res = await api.get("/v1/allergies/", {
+        params: { person_id: user!.person_id },
+      });
       setAllergies(Array.isArray(res.data) ? res.data : res.data.results ?? []);
     } catch {
       setError("Failed to load allergy records.");
