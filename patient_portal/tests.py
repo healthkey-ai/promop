@@ -12085,3 +12085,133 @@ class AllergyListTest(TestCase):
         self.assertGreater(allergy_obs.count(), 0, 'No ALLERGY-tagged observation created')
         obs = allergy_obs.first()
         self.assertEqual(obs.value_as_string, 'high')
+
+
+class AuditRetentionTest(TestCase):
+    """prune_audit_events management command — HL7 PHR-S FM TI.2.2.
+
+    Verifies retention-window pruning: old rows deleted, newer rows kept,
+    --dry-run is a no-op, --days overrides the setting, --archive writes JSONL
+    before deleting, and batching handles more rows than the batch size.
+    """
+
+    def _make_event(self, days_ago, **kwargs):
+        from patient_portal.models import AuditEvent
+        ts = timezone.now() - timedelta(days=days_ago)
+        defaults = dict(
+            event_type=AuditEvent.EVENT_VIEW,
+            method='GET',
+            path='/api/v1/patient-records/',
+            status_code=200,
+        )
+        defaults.update(kwargs)
+        return AuditEvent.objects.create(timestamp=ts, **defaults)
+
+    def _run(self, **opts):
+        from django.core.management import call_command
+        out = io.StringIO()
+        call_command('prune_audit_events', stdout=out, **opts)
+        return out.getvalue()
+
+    def test_deletes_older_and_keeps_newer(self):
+        from patient_portal.models import AuditEvent
+        old = self._make_event(days_ago=3000)
+        recent = self._make_event(days_ago=10)
+        self._run(days=2190)
+        self.assertFalse(AuditEvent.objects.filter(pk=old.pk).exists())
+        self.assertTrue(AuditEvent.objects.filter(pk=recent.pk).exists())
+
+    def test_boundary_row_just_inside_window_is_kept(self):
+        from patient_portal.models import AuditEvent
+        # 100 days ago, window 200 days -> not older than cutoff -> kept.
+        row = self._make_event(days_ago=100)
+        self._run(days=200)
+        self.assertTrue(AuditEvent.objects.filter(pk=row.pk).exists())
+
+    def test_dry_run_deletes_nothing(self):
+        from patient_portal.models import AuditEvent
+        old = self._make_event(days_ago=3000)
+        out = self._run(days=2190, dry_run=True)
+        self.assertTrue(AuditEvent.objects.filter(pk=old.pk).exists())
+        self.assertIn('Dry run', out)
+
+    def test_days_override(self):
+        from patient_portal.models import AuditEvent
+        # 400 days old; default 2190 would keep it, but --days 365 prunes it.
+        old = self._make_event(days_ago=400)
+        self._run(days=365)
+        self.assertFalse(AuditEvent.objects.filter(pk=old.pk).exists())
+
+    def test_empty_table_is_noop(self):
+        from patient_portal.models import AuditEvent
+        self.assertEqual(AuditEvent.objects.count(), 0)
+        out = self._run(days=2190)
+        self.assertIn('Nothing to prune', out)
+
+    def test_all_newer_keeps_everything(self):
+        from patient_portal.models import AuditEvent
+        for _ in range(5):
+            self._make_event(days_ago=1)
+        self._run(days=30)
+        self.assertEqual(AuditEvent.objects.count(), 5)
+
+    def test_archive_writes_jsonl_then_deletes(self):
+        from patient_portal.models import AuditEvent
+        e1 = self._make_event(days_ago=3000, user_id='42', user_email='a@example.org',
+                              detail={'note': 'x'})
+        e2 = self._make_event(days_ago=2500, resource_id='rec-1')
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = os.path.join(tmpdir, 'audit-archive.jsonl')
+            self._run(days=2190, archive=archive_path)
+            with open(archive_path, encoding='utf-8') as fh:
+                lines = [line for line in fh.read().splitlines() if line]
+        self.assertEqual(len(lines), 2)
+        records = [json.loads(line) for line in lines]
+        ids = {r['id'] for r in records}
+        self.assertEqual(ids, {e1.pk, e2.pk})
+        # timestamp serialized as ISO string
+        for r in records:
+            self.assertIsInstance(r['timestamp'], str)
+            self.assertIn('T', r['timestamp'])
+        # rows actually deleted
+        self.assertFalse(AuditEvent.objects.filter(pk__in=[e1.pk, e2.pk]).exists())
+
+    def test_archive_only_contains_matched_rows(self):
+        from patient_portal.models import AuditEvent
+        old = self._make_event(days_ago=3000)
+        recent = self._make_event(days_ago=5)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = os.path.join(tmpdir, 'a.jsonl')
+            self._run(days=2190, archive=archive_path)
+            with open(archive_path, encoding='utf-8') as fh:
+                records = [json.loads(line) for line in fh.read().splitlines() if line]
+        self.assertEqual({r['id'] for r in records}, {old.pk})
+        self.assertTrue(AuditEvent.objects.filter(pk=recent.pk).exists())
+
+    def test_batching_handles_more_than_batch_size(self):
+        from patient_portal.models import AuditEvent
+        for _ in range(7):
+            self._make_event(days_ago=3000)
+        self._run(days=2190, batch_size=2)
+        self.assertEqual(AuditEvent.objects.count(), 0)
+
+    def test_batching_with_archive_captures_all_rows(self):
+        from patient_portal.models import AuditEvent
+        created = [self._make_event(days_ago=3000).pk for _ in range(5)]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = os.path.join(tmpdir, 'a.jsonl')
+            self._run(days=2190, batch_size=2, archive=archive_path)
+            with open(archive_path, encoding='utf-8') as fh:
+                records = [json.loads(line) for line in fh.read().splitlines() if line]
+        self.assertEqual({r['id'] for r in records}, set(created))
+        self.assertEqual(AuditEvent.objects.count(), 0)
+
+    def test_uses_settings_default_when_no_days(self):
+        from django.test import override_settings
+        from patient_portal.models import AuditEvent
+        old = self._make_event(days_ago=400)
+        recent = self._make_event(days_ago=100)
+        with override_settings(AUDIT_EVENT_RETENTION_DAYS=200):
+            self._run()
+        self.assertFalse(AuditEvent.objects.filter(pk=old.pk).exists())
+        self.assertTrue(AuditEvent.objects.filter(pk=recent.pk).exists())

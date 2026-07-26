@@ -152,6 +152,14 @@ LOGGING = {
     },
 }
 
+# Audit-event retention (HL7 PHR-S FM TI.2.2 — Audit Log Management).
+# AuditEvent rows older than this many days are eligible for pruning by the
+# `prune_audit_events` management command (typically run as a scheduled job).
+# Default 2190 days (~6 years): a common minimum retention for healthcare audit
+# logs (e.g. HIPAA record-retention practice). Override per-deployment via the
+# AUDIT_EVENT_RETENTION_DAYS env var, or per-run via `--days N`.
+AUDIT_EVENT_RETENTION_DAYS = int(os.environ.get('AUDIT_EVENT_RETENTION_DAYS', '2190'))
+
 ROOT_URLCONF = 'ctomop.urls'
 
 TEMPLATES = [

@@ -282,9 +282,9 @@ all, patients see only their own — filterable by `event_type` / `method` / `us
 
 ## Cross-cutting
 
-- **FM traceability:** maintain a short mapping of each shipped capability to its FM
-  function ID (PH.1.x, etc.) so scope stays visible and a future conformance pass has a
-  starting point.
+- **FM traceability:** ✅ done — see [`phrs-fm-traceability.md`](phrs-fm-traceability.md),
+  the capability-to-FM-function-ID mapping (PH.1.x, TI.2.x, etc.). Keep it current as
+  capabilities land so scope stays visible and a future conformance pass has a starting point.
 
 ## Verification (per phase)
 
