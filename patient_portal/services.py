@@ -3,15 +3,35 @@ from __future__ import annotations
 
 import logging
 
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
 from omop_core.models import GroupAccess, PatientRecord, Person
 from omop_core.services.pk import next_pk
-from patient_portal.models import PatientUser
+from patient_portal.models import Identity, PatientUser
 
 logger = logging.getLogger(__name__)
+
+
+def password_validation_errors(password, email=None):
+    """Return a list of validation-error messages for a proposed password.
+
+    Empty list means the password satisfies the project's AUTH_PASSWORD_VALIDATORS
+    (minimum length, not-common, not-all-numeric, not-similar-to-email). Self-service
+    password-set paths (signup, invite accept) MUST call this — Django does not run the
+    validators automatically on set_password()/create_user() (PHR-S FM TI.1.1#06).
+    """
+    # A transient (unsaved) Identity lets UserAttributeSimilarityValidator compare the
+    # password against the email without needing the account to exist yet.
+    user = Identity(email=email) if email else None
+    try:
+        validate_password(password, user=user)
+    except ValidationError as exc:
+        return list(exc.messages)
+    return []
 
 
 def patient_person_for(identity):
