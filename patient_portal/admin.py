@@ -10,7 +10,7 @@ class IdentityAdmin(UserAdmin):
     search_fields = ['email', 'name', 'sub']
     ordering = ['email']
     readonly_fields = ['uid', 'issuer', 'sub', 'created_at']
-    actions = ['grant_premium', 'revoke_premium']
+    actions = ['grant_premium', 'revoke_premium', 'reset_password']
 
     fieldsets = (
         (None,          {'fields': ('uid', 'issuer', 'sub', 'email', 'name')}),
@@ -28,6 +28,24 @@ class IdentityAdmin(UserAdmin):
     def revoke_premium(self, request, queryset):
         updated = queryset.update(is_premium=False)
         self.message_user(request, f'Revoked Premium from {updated} user(s).')
+
+    @admin.action(description='Email password reset link')
+    def reset_password(self, request, queryset):
+        """Administrative password reset (PHR-S FM TI.1.1#08): email each selected
+        account a single-use reset link (via the configured Mailgun/anymail backend).
+        No password is set or emailed — the user chooses their own via the link."""
+        from django.contrib import messages
+        from patient_portal.api.password_reset import send_password_reset_email, PasswordResetEmailError
+        sent, failed = 0, []
+        for identity in queryset:
+            try:
+                send_password_reset_email(identity)
+                sent += 1
+            except PasswordResetEmailError:
+                failed.append(identity.email or str(identity))
+        self.message_user(request, f'Sent {sent} password-reset email(s).')
+        if failed:
+            self.message_user(request, f'Could not email: {", ".join(failed)}', level=messages.WARNING)
 
 @admin.register(PatientMessage)
 class PatientMessageAdmin(admin.ModelAdmin):

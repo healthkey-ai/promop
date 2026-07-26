@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     CurrentUserViewSet, PatientRecordViewSet, login_view, logout_view, auth_test,
+    change_password,
     PersonViewSet,
     ConditionOccurrenceViewSet, DrugExposureViewSet, MeasurementViewSet,
     ObservationViewSet, ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
@@ -30,6 +31,7 @@ from .patient_invitations import (
 from .patient_signup import PatientSignupView
 from .audit_views import AuditEventViewSet
 from .representatives import PersonalRepresentativeViewSet
+from .password_reset import reset_password
 
 router = DefaultRouter()
 
@@ -58,6 +60,8 @@ urlpatterns = [
     path('', include(router.urls)),
     path('auth/login/', login_view, name='v1-login'),
     path('auth/logout/', logout_view, name='v1-logout'),
+    path('auth/change-password/', change_password, name='v1-change-password'),
+    path('auth/reset-password/', reset_password, name='v1-reset-password'),
     path('auth/test/', auth_test, name='v1-auth-test'),
     path('patients/signup/', PatientSignupView.as_view(), name='v1-patient-signup'),
     path('patients/<int:person_id>/invite/', PatientInviteView.as_view(), name='v1-patient-invite'),

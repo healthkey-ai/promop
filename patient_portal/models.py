@@ -61,7 +61,21 @@ class Identity(AbstractBaseUser, PermissionsMixin):
     is_premium = models.BooleanField(default=False, help_text="Grants premium-tier feature access (e.g. data export) across all connected apps.")
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # Authentication-policy state (PHR-S FM TI.1.1). Applies to local
+    # (email/password) accounts; OIDC/service identities carry an unusable password.
+    must_change_password = models.BooleanField(
+        default=False, help_text="Force a password change on next successful login (e.g. after an admin reset).",
+    )
+    failed_login_count = models.PositiveIntegerField(default=0)
+    locked_until = models.DateTimeField(
+        null=True, blank=True, help_text="If set and in the future, local logins are refused (lockout).",
+    )
+
     objects = IdentityManager()
+
+    @property
+    def is_locked(self) -> bool:
+        return bool(self.locked_until and self.locked_until > timezone.now())
 
     USERNAME_FIELD = "uid"
     REQUIRED_FIELDS = ["email"]
@@ -94,6 +108,24 @@ class Identity(AbstractBaseUser, PermissionsMixin):
         if self.email:
             return self.email
         return f"{self.issuer}|{self.sub}"
+
+
+class PasswordHistory(models.Model):
+    """Prior password hashes for an Identity, to enforce no-reuse policy
+    (PHR-S FM TI.1.1#04 time-based and #05 count-based reuse limits)."""
+    identity = models.ForeignKey(
+        Identity, on_delete=models.CASCADE, related_name='password_history',
+    )
+    password = models.CharField(max_length=128)  # the hashed password
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'password_history'
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['identity', '-created_at'], name='pwhist_identity_ts_idx')]
+
+    def __str__(self):
+        return f"PasswordHistory({self.identity_id} @ {self.created_at:%Y-%m-%d})"
 
 
 class PatientUser(models.Model):

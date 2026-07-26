@@ -26,7 +26,9 @@ class UserSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'sub', 'email', 'name', 'is_staff', 'is_superuser',
             'is_org_admin', 'org_accesses', 'is_patient', 'person_id',
+            'must_change_password',
         ]
+        read_only_fields = ['must_change_password']
 
     def _patient_person(self, obj):
         """Memoized patient-record lookup so is_patient/person_id share one query."""
