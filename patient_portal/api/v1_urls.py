@@ -17,6 +17,7 @@ from .views import (
     concept_ancestors, concept_descendants, concept_graph_batch,
     concept_synonyms, concept_synonym_search,
     org_disease_stats,
+    InterchangeAgreementViewSet,
 )
 from .org_views import (
     OrgListCreateView, OrgDetailView,
@@ -56,6 +57,7 @@ router.register(r'immunizations', ImmunizationListViewSet, basename='v1-immuniza
 router.register(r'allergies', AllergyListViewSet, basename='v1-allergies')
 router.register(r'audit-events', AuditEventViewSet, basename='v1-audit-events')
 router.register(r'personal-representatives', PersonalRepresentativeViewSet, basename='v1-personal-representatives')
+router.register(r'interchange-agreements', InterchangeAgreementViewSet, basename='v1-interchange-agreements')
 
 urlpatterns = [
     path('', include(router.urls)),

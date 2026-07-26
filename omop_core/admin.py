@@ -1,6 +1,7 @@
 from django.contrib import admin
 from .models import (
-    Person, PatientRecord, Concept, Vocabulary, Domain, ConceptClass
+    Person, PatientRecord, Concept, Vocabulary, Domain, ConceptClass,
+    InterchangeAgreement,
 )
 
 @admin.register(Person)
@@ -41,3 +42,14 @@ class DomainAdmin(admin.ModelAdmin):
 class ConceptClassAdmin(admin.ModelAdmin):
     list_display = ['concept_class_id', 'concept_class_name']
     search_fields = ['concept_class_id', 'concept_class_name']
+
+
+@admin.register(InterchangeAgreement)
+class InterchangeAgreementAdmin(admin.ModelAdmin):
+    list_display = [
+        'partner_name', 'status', 'active',
+        'effective_date', 'expiry_date', 'updated_at',
+    ]
+    search_fields = ['partner_name']
+    list_filter = ['status', 'active', 'effective_date']
+    readonly_fields = ['created_at', 'updated_at']
