@@ -4495,7 +4495,14 @@ def vocab_release_latest(request):
     if '*' in client_tags or etag in client_tags:
         return Response(status=status.HTTP_304_NOT_MODIFIED, headers={'ETag': etag})
     body = _serialize_release(release)
-    return _stamp_release(Response(body, headers={'ETag': etag}), body=body)
+    # Stamp from the release fetched above — not _stamp_release(), which
+    # re-queries current_release_id() and could disagree with the ETag/body
+    # if a publish lands between the two queries.
+    body['vocabulary_release'] = release.release_id
+    return Response(
+        body,
+        headers={'ETag': etag, 'X-Vocabulary-Release': release.release_id},
+    )
 
 
 @api_view(['GET'])

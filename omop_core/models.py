@@ -6,6 +6,7 @@ from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db.models.functions import Upper
+from django.utils import timezone
 
 
 class ProvenanceRecord(models.Model):
@@ -1427,7 +1428,10 @@ class VocabRelease(models.Model):
         default=dict, blank=True,
         help_text="{table_name: row count} at publish time",
     )
-    build_started_at = models.DateTimeField(auto_now_add=True)
+    # default= (not auto_now_add) so publish_release can stamp the moment the
+    # build actually started — auto_now_add would record row creation, i.e.
+    # the END of the build once a before_publish callback applies mutations.
+    build_started_at = models.DateTimeField(default=timezone.now)
     published_at = models.DateTimeField(null=True, blank=True)
     notes = models.TextField(blank=True, default='')
 

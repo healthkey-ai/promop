@@ -7152,6 +7152,16 @@ class VocabReleaseApiTest(_ConceptFixtureBase):
         self.assertEqual(resp.content, b'')
         self.assertEqual(resp['ETag'], f'"{self.newer.release_id}"')
 
+    def test_latest_if_none_match_weak_tag_returns_304(self):
+        """RFC 7232 weak comparison: a W/ prefix still matches the strong tag."""
+        resp = self.client.get(
+            self.URL_LATEST,
+            HTTP_IF_NONE_MATCH=f'W/"{self.newer.release_id}"',
+            **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_304_NOT_MODIFIED)
+        self.assertEqual(resp['ETag'], f'"{self.newer.release_id}"')
+
     def test_latest_if_none_match_star_returns_304(self):
         resp = self.client.get(
             self.URL_LATEST, HTTP_IF_NONE_MATCH='*', **self._auth(),
@@ -7239,12 +7249,29 @@ class ConceptSynonymsApiTest(_ConceptFixtureBase):
         return f'/api/v1/concepts/{concept_id}/synonyms/'
 
     def test_synonyms_shape(self):
+        # A published release must exist: production responses are stamped
+        # with vocabulary_release (body + header), and the exact-key
+        # assertions below pin that contract — without a release the stamped
+        # keys silently vanish and the test would document a shape consumers
+        # never see.
+        from django.utils import timezone as tz
+        from omop_core.models import VocabRelease
+        release = VocabRelease.objects.create(
+            release_id='rel-20210101-cccccc',
+            status=VocabRelease.STATUS_PUBLISHED,
+            published_at=tz.now(),
+        )
         resp = self.client.get(self._url(self.creatinine_serum.concept_id), **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         payload = resp.json()
         # Shipped consumer contract (promop#239): unpaginated, rows carry only
         # the synonym name + language.
-        self.assertEqual(set(payload.keys()), {'concept_id', 'count', 'results'})
+        self.assertEqual(
+            set(payload.keys()),
+            {'concept_id', 'count', 'results', 'vocabulary_release'},
+        )
+        self.assertEqual(payload['vocabulary_release'], release.release_id)
+        self.assertEqual(resp['X-Vocabulary-Release'], release.release_id)
         self.assertEqual(payload['concept_id'], self.creatinine_serum.concept_id)
         self.assertEqual(payload['count'], 2)
         names = {r['concept_synonym_name'] for r in payload['results']}

@@ -153,6 +153,7 @@ def publish_release(*, notes=''):
     Returns the new VocabRelease (status='published').  Prior releases remain
     published for history; ``current_release()`` always points at the newest.
     """
+    started = timezone.now()
     with transaction.atomic():
         _set_repeatable_read()
         checksums, counts = compute_table_checksums()
@@ -169,5 +170,6 @@ def publish_release(*, notes=''):
             table_checksums=checksums,
             row_counts=counts,
             notes=notes,
+            build_started_at=started,
             published_at=timezone.now(),
         )
