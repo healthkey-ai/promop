@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import Identity, PatientMessage, PatientConsent, PatientInvitation, AuditEvent
+from .models import Identity, PatientMessage, PatientConsent, PatientInvitation, AuditEvent, BreakGlassGrant
 
 
 @admin.register(Identity)
@@ -91,4 +91,22 @@ class AuditEventAdmin(admin.ModelAdmin):
         return False  # audit rows are written only by the middleware
 
     def has_change_permission(self, request, obj=None):
-        return False  # immutable audit trail
+        return False  # immutable audit trail (TI.2.2.1)
+
+    def has_delete_permission(self, request, obj=None):
+        return False  # indelible via admin; deletion only through the audited retention job
+
+
+@admin.register(BreakGlassGrant)
+class BreakGlassGrantAdmin(admin.ModelAdmin):
+    """Review emergency-access authorizations (PHR-S FM TI.2.3#04)."""
+    list_display = ['created_at', 'identity', 'person_id', 'expires_at', 'reason']
+    list_filter = ['created_at']
+    search_fields = ['identity__email', 'person_id', 'reason']
+    readonly_fields = [f.name for f in BreakGlassGrant._meta.fields]
+
+    def has_add_permission(self, request):
+        return False  # grants are created only via the break-glass endpoint
+
+    def has_change_permission(self, request, obj=None):
+        return False  # immutable record of the emergency authorization

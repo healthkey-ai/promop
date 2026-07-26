@@ -107,9 +107,20 @@ class AuditEventViewSet(viewsets.ReadOnlyModelViewSet):
         request = self.request
         qs = AuditEvent.objects.all()
 
-        # Non-privileged callers are hard-scoped to their own events.
+        # Non-privileged callers see their own events, plus — under an active
+        # break-glass grant (TI.2.3#04) — the audited access to that patient's
+        # records (events whose resource_id is the granted person_id).
         if not self._is_privileged():
-            qs = qs.filter(user_id=str(request.user.pk))
+            from django.db.models import Q
+            from patient_portal.models import BreakGlassGrant
+            scope = Q(user_id=str(request.user.pk))
+            granted = BreakGlassGrant.objects.filter(
+                identity=request.user, expires_at__gt=timezone.now(),
+            ).values_list('person_id', flat=True)
+            granted_ids = [str(p) for p in granted]
+            if granted_ids:
+                scope |= Q(resource_id__in=granted_ids)
+            qs = qs.filter(scope)
 
         params = request.query_params
         event_type = params.get('event_type')

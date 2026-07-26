@@ -12601,3 +12601,115 @@ class AuditStandardsTest(TestCase):
         self.assertEqual(sys_events.count(), 1)
         self.assertGreaterEqual(sys_events.first().detail['deleted'], 1)
         self.assertEqual(sys_events.first().user_id, 'system')
+
+
+# ---------------------------------------------------------------------------
+# #304 — audit indelibility / tamper-evidence (TI.2.2.1) + break-glass (TI.2.3#04)
+# ---------------------------------------------------------------------------
+
+class AuditIndelibilityTest(TestCase):
+    """Per-row HMAC tamper-evidence + verify command + delete restriction."""
+
+    def _mk(self, **kw):
+        from patient_portal.models import AuditEvent
+        d = dict(event_type='record_view', method='GET', path='/api/x/', status_code=200)
+        d.update(kw)
+        return AuditEvent.objects.create(**d)
+
+    def test_new_event_is_signed_and_valid(self):
+        row = self._mk()
+        self.assertTrue(row.signature)
+        self.assertTrue(row.signature_valid())
+
+    def test_tampering_breaks_signature(self):
+        from patient_portal.models import AuditEvent
+        row = self._mk(path='/api/original/')
+        AuditEvent.objects.filter(pk=row.pk).update(path='/api/HACKED/')  # bypasses save()
+        row.refresh_from_db()
+        self.assertFalse(row.signature_valid())
+
+    def test_verify_command_passes_when_clean(self):
+        from django.core.management import call_command
+        self._mk()
+        self._mk()
+        call_command('verify_audit_integrity')  # must not raise
+
+    def test_verify_command_detects_tampering(self):
+        from django.core.management import call_command
+        from patient_portal.models import AuditEvent
+        row = self._mk()
+        AuditEvent.objects.filter(pk=row.pk).update(status_code=500)  # tamper, signature untouched
+        with self.assertRaises(SystemExit):
+            call_command('verify_audit_integrity')
+
+    def test_admin_delete_is_denied(self):
+        from django.contrib.admin.sites import AdminSite
+        from patient_portal.admin import AuditEventAdmin
+        from patient_portal.models import AuditEvent
+        admin_obj = AuditEventAdmin(AuditEvent, AdminSite())
+        self.assertFalse(admin_obj.has_delete_permission(None))
+        self.assertFalse(admin_obj.has_change_permission(None))
+
+
+class BreakGlassTest(TestCase):
+    """Emergency-access authorization for audit review (TI.2.3#04)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Organization, GroupAccess
+        from patient_portal.models import PatientUser
+        cls.org = Organization.objects.create(name='BG Org', slug='bg-org')
+        cls.org_admin = Identity.objects.create_user(email='bg-admin@test.com', password='pw')
+        GroupAccess.objects.create(identity=cls.org_admin, org=cls.org, role='org_admin')
+        cls.person = Person.objects.create(person_id=96001)
+        cls.patient = Identity.objects.create_user(email='bg-patient@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.patient, person=cls.person)
+
+    def _c(self, ident):
+        c = APIClient()
+        c.force_authenticate(user=ident)
+        return c
+
+    def _rows(self, resp):
+        return resp.data['results'] if isinstance(resp.data, dict) and 'results' in resp.data else resp.data
+
+    def test_patient_cannot_break_glass(self):
+        resp = self._c(self.patient).post('/api/v1/break-glass/',
+                                          {'person_id': 96001, 'reason': 'x'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_break_glass_requires_reason(self):
+        resp = self._c(self.org_admin).post('/api/v1/break-glass/', {'person_id': 96001}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_break_glass_creates_grant_with_reason(self):
+        from patient_portal.models import BreakGlassGrant
+        resp = self._c(self.org_admin).post('/api/v1/break-glass/',
+                                            {'person_id': 96001, 'reason': 'ED admission'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        grant = BreakGlassGrant.objects.get(identity=self.org_admin, person_id=96001)
+        self.assertEqual(grant.reason, 'ED admission')
+        self.assertTrue(grant.is_active)
+
+    def test_break_glass_grants_audit_visibility(self):
+        from patient_portal.models import AuditEvent, BreakGlassGrant
+        from datetime import timedelta
+        from django.utils import timezone as tz
+        # An audit entry about the patient's record, recorded for someone else.
+        AuditEvent.objects.create(
+            event_type='record_view', method='GET', path='/api/patient-info/96001/',
+            status_code=200, user_id='99999', resource_id='96001',
+        )
+        # Before break-glass: the org_admin (non-privileged for audit) sees none of it.
+        before = self._rows(self._c(self.org_admin).get('/api/v1/audit-events/'))
+        self.assertNotIn('96001', {r['resource_id'] for r in before})
+        # Break glass, then the patient's audit entry becomes visible.
+        self._c(self.org_admin).post('/api/v1/break-glass/',
+                                     {'person_id': 96001, 'reason': 'emergency'}, format='json')
+        after = self._rows(self._c(self.org_admin).get('/api/v1/audit-events/'))
+        self.assertIn('96001', {r['resource_id'] for r in after})
+        # Once the grant expires, visibility is revoked.
+        BreakGlassGrant.objects.filter(identity=self.org_admin, person_id=96001).update(
+            expires_at=tz.now() - timedelta(seconds=1))
+        expired = self._rows(self._c(self.org_admin).get('/api/v1/audit-events/'))
+        self.assertNotIn('96001', {r['resource_id'] for r in expired})

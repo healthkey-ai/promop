@@ -227,6 +227,10 @@ AUTH_LOCKOUT_SECONDS = int(os.environ.get('AUTH_LOCKOUT_SECONDS', '900'))     # 
 PASSWORD_HISTORY_SIZE = int(os.environ.get('PASSWORD_HISTORY_SIZE', '5'))     # #05 last-N passwords that may not be reused
 PASSWORD_REUSE_DAYS = int(os.environ.get('PASSWORD_REUSE_DAYS', '180'))       # #04 no reuse within this many days
 
+# Audit tamper-evidence (TI.2.2.1) and break-glass (TI.2.3#04).
+AUDIT_HMAC_KEY = os.environ.get('AUDIT_HMAC_KEY', '')                          # falls back to SECRET_KEY when empty
+BREAK_GLASS_TTL_SECONDS = int(os.environ.get('BREAK_GLASS_TTL_SECONDS', '3600'))  # emergency-access window (1h)
+
 _mailgun_configured = bool(
     os.environ.get('MAILGUN_API_KEY') and os.environ.get('MAILGUN_SENDER_DOMAIN')
 )
