@@ -15,7 +15,7 @@ from .views import (
     PatientMessageViewSet,
     vocabulary_list, concept_lookup, concept_search, concept_list,
     concept_ancestors, concept_descendants, concept_graph_batch,
-    concept_synonyms, concept_synonym_search,
+    concept_synonyms, concept_synonym_search, concept_replacement,
     org_disease_stats,
 )
 from .org_views import (
@@ -77,6 +77,7 @@ urlpatterns = [
     path('concepts/<int:concept_id>/ancestors/', concept_ancestors, name='v1-concept-ancestors'),
     path('concepts/<int:concept_id>/descendants/', concept_descendants, name='v1-concept-descendants'),
     path('concepts/<int:concept_id>/synonyms/', concept_synonyms, name='v1-concept-synonyms'),
+    path('concepts/<int:concept_id>/replacement/', concept_replacement, name='v1-concept-replacement'),
     path('concepts/', concept_list, name='v1-concept-list'),
     path('stats/org-disease/', org_disease_stats, name='v1-stats-org-disease'),
     path('orgs/', OrgListCreateView.as_view(), name='v1-org-list'),
