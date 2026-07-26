@@ -87,6 +87,7 @@ INSTALLED_APPS = [
     'omop_genomics',
     'omop_oncology',
     'patient_portal',
+    'anymail',
 ]
 
 MIDDLEWARE = [
@@ -211,24 +212,25 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-_smtp_env_configured = bool(
-    os.environ.get('EMAIL_HOST_USER') and os.environ.get('EMAIL_HOST_PASSWORD')
+_mailgun_configured = bool(
+    os.environ.get('MAILGUN_API_KEY') and os.environ.get('MAILGUN_SENDER_DOMAIN')
 )
 
-# Email
+# Email — uses Mailgun HTTP API via django-anymail when configured,
+# falls back to console backend for local development.
 EMAIL_BACKEND = os.environ.get(
     'EMAIL_BACKEND',
     (
-        'django.core.mail.backends.smtp.EmailBackend'
-        if (not DEBUG or _smtp_env_configured)
+        'anymail.backends.mailgun.EmailBackend'
+        if _mailgun_configured
         else 'django.core.mail.backends.console.EmailBackend'
     ),
 )
-EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.mailgun.org')
-EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))
-EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'true').lower() == 'true'
-EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
-EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
+ANYMAIL = {}
+if os.environ.get('MAILGUN_API_KEY'):
+    ANYMAIL['MAILGUN_API_KEY'] = os.environ['MAILGUN_API_KEY']
+if os.environ.get('MAILGUN_SENDER_DOMAIN'):
+    ANYMAIL['MAILGUN_SENDER_DOMAIN'] = os.environ['MAILGUN_SENDER_DOMAIN']
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'PROMOP <noreply@healthkey.ai>')
 
 # Base URL used to build invitation accept links in emails.
@@ -248,6 +250,9 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = []
+
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 

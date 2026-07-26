@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from patient_portal.models import Identity
+from patient_portal.models import Identity, PatientConsent, PatientMessage
 from omop_core.models import (
     PatientRecord, Concept,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
@@ -12,6 +12,7 @@ from omop_oncology.models import Episode, EpisodeEvent
 from datetime import date
 from django.utils.timezone import localdate
 from django.utils import timezone
+from omop_core.services.access import has_org_admin_access
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -47,14 +48,7 @@ class UserSerializer(serializers.ModelSerializer):
         return person.person_id if person else None
 
     def get_is_org_admin(self, obj):
-        now = timezone.now()
-        from django.db.models import Q
-        return GroupAccess.objects.filter(
-            identity=obj,
-            role='org_admin',
-        ).filter(
-            Q(expires_at__isnull=True) | Q(expires_at__gt=now)
-        ).exists()
+        return has_org_admin_access(obj)
 
     def get_org_accesses(self, obj):
         now = timezone.now()
@@ -145,17 +139,21 @@ class OrgTrustSerializer(serializers.ModelSerializer):
 class OrgInvitationSerializer(serializers.ModelSerializer):
     status = serializers.SerializerMethodField()
     org_slug = serializers.SlugRelatedField(source='org', slug_field='slug', read_only=True)
+    redirect_url = serializers.SerializerMethodField()
 
     class Meta:
         model = OrgInvitation
         fields = [
-            'id', 'org_slug', 'email', 'role', 'status',
+            'id', 'org_slug', 'email', 'role', 'redirect_url', 'status',
             'expires_at', 'created_at',
         ]
-        read_only_fields = ['id', 'org_slug', 'status', 'expires_at', 'created_at']
+        read_only_fields = ['id', 'org_slug', 'redirect_url', 'status', 'expires_at', 'created_at']
 
     def get_status(self, obj):
         return obj.status
+
+    def get_redirect_url(self, obj):
+        return obj.redirect_url or None
 
 
 class GroupAccessSerializer(serializers.ModelSerializer):
@@ -164,17 +162,21 @@ class GroupAccessSerializer(serializers.ModelSerializer):
     is_premium = serializers.BooleanField(source='identity.is_premium', read_only=True)
     org_slug = serializers.SlugRelatedField(source='org', slug_field='slug', read_only=True)
     group_name = serializers.CharField(source='group.name', read_only=True, default=None)
+    redirect_url = serializers.SerializerMethodField()
 
     class Meta:
         model = GroupAccess
         fields = [
             'id', 'email', 'name', 'is_premium', 'org_slug', 'group_name', 'role',
-            'expires_at', 'granted_at',
+            'redirect_url', 'expires_at', 'granted_at',
         ]
         read_only_fields = [
             'id', 'email', 'name', 'is_premium', 'org_slug', 'group_name', 'role',
-            'expires_at', 'granted_at',
+            'redirect_url', 'expires_at', 'granted_at',
         ]
+
+    def get_redirect_url(self, obj):
+        return obj.redirect_url or None
 
 
 class PatientListSerializer(serializers.ModelSerializer):
@@ -497,7 +499,7 @@ class PatientDocumentSerializer(serializers.ModelSerializer):
         model = PatientDocument
         fields = [
             'id', 'person', 'doc_type', 'title',
-            'file_url', 'file_name', 'verified', 'uploaded_at',
+            'file', 'file_url', 'file_name', 'verified', 'uploaded_at',
         ]
 
 
@@ -560,10 +562,95 @@ class PatientSurveyResponseSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('values_dates must be a dict.')
         return value
 
+    def validate_completed_at(self, value):
+        if self.instance and self.instance.completed_at is not None and value is None:
+            raise serializers.ValidationError('Cannot re-open a completed survey.')
+        return value
+
     def update(self, instance, validated_data):
+        # Strip immutable identity fields — person and survey are set on create only.
+        validated_data.pop('person', None)
+        validated_data.pop('survey', None)
         # Merge incoming values/values_dates into existing dicts (autosave support).
         for field in ('values', 'values_dates'):
             if field in validated_data:
                 current = getattr(instance, field) or {}
                 validated_data[field] = {**current, **validated_data[field]}
         return super().update(instance, validated_data)
+
+
+# ---------------------------------------------------------------------------
+# Patient consent serializer
+# ---------------------------------------------------------------------------
+
+class PatientConsentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PatientConsent
+        fields = ['id', 'consent_type', 'consent_granted', 'consent_date', 'consent_document']
+        read_only_fields = ['id', 'consent_type', 'consent_date', 'consent_document']
+
+
+# ---------------------------------------------------------------------------
+# Patient message serializer (bidirectional messaging — Phase 4b)
+# ---------------------------------------------------------------------------
+
+class PatientMessageSerializer(serializers.ModelSerializer):
+    sender_name = serializers.SerializerMethodField()
+    reply_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PatientMessage
+        fields = ['id', 'patient_user', 'parent', 'sender', 'sender_name',
+                  'subject', 'message', 'sender_is_patient', 'is_read',
+                  'read_at', 'reply_count', 'created_at']
+        read_only_fields = ['id', 'sender', 'sender_is_patient', 'is_read',
+                            'read_at', 'sender_name', 'reply_count',
+                            'created_at']
+        extra_kwargs = {
+            'patient_user': {'required': False},  # Auto-set by perform_create for patients
+        }
+
+    def get_sender_name(self, obj):
+        if obj.sender:
+            return obj.sender.name or obj.sender.email or str(obj.sender)
+        return "Patient" if obj.sender_is_patient else "Provider"
+
+    def get_reply_count(self, obj):
+        if hasattr(obj, '_reply_count'):
+            return obj._reply_count
+        return obj.replies.count()
+
+    # Cross-thread reply validation is in PatientMessageViewSet.perform_create
+    # where the resolved patient_user is known (not in self.initial_data).
+
+
+class ImmunizationSerializer(serializers.ModelSerializer):
+    """Read-only serializer for immunization DrugExposure rows (route_source_value='VACCINE')."""
+    vaccine_name = serializers.SerializerMethodField()
+    date = serializers.DateField(source='drug_exposure_start_date')
+
+    class Meta:
+        model = DrugExposure
+        fields = ['drug_exposure_id', 'vaccine_name', 'date', 'lot_number']
+
+    def get_vaccine_name(self, obj):
+        if obj.drug_concept and obj.drug_concept.concept_name:
+            return obj.drug_concept.concept_name
+        return obj.drug_source_value or 'Unknown vaccine'
+
+
+class AllergySerializer(serializers.ModelSerializer):
+    """Read-only serializer for allergy Observation rows (qualifier_source_value='ALLERGY')."""
+    allergen_name = serializers.SerializerMethodField()
+    criticality = serializers.CharField(source='value_as_string', default='')
+    clinical_status = serializers.CharField(source='value_source_value', default='')
+    recorded_date = serializers.DateField(source='observation_date')
+
+    class Meta:
+        model = Observation
+        fields = ['observation_id', 'allergen_name', 'criticality', 'clinical_status', 'recorded_date']
+
+    def get_allergen_name(self, obj):
+        if obj.observation_concept and obj.observation_concept.concept_name:
+            return obj.observation_concept.concept_name
+        return obj.observation_source_value or 'Unknown allergen'

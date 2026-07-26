@@ -1,9 +1,12 @@
-from django.db.models import Q
+import logging
+
 from django.utils import timezone
 from rest_framework.permissions import BasePermission
 
 from .providers.base import TokenClaims
-from omop_core.models import GroupAccess, Organization
+from omop_core.services.access import has_org_admin_access
+
+logger = logging.getLogger(__name__)
 
 # Sentinel value set by ServiceTokenAuthentication when the HMAC check passes.
 # Use is_service_token() rather than comparing this string directly.
@@ -122,6 +125,32 @@ class LabSyncPermission(ScopedTokenPermission):
         return super().has_permission(request, view)
 
 
+_SURVEY_PATIENT_METHODS = frozenset(('GET', 'HEAD', 'OPTIONS', 'POST', 'PATCH'))
+
+
+class SurveyResponsePermission(ScopedTokenPermission):
+    """ScopedTokenPermission that also allows POST for patient survey responses.
+
+    Patients need to create survey responses (start a survey) and autosave
+    answers via PATCH. The viewset enforces per-person authorization via
+    _OmopFilterMixin and PatientSelfScopePermission, so allowing POST/PATCH
+    here is safe. Staff and superusers retain full access.
+
+    Service tokens and OAuth2 SMART scopes are handled exactly as in the
+    base class.
+    """
+
+    def has_permission(self, request, view):
+        token = request.auth
+        if token is None or isinstance(token, TokenClaims):
+            if not (request.user and request.user.is_authenticated):
+                return False
+            if request.user.is_superuser or getattr(request.user, 'is_staff', False):
+                return True
+            return request.method in _SURVEY_PATIENT_METHODS
+        return super().has_permission(request, view)
+
+
 class IsStaffPermission(BasePermission):
     """Allow access only to staff users (is_staff=True)."""
 
@@ -131,6 +160,99 @@ class IsStaffPermission(BasePermission):
             request.user.is_authenticated and
             getattr(request.user, 'is_staff', False)
         )
+
+
+def _resolve_person_id(obj):
+    """Extract person_id from any OMOP model instance.
+
+    Returns the person_id (int) or None if it cannot be determined.
+
+    Handles three patterns:
+    - Direct FK: obj.person_id (covers Person, PatientRecord, ConditionOccurrence,
+      DrugExposure, Measurement, Observation, ProcedureOccurrence, Episode,
+      PatientDocument, PatientTrialEnrollment, PatientSurveyResponse)
+    - PatientConsent/PatientMessage: has patient_user_id FK. Resolves via
+      PatientUser.objects.values_list('person_id', ...).
+    - EpisodeEvent: has a bare episode_id (BigIntegerField, not a FK). Resolves
+      via Episode.objects.values_list('person_id', ...).
+    """
+    # Pattern 1: direct person_id attribute (covers most OMOP models)
+    pid = getattr(obj, 'person_id', None)
+    if pid is not None:
+        return pid
+
+    # Pattern 2: PatientConsent — resolve via PatientUser.person_id
+    patient_user_id = getattr(obj, 'patient_user_id', None)
+    if patient_user_id is not None:
+        from patient_portal.models import PatientUser
+        try:
+            return PatientUser.objects.values_list('person_id', flat=True).get(pk=patient_user_id)
+        except PatientUser.DoesNotExist:
+            return None
+
+    # Pattern 3: EpisodeEvent — resolve via Episode table
+    episode_id = getattr(obj, 'episode_id', None)
+    if episode_id is not None:
+        from omop_oncology.models import Episode
+        try:
+            return Episode.objects.values_list('person_id', flat=True).get(
+                episode_id=episode_id
+            )
+        except Episode.DoesNotExist:
+            return None
+
+    return None
+
+
+class PatientSelfScopePermission(BasePermission):
+    """Object-level permission: patients may only access their own data.
+
+    Belt-and-suspenders safety net on top of queryset filtering. DRF calls
+    ``has_object_permission`` on retrieve/update/destroy — not on list (which
+    relies on queryset scoping in ``_OmopFilterMixin``/viewset ``get_queryset``).
+
+    Bypass rules (allow access regardless of object ownership):
+    - Service tokens (trusted backend)
+    - Staff / superuser
+    - Non-patient identities (no PatientUser link, or has provider GroupAccess)
+    """
+
+    def has_permission(self, request, view):
+        return True  # View-level gating is ScopedTokenPermission's job
+
+    def has_object_permission(self, request, view, obj):
+        if is_service_token(request):
+            return True
+
+        from patient_portal.services import patient_person_for
+        patient_person = patient_person_for(request.user)
+        if patient_person is None:
+            # Not a patient (staff, superuser, provider, or unauthenticated).
+            return True
+
+        obj_person_id = _resolve_person_id(obj)
+        if obj_person_id is None:
+            # Cannot determine ownership — fail closed.
+            logger.warning(
+                'PatientSelfScopePermission: cannot resolve person_id for %s pk=%s',
+                type(obj).__name__, getattr(obj, 'pk', '?'),
+            )
+            return False
+
+        return obj_person_id == patient_person.person_id
+
+
+class PatientDeletePermission(ScopedTokenPermission):
+    """ScopedTokenPermission that also allows DELETE for patient account deletion.
+
+    Used on the ``me`` action where patients need to delete their own account.
+    All other methods defer to the standard ScopedTokenPermission rules.
+    """
+
+    def has_permission(self, request, view):
+        if request.method == 'DELETE':
+            return bool(request.user and request.user.is_authenticated)
+        return super().has_permission(request, view)
 
 
 class IsStaffOrOrgAdmin(BasePermission):
@@ -144,21 +266,4 @@ class IsStaffOrOrgAdmin(BasePermission):
             return True
 
         slug = view.kwargs.get('slug')
-        if not slug:
-            # No slug: allow if user has any active org_admin grant (e.g., list view)
-            now = timezone.now()
-            return GroupAccess.objects.filter(
-                identity=request.user,
-                role='org_admin',
-            ).filter(
-                Q(expires_at__isnull=True) | Q(expires_at__gt=now)
-            ).exists()
-
-        now = timezone.now()
-        return GroupAccess.objects.filter(
-            identity=request.user,
-            role='org_admin',
-            org__slug=slug,
-        ).filter(
-            Q(expires_at__isnull=True) | Q(expires_at__gt=now)
-        ).exists()
+        return has_org_admin_access(request.user, slug)

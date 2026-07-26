@@ -18,7 +18,7 @@ from omop_core.models import (
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
     PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
-    Relationship, ConceptRelationship, ConceptAncestor,
+    Relationship, ConceptRelationship, ConceptAncestor, ConceptSynonym,
     # Controlled vocabulary lookup models
     Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
     ProgesteroneReceptorStatus, Her2Status, HrStatus, HrdStatus,
@@ -50,7 +50,7 @@ from omop_core.services.regimen_resolution import (
     validate_hemonc_regimen,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
-from omop_core.services.access import get_visible_orgs, build_trusting_map
+from omop_core.services.access import get_visible_orgs, build_trusting_map, get_admin_orgs
 from datetime import datetime, timedelta
 from django.utils.timezone import localdate
 import csv
@@ -59,7 +59,7 @@ import json
 import logging
 import re
 from io import StringIO
-from .permissions import ScopedTokenPermission, get_request_org, is_service_token
+from .permissions import ScopedTokenPermission, SurveyResponsePermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
@@ -68,6 +68,9 @@ from .serializers import (
     EpisodeSerializer, EpisodeEventSerializer,
     PatientDocumentSerializer, PatientTrialEnrollmentSerializer,
     SurveySerializer, PatientSurveyResponseSerializer,
+    PatientConsentSerializer,
+    PatientMessageSerializer,
+    ImmunizationSerializer, AllergySerializer,
 )
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
@@ -171,7 +174,7 @@ def _delete_omop_clinical_rows(person):
 @method_decorator(csrf_exempt, name='dispatch')
 class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PatientRecordSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     pagination_class = PatientRecordPagination
 
     DATE_FILTERS = {
@@ -218,10 +221,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 Q(expires_at__isnull=True) | Q(expires_at__gt=now),
             )
 
-            # Org-admin grants: see all patients belonging to those orgs
-            admin_org_ids = list(
-                active_grants.filter(role='org_admin').values_list('org_id', flat=True)
-            )
+            # Org-admin access includes trust-derived admin orgs.
+            admin_org_ids = list(get_admin_orgs(self.request.user).values_list('id', flat=True))
 
             # Group grants: see patients in those groups
             actor_group_ids = list(
@@ -513,7 +514,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response({**serializer.data, 'previous_values': previous_values})
 
-    @action(detail=True, methods=['get'], permission_classes=[ScopedTokenPermission])
+    @action(detail=True, methods=['get'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def provenance(self, request, pk=None):
         """GET /api/patient-info/{person_id}/provenance/ — full provenance history for a patient."""
         try:
@@ -549,9 +550,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         records = ProvenanceRecord.objects.filter(q).select_related('content_type').order_by('-created_at')
         return Response(ProvenanceRecordSerializer(records, many=True).data)
 
-    @action(detail=False, methods=['get', 'patch'], permission_classes=[ScopedTokenPermission])
+    @action(detail=False, methods=['get', 'patch', 'delete'], permission_classes=[PatientDeletePermission, PatientSelfScopePermission])
     def me(self, request):
-        """GET/PATCH /api/patient-info/me/ — current user's own PatientRecord."""
+        """GET/PATCH/DELETE /api/patient-info/me/ — current user's own PatientRecord."""
+        if request.method == 'DELETE':
+            return self._delete_patient_account(request)
+
         from patient_portal.models import PatientUser
         from patient_portal.services import resolve_or_create_person
 
@@ -621,7 +625,72 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response(serializer.data)
 
-    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission])
+    def _delete_patient_account(self, request):
+        """DELETE /api/patient-info/me/ — permanently delete the patient's account and all data."""
+        from patient_portal.services import patient_person_for
+        from patient_portal.models import PatientUser
+
+        patient_person = patient_person_for(request.user)
+        if patient_person is None:
+            return Response(
+                {'detail': 'Only patients can delete their own account.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        confirm = request.data.get('confirm')
+        if confirm != 'DELETE':
+            return Response(
+                {'detail': 'Request body must include {"confirm": "DELETE"}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        person_id = patient_person.person_id
+        identity = request.user
+
+        with transaction.atomic():
+            # Delete EpisodeEvent rows — bare integer FK, not covered by CASCADE
+            episode_ids = list(
+                Episode.objects.filter(person=patient_person)
+                .values_list('episode_id', flat=True)
+            )
+            if episode_ids:
+                EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
+
+            # Delete Person — cascades to all OMOP tables, PatientRecord, PatientUser
+            patient_person.delete()
+
+            # Delete the Identity (auth credential)
+            identity.delete()
+
+        logger.info(
+            'patient_account_deleted person_id=%s identity_email=%s',
+            person_id, getattr(identity, 'email', '?'),
+        )
+
+        return Response({'detail': 'Account and all associated data have been permanently deleted.'})
+
+    @action(detail=True, methods=['get'], url_path='export-fhir',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def export_fhir(self, request, pk=None):
+        """GET /api/v1/patient-records/{person_id}/export-fhir/ — export as FHIR R4 Bundle.
+
+        ``pk`` is interpreted as ``person_id`` (consistent with ``retrieve``).
+        """
+        from omop_core.services.fhir_export import build_fhir_bundle
+
+        try:
+            person = Person.objects.get(person_id=pk)
+            patient_record = PatientRecord.objects.get(person=person)
+        except (Person.DoesNotExist, PatientRecord.DoesNotExist):
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Object-level permission check (PatientSelfScopePermission)
+        self.check_object_permissions(request, patient_record)
+
+        bundle = build_fhir_bundle(person)
+        return Response(bundle, content_type='application/fhir+json')
+
+    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def upload_csv(self, request):
         """Upload patients from CSV file"""
         if 'file' not in request.FILES:
@@ -697,7 +766,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
     
-    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission])
+    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def upload_fhir(self, request):
         """Upload patients from FHIR JSON file"""
         if 'file' not in request.FILES:
@@ -762,6 +831,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         'medication_requests': [],
                         'immunizations': [],
                         'diagnostic_reports': [],
+                        'allergy_intolerances': [],
                         'encounters': [],
                     }
                     if patient_id:
@@ -818,6 +888,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     patient_id = _resolve_patient_ref(patient_ref)
                     if patient_id in patients_data:
                         patients_data[patient_id]['diagnostic_reports'].append(resource)
+                elif resource_type == 'AllergyIntolerance':
+                    patient_ref = resource.get('patient', {}).get('reference', '')
+                    patient_id = _resolve_patient_ref(patient_ref)
+                    if patient_id in patients_data:
+                        patients_data[patient_id]['allergy_intolerances'].append(resource)
                 elif resource_type == 'Encounter':
                     patient_ref = resource.get('subject', {}).get('reference', '')
                     patient_id = _resolve_patient_ref(patient_ref)
@@ -2280,8 +2355,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         if therapy_line is None:
                             continue
                         
-                        # Check if this is a regimen (parent) or individual drug (partOf)
-                        if not medication.get('partOf'):
+                        # Check if this is a regimen (parent) or individual drug (partOf).
+                        # Only treat as sub-resource when partOf references a MedicationStatement;
+                        # a Procedure/ reference (radiation 1L + maintenance) should NOT suppress
+                        # processing of the maintenance MedicationStatement.
+                        _part_of = medication.get('partOf', [])
+                        _is_med_sub_resource = any(
+                            ref.get('reference', '').startswith('MedicationStatement/')
+                            for ref in _part_of
+                        )
+                        if not _is_med_sub_resource:
                             # This is the named regimen
                             regimen_name = medication.get('medicationCodeableConcept', {}).get('text', '')
                             effective_period = medication.get('effectivePeriod', {})
@@ -2304,16 +2387,18 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     'regimen': regimen_name,
                                     'start_date': start_date,
                                     'end_date': end_date,
-                                    'outcome': therapy_outcome,
                                     'hemonc_concept_id': hemonc_concept_id,
                                 }
+                                if therapy_outcome is not None:
+                                    therapy_lines[therapy_line]['outcome'] = therapy_outcome
                             else:
                                 therapy_lines[therapy_line]['regimen'] = regimen_name
                                 if start_date:
                                     therapy_lines[therapy_line]['start_date'] = start_date
                                 if end_date:
                                     therapy_lines[therapy_line]['end_date'] = end_date
-                                therapy_lines[therapy_line]['outcome'] = therapy_outcome
+                                if therapy_outcome is not None:
+                                    therapy_lines[therapy_line]['outcome'] = therapy_outcome
                                 if hemonc_concept_id:
                                     therapy_lines[therapy_line]['hemonc_concept_id'] = hemonc_concept_id
                     
@@ -2353,7 +2438,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 first_line_end_date = datetime.strptime(therapy_lines[1]['end_date'][:10], '%Y-%m-%d').date()
                             except:
                                 pass
-                        first_line_outcome = therapy_lines[1]['outcome']
+                        first_line_outcome = therapy_lines[1].get('outcome')
                     
                     if 2 in therapy_lines:
                         second_line_therapy = therapy_lines[2]['regimen']
@@ -2368,7 +2453,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 second_line_end_date = datetime.strptime(therapy_lines[2]['end_date'][:10], '%Y-%m-%d').date()
                             except:
                                 pass
-                        second_line_outcome = therapy_lines[2]['outcome']
+                        second_line_outcome = therapy_lines[2].get('outcome')
                     
                     # Map line 3 and 4 to "later" field (prioritize most recent)
                     if 4 in therapy_lines:
@@ -2384,7 +2469,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 later_end_date = datetime.strptime(therapy_lines[4]['end_date'][:10], '%Y-%m-%d').date()
                             except:
                                 pass
-                        later_outcome = therapy_lines[4]['outcome']
+                        later_outcome = therapy_lines[4].get('outcome')
                     elif 3 in therapy_lines:
                         later_therapy = therapy_lines[3]['regimen']
                         if therapy_lines[3].get('start_date'):
@@ -2398,7 +2483,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 later_end_date = datetime.strptime(therapy_lines[3]['end_date'][:10], '%Y-%m-%d').date()
                             except:
                                 pass
-                        later_outcome = therapy_lines[3]['outcome']
+                        later_outcome = therapy_lines[3].get('outcome')
                     
                     # Match therapy intent and discontinuation observations to therapy lines by date
                     for intent_obs in therapy_intent_observations:
@@ -2635,7 +2720,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         for d in DrugExposure.objects.filter(person=person)
                     }
 
-                    def _write_drug_exposure(codeable, start_str, end_str=None, sig=None):
+                    def _write_drug_exposure(codeable, start_str, end_str=None, sig=None, route_source_value=None):
                         if not start_str:
                             return
                         try:
@@ -2674,6 +2759,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             drug_source_value=source_value,
                             drug_source_concept=drug_concept,
                             sig=(sig or '')[:255],
+                            route_source_value=route_source_value,
                         )
                         _de._skip_patient_record_refresh = True
                         _de.save()
@@ -2704,6 +2790,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _write_drug_exposure(
                             _immunization.get('vaccineCode'),
                             _immunization.get('occurrenceDateTime') or _immunization.get('recorded'),
+                            route_source_value='VACCINE',
                         )
 
                     logger.info(
@@ -2713,7 +2800,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
                     # --- Write DiagnosticReport rows into OMOP Observation ---
                     _existing_report_keys = {
-                        (o.observation_source_value, o.observation_date, o.value_as_string)
+                        (o.observation_source_value, o.observation_date, o.value_as_string, o.qualifier_source_value)
                         for o in Observation.objects.filter(person=person)
                     }
                     for _report in data.get('diagnostic_reports', []):
@@ -2747,7 +2834,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             )
                         _value = (_report.get('conclusion') or _display or 'Diagnostic report')[:60]
                         _source = (_code or _display or 'DiagnosticReport')[:50]
-                        _report_key = (_source, _report_date, _value)
+                        _report_key = (_source, _report_date, _value, None)
                         if _report_key in _existing_report_keys:
                             continue
                         _obs = Observation(
@@ -2771,6 +2858,59 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         "TIMING patient=%s phase=diagnostic_reports elapsed=%.1fs count=%d",
                         _timing_hash, _time.monotonic() - _pt_start, len(data.get('diagnostic_reports', [])),
                     )
+
+                    # --- Write AllergyIntolerance rows into OMOP Observation ---
+                    # Tagged with qualifier_source_value='ALLERGY' for the allergy
+                    # list endpoint (PHR-S FM PH.2.5).
+                    for _allergy in data.get('allergy_intolerances', []):
+                        _allergy_date_str = _allergy.get('recordedDate') or _allergy.get('onsetDateTime')
+                        if not _allergy_date_str:
+                            continue
+                        try:
+                            _allergy_dt = datetime.fromisoformat(_allergy_date_str[:10])
+                        except (ValueError, TypeError):
+                            continue
+                        _allergy_date = _allergy_dt.date()
+                        _system, _code, _display = _coding_parts(_allergy.get('code'))
+                        _vocab = _vocab_from_system(_system)
+                        _allergy_concept = None
+                        if _code:
+                            if _vocab == 'LOINC':
+                                _allergy_concept = _cc_by_loinc(_code)
+                            else:
+                                _allergy_concept = _cc_by_vocab(_vocab, _code)
+                        if _allergy_concept is None:
+                            _allergy_concept = get_or_create_quarantine_observation(
+                                source_vocabulary_id=_vocab,
+                                concept_code=_code,
+                                concept_name=_display or 'FHIR AllergyIntolerance',
+                                source_system='fhir-upload',
+                            )
+                        _criticality = (_allergy.get('criticality') or '')[:60]
+                        _, _cs_code, _cs_display = _coding_parts(_allergy.get('clinicalStatus'))
+                        _clinical_status = (_cs_display or _cs_code or '')[:50]
+                        _allergy_source = (_code or _display or 'AllergyIntolerance')[:50]
+                        _allergy_key = (_allergy_source, _allergy_date, _criticality, 'ALLERGY')
+                        if _allergy_key in _existing_report_keys:
+                            continue
+                        _obs = Observation(
+                            observation_id=next_pk(Observation, 'observation_id'),
+                            person=person,
+                            observation_concept=_allergy_concept,
+                            observation_date=_allergy_date,
+                            observation_datetime=timezone.make_aware(_allergy_dt) if _allergy_dt.tzinfo is None else _allergy_dt,
+                            observation_type_concept=_concept_ehr_type or _allergy_concept,
+                            value_as_string=_criticality,
+                            observation_source_value=_allergy_source,
+                            observation_source_concept=_allergy_concept,
+                            qualifier_source_value='ALLERGY',
+                            value_source_value=_clinical_status,
+                        )
+                        _obs._skip_patient_record_refresh = True
+                        _obs.save()
+                        _existing_report_keys.add(_allergy_key)
+                        if prov_source:
+                            _record_provenance(_obs, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
                     # --- Write ProcedureOccurrence records ---
                     _existing_proc_keys = {
@@ -3446,7 +3586,7 @@ class PersonViewSet(viewsets.GenericViewSet):
       POST /api/persons/find_or_create/  — resolve OIDC identity to a Person row
       PATCH /api/persons/{person_id}/    — fill-if-empty demographic patch
     """
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Person.objects.all()
     lookup_field = 'person_id'
 
@@ -3662,21 +3802,21 @@ class _ProvenanceMixin:
 @method_decorator(csrf_exempt, name='dispatch')
 class ConditionOccurrenceViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ConditionOccurrenceSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = ConditionOccurrence.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class DrugExposureViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = DrugExposureSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = DrugExposure.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class MeasurementViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Measurement.objects.all()
     ordering_fields = ['measurement_date', 'measurement_id']
     ordering = ['-measurement_date']
@@ -3712,28 +3852,28 @@ class MeasurementViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewS
 @method_decorator(csrf_exempt, name='dispatch')
 class ObservationViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ObservationSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Observation.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class ProcedureOccurrenceViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ProcedureOccurrenceSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = ProcedureOccurrence.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class EpisodeViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = EpisodeSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Episode.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class EpisodeEventViewSet(viewsets.ModelViewSet):
     serializer_class = EpisodeEventSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
 
     def list(self, request, *args, **kwargs):
         if not request.query_params.get('episode_id'):
@@ -3833,11 +3973,15 @@ def concept_lookup(request):
 
     Query params (repeatable):
         lookup=VOCAB_ID:concept_code
+        include_versions=1   (optional) — also return a top-level
+                             `_vocabulary_versions` map {vocab_id: version}
 
     Response 200:
         { "LOINC": { "2160-0": 3013682, "2345-7": null }, "SNOMED": { ... } }
 
     Unknown codes return null; healthkey-etl substitutes concept_id=0 downstream.
+    The default `{vocab: {code: id}}` shape is frozen; `include_versions=1` is
+    additive so consumers can pin a vocabulary release / detect drift (promop#240).
     """
     from omop_core.models import Concept as OmopConcept
 
@@ -3878,6 +4022,16 @@ def concept_lookup(request):
         if v in result and c in result[v]:
             result[v][c] = cid
 
+    # Opt-in: add a top-level `_vocabulary_versions` map so consumers can pin a
+    # release / detect drift (promop#240). Off by default to keep the frozen
+    # `{vocab: {code: id}}` shape that healthkey-etl reads.
+    if request.query_params.get('include_versions') in ('1', 'true', 'True', 'yes') \
+            and '_vocabulary_versions' not in result:
+        # Guard: never clobber a user-requested vocabulary bucket that happens to
+        # be literally named `_vocabulary_versions` (not a real OMOP vocab id).
+        version_map = _vocab_version_map()
+        result['_vocabulary_versions'] = {v: version_map.get(v) for v in by_vocab}
+
     return Response(result)
 
 
@@ -3907,12 +4061,21 @@ def _concept_graph_filters(request):
     return relationship_ids, vocabulary_ids, concept_class_ids, max_levels
 
 
-def _serialize_concept_graph_node(concept, **extra):
+def _vocab_version_map():
+    """``{vocabulary_id: vocabulary_version}`` for every vocabulary (small table,
+    one query). Lets concept responses carry the release/version each concept
+    came from, so consumers can pin a release and detect drift (promop#240)."""
+    from omop_core.models import Vocabulary
+    return dict(Vocabulary.objects.values_list('vocabulary_id', 'vocabulary_version'))
+
+
+def _serialize_concept_graph_node(concept, versions=None, **extra):
     payload = {
         'concept_id': concept.concept_id,
         'concept_name': concept.concept_name,
         'concept_code': concept.concept_code,
         'vocabulary_id': concept.vocabulary_id,
+        'vocabulary_version': (versions or {}).get(concept.vocabulary_id),
         'concept_class_id': concept.concept_class_id,
         'domain_id': concept.domain_id,
         'standard_concept': concept.standard_concept,
@@ -3937,6 +4100,7 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
     """
     grouped = {source_id: [] for source_id in source_ids}
     truncated = set()
+    versions = _vocab_version_map()
 
     def _append(source_id, node):
         bucket = grouped[source_id]
@@ -3970,6 +4134,7 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
                 'concept_2_id',
                 lambda edge: _serialize_concept_graph_node(
                     edge.concept_1,
+                    versions=versions,
                     relationship_id=edge.relationship_id,
                     min_levels_of_separation=None,
                     max_levels_of_separation=None,
@@ -3986,6 +4151,7 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
                 'concept_1_id',
                 lambda edge: _serialize_concept_graph_node(
                     edge.concept_2,
+                    versions=versions,
                     relationship_id=edge.relationship_id,
                     min_levels_of_separation=None,
                     max_levels_of_separation=None,
@@ -4009,6 +4175,7 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
             'descendant_concept_id',
             lambda edge: _serialize_concept_graph_node(
                 edge.ancestor_concept,
+                versions=versions,
                 relationship_id=None,
                 min_levels_of_separation=edge.min_levels_of_separation,
                 max_levels_of_separation=edge.max_levels_of_separation,
@@ -4029,6 +4196,7 @@ def _query_concept_graph(source_ids, direction, relationship_ids, vocabulary_ids
             'ancestor_concept_id',
             lambda edge: _serialize_concept_graph_node(
                 edge.descendant_concept,
+                versions=versions,
                 relationship_id=None,
                 min_levels_of_separation=edge.min_levels_of_separation,
                 max_levels_of_separation=edge.max_levels_of_separation,
@@ -4159,11 +4327,12 @@ def _apply_concept_filters(queryset, query_params):
     return queryset
 
 
-def _serialize_concept(concept):
+def _serialize_concept(concept, versions=None):
     return {
         'concept_id': concept.concept_id,
         'concept_name': concept.concept_name,
         'vocabulary_id': concept.vocabulary_id,
+        'vocabulary_version': (versions or {}).get(concept.vocabulary_id),
         'concept_code': concept.concept_code,
         'domain_id': concept.domain_id,
         'concept_class_id': concept.concept_class_id,
@@ -4177,7 +4346,8 @@ def _paginated_concept_response(queryset, request):
     # the matched set on every page request.
     paginator = ConceptPagination()
     page = paginator.paginate_queryset(queryset.order_by('concept_id'), request)
-    return paginator.get_paginated_response([_serialize_concept(c) for c in page])
+    versions = _vocab_version_map()
+    return paginator.get_paginated_response([_serialize_concept(c, versions) for c in page])
 
 
 @api_view(['GET'])
@@ -4237,6 +4407,78 @@ def concept_list(request):
 
     queryset = _apply_concept_filters(Concept.objects.all(), request.query_params)
     return _paginated_concept_response(queryset, request)
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_synonyms(request, concept_id):
+    """
+    List the synonyms (alternate names) for one OMOP concept, so a consumer
+    mirroring promop's vocabulary can cache them (promop#239).
+
+    Response 200: { "concept_id": N, "count": M, "results": [
+        { "concept_synonym_name": "...", "language_concept_id": 4180186 }, ... ] }
+    Response 404: concept_id not found.
+    """
+    if not Concept.objects.filter(concept_id=concept_id).exists():
+        return Response({'detail': 'Concept not found.'}, status=status.HTTP_404_NOT_FOUND)
+    rows = list(
+        ConceptSynonym.objects
+        .filter(concept_id=concept_id)
+        .order_by('concept_synonym_name')
+        .values('concept_synonym_name', 'language_concept_id')
+    )
+    return Response({'concept_id': concept_id, 'count': len(rows), 'results': rows})
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_synonym_search(request):
+    """
+    Find concepts by a synonym (alternate name) substring — the reverse of
+    `concepts/lookup/`, for alias resolution (e.g. regimen alias 'VRd' → the
+    HemOnc concept). Backed by a GIN trigram index on `concept_synonym_name`.
+
+    Query params:
+        q                 required, minimum 3 characters
+        vocabulary_id     optional exact-match filter on the concept
+        concept_class_id  optional exact-match filter on the concept
+        page / page_size  pagination (page_size capped at 100)
+
+    Response 200: paginated {count, next, previous, results: [
+        { concept_id, concept_name, vocabulary_id, concept_code,
+          concept_class_id, standard_concept, concept_synonym_name }, ... ]}
+    """
+    # Minimum 3 chars: a pg_trgm trigram is 3 chars, so shorter queries could
+    # not use the GIN trigram index and would force a full table scan.
+    query = (request.query_params.get('q') or '').strip()
+    if len(query) < 3:
+        return Response(
+            {'detail': "Query parameter 'q' is required and must be at least 3 characters."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    qs = ConceptSynonym.objects.select_related('concept').filter(
+        concept_synonym_name__icontains=query,
+    )
+    vocabulary_id = request.query_params.get('vocabulary_id')
+    if vocabulary_id:
+        qs = qs.filter(concept__vocabulary_id=vocabulary_id)
+    concept_class_id = request.query_params.get('concept_class_id')
+    if concept_class_id:
+        qs = qs.filter(concept__concept_class_id=concept_class_id)
+
+    paginator = ConceptPagination()
+    page = paginator.paginate_queryset(qs.order_by('concept_id', 'concept_synonym_name'), request)
+    results = [{
+        'concept_id': s.concept_id,
+        'concept_name': s.concept.concept_name,
+        'vocabulary_id': s.concept.vocabulary_id,
+        'concept_code': s.concept.concept_code,
+        'concept_class_id': s.concept.concept_class_id,
+        'standard_concept': s.concept.standard_concept,
+        'concept_synonym_name': s.concept_synonym_name,
+    } for s in page]
+    return paginator.get_paginated_response(results)
 
 
 # =============================================================================
@@ -4313,8 +4555,43 @@ def vocabulary_list(request, model_name):
 @method_decorator(csrf_exempt, name='dispatch')
 class PatientDocumentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = PatientDocumentSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientDocument.objects.all()
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        doc_type = self.request.query_params.get('doc_type')
+        if doc_type:
+            qs = qs.filter(doc_type=doc_type)
+        return qs
+
+
+class ImmunizationListViewSet(_OmopFilterMixin, viewsets.ReadOnlyModelViewSet):
+    """Read-only list of immunization records (PHR-S FM PH.2.5).
+
+    Immunizations are stored as DrugExposure rows tagged with
+    route_source_value='VACCINE'. Filter by person: GET /v1/immunizations/?person_id=42
+    """
+    serializer_class = ImmunizationSerializer
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    pagination_class = PatientRecordPagination
+    queryset = DrugExposure.objects.filter(
+        route_source_value='VACCINE',
+    ).select_related('drug_concept')
+
+
+class AllergyListViewSet(_OmopFilterMixin, viewsets.ReadOnlyModelViewSet):
+    """Read-only list of allergy records (PHR-S FM PH.2.5).
+
+    Allergies are stored as Observation rows tagged with
+    qualifier_source_value='ALLERGY'. Filter by person: GET /v1/allergies/?person_id=42
+    """
+    serializer_class = AllergySerializer
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    pagination_class = PatientRecordPagination
+    queryset = Observation.objects.filter(
+        qualifier_source_value='ALLERGY',
+    ).select_related('observation_concept')
 
 
 class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
@@ -4326,7 +4603,7 @@ class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     Filter by person: GET /api/trial-enrollments/?person_id=42
     """
     serializer_class = PatientTrialEnrollmentSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientTrialEnrollment.objects.all()
 
 
@@ -4414,7 +4691,7 @@ class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.
     PUT is disabled: values/values_dates are append-only dicts; use PATCH.
     """
     serializer_class = PatientSurveyResponseSerializer
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [SurveyResponsePermission, PatientSelfScopePermission]
     queryset = PatientSurveyResponse.objects.select_related('survey').all()
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
@@ -4437,3 +4714,168 @@ class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.
     def partial_update(self, request, *args, **kwargs):
         kwargs['partial'] = True
         return self.update(request, *args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Patient Consent management (PHR-S FM Phase 3)
+# ---------------------------------------------------------------------------
+
+class PatientConsentViewSet(viewsets.ModelViewSet):
+    """Patient consent grants — auto-created for each consent type.
+
+    Patients toggle ``consent_granted`` via PATCH; consents are never
+    created or deleted by patients directly.
+
+    GET  /api/v1/consents/         → list (auto-creates missing types)
+    PATCH /api/v1/consents/{id}/   → toggle consent_granted
+    """
+    serializer_class = PatientConsentSerializer
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    CONSENT_TYPES = ['data_sharing', 'clinical_trial', 'research']
+
+    def get_queryset(self):
+        from patient_portal.models import PatientConsent
+        from patient_portal.services import patient_person_for
+
+        person = patient_person_for(self.request.user)
+        if person is not None:
+            return PatientConsent.objects.filter(patient_user__person=person)
+        # Staff / superuser — return all consents
+        return PatientConsent.objects.all()
+
+    def list(self, request, *args, **kwargs):
+        from patient_portal.models import PatientConsent, PatientUser
+        from patient_portal.services import patient_person_for
+
+        person = patient_person_for(request.user)
+        if person is not None:
+            try:
+                patient_user = PatientUser.objects.get(person=person)
+            except PatientUser.DoesNotExist:
+                return Response([], status=status.HTTP_200_OK)
+            # Auto-create missing consent types
+            for consent_type in self.CONSENT_TYPES:
+                PatientConsent.objects.get_or_create(
+                    patient_user=patient_user,
+                    consent_type=consent_type,
+                    defaults={'consent_granted': False},
+                )
+        return super().list(request, *args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Patient messages — bidirectional messaging (PHR-S FM Phase 4b)
+# ---------------------------------------------------------------------------
+
+class MessagePagination(PageNumberPagination):
+    page_size = 50
+
+
+class PatientMessageViewSet(viewsets.ModelViewSet):
+    """Bidirectional patient–provider messaging with threading.
+
+    GET   /api/v1/messages/               → list (patients see only their own)
+    POST  /api/v1/messages/               → create a new message or reply
+    PATCH /api/v1/messages/{id}/           → edit own message text
+    PATCH /api/v1/messages/{id}/mark-read/ → mark a message as read
+
+    Query params:
+      - parent=null       → top-level threads only
+      - parent={id}       → replies to a specific message
+      - is_read=false     → unread messages only
+      - is_read=true      → read messages only
+    """
+    serializer_class = PatientMessageSerializer
+    permission_classes = [SurveyResponsePermission, PatientSelfScopePermission]
+    pagination_class = MessagePagination
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+
+    def get_queryset(self):
+        from patient_portal.models import PatientMessage
+        from patient_portal.services import patient_person_for
+
+        from django.db.models import Count
+        qs = PatientMessage.objects.select_related(
+            'sender', 'parent', 'patient_user',
+        ).annotate(_reply_count=Count('replies')).order_by('-created_at')
+        person = patient_person_for(self.request.user)
+        if person is not None:
+            qs = qs.filter(patient_user__person=person)
+
+        # Optional filters
+        parent = self.request.query_params.get('parent')
+        if parent == 'null':
+            qs = qs.filter(parent__isnull=True)  # Top-level threads only
+        elif parent:
+            try:
+                qs = qs.filter(parent_id=int(parent))
+            except (ValueError, TypeError):
+                qs = qs.none()
+
+        is_read = self.request.query_params.get('is_read')
+        if is_read is not None:
+            qs = qs.filter(read_at__isnull=(is_read.lower() == 'false'))
+
+        return qs
+
+    def perform_create(self, serializer):
+        from patient_portal.models import PatientUser
+        from patient_portal.services import patient_person_for
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+
+        user = self.request.user
+        person = patient_person_for(user)
+
+        # Auto-set sender and sender_is_patient
+        kwargs = {
+            'sender': user,
+            'sender_is_patient': person is not None,
+        }
+
+        if person is not None:
+            # Patient: force patient_user to their own record
+            try:
+                pu = PatientUser.objects.get(identity=user, person=person)
+            except PatientUser.DoesNotExist:
+                raise PermissionDenied('No patient record linked to this account.')
+            kwargs['patient_user'] = pu
+        else:
+            # Staff: inherit patient_user from parent on reply, require on new thread
+            parent = serializer.validated_data.get('parent')
+            if parent:
+                kwargs['patient_user'] = parent.patient_user
+            elif not serializer.validated_data.get('patient_user'):
+                raise ValidationError({'patient_user': 'Staff must specify patient_user when starting a new thread.'})
+
+        # Validate parent belongs to the same patient thread
+        parent = serializer.validated_data.get('parent')
+        resolved_pu = kwargs.get('patient_user') or serializer.validated_data.get('patient_user')
+        if parent and resolved_pu:
+            if parent.patient_user_id != resolved_pu.pk:
+                raise PermissionDenied('Cannot reply to another patient\'s message.')
+
+        serializer.save(**kwargs)
+
+    def perform_update(self, serializer):
+        from rest_framework.exceptions import PermissionDenied
+        # Only the sender can edit message text; prevent patients from altering
+        # provider messages.
+        obj = serializer.instance
+        if obj.sender_id != self.request.user.pk:
+            raise PermissionDenied('You can only edit your own messages.')
+        # Strip immutable fields on update
+        for field in ('patient_user', 'parent', 'subject'):
+            serializer.validated_data.pop(field, None)
+        serializer.save()
+
+    @action(detail=True, methods=['patch'], url_path='mark-read')
+    def mark_read(self, request, pk=None):
+        msg = self.get_object()
+        if msg.read_at is None:
+            msg.read_at = timezone.now()
+            msg.is_read = True  # Keep legacy field in sync
+            msg.save(update_fields=['read_at', 'is_read'])
+        serializer = self.get_serializer(msg)
+        return Response(serializer.data)

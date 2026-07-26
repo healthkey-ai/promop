@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import AcceptInvite from './AcceptInvite';
+import * as AcceptInviteModule from './AcceptInvite';
 
 // vi.hoisted runs before any module is imported, so the fn is available in factory closures
 const { mockAxiosPost } = vi.hoisted(() => ({ mockAxiosPost: vi.fn() }));
@@ -32,20 +32,20 @@ const withoutToken = () =>
 describe('AcceptInvite', () => {
   it('shows error message immediately when no token is in the URL', () => {
     withoutToken();
-    render(<AcceptInvite />);
+    render(<AcceptInviteModule.default />);
     expect(screen.getByText(/No invitation token found/i)).toBeInTheDocument();
   });
 
   it('shows the Accept button when a token is present', () => {
     withToken();
-    render(<AcceptInvite />);
+    render(<AcceptInviteModule.default />);
     expect(screen.getByRole('button', { name: /accept invitation/i })).toBeInTheDocument();
   });
 
   it('calls the confirm-invitation endpoint with the token on accept', async () => {
     withToken();
     mockAxiosPost.mockResolvedValueOnce({ data: { detail: 'Done.' } });
-    render(<AcceptInvite />);
+    render(<AcceptInviteModule.default />);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /accept invitation/i }));
     await waitFor(() =>
@@ -56,7 +56,7 @@ describe('AcceptInvite', () => {
   it('shows success message and Go to PROMOP button after a successful accept', async () => {
     withToken();
     mockAxiosPost.mockResolvedValueOnce({ data: { detail: 'Access granted to Acme Oncology.' } });
-    render(<AcceptInvite />);
+    render(<AcceptInviteModule.default />);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /accept invitation/i }));
     await waitFor(() =>
@@ -65,10 +65,28 @@ describe('AcceptInvite', () => {
     expect(screen.getByRole('button', { name: /go to promop/i })).toBeInTheDocument();
   });
 
+  it('redirects to the supplied analyst site after a successful accept', async () => {
+    withToken();
+    mockAxiosPost.mockResolvedValueOnce({
+      data: {
+        detail: 'Access granted to Acme Oncology.',
+        redirect_url: 'https://analytics.healthkey.ai/custom',
+      },
+    });
+    render(<AcceptInviteModule.default />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /accept invitation/i }));
+    await waitFor(() => screen.getByRole('link', { name: /continue/i }));
+    expect(screen.getByRole('link', { name: /continue/i })).toHaveAttribute(
+      'href',
+      'https://analytics.healthkey.ai/custom'
+    );
+  });
+
   it('navigates to / when Go to PROMOP is clicked after success', async () => {
     withToken();
     mockAxiosPost.mockResolvedValueOnce({ data: { detail: 'Done.' } });
-    render(<AcceptInvite />);
+    render(<AcceptInviteModule.default />);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /accept invitation/i }));
     await waitFor(() => screen.getByRole('button', { name: /go to promop/i }));
@@ -81,7 +99,7 @@ describe('AcceptInvite', () => {
     mockAxiosPost.mockRejectedValueOnce({
       response: { data: { error: 'Invitation has expired.' } },
     });
-    render(<AcceptInvite />);
+    render(<AcceptInviteModule.default />);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /accept invitation/i }));
     await waitFor(() =>
@@ -92,7 +110,7 @@ describe('AcceptInvite', () => {
   it('shows a fallback error message when the response has no error field', async () => {
     withToken();
     mockAxiosPost.mockRejectedValueOnce(new Error('Network Error'));
-    render(<AcceptInvite />);
+    render(<AcceptInviteModule.default />);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /accept invitation/i }));
     await waitFor(() =>
@@ -102,7 +120,7 @@ describe('AcceptInvite', () => {
 
   it('navigates to /login when Back to Login is clicked from error state', async () => {
     withoutToken();
-    render(<AcceptInvite />);
+    render(<AcceptInviteModule.default />);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /back to login/i }));
     expect(mockNavigate).toHaveBeenCalledWith('/login');

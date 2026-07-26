@@ -7,7 +7,7 @@ import django.utils.timezone
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('patient_portal', '0006_patientinvitation_and_more'),
+        ('patient_portal', '0008_patientmessage_parent_patientmessage_read_at_and_more'),
     ]
 
     operations = [

@@ -351,6 +351,7 @@ Response:
       "concept_name": "HER2 inhibitor",
       "concept_code": "CLASS-HER2",
       "vocabulary_id": "HemOnc",
+      "vocabulary_version": "HemOnc 2024-12-19",
       "concept_class_id": "Drug Class",
       "domain_id": "Drug",
       "standard_concept": null,
@@ -394,6 +395,7 @@ Response:
       "concept_name": "trastuzumab",
       "concept_code": "RX-TRAST",
       "vocabulary_id": "RxNorm",
+      "vocabulary_version": "RxNorm 2024-09-03",
       "concept_class_id": "Ingredient",
       "domain_id": "Drug",
       "standard_concept": null,
@@ -443,6 +445,7 @@ Response:
         "concept_name": "trastuzumab",
         "concept_code": "RX-TRAST",
         "vocabulary_id": "RxNorm",
+        "vocabulary_version": "RxNorm 2024-09-03",
         "concept_class_id": "Ingredient",
         "domain_id": "Drug",
         "standard_concept": null,
@@ -595,6 +598,15 @@ GET /api/v1/concepts/lookup/?lookup=LOINC:2160-0&lookup=LOINC:2345-7&lookup=SNOM
 
 Unknown codes return `null`. Requires `patient/*.read` scope (read-only).
 
+**Opt-in `?include_versions=1`** — adds a top-level `_vocabulary_versions` map (release/version per requested vocabulary) so consumers can pin a release and detect drift. The default `{vocab: {code: id}}` shape is unchanged (phr-etl reads `result[vocab][code]`), so this is additive and off by default.
+```json
+{
+  "LOINC":  { "2160-0": 3013682 },
+  "SNOMED": { "44054006": 201826 },
+  "_vocabulary_versions": { "LOINC": "LOINC 2.77", "SNOMED": "SNOMED 2024-09-01" }
+}
+```
+
 **Response 400** — no `lookup` params supplied, or a param is missing the `:` separator.
 
 ---
@@ -633,6 +645,7 @@ GET /api/v1/concepts/search/?q=creatinine&vocabulary_id=LOINC&domain_id=Measurem
       "concept_id": 3016723,
       "concept_name": "Creatinine [Mass/volume] in Serum or Plasma",
       "vocabulary_id": "LOINC",
+      "vocabulary_version": "LOINC 2.77",
       "concept_code": "2160-0",
       "domain_id": "Measurement",
       "concept_class_id": "Lab Test",
@@ -646,6 +659,73 @@ Results are ordered by `concept_id` for stable pagination. Unknown search string
 empty paginated result (`count: 0`). Requires `patient/*.read` or `user/*.read` scope.
 
 **Response 400** — `q` is missing or shorter than 2 characters.
+
+---
+
+### GET /api/v1/concepts/{concept_id}/synonyms/
+
+List the synonyms (alternate names) for one concept, so a consumer mirroring promop's vocabulary can cache them.
+
+**Request**
+```
+GET /api/v1/concepts/7001/synonyms/
+```
+
+**Response 200**
+```json
+{
+  "concept_id": 7001,
+  "count": 2,
+  "results": [
+    { "concept_synonym_name": "RVD", "language_concept_id": 4180186 },
+    { "concept_synonym_name": "VRd", "language_concept_id": 4180186 }
+  ]
+}
+```
+
+**Response 404** — `concept_id` not found. Requires `patient/*.read` or `user/*.read` scope.
+
+---
+
+### GET /api/v1/concepts/synonyms/
+
+Find concepts by a synonym (alternate name) substring — the reverse of `concepts/lookup/`, for alias resolution (e.g. regimen alias `VRd` → the HemOnc concept). Backed by a GIN trigram index on `concept_synonym_name`.
+
+Query params:
+
+| Param | Required | Description |
+|---|---:|---|
+| `q` | yes | Synonym substring; minimum 3 characters (trigram) |
+| `vocabulary_id` | no | Exact-match filter on the matched concept |
+| `concept_class_id` | no | Exact-match filter on the matched concept |
+| `page` / `page_size` | no | Pagination; `page_size` capped at 100 |
+
+**Request**
+```
+GET /api/v1/concepts/synonyms/?q=VRd&vocabulary_id=HemOnc
+```
+
+**Response 200**
+```json
+{
+  "count": 1,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "concept_id": 7001,
+      "concept_name": "Bortezomib, Lenalidomide, Dexamethasone",
+      "vocabulary_id": "HemOnc",
+      "concept_code": "HO-VRD",
+      "concept_class_id": "Regimen",
+      "standard_concept": "S",
+      "concept_synonym_name": "VRd"
+    }
+  ]
+}
+```
+
+**Response 400** — `q` is missing or shorter than 3 characters. Requires `patient/*.read` or `user/*.read` scope.
 
 ---
 
@@ -685,6 +765,7 @@ GET /api/v1/concepts/?domain_id=Measurement&concept_class_id=Lab%20Test&page_siz
       "concept_id": 3016723,
       "concept_name": "Creatinine [Mass/volume] in Serum or Plasma",
       "vocabulary_id": "LOINC",
+      "vocabulary_version": "LOINC 2.77",
       "concept_code": "2160-0",
       "domain_id": "Measurement",
       "concept_class_id": "Lab Test",

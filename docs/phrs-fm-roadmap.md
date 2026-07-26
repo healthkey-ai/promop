@@ -47,6 +47,19 @@ applied on staging. Shipped: the patient role surface (`patient_person_for`,
 (`can_access_patient` + `_OmopFilterMixin`) and is covered by existing tests. 810 backend /
 68 frontend tests green. The design detail below is retained as the as-built record.
 
+**Post-merge hardening (same PR series):**
+- **`PatientSelfScopePermission`** — centralized object-level permission
+  (`permissions.py`) applied to all OMOP viewsets as belt-and-suspenders on top of
+  queryset filtering. Uses `_resolve_person_id()` to extract `person_id` from any OMOP
+  model (including `EpisodeEvent` via its bare `episode_id` → `Episode` lookup). Bypasses
+  for service tokens, staff, superusers, and non-patient identities.
+- **Patient account deletion (GDPR right to erasure)** — `DELETE /api/v1/patient-records/me/`
+  with `{"confirm": "DELETE"}`. Hard-deletes all patient data (Person cascade + orphan
+  EpisodeEvent cleanup + Identity removal) inside `transaction.atomic()`. Frontend: profile
+  dropdown in `PatientDetail` header replaces standalone "Sign out" button; includes
+  `DeleteAccountDialog` with typed confirmation.
+- **FM:** TI.1.7 (Account Holder data deletion).
+
 **FM:** PH.1 (PHR Account Holder Profile), TI.1 (Security / access control).
 
 **Goal:** a patient can log in and **view/edit their own record** (and only their own),
@@ -136,13 +149,20 @@ and a duplicate/claim guard, so it is kept out of this phase.
 
 ---
 
-## Phase 2 — Own-record FHIR export
+## Phase 2 — Own-record FHIR export  ✅ DONE
 
 **FM:** PH.2 (Manage Historical & Current-State Data), PH.2.4 (Ad-hoc views), S.3
 (import/export).
 
+**Status:** Implemented. Export service (`omop_core/services/fhir_export.py`), API endpoint
+(`GET /api/v1/patient-records/{person_id}/export-fhir/`), management command
+(`export_fhir_bundle`), and frontend "Download my record (FHIR)" button on `PatientHome`.
+830 backend / 75 frontend tests green.
+
 *(Own-record viewing lands in Phase 1 via `PatientHome`. This phase adds the ability to
 export that record as FHIR, plus any read-only presentation refinements.)*
+
+**Detailed sub-plan:** see [`docs/phase2-fhir-export-plan.md`](phase2-fhir-export-plan.md).
 
 **Gap:** promop has three FHIR **import** paths but **no export** of a real patient's data
 (`generate_fhir_bundle` is synthetic-only; `export_org_patients` emits raw JSON, not FHIR).
@@ -161,60 +181,86 @@ export that record as FHIR, plus any read-only presentation refinements.)*
 
 ---
 
-## Phase 3 — Consent grants
+## Phase 3 — Consent grants  ✅ DONE
 
 **FM:** PH.1.5 (Manage Consents and Authorizations).
 
-**Existing:** `PatientConsent` (`patient_portal/models.py:118`, keyed to `PatientUser`,
-boolean-per-type), `consent_management` server view (`views.py:114`), and
-`FhirPatientConsentView` (`api/fhir/sync.py:790`).
+**Status:** Delivered in PR #283 (issue #278), merged to `dev` 2026-07-25. Shipped:
+`PatientConsentViewSet` at `/api/v1/consents/` (list + PATCH toggle), auto-creates all 3
+consent types on first list, queryset self-scoped to the authenticated patient.
+`_resolve_person_id` extended with `patient_user_id` pattern for `PatientSelfScopePermission`.
+Frontend `PatientConsents` component with toggle switches on `PatientHome`. `consent_date`
+changed to `auto_now=True` so timestamp reflects actual consent decision time.
+863 backend / 81 frontend tests green.
 
-- Promote consent to a first-class DRF resource under `/api/v1/`: list/grant/revoke the
-  patient's own consents (self-scoped via the Phase-1 guard), with `consent_type`, granted
-  flag, timestamp, and optional scope note. Reuse the existing `PatientConsent` model;
-  types data_sharing / clinical_trial / research already seeded.
-- Frontend: a Consents view in patient mode (reuse `FormField`/`Select` primitives).
-- Tests: grant/revoke, self-scope enforcement, uniqueness per type.
+**Existing:** `PatientConsent` (`patient_portal/models.py:173`, keyed to `PatientUser`,
+boolean-per-type), `consent_management` server view (`views.py:113`), and
+`FhirPatientConsentView` (`api/fhir/sync.py:791`).
 
 *Stretch (deferred):* represent grants as FHIR `Consent` resources. The current
 boolean-per-type model is adequate for the oncology use case.
 
 ---
 
-## Phase 4 — Patient-originated data & messaging
+## Phase 4a — Patient-originated data (surveys in patient mode)  ✅ DONE
 
-**FM:** PH.6 (Manage Encounters w/ Providers), PH.2.1 (Account-Holder-Originated Data),
-PH.3.1.
+**FM:** PH.2.1 (Account-Holder-Originated Data), PH.3.1.
+
+**Status:** Delivered in PR #285 (issue #284), merged to `dev` 2026-07-25. Shipped:
+`SurveyResponsePermission` allowing session-auth patients to POST (start surveys),
+`PatientSurveys` list component with status badges and start/continue/view actions,
+`SurveyForm` multi-page renderer with autosave on page navigation, progress tracking,
+and read-only completed view. Review hardening: `completed_at` validation (no re-open),
+immutable person/survey on PATCH, permission method whitelist, cross-patient POST test.
+869 backend / 103 frontend tests green.
 
 **Existing:** Surveys/PRO capture is solid (`Survey` / `PatientSurveyResponse`,
 `omop_core/models.py:2473,2510`; viewsets `api/views.py:4124,4199`); HealthKit device sync
-(`api/fhir/sync.py`); messaging is **one-way, server-rendered, no provider recipient**
-(`PatientMessage` `patient_portal/models.py:138`, `views.py:80`).
-
-- Expose surveys + responses in patient mode (self-scoped) so patients complete PROs from
-  the SPA.
-- Upgrade messaging to bidirectional: add a DRF endpoint under `/api/v1/`, a
-  recipient/thread concept, and read-state, replacing the template-only flow. Render in
-  patient mode.
-- Tests: patient completes a survey (own responses only); message create/list/reply
-  self-scoped.
+(`api/fhir/sync.py`).
 
 ---
 
-## Phase 5 — Account-holder clinical lists (oncology-relevant subset)
+## Phase 4b — Bidirectional messaging ✅ DONE
+
+**FM:** PH.6 (Manage Encounters w/ Providers).
+
+**As-built (PR #289):**
+
+- Added `parent` (self-FK for threading), `sender` (Identity FK), `read_at` fields to `PatientMessage`
+- `PatientMessageViewSet` under `/api/v1/messages/` with threading, read-state, and self-scoping
+- `perform_create` auto-sets sender/patient_user; cross-patient reply guard; sender-only edits
+- `MessagePagination` (page_size=50, `-created_at` ordering)
+- N+1 prevention via `Count('replies')` annotation
+- `mark-read` custom action
+- Frontend `PatientMessages.tsx`: thread list, conversation view, compose, chat-bubble UI
+- 11 backend tests (isolation, threading, cross-patient blocks, filters)
+- 8 frontend tests
+
+---
+
+## Phase 5 — Account-holder clinical lists (oncology-relevant subset) ✅ DONE
 
 **FM:** PH.1.4 (Advance Directives), PH.2.5 (problem/med/allergy/immunization lists),
 PH.3 (care plans).
 
-**Gap:** allergies and immunizations are folded into generic OMOP Observation/DrugExposure
-rows with no structured list; care plans, advance directives, and goals are absent.
+**As-built:**
 
-- Prioritize by oncology value; likely: structured **allergy list** and **immunization
-  list** as read models derived from OMOP (mirroring how `PatientRecord` is derived),
-  surfaced as `PatientInfo` tabs. Add **advance directives** as a document type (extend
-  `PatientDocument.doc_type`, `omop_core/models.py:2369`).
-- Defer care plans/goals unless a concrete oncology driver appears.
-- Tests per new list/field following the CLAUDE.md "new attribute → all layers" rule.
+- **Advance Directives** — added `ADVANCE_DIRECTIVE` to `PatientDocument.DOC_TYPE_CHOICES`;
+  `PatientDocumentViewSet` extended with `doc_type` query param filtering; frontend
+  `AdvanceDirectives.tsx` component (list + upload) wired into `PatientHome`.
+- **Immunization List** — immunization `DrugExposure` rows tagged with
+  `route_source_value='VACCINE'` in both FHIR sync (`sync.py`) and legacy upload
+  (`views.py`). Read-only `ImmunizationListViewSet` at `/api/v1/immunizations/` with
+  `ImmunizationSerializer` (vaccine_name, date, lot_number). Frontend
+  `ImmunizationList.tsx` table on `PatientHome`.
+- **Allergy List** — allergy `Observation` rows tagged with `qualifier_source_value='ALLERGY'`
+  in FHIR sync; `AllergyIntolerance` FHIR resource collection + write added to legacy
+  upload handler. Read-only `AllergyListViewSet` at `/api/v1/allergies/` with
+  `AllergySerializer` (allergen_name, criticality, clinical_status, recorded_date).
+  Frontend `AllergyList.tsx` table on `PatientHome`.
+- Care plans/goals deferred — no concrete oncology driver.
+- 9 new backend tests (AD creation/filtering, immunization list + exclusion, allergy list
+  + exclusion + FHIR upload integration). 112 frontend tests green.
 
 ---
 

@@ -11,6 +11,12 @@ const publicApi = axios.create({
   },
 });
 
+// Module-local (not exported): the file must export only the component so
+// react-refresh/only-export-components / Fast Refresh stays happy.
+function redirectBrowser(url: string) {
+  window.location.assign(url);
+}
+
 export default function AcceptInvite() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
@@ -19,13 +25,18 @@ export default function AcceptInvite() {
   const [state, setState] = useState<State>(token ? 'ready' : 'error');
   const [message, setMessage] = useState(token ? '' : 'No invitation token found in this link.');
   const [confirming, setConfirming] = useState(false);
+  const [redirectUrl, setRedirectUrl] = useState('');
 
   const handleAccept = async () => {
     setConfirming(true);
     try {
       const res = await publicApi.post('/orgs/confirm-invitation/', { token });
       setMessage(res.data.detail ?? 'Invitation accepted.');
+      setRedirectUrl(res.data.redirect_url ?? '');
       setState('success');
+      if (res.data.redirect_url) {
+        redirectBrowser(res.data.redirect_url);
+      }
     } catch (err: unknown) {
       const msg =
         err && typeof err === 'object' && 'response' in err
@@ -63,12 +74,21 @@ export default function AcceptInvite() {
             <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded p-3">
               {message}
             </p>
-            <button
-              onClick={() => navigate('/')}
-              className="w-full py-2 px-4 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm font-medium"
-            >
-              Go to PROMOP
-            </button>
+            {redirectUrl ? (
+              <a
+                href={redirectUrl}
+                className="block w-full py-2 px-4 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm font-medium text-center"
+              >
+                Continue
+              </a>
+            ) : (
+              <button
+                onClick={() => navigate('/')}
+                className="w-full py-2 px-4 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm font-medium"
+              >
+                Go to PROMOP
+              </button>
+            )}
           </>
         )}
 

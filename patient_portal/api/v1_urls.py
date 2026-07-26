@@ -8,9 +8,13 @@ from .views import (
     ObservationViewSet, ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
     PatientDocumentViewSet,
     PatientTrialEnrollmentViewSet,
+    ImmunizationListViewSet, AllergyListViewSet,
     SurveyViewSet, PatientSurveyResponseViewSet,
+    PatientConsentViewSet,
+    PatientMessageViewSet,
     vocabulary_list, concept_lookup, concept_search, concept_list,
     concept_ancestors, concept_descendants, concept_graph_batch,
+    concept_synonyms, concept_synonym_search,
     org_disease_stats,
 )
 from .org_views import (
@@ -42,6 +46,10 @@ router.register(r'documents', PatientDocumentViewSet, basename='v1-documents')
 router.register(r'trial-enrollments', PatientTrialEnrollmentViewSet, basename='v1-trial-enrollments')
 router.register(r'surveys', SurveyViewSet, basename='v1-surveys')
 router.register(r'survey-responses', PatientSurveyResponseViewSet, basename='v1-survey-responses')
+router.register(r'consents', PatientConsentViewSet, basename='v1-consents')
+router.register(r'messages', PatientMessageViewSet, basename='v1-messages')
+router.register(r'immunizations', ImmunizationListViewSet, basename='v1-immunizations')
+router.register(r'allergies', AllergyListViewSet, basename='v1-allergies')
 router.register(r'audit-events', AuditEventViewSet, basename='v1-audit-events')
 
 urlpatterns = [
@@ -56,9 +64,11 @@ urlpatterns = [
     path('vocabularies/<str:model_name>/', vocabulary_list, name='v1-vocabulary-list'),
     path('concepts/lookup/', concept_lookup, name='v1-concept-lookup'),
     path('concepts/search/', concept_search, name='v1-concept-search'),
+    path('concepts/synonyms/', concept_synonym_search, name='v1-concept-synonym-search'),
     path('concepts/graph/', concept_graph_batch, name='v1-concept-graph-batch'),
     path('concepts/<int:concept_id>/ancestors/', concept_ancestors, name='v1-concept-ancestors'),
     path('concepts/<int:concept_id>/descendants/', concept_descendants, name='v1-concept-descendants'),
+    path('concepts/<int:concept_id>/synonyms/', concept_synonyms, name='v1-concept-synonyms'),
     path('concepts/', concept_list, name='v1-concept-list'),
     path('stats/org-disease/', org_disease_stats, name='v1-stats-org-disease'),
     path('orgs/', OrgListCreateView.as_view(), name='v1-org-list'),

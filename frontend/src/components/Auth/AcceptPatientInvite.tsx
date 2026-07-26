@@ -24,8 +24,10 @@ export default function AcceptPatientInvite() {
   const navigate = useNavigate();
   const token = params.get('token') ?? '';
 
-  const [state, setState] = useState<State>('loading');
-  const [message, setMessage] = useState('');
+  // Derive the no-token error state at init (matches AcceptInvite.tsx) so the
+  // effect never calls setState synchronously on mount.
+  const [state, setState] = useState<State>(token ? 'loading' : 'error');
+  const [message, setMessage] = useState(token ? '' : 'No invitation token found in this link.');
   const [email, setEmail] = useState('');
   const [patientName, setPatientName] = useState('');
   const [password, setPassword] = useState('');
@@ -33,12 +35,15 @@ export default function AcceptPatientInvite() {
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (!token) {
-      setState('error');
-      setMessage('No invitation token found in this link.');
-      return;
-    }
+    // No synchronous setState in the effect body — the no-token branch lives in
+    // the async IIFE (like the catch path), which also re-derives the error
+    // state if `token` later becomes absent while mounted.
     (async () => {
+      if (!token) {
+        setState('error');
+        setMessage('No invitation token found in this link.');
+        return;
+      }
       try {
         const res = await publicApi.get('/v1/patient-invitations/lookup/', { params: { token } });
         setEmail(res.data.email ?? '');

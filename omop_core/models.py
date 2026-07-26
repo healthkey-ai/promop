@@ -4,7 +4,8 @@ from django.db import models
 from django.db.models import F, Q
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
-from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.indexes import GinIndex, OpClass
+from django.db.models.functions import Upper
 
 
 class ProvenanceRecord(models.Model):
@@ -127,6 +128,7 @@ class OrgInvitation(models.Model):
     )
     email = models.EmailField()
     role = models.CharField(max_length=20, choices=ROLE, default='doctor')
+    redirect_url = models.URLField(max_length=500, blank=True, default='')
     token = models.CharField(max_length=64, unique=True)
     invited_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
@@ -260,6 +262,7 @@ class GroupAccess(models.Model):
         null=True, blank=True, related_name='access_grants',
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    redirect_url = models.URLField(max_length=500, blank=True, default='')
     expires_at = models.DateTimeField(null=True, blank=True)
     granted_at = models.DateTimeField(auto_now_add=True)
     granted_by = models.ForeignKey(
@@ -718,6 +721,9 @@ class DrugExposure(models.Model):
 
     class Meta:
         db_table = 'drug_exposure'
+        indexes = [
+            models.Index(fields=['route_source_value'], name='ix_de_route_src'),
+        ]
 
     def __str__(self):
         return f"Drug Exposure {self.drug_exposure_id} for Person {self.person_id}"
@@ -839,6 +845,9 @@ class Observation(models.Model):
 
     class Meta:
         db_table = 'observation'
+        indexes = [
+            models.Index(fields=['qualifier_source_value'], name='ix_obs_qual_src'),
+        ]
 
     def __str__(self):
         return f"Observation {self.observation_id} for Person {self.person_id}"
@@ -1268,7 +1277,17 @@ class ConceptSynonym(models.Model):
 
     class Meta:
         db_table = 'concept_synonym'
-        indexes = [models.Index(fields=['concept'], name='ix_concept_synonym_concept')]
+        indexes = [
+            models.Index(fields=['concept'], name='ix_concept_synonym_concept'),
+            # Functional GIN trigram index on UPPER(name): Django compiles
+            # `__icontains` to `UPPER(col::text) LIKE UPPER(...)`, so a raw-column
+            # gin_trgm index would NOT be used — the expression must match.
+            # (pg_trgm enabled in migration 0094.)
+            GinIndex(
+                OpClass(Upper('concept_synonym_name'), name='gin_trgm_ops'),
+                name='ix_concept_synonym_name_trgm',
+            ),
+        ]
         # CDM natural PK — makes loader re-runs idempotent via ON CONFLICT DO NOTHING.
         constraints = [
             models.UniqueConstraint(
@@ -2461,11 +2480,13 @@ class PatientDocument(models.Model):
         ('BONE_MARROW', 'Bone Marrow'),
         ('CONSENT', 'Consent'),
         ('IMAGING', 'Imaging'),
+        ('ADVANCE_DIRECTIVE', 'Advance Directive'),
         ('OTHER', 'Other'),
     ]
     person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='documents')
     doc_type = models.CharField(max_length=50, choices=DOC_TYPE_CHOICES)
     title = models.CharField(max_length=255, blank=True, null=True)
+    file = models.FileField(upload_to='patient_documents/%Y/%m/', blank=True, null=True)
     file_url = models.URLField(blank=True, null=True)
     file_name = models.CharField(max_length=255, blank=True, null=True)
     verified = models.BooleanField(default=False)
