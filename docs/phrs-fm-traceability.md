@@ -84,7 +84,7 @@ intentionally ○.
 | TI.1.x | Privacy / data masking / routing | ◐ | Org-scoping, trust maps, `hide_from_patient` groundwork; no field-level masking | — |
 | **TI.2** | **Audit** | ✅ | | #295 |
 | TI.2.1 | Audit triggers | ✅ | `AuditLogMiddleware` audits every API/OAuth request; classified `record_view`/`record_create`/`record_update`/`record_delete`/`auth`/`consent` | #295 |
-| TI.2.2 | Audit log management (retention) | ◐→✅ | Immutable `AuditEvent` rows (admin view-only); **retention/archival command in progress** | #298 |
+| TI.2.2 | Audit log management (retention) | ✅ | Immutable `AuditEvent` rows (admin view-only); `prune_audit_events` command + `AUDIT_EVENT_RETENTION_DAYS` setting (default ~6y) with `--dry-run`/`--days`/`--archive` | #298/#299 |
 | TI.2.3 | Audit notification & review | ✅ | Read-only `GET /api/v1/audit-events/` — staff see all, patients see own; filter by type/method/user/time | #295 |
 | TI.4 | Standard terminology & services | ✅ | OMOP concept model; vocabulary endpoints; concept search/lookup/ancestors/descendants/graph/synonyms | #239 |
 | TI.5 | Standards-based interoperability | ✅ | FHIR R4 (import/export), OMOP CDM v5.4, SMART-on-FHIR / OAuth2, `.well-known/smart-configuration` | — |
@@ -96,7 +96,7 @@ intentionally ○.
 
 - **Complete (✅):** the account-holder core — PH.1 profile & provisioning, PH.1.4 directives,
   PH.1.5 consent, PH.2 data management incl. FHIR export, PH.6.3 messaging, TI.1 security,
-  TI.2 audit (retention landing via #298), TI.4/TI.5 terminology & interoperability.
+  TI.2 audit incl. retention (#295/#298), TI.4/TI.5 terminology & interoperability.
 - **Partial (◐):** PH.2.5 clinical lists (family/genetic/social history gaps), PH.3 wellness,
   RI.1/RI.2 record infrastructure, S.4.1 research (backend only), TI.1.x privacy masking.
 - **Not yet / deferred (○):** PH.4 education, PH.5 decision support, PH.6 referrals, most of
