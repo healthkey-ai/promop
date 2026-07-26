@@ -8,6 +8,7 @@ from .views import (
     ObservationViewSet, ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
     PatientDocumentViewSet,
     PatientTrialEnrollmentViewSet,
+    ImmunizationListViewSet, AllergyListViewSet,
     SurveyViewSet, PatientSurveyResponseViewSet,
     PatientConsentViewSet,
     PatientMessageViewSet,
@@ -46,6 +47,8 @@ router.register(r'surveys', SurveyViewSet, basename='v1-surveys')
 router.register(r'survey-responses', PatientSurveyResponseViewSet, basename='v1-survey-responses')
 router.register(r'consents', PatientConsentViewSet, basename='v1-consents')
 router.register(r'messages', PatientMessageViewSet, basename='v1-messages')
+router.register(r'immunizations', ImmunizationListViewSet, basename='v1-immunizations')
+router.register(r'allergies', AllergyListViewSet, basename='v1-allergies')
 
 urlpatterns = [
     path('', include(router.urls)),

@@ -531,6 +531,7 @@ class FhirSyncView(APIView):
                 drug_exposure_start_date=date,
                 drug_type_concept=ehr_type,
                 drug_source_value=_source_text(imm.get('vaccineCode'))[:50],
+                route_source_value='VACCINE',
             ))
         return self._upsert_clinical(
             DrugExposure, 'drug_exposure_id', 'drug_concept_id',
@@ -538,15 +539,21 @@ class FhirSyncView(APIView):
 
     def _ingest_clinical_observations(self, person, allergies, reports, ehr_type, no_match, cache, source_user_id, org):
         # AllergyIntolerance + DiagnosticReport land in the OMOP observation table.
+        # Allergies are tagged with qualifier_source_value='ALLERGY' so they can
+        # be filtered separately for the allergy list endpoint (PHR-S FM PH.2.5).
         items = [
             {'code': a.get('code'),
              'effective': a.get('recordedDate') or a.get('onsetDateTime'),
-             'value': a.get('criticality') or _source_text(a.get('clinicalStatus'))}
+             'value': a.get('criticality') or '',
+             'qualifier': 'ALLERGY',
+             'value_source': _source_text(a.get('clinicalStatus'))[:50]}
             for a in allergies
         ] + [
             {'code': r.get('code'),
              'effective': r.get('effectiveDateTime') or r.get('issued'),
-             'value': r.get('conclusion') or ''}
+             'value': r.get('conclusion') or '',
+             'qualifier': None,
+             'value_source': None}
             for r in reports
         ]
         rows = []
@@ -563,6 +570,8 @@ class FhirSyncView(APIView):
                 observation_type_concept=ehr_type,
                 value_as_string=(item['value'] or '')[:60],
                 observation_source_value=_source_text(item['code'])[:50],
+                qualifier_source_value=item.get('qualifier'),
+                value_source_value=item.get('value_source'),
             ))
         return self._upsert_clinical(
             Observation, 'observation_id', 'observation_concept_id',
