@@ -91,6 +91,18 @@ class PatientInvitationSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class AuditEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        from patient_portal.models import AuditEvent
+        model = AuditEvent
+        fields = [
+            'id', 'event_type', 'timestamp', 'method', 'path', 'status_code',
+            'user_id', 'user_email', 'client_id', 'resource_id', 'ip_address',
+            'duration_ms', 'detail',
+        ]
+        read_only_fields = fields
+
+
 class OrgTrustSerializer(serializers.ModelSerializer):
     granting_org_slug = serializers.SlugRelatedField(
         source='granting_org', slug_field='slug', read_only=True,

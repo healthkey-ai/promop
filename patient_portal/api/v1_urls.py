@@ -24,6 +24,7 @@ from .patient_invitations import (
     PatientInviteView, accept_patient_invitation, patient_invitation_lookup,
 )
 from .patient_signup import PatientSignupView
+from .audit_views import AuditEventViewSet
 
 router = DefaultRouter()
 
@@ -41,6 +42,7 @@ router.register(r'documents', PatientDocumentViewSet, basename='v1-documents')
 router.register(r'trial-enrollments', PatientTrialEnrollmentViewSet, basename='v1-trial-enrollments')
 router.register(r'surveys', SurveyViewSet, basename='v1-surveys')
 router.register(r'survey-responses', PatientSurveyResponseViewSet, basename='v1-survey-responses')
+router.register(r'audit-events', AuditEventViewSet, basename='v1-audit-events')
 
 urlpatterns = [
     path('', include(router.urls)),
