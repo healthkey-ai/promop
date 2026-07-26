@@ -1481,3 +1481,166 @@ class ReportRegimenMappingGapsCommandTest(TestCase):
         call_command('report_regimen_mapping_gaps', stdout=out)
         self.assertIn('No mapping gaps recorded.', out.getvalue())
 
+
+# ---------------------------------------------------------------------------
+# TEST-07: VocabularyRelease model + service tests
+# ---------------------------------------------------------------------------
+
+class VocabularyReleaseModelTest(TestCase):
+    """Test VocabularyRelease CRUD and field defaults."""
+
+    def test_create_with_defaults(self):
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone
+
+        now = timezone.now()
+        vr = VocabularyRelease.objects.create(build_timestamp=now)
+        self.assertEqual(vr.status, 'staged')
+        self.assertEqual(vr.schema_version, '5.4')
+        self.assertEqual(vr.scope, [])
+        self.assertEqual(vr.vocab_versions, {})
+        self.assertEqual(vr.row_counts, {})
+        self.assertEqual(vr.checksums, {})
+        self.assertIsNone(vr.published_at)
+        self.assertIsNone(vr.athena_version)
+        self.assertIsNone(vr.notes)
+
+    def test_create_published(self):
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone
+
+        now = timezone.now()
+        vr = VocabularyRelease.objects.create(
+            build_timestamp=now,
+            scope=['SNOMED', 'LOINC'],
+            athena_version='v5.0 2024-07-01',
+            vocab_versions={'SNOMED': '20240701', 'LOINC': '2.77'},
+            row_counts={'concept': 500000, 'concept_relationship': 1200000},
+            checksums={'concept': {'count': 500000, 'max_id': 999999, 'min_id': 1}},
+            status='published',
+            published_at=now,
+            notes='Initial load',
+        )
+        vr.refresh_from_db()
+        self.assertEqual(vr.scope, ['SNOMED', 'LOINC'])
+        self.assertEqual(vr.vocab_versions['LOINC'], '2.77')
+        self.assertEqual(vr.row_counts['concept'], 500000)
+        self.assertEqual(vr.status, 'published')
+        self.assertIn('concept', vr.checksums)
+
+    def test_str_representation(self):
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone
+
+        now = timezone.now()
+        vr = VocabularyRelease.objects.create(
+            build_timestamp=now, status='published', published_at=now,
+        )
+        s = str(vr)
+        self.assertIn('published', s)
+        self.assertIn(str(vr.pk), s)
+
+    def test_ordering_by_published_at(self):
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone
+        from datetime import timedelta
+
+        now = timezone.now()
+        older = VocabularyRelease.objects.create(
+            build_timestamp=now - timedelta(hours=2),
+            status='published', published_at=now - timedelta(hours=2),
+        )
+        newer = VocabularyRelease.objects.create(
+            build_timestamp=now,
+            status='published', published_at=now,
+        )
+        releases = list(VocabularyRelease.objects.all())
+        self.assertEqual(releases[0].pk, newer.pk)
+        self.assertEqual(releases[1].pk, older.pk)
+
+
+class VocabularyReleaseServiceTest(TestCase):
+    """Test get_latest_release() and get_release_etag()."""
+
+    def test_get_latest_release_empty(self):
+        from omop_core.services.vocab_release import get_latest_release
+        self.assertIsNone(get_latest_release())
+
+    def test_get_latest_release_ignores_staged(self):
+        from omop_core.models import VocabularyRelease
+        from omop_core.services.vocab_release import get_latest_release
+        from django.utils import timezone
+
+        VocabularyRelease.objects.create(
+            build_timestamp=timezone.now(), status='staged',
+        )
+        self.assertIsNone(get_latest_release())
+
+    def test_get_latest_release_returns_most_recent_published(self):
+        from omop_core.models import VocabularyRelease
+        from omop_core.services.vocab_release import get_latest_release
+        from django.utils import timezone
+        from datetime import timedelta
+
+        now = timezone.now()
+        VocabularyRelease.objects.create(
+            build_timestamp=now - timedelta(days=1),
+            status='published', published_at=now - timedelta(days=1),
+        )
+        newer = VocabularyRelease.objects.create(
+            build_timestamp=now,
+            status='published', published_at=now,
+        )
+        VocabularyRelease.objects.create(
+            build_timestamp=now, status='retired',
+            published_at=now - timedelta(hours=1),
+        )
+        result = get_latest_release()
+        self.assertEqual(result.pk, newer.pk)
+
+    def test_get_release_etag_none(self):
+        from omop_core.services.vocab_release import get_release_etag
+        self.assertIsNone(get_release_etag(None))
+
+    def test_get_release_etag_format(self):
+        from omop_core.models import VocabularyRelease
+        from omop_core.services.vocab_release import get_release_etag
+        from django.utils import timezone
+
+        now = timezone.now()
+        vr = VocabularyRelease.objects.create(
+            build_timestamp=now, status='published', published_at=now,
+        )
+        etag = get_release_etag(vr)
+        self.assertTrue(etag.startswith('"vr-'))
+        self.assertTrue(etag.endswith('"'))
+        self.assertIn(str(vr.pk), etag)
+
+    def test_get_release_etag_stable(self):
+        from omop_core.models import VocabularyRelease
+        from omop_core.services.vocab_release import get_release_etag
+        from django.utils import timezone
+
+        now = timezone.now()
+        vr = VocabularyRelease.objects.create(
+            build_timestamp=now, status='published', published_at=now,
+        )
+        self.assertEqual(get_release_etag(vr), get_release_etag(vr))
+
+    def test_get_release_etag_unique_across_releases(self):
+        from omop_core.models import VocabularyRelease
+        from omop_core.services.vocab_release import get_release_etag
+        from django.utils import timezone
+        from datetime import timedelta
+
+        now = timezone.now()
+        vr1 = VocabularyRelease.objects.create(
+            build_timestamp=now - timedelta(hours=1),
+            status='published', published_at=now - timedelta(hours=1),
+        )
+        vr2 = VocabularyRelease.objects.create(
+            build_timestamp=now,
+            status='published', published_at=now,
+        )
+        self.assertNotEqual(get_release_etag(vr1), get_release_etag(vr2))
+
