@@ -3424,6 +3424,46 @@ def login_view(request):
 
 @csrf_exempt
 @api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def change_password(request):
+    """Change the authenticated local account's password (PHR-S FM TI.1.1).
+
+    Enforces the password validators, the no-reuse policy, and clears the
+    force-change flag. Used both for a routine change and to satisfy a
+    must_change_password requirement after an admin reset.
+    """
+    from django.contrib.auth import update_session_auth_hash
+    from patient_portal.services import (
+        password_reuse_error, password_validation_errors, set_new_password,
+    )
+
+    identity = request.user
+    current = request.data.get('current_password') or ''
+    new = request.data.get('new_password') or ''
+
+    if not new:
+        return Response({'error': 'new_password is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Verify the current password for accounts that have one (OIDC/service
+    # identities carry an unusable password and set one for the first time here).
+    if identity.has_usable_password() and not identity.check_password(current):
+        return Response({'error': 'Current password is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    pw_errors = password_validation_errors(new, email=getattr(identity, 'email', None))
+    if pw_errors:
+        return Response({'error': ' '.join(pw_errors)}, status=status.HTTP_400_BAD_REQUEST)
+
+    reuse_error = password_reuse_error(identity, new)
+    if reuse_error:
+        return Response({'error': reuse_error}, status=status.HTTP_400_BAD_REQUEST)
+
+    set_new_password(identity, new, must_change=False)
+    update_session_auth_hash(request, identity)  # keep the session valid after the change
+    return Response({'detail': 'Password updated.'}, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['POST'])
 @permission_classes([AllowAny])
 def logout_view(request):
     """Logout the user and clear session"""

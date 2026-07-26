@@ -12347,3 +12347,173 @@ class PersonalRepresentativeApiTest(TestCase):
             'representative': self.rep.pk, 'person_id': self.person_b.person_id, 'relationship': 'other',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+# ---------------------------------------------------------------------------
+# #302 — TI.1.1 authentication controls: lockout, reuse policy, force-change
+# ---------------------------------------------------------------------------
+
+@override_settings(
+    AUTH_LOCKOUT_THRESHOLD=3, AUTH_LOCKOUT_SECONDS=900,
+    PASSWORD_HISTORY_SIZE=3, PASSWORD_REUSE_DAYS=180,
+)
+class AuthControlsTest(TestCase):
+    """Account lockout, no-reuse policy, force-change, and change-password (#302)."""
+
+    def setUp(self):
+        from patient_portal.services import record_password
+        self.email = 'auth-ctrl@test.com'
+        self.password = 'Zr7-quokka-vale'
+        self.identity = Identity.objects.create_user(email=self.email, password=self.password)
+        record_password(self.identity)  # seed initial history
+        self.client = APIClient()
+
+    def _login(self, password):
+        return self.client.post('/api/v1/auth/login/',
+                                {'username': self.email, 'password': password}, format='json')
+
+    def _authed(self):
+        c = APIClient()
+        c.force_authenticate(user=self.identity)
+        return c
+
+    # --- lockout (TI.1.1#03) ---
+
+    def test_lockout_after_threshold_failures(self):
+        for _ in range(3):
+            self.assertEqual(self._login('wrong-password').status_code, status.HTTP_401_UNAUTHORIZED)
+        self.identity.refresh_from_db()
+        self.assertTrue(self.identity.is_locked)
+        # Correct password is refused while locked.
+        self.assertEqual(self._login(self.password).status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_successful_login_resets_failure_count(self):
+        self._login('wrong-password')
+        self._login('wrong-password')
+        self.assertEqual(self._login(self.password).status_code, status.HTTP_200_OK)
+        self.identity.refresh_from_db()
+        self.assertEqual(self.identity.failed_login_count, 0)
+
+    def test_lockout_expires(self):
+        for _ in range(3):
+            self._login('wrong-password')
+        self.identity.refresh_from_db()
+        self.identity.locked_until = timezone.now() - timedelta(seconds=1)
+        self.identity.save(update_fields=['locked_until'])
+        self.assertEqual(self._login(self.password).status_code, status.HTTP_200_OK)
+
+    # --- no-reuse policy (TI.1.1#04/#05) ---
+
+    def test_change_password_rejects_reuse_of_current(self):
+        resp = self._authed().post('/api/v1/auth/change-password/',
+                                   {'current_password': self.password, 'new_password': self.password}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_change_password_rejects_recently_used(self):
+        c = self._authed()
+        p2 = 'Br9-wombat-keel'
+        self.assertEqual(c.post('/api/v1/auth/change-password/',
+                                {'current_password': self.password, 'new_password': p2}, format='json').status_code, 200)
+        # Going back to the original (still in history) is rejected.
+        resp = c.post('/api/v1/auth/change-password/',
+                      {'current_password': p2, 'new_password': self.password}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_change_password_accepts_new_unique(self):
+        resp = self._authed().post('/api/v1/auth/change-password/',
+                                   {'current_password': self.password, 'new_password': 'Cq2-badger-mint'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.identity.refresh_from_db()
+        self.assertTrue(self.identity.check_password('Cq2-badger-mint'))
+
+    # --- change-password guards ---
+
+    def test_change_password_wrong_current_rejected(self):
+        resp = self._authed().post('/api/v1/auth/change-password/',
+                                   {'current_password': 'nope', 'new_password': 'Cq2-badger-mint'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_change_password_enforces_validators(self):
+        resp = self._authed().post('/api/v1/auth/change-password/',
+                                   {'current_password': self.password, 'new_password': 'password'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_change_password_requires_auth(self):
+        resp = APIClient().post('/api/v1/auth/change-password/',
+                                {'current_password': self.password, 'new_password': 'Cq2-badger-mint'}, format='json')
+        self.assertIn(resp.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    # --- force-change (TI.1.1#09) ---
+
+    def test_force_change_flag_set_and_cleared_by_change_password(self):
+        from patient_portal.services import set_new_password
+        set_new_password(self.identity, 'Tmp-reset-9021', must_change=True)
+        self.identity.refresh_from_db()
+        self.assertTrue(self.identity.must_change_password)
+        # Surfaced to the client via /user/.
+        r = self._authed().get('/api/v1/user/')
+        self.assertTrue(r.data['user']['must_change_password'])
+        # Changing the password clears the flag.
+        r = self._authed().post('/api/v1/auth/change-password/',
+                                {'current_password': 'Tmp-reset-9021', 'new_password': 'Cq2-badger-mint'}, format='json')
+        self.assertEqual(r.status_code, status.HTTP_200_OK, r.data)
+        self.identity.refresh_from_db()
+        self.assertFalse(self.identity.must_change_password)
+
+
+@override_settings(
+    EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+    APP_BASE_URL='https://app.test',
+    PASSWORD_HISTORY_SIZE=3, PASSWORD_REUSE_DAYS=180,
+)
+class PasswordResetFlowTest(TestCase):
+    """Admin-initiated password reset via emailed single-use link (#302, TI.1.1#08)."""
+
+    def setUp(self):
+        from django.core import mail
+        self.identity = Identity.objects.create_user(email='reset-me@test.com', password='Zr7-quokka-vale')
+        mail.outbox = []
+
+    def _uid_token(self):
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.encoding import force_bytes
+        from django.utils.http import urlsafe_base64_encode
+        return (urlsafe_base64_encode(force_bytes(self.identity.pk)),
+                default_token_generator.make_token(self.identity))
+
+    def test_admin_action_emails_reset_link(self):
+        from django.core import mail
+        from patient_portal.api.password_reset import send_password_reset_email
+        send_password_reset_email(self.identity)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn('reset-me@test.com', mail.outbox[0].to)
+        self.assertIn('/reset-password?uid=', mail.outbox[0].body)
+
+    def test_reset_with_valid_link_sets_password(self):
+        uid, token = self._uid_token()
+        resp = APIClient().post('/api/v1/auth/reset-password/',
+                                {'uid': uid, 'token': token, 'new_password': 'Cq2-badger-mint'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.identity.refresh_from_db()
+        self.assertTrue(self.identity.check_password('Cq2-badger-mint'))
+
+    def test_reset_link_is_single_use(self):
+        uid, token = self._uid_token()
+        body = {'uid': uid, 'token': token, 'new_password': 'Cq2-badger-mint'}
+        self.assertEqual(APIClient().post('/api/v1/auth/reset-password/', body, format='json').status_code, 200)
+        # Token is tied to the (now-changed) password hash, so it no longer validates.
+        resp = APIClient().post('/api/v1/auth/reset-password/',
+                                {'uid': uid, 'token': token, 'new_password': 'Dp4-otter-lime'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_reset_rejects_invalid_token(self):
+        uid, _ = self._uid_token()
+        resp = APIClient().post('/api/v1/auth/reset-password/',
+                                {'uid': uid, 'token': 'bogus-token', 'new_password': 'Cq2-badger-mint'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_reset_enforces_validators(self):
+        uid, token = self._uid_token()
+        resp = APIClient().post('/api/v1/auth/reset-password/',
+                                {'uid': uid, 'token': token, 'new_password': 'password'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)

@@ -220,6 +220,13 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+# Authentication-policy controls for local (email/password) accounts — PHR-S FM TI.1.1.
+# All env-configurable per organizational policy.
+AUTH_LOCKOUT_THRESHOLD = int(os.environ.get('AUTH_LOCKOUT_THRESHOLD', '5'))   # #03 consecutive failures before lockout
+AUTH_LOCKOUT_SECONDS = int(os.environ.get('AUTH_LOCKOUT_SECONDS', '900'))     # #03 lockout duration (15 min)
+PASSWORD_HISTORY_SIZE = int(os.environ.get('PASSWORD_HISTORY_SIZE', '5'))     # #05 last-N passwords that may not be reused
+PASSWORD_REUSE_DAYS = int(os.environ.get('PASSWORD_REUSE_DAYS', '180'))       # #04 no reuse within this many days
+
 _mailgun_configured = bool(
     os.environ.get('MAILGUN_API_KEY') and os.environ.get('MAILGUN_SENDER_DOMAIN')
 )
