@@ -285,6 +285,97 @@ all, patients see only their own — filterable by `event_type` / `method` / `us
 - **FM traceability:** ✅ done — see [`phrs-fm-traceability.md`](phrs-fm-traceability.md),
   the capability-to-FM-function-ID mapping (PH.1.x, TI.2.x, etc.). Keep it current as
   capabilities land so scope stays visible and a future conformance pass has a starting point.
+- **Self-attestation conformance claim:** [`phrs-fm-conformance-claim.md`](phrs-fm-conformance-claim.md)
+  — criterion-level verification of the claimed subset (78 SHALL: 49 MET / 18 PARTIAL / 11 NOT MET;
+  10 functions claimed conformant). Refresh when remediation lands.
+
+---
+
+# Conformance Program — Path to Full PHR-S FM R2 SHALL Compliance
+
+**Goal:** take promop from its current oncology-focused subset to **full-model** conformance —
+all **748 SHALL** criteria across the 247 PHR-S FM R2 functions (per analysis of the R2
+`Requirements` resources; HL7 quotes ~750). This is a multi-quarter program; the pragmatic
+patient-facing product work above remains the near-term priority, and the workstreams below are
+sequenced by **leverage** (shared infrastructure that satisfies many SHALLs at once) rather than
+by FM chapter order.
+
+### Baseline (2026-07-26)
+- **~49 SHALL confirmed MET** (from the 78-criterion verified subset in the conformance claim).
+- **~699 remaining** — a few PARTIAL in built functions, the large majority **not yet implemented**.
+
+### Where the SHALLs are (why sequence matters)
+| Domain / area | Functions | SHALL | Note |
+|---|---|---:|---|
+| **RI.1.1 Record-lifecycle events** | 52 | **278** | originate/amend/access/disclose/transmit/de-identify/archive/purge… × evidence |
+| **TI.2 Audit** | 37 | **231** | mostly granular per-trigger criteria (TI.2.1.2.x / TI.2.1.3.x) |
+| TI.1 Security | 14 | 66 | authN/authZ/access-control/privacy/non-repudiation |
+| PH.2 Data management | 14 | 39 | |
+| RI.1 lifecycle (other) | 7 | 26 | |
+| PH.1 Account-holder profile | 6 | 19 | |
+| PH.3 Wellness/self-care | 7 | 14 | care plans mostly unbuilt |
+| TI.5 Interoperability · TI.4 Terminology | 10 | 23 | |
+| PH.6 Encounters/providers | 5 | 11 | |
+| TI.3 / TI.6–10 infra services | 4 | 10 | registry, business rules, workflow, backup, terminology models |
+| S.1–S.4 Supportive | 12 | 18 | provider info, financial, admin, research |
+| RI.2–3 Sync/archive · PH.4/PH.5 | 4 | 8 | |
+
+**Key leverage:** RI.1.1 (278) + TI.2 (231) = **509 SHALL (68% of the model)**, and they are
+largely the *same* capability — a standards-based, tamper-evident **audit + record-lifecycle
+ledger**. Building that one subsystem well is the single highest-impact move in the program.
+
+### Workstreams (sequenced)
+
+**WS0 — Close gaps in already-built functions** *(near-term; ~30–40 SHALL)*
+Fix the PARTIAL/NOT-MET criteria in the 17 functions we've already partly built (conformance
+claim §6). Tracked: **#301** (password-validator bypass, security), **#302** (TI.1.1 auth
+controls), **#303 / #304** (audit format, coverage, indelibility, break-glass), **#305** (TI.4.2
+terminology maintenance), **#306** (exchange integrity / non-repudiation / multi-version /
+agreements), **#307** (PH data: entered-in-error, rendering, AD status, revision history),
+**#308** (PH.6.3 proxy-authorization API + confidentiality tagging). Moves the claimed-conformant
+set from 10 functions toward ~26.
+
+**WS1 — Standards-based Audit + Record-Lifecycle ledger** *(the 509-SHALL centerpiece)*
+One subsystem, three increments:
+1. **Standards-based audit record** — emit FHIR R4 `AuditEvent` (IHE ATNA / RFC 3881), audit
+   *access to the audit log*, and bring admin/background events onto the trail (extends #303);
+   add tamper-evidence (hash-chain / append-only) and retention already exists (#304). → most of
+   TI.2 core.
+2. **Record-lifecycle ledger** — model each RI.1.1 lifecycle event as a FHIR `Provenance` entry
+   with the standard lifecycle event codes (originate, amend, verify, attest, access, disclose,
+   transmit, receive, de-identify, re-identify, extract, archive, restore, purge, encrypt,
+   decrypt…) plus evidence/actor/signature. → RI.1.1 parents + RI.1.2/1.3/1.4.
+3. **Granular trigger/event criteria** — the per-type children (TI.2.1.2.x/2.1.3.x, RI.1.1.x.1)
+   become largely mechanical once (1)+(2) exist: map each promop write/read path to its lifecycle
+   event + audit trigger. Drive to zero with a coverage matrix (event-type × captured?).
+
+**WS2 — Security completion (TI.1, 66 SHALL)**
+Build out TI.1 sub-functions: TI.1.3 access control, TI.1.4 patient access management, TI.1.5
+non-repudiation (digital signing — shared with #306), TI.1.6 secure data exchange, TI.1.8 privacy
+& confidentiality levels (shared with #308), finishing TI.1.1/1.2/1.7 from WS0.
+
+**WS3 — Personal Health breadth (PH, ~90 SHALL)**
+Finish PH.1/PH.2 (WS0), then the unbuilt patient functions, oncology value first: **PH.5 decision
+support** (drug-interaction / guideline alerts), **PH.6** encounters/referrals, **PH.3** care
+plans & self-care, **PH.4** health education.
+
+**WS4 — Interoperability & Terminology (TI.4 + TI.5, ~23 SHALL)**
+Multi-version interchange, non-repudiation on exchange, formal interchange agreements, terminology
+version-history / deprecation / mapping-in-models (#305, #306).
+
+**WS5 — Supportive + remaining infrastructure (S + RI.2/3 + TI.3/6–10, ~34 SHALL)**
+**S.4.1** patient-facing trial matching (big head start from the EXACT integration), S.1–S.3
+provider/financial/admin, RI.2 sync / RI.3 archive-restore, and the TI.3/TI.6–TI.10 platform
+services (registry, business rules, workflow, backup, terminology models).
+
+### Governance
+- Each workstream lands as issue-tracked feature branches + PRs (CLAUDE.md), each PR updating the
+  **traceability matrix** and the **conformance claim** (§5/§6 + Appendix A) so the MET count is
+  always current.
+- Re-run the criterion verification per workstream; a function moves into the claim §5 only when
+  **all** its applicable SHALL are MET.
+- Rough order of value-per-effort: **WS0 → WS1 → WS2 → WS3 → WS4 → WS5** (WS1 alone retires ~2/3
+  of the model's SHALLs).
 
 ## Verification (per phase)
 
