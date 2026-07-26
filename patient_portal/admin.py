@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import Identity, PatientMessage, PatientConsent, PatientInvitation
+from .models import Identity, PatientMessage, PatientConsent, PatientInvitation, AuditEvent
 
 
 @admin.register(Identity)
@@ -59,3 +59,18 @@ class PatientInvitationAdmin(admin.ModelAdmin):
     search_fields = ['email', 'person__person_id']
     list_filter = ['created_at']
     readonly_fields = ['token', 'created_at', 'accepted_at']
+
+
+@admin.register(AuditEvent)
+class AuditEventAdmin(admin.ModelAdmin):
+    list_display = ['timestamp', 'event_type', 'method', 'path', 'status_code', 'user_email', 'ip_address']
+    list_filter = ['event_type', 'method', 'timestamp']
+    search_fields = ['path', 'user_id', 'user_email', 'client_id', 'resource_id', 'ip_address']
+    readonly_fields = [f.name for f in AuditEvent._meta.fields]
+    ordering = ['-timestamp']
+
+    def has_add_permission(self, request):
+        return False  # audit rows are written only by the middleware
+
+    def has_change_permission(self, request, obj=None):
+        return False  # immutable audit trail

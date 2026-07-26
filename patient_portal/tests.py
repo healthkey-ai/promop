@@ -3758,7 +3758,8 @@ class ProvenanceFhirUploadTest(_SmartBase):
 # ---------------------------------------------------------------------------
 
 class AuditLogMiddlewareTest(_SmartBase):
-    """Audit log middleware emits JSON for mutating requests, silent on reads."""
+    """Audit log middleware emits a JSON stdout line for every audited request
+    (reads as record_view, writes classified by method)."""
 
     def _capture_audit_logs(self, handler, *args, **kwargs):
         """Call handler and return list of parsed audit log JSON entries emitted."""
@@ -3800,7 +3801,7 @@ class AuditLogMiddlewareTest(_SmartBase):
 
         self.assertEqual(len(logs), 1)
         entry = logs[0]
-        self.assertEqual(entry['event'], 'api_write')
+        self.assertEqual(entry['event'], 'record_update')
         self.assertEqual(entry['method'], 'PATCH')
         self.assertIn('patient-info', entry['path'])
         self.assertEqual(entry['client_id'], 'foundation-client-id')
@@ -3843,8 +3844,8 @@ class AuditLogMiddlewareTest(_SmartBase):
         self.assertEqual(len(logs), 1)
         self.assertEqual(logs[0]['method'], 'DELETE')
 
-    def test_get_does_not_emit_audit_log(self):
-        """GET produces no audit log entries."""
+    def test_get_emits_record_view_audit_log(self):
+        """GET is now audited as a record_view (TI.2 covers reads)."""
         _, pi = self._make_person_and_pi(88802)
 
         logs = self._capture_audit_logs(
@@ -3852,15 +3853,18 @@ class AuditLogMiddlewareTest(_SmartBase):
             f'/api/patient-info/{pi.pk}/',
         )
 
-        self.assertEqual(len(logs), 0, f'Unexpected audit logs for GET: {logs}')
+        self.assertEqual(len(logs), 1, f'Expected one record_view log for GET: {logs}')
+        self.assertEqual(logs[0]['event'], 'record_view')
+        self.assertEqual(logs[0]['method'], 'GET')
 
-    def test_list_get_does_not_emit_audit_log(self):
-        """GET list endpoint produces no audit log entries."""
+    def test_list_get_emits_record_view_audit_log(self):
+        """GET list endpoint is audited as a single record_view entry."""
         logs = self._capture_audit_logs(
             self.read_client.get,
             '/api/patient-info/',
         )
-        self.assertEqual(len(logs), 0)
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]['event'], 'record_view')
 
     # ------------------------------------------------------------------
     # Log content correctness
@@ -10594,6 +10598,190 @@ class PatientSignupTest(TestCase):
             'org': 'acme-onc', 'email': 'x@example.com', 'password': 'sup3rsecret',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+# ---------------------------------------------------------------------------
+# PHR-S FM TI.2 — persisted audit events + review API (issue #295)
+# ---------------------------------------------------------------------------
+
+class AuditTrailTI2Test(_SmartBase):
+    """Audit events are persisted to the DB and reviewable via /api/v1/audit-events/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from patient_portal.models import PatientUser
+        cls.staff = Identity.objects.create_user(email='auditor@test.com', password='pw', is_staff=True)
+        cls.pt_person = Person.objects.create(person_id=71001, given_name='Pat', family_name='Ient')
+        cls.patient_identity = Identity.objects.create_user(email='pat-audit@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.patient_identity, person=cls.pt_person)
+
+    def setUp(self):
+        from patient_portal.models import AuditEvent
+        AuditEvent.objects.all().delete()
+
+    def _staff_client(self):
+        c = APIClient()
+        c.force_authenticate(user=self.staff)
+        return c
+
+    def _patient_client(self):
+        c = APIClient()
+        c.force_authenticate(user=self.patient_identity)
+        return c
+
+    def _mk_event(self, **kw):
+        from patient_portal.models import AuditEvent
+        defaults = dict(event_type=AuditEvent.EVENT_VIEW, method='GET', path='/api/x/', status_code=200)
+        defaults.update(kw)
+        return AuditEvent.objects.create(**defaults)
+
+    # --- classification (unit) ---
+
+    def test_event_type_classification(self):
+        from django.test import RequestFactory
+        from patient_portal.api.middleware import _classify_event_type
+        rf = RequestFactory()
+        self.assertEqual(_classify_event_type(rf.post('/api/v1/auth/login/')), 'auth')
+        self.assertEqual(_classify_event_type(rf.post('/api/v1/patients/signup/')), 'auth')
+        self.assertEqual(_classify_event_type(rf.post('/o/token/')), 'auth')
+        self.assertEqual(_classify_event_type(rf.post('/api/fhir/patient-consent/')), 'consent')
+        self.assertEqual(_classify_event_type(rf.get('/api/v1/patient-records/')), 'record_view')
+        self.assertEqual(_classify_event_type(rf.post('/api/v1/measurements/')), 'record_create')
+        self.assertEqual(_classify_event_type(rf.patch('/api/v1/patient-records/1/')), 'record_update')
+        self.assertEqual(_classify_event_type(rf.delete('/api/v1/measurements/1/')), 'record_delete')
+
+    # --- persistence via middleware ---
+
+    def test_get_persists_record_view_event(self):
+        from patient_portal.models import AuditEvent
+        self.read_client.get('/api/patient-info/')
+        ev = AuditEvent.objects.filter(method='GET').latest('id')
+        self.assertEqual(ev.event_type, 'record_view')
+        self.assertIn('/api/patient-info', ev.path)
+        self.assertEqual(ev.status_code, 200)
+        self.assertEqual(ev.client_id, 'foundation-client-id')
+        self.assertEqual(ev.user_id, str(self.foundation_user.pk))
+        self.assertIsNotNone(ev.duration_ms)
+
+    def test_patch_persists_record_update_event(self):
+        from patient_portal.models import AuditEvent
+        person = Person.objects.create(person_id=71010)
+        pi = PatientRecord.objects.create(person=person, organization=self.organization)
+        self.write_client.patch(f'/api/patient-info/{pi.pk}/', {'ecog_status': '1'}, format='json')
+        ev = AuditEvent.objects.filter(method='PATCH').latest('id')
+        self.assertEqual(ev.event_type, 'record_update')
+
+    def test_post_persists_record_create_event(self):
+        from patient_portal.models import AuditEvent
+        payload = {
+            'person': self.person.pk,
+            'measurement_concept': self.type_concept.pk,
+            'measurement_date': '2024-01-01',
+            'measurement_type_concept': self.type_concept.pk,
+            'measurement_id': 71901,
+        }
+        self.write_client.post('/api/measurements/', payload, format='json')
+        ev = AuditEvent.objects.filter(method='POST').latest('id')
+        self.assertEqual(ev.event_type, 'record_create')
+
+    def test_delete_persists_record_delete_event(self):
+        from omop_core.models import Measurement
+        from patient_portal.models import AuditEvent
+        m = Measurement.objects.create(
+            measurement_id=71902, person=self.person, measurement_concept=self.type_concept,
+            measurement_date='2024-01-01', measurement_type_concept=self.type_concept,
+        )
+        self.write_client.delete(f'/api/measurements/{m.measurement_id}/')
+        ev = AuditEvent.objects.filter(method='DELETE').latest('id')
+        self.assertEqual(ev.event_type, 'record_delete')
+
+    def test_audit_events_endpoint_is_not_self_audited(self):
+        from patient_portal.models import AuditEvent
+        self._staff_client().get('/api/v1/audit-events/')
+        self.assertEqual(AuditEvent.objects.filter(path__contains='audit-events').count(), 0)
+
+    def test_should_audit_scope_rules(self):
+        from django.test import RequestFactory
+        from patient_portal.api.middleware import _should_audit
+        rf = RequestFactory()
+        self.assertTrue(_should_audit(rf.get('/api/patient-info/')))
+        self.assertTrue(_should_audit(rf.post('/o/token/')))
+        self.assertFalse(_should_audit(rf.get('/')))              # SPA / non-API
+        self.assertFalse(_should_audit(rf.get('/static/app.js')))  # static asset
+        self.assertFalse(_should_audit(rf.options('/api/patient-info/')))  # preflight
+        self.assertFalse(_should_audit(rf.get('/api/v1/audit-events/')))   # review endpoint
+
+    # --- review API scoping ---
+
+    def test_unauthenticated_cannot_review(self):
+        resp = APIClient().get('/api/v1/audit-events/')
+        self.assertIn(resp.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_staff_sees_all_events(self):
+        self._mk_event(user_id='111')
+        self._mk_event(user_id='222')
+        resp = self._staff_client().get('/api/v1/audit-events/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        user_ids = {r['user_id'] for r in resp.data['results']}
+        self.assertIn('111', user_ids)
+        self.assertIn('222', user_ids)
+
+    def test_patient_sees_only_own_events(self):
+        own = str(self.patient_identity.pk)
+        self._mk_event(user_id=own)
+        self._mk_event(user_id='999999')
+        resp = self._patient_client().get('/api/v1/audit-events/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        returned = {r['user_id'] for r in resp.data['results']}
+        self.assertEqual(returned, {own})
+
+    # --- filters ---
+
+    def test_filter_by_event_type(self):
+        from patient_portal.models import AuditEvent
+        self._mk_event(user_id='111', event_type=AuditEvent.EVENT_VIEW)
+        self._mk_event(user_id='111', event_type=AuditEvent.EVENT_DELETE, method='DELETE')
+        resp = self._staff_client().get('/api/v1/audit-events/', {'event_type': 'record_delete'})
+        types = {r['event_type'] for r in resp.data['results']}
+        self.assertEqual(types, {'record_delete'})
+
+    def test_filter_by_method_is_case_insensitive(self):
+        self._mk_event(user_id='111', method='GET')
+        self._mk_event(user_id='111', method='POST', event_type='record_create')
+        resp = self._staff_client().get('/api/v1/audit-events/', {'method': 'post'})
+        methods = {r['method'] for r in resp.data['results']}
+        self.assertEqual(methods, {'POST'})
+
+    def test_filter_by_user_id_privileged_only(self):
+        self._mk_event(user_id='111')
+        self._mk_event(user_id='222')
+        resp = self._staff_client().get('/api/v1/audit-events/', {'user_id': '222'})
+        returned = {r['user_id'] for r in resp.data['results']}
+        self.assertEqual(returned, {'222'})
+
+    def test_filter_by_timestamp_window(self):
+        from datetime import timedelta
+        from django.utils import timezone as tz
+        now = tz.now()
+        self._mk_event(user_id='111', timestamp=now - timedelta(days=3))
+        self._mk_event(user_id='111', timestamp=now)
+        cutoff = (now - timedelta(days=1)).isoformat()
+        resp = self._staff_client().get('/api/v1/audit-events/', {'after': cutoff})
+        self.assertEqual(len(resp.data['results']), 1)
+
+    # --- resilience ---
+
+    def test_db_write_failure_does_not_block_response(self):
+        from unittest.mock import patch as mock_patch
+        person = Person.objects.create(person_id=71020)
+        pi = PatientRecord.objects.create(person=person, organization=self.organization)
+        with mock_patch(
+            'patient_portal.api.middleware.AuditLogMiddleware._persist',
+            side_effect=RuntimeError('db down'),
+        ):
+            resp = self.write_client.patch(f'/api/patient-info/{pi.pk}/', {'ecog_status': '1'}, format='json')
+        self.assertIn(resp.status_code, range(200, 600))
 
 
 class ConceptSynonymApiTest(_SmartBase):

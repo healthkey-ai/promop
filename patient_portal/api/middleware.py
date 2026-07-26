@@ -40,7 +40,49 @@ class DeprecationWarningMiddleware:
             response['Link'] = _SUCCESSOR
         return response
 
-_SAFE_METHODS = frozenset({'GET', 'HEAD', 'OPTIONS', 'TRACE'})
+# Only these methods are audited. HEAD/OPTIONS/TRACE (CORS preflight, health probes)
+# are intentionally excluded as noise; GET is audited as a record_view (TI.2).
+_AUDITED_METHODS = frozenset({'GET', 'POST', 'PUT', 'PATCH', 'DELETE'})
+
+# Paths whose prefixes carry auditable API/auth activity. Everything else
+# (static assets, the SPA shell, admin, health checks) is skipped.
+_AUDITED_PREFIXES = ('/api/', '/o/')
+
+
+def _classify_event_type(request):
+    """Map a request to a TI.2 audit event_type.
+
+    Auth and consent are recognised by path first (a login is a POST but an
+    auth event, not a create); everything else falls back to CRUD-by-method,
+    with reads recorded as record_view.
+    """
+    from patient_portal.models import AuditEvent
+
+    path = request.path
+    method = request.method
+
+    if (
+        '/auth/login' in path
+        or '/auth/logout' in path
+        or '/patients/signup' in path
+        or '/patient-invitations/accept' in path
+        or path.startswith('/o/token')
+        or path.startswith('/o/authorize')
+        or path.startswith('/o/revoke')
+        or path.startswith('/o/introspect')
+    ):
+        return AuditEvent.EVENT_AUTH
+    if 'consent' in path:
+        return AuditEvent.EVENT_CONSENT
+    if method == 'GET':
+        return AuditEvent.EVENT_VIEW
+    if method == 'POST':
+        return AuditEvent.EVENT_CREATE
+    if method in ('PUT', 'PATCH'):
+        return AuditEvent.EVENT_UPDATE
+    if method == 'DELETE':
+        return AuditEvent.EVENT_DELETE
+    return AuditEvent.EVENT_OTHER
 
 
 def _get_client_id(request):
@@ -66,12 +108,29 @@ def _get_resource_id(request):
     return None
 
 
+def _should_audit(request):
+    """True when this request is on an auditable API/auth path with an audited method.
+
+    The audit-review endpoint itself is skipped so listing the trail does not
+    flood it with self-referential record_view rows.
+    """
+    if request.method not in _AUDITED_METHODS:
+        return False
+    path = request.path
+    if '/audit-events' in path:
+        return False
+    return path.startswith(_AUDITED_PREFIXES)
+
+
 class AuditLogMiddleware:
     """
-    Emits a structured JSON audit log line for every mutating API request
-    (POST, PUT, PATCH, DELETE). Reads are not logged.
+    Persists an audit-trail entry (HL7 PHR-S FM TI.2) for every audited API
+    request — reads (record_view) as well as writes — dual-writing a structured
+    JSON line to stdout (SIEM-friendly) and an AuditEvent row (reviewable via
+    /api/v1/audit-events/).
 
-    Never raises — failures are swallowed so the API response is never blocked.
+    Never raises — stdout and DB writes are independently guarded so a logging
+    or database failure can never block the API response.
     """
 
     def __init__(self, get_response):
@@ -81,18 +140,21 @@ class AuditLogMiddleware:
         start = time.monotonic()
         response = self.get_response(request)
 
-        if request.method in _SAFE_METHODS:
+        if not _should_audit(request):
             return response
 
+        entry = None
         try:
-            user = request.user
+            user = getattr(request, 'user', None)
+            authed = bool(user and user.is_authenticated)
             entry = {
-                'event': 'api_write',
+                'event': _classify_event_type(request),
                 'method': request.method,
                 'path': request.path,
                 'status_code': response.status_code,
                 'client_id': _get_client_id(request),
-                'user_id': str(user.pk) if user and user.is_authenticated else None,
+                'user_id': str(user.pk) if authed else None,
+                'user_email': (getattr(user, 'email', '') or None) if authed else None,
                 'resource_id': _get_resource_id(request),
                 'ip_address': (
                     request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
@@ -100,8 +162,37 @@ class AuditLogMiddleware:
                 ),
                 'duration_ms': round((time.monotonic() - start) * 1000),
             }
+        except Exception:
+            logger.warning("AuditLogMiddleware failed to build audit entry", exc_info=True)
+            return response
+
+        # stdout (SIEM) and DB (review API) are written independently so one
+        # failing never suppresses the other, and neither blocks the response.
+        try:
             logger.info(json.dumps(entry))
         except Exception:
-            logger.warning("AuditLogMiddleware internal error", exc_info=True)
+            logger.warning("AuditLogMiddleware stdout write failed", exc_info=True)
+
+        try:
+            self._persist(entry)
+        except Exception:
+            logger.warning("AuditLogMiddleware DB write failed", exc_info=True)
 
         return response
+
+    @staticmethod
+    def _persist(entry):
+        from patient_portal.models import AuditEvent
+
+        AuditEvent.objects.create(
+            event_type=entry['event'],
+            method=entry['method'],
+            path=entry['path'][:512],
+            status_code=entry['status_code'],
+            user_id=entry['user_id'],
+            user_email=(entry['user_email'] or '')[:254] or None,
+            client_id=entry['client_id'],
+            resource_id=entry['resource_id'],
+            ip_address=(entry['ip_address'] or '')[:64] or None,
+            duration_ms=entry['duration_ms'],
+        )

@@ -264,13 +264,27 @@ PH.3 (care plans).
 
 ---
 
+## TI.2 — Audit Trail  ✅ DONE
+
+**FM:** TI.2 (Audit) — TI.2.1 audit triggers, TI.2.2 audit log management, TI.2.3 audit
+review.
+
+**Status:** Delivered in PR for issue #295. `AuditLogMiddleware`
+(`patient_portal/api/middleware.py`) now audits **every** API/OAuth request — reads
+(`record_view`) as well as writes — classifying each as `record_view` / `record_create` /
+`record_update` / `record_delete` / `auth` / `consent`, and **dual-writes** a structured
+JSON line to stdout (SIEM) and an `AuditEvent` row (`patient_portal/models.py`) for review.
+Writes are independently guarded so neither stdout nor DB failure can block the response;
+non-API paths, CORS preflight, and the audit endpoint itself are excluded.
+Review API: read-only `GET /api/v1/audit-events/` (`audit_views.py`) — staff/service see
+all, patients see only their own — filterable by `event_type` / `method` / `user_id` /
+`after` / `before`. Rows are immutable (admin is view-only). Backend suite green (825).
+
 ## Cross-cutting
 
 - **FM traceability:** maintain a short mapping of each shipped capability to its FM
   function ID (PH.1.x, etc.) so scope stays visible and a future conformance pass has a
   starting point.
-- **Audit (TI.2):** the FM expects consent/record-access audit trails. A follow-up, not in
-  the pragmatic subset unless a phase surfaces a concrete need.
 
 ## Verification (per phase)
 

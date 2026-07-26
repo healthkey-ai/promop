@@ -3,6 +3,7 @@ import uuid
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
 from django.db.models import Q
+from django.utils import timezone
 
 
 class IdentityManager(BaseUserManager):
@@ -214,3 +215,55 @@ class PatientMessage(models.Model):
 
     def __str__(self):
         return f"{self.subject} - {self.created_at}"
+
+
+class AuditEvent(models.Model):
+    """A persisted audit-trail entry — HL7 PHR-S FM TI.2 (Audit).
+
+    One row per audited API request (reads and writes), written by
+    AuditLogMiddleware in addition to the stdout JSON line. Reviewable via
+    the read-only /api/v1/audit-events/ endpoint (TI.2.3).
+
+    `user_id` is the string form of the acting Identity's PK (matching the
+    stdout log), so it is comparable even after the Identity is deleted.
+    """
+    EVENT_VIEW = 'record_view'
+    EVENT_CREATE = 'record_create'
+    EVENT_UPDATE = 'record_update'
+    EVENT_DELETE = 'record_delete'
+    EVENT_AUTH = 'auth'
+    EVENT_CONSENT = 'consent'
+    EVENT_OTHER = 'other'
+    EVENT_TYPES = [
+        (EVENT_VIEW, 'Record view'),
+        (EVENT_CREATE, 'Record create'),
+        (EVENT_UPDATE, 'Record update'),
+        (EVENT_DELETE, 'Record delete'),
+        (EVENT_AUTH, 'Authentication'),
+        (EVENT_CONSENT, 'Consent'),
+        (EVENT_OTHER, 'Other'),
+    ]
+
+    event_type = models.CharField(max_length=32, choices=EVENT_TYPES, db_index=True)
+    timestamp = models.DateTimeField(default=timezone.now, db_index=True)
+    method = models.CharField(max_length=8)
+    path = models.CharField(max_length=512)
+    status_code = models.PositiveSmallIntegerField(null=True, blank=True)
+    user_id = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    user_email = models.CharField(max_length=254, null=True, blank=True)
+    client_id = models.CharField(max_length=255, null=True, blank=True)
+    resource_id = models.CharField(max_length=255, null=True, blank=True)
+    ip_address = models.CharField(max_length=64, null=True, blank=True)
+    duration_ms = models.PositiveIntegerField(null=True, blank=True)
+    detail = models.JSONField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'audit_event'
+        ordering = ['-timestamp']
+        indexes = [
+            models.Index(fields=['user_id', '-timestamp'], name='audit_user_ts_idx'),
+            models.Index(fields=['event_type', '-timestamp'], name='audit_type_ts_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.timestamp:%Y-%m-%d %H:%M:%S} {self.event_type} {self.method} {self.path}"
