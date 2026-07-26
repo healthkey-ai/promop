@@ -10696,10 +10696,13 @@ class AuditTrailTI2Test(_SmartBase):
         ev = AuditEvent.objects.filter(method='DELETE').latest('id')
         self.assertEqual(ev.event_type, 'record_delete')
 
-    def test_audit_events_endpoint_is_not_self_audited(self):
+    def test_audit_log_access_is_itself_audited(self):
+        """Accessing the audit trail is logged as audit_review (TI.2.2#04)."""
         from patient_portal.models import AuditEvent
         self._staff_client().get('/api/v1/audit-events/')
-        self.assertEqual(AuditEvent.objects.filter(path__contains='audit-events').count(), 0)
+        rows = AuditEvent.objects.filter(path__contains='audit-events')
+        self.assertGreaterEqual(rows.count(), 1)
+        self.assertEqual(rows.latest('id').event_type, 'audit_review')
 
     def test_should_audit_scope_rules(self):
         from django.test import RequestFactory
@@ -10707,10 +10710,11 @@ class AuditTrailTI2Test(_SmartBase):
         rf = RequestFactory()
         self.assertTrue(_should_audit(rf.get('/api/patient-info/')))
         self.assertTrue(_should_audit(rf.post('/o/token/')))
+        self.assertTrue(_should_audit(rf.get('/api/v1/audit-events/')))    # audit-log access IS audited
+        self.assertTrue(_should_audit(rf.post('/admin/patient_portal/identity/1/change/')))  # admin
         self.assertFalse(_should_audit(rf.get('/')))              # SPA / non-API
         self.assertFalse(_should_audit(rf.get('/static/app.js')))  # static asset
         self.assertFalse(_should_audit(rf.options('/api/patient-info/')))  # preflight
-        self.assertFalse(_should_audit(rf.get('/api/v1/audit-events/')))   # review endpoint
 
     # --- review API scoping ---
 
@@ -12193,7 +12197,9 @@ class AuditRetentionTest(TestCase):
         for _ in range(7):
             self._make_event(days_ago=3000)
         self._run(days=2190, batch_size=2)
-        self.assertEqual(AuditEvent.objects.count(), 0)
+        # All pruned; the prune records its own system audit event (#303), so
+        # exclude that when asserting the old rows are gone.
+        self.assertEqual(AuditEvent.objects.exclude(path='manage.py prune_audit_events').count(), 0)
 
     def test_batching_with_archive_captures_all_rows(self):
         from patient_portal.models import AuditEvent
@@ -12204,7 +12210,7 @@ class AuditRetentionTest(TestCase):
             with open(archive_path, encoding='utf-8') as fh:
                 records = [json.loads(line) for line in fh.read().splitlines() if line]
         self.assertEqual({r['id'] for r in records}, set(created))
-        self.assertEqual(AuditEvent.objects.count(), 0)
+        self.assertEqual(AuditEvent.objects.exclude(path='manage.py prune_audit_events').count(), 0)
 
     def test_uses_settings_default_when_no_days(self):
         from django.test import override_settings
@@ -12517,3 +12523,81 @@ class PasswordResetFlowTest(TestCase):
         resp = APIClient().post('/api/v1/auth/reset-password/',
                                 {'uid': uid, 'token': token, 'new_password': 'password'}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+# ---------------------------------------------------------------------------
+# #303 — standards-based audit format + audit-log-access + admin/background triggers
+# ---------------------------------------------------------------------------
+
+class AuditStandardsTest(TestCase):
+    """FHIR AuditEvent output (TI.2.2#01), audit-review + admin classification,
+    and background-command auditing (TI.2.1)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = Identity.objects.create_user(email='audit-std@test.com', password='pw', is_staff=True)
+
+    def _staff(self):
+        c = APIClient()
+        c.force_authenticate(user=self.staff)
+        return c
+
+    def _mk(self, **kw):
+        from patient_portal.models import AuditEvent
+        d = dict(event_type=AuditEvent.EVENT_VIEW, method='GET', path='/api/x/', status_code=200)
+        d.update(kw)
+        return AuditEvent.objects.create(**d)
+
+    def test_classification_of_admin_and_audit_review(self):
+        from django.test import RequestFactory
+        from patient_portal.api.middleware import _classify_event_type
+        rf = RequestFactory()
+        self.assertEqual(_classify_event_type(rf.get('/api/v1/audit-events/')), 'audit_review')
+        self.assertEqual(_classify_event_type(rf.get('/api/v1/audit-events/fhir/')), 'audit_review')
+        self.assertEqual(_classify_event_type(rf.post('/admin/patient_portal/identity/1/change/')), 'admin')
+
+    def test_fhir_endpoint_returns_auditevent_bundle(self):
+        self._mk(event_type='record_create', method='POST', path='/api/v1/measurements/',
+                 status_code=201, user_id='7', user_email='u@test.com', ip_address='10.0.0.1')
+        resp = self._staff().get('/api/v1/audit-events/fhir/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['resourceType'], 'Bundle')
+        self.assertEqual(resp.data['type'], 'searchset')
+        resources = [e['resource'] for e in resp.data['entry']]
+        self.assertTrue(all(r['resourceType'] == 'AuditEvent' for r in resources))
+        created = next(r for r in resources if r['action'] == 'C')
+        self.assertEqual(created['outcome'], '0')  # 201 -> success
+        self.assertEqual(created['agent'][0]['who']['identifier']['value'], '7')
+        self.assertEqual(created['agent'][0]['network']['address'], '10.0.0.1')
+
+    def test_fhir_outcome_maps_failure_status(self):
+        self._mk(event_type='record_view', method='GET', status_code=403, user_id='7')
+        resp = self._staff().get('/api/v1/audit-events/fhir/', {'method': 'GET'})
+        outcomes = {e['resource']['outcome'] for e in resp.data['entry']}
+        self.assertIn('4', outcomes)  # 403 -> minor failure
+
+    def test_fhir_output_is_scoped_for_non_staff(self):
+        from patient_portal.models import PatientUser
+        person = Person.objects.create(person_id=95001)
+        patient = Identity.objects.create_user(email='pt-fhir@test.com', password='pw')
+        PatientUser.objects.create(identity=patient, person=person)
+        self._mk(user_id=str(patient.pk))
+        self._mk(user_id='99999')  # someone else
+        c = APIClient()
+        c.force_authenticate(user=patient)
+        resp = c.get('/api/v1/audit-events/fhir/')
+        who = {e['resource']['agent'][0]['who']['identifier']['value'] for e in resp.data['entry']}
+        self.assertEqual(who, {str(patient.pk)})
+
+    def test_prune_command_records_system_audit_event(self):
+        from datetime import timedelta
+        from django.utils import timezone as tz
+        from django.core.management import call_command
+        from patient_portal.models import AuditEvent
+        old = self._mk(user_id='1')
+        AuditEvent.objects.filter(pk=old.pk).update(timestamp=tz.now() - timedelta(days=4000))
+        call_command('prune_audit_events', '--days', '30')
+        sys_events = AuditEvent.objects.filter(event_type='admin', path='manage.py prune_audit_events')
+        self.assertEqual(sys_events.count(), 1)
+        self.assertGreaterEqual(sys_events.first().detail['deleted'], 1)
+        self.assertEqual(sys_events.first().user_id, 'system')

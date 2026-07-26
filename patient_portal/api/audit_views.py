@@ -11,12 +11,62 @@ import datetime as _datetime
 from django.utils.dateparse import parse_date, parse_datetime
 from django.utils import timezone
 from rest_framework import viewsets
+from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 
 from patient_portal.models import AuditEvent
 from .permissions import is_service_token
 from .serializers import AuditEventSerializer
+
+
+# event_type → FHIR R4 AuditEvent.action code (C|R|U|D|E).
+_FHIR_ACTION = {
+    AuditEvent.EVENT_CREATE: 'C',
+    AuditEvent.EVENT_VIEW: 'R',
+    AuditEvent.EVENT_AUDIT_REVIEW: 'R',
+    AuditEvent.EVENT_UPDATE: 'U',
+    AuditEvent.EVENT_DELETE: 'D',
+}
+
+
+def _fhir_outcome(status_code):
+    """FHIR R4 AuditEvent.outcome: 0 success, 4 minor failure, 8 serious failure."""
+    if status_code is None:
+        return '0'
+    if status_code >= 500:
+        return '8'
+    if status_code >= 400:
+        return '4'
+    return '0'
+
+
+def to_fhir_audit_event(row):
+    """Project an AuditEvent row to a FHIR R4 `AuditEvent` resource (TI.2.2#01)."""
+    resource = {
+        'resourceType': 'AuditEvent',
+        'id': str(row.id),
+        'action': _FHIR_ACTION.get(row.event_type, 'E'),
+        'recorded': row.timestamp.isoformat(),
+        'outcome': _fhir_outcome(row.status_code),
+        'type': {
+            'system': 'http://terminology.hl7.org/CodeSystem/audit-event-type',
+            'code': 'rest',
+            'display': 'RESTful Operation',
+        },
+        'subtype': [{'system': 'http://hl7.org/fhir/restful-interaction', 'code': row.method}],
+        'source': {'observer': {'display': 'promop'}},
+        'agent': [{
+            'requestor': True,
+            'who': {'identifier': {'value': row.user_id or 'anonymous'}},
+            'network': {'address': row.ip_address or '', 'type': '2'},  # 2 = IP address
+        }],
+        'entity': [{'what': {'display': row.path}}],
+    }
+    if row.user_email:
+        resource['agent'][0]['who']['display'] = row.user_email
+    return resource
 
 
 class AuditEventPagination(PageNumberPagination):
@@ -89,3 +139,19 @@ class AuditEventViewSet(viewsets.ReadOnlyModelViewSet):
                 qs = qs.filter(timestamp__lte=dt)
 
         return qs
+
+    @action(detail=False, methods=['get'], url_path='fhir')
+    def fhir(self, request):
+        """Render the (scoped, filtered) audit trail as a FHIR R4 `AuditEvent`
+        searchset Bundle — standards-based audit format (TI.2.2#01). Honors the
+        same scoping/filters/pagination as the JSON list."""
+        qs = self.get_queryset()
+        total = qs.count()
+        page = self.paginate_queryset(qs)
+        rows = page if page is not None else list(qs)
+        return Response({
+            'resourceType': 'Bundle',
+            'type': 'searchset',
+            'total': total,
+            'entry': [{'resource': to_fhir_audit_event(r)} for r in rows],
+        })
