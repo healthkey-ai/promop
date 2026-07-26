@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('omop_core', '0122_add_clinical_list_indexes_and_document_file'),
+        ('omop_core', '0123_vocabulary_deprecated_date_and_more'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

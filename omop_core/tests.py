@@ -1481,3 +1481,136 @@ class ReportRegimenMappingGapsCommandTest(TestCase):
         call_command('report_regimen_mapping_gaps', stdout=out)
         self.assertIn('No mapping gaps recorded.', out.getvalue())
 
+
+# ---------------------------------------------------------------------------
+# TI.4.2 Terminology maintenance (promop#305)
+#   - vocabulary deprecation (#05)
+#   - append-only version change-history (#01/#09)
+#   - concept-replacement resolution / embedded-term substitution (#07)
+# ---------------------------------------------------------------------------
+
+class TerminologyMaintenanceTest(TestCase):
+    """Vocabulary deprecation, version history, concept-replacement resolution."""
+
+    def setUp(self):
+        from omop_core.models import Relationship, ConceptRelationship
+        (self.vocab, self.dom_cond, self.dom_meas, self.dom_drug,
+         self.dom_type, self.dom_obs, self.cc) = _make_vocab()
+        # A deprecated concept that is 'Concept replaced by' an active successor,
+        # via one intermediate hop to exercise chain-following.
+        self.old = _concept(880001, 'Old ingredient', self.dom_drug, self.vocab, self.cc, code='OLD')
+        self.old.invalid_reason = 'U'
+        self.old.save(update_fields=['invalid_reason'])
+        self.mid = _concept(880002, 'Interim ingredient', self.dom_drug, self.vocab, self.cc, code='MID')
+        self.mid.invalid_reason = 'U'
+        self.mid.save(update_fields=['invalid_reason'])
+        self.new = _concept(880003, 'Current ingredient', self.dom_drug, self.vocab, self.cc, code='NEW')
+
+        self.rel, _ = Relationship.objects.get_or_create(
+            relationship_id='Concept replaced by',
+            defaults={
+                'relationship_name': 'Concept replaced by',
+                'is_hierarchical': 0,
+                'defines_ancestry': 0,
+                'reverse_relationship_id': 'Concept replaces',
+                'relationship_concept_id': 0,
+            },
+        )
+        for a, b in ((self.old, self.mid), (self.mid, self.new)):
+            ConceptRelationship.objects.get_or_create(
+                concept_1=a, concept_2=b, relationship=self.rel,
+                defaults={'valid_start_date': date(1970, 1, 1),
+                          'valid_end_date': date(2099, 12, 31)},
+            )
+
+    # --- #05 vocabulary deprecation ---
+
+    def test_vocabulary_deprecation_command_sets_flag(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from omop_core.models import Vocabulary
+
+        call_command('deprecate_vocabulary', 'OMOP_TEST',
+                     reason='Superseded', stdout=StringIO())
+        v = Vocabulary.objects.get(vocabulary_id='OMOP_TEST')
+        self.assertTrue(v.is_deprecated)
+        self.assertEqual(v.deprecated_date, date.today())
+        self.assertEqual(v.deprecated_reason, 'Superseded')
+
+    def test_deprecate_command_records_history_and_undo(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from omop_core.models import Vocabulary, VocabularyVersionHistory
+
+        call_command('deprecate_vocabulary', 'OMOP_TEST',
+                     reason='Superseded', stdout=StringIO())
+        hist = VocabularyVersionHistory.objects.filter(
+            vocabulary_id='OMOP_TEST',
+            action=VocabularyVersionHistory.ACTION_DEPRECATED,
+        )
+        self.assertEqual(hist.count(), 1)
+        self.assertEqual(hist.first().note, 'Superseded')
+
+        call_command('deprecate_vocabulary', 'OMOP_TEST', undo=True, stdout=StringIO())
+        v = Vocabulary.objects.get(vocabulary_id='OMOP_TEST')
+        self.assertFalse(v.is_deprecated)
+        self.assertIsNone(v.deprecated_date)
+
+    def test_deprecate_command_unknown_vocabulary_errors(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError):
+            call_command('deprecate_vocabulary', 'NOPE', stdout=StringIO())
+
+    # --- #01/#09 version change-history helper ---
+
+    def test_version_history_helper_records_each_action(self):
+        from omop_core.models import (
+            record_vocabulary_version_history, VocabularyVersionHistory,
+        )
+        record_vocabulary_version_history(
+            'LOINC', version='2.77', action=VocabularyVersionHistory.ACTION_LOADED,
+            cdm_release_date=date(2026, 1, 1),
+        )
+        record_vocabulary_version_history(
+            'LOINC', version='2.78', action=VocabularyVersionHistory.ACTION_REPLACED,
+        )
+        record_vocabulary_version_history(
+            'LOINC', version='2.78', action=VocabularyVersionHistory.ACTION_DEPRECATED,
+            note='retired',
+        )
+        rows = VocabularyVersionHistory.objects.filter(vocabulary_id='LOINC')
+        self.assertEqual(rows.count(), 3)
+        self.assertEqual(
+            set(rows.values_list('action', flat=True)),
+            {'loaded', 'replaced', 'deprecated'},
+        )
+        # Append-only: replaced does not overwrite the loaded row.
+        self.assertEqual(rows.filter(version='2.77').count(), 1)
+
+    # --- #07 concept-replacement resolution ---
+
+    def test_resolve_concept_replacement_follows_chain_to_active(self):
+        from omop_core.models import resolve_concept_replacement
+
+        resolved, chain = resolve_concept_replacement(self.old.concept_id)
+        self.assertEqual(resolved.concept_id, self.new.concept_id)
+        self.assertIsNone(resolved.invalid_reason)
+        self.assertEqual(chain, [880001, 880002, 880003])
+
+    def test_resolve_concept_replacement_active_concept_is_identity(self):
+        from omop_core.models import resolve_concept_replacement
+
+        resolved, chain = resolve_concept_replacement(self.new.concept_id)
+        self.assertEqual(resolved.concept_id, self.new.concept_id)
+        self.assertEqual(chain, [self.new.concept_id])
+
+    def test_resolve_concept_replacement_unknown_returns_none(self):
+        from omop_core.models import resolve_concept_replacement
+
+        resolved, chain = resolve_concept_replacement(999999999)
+        self.assertIsNone(resolved)
+        self.assertEqual(chain, [])
+

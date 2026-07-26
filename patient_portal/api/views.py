@@ -4561,6 +4561,44 @@ def concept_synonym_search(request):
     return paginator.get_paginated_response(results)
 
 
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_replacement(request, concept_id):
+    """
+    Resolve a (possibly deprecated) concept to its active replacement.
+
+    Embedded-term substitution (PHR-S FM TI.4.2#07) in an OMOP-based store
+    reduces to a concept-replacement lookup: when a terminology release retires
+    a concept, Athena loads a `'Concept replaced by'` edge to the successor.
+    This endpoint walks that chain and returns the terminal active concept.
+
+    Response 200: {
+        "concept_id": N,                 # requested concept
+        "replaced": true|false,          # whether a substitution was applied
+        "resolved_concept": { concept_id, concept_name, concept_code,
+                              vocabulary_id, concept_class_id, domain_id,
+                              standard_concept, invalid_reason },
+        "chain": [id0, id1, ...]         # traversal order (>=1 entry)
+    }
+    Response 404: concept_id not found.
+    """
+    from omop_core.models import resolve_concept_replacement
+
+    resolved, chain = resolve_concept_replacement(concept_id)
+    if resolved is None:
+        return Response({'detail': 'Concept not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    versions = _vocab_version_map()
+    return Response({
+        'concept_id': concept_id,
+        'replaced': resolved.concept_id != concept_id,
+        'resolved_concept': _serialize_concept_graph_node(
+            resolved, versions, invalid_reason=resolved.invalid_reason,
+        ),
+        'chain': chain,
+    })
+
+
 # =============================================================================
 # Controlled vocabulary endpoints
 # GET /api/vocabularies/<model_name>/ → [{code, title}, ...]
