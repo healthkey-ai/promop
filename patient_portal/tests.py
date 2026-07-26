@@ -4444,6 +4444,27 @@ class AthenaVocabularyLoadTest(TestCase):
         self.assertEqual(Concept.objects.count(), before_concepts)
         self.assertEqual(Relationship.objects.count(), before_rels)
 
+    def test_load_records_version_history_append_only(self):
+        """The loader appends version-history rows on each load, never truncating (#305).
+
+        (--replace itself TRUNCATEs vocab tables, which Postgres refuses inside the
+        atomic test transaction; the append-only trail is what we assert here — two
+        loads accumulate rows rather than overwriting.)
+        """
+        from omop_core.models import VocabularyVersionHistory
+        from django.core.management import call_command
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_minimal_athena(tmpdir)
+            call_command('load_athena_vocabularies', path=tmpdir)
+            after_first = VocabularyVersionHistory.objects.filter(
+                action=VocabularyVersionHistory.ACTION_LOADED).count()
+            self.assertGreater(after_first, 0)
+            call_command('load_athena_vocabularies', path=tmpdir)
+            after_second = VocabularyVersionHistory.objects.filter(
+                action=VocabularyVersionHistory.ACTION_LOADED).count()
+        # Second load appends more history rows rather than replacing the trail.
+        self.assertEqual(after_second, after_first * 2)
+
 
 class RxNavServiceTest(TestCase):
     """Test rxnav_service.resolve_drug() with mocked HTTP calls."""
@@ -6800,6 +6821,78 @@ class ConceptGraphTest(_SmartBase):
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.json()['truncated'], [])
+
+
+class ConceptReplacementEndpointTest(_SmartBase):
+    """GET /api/v1/concepts/{id}/replacement/ — embedded-term substitution (TI.4.2#07)."""
+
+    def setUp(self):
+        import datetime
+        self.vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RxNorm',
+            defaults={'vocabulary_name': 'RxNorm', 'vocabulary_reference': '',
+                      'vocabulary_version': 'RxNorm 2026', 'vocabulary_concept_id': 0},
+        )
+        self.domain, _ = Domain.objects.get_or_create(
+            domain_id='Drug', defaults={'domain_name': 'Drug', 'domain_concept_id': 13},
+        )
+        self.cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Ingredient',
+            defaults={'concept_class_name': 'Ingredient', 'concept_class_concept_id': 0},
+        )
+        self.today = datetime.date(1970, 1, 1)
+        self.future = datetime.date(2099, 12, 31)
+        self.old = Concept.objects.create(
+            concept_id=770001, concept_name='Old drug', domain=self.domain,
+            vocabulary=self.vocab, concept_class=self.cc, concept_code='OLD',
+            valid_start_date=self.today, valid_end_date=self.future, invalid_reason='U',
+        )
+        self.new = Concept.objects.create(
+            concept_id=770002, concept_name='New drug', domain=self.domain,
+            vocabulary=self.vocab, concept_class=self.cc, concept_code='NEW',
+            valid_start_date=self.today, valid_end_date=self.future,
+        )
+        self.rel, _ = Relationship.objects.get_or_create(
+            relationship_id='Concept replaced by',
+            defaults={'relationship_name': 'Concept replaced by', 'is_hierarchical': 0,
+                      'defines_ancestry': 0, 'reverse_relationship_id': 'Concept replaces',
+                      'relationship_concept_id': 0},
+        )
+        ConceptRelationship.objects.get_or_create(
+            concept_1=self.old, concept_2=self.new, relationship=self.rel,
+            defaults={'valid_start_date': self.today, 'valid_end_date': self.future},
+        )
+
+    def _auth(self):
+        return {'HTTP_AUTHORIZATION': f'Bearer {self.read_token.token}'}
+
+    def test_deprecated_concept_resolves_to_successor(self):
+        resp = self.client.get(
+            f'/api/v1/concepts/{self.old.concept_id}/replacement/', **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        body = resp.json()
+        self.assertTrue(body['replaced'])
+        self.assertEqual(body['resolved_concept']['concept_id'], self.new.concept_id)
+        self.assertEqual(body['chain'], [self.old.concept_id, self.new.concept_id])
+        self.assertEqual(body['resolved_concept']['vocabulary_version'], 'RxNorm 2026')
+
+    def test_active_concept_is_identity(self):
+        resp = self.client.get(
+            f'/api/v1/concepts/{self.new.concept_id}/replacement/', **self._auth(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        body = resp.json()
+        self.assertFalse(body['replaced'])
+        self.assertEqual(body['resolved_concept']['concept_id'], self.new.concept_id)
+
+    def test_unknown_concept_returns_404(self):
+        resp = self.client.get('/api/v1/concepts/99999999/replacement/', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_unauthenticated_returns_401_or_403(self):
+        resp = self.client.get(f'/api/v1/concepts/{self.old.concept_id}/replacement/')
+        self.assertIn(resp.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
 
 class _ConceptFixtureBase(_SmartBase):
