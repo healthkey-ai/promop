@@ -79,9 +79,13 @@ API contract. To honour the decision, promop must provide:
 ### Release construction & publication
 - Immutable, content-addressed **release manifests**: a **release id**, per-vocabulary
   versions, schema version, corpus scope, build timestamp, checksums.
-- **Atomic publication** (stage → validate → publish). The current
-  `load_athena_vocabularies` can `TRUNCATE`-and-reload (cascading clinical tables) with
-  no publish boundary; consumers must never read an in-progress database.
+- **Atomic publication** (stage → validate → publish). The loader stages into UNLOGGED
+  `_stage_*` mirrors, validates (row-count drift, natural-key uniqueness, FK integrity,
+  namespace hygiene), and publishes in a single transaction that writes per-row change
+  records (`ReleaseTableChange`, with tombstones for removals) and flips the
+  `VocabRelease` to published atomically. `--replace` no longer `TRUNCATE`s (a separate
+  `reset_vocab_tables` command is the explicit escape hatch); consumers never read an
+  in-progress database.
 - Retention of prior releases; rollback.
 
 ### API contract (what a cache pins and validates against)
@@ -102,10 +106,16 @@ API contract. To honour the decision, promop must provide:
   identity preserved.
 
 ### Corpus boundary
-- The loader currently scopes `concept` to selected vocabularies/classes,
-  `concept_relationship` to loaded-endpoint pairs, and `concept_ancestor` to
-  HemOnc→HemOnc. Either **widen the corpus** to the declared "all vocabulary data" or
-  **narrow this ADR's scope** explicitly. "All" must not remain aspirational.
+- **Corpus boundary = the scope declared in each release manifest.** The loader scopes
+  `concept` to `VOCAB_SCOPE` vocabularies (HemOnc, RxNorm/RxNorm Extension ingredient+drug
+  classes, ATC L-subtree, LOINC Measurement/Observation domains, UCUM, Visit, Type Concept,
+  SNOMED, ICD10CM, CVX), `concept_relationship` to loaded-endpoint pairs, and
+  `concept_ancestor` to HemOnc→HemOnc. Locally-minted `HK-*` quarantine vocabularies are
+  part of the published corpus but are never modified by the Athena loader. This boundary
+  is published per-release in the manifest's `corpus_scope` (declared + loaded
+  vocabularies), so consumers always know exactly what a release governs. "All vocabulary
+  data" is explicitly narrowed to this declared scope; widening it is a future,
+  separately-decided change.
 
 ### Integrity / no poisoning
 - **No locally-minted concepts inside a licensed `vocabulary_id`.** Unmatched/local content

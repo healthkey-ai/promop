@@ -1317,6 +1317,15 @@ class SourceToConceptMap(models.Model):
 
     class Meta:
         db_table = 'source_to_concept_map'
+        # CDM natural key — table starts empty so this is safe to add; makes
+        # loader re-runs idempotent and stage validation meaningful.
+        constraints = [
+            models.UniqueConstraint(
+                fields=['source_code', 'source_vocabulary_id', 'target_concept',
+                        'valid_start_date'],
+                name='uq_stcm_natural_key',
+            ),
+        ]
         indexes = [models.Index(fields=['source_code'], name='ix_stcm_source_code')]
 
 

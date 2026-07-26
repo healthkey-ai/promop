@@ -147,27 +147,40 @@ def _set_repeatable_read():
         pass
 
 
-def publish_release(*, notes=''):
+def publish_release(*, notes='', before_publish=None):
     """Build a manifest from the current corpus tables and publish it.
 
     Returns the new VocabRelease (status='published').  Prior releases remain
     published for history; ``current_release()`` always points at the newest.
+
+    ``before_publish`` (issue #236 PR 3): optional callable invoked with the
+    fresh staging release inside the publish transaction, after the manifest
+    row exists and before the checksums are computed.  The loader uses it to
+    write ``ReleaseTableChange`` rows and apply the staged corpus mutations,
+    so change records, corpus writes, and the manifest flip commit — or roll
+    back — atomically.  Checksums are computed after the callback returns, so
+    the manifest describes the post-publish corpus.
     """
     with transaction.atomic():
         _set_repeatable_read()
+        release = VocabRelease.objects.create(
+            release_id=new_release_id(),
+            status=VocabRelease.STATUS_STAGING,
+            schema_version=RELEASE_SCHEMA_VERSION,
+            notes=notes,
+        )
+        if before_publish is not None:
+            before_publish(release)
         checksums, counts = compute_table_checksums()
         versions = {
             row['vocabulary_id']: row['vocabulary_version']
             for row in Vocabulary.objects.values('vocabulary_id', 'vocabulary_version')
         }
-        return VocabRelease.objects.create(
-            release_id=new_release_id(),
-            status=VocabRelease.STATUS_PUBLISHED,
-            schema_version=RELEASE_SCHEMA_VERSION,
-            corpus_scope=current_corpus_scope(),
-            vocabulary_versions=versions,
-            table_checksums=checksums,
-            row_counts=counts,
-            notes=notes,
-            published_at=timezone.now(),
-        )
+        release.corpus_scope = current_corpus_scope()
+        release.vocabulary_versions = versions
+        release.table_checksums = checksums
+        release.row_counts = counts
+        release.status = VocabRelease.STATUS_PUBLISHED
+        release.published_at = timezone.now()
+        release.save()
+        return release

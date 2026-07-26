@@ -10,7 +10,7 @@ TEST-04: FLBundleGenerator unit tests
 from datetime import date
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 
 from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
@@ -459,7 +459,17 @@ class CdmComplianceTablesTest(_OmopBase):
 
 
 class LoadAthenaVocabExtraTablesTest(_OmopBase):
-    """load_athena_vocabularies loaders for concept_synonym and drug_strength (#223)."""
+    """load_athena_vocabularies stage loaders for concept_synonym / drug_strength /
+    vocabulary (#223; updated for the stage → validate → publish rework in #236).
+
+    The per-file loaders now COPY into UNLOGGED _stage_* mirrors and read their
+    concept filters from _stage_concept, so these tests create the mirrors,
+    seed _stage_concept from the ORM-created concepts, and assert against the
+    staged rows.  End-to-end publish behavior is covered by
+    AtomicVocabPublishTest — including rerun idempotency
+    (test_second_identical_load_is_a_noop), which subsumes the old
+    direct-insert idempotency test.
+    """
 
     PERSON_ID = 90280
 
@@ -467,7 +477,10 @@ class LoadAthenaVocabExtraTablesTest(_OmopBase):
         import os
         import tempfile
         from io import StringIO
-        from omop_core.management.commands.load_athena_vocabularies import Command
+        from django.db import connection
+        from omop_core.management.commands.load_athena_vocabularies import (
+            Command, TABLE_SPECS,
+        )
         d = tempfile.mkdtemp()
         with open(os.path.join(d, filename), 'w', encoding='utf-8', newline='') as f:
             f.write('\t'.join(header) + '\n')
@@ -477,26 +490,36 @@ class LoadAthenaVocabExtraTablesTest(_OmopBase):
         cmd._base = d
         cmd._gcs_bucket = None
         cmd._direct = False
+        cmd._create_stage_tables()
+        self.addCleanup(cmd._drop_stage_tables)
+        # The ORM-created concepts stand in for a staged concept corpus.
+        cols = ', '.join(TABLE_SPECS['concept']['cols'])
+        with connection.cursor() as cur:
+            cur.execute(f'INSERT INTO _stage_concept ({cols}) SELECT {cols} FROM concept')
         return getattr(cmd, method_name)(False)
 
+    def _stage_rows(self, table, cols='*'):
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute(f'SELECT {cols} FROM _stage_{table}')
+            return cur.fetchall()
+
     def test_concept_synonym_loads_and_filters_unloaded_refs(self):
-        from omop_core.models import ConceptSynonym
         _concept(4180186, 'English language', self.dom_meas, self.vocab, self.cc)
-        drug = _concept(950001, 'Doxorubicin', self.dom_drug, self.vocab, self.cc, code='1790')
+        _concept(950001, 'Doxorubicin', self.dom_drug, self.vocab, self.cc, code='1790')
         self._run_loader(
             '_load_concept_synonym', 'CONCEPT_SYNONYM.csv',
             ['concept_id', 'concept_synonym_name', 'language_concept_id'],
             [
                 (950001, 'Adriamycin', 4180186),   # valid
-                (999999, 'Ghost', 4180186),         # concept not loaded -> skip
-                (950001, 'BadLang', 888888),        # language not loaded -> skip
+                (999999, 'Ghost', 4180186),         # concept not staged -> skip
+                (950001, 'BadLang', 888888),        # language not staged -> skip
             ],
         )
-        names = list(ConceptSynonym.objects.values_list('concept_synonym_name', flat=True))
+        names = [r[0] for r in self._stage_rows('concept_synonym', 'concept_synonym_name')]
         self.assertEqual(names, ['Adriamycin'])
 
     def test_drug_strength_loads_and_nulls_unloaded_unit(self):
-        from omop_core.models import DrugStrength
         _concept(950001, 'Doxorubicin', self.dom_drug, self.vocab, self.cc, code='1790')
         _concept(950002, 'Doxorubicin 2 MG/ML', self.dom_drug, self.vocab, self.cc, code='1791')
         _concept(8576, 'milligram', self.dom_meas, self.vocab, self.cc)
@@ -508,44 +531,18 @@ class LoadAthenaVocabExtraTablesTest(_OmopBase):
             '_load_drug_strength', 'DRUG_STRENGTH.csv', header,
             [
                 (950001, 950001, 10, 8576, '', '', '', '', '', '19700101', '20991231', ''),
-                (999999, 950001, 5, 8576, '', '', '', '', '', '19700101', '20991231', ''),   # drug not loaded -> skip
-                (950002, 950001, 20, 777777, '', '', '', '', '', '19700101', '20991231', ''),  # unit not loaded -> NULL
+                (999999, 950001, 5, 8576, '', '', '', '', '', '19700101', '20991231', ''),   # drug not staged -> skip
+                (950002, 950001, 20, 777777, '', '', '', '', '', '19700101', '20991231', ''),  # unit not staged -> NULL
             ],
         )
-        self.assertEqual(DrugStrength.objects.count(), 2)
-        loaded_unit = DrugStrength.objects.get(amount_value=10.0)
-        self.assertEqual(loaded_unit.amount_unit_concept_id, 8576)
-        nulled_unit = DrugStrength.objects.get(amount_value=20.0)
-        self.assertIsNone(nulled_unit.amount_unit_concept_id)
-
-    def test_loader_rerun_is_idempotent(self):
-        """Re-running the loaders without --replace must not duplicate rows."""
-        from omop_core.models import ConceptSynonym, DrugStrength
-        _concept(4180186, 'English language', self.dom_meas, self.vocab, self.cc)
-        _concept(950001, 'Doxorubicin', self.dom_drug, self.vocab, self.cc, code='1790')
-        self._run_loader(
-            '_load_concept_synonym', 'CONCEPT_SYNONYM.csv',
-            ['concept_id', 'concept_synonym_name', 'language_concept_id'],
-            [(950001, 'Adriamycin', 4180186)],
-        )
-        self._run_loader(
-            '_load_concept_synonym', 'CONCEPT_SYNONYM.csv',
-            ['concept_id', 'concept_synonym_name', 'language_concept_id'],
-            [(950001, 'Adriamycin', 4180186)],
-        )
-        self.assertEqual(ConceptSynonym.objects.count(), 1)
-        ds_header = ['drug_concept_id', 'ingredient_concept_id', 'amount_value',
-                     'amount_unit_concept_id', 'numerator_value', 'numerator_unit_concept_id',
-                     'denominator_value', 'denominator_unit_concept_id', 'box_size',
-                     'valid_start_date', 'valid_end_date', 'invalid_reason']
-        ds_rows = [(950001, 950001, 10, '', '', '', '', '', '', '19700101', '20991231', '')]
-        self._run_loader('_load_drug_strength', 'DRUG_STRENGTH.csv', ds_header, ds_rows)
-        self._run_loader('_load_drug_strength', 'DRUG_STRENGTH.csv', ds_header, ds_rows)
-        self.assertEqual(DrugStrength.objects.count(), 1)
+        rows = self._stage_rows('drug_strength', 'amount_value, amount_unit_concept_id')
+        self.assertEqual(len(rows), 2)
+        by_amount = {float(a): u for a, u in rows}
+        self.assertEqual(by_amount[10.0], 8576)
+        self.assertIsNone(by_amount[20.0])
 
     def test_vocabulary_none_row_loaded_for_cdm_version(self):
-        """The out-of-scope 'None' VOCABULARY.csv row is kept so cdm_source gets a version."""
-        from omop_core.models import Vocabulary
+        """The out-of-scope 'None' VOCABULARY.csv row is staged so cdm_source gets a version."""
         self._run_loader(
             '_load_vocabularies', 'VOCABULARY.csv',
             ['vocabulary_id', 'vocabulary_name', 'vocabulary_reference',
@@ -555,19 +552,19 @@ class LoadAthenaVocabExtraTablesTest(_OmopBase):
                 ('NotInScope', 'Some vocab', '', 'v1', 1),
             ],
         )
-        row = Vocabulary.objects.get(vocabulary_id='None')
-        self.assertEqual(row.vocabulary_version, 'v5.4 01-JAN-26')
-        self.assertFalse(Vocabulary.objects.filter(vocabulary_id='NotInScope').exists())
+        rows = dict(self._stage_rows('vocabulary', 'vocabulary_id, vocabulary_version'))
+        self.assertEqual(rows.get('None'), 'v5.4 01-JAN-26')
+        self.assertNotIn('NotInScope', rows)
 
     def test_sync_cdm_source_recreates_missing_row(self):
-        """_sync_cdm_source_metadata re-seeds the row wiped by --replace TRUNCATE CASCADE."""
-        from io import StringIO
-        from omop_core.management.commands.load_athena_vocabularies import Command
+        """sync_cdm_source_metadata re-seeds the row if it was wiped."""
+        from omop_core.management.commands.load_athena_vocabularies import (
+            sync_cdm_source_metadata,
+        )
         from omop_core.models import CdmSource
         CdmSource.objects.filter(cdm_source_abbreviation='PRomop').delete()
         self.assertFalse(CdmSource.objects.filter(cdm_source_abbreviation='PRomop').exists())
-        cmd = Command(stdout=StringIO())
-        cmd._sync_cdm_source_metadata()
+        sync_cdm_source_metadata(lambda msg: None)
         row = CdmSource.objects.get(cdm_source_abbreviation='PRomop')
         self.assertEqual(row.cdm_version, '5.4')
 
@@ -1553,3 +1550,358 @@ class VocabReleaseServiceTest(TestCase):
         text = out.getvalue()
         self.assertIn('Published rel-', text)
         self.assertIn('concept', text)
+
+
+# ---------------------------------------------------------------------------
+# Issue #236 PR 3 — load_athena_vocabularies stage → validate → publish
+# ---------------------------------------------------------------------------
+
+_TSV = {
+    'RELATIONSHIP.csv': (
+        'relationship_id\trelationship_name\tis_hierarchical\tdefines_ancestry\treverse_relationship_id\trelationship_concept_id',
+        ['Maps to\tMaps to\t0\t0\tMapped from\t0'],
+    ),
+    'VOCABULARY.csv': (
+        'vocabulary_id\tvocabulary_name\tvocabulary_reference\tvocabulary_version\tvocabulary_concept_id',
+        [
+            'None\tNone\t\tv20260101\t0',
+            'HemOnc\tHemOnc\t\t\t0',
+            'RxNorm\tRxNorm\t\t\t0',
+            'SNOMED\tSNOMED\t\t\t0',
+        ],
+    ),
+    'DOMAIN.csv': (
+        'domain_id\tdomain_name\tdomain_concept_id',
+        ['Drug\tDrug\t0', 'Metadata\tMetadata\t0'],
+    ),
+    'CONCEPT_CLASS.csv': (
+        'concept_class_id\tconcept_class_name\tconcept_class_concept_id',
+        ['Regimen\tRegimen\t0', 'Ingredient\tIngredient\t0',
+         'Clinical Drug\tClinical Drug\t0', 'Undefined\tUndefined\t0'],
+    ),
+    'CONCEPT.csv': (
+        'concept_id\tconcept_name\tdomain_id\tvocabulary_id\tconcept_class_id\tstandard_concept\tconcept_code\tvalid_start_date\tvalid_end_date\tinvalid_reason',
+        [
+            '101\tBortezomib regimen\tDrug\tHemOnc\tRegimen\tS\tHO101\t20200101\t20991231\t',
+            '102\tbortezomib\tDrug\tRxNorm\tIngredient\tS\tRX102\t20200101\t20991231\t',
+            '103\tbortezomib 3.5 MG\tDrug\tRxNorm\tClinical Drug\tS\tRX103\t20200101\t20991231\t',
+            '4180186\tEnglish\tMetadata\tSNOMED\tUndefined\tS\t4180186\t20200101\t20991231\t',
+        ],
+    ),
+    'CONCEPT_RELATIONSHIP.csv': (
+        'concept_id_1\tconcept_id_2\trelationship_id\tvalid_start_date\tvalid_end_date\tinvalid_reason',
+        ['101\t102\tMaps to\t20200101\t20991231\t'],
+    ),
+    'CONCEPT_ANCESTOR.csv': (
+        'ancestor_concept_id\tdescendant_concept_id\tmin_levels_of_separation\tmax_levels_of_separation',
+        ['101\t101\t0\t0'],
+    ),
+    'CONCEPT_SYNONYM.csv': (
+        'concept_id\tconcept_synonym_name\tlanguage_concept_id',
+        ['101\tBortezomib-based regimen\t4180186'],
+    ),
+    'DRUG_STRENGTH.csv': (
+        'drug_concept_id\tingredient_concept_id\tamount_value\tamount_unit_concept_id\tnumerator_value\tnumerator_unit_concept_id\tdenominator_value\tdenominator_unit_concept_id\tbox_size\tvalid_start_date\tvalid_end_date\tinvalid_reason',
+        ['103\t102\t3.5\t\t\t\t\t\t\t20200101\t20991231\t'],
+    ),
+    'SOURCE_TO_CONCEPT_MAP.csv': (
+        'source_code\tsource_concept_id\tsource_vocabulary_id\tsource_code_description\ttarget_concept_id\ttarget_vocabulary_id\tvalid_start_date\tvalid_end_date\tinvalid_reason',
+        ['BOR-R\t0\tHemOnc\tBortezomib regimen map\t101\tHemOnc\t20200101\t20991231\t'],
+    ),
+}
+
+
+class AtomicVocabPublishTest(TestCase):
+    """load_athena_vocabularies stage → validate → publish (issue #236 PR 3)."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        # FK targets for locally-created (HK-*) rows.
+        Domain.objects.get_or_create(
+            domain_id='Drug', defaults={'domain_name': 'Drug', 'domain_concept_id': 0})
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0})
+
+    # -- fixture helpers -----------------------------------------------------
+
+    def _write(self, name, header, rows):
+        from pathlib import Path
+        Path(self.dir, name).write_text(
+            header + '\n' + '\n'.join(rows) + '\n', encoding='utf-8')
+
+    def _write_corpus(self, **overrides):
+        """Write the full 10-file corpus; per-file row lists may be overridden."""
+        for name, (header, rows) in _TSV.items():
+            self._write(name, header, overrides.get(name, rows))
+
+    def _run(self, *args):
+        from io import StringIO
+        from django.core.management import call_command
+        out = StringIO()
+        call_command('load_athena_vocabularies', '--path', self.dir, *args,
+                     stdout=out, stderr=out)
+        return out.getvalue()
+
+    def _table_count(self, table):
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM {table}')
+            return cur.fetchone()[0]
+
+    def _changes(self, release, **filters):
+        from omop_core.models import ReleaseTableChange
+        return ReleaseTableChange.objects.filter(release=release, **filters)
+
+    def _published_release(self):
+        from omop_core.models import VocabRelease
+        return VocabRelease.objects.get(status=VocabRelease.STATUS_PUBLISHED)
+
+    # -- tests ---------------------------------------------------------------
+
+    def test_fresh_load_publishes_release_with_insert_change_rows(self):
+        from omop_core.models import VocabRelease
+        self._write_corpus()
+        out = self._run()
+
+        self.assertIn('Published rel-', out)
+        # Live corpus populated (4 concepts from the fixture; concept 0 pre-exists).
+        self.assertEqual(Concept.objects.filter(concept_id__gt=0).count(), 4)
+        self.assertEqual(self._table_count('source_to_concept_map'), 1)
+
+        release = self._published_release()
+        self.assertEqual(release.status, VocabRelease.STATUS_PUBLISHED)
+        # Every staged corpus row arrives as an insert change row; the publish
+        # may also update migration-seeded metadata rows (vocabulary, domain,
+        # concept_class, relationship) to match the files — but a fresh load
+        # never updates or tombstones corpus content.
+        self.assertEqual(
+            set(self._changes(release, table_name='concept')
+                .values_list('operation', flat=True)),
+            {'insert'},
+        )
+        self.assertFalse(self._changes(release, operation='tombstone').exists())
+        self.assertLessEqual(
+            set(self._changes(release, operation='update')
+                .values_list('table_name', flat=True)),
+            {'vocabulary', 'domain', 'concept_class', 'relationship'},
+        )
+        self.assertEqual(self._changes(release, table_name='concept').count(), 4)
+        self.assertEqual(self._changes(release, table_name='source_to_concept_map').count(), 1)
+        # seq is dense starting at 1.
+        seqs = sorted(self._changes(release).values_list('seq', flat=True))
+        self.assertEqual(seqs, list(range(1, len(seqs) + 1)))
+        # Manifest describes the post-publish corpus.
+        self.assertEqual(release.row_counts['concept'], Concept.objects.count())
+        self.assertEqual(release.row_counts['source_to_concept_map'], 1)
+        # Stage mirrors are dropped after publish.
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute("SELECT tablename FROM pg_tables WHERE tablename LIKE '_stage_%'")
+            self.assertEqual(cur.fetchall(), [])
+
+    def test_stage_only_leaves_live_untouched(self):
+        self._write_corpus()
+        out = self._run('--stage-only')
+        self.assertIn('--stage-only', out)
+        self.assertEqual(Concept.objects.filter(concept_id__gt=0).count(), 0)
+        self.assertEqual(self._table_count('_stage_concept'), 4)
+        from omop_core.models import VocabRelease
+        self.assertEqual(VocabRelease.objects.count(), 0)
+
+    def test_update_in_place_writes_update_change_row(self):
+        self._write_corpus()
+        self._run()
+        # Rename concept 101 in the file and reload.
+        self._write_corpus(**{
+            'CONCEPT.csv': [r.replace('Bortezomib regimen', 'Bortezomib RENAMED')
+                            if r.startswith('101\t') else r
+                            for r in _TSV['CONCEPT.csv'][1]],
+        })
+        self._run()
+
+        self.assertEqual(Concept.objects.get(concept_id=101).concept_name,
+                         'Bortezomib RENAMED')
+        from omop_core.models import VocabRelease
+        second = VocabRelease.objects.filter(
+            status=VocabRelease.STATUS_PUBLISHED).latest('published_at')
+        upd = self._changes(second, table_name='concept', operation='update')
+        self.assertEqual(upd.count(), 1)
+        payload = upd.get().payload
+        self.assertEqual(payload['old']['concept_name'], 'Bortezomib regimen')
+        self.assertEqual(payload['new']['concept_name'], 'Bortezomib RENAMED')
+
+    def test_retired_row_produces_tombstone_with_validity_window(self):
+        self._write_corpus()
+        self._run()
+        # Athena retires concept 103 (and with it the drug_strength row).
+        self._write_corpus(**{
+            'CONCEPT.csv': [r for r in _TSV['CONCEPT.csv'][1]
+                            if not r.startswith('103\t')],
+            'DRUG_STRENGTH.csv': [],
+        })
+        self._run('--max-drift-pct', '100')
+
+        self.assertFalse(Concept.objects.filter(concept_id=103).exists())
+        self.assertEqual(self._table_count('drug_strength'), 0)
+        from omop_core.models import VocabRelease
+        second = VocabRelease.objects.filter(
+            status=VocabRelease.STATUS_PUBLISHED).latest('published_at')
+        tom = self._changes(second, operation='tombstone')
+        self.assertEqual(
+            set(tom.values_list('table_name', flat=True)),
+            {'concept', 'drug_strength'},
+        )
+        payload = tom.get(table_name='concept').payload
+        self.assertEqual(payload['concept_id'], 103)
+        self.assertIn('valid_start_date', payload)
+        self.assertIn('valid_end_date', payload)
+        self.assertIn('invalid_reason', payload)
+
+    def test_hk_rows_survive_publish(self):
+        hk = Concept.objects.create(
+            concept_id=900001, concept_name='Local quarantine regimen',
+            domain_id='Drug', vocabulary_id='HK-Regimen',
+            concept_class_id='Regimen', concept_code='hkr:local-x',
+            valid_start_date='2020-01-01', valid_end_date='2099-12-31',
+        )
+        self._write_corpus()
+        self._run()
+
+        hk.refresh_from_db()
+        self.assertEqual(hk.concept_name, 'Local quarantine regimen')
+        self.assertTrue(Vocabulary.objects.filter(vocabulary_id='HK-Regimen').exists())
+        from omop_core.models import ReleaseTableChange
+        self.assertFalse(
+            ReleaseTableChange.objects.filter(row_key__contains='900001').exists())
+
+    def test_stage_id_colliding_with_live_hk_concept_aborts(self):
+        Concept.objects.create(
+            concept_id=900001, concept_name='Local quarantine regimen',
+            domain_id='Drug', vocabulary_id='HK-Regimen',
+            concept_class_id='Regimen', concept_code='hkr:local-x',
+            valid_start_date='2020-01-01', valid_end_date='2099-12-31',
+        )
+        from django.core.management.base import CommandError
+        self._write_corpus(**{
+            'CONCEPT.csv': _TSV['CONCEPT.csv'][1] + [
+                '900001\tAthena newcomer\tDrug\tHemOnc\tRegimen\tS\tHO900001\t20200101\t20991231\t'],
+        })
+        with self.assertRaises(CommandError) as ctx:
+            self._run()
+        self.assertIn('collides with a live locally-minted', str(ctx.exception))
+        # The HK row is untouched and nothing was published.
+        self.assertEqual(Concept.objects.get(concept_id=900001).concept_name,
+                         'Local quarantine regimen')
+        from omop_core.models import VocabRelease
+        self.assertEqual(VocabRelease.objects.count(), 0)
+
+    def test_fk_integrity_gate_aborts(self):
+        from django.core.management.base import CommandError
+        from omop_core.management.commands.load_athena_vocabularies import Command as LoadCmd
+        # Simulate a loader/filter bug: let a relationship referencing an
+        # unstaged concept_id through to the stage mirror.
+        self._write_corpus(**{
+            'CONCEPT_RELATIONSHIP.csv': ['101\t999\tMaps to\t20200101\t20991231\t'],
+        })
+        staged = {101, 102, 103, 4180186, 999}
+        with patch.object(LoadCmd, '_stage_ids', lambda self, where='': staged):
+            with self.assertRaises(CommandError) as ctx:
+                self._run()
+        self.assertIn('concept_relationship.concept_id_2', str(ctx.exception))
+
+    def test_drift_gate_aborts_on_shrinking_corpus(self):
+        from django.core.management.base import CommandError
+        self._write_corpus()
+        self._run()
+        # Next export carries only 1 of the 4 in-scope concepts (75% drift).
+        self._write_corpus(**{'CONCEPT.csv': [_TSV['CONCEPT.csv'][1][0]]})
+        with self.assertRaises(CommandError) as ctx:
+            self._run()
+        self.assertIn('drifts', str(ctx.exception))
+        # Live tables unchanged.
+        self.assertEqual(Concept.objects.filter(concept_id__gt=0).count(), 4)
+
+    def test_namespace_gate_rejects_locally_minted_codes(self):
+        from django.core.management.base import CommandError
+        self._write_corpus(**{
+            'CONCEPT.csv': _TSV['CONCEPT.csv'][1] + [
+                '104\tFake regimen\tDrug\tHemOnc\tRegimen\tS\tFHIR-104\t20200101\t20991231\t'],
+        })
+        with self.assertRaises(CommandError) as ctx:
+            self._run()
+        self.assertIn('locally-minted codes', str(ctx.exception))
+        self.assertFalse(Concept.objects.filter(concept_id=104).exists())
+
+    def test_second_identical_load_is_a_noop(self):
+        from omop_core.models import VocabRelease
+        self._write_corpus()
+        self._run()
+        self._run()  # same files again
+        self.assertEqual(VocabRelease.objects.filter(
+            status=VocabRelease.STATUS_PUBLISHED).count(), 2)
+        second = VocabRelease.objects.filter(
+            status=VocabRelease.STATUS_PUBLISHED).latest('published_at')
+        self.assertEqual(self._changes(second).count(), 0)
+        self.assertEqual(self._table_count('source_to_concept_map'), 1)
+        self.assertEqual(Concept.objects.filter(concept_id__gt=0).count(), 4)
+
+    def test_publish_rolls_back_atomically_on_error(self):
+        from omop_core.models import ReleaseTableChange, VocabRelease
+        self._write_corpus()
+        with patch('omop_core.services.vocab_release.compute_table_checksums',
+                   side_effect=RuntimeError('boom')):
+            with self.assertRaises(RuntimeError):
+                self._run()
+        # Nothing applied, nothing published, no change rows.
+        self.assertEqual(Concept.objects.filter(concept_id__gt=0).count(), 0)
+        self.assertEqual(VocabRelease.objects.count(), 0)
+        self.assertEqual(ReleaseTableChange.objects.count(), 0)
+
+
+class ResetVocabTablesTest(TransactionTestCase):
+    """reset_vocab_tables escape hatch (issue #236 PR 3).
+
+    TransactionTestCase (not TestCase): the command TRUNCATEs, and Postgres
+    refuses to TRUNCATE a table with pending deferred-FK trigger events —
+    which any ORM write inside TestCase's never-committed wrapping
+    transaction leaves queued.  Autocommit mode matches how the command is
+    actually run in production.
+    """
+
+    serialized_rollback = True
+
+    def test_refuses_without_confirm(self):
+        from django.core.management.base import CommandError
+        from io import StringIO
+        from django.core.management import call_command
+        with self.assertRaises(CommandError):
+            call_command('reset_vocab_tables', stdout=StringIO())
+
+    def test_truncates_and_reseeds(self):
+        from io import StringIO
+        from django.core.management import call_command
+        Domain.objects.get_or_create(
+            domain_id='Drug', defaults={'domain_name': 'Drug', 'domain_concept_id': 0})
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0})
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc', defaults={'vocabulary_name': 'HemOnc',
+                                              'vocabulary_concept_id': 0})
+        Concept.objects.create(
+            concept_id=101, concept_name='x', domain_id='Drug',
+            vocabulary_id='HemOnc', concept_class_id='Regimen',
+            concept_code='HO101', valid_start_date='2020-01-01',
+            valid_end_date='2099-12-31',
+        )
+        out = StringIO()
+        call_command('reset_vocab_tables', '--confirm', stdout=out)
+        self.assertEqual(Concept.objects.filter(concept_id__gt=0).count(), 0)
+        self.assertFalse(Vocabulary.objects.filter(vocabulary_id='HemOnc').exists())
+        # concept 0 and cdm_source are re-seeded by the command.
+        self.assertTrue(Concept.objects.filter(concept_id=0).exists())
+        self.assertIn('CASCADE', out.getvalue())

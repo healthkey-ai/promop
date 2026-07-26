@@ -5,7 +5,8 @@ BUCKET="${1:-ctomop-staging-vocab}"
 VOCAB_DIR="${2:-$HOME/Downloads/vocabulary_download_v5_*}"
 
 FILES="CONCEPT.csv CONCEPT_CLASS.csv CONCEPT_RELATIONSHIP.csv \
-       CONCEPT_ANCESTOR.csv DOMAIN.csv RELATIONSHIP.csv VOCABULARY.csv"
+       CONCEPT_ANCESTOR.csv DOMAIN.csv RELATIONSHIP.csv VOCABULARY.csv \
+       CONCEPT_SYNONYM.csv DRUG_STRENGTH.csv SOURCE_TO_CONCEPT_MAP.csv"
 
 human_size() {
   local bytes=$1
