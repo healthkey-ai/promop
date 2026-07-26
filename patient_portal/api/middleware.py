@@ -65,6 +65,9 @@ def _classify_event_type(request):
     # Access to the audit trail itself is auditable (TI.2.2#04).
     if '/audit-events' in path:
         return AuditEvent.EVENT_AUDIT_REVIEW
+    # Emergency-access authorization (TI.2.3#04).
+    if '/break-glass' in path:
+        return AuditEvent.EVENT_BREAK_GLASS
     # Django-admin activity (privileged / security-config actions — TI.2.1).
     if path.startswith('/admin/'):
         return AuditEvent.EVENT_ADMIN

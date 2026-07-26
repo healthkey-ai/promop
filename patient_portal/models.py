@@ -267,6 +267,7 @@ class AuditEvent(models.Model):
     EVENT_CONSENT = 'consent'
     EVENT_ADMIN = 'admin'                # Django-admin / background system activity (TI.2.1)
     EVENT_AUDIT_REVIEW = 'audit_review'  # access to the audit trail itself (TI.2.2#04)
+    EVENT_BREAK_GLASS = 'break_glass'    # emergency-access authorization (TI.2.3#04)
     EVENT_OTHER = 'other'
     EVENT_TYPES = [
         (EVENT_VIEW, 'Record view'),
@@ -277,6 +278,7 @@ class AuditEvent(models.Model):
         (EVENT_CONSENT, 'Consent'),
         (EVENT_ADMIN, 'Administrative / system'),
         (EVENT_AUDIT_REVIEW, 'Audit-log access'),
+        (EVENT_BREAK_GLASS, 'Break-glass emergency access'),
         (EVENT_OTHER, 'Other'),
     ]
 
@@ -292,6 +294,10 @@ class AuditEvent(models.Model):
     ip_address = models.CharField(max_length=64, null=True, blank=True)
     duration_ms = models.PositiveIntegerField(null=True, blank=True)
     detail = models.JSONField(null=True, blank=True)
+    # Tamper-evidence: HMAC over the row's immutable content (TI.2.2.1#01). Any
+    # later alteration is detectable by recomputing and comparing (see
+    # `verify_audit_integrity`). Set automatically on first save.
+    signature = models.CharField(max_length=64, blank=True, default='')
 
     class Meta:
         db_table = 'audit_event'
@@ -301,5 +307,57 @@ class AuditEvent(models.Model):
             models.Index(fields=['event_type', '-timestamp'], name='audit_type_ts_idx'),
         ]
 
+    def compute_signature(self) -> str:
+        """HMAC-SHA256 over the immutable content fields (excludes id/signature)."""
+        import hashlib
+        import hmac
+        import json as _json
+        from django.conf import settings
+
+        ts = self.timestamp.isoformat() if self.timestamp else ''
+        canonical = '|'.join(str(v) for v in [
+            ts, self.event_type, self.method, self.path, self.status_code,
+            self.user_id, self.user_email, self.client_id, self.resource_id,
+            self.ip_address, self.duration_ms,
+            _json.dumps(self.detail, sort_keys=True, default=str),
+        ])
+        key = (getattr(settings, 'AUDIT_HMAC_KEY', '') or settings.SECRET_KEY).encode()
+        return hmac.new(key, canonical.encode(), hashlib.sha256).hexdigest()
+
+    def save(self, *args, **kwargs):
+        if not self.signature:
+            self.signature = self.compute_signature()
+        super().save(*args, **kwargs)
+
+    def signature_valid(self) -> bool:
+        import hmac
+        return bool(self.signature) and hmac.compare_digest(self.signature, self.compute_signature())
+
     def __str__(self):
         return f"{self.timestamp:%Y-%m-%d %H:%M:%S} {self.event_type} {self.method} {self.path}"
+
+
+class BreakGlassGrant(models.Model):
+    """A time-boxed emergency-access ("break-glass") authorization (PHR-S FM
+    TI.2.3#04). Grants the requesting identity emergency visibility of a specific
+    patient's audit-log entries, with a captured reason, for a short window.
+    Creating a grant is itself audited."""
+    identity = models.ForeignKey(
+        Identity, on_delete=models.CASCADE, related_name='break_glass_grants',
+    )
+    person_id = models.BigIntegerField(db_index=True)
+    reason = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'break_glass_grant'
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['identity', 'expires_at'], name='breakglass_identity_exp_idx')]
+
+    @property
+    def is_active(self) -> bool:
+        return self.expires_at > timezone.now()
+
+    def __str__(self):
+        return f"BreakGlass({self.identity_id} -> Person {self.person_id})"
