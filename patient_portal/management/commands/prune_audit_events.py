@@ -150,6 +150,21 @@ class Command(BaseCommand):
             if archive_file is not None:
                 archive_file.close()
 
+        # Record the prune itself as a system audit event (TI.2.1 — background
+        # trigger; deleting audit records is security-sensitive and must be logged).
+        if deleted:
+            AuditEvent.objects.create(
+                event_type=AuditEvent.EVENT_ADMIN,
+                method='COMMAND',
+                path='manage.py prune_audit_events',
+                user_id='system',
+                detail={
+                    'deleted': deleted, 'archived': archived,
+                    'cutoff': cutoff.isoformat(), 'retention_days': days,
+                    'archive_path': archive_path or None,
+                },
+            )
+
         self.stdout.write(f"Archived: {archived}")
         self.stdout.write(f"Deleted: {deleted}")
         if archive_path:

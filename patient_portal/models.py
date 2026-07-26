@@ -265,6 +265,8 @@ class AuditEvent(models.Model):
     EVENT_DELETE = 'record_delete'
     EVENT_AUTH = 'auth'
     EVENT_CONSENT = 'consent'
+    EVENT_ADMIN = 'admin'                # Django-admin / background system activity (TI.2.1)
+    EVENT_AUDIT_REVIEW = 'audit_review'  # access to the audit trail itself (TI.2.2#04)
     EVENT_OTHER = 'other'
     EVENT_TYPES = [
         (EVENT_VIEW, 'Record view'),
@@ -273,6 +275,8 @@ class AuditEvent(models.Model):
         (EVENT_DELETE, 'Record delete'),
         (EVENT_AUTH, 'Authentication'),
         (EVENT_CONSENT, 'Consent'),
+        (EVENT_ADMIN, 'Administrative / system'),
+        (EVENT_AUDIT_REVIEW, 'Audit-log access'),
         (EVENT_OTHER, 'Other'),
     ]
 

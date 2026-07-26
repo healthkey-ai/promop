@@ -44,9 +44,10 @@ class DeprecationWarningMiddleware:
 # are intentionally excluded as noise; GET is audited as a record_view (TI.2).
 _AUDITED_METHODS = frozenset({'GET', 'POST', 'PUT', 'PATCH', 'DELETE'})
 
-# Paths whose prefixes carry auditable API/auth activity. Everything else
-# (static assets, the SPA shell, admin, health checks) is skipped.
-_AUDITED_PREFIXES = ('/api/', '/o/')
+# Paths whose prefixes carry auditable activity: the API, OAuth, and the Django
+# admin (privileged/security-config actions — TI.2.1). Static assets, the SPA
+# shell, and health checks are skipped.
+_AUDITED_PREFIXES = ('/api/', '/o/', '/admin/')
 
 
 def _classify_event_type(request):
@@ -60,6 +61,13 @@ def _classify_event_type(request):
 
     path = request.path
     method = request.method
+
+    # Access to the audit trail itself is auditable (TI.2.2#04).
+    if '/audit-events' in path:
+        return AuditEvent.EVENT_AUDIT_REVIEW
+    # Django-admin activity (privileged / security-config actions — TI.2.1).
+    if path.startswith('/admin/'):
+        return AuditEvent.EVENT_ADMIN
 
     if (
         '/auth/login' in path
@@ -109,17 +117,11 @@ def _get_resource_id(request):
 
 
 def _should_audit(request):
-    """True when this request is on an auditable API/auth path with an audited method.
-
-    The audit-review endpoint itself is skipped so listing the trail does not
-    flood it with self-referential record_view rows.
-    """
+    """True when this request is on an auditable path (API / OAuth / admin) with
+    an audited method. Access to the audit trail itself IS audited (TI.2.2#04)."""
     if request.method not in _AUDITED_METHODS:
         return False
-    path = request.path
-    if '/audit-events' in path:
-        return False
-    return path.startswith(_AUDITED_PREFIXES)
+    return request.path.startswith(_AUDITED_PREFIXES)
 
 
 class AuditLogMiddleware:
