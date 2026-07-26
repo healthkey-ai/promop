@@ -721,6 +721,9 @@ class DrugExposure(models.Model):
 
     class Meta:
         db_table = 'drug_exposure'
+        indexes = [
+            models.Index(fields=['route_source_value'], name='ix_de_route_src'),
+        ]
 
     def __str__(self):
         return f"Drug Exposure {self.drug_exposure_id} for Person {self.person_id}"
@@ -842,6 +845,9 @@ class Observation(models.Model):
 
     class Meta:
         db_table = 'observation'
+        indexes = [
+            models.Index(fields=['qualifier_source_value'], name='ix_obs_qual_src'),
+        ]
 
     def __str__(self):
         return f"Observation {self.observation_id} for Person {self.person_id}"
@@ -2480,6 +2486,7 @@ class PatientDocument(models.Model):
     person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='documents')
     doc_type = models.CharField(max_length=50, choices=DOC_TYPE_CHOICES)
     title = models.CharField(max_length=255, blank=True, null=True)
+    file = models.FileField(upload_to='patient_documents/%Y/%m/', blank=True, null=True)
     file_url = models.URLField(blank=True, null=True)
     file_name = models.CharField(max_length=255, blank=True, null=True)
     verified = models.BooleanField(default=False)

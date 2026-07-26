@@ -487,7 +487,7 @@ class PatientDocumentSerializer(serializers.ModelSerializer):
         model = PatientDocument
         fields = [
             'id', 'person', 'doc_type', 'title',
-            'file_url', 'file_name', 'verified', 'uploaded_at',
+            'file', 'file_url', 'file_name', 'verified', 'uploaded_at',
         ]
 
 

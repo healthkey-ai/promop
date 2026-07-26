@@ -57,6 +57,7 @@ export default function AdvanceDirectives({ user }: { user: User | null }) {
       formData.append("doc_type", "ADVANCE_DIRECTIVE");
       formData.append("title", file.name);
       formData.append("file_name", file.name);
+      formData.append("file", file);
       await api.post("/v1/documents/", formData);
       await fetchDocuments();
     } catch {
