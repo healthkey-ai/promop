@@ -61,7 +61,11 @@ def build_trusting_map(org_list) -> 'dict[int, set[int]]':
         ).values('trusted_domain', 'granting_org_id'):
             domain = row['trusted_domain'].lower()
             for org_id in domain_to_org_ids.get(domain, set()):
-                trusting_map[org_id].add(row['granting_org_id'])
+                # Skip self-referential: an org granting a domain trust to a
+                # domain its own users have should not inflate its own
+                # accessible-patient count.
+                if row['granting_org_id'] != org_id:
+                    trusting_map[org_id].add(row['granting_org_id'])
 
     return trusting_map
 
