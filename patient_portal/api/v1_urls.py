@@ -24,7 +24,7 @@ from .org_views import (
     OrgInviteView, OrgInvitationListView, OrgInvitationDetailView,
     OrgTrustListCreateView, OrgTrustDetailView,
     OrgAccessListView, OrgAccessDetailView,
-    confirm_invitation,
+    confirm_invitation, org_public_info, OrgPatientSignupView,
 )
 from .patient_invitations import (
     PatientInviteView, accept_patient_invitation, patient_invitation_lookup,
@@ -92,4 +92,6 @@ urlpatterns = [
     path('orgs/<slug:slug>/trusts/<int:trust_id>/', OrgTrustDetailView.as_view(), name='v1-org-trust-detail'),
     path('orgs/<slug:slug>/access/', OrgAccessListView.as_view(), name='v1-org-access-list'),
     path('orgs/<slug:slug>/access/<int:access_id>/', OrgAccessDetailView.as_view(), name='v1-org-access-detail'),
+    path('orgs/<slug:slug>/public/', org_public_info, name='v1-org-public-info'),
+    path('orgs/<slug:slug>/patient-signup/', OrgPatientSignupView.as_view(), name='v1-org-patient-signup'),
 ]

@@ -73,7 +73,7 @@ class UserSerializer(serializers.ModelSerializer):
 class OrganizationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Organization
-        fields = ['id', 'name', 'slug', 'is_active', 'allows_public_aggregated_data', 'created_at']
+        fields = ['id', 'name', 'slug', 'is_active', 'allows_public_aggregated_data', 'allows_patient_signup', 'created_at']
         read_only_fields = ['id', 'created_at']
 
 
@@ -143,14 +143,15 @@ class OrgInvitationSerializer(serializers.ModelSerializer):
     status = serializers.SerializerMethodField()
     org_slug = serializers.SlugRelatedField(source='org', slug_field='slug', read_only=True)
     redirect_url = serializers.SerializerMethodField()
+    person_id = serializers.IntegerField(source='person.person_id', read_only=True, default=None)
 
     class Meta:
         model = OrgInvitation
         fields = [
-            'id', 'org_slug', 'email', 'role', 'redirect_url', 'status',
+            'id', 'org_slug', 'email', 'role', 'redirect_url', 'person_id', 'status',
             'expires_at', 'created_at',
         ]
-        read_only_fields = ['id', 'org_slug', 'redirect_url', 'status', 'expires_at', 'created_at']
+        read_only_fields = ['id', 'org_slug', 'redirect_url', 'person_id', 'status', 'expires_at', 'created_at']
 
     def get_status(self, obj):
         return obj.status

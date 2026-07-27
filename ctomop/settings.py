@@ -356,6 +356,7 @@ REST_FRAMEWORK = {
         # Patient self-service ingest (/api/fhir/patient-sync/) — per-patient, so
         # a more generous bucket than the shared service-token /sync/ endpoint.
         'patient_sync': os.environ.get('PATIENT_SYNC_THROTTLE_RATE', '120/minute'),
+        'patient_signup': '10/hour',
     },
 }
 

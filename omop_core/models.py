@@ -56,6 +56,10 @@ class Organization(models.Model):
                   "available for analysis in PRism Analytics to any signed-up user. "
                   "Does not grant access to individual patient records in PRomop.",
     )
+    allows_patient_signup = models.BooleanField(
+        default=False,
+        help_text="When true, patients may self-register via the org's public page.",
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='+',
@@ -198,6 +202,7 @@ class OrgInvitation(models.Model):
         ('org_admin', 'Org Admin'),
         ('doctor', 'Doctor'),
         ('analyst', 'Analyst'),
+        ('patient', 'Patient'),
     ]
     org = models.ForeignKey(
         Organization, on_delete=models.CASCADE, related_name='invitations',
@@ -206,6 +211,11 @@ class OrgInvitation(models.Model):
     role = models.CharField(max_length=20, choices=ROLE, default='doctor')
     redirect_url = models.URLField(max_length=500, blank=True, default='')
     token = models.CharField(max_length=64, unique=True)
+    person = models.ForeignKey(
+        'Person', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+        help_text="If set, accepting the invite links the patient to this person record.",
+    )
     invited_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='+',
@@ -324,6 +334,7 @@ class GroupAccess(models.Model):
         ('org_admin', 'Org Admin'),
         ('doctor',    'Doctor'),
         ('analyst',   'Analyst'),
+        ('patient',   'Patient'),
     ]
     identity = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
