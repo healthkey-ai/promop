@@ -9,11 +9,16 @@ csv.field_size_limit(sys.maxsize)
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection
 
+import logging
+
 from omop_core.models import (
     Vocabulary, Domain, ConceptClass, Concept,
     Relationship, ConceptRelationship, ConceptAncestor, CdmSource,
     VocabularyVersionHistory, record_vocabulary_version_history,
+    VocabularyRelease,
 )
+
+logger = logging.getLogger(__name__)
 
 VOCAB_SCOPE = frozenset({
     'HemOnc', 'RxNorm', 'RxNorm Extension', 'ATC', 'LOINC', 'UCUM',
@@ -145,10 +150,19 @@ class Command(BaseCommand):
             self._log(f'Loading from gs://{bucket_name}/ (download-one-process-delete)')
 
         t0 = time.monotonic()
+        self._build_start = time.time()  # wall-clock for VocabularyRelease
 
         self._base = base
 
         self._direct = replace and not dry_run
+
+        if replace:
+            logger.warning(
+                '--replace uses TRUNCATE CASCADE and will destroy clinical '
+                'data in tables that FK to concept (drug_exposure, measurement, '
+                'condition_occurrence, etc.). The default upsert path (no flag) '
+                'is safe for databases with clinical data.'
+            )
 
         if self._direct:
             self._clear()
@@ -163,11 +177,13 @@ class Command(BaseCommand):
             'concept_ancestor':     self._load_concept_ancestors(dry_run),
             'concept_synonym':      self._load_concept_synonym(dry_run),
             'drug_strength':        self._load_drug_strength(dry_run),
+            'source_to_concept_map': self._load_source_to_concept_map(dry_run),
         }
         if not dry_run:
             self._seed_concept_zero()
             self._sync_cdm_source_metadata()
             self._record_version_history(replace)
+            self._publish_release(counts)
         elapsed = time.monotonic() - t0
         verb = 'would load' if dry_run else 'loaded'
         total = sum(counts.values())
@@ -736,3 +752,105 @@ class Command(BaseCommand):
             )
             recorded += 1
         self._log(f'  vocabulary_version_history: recorded {recorded} {action} row(s)')
+
+    def _load_source_to_concept_map(self, dry_run):
+        self._log('Loading SOURCE_TO_CONCEPT_MAP.csv...')
+        t = time.monotonic()
+        try:
+            f = self._open('SOURCE_TO_CONCEPT_MAP.csv')
+        except CommandError:
+            self._log('  SOURCE_TO_CONCEPT_MAP.csv not found, skipping.')
+            return 0
+        loaded_ids = set(Concept.objects.values_list('concept_id', flat=True))
+        count = scanned = 0
+        rows = []
+        cols_out = (
+            'source_code', 'source_concept_id', 'source_vocabulary_id',
+            'source_code_description', 'target_concept_id', 'target_vocabulary_id',
+            'valid_start_date', 'valid_end_date', 'invalid_reason',
+        )
+        with f:
+            reader = csv.reader(f, delimiter='\t')
+            idx = _header_index(next(reader))
+            i_src_code = idx['source_code']
+            i_src_cid = idx['source_concept_id']
+            i_src_vid = idx['source_vocabulary_id']
+            i_src_desc = idx['source_code_description']
+            i_tgt_cid = idx['target_concept_id']
+            i_tgt_vid = idx['target_vocabulary_id']
+            i_start = idx['valid_start_date']
+            i_end = idx['valid_end_date']
+            i_inv = idx['invalid_reason']
+            for row in reader:
+                scanned += 1
+                if scanned % PROGRESS_EVERY == 0:
+                    self._log(f'  stcm: scanned {scanned:,}, {count:,} matched ({time.monotonic() - t:.0f}s)...')
+                try:
+                    src_cid = int(row[i_src_cid])
+                    tgt_cid = int(row[i_tgt_cid])
+                except (ValueError, IndexError):
+                    continue
+                if src_cid not in loaded_ids or tgt_cid not in loaded_ids:
+                    continue
+                count += 1
+                if not dry_run:
+                    rows.append((
+                        row[i_src_code][:50],
+                        src_cid,
+                        row[i_src_vid][:20],
+                        (row[i_src_desc] or None) if i_src_desc < len(row) else None,
+                        tgt_cid,
+                        row[i_tgt_vid][:20],
+                        _parse_date(row[i_start]),
+                        _parse_date(row[i_end]),
+                        row[i_inv][:1] if row[i_inv] else None,
+                    ))
+                    if len(rows) >= BATCH:
+                        _copy_rows('source_to_concept_map', cols_out, rows, self._log, direct=self._direct)
+                        rows = []
+        if not dry_run:
+            _copy_rows('source_to_concept_map', cols_out, rows, self._log, direct=self._direct)
+        self._cleanup('SOURCE_TO_CONCEPT_MAP.csv')
+        self._log(f'  stcm: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
+        return count
+
+    def _publish_release(self, counts):
+        """Create a published VocabularyRelease row capturing this load."""
+        from datetime import datetime as dt, timezone as _tz
+        from django.utils import timezone
+
+        vocab_versions = dict(
+            Vocabulary.objects.order_by('vocabulary_id')
+            .values_list('vocabulary_id', 'vocabulary_version')
+        )
+        checksums = {}
+        for table_name in counts:
+            try:
+                with connection.cursor() as cur:
+                    cur.execute(
+                        f'SELECT COUNT(*), MIN(ctid::text), MAX(ctid::text) '
+                        f'FROM {table_name}'
+                    )
+                    row = cur.fetchone()
+                    checksums[table_name] = {
+                        'count': row[0],
+                        'min_ctid': row[1],
+                        'max_ctid': row[2],
+                    }
+            except Exception:
+                checksums[table_name] = {'count': counts[table_name]}
+
+        now = timezone.now()
+        build_ts = dt.fromtimestamp(self._build_start, tz=_tz.utc)
+        release = VocabularyRelease.objects.create(
+            schema_version='5.4',
+            scope=sorted(VOCAB_SCOPE),
+            build_timestamp=build_ts,
+            athena_version=getattr(self, '_cdm_vocab_version', None),
+            vocab_versions=vocab_versions,
+            row_counts=counts,
+            checksums=checksums,
+            status='published',
+            published_at=now,
+        )
+        self._log(f'  vocabulary_release: published release pk={release.pk}')
