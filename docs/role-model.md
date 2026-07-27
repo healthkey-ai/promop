@@ -67,6 +67,41 @@ a minor child, elderly parent, family member, friend, etc. In this case
 one Identity manages multiple Person records. See "Personal Representatives"
 below.
 
+### System-Level Role: Staff
+
+The roles above (org_admin, doctor, analyst, patient) are **org-scoped** —
+they are stored as `GroupAccess` rows tying an Identity to a specific
+Organization. Staff is a **system-level flag** on the Identity model itself
+(`is_staff`). It is not tied to any org.
+
+**staff** (`is_staff=True`) — platform operator. Capabilities beyond org_admin:
+
+- **Create new organizations** — org_admins cannot create orgs, only manage
+  their assigned ones.
+- **Deactivate/reactivate organizations** — toggle `is_active` on any org.
+  Org admins cannot change this flag.
+- **Delete organizations** — remove an org entirely.
+- **Cross-org visibility** — staff bypasses org-scoping and can see all
+  patients across all orgs, not just patients in their assigned org.
+- **Full API access** — bypasses patient-only restrictions on all endpoints.
+- **Bypasses all authorization checks** — `can_access_patient()` and
+  `can_modify_patient()` return True for staff.
+
+Staff users do not need a `GroupAccess` row to access an org's data.
+
+| Flag | Set by | Stored in | Typical user |
+|---|---|---|---|
+| `is_staff` | Existing staff user or Django admin | `Identity` model | Platform ops, support, initial admin |
+
+This flag should not be set for end-users (patients, doctors, analysts, or
+org admins). It is for platform operators who manage the system itself,
+not clinical data.
+
+> **Note:** Django's `is_superuser` field still exists on the Identity model
+> (inherited from `AbstractBaseUser`) but is not used by the application.
+> All privileged checks use `is_staff`. See [#327](https://github.com/healthkey-ai/promop/issues/327)
+> for the migration that consolidated superuser checks into staff.
+
 ### Navigator Role (Removed)
 
 The **navigator** role (patient navigator / care coordinator) was removed
