@@ -14,9 +14,9 @@ conformance target for each.
 > recognized vendor pattern; the accompanying **self-attestation**
 > ([`phrs-fm-conformance-claim.md`](phrs-fm-conformance-claim.md)) then attests against it.
 
-**Profile:** HealthKey Oncology Patient PHR · **v0.2** · basis: PHR-S FM R2 ·
-updated 2026-07-27 — **all Essential functions conform** (WS0 complete; final re-verification
-recommended before external attestation).
+**Profile:** HealthKey Oncology Patient PHR · **v0.3** · basis: PHR-S FM R2 ·
+re-verified 2026-07-27 — **24 of 25 Essential functions conform** (74/78 SHALL MET); the sole
+Essential residual is TI.2.2.1 audit indelibility (#318).
 
 **Status legend:** ✅ conformant (all in-scope SHALL met) · ◐ partial (gap → issue) ·
 ⏳ in progress · ○ not started · **E** Essential (required for the profile) ·
@@ -53,7 +53,7 @@ recommended before external attestation).
 | TI.2 | Audit (parent) | E | ✅ | — |
 | TI.2.1 | Audit triggers | E | ✅ | (admin+background — #303; not every command wired) |
 | TI.2.2 | Audit log management (format, retention, access-audit) | E | ✅ | (#298,#303) |
-| TI.2.2.1 | Audit log indelibility | E | ✅ | tamper-evidence + delete-restriction (#304); not physical WORM |
+| TI.2.2.1 | Audit log indelibility | E | ◐ | tamper-evidence + delete-restriction (#304); unchained HMAC → row deletion undetectable — hash-chain/WORM pending (#318) |
 | TI.2.3 | Audit notification & review (incl. break-glass) | E | ✅ | (#304) |
 
 ### Trust Infrastructure — terminology & interoperability
@@ -86,13 +86,21 @@ bulk of the model's cost lives:
 
 ---
 
-## Current conformance snapshot (2026-07-27)
-**All ~26 Essential functions of the profile now conform** — the WS0 gap-closure workstream
-(#301–#308) is complete and merged to `dev`. Optional functions (TI.5.2, TI.5.4) remain
-declared out-of-scope and do not affect the claim.
+## Current conformance snapshot (re-verified 2026-07-27)
+Criterion-level re-verification (4 independent audit passes over current `dev`) after WS0:
+**74 MET · 4 PARTIAL · 0 NOT MET** across the 78 SHALL — **23 of 26 functions fully conformant**.
 
-Backend suite green at 1005 tests. Each closed gap was implemented with targeted tests for
-the specific SHALL criterion.
+- **Essential set: 24 of 25 functions conform.** The one Essential residual is **TI.2.2.1**
+  (audit indelibility) — tamper-*evidence* + delete-restriction is implemented, but the per-row
+  HMAC is unchained so whole-row deletion is undetectable; hash-chain/WORM is tracked in **#318**.
+- **Optional (out of scope):** TI.5.2 (multi-version — R4 declared/negotiated only) and TI.5.4
+  (agreement records descriptive, not enforcement-bound) — do not affect the claim.
+- **Disclosed caveats** (see the claim §7): S.3.6 non-repudiation is symmetric HMAC (not asymmetric);
+  PH.2.3#09 content-digest is opt-in (transport auth carries it); PH.1.2#05 redaction is a bounded
+  hook; TI.1.1#09 `must_change_password` flag is inert (#319); TI.4.2 versioning is sequential.
+
+Backend suite green at 1005 tests. The authoritative per-function determination is in
+[`phrs-fm-conformance-claim.md`](phrs-fm-conformance-claim.md) §5/§6 + Appendix A.
 
 ## WS0 gap closure (complete)
 Every Essential gap in this profile has been closed:
