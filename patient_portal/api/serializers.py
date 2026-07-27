@@ -296,7 +296,46 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             {c.concept_id: c for c in Concept.objects.filter(concept_id__in=concept_ids).only('concept_id', 'concept_name')}
             if concept_ids else {}
         )
-        return super().to_representation(instance)
+        data = super().to_representation(instance)
+        return self._apply_demographic_redaction(instance, data)
+
+    # PHR-S FM PH.1.2#05 — consent/preference-driven demographic rendering.
+    # Fields suppressed for non-owner readers when the patient has opted in via
+    # PatientRecord.suppress_demographics_for_others.
+    REDACTED_DEMOGRAPHIC_FIELDS = (
+        'date_of_birth', 'age', 'patient_age',
+        'country', 'region', 'city', 'postal_code', 'longitude', 'latitude',
+        'patient_name', 'name',
+    )
+
+    def _apply_demographic_redaction(self, instance, data):
+        """Redact selected demographics unless the reader is the account holder.
+
+        Bounded minimal hook (issue #307). Requires a ``request`` in serializer
+        context to identify the reader; when absent (internal/derivation code
+        paths) no redaction is applied. Wiring redaction into every read path
+        that omits serializer context is documented as deferred.
+        """
+        if not getattr(instance, 'suppress_demographics_for_others', False):
+            return data
+        request = self.context.get('request')
+        if request is None or self._is_account_holder(request, instance):
+            return data
+        for field in self.REDACTED_DEMOGRAPHIC_FIELDS:
+            if field in data:
+                data[field] = None
+        data['demographics_redacted'] = True
+        return data
+
+    @staticmethod
+    def _is_account_holder(request, instance):
+        user = getattr(request, 'user', None)
+        if user is None or not getattr(user, 'is_authenticated', False):
+            return False
+        from patient_portal.models import PatientUser
+        return PatientUser.objects.filter(
+            identity=user, person_id=instance.person_id,
+        ).exists()
 
     def get_age(self, obj):
         if obj.date_of_birth:
@@ -412,6 +451,7 @@ class ConditionOccurrenceSerializer(serializers.ModelSerializer):
             'condition_type_concept', 'condition_status_concept',
             'stop_reason', 'condition_source_value', 'condition_source_concept',
             'condition_status_source_value',
+            'is_erroneous', 'erroneous_reason',
         ]
         extra_kwargs = {'condition_occurrence_id': {'required': False}}
 
@@ -427,6 +467,7 @@ class DrugExposureSerializer(serializers.ModelSerializer):
             'route_concept', 'lot_number',
             'drug_source_value', 'drug_source_concept',
             'route_source_value', 'dose_unit_source_value',
+            'is_erroneous', 'erroneous_reason',
         ]
         extra_kwargs = {'drug_exposure_id': {'required': False}}
 
@@ -442,6 +483,7 @@ class MeasurementSerializer(serializers.ModelSerializer):
             'unit_concept', 'range_low', 'range_high',
             'measurement_source_value', 'measurement_source_concept',
             'unit_source_value', 'value_source_value',
+            'is_erroneous', 'erroneous_reason',
         ]
         extra_kwargs = {'measurement_id': {'required': False}}
 
@@ -457,6 +499,7 @@ class ObservationSerializer(serializers.ModelSerializer):
             'qualifier_concept', 'unit_concept',
             'observation_source_value', 'observation_source_concept',
             'unit_source_value', 'qualifier_source_value', 'value_source_value',
+            'is_erroneous', 'erroneous_reason',
         ]
         extra_kwargs = {'observation_id': {'required': False}}
 
@@ -471,6 +514,7 @@ class ProcedureOccurrenceSerializer(serializers.ModelSerializer):
             'procedure_type_concept', 'modifier_concept', 'quantity',
             'procedure_source_value', 'procedure_source_concept',
             'modifier_source_value',
+            'is_erroneous', 'erroneous_reason',
         ]
         extra_kwargs = {'procedure_occurrence_id': {'required': False}}
 
@@ -503,6 +547,7 @@ class PatientDocumentSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'person', 'doc_type', 'title',
             'file', 'file_url', 'file_name', 'verified', 'uploaded_at',
+            'status', 'effective_date',
         ]
 
 

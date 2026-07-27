@@ -881,6 +881,11 @@ class ConditionOccurrence(models.Model):
     condition_source_value = models.CharField(max_length=50, null=True, blank=True)
     condition_source_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='condition_source_occurrences', db_column='condition_source_concept_id', null=True, blank=True)
     condition_status_source_value = models.CharField(max_length=50, null=True, blank=True)
+    # PHR-S FM PH.1.1#06 — entered-in-error. Flag a row as erroneous while
+    # RETAINING it (FHIR status=entered-in-error semantics). Excluded from
+    # normal reads by default; never deleted.
+    is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
+    erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
 
     class Meta:
         db_table = 'condition_occurrence'
@@ -914,6 +919,9 @@ class DrugExposure(models.Model):
     drug_source_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='drug_source_exposures', db_column='drug_source_concept_id', null=True, blank=True)
     route_source_value = models.CharField(max_length=50, null=True, blank=True)
     dose_unit_source_value = models.CharField(max_length=50, null=True, blank=True)
+    # PHR-S FM PH.1.1#06 — entered-in-error (retain, exclude from normal reads).
+    is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
+    erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
 
     class Meta:
         db_table = 'drug_exposure'
@@ -943,6 +951,9 @@ class ProcedureOccurrence(models.Model):
     procedure_source_value = models.CharField(max_length=50, null=True, blank=True)
     procedure_source_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='procedure_sources', db_column='procedure_source_concept_id', null=True, blank=True)
     modifier_source_value = models.CharField(max_length=50, null=True, blank=True)
+    # PHR-S FM PH.1.1#06 — entered-in-error (retain, exclude from normal reads).
+    is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
+    erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
 
     class Meta:
         db_table = 'procedure_occurrence'
@@ -979,6 +990,9 @@ class Measurement(models.Model):
     value_source_value = models.CharField(max_length=50, null=True, blank=True)
     measurement_event_id = models.BigIntegerField(null=True, blank=True)
     meas_event_field_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='measurement_event_fields', db_column='meas_event_field_concept_id', null=True, blank=True)
+    # PHR-S FM PH.1.1#06 — entered-in-error (retain, exclude from normal reads).
+    is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
+    erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
 
     class Meta:
         db_table = 'measurement'
@@ -1038,6 +1052,9 @@ class Observation(models.Model):
     value_source_value = models.CharField(max_length=50, null=True, blank=True)
     observation_event_id = models.BigIntegerField(null=True, blank=True)
     obs_event_field_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='observation_event_fields', db_column='obs_event_field_concept_id', null=True, blank=True)
+    # PHR-S FM PH.1.1#06 — entered-in-error (retain, exclude from normal reads).
+    is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
+    erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
 
     class Meta:
         db_table = 'observation'
@@ -2466,6 +2483,16 @@ class PatientRecord(models.Model):
         help_text="Owning organization — scopes API access for service clients",
     )
 
+    # PHR-S FM PH.1.2#05 — consent/preference-driven demographic rendering.
+    # When True, sensitive demographics (date of birth, geographic location,
+    # patient name) are redacted from serialized output for readers who are NOT
+    # the account holder themselves. The account holder always sees their own
+    # data in full.  Default False preserves existing behavior.
+    suppress_demographics_for_others = models.BooleanField(
+        default=False,
+        help_text="If set, redact DOB/location/name from responses served to non-owner readers",
+    )
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -2659,11 +2686,62 @@ class PatientRecord(models.Model):
 
 
 # =============================================================================
+# Revision history (PHR-S FM TI.1.2#04)
+# =============================================================================
+
+class RecordRevision(models.Model):
+    """Field-level change history for account-holder entities (PHR-S FM TI.1.2#04).
+
+    A lightweight, custom change-log (mirrors the ``PasswordHistory`` pattern)
+    rather than a general-purpose history library, so it adds no new
+    third-party dependency. One row per changed field per update, capturing the
+    old and new value so a record's contents can be reconstructed over time.
+
+    ``changed_by`` is the string form of the acting Identity's PK (matching the
+    ``AuditEvent.user_id`` convention), so it remains meaningful even after the
+    Identity is deleted.  Values are stored as text (``str(value)``) for a
+    uniform, queryable representation across field types.
+    """
+    patient_record = models.ForeignKey(
+        'PatientRecord', on_delete=models.CASCADE, related_name='revisions',
+    )
+    changed_by = models.CharField(
+        max_length=255, null=True, blank=True,
+        help_text="String form of the acting Identity PK (or 'system')",
+    )
+    changed_at = models.DateTimeField(auto_now_add=True)
+    field = models.CharField(max_length=100)
+    old_value = models.TextField(null=True, blank=True)
+    new_value = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'record_revision'
+        ordering = ['-changed_at', 'field']
+        indexes = [
+            models.Index(fields=['patient_record', '-changed_at'], name='recrev_pr_ts_idx'),
+        ]
+
+    def __str__(self):
+        return f"RecordRevision(pr={self.patient_record_id}, {self.field} @ {self.changed_at:%Y-%m-%d})"
+
+
+# =============================================================================
 # Document Storage
 # =============================================================================
 
 class PatientDocument(models.Model):
     """Scanned/uploaded medical documents. File binary lives in external storage; URL stored here."""
+    # PHR-S FM PH.1.4#04 — advance-directive effective status. An advance
+    # directive (or any document) needs a "currently in effect" status and an
+    # effective date distinct from the technical upload timestamp (uploaded_at).
+    STATUS_ACTIVE = 'active'
+    STATUS_SUPERSEDED = 'superseded'
+    STATUS_REVOKED = 'revoked'
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, 'Active / In effect'),
+        (STATUS_SUPERSEDED, 'Superseded'),
+        (STATUS_REVOKED, 'Revoked'),
+    ]
     DOC_TYPE_CHOICES = [
         ('FISH', 'FISH'),
         ('GEP', 'GEP'),
@@ -2687,6 +2765,15 @@ class PatientDocument(models.Model):
     file_name = models.CharField(max_length=255, blank=True, null=True)
     verified = models.BooleanField(default=False)
     uploaded_at = models.DateTimeField(auto_now_add=True)
+    # PH.1.4#04 — "in effect" status + effective date (distinct from uploaded_at).
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE,
+        help_text="Effective status of the document (advance directives: active/superseded/revoked)",
+    )
+    effective_date = models.DateField(
+        null=True, blank=True,
+        help_text="Date the document takes/took effect (distinct from the upload timestamp)",
+    )
 
     class Meta:
         db_table = 'patient_document'
