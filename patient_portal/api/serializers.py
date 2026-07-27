@@ -7,6 +7,7 @@ from omop_core.models import (
     Survey, PatientSurveyResponse,
     StemCellTransplant, SctEligibility, PostTransformationOutcome,
     Organization, OrgTrust, OrgInvitation, GroupAccess,
+    InterchangeAgreement,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from datetime import date
@@ -701,3 +702,23 @@ class AllergySerializer(serializers.ModelSerializer):
         if obj.observation_concept and obj.observation_concept.concept_name:
             return obj.observation_concept.concept_name
         return obj.observation_source_value or 'Unknown allergen'
+
+
+class InterchangeAgreementSerializer(serializers.ModelSerializer):
+    """Read-only serializer for documented interchange agreements (TI.5.4#01)."""
+    partner_organization_name = serializers.CharField(
+        source='partner_organization.name', read_only=True, default=None,
+    )
+    in_effect = serializers.SerializerMethodField()
+
+    class Meta:
+        model = InterchangeAgreement
+        fields = [
+            'id', 'partner_name', 'partner_organization', 'partner_organization_name',
+            'standards_supported', 'standard_versions',
+            'effective_date', 'expiry_date', 'status', 'active', 'in_effect',
+            'notes', 'created_at', 'updated_at',
+        ]
+
+    def get_in_effect(self, obj):
+        return obj.is_in_effect()

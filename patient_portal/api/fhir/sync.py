@@ -185,6 +185,28 @@ class FhirSyncView(APIView):
 
     @transaction.atomic
     def post(self, request):
+        # Bounded multi-version interchange (TI.5.2#01): decline non-R4 requests.
+        from patient_portal.api.fhir.integrity import (
+            check_fhir_version, verify_content_digest,
+        )
+        version_error = check_fhir_version(request)
+        if version_error:
+            return Response({'detail': version_error},
+                            status=status.HTTP_406_NOT_ACCEPTABLE)
+
+        # Content integrity (S.3.6#10 / PH.2.3#09): opt-in digest of the raw
+        # request body. No integrity header → unchanged behavior. Guarded so a
+        # consumed request stream can never break existing (no-header) clients.
+        try:
+            raw_body = request.body
+        except Exception:
+            raw_body = None
+        if raw_body is not None:
+            digest_error = verify_content_digest(request, raw_body)
+            if digest_error:
+                return Response({'detail': digest_error},
+                                status=status.HTTP_400_BAD_REQUEST)
+
         serializer = FhirSyncRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data

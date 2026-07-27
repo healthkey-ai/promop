@@ -231,6 +231,11 @@ PASSWORD_REUSE_DAYS = int(os.environ.get('PASSWORD_REUSE_DAYS', '180'))       # 
 AUDIT_HMAC_KEY = os.environ.get('AUDIT_HMAC_KEY', '')                          # falls back to SECRET_KEY when empty
 BREAK_GLASS_TTL_SECONDS = int(os.environ.get('BREAK_GLASS_TTL_SECONDS', '3600'))  # emergency-access window (1h)
 
+# Data-exchange integrity & non-repudiation (S.3.6#10 / PH.2.3#09, issue #306).
+# Key used to sign exported FHIR bundles (HMAC-SHA256). Falls back to SECRET_KEY
+# when empty, mirroring the AUDIT_HMAC_KEY pattern.
+EXPORT_SIGNING_KEY = os.environ.get('EXPORT_SIGNING_KEY', '')
+
 _mailgun_configured = bool(
     os.environ.get('MAILGUN_API_KEY') and os.environ.get('MAILGUN_SENDER_DOMAIN')
 )
