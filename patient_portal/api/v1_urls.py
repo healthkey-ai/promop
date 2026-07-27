@@ -16,6 +16,7 @@ from .views import (
     vocabulary_list, concept_lookup, concept_search, concept_list,
     concept_ancestors, concept_descendants, concept_graph_batch,
     concept_synonyms, concept_synonym_search, concept_replacement,
+    vocab_release_list, vocab_release_detail, vocab_release_latest,
     org_disease_stats,
     InterchangeAgreementViewSet,
 )
@@ -71,6 +72,9 @@ urlpatterns = [
     path('patients/<int:person_id>/invite/', PatientInviteView.as_view(), name='v1-patient-invite'),
     path('patient-invitations/lookup/', patient_invitation_lookup, name='v1-patient-invitation-lookup'),
     path('patient-invitations/accept/', accept_patient_invitation, name='v1-patient-invitation-accept'),
+    path('vocab-releases/', vocab_release_list, name='v1-vocab-release-list'),
+    path('vocab-releases/latest/', vocab_release_latest, name='v1-vocab-release-latest'),
+    path('vocab-releases/<int:release_id>/', vocab_release_detail, name='v1-vocab-release-detail'),
     path('vocabularies/<str:model_name>/', vocabulary_list, name='v1-vocabulary-list'),
     path('concepts/lookup/', concept_lookup, name='v1-concept-lookup'),
     path('concepts/search/', concept_search, name='v1-concept-search'),

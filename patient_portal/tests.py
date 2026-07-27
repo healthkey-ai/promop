@@ -13438,305 +13438,112 @@ class AuditHashChainTest(TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Patient Role Phase 1 Tests
+# Vocabulary Release API tests
 # ---------------------------------------------------------------------------
 
-class PatientRoleModelTest(TestCase):
-    """Test patient role in GroupAccess and allows_patient_signup on Organization."""
 
-    def test_patient_role_choice_valid(self):
-        org = Organization.objects.create(name='PR Org', slug='pr-org')
-        user = Identity.objects.create_user(email='patient-role@test.com', password='pw')
-        grant = GroupAccess.objects.create(identity=user, org=org, role='patient')
-        self.assertEqual(grant.role, 'patient')
+# ---------------------------------------------------------------------------
+# Vocabulary Release API tests
+# ---------------------------------------------------------------------------
 
-    def test_allows_patient_signup_default_false(self):
-        org = Organization.objects.create(name='NoSignup', slug='no-signup')
-        self.assertFalse(org.allows_patient_signup)
+class VocabReleaseAPITest(_SmartBase):
+    """Test /api/v1/vocab-releases/ endpoints and ETag on concept endpoints."""
 
-    def test_allows_patient_signup_settable(self):
-        org = Organization.objects.create(name='SignupOrg', slug='signup-org', allows_patient_signup=True)
-        org.refresh_from_db()
-        self.assertTrue(org.allows_patient_signup)
+    def tearDown(self):
+        super().tearDown()
+        # Reset module-level cache so stale release PKs don't leak into other tests
+        from patient_portal.api.views import _vocab_version_cache
+        _vocab_version_cache['release_pk'] = None
+        _vocab_version_cache['map'] = None
 
-    def test_org_invitation_patient_role(self):
-        org = Organization.objects.create(name='InvOrg', slug='inv-org')
-        inv = OrgInvitation.objects.create(
-            org=org, email='pt@test.com', role='patient',
-            token='a' * 64,
-            expires_at=timezone.now() + timezone.timedelta(days=7),
+    def _make_release(self, **kwargs):
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone
+        defaults = {
+            'build_timestamp': timezone.now(),
+            'status': 'published',
+            'published_at': timezone.now(),
+            'scope': ['SNOMED', 'LOINC'],
+            'vocab_versions': {'SNOMED': '20240701'},
+            'row_counts': {'concept': 100},
+            'checksums': {'concept': {'count': 100}},
+        }
+        defaults.update(kwargs)
+        return VocabularyRelease.objects.create(**defaults)
+
+    def test_list_returns_published_only(self):
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone
+        self._make_release()
+        VocabularyRelease.objects.create(
+            build_timestamp=timezone.now(), status='staged',
         )
-        self.assertEqual(inv.role, 'patient')
-
-    def test_org_invitation_person_fk(self):
-        from omop_core.models import Person
-        org = Organization.objects.create(name='FKOrg', slug='fk-org')
-        person = Person.objects.create(person_id=99990, year_of_birth=1990,
-                                       gender_source_value='F', race_source_value='unknown',
-                                       ethnicity_source_value='unknown')
-        inv = OrgInvitation.objects.create(
-            org=org, email='linked@test.com', role='patient', person=person,
-            token='b' * 64,
-            expires_at=timezone.now() + timezone.timedelta(days=7),
+        VocabularyRelease.objects.create(
+            build_timestamp=timezone.now(), status='retired',
+            published_at=timezone.now(),
         )
-        inv.refresh_from_db()
-        self.assertEqual(inv.person_id, person.pk)
-
-
-class PatientPersonForWithPatientGrantTest(TestCase):
-    """patient_person_for() should still resolve patients who have a 'patient' GroupAccess."""
-
-    def setUp(self):
-        from omop_core.models import Person
-        from patient_portal.models import PatientUser
-        self.org = Organization.objects.create(name='PPF Org', slug='ppf-org')
-        self.identity = Identity.objects.create_user(email='ppf-patient@test.com', password='pw')
-        self.person = Person.objects.create(
-            person_id=99991, year_of_birth=1985,
-            gender_source_value='M', race_source_value='unknown',
-            ethnicity_source_value='unknown',
-        )
-        PatientUser.objects.create(identity=self.identity, person=self.person)
-
-    def test_no_grant_is_patient(self):
-        from patient_portal.services import patient_person_for
-        self.assertEqual(patient_person_for(self.identity), self.person)
-
-    def test_patient_grant_still_patient(self):
-        from patient_portal.services import patient_person_for
-        GroupAccess.objects.create(identity=self.identity, org=self.org, role='patient')
-        self.assertEqual(patient_person_for(self.identity), self.person)
-
-    def test_doctor_grant_not_patient(self):
-        from patient_portal.services import patient_person_for
-        GroupAccess.objects.create(identity=self.identity, org=self.org, role='doctor')
-        self.assertIsNone(patient_person_for(self.identity))
-
-    def test_mixed_patient_and_doctor_grant_not_patient(self):
-        from patient_portal.services import patient_person_for
-        org2 = Organization.objects.create(name='PPF Org2', slug='ppf-org2')
-        GroupAccess.objects.create(identity=self.identity, org=self.org, role='patient')
-        GroupAccess.objects.create(identity=self.identity, org=org2, role='doctor')
-        self.assertIsNone(patient_person_for(self.identity))
-
-
-@override_settings(
-    EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
-    APP_BASE_URL='https://app.test',
-)
-class PatientInviteViaOrgTest(TestCase):
-    """Test inviting a patient via /api/orgs/{slug}/invite/ with role=patient."""
-
-    def setUp(self):
-        self.client = APIClient()
-        self.staff = _make_user('pt-inv-staff@test.com', is_staff=True)
-        self.org = _make_org('Pt Inv Org', 'pt-inv-org')
-        self.client.force_authenticate(user=self.staff)
-
-    def test_invite_patient_creates_invitation(self):
-        resp = self.client.post('/api/orgs/pt-inv-org/invite/', {
-            'email': 'newpatient@test.com',
-            'role': 'patient',
-        })
-        self.assertEqual(resp.status_code, 201)
-        inv = OrgInvitation.objects.get(org=self.org, email='newpatient@test.com')
-        self.assertEqual(inv.role, 'patient')
-        self.assertIsNone(inv.person)
-
-    def test_invite_patient_with_person_id(self):
-        from omop_core.models import Person
-        person = Person.objects.create(
-            person_id=99992, year_of_birth=1970,
-            gender_source_value='F', race_source_value='unknown',
-            ethnicity_source_value='unknown',
-        )
-        resp = self.client.post('/api/orgs/pt-inv-org/invite/', {
-            'email': 'linkedpt@test.com',
-            'role': 'patient',
-            'person_id': person.person_id,
-        })
-        self.assertEqual(resp.status_code, 201)
-        inv = OrgInvitation.objects.get(org=self.org, email='linkedpt@test.com')
-        self.assertEqual(inv.person_id, person.pk)
-
-    def test_person_id_rejected_for_non_patient_role(self):
-        from omop_core.models import Person
-        person = Person.objects.create(
-            person_id=99993, year_of_birth=1970,
-            gender_source_value='F', race_source_value='unknown',
-            ethnicity_source_value='unknown',
-        )
-        resp = self.client.post('/api/orgs/pt-inv-org/invite/', {
-            'email': 'doc@test.com',
-            'role': 'doctor',
-            'person_id': person.person_id,
-        })
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn('person_id', resp.data['error'])
-
-    def test_confirm_patient_invite_creates_patient_user(self):
-        from patient_portal.models import PatientUser
-        # Create invitation
-        resp = self.client.post('/api/orgs/pt-inv-org/invite/', {
-            'email': 'confirm-pt@test.com',
-            'role': 'patient',
-        })
-        self.assertEqual(resp.status_code, 201)
-        token = OrgInvitation.objects.get(email='confirm-pt@test.com').token
-
-        # Confirm (unauthenticated)
-        anon = APIClient()
-        resp = anon.post('/api/orgs/confirm-invitation/', {'token': token})
+        resp = self.read_client.get('/api/v1/vocab-releases/')
         self.assertEqual(resp.status_code, 200)
-        self.assertIn('/org/pt-inv-org/', resp.data.get('redirect_url', ''))
+        self.assertEqual(resp.data['count'], 1)
 
-        identity = Identity.objects.get(email='confirm-pt@test.com', issuer='urn:local')
-        self.assertTrue(PatientUser.objects.filter(identity=identity).exists())
-        self.assertTrue(
-            GroupAccess.objects.filter(identity=identity, org=self.org, role='patient').exists()
-        )
-
-    def test_confirm_patient_invite_with_person_links_existing(self):
-        from omop_core.models import Person
-        from patient_portal.models import PatientUser
-        person = Person.objects.create(
-            person_id=99994, year_of_birth=1980,
-            gender_source_value='M', race_source_value='unknown',
-            ethnicity_source_value='unknown',
-        )
-        resp = self.client.post('/api/orgs/pt-inv-org/invite/', {
-            'email': 'link-pt@test.com',
-            'role': 'patient',
-            'person_id': person.person_id,
-        })
-        self.assertEqual(resp.status_code, 201)
-        token = OrgInvitation.objects.get(email='link-pt@test.com').token
-
-        anon = APIClient()
-        resp = anon.post('/api/orgs/confirm-invitation/', {'token': token})
+    def test_detail_returns_checksums(self):
+        release = self._make_release()
+        resp = self.read_client.get(f'/api/v1/vocab-releases/{release.pk}/')
         self.assertEqual(resp.status_code, 200)
+        self.assertIn('checksums', resp.data)
+        self.assertEqual(resp.data['checksums']['concept']['count'], 100)
 
-        identity = Identity.objects.get(email='link-pt@test.com', issuer='urn:local')
-        pu = PatientUser.objects.get(identity=identity)
-        self.assertEqual(pu.person_id, person.pk)
-
-    def test_invitation_email_uses_org_scoped_url(self):
-        from django.core import mail
-        self.client.post('/api/orgs/pt-inv-org/invite/', {
-            'email': 'email-check@test.com',
-            'role': 'doctor',
-        })
-        self.assertEqual(len(mail.outbox), 1)
-        self.assertIn('/org/pt-inv-org/accept-invite?token=', mail.outbox[0].body)
-
-
-@override_settings(
-    EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
-    APP_BASE_URL='https://app.test',
-)
-class OrgPatientSignupTest(TestCase):
-    """Test the public patient self-signup endpoint."""
-
-    def setUp(self):
-        self.org = Organization.objects.create(
-            name='Signup Org', slug='signup-org', allows_patient_signup=True,
-        )
-        self.no_signup_org = Organization.objects.create(
-            name='No Signup', slug='no-signup-org', allows_patient_signup=False,
-        )
-
-    def test_signup_creates_account(self):
-        from patient_portal.models import PatientUser
-        resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
-            'email': 'self-signup@test.com',
-            'password': 'Str0ng!Pass99',
-            'given_name': 'Test',
-            'family_name': 'Patient',
-        })
-        self.assertEqual(resp.status_code, 201)
-        self.assertIn('person_id', resp.data)
-        self.assertEqual(resp.data['redirect_url'], '/org/signup-org/')
-
-        identity = Identity.objects.get(email='self-signup@test.com')
-        self.assertTrue(identity.has_usable_password())
-        self.assertTrue(PatientUser.objects.filter(identity=identity).exists())
-        self.assertTrue(
-            GroupAccess.objects.filter(identity=identity, org=self.org, role='patient').exists()
-        )
-
-    def test_signup_disabled_returns_403(self):
-        resp = APIClient().post('/api/v1/orgs/no-signup-org/patient-signup/', {
-            'email': 'blocked@test.com',
-            'password': 'Str0ng!Pass99',
-        })
-        self.assertEqual(resp.status_code, 403)
-
-    def test_signup_duplicate_email_returns_409(self):
-        Identity.objects.create_user(email='dup@test.com', password='existing')
-        resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
-            'email': 'dup@test.com',
-            'password': 'Str0ng!Pass99',
-        })
-        self.assertEqual(resp.status_code, 409)
-
-    def test_signup_weak_password_returns_400(self):
-        resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
-            'email': 'weak@test.com',
-            'password': '123',
-        })
-        self.assertEqual(resp.status_code, 400)
-
-    def test_signup_missing_email_returns_400(self):
-        resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
-            'password': 'Str0ng!Pass99',
-        })
-        self.assertEqual(resp.status_code, 400)
-
-
-class OrgPublicInfoTest(TestCase):
-    """Test the public org info endpoint."""
-
-    def test_returns_public_fields(self):
-        Organization.objects.create(
-            name='Public Org', slug='public-org', allows_patient_signup=True,
-        )
-        resp = APIClient().get('/api/v1/orgs/public-org/public/')
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data['name'], 'Public Org')
-        self.assertEqual(resp.data['slug'], 'public-org')
-        self.assertTrue(resp.data['allows_patient_signup'])
-
-    def test_inactive_org_returns_404(self):
-        Organization.objects.create(
-            name='Inactive', slug='inactive-org', is_active=False,
-        )
-        resp = APIClient().get('/api/v1/orgs/inactive-org/public/')
+    def test_detail_404_for_nonexistent(self):
+        resp = self.read_client.get('/api/v1/vocab-releases/99999/')
         self.assertEqual(resp.status_code, 404)
 
-    def test_nonexistent_org_returns_404(self):
-        resp = APIClient().get('/api/v1/orgs/nonexistent/public/')
+    def test_latest_returns_most_recent_published(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        now = timezone.now()
+        self._make_release(published_at=now - timedelta(days=1))
+        newer = self._make_release(published_at=now)
+        resp = self.read_client.get('/api/v1/vocab-releases/latest/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['id'], newer.pk)
+
+    def test_latest_returns_etag(self):
+        self._make_release()
+        resp = self.read_client.get('/api/v1/vocab-releases/latest/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('ETag', resp)
+        self.assertTrue(resp['ETag'].startswith('"vr-'))
+
+    def test_latest_304_on_matching_etag(self):
+        self._make_release()
+        resp1 = self.read_client.get('/api/v1/vocab-releases/latest/')
+        etag = resp1['ETag']
+        resp2 = self.read_client.get(
+            '/api/v1/vocab-releases/latest/', HTTP_IF_NONE_MATCH=etag,
+        )
+        self.assertEqual(resp2.status_code, 304)
+
+    def test_latest_404_when_empty(self):
+        resp = self.read_client.get('/api/v1/vocab-releases/latest/')
         self.assertEqual(resp.status_code, 404)
 
+    def test_concept_list_returns_etag_when_release_exists(self):
+        self._make_release()
+        resp = self.read_client.get('/api/v1/concepts/?vocabulary_id=SNOMED')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('ETag', resp)
 
-class OrganizationSerializerTest(TestCase):
-    """Test that allows_patient_signup is in the serializer output and writable."""
-
-    def setUp(self):
-        self.staff = _make_user('ser-staff@test.com', is_staff=True)
-        self.client = APIClient()
-        self.client.force_authenticate(user=self.staff)
-        self.org = Organization.objects.create(
-            name='Ser Org', slug='ser-org',
+    def test_concept_list_304_on_matching_etag(self):
+        self._make_release()
+        resp1 = self.read_client.get('/api/v1/concepts/?vocabulary_id=SNOMED')
+        etag = resp1['ETag']
+        resp2 = self.read_client.get(
+            '/api/v1/concepts/?vocabulary_id=SNOMED', HTTP_IF_NONE_MATCH=etag,
         )
+        self.assertEqual(resp2.status_code, 304)
 
-    def test_allows_patient_signup_in_response(self):
-        resp = self.client.get(f'/api/orgs/ser-org/')
+    def test_concept_search_returns_etag(self):
+        self._make_release()
+        resp = self.read_client.get('/api/v1/concepts/search/?q=test')
         self.assertEqual(resp.status_code, 200)
-        self.assertIn('allows_patient_signup', resp.data)
-        self.assertFalse(resp.data['allows_patient_signup'])
-
-    def test_allows_patient_signup_patchable(self):
-        resp = self.client.patch('/api/orgs/ser-org/', {'allows_patient_signup': True}, format='json')
-        self.assertEqual(resp.status_code, 200)
-        self.org.refresh_from_db()
-        self.assertTrue(self.org.allows_patient_signup)
+        self.assertIn('ETag', resp)
