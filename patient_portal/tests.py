@@ -13277,3 +13277,67 @@ class InterchangeAgreementTest(TestCase):
         from django.contrib import admin as dj_admin
         from omop_core.models import InterchangeAgreement
         self.assertIn(InterchangeAgreement, dj_admin.site._registry)
+
+
+# ---------------------------------------------------------------------------
+# #308 remainder — message confidentiality levels (PHR-S FM PH.6.3#08)
+# ---------------------------------------------------------------------------
+
+class PatientMessageConfidentialityTest(TestCase):
+    """Confidentiality tagging restricts sensitive messages to their sender + the patient."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser, PatientMessage
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(person_id=98501, family_name='Conf', given_name='Cara')
+        PatientRecord.objects.create(person=cls.person)
+        cls.patient = Identity.objects.create_user(email='conf-pt@test.com', password='pw')
+        cls.pu = PatientUser.objects.create(identity=cls.patient, person=cls.person)
+        cls.staff_a = Identity.objects.create_user(email='conf-staffa@test.com', password='pw', is_staff=True)
+        cls.staff_b = Identity.objects.create_user(email='conf-staffb@test.com', password='pw', is_staff=True)
+        cls.restricted = PatientMessage.objects.create(
+            patient_user=cls.pu, sender=cls.staff_a, subject='sensitive', message='...',
+            sender_is_patient=False, confidentiality=PatientMessage.CONFIDENTIALITY_RESTRICTED,
+        )
+        cls.normal = PatientMessage.objects.create(
+            patient_user=cls.pu, sender=cls.staff_a, subject='routine', message='...',
+            sender_is_patient=False, confidentiality=PatientMessage.CONFIDENTIALITY_NORMAL,
+        )
+
+    def _c(self, ident):
+        c = APIClient()
+        c.force_authenticate(user=ident)
+        return c
+
+    def _ids(self, resp):
+        rows = resp.data['results'] if isinstance(resp.data, dict) and 'results' in resp.data else resp.data
+        return {r['id'] for r in rows}
+
+    def test_default_confidentiality_is_normal_and_exposed(self):
+        resp = self._c(self.patient).post('/api/v1/messages/', {'subject': 'q', 'message': 'hi'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['confidentiality'], 'normal')
+
+    def test_patient_can_set_confidentiality(self):
+        resp = self._c(self.patient).post(
+            '/api/v1/messages/', {'subject': 'q', 'message': 'hi', 'confidentiality': 'very_restricted'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['confidentiality'], 'very_restricted')
+
+    def test_restricted_hidden_from_other_staff(self):
+        ids = self._ids(self._c(self.staff_b).get('/api/v1/messages/'))
+        self.assertNotIn(self.restricted.id, ids)   # not the sender → hidden
+        self.assertIn(self.normal.id, ids)          # normal still visible
+
+    def test_restricted_visible_to_sender_staff(self):
+        ids = self._ids(self._c(self.staff_a).get('/api/v1/messages/'))
+        self.assertIn(self.restricted.id, ids)
+
+    def test_restricted_visible_to_account_holder(self):
+        ids = self._ids(self._c(self.patient).get('/api/v1/messages/'))
+        self.assertIn(self.restricted.id, ids)      # the patient always sees their own thread
+
+    def test_other_staff_cannot_retrieve_restricted(self):
+        resp = self._c(self.staff_b).get(f'/api/v1/messages/{self.restricted.id}/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)

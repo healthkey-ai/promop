@@ -650,7 +650,7 @@ class PatientMessageSerializer(serializers.ModelSerializer):
         model = PatientMessage
         fields = ['id', 'patient_user', 'parent', 'sender', 'sender_name',
                   'subject', 'message', 'sender_is_patient', 'is_read',
-                  'read_at', 'reply_count', 'created_at']
+                  'read_at', 'confidentiality', 'reply_count', 'created_at']
         read_only_fields = ['id', 'sender', 'sender_is_patient', 'is_read',
                             'read_at', 'sender_name', 'reply_count',
                             'created_at']

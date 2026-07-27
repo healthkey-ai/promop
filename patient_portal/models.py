@@ -225,6 +225,15 @@ class PatientConsent(models.Model):
 
 class PatientMessage(models.Model):
     """Messages between patients and healthcare providers"""
+    CONFIDENTIALITY_NORMAL = 'normal'
+    CONFIDENTIALITY_RESTRICTED = 'restricted'
+    CONFIDENTIALITY_VERY_RESTRICTED = 'very_restricted'
+    CONFIDENTIALITY_CHOICES = [
+        (CONFIDENTIALITY_NORMAL, 'Normal'),
+        (CONFIDENTIALITY_RESTRICTED, 'Restricted'),
+        (CONFIDENTIALITY_VERY_RESTRICTED, 'Very restricted'),
+    ]
+
     patient_user = models.ForeignKey(PatientUser, on_delete=models.CASCADE, related_name='messages')
     parent = models.ForeignKey(
         'self', on_delete=models.CASCADE, null=True, blank=True, related_name='replies',
@@ -239,6 +248,11 @@ class PatientMessage(models.Model):
     sender_is_patient = models.BooleanField(default=True)
     is_read = models.BooleanField(default=False)
     read_at = models.DateTimeField(null=True, blank=True, help_text='When the message was read')
+    confidentiality = models.CharField(
+        max_length=20, choices=CONFIDENTIALITY_CHOICES, default=CONFIDENTIALITY_NORMAL, db_index=True,
+        help_text='Sensitivity level (PHR-S FM PH.6.3#08); restricted messages are hidden '
+                  'from staff other than the sender.',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

@@ -5037,7 +5037,19 @@ class PatientMessageViewSet(viewsets.ModelViewSet):
         ).annotate(_reply_count=Count('replies')).order_by('-created_at')
         person = patient_person_for(self.request.user)
         if person is not None:
+            # The account holder sees their own thread at every confidentiality level.
             qs = qs.filter(patient_user__person=person)
+        else:
+            # Staff/providers: restricted & very-restricted messages are visible only
+            # to their sender — sensitive content is not broadly visible to other
+            # staff (PHR-S FM PH.6.3#08). Service tokens/superusers are unrestricted.
+            from django.db.models import Q
+            if not (is_service_token(self.request)
+                    or getattr(self.request.user, 'is_superuser', False)):
+                qs = qs.filter(
+                    Q(confidentiality=PatientMessage.CONFIDENTIALITY_NORMAL)
+                    | Q(sender=self.request.user)
+                )
 
         # Optional filters
         parent = self.request.query_params.get('parent')
