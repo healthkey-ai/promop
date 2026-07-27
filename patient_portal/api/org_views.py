@@ -378,8 +378,13 @@ def confirm_invitation(request):
 
         # For patient invites, create the PatientUser link
         if invitation.role == 'patient':
-            person = invitation.person
-            if person is None:
+            existing_pu = PatientUser.objects.filter(identity=identity).first()
+            if existing_pu:
+                person = existing_pu.person
+            elif invitation.person:
+                person = invitation.person
+                PatientUser.objects.create(identity=identity, person=person)
+            else:
                 # No pre-existing person — create a new one
                 new_id = next_pk(Person, 'person_id')
                 person = Person.objects.create(
@@ -389,13 +394,11 @@ def confirm_invitation(request):
                     race_source_value='unknown',
                     ethnicity_source_value='unknown',
                 )
-                PatientRecord.objects.create(person=person, email=invitation.email)
-
-            # Link the identity to the person (idempotent)
-            PatientUser.objects.get_or_create(
-                identity=identity,
-                defaults={'person': person},
-            )
+                PatientRecord.objects.create(
+                    person=person, email=invitation.email,
+                    organization=invitation.org,
+                )
+                PatientUser.objects.create(identity=identity, person=person)
 
         invitation.confirmed_at = timezone.now()
         invitation.save(update_fields=['confirmed_at'])
@@ -466,6 +469,11 @@ class OrgAccessDetailView(APIView):
         if grant.role == 'org_admin':
             return Response(
                 {'error': 'Cannot modify org_admin grants via this endpoint.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if grant.role == 'patient':
+            return Response(
+                {'error': 'Cannot modify patient grants via this endpoint.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -547,6 +555,11 @@ class OrgPatientSignupView(APIView):
 
         if not email:
             return Response({'error': 'email is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            from django.core.validators import validate_email as _validate_email
+            _validate_email(email)
+        except ValidationError:
+            return Response({'error': 'Invalid email address.'}, status=status.HTTP_400_BAD_REQUEST)
         if not password:
             return Response({'error': 'password is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -578,22 +591,23 @@ class OrgPatientSignupView(APIView):
                     name=f"{given_name} {family_name}".strip(),
                 )
 
-            # Create Person + PatientRecord + PatientUser
-            new_id = next_pk(Person, 'person_id')
-            person = Person.objects.create(
-                person_id=new_id,
-                given_name=given_name or None,
-                family_name=family_name or None,
-                year_of_birth=1900,
-                gender_source_value='unknown',
-                race_source_value='unknown',
-                ethnicity_source_value='unknown',
-            )
-            PatientRecord.objects.create(person=person, email=email)
-            PatientUser.objects.get_or_create(
-                identity=identity,
-                defaults={'person': person},
-            )
+            # Reuse existing PatientUser link if present (e.g. from a prior invitation)
+            existing_pu = PatientUser.objects.filter(identity=identity).first()
+            if existing_pu:
+                person = existing_pu.person
+            else:
+                new_id = next_pk(Person, 'person_id')
+                person = Person.objects.create(
+                    person_id=new_id,
+                    given_name=given_name or None,
+                    family_name=family_name or None,
+                    year_of_birth=1900,
+                    gender_source_value='unknown',
+                    race_source_value='unknown',
+                    ethnicity_source_value='unknown',
+                )
+                PatientRecord.objects.create(person=person, email=email, organization=org)
+                PatientUser.objects.create(identity=identity, person=person)
 
             # Grant patient access to this org
             GroupAccess.objects.get_or_create(
