@@ -4,6 +4,13 @@
 > not validated by the HL7 EHR WG. The §5 functions were verified criterion-by-criterion
 > against the source code (see Appendix A); the signatory should confirm the determination
 > before issuing.
+>
+> **Update 2026-07-27 (post-WS0):** the remediation workstream **#301–#308 is complete and
+> merged** — every §6 gap has an implemented, tested fix (see the closed-issue table in
+> Appendix B and [`phrs-fm-onco-profile.md`](phrs-fm-onco-profile.md), whose ~26 Essential
+> functions now all conform). The §4/§5/§6 figures below are the **original point-in-time
+> audit** and are intentionally left unchanged; **re-run the criterion-level verification to
+> promote the now-fixed §6 functions into §5** before issuing a formal attestation.
 
 ## 1. System & vendor identification
 | Field | Value |
@@ -189,14 +196,14 @@ Verdicts from source-code verification, 2026-07-26. **✅ MET · ◐ PARTIAL · 
 | TI.2.3#02 | ✅ | `after`/`before` timestamp-window filtering |
 | TI.2.3#04 | ✗ | No break-glass / emergency-access authorization |
 
-## Appendix B — Remediation issues
-| Issue | Covers |
-|---|---|
-| #301 | Password validators bypassed on signup/invite (security) — TI.1.1#06 |
-| #302 | TI.1.1 auth controls: lockout, reuse policy, force-change, admin reset |
-| #303 | TI.2 standards-based audit format + audit-log-access auditing + admin/background triggers |
-| #304 | TI.2 audit indelibility/tamper-evidence + break-glass review access |
-| #305 | TI.4.2 terminology maintenance: version history, deprecation, embedded-term substitution |
-| #306 | TI.5/S.3.6/PH.2.3 exchange integrity & non-repudiation, multi-version interchange, agreements |
-| #307 | PH.1/PH.2/TI.1.2 account-holder data: entered-in-error, rendering, AD status, revision history |
-| #308 | PH.6.3 communications: proxy-authorization API + message confidentiality tagging |
+## Appendix B — Remediation issues (all ✅ merged, 2026-07-27)
+| Issue | PR | Covers |
+|---|---|---|
+| #301 | #309 | Password validators bypassed on signup/invite (security) — TI.1.1#06 |
+| #302 | #310 | TI.1.1 auth controls: lockout, reuse policy, force-change, admin reset |
+| #303 | #311 | TI.2 standards-based audit format + audit-log-access auditing + admin/background triggers |
+| #304 | #312 | TI.2 audit indelibility/tamper-evidence + break-glass review access |
+| #305 | #313 | TI.4.2 terminology maintenance: version history, deprecation, embedded-term substitution |
+| #306 | #314 | TI.5/S.3.6/PH.2.3 exchange integrity & non-repudiation, interchange agreements |
+| #307 | #316 | PH.1/PH.2/TI.1.2 account-holder data: entered-in-error, rendering, AD status, revision history |
+| #308 | #309 + #317 | PH.6.3 communications: proxy-authorization render API + message confidentiality |

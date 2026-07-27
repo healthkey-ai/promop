@@ -7,6 +7,14 @@ as-built capabilities. This is the conformance-posture map referenced as the
 update it whenever a capability lands so a future formal conformance pass has a
 starting point.
 
+> **Update 2026-07-27 — WS0 complete.** The remediation workstream #301–#308 merged,
+> moving these to conformant: **PH.1.1, PH.1.2, PH.1.4, PH.2.3, PH.6.3, TI.1.1, TI.1.2,
+> TI.1.7, TI.2.2, TI.2.2.1, TI.2.3, TI.4.2, TI.5.1.1, S.3.6** (were ◐/○ below). For the
+> authoritative, per-function status of the oncology profile's Essential set, see
+> [`phrs-fm-onco-profile.md`](phrs-fm-onco-profile.md) and the self-attestation
+> [`phrs-fm-conformance-claim.md`](phrs-fm-conformance-claim.md). The per-row ◐/○ statuses
+> in the tables below predate WS0 and are being reconciled.
+
 **Status legend**
 
 | | Meaning |

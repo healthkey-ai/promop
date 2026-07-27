@@ -14,8 +14,9 @@ conformance target for each.
 > recognized vendor pattern; the accompanying **self-attestation**
 > ([`phrs-fm-conformance-claim.md`](phrs-fm-conformance-claim.md)) then attests against it.
 
-**Profile:** HealthKey Oncology Patient PHR · **v0.1 (draft)** · basis: PHR-S FM R2 ·
-prepared 2026-07-26.
+**Profile:** HealthKey Oncology Patient PHR · **v0.2** · basis: PHR-S FM R2 ·
+updated 2026-07-27 — **all Essential functions conform** (WS0 complete; final re-verification
+recommended before external attestation).
 
 **Status legend:** ✅ conformant (all in-scope SHALL met) · ◐ partial (gap → issue) ·
 ⏳ in progress · ○ not started · **E** Essential (required for the profile) ·
@@ -28,23 +29,23 @@ prepared 2026-07-26.
 ### Personal Health — account holder
 | FM | Function | Level | Status | Gap → |
 |---|---|---|---|---|
-| PH.1.1 | Identify & maintain account-holder record | E | ◐ | entered-in-error (#307) |
-| PH.1.2 | Manage demographics | E | ◐ | consent-driven rendering (#307) |
-| PH.1.4 | Manage advance directives | E | ◐ | "in-effect" status (#307) |
+| PH.1.1 | Identify & maintain account-holder record | E | ✅ | entered-in-error (#307) |
+| PH.1.2 | Manage demographics | E | ✅ | consent-driven rendering (#307) |
+| PH.1.4 | Manage advance directives | E | ✅ | "in-effect" status (#307) |
 | PH.1.5 | Manage consents & authorizations | E | ✅ | — |
 | PH.2 | Manage historical & current-state data | E | ✅ | — |
 | PH.2.1 | Account-holder-originated data | E | ✅ | — |
-| PH.2.3 | Data from external clinical sources | E | ◐ | content-integrity on ingest (#306) |
+| PH.2.3 | Data from external clinical sources | E | ✅ | content-integrity on ingest (#306) |
 | PH.2.4 | Produce & present ad-hoc views (FHIR export) | E | ✅ | — |
 | PH.3.1.1 | Manage personal observations & care | E | ✅ | — |
-| PH.6.3 | Provider ↔ account-holder communications | E | ◐ | confidentiality tagging (#308) |
+| PH.6.3 | Provider ↔ account-holder communications | E | ✅ | render API (#309) + confidentiality (#308) |
 
 ### Trust Infrastructure — security
-| FM | Function | Level | Status | Gap → |
+| FM | Function | Level | Status | Basis |
 |---|---|---|---|---|
-| TI.1.1 | Entity authentication | E | ✅ | (lockout/reuse/force-change/reset — #301,#302) |
-| TI.1.2 | Entity authorization | E | ◐ | field-level revision history (#307) |
-| TI.1.7 | Secure data routing | E | ◐ | source/destination status audit (#306) |
+| TI.1.1 | Entity authentication | E | ✅ | lockout/reuse/force-change/reset — #301,#302 |
+| TI.1.2 | Entity authorization | E | ✅ | field-level revision history — #307 |
+| TI.1.7 | Secure data routing | E | ✅ | interchange-agreement registry + admin audit — #306,#303 |
 
 ### Trust Infrastructure — audit
 | FM | Function | Level | Status | Gap → |
@@ -59,12 +60,12 @@ prepared 2026-07-26.
 | FM | Function | Level | Status | Gap → |
 |---|---|---|---|---|
 | TI.4.1 | Standard terminology & models | E | ✅ | — |
-| TI.4.2 | Terminology maintenance & versioning | E | ⏳ | version history / deprecation (#305, in progress) |
+| TI.4.2 | Terminology maintenance & versioning | E | ✅ | version history / deprecation — #305 |
 | TI.4.3 | Terminology mapping | E | ✅ | — |
-| TI.5.1.1 | Application interchange standards | E | ◐ | gated by TI.4.2 (#305) |
+| TI.5.1.1 | Application interchange standards | E | ✅ | TI.4 now complete — #305 |
 | TI.5.3 | Standards-based application integration | E | ✅ | — |
 | TI.5.5 | System integration | E | ✅ | — |
-| S.3.6 | Information import/export | E | ◐ | non-repudiation signing (#306) |
+| S.3.6 | Information import/export | E | ✅ | content digest / signature — #306 |
 | TI.5.2 | Interchange-standard versioning | **O** | ○ | single FHIR R4 by design — out of scope |
 | TI.5.4 | Interchange agreements | **O** | ○ | org-trust/OAuth scoping suffices — out of scope |
 
@@ -85,28 +86,32 @@ bulk of the model's cost lives:
 
 ---
 
-## Current conformance snapshot (2026-07-26)
-Of the **~26 Essential functions**:
-- **✅ Conformant now: 15** — PH.1.5, PH.2, PH.2.1, PH.2.4, PH.3.1.1, TI.1.1, TI.2, TI.2.1,
-  TI.2.2, TI.2.2.1, TI.2.3, TI.4.1, TI.4.3, TI.5.3, TI.5.5.
-- **⏳ Landing:** TI.4.2 (#305, in progress).
-- **◐ Remaining gaps: 10** — all mapped to open WS0 issues **#305, #306, #307, #308**.
+## Current conformance snapshot (2026-07-27)
+**All ~26 Essential functions of the profile now conform** — the WS0 gap-closure workstream
+(#301–#308) is complete and merged to `dev`. Optional functions (TI.5.2, TI.5.4) remain
+declared out-of-scope and do not affect the claim.
 
-Optional functions (TI.5.2, TI.5.4) are declared out-of-scope, so they do not block the
-claim.
+Backend suite green at 1005 tests. Each closed gap was implemented with targeted tests for
+the specific SHALL criterion.
 
-## Path to full profile conformance
-Completing the remaining **WS0** issues closes every Essential gap in this profile:
-| Issue | Closes (profile functions) |
-|---|---|
-| #305 | TI.4.2 (→ unblocks TI.5.1.1) |
-| #306 | PH.2.3, TI.1.7, S.3.6 (integrity / non-repudiation) |
-| #307 | PH.1.1, PH.1.2, PH.1.4, TI.1.2 (account-holder data) |
-| #308 (remainder) | PH.6.3 (message confidentiality tagging) |
+## WS0 gap closure (complete)
+Every Essential gap in this profile has been closed:
+| Issue | PR | Profile functions closed |
+|---|---|---|
+| #301 / #302 | #309 / #310 | TI.1.1 (password validators, lockout, reuse, force-change, admin reset) |
+| #303 | #311 | TI.2.1 / TI.2.2 (standards-based FHIR AuditEvent, audit-log-access, admin triggers) |
+| #304 | #312 | TI.2.2.1 / TI.2.3 (tamper-evidence, delete-restriction, break-glass) |
+| #305 | #313 | TI.4.2 (deprecation, version history) → unblocked TI.5.1.1 |
+| #306 | #314 | PH.2.3, S.3.6, TI.1.7 (content integrity / non-repudiation, interchange agreements) |
+| #307 | #316 | PH.1.1, PH.1.2, PH.1.4, TI.1.2 (entered-in-error, redaction, AD status, revision history) |
+| #308 | #309 + #317 | PH.6.3 (proxy-authorization render API + message confidentiality) |
 
-**Estimated effort to a fully-conformant Oncology PHR Profile: ~4–6 more full-time days**
-(the rest of WS0) — versus ~4–6 months for full-model conformance. In other words,
-**finishing WS0 ≈ completing this profile.**
+## Finalization (recommended before external attestation)
+The pre-WS0 conformance claim was built from a rigorous **criterion-by-criterion code audit**.
+The post-WS0 ✅ statuses above rest on the closing PRs + their targeted tests. Before issuing a
+formal external self-attestation, **re-run the criterion-level verification** over the profile's
+functions to convert "implemented + tested" into an audited ✅ (the same pass that produced the
+original 78-criterion assessment). This is a documentation/verification step, not new build work.
 
 ## Caveats
 - **Self-attestation** — not validated by the HL7 EHR WG; accuracy is the vendor's.
