@@ -111,6 +111,8 @@ def patient_person_for(identity):
     now = timezone.now()
     has_provider_grant = GroupAccess.objects.filter(
         identity=identity,
+    ).exclude(
+        role='patient',
     ).filter(
         Q(expires_at__isnull=True) | Q(expires_at__gt=now),
     ).exists()
