@@ -20,6 +20,7 @@ vi.mock("@/components/Auth/AuthCallback", () => ({ AuthCallback: () => <div>AUTH
 vi.mock("@/components/Auth/AcceptInvite", () => ({ default: () => <div>ACCEPT_INVITE</div> }));
 vi.mock("@/components/Auth/AcceptPatientInvite", () => ({ default: () => <div>ACCEPT_PATIENT_INVITE</div> }));
 vi.mock("@/components/Auth/ResetPassword", () => ({ default: () => <div>RESET_PASSWORD</div> }));
+vi.mock("@/components/Auth/ChangePassword", () => ({ default: () => <div>CHANGE_PASSWORD</div> }));
 
 const baseAuth = { loading: false, refresh: vi.fn(), logout: vi.fn(), login: vi.fn() };
 
@@ -74,5 +75,37 @@ describe("App role-gated routing", () => {
     mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
     renderAt("/org-admin");
     expect(screen.getByText("ORG_ADMIN")).toBeInTheDocument();
+  });
+});
+
+describe("App force-password-change gate (TI.1.1#09)", () => {
+  it("holds a flagged user on the change-password screen instead of their route", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 1, is_patient: true, person_id: 5, must_change_password: true },
+    });
+    renderAt("/");
+    expect(screen.getByText("CHANGE_PASSWORD")).toBeInTheDocument();
+    expect(screen.queryByText("PATIENT_HOME")).not.toBeInTheDocument();
+  });
+
+  it("gates provider routes too", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 2, is_org_admin: true, must_change_password: true },
+    });
+    renderAt("/org-admin");
+    expect(screen.getByText("CHANGE_PASSWORD")).toBeInTheDocument();
+    expect(screen.queryByText("ORG_ADMIN")).not.toBeInTheDocument();
+  });
+
+  it("does not gate the public reset-password page", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 1, is_patient: true, person_id: 5, must_change_password: true },
+    });
+    renderAt("/reset-password");
+    expect(screen.getByText("RESET_PASSWORD")).toBeInTheDocument();
+    expect(screen.queryByText("CHANGE_PASSWORD")).not.toBeInTheDocument();
   });
 });

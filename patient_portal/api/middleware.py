@@ -4,6 +4,8 @@ import logging
 import time
 from email.utils import parsedate_to_datetime
 
+from django.http import JsonResponse
+
 logger = logging.getLogger('audit')
 
 _SUNSET_DATE = 'Tue, 01 Sep 2026 00:00:00 GMT'
@@ -201,3 +203,55 @@ class AuditLogMiddleware:
             ip_address=(entry['ip_address'] or '')[:64] or None,
             duration_ms=entry['duration_ms'],
         )
+
+
+# Endpoints that stay reachable while a force-change is pending, so the client
+# can read the flag (/user/), clear it (change-password), or leave (logout/login).
+# Matched as substrings after /api/ so both /api/ and /api/v1/ forms are covered.
+_FORCE_CHANGE_EXEMPT = (
+    '/auth/change-password',
+    '/auth/logout',
+    '/auth/login',
+    '/auth/reset-password',
+    '/user/',
+)
+
+
+class ForcePasswordChangeMiddleware:
+    """
+    Enforce Identity.must_change_password (HL7 PHR-S FM TI.1.1#09).
+
+    When a session-authenticated account is flagged for a forced password change
+    (e.g. after an administrative reset), every /api/ request is refused with 403
+    and a machine-readable ``code: password_change_required`` until the password
+    is changed — except the handful of endpoints the client needs to resolve the
+    state (read the flag, change the password, or sign out).
+
+    Only session-authenticated identities are gated. Token/OAuth clients
+    authenticate inside the view (request.user is anonymous here) and carry an
+    unusable local password, so the flag never applies to them.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if self._is_blocked(request):
+            return JsonResponse(
+                {'detail': 'Password change required before continuing.',
+                 'code': 'password_change_required'},
+                status=403,
+            )
+        return self.get_response(request)
+
+    @staticmethod
+    def _is_blocked(request):
+        path = request.path
+        if not path.startswith('/api/'):
+            return False
+        user = getattr(request, 'user', None)
+        if not (user and user.is_authenticated):
+            return False
+        if not getattr(user, 'must_change_password', False):
+            return False
+        return not any(frag in path for frag in _FORCE_CHANGE_EXEMPT)

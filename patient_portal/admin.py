@@ -10,11 +10,12 @@ class IdentityAdmin(UserAdmin):
     search_fields = ['email', 'name', 'sub']
     ordering = ['email']
     readonly_fields = ['uid', 'issuer', 'sub', 'created_at']
-    actions = ['grant_premium', 'revoke_premium', 'reset_password']
+    actions = ['grant_premium', 'revoke_premium', 'reset_password', 'require_password_change']
 
     fieldsets = (
         (None,          {'fields': ('uid', 'issuer', 'sub', 'email', 'name')}),
         ('Access',      {'fields': ('is_active', 'is_staff', 'is_superuser', 'is_premium')}),
+        ('Security',    {'fields': ('must_change_password',)}),
         ('Timestamps',  {'fields': ('created_at',)}),
     )
     add_fieldsets = ()
@@ -46,6 +47,14 @@ class IdentityAdmin(UserAdmin):
         self.message_user(request, f'Sent {sent} password-reset email(s).')
         if failed:
             self.message_user(request, f'Could not email: {", ".join(failed)}', level=messages.WARNING)
+
+    @admin.action(description='Require password change at next login')
+    def require_password_change(self, request, queryset):
+        """Force a password change (PHR-S FM TI.1.1#09): set the force-change flag so
+        the account is refused every /api/ request except change-password until it sets
+        a new password. Enforced by ForcePasswordChangeMiddleware."""
+        updated = queryset.update(must_change_password=True)
+        self.message_user(request, f'Flagged {updated} account(s) to change password at next login.')
 
 @admin.register(PatientMessage)
 class PatientMessageAdmin(admin.ModelAdmin):
