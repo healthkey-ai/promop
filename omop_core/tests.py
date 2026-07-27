@@ -1777,3 +1777,117 @@ class VocabularyReleaseServiceTest(TestCase):
         )
         self.assertNotEqual(get_release_etag(vr1), get_release_etag(vr2))
 
+
+# ---------------------------------------------------------------------------
+# TEST-08: STCM loader + VocabularyRelease publication from loader
+# ---------------------------------------------------------------------------
+
+class LoadSTCMTest(_OmopBase):
+    """Test _load_source_to_concept_map in the Athena loader."""
+
+    PERSON_ID = 90290
+
+    def _run_loader(self, method_name, filename, header, rows):
+        import os
+        import tempfile
+        from io import StringIO
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, filename), 'w', encoding='utf-8', newline='') as f:
+            f.write('\t'.join(header) + '\n')
+            for r in rows:
+                f.write('\t'.join(str(x) for x in r) + '\n')
+        cmd = Command(stdout=StringIO())
+        cmd._base = d
+        cmd._gcs_bucket = None
+        cmd._direct = False
+        return getattr(cmd, method_name)(False)
+
+    def test_stcm_loads_and_filters_unloaded_refs(self):
+        from omop_core.models import SourceToConceptMap
+        src = _concept(960001, 'Source concept', self.dom_meas, self.vocab, self.cc, code='SRC1')
+        tgt = _concept(960002, 'Target concept', self.dom_meas, self.vocab, self.cc, code='TGT1')
+        header = [
+            'source_code', 'source_concept_id', 'source_vocabulary_id',
+            'source_code_description', 'target_concept_id', 'target_vocabulary_id',
+            'valid_start_date', 'valid_end_date', 'invalid_reason',
+        ]
+        count = self._run_loader(
+            '_load_source_to_concept_map', 'SOURCE_TO_CONCEPT_MAP.csv', header,
+            [
+                ('ABC', 960001, 'OMOP_TEST', 'desc', 960002, 'OMOP_TEST', '19700101', '20991231', ''),
+                ('DEF', 999998, 'OMOP_TEST', '', 960002, 'OMOP_TEST', '19700101', '20991231', ''),  # src not loaded
+                ('GHI', 960001, 'OMOP_TEST', '', 999997, 'OMOP_TEST', '19700101', '20991231', ''),  # tgt not loaded
+            ],
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual(SourceToConceptMap.objects.count(), 1)
+        row = SourceToConceptMap.objects.first()
+        self.assertEqual(row.source_code, 'ABC')
+        self.assertEqual(row.source_concept_id, 960001)
+        self.assertEqual(row.target_concept_id, 960002)
+
+    def test_stcm_dry_run_returns_count_without_writing(self):
+        import os
+        import tempfile
+        from io import StringIO
+        from omop_core.models import SourceToConceptMap
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        _concept(960001, 'Source concept', self.dom_meas, self.vocab, self.cc, code='SRC1')
+        _concept(960002, 'Target concept', self.dom_meas, self.vocab, self.cc, code='TGT1')
+        header = [
+            'source_code', 'source_concept_id', 'source_vocabulary_id',
+            'source_code_description', 'target_concept_id', 'target_vocabulary_id',
+            'valid_start_date', 'valid_end_date', 'invalid_reason',
+        ]
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, 'SOURCE_TO_CONCEPT_MAP.csv'), 'w', encoding='utf-8', newline='') as f:
+            f.write('\t'.join(header) + '\n')
+            f.write('\t'.join(str(x) for x in ('ABC', 960001, 'OMOP_TEST', '', 960002, 'OMOP_TEST', '19700101', '20991231', '')) + '\n')
+        cmd = Command(stdout=StringIO())
+        cmd._base = d
+        cmd._gcs_bucket = None
+        cmd._direct = False
+        count = cmd._load_source_to_concept_map(True)  # dry_run=True
+        self.assertEqual(count, 1)
+        self.assertEqual(SourceToConceptMap.objects.count(), 0)
+
+    def test_stcm_missing_file_returns_zero(self):
+        import tempfile
+        from io import StringIO
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        d = tempfile.mkdtemp()  # empty dir, no SOURCE_TO_CONCEPT_MAP.csv
+        cmd = Command(stdout=StringIO())
+        cmd._base = d
+        cmd._gcs_bucket = None
+        cmd._direct = False
+        count = cmd._load_source_to_concept_map(False)
+        self.assertEqual(count, 0)
+
+
+class PublishReleaseTest(_OmopBase):
+    """Test _publish_release creates a VocabularyRelease row."""
+
+    PERSON_ID = 90291
+
+    def test_publish_release_creates_row(self):
+        import time as _time
+        from io import StringIO
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        from omop_core.models import VocabularyRelease
+
+        cmd = Command(stdout=StringIO())
+        cmd._build_start = _time.time()
+        cmd._cdm_vocab_version = 'v5.0 2024-07-01'
+        counts = {'concept': 100, 'vocabulary': 5}
+        cmd._publish_release(counts)
+
+        self.assertEqual(VocabularyRelease.objects.count(), 1)
+        release = VocabularyRelease.objects.first()
+        self.assertEqual(release.status, 'published')
+        self.assertIsNotNone(release.published_at)
+        self.assertEqual(release.athena_version, 'v5.0 2024-07-01')
+        self.assertEqual(release.row_counts, {'concept': 100, 'vocabulary': 5})
+        self.assertIn('concept', release.checksums)
+        self.assertIn('vocabulary', release.checksums)
+
