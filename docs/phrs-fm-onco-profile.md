@@ -14,9 +14,9 @@ conformance target for each.
 > recognized vendor pattern; the accompanying **self-attestation**
 > ([`phrs-fm-conformance-claim.md`](phrs-fm-conformance-claim.md)) then attests against it.
 
-**Profile:** HealthKey Oncology Patient PHR · **v0.3** · basis: PHR-S FM R2 ·
-re-verified 2026-07-27 — **24 of 25 Essential functions conform** (74/78 SHALL MET); the sole
-Essential residual is TI.2.2.1 audit indelibility (#318).
+**Profile:** HealthKey Oncology Patient PHR · **v0.4** · basis: PHR-S FM R2 ·
+re-verified 2026-07-27, updated for #318 — **all 25 Essential functions conform** (75/78 SHALL
+MET); the 3 remaining PARTIAL criteria are both in Optional functions (TI.5.2, TI.5.4).
 
 **Status legend:** ✅ conformant (all in-scope SHALL met) · ◐ partial (gap → issue) ·
 ⏳ in progress · ○ not started · **E** Essential (required for the profile) ·
@@ -53,7 +53,7 @@ Essential residual is TI.2.2.1 audit indelibility (#318).
 | TI.2 | Audit (parent) | E | ✅ | — |
 | TI.2.1 | Audit triggers | E | ✅ | (admin+background — #303; not every command wired) |
 | TI.2.2 | Audit log management (format, retention, access-audit) | E | ✅ | (#298,#303) |
-| TI.2.2.1 | Audit log indelibility | E | ◐ | tamper-evidence + delete-restriction (#304); unchained HMAC → row deletion undetectable — hash-chain/WORM pending (#318) |
+| TI.2.2.1 | Audit log indelibility | E | ✅ | tamper-evidence + delete-restriction (#304) + **hash chain** (#320) → row deletion/insertion detectable; tail-truncation needs external anchor (planned) |
 | TI.2.3 | Audit notification & review (incl. break-glass) | E | ✅ | (#304) |
 
 ### Trust Infrastructure — terminology & interoperability
@@ -87,19 +87,22 @@ bulk of the model's cost lives:
 ---
 
 ## Current conformance snapshot (re-verified 2026-07-27)
-Criterion-level re-verification (4 independent audit passes over current `dev`) after WS0:
-**74 MET · 4 PARTIAL · 0 NOT MET** across the 78 SHALL — **23 of 26 functions fully conformant**.
+Criterion-level re-verification (4 independent audit passes over current `dev`) after WS0, updated
+for #318: **75 MET · 3 PARTIAL · 0 NOT MET** across the 78 SHALL — **24 of 26 functions fully
+conformant**.
 
-- **Essential set: 24 of 25 functions conform.** The one Essential residual is **TI.2.2.1**
-  (audit indelibility) — tamper-*evidence* + delete-restriction is implemented, but the per-row
-  HMAC is unchained so whole-row deletion is undetectable; hash-chain/WORM is tracked in **#318**.
+- **Essential set: all 25 functions conform.** The last Essential residual — **TI.2.2.1** audit
+  indelibility — was closed by #318 (#320): a per-row HMAC signature (alteration) plus a `chain_hash`
+  linking each row to its predecessor (deletion/insertion), verified by `verify_audit_integrity`.
+  Disclosed limit: tamper-*evidence*, not physical WORM, and tail-truncation of the newest rows needs
+  an external `chain_hash` anchor (planned).
 - **Optional (out of scope):** TI.5.2 (multi-version — R4 declared/negotiated only) and TI.5.4
   (agreement records descriptive, not enforcement-bound) — do not affect the claim.
 - **Disclosed caveats** (see the claim §7): S.3.6 non-repudiation is symmetric HMAC (not asymmetric);
   PH.2.3#09 content-digest is opt-in (transport auth carries it); PH.1.2#05 redaction is a bounded
   hook; TI.1.1#09 `must_change_password` flag is inert (#319); TI.4.2 versioning is sequential.
 
-Backend suite green at 1005 tests. The authoritative per-function determination is in
+Backend suite green at 1010 tests. The authoritative per-function determination is in
 [`phrs-fm-conformance-claim.md`](phrs-fm-conformance-claim.md) §5/§6 + Appendix A.
 
 ## WS0 gap closure (complete)
@@ -113,6 +116,7 @@ Every Essential gap in this profile has been closed:
 | #306 | #314 | PH.2.3, S.3.6, TI.1.7 (content integrity / non-repudiation, interchange agreements) |
 | #307 | #316 | PH.1.1, PH.1.2, PH.1.4, TI.1.2 (entered-in-error, redaction, AD status, revision history) |
 | #308 | #309 + #317 | PH.6.3 (proxy-authorization render API + message confidentiality) |
+| #318 | #320 | TI.2.2.1 (audit **hash chain** — detect audit-row deletion → Essential set 25/25) |
 
 ## Finalization (recommended before external attestation)
 The pre-WS0 conformance claim was built from a rigorous **criterion-by-criterion code audit**.
@@ -125,6 +129,7 @@ original 78-criterion assessment). This is a documentation/verification step, no
 - **Self-attestation** — not validated by the HL7 EHR WG; accuracy is the vendor's.
 - **Vendor-defined profile** — documented here as a distinct artifact; the conformance
   *claim* does not itself create an HL7 Functional Profile (Ch. 7).
-- TI.2.2.1 is tamper-**evidence** + delete-restriction, not physical WORM immutability.
+- TI.2.2.1 is tamper-**evidence** (per-row HMAC + hash chain) + delete-restriction, not physical
+  WORM immutability; tail-truncation of the newest rows still needs an external `chain_hash` anchor.
 - "Essential Now" priority has not been reconciled against the normative Function List;
   the Essential/Optional split above is HealthKey's profiling decision for oncology PHR use.

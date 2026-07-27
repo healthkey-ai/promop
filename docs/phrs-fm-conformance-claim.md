@@ -1,16 +1,17 @@
 # HL7 PHR-S FM R2 — Conformance Claim via Self-Attestation
 
 > **Status:** Ready for authorized signature. **Re-verified 2026-07-27** against `dev` HEAD
-> after the WS0 remediation (#301–#308) merged. Self-attestation — not validated by the HL7
-> EHR WG. The §5 functions were verified criterion-by-criterion against the source code (see
-> Appendix A); the signatory should confirm the determination before issuing.
+> after the WS0 remediation (#301–#308) merged; **updated for the TI.2.2.1 audit hash chain
+> (#318)**. Self-attestation — not validated by the HL7 EHR WG. The §5 functions were verified
+> criterion-by-criterion against the source code (see Appendix A); the signatory should confirm
+> the determination before issuing.
 
 ## 1. System & vendor identification
 | Field | Value |
 |---|---|
 | Product | **promop** (oncology PHR / patient portal) |
 | Vendor / attesting entity | **HealthKey.ai** |
-| Product version | `dev` @ `eb3a513` (2026-07-27) |
+| Product version | `dev` @ `9ad972d` (2026-07-27) |
 | Attestation type | **Self-Attestation** |
 | Attestation date | **2026-07-27** |
 | Authorized representative | **Adam Blum** — adam@healthkey.ai |
@@ -35,10 +36,11 @@
   (Appendix A). Re-verified after WS0. **No HL7 conformance-determination tool** was used.
 - **Scope evaluated:** 26 candidate leaf functions, **78 SHALL criteria**. No criterion ruled N/A —
   all conditional dependencies (local passwords, patient + provider roles, external ingest) apply.
-- **Result (2026-07-27):** **74 MET · 4 PARTIAL · 0 NOT MET** — **23 of 26 functions fully
-  conformant** (up from 49/18/11 and 10 conformant at the pre-WS0 audit).
+- **Result (2026-07-27, incl. #318):** **75 MET · 3 PARTIAL · 0 NOT MET** — **24 of 26 functions
+  fully conformant** (up from 49/18/11 and 10 conformant at the pre-WS0 audit). The 3 remaining
+  PARTIAL criteria are both in **Optional** functions (TI.5.2, TI.5.4).
 - **Supporting evidence:** the traceability matrix + profile doc, and the automated regression suite
-  (**1005 backend tests passing**).
+  (**1010 backend tests passing**).
 
 ## 5. Functions CLAIMED conformant *(all applicable SHALL met — re-verified)*
 | FM ID | Function | Determination |
@@ -59,6 +61,7 @@
 | TI.2 | Audit (parent) | 2/2 MET |
 | TI.2.1 | Audit triggers | 4/4 MET |
 | TI.2.2 | Audit log management (FHIR AuditEvent, retention, access-audit) | 2/2 MET |
+| TI.2.2.1 | Audit log indelibility | 1/1 MET *(hash chain, #318; see §7.2)* |
 | TI.2.3 | Audit notification & review (incl. break-glass) | 3/3 MET |
 | TI.4.1 | Standard terminology & models | 3/3 MET |
 | TI.4.2 | Terminology maintenance & versioning | 7/7 MET *(see §7.7)* |
@@ -71,20 +74,23 @@
 ## 6. Functions evaluated but NOT claimed *(≥1 SHALL only PARTIAL)*
 | FM ID | Profile level | Residual | Path to MET |
 |---|---|---|---|
-| **TI.2.2.1** Audit log indelibility | **Essential** | #01 PARTIAL — per-row HMAC gives tamper-**evidence** (detects field alteration) but not indelibility: it is **unchained, so whole-row deletion is undetectable**, and rows stay DB-mutable | hash-chain linking each row to its predecessor, or append-only/WORM storage → #318 |
 | TI.5.2 Interchange-standard versioning | Optional (out of scope) | #01/#02 PARTIAL — FHIR R4 declared + non-R4 cleanly rejected (406), but no cross-version transform | multi-version support if a non-R4 partner is required |
 | TI.5.4 Interchange agreements | Optional (out of scope) | #01 PARTIAL — `InterchangeAgreement` records exist but exchange is gated by OAuth/`OrgTrust`, not driven/enforced by the agreement | bind provisioning to agreement records |
 
-Only **TI.2.2.1** is an Essential function of the profile; TI.5.2 and TI.5.4 are declared Optional
-and do not block the profile claim.
+Both remaining PARTIAL functions (TI.5.2, TI.5.4) are declared **Optional** and do not block the
+profile claim. As of #318 **every Essential function of the profile is fully conformant.**
 
 ## 7. Limitations & caveats (disclosed)
 1. **Scoped, function-level claim** against the HealthKey Oncology Patient PHR Profile — not a claim
-   of full-model conformance. The profile's Essential set is fully conformant **except TI.2.2.1**.
-2. **TI.2.2.1 indelibility** — implemented as tamper-**evidence** (per-row HMAC-SHA256 `signature` +
-   `verify_audit_integrity`) plus delete-restriction (admin delete disabled; deletion only via the
-   audited retention job). This is **not physical WORM immutability**, and the HMAC is per-row
-   (unchained) so whole-row deletion is not detectable. Attested **PARTIAL**.
+   of full-model conformance. The profile's **entire Essential set is fully conformant** (as of #318);
+   the only remaining PARTIAL functions are Optional (§6).
+2. **TI.2.2.1 indelibility** — implemented as tamper-**evidence**: per-row HMAC-SHA256 `signature`
+   (detects field alteration) **plus a hash chain** (`chain_hash` links each row to its predecessor,
+   sealed under an advisory lock; #318) so whole-row deletion/insertion between survivors is now
+   detected by `verify_audit_integrity`, and delete-restriction (admin delete disabled; deletion only
+   via the audited retention job). Attested **MET**. Disclosed limit: this is tamper-*evidence*, not
+   physical WORM — rows remain DB-mutable, and **tail-truncation of the newest rows** is undetectable
+   without an external anchor (periodically publishing the latest `chain_hash` closes this — planned).
 3. **S.3.6#10 non-repudiation** uses a **symmetric HMAC** (`EXPORT_SIGNING_KEY`) over exported
    bundles — strong content-integrity + origin authentication to key-holders, but **not asymmetric
    third-party non-repudiation** (a shared-key holder could forge). Disclosed.
@@ -133,7 +139,7 @@ Four independent criterion-level audit passes over the current `dev` code. **✅
 | TI.2 | 2 | 2 | ✅ |
 | TI.2.1 | 4 | 4 | ✅ |
 | TI.2.2 | 2 | 2 | ✅ |
-| **TI.2.2.1** | 1 | 0 | **◐** — indelibility (see §6, §7.2) |
+| TI.2.2.1 | 1 | 1 | ✅ *(hash chain, #318; see §7.2 limit)* |
 | TI.2.3 | 3 | 3 | ✅ |
 | TI.4.1 | 3 | 3 | ✅ |
 | TI.4.2 | 7 | 7 | ✅ |
@@ -144,11 +150,10 @@ Four independent criterion-level audit passes over the current `dev` code. **✅
 | **TI.5.4** | 1 | 0 | **◐** — agreement enforcement (Optional) |
 | TI.5.5 | 1 | 1 | ✅ |
 | S.3.6 | 1 | 1 | ✅ |
-| **Total** | **78** | **74** | 23 functions ✅ · 4 SHALL ◐ |
+| **Total** | **78** | **75** | 24 functions ✅ · 3 SHALL ◐ |
 
-**Residual (PARTIAL) criteria:** TI.2.2.1#01 (indelibility — unchained HMAC, row deletion
-undetectable); TI.5.2#01/#02 (declared R4 only, no cross-version transform); TI.5.4#01 (agreement
-records descriptive, not enforcement-bound).
+**Residual (PARTIAL) criteria:** TI.5.2#01/#02 (declared R4 only, no cross-version transform);
+TI.5.4#01 (agreement records descriptive, not enforcement-bound). Both are in Optional functions.
 
 ## Appendix B — Remediation
 **WS0 (closed, merged 2026-07-27):**
@@ -162,6 +167,8 @@ records descriptive, not enforcement-bound).
 | #306 | #314 | S.3.6/PH.2.3/TI.5 exchange integrity, non-repudiation, interchange agreements |
 | #307 | #316 | PH.1/PH.2/TI.1.2 entered-in-error, redaction, AD status, revision history |
 | #308 | #309 + #317 | PH.6.3 proxy-authorization render API + message confidentiality |
+| #318 | #320 | TI.2.2.1 audit **hash chain** — detect audit-row deletion (Essential set → 25/25) |
 
-**Residual follow-ups (from re-verification):** #318 audit hash-chain / WORM indelibility (TI.2.2.1);
-#319 wire the `must_change_password` force-change flag (TI.1.1#09). TI.5.2 / TI.5.4 remain Optional.
+**Residual follow-ups (from re-verification):** #319 wire the `must_change_password` force-change flag
+(TI.1.1#09, §7.6); external `chain_hash` anchoring to close tail-truncation (TI.2.2.1 limit, §7.2).
+TI.5.2 / TI.5.4 remain Optional.
