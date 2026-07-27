@@ -10,7 +10,7 @@ Add a first-class **patient** role to the org/access system so that:
 
 ---
 
-## Phase 1 — Model & Backend Changes
+## Phase 1 — Model & Backend Changes ✅ Done (PR #325)
 
 ### 1.1 Add `allows_patient_signup` to `Organization`
 
