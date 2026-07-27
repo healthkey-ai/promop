@@ -161,6 +161,50 @@ def _record_provenance(record, source, source_user_id, target_patient_id=None, m
     )
 
 
+def _write_record_revisions(patient_record, previous_values, request):
+    """Persist field-level revision-history rows for a PatientRecord update.
+
+    PHR-S FM TI.1.2#04. ``previous_values`` maps field name -> value BEFORE the
+    update (as captured by the PATCH path). We compare against the freshly saved
+    instance and write one RecordRevision per field whose value actually
+    changed, so a record's contents can be reconstructed over time.
+
+    Returns the list of created RecordRevision instances.
+    """
+    from omop_core.models import RecordRevision
+
+    def _norm(v):
+        # Normalize to a stable string form for storage + comparison.
+        return None if v is None else str(v)
+
+    user = getattr(request, 'user', None)
+    changed_by = (
+        str(user.pk) if getattr(user, 'is_authenticated', False) and user.pk is not None
+        else 'system'
+    )
+
+    patient_record.refresh_from_db()
+    rows = []
+    for field, old in previous_values.items():
+        # Resolve the new value the same way the PATCH path captured the old one
+        # (FK fields are stored/compared via their {field}_id attribute).
+        fk_id = f'{field}_id'
+        new = getattr(patient_record, fk_id, None) if hasattr(patient_record, fk_id) else getattr(patient_record, field, None)
+        old_s, new_s = _norm(old), _norm(new)
+        if old_s == new_s:
+            continue
+        rows.append(RecordRevision(
+            patient_record=patient_record,
+            changed_by=changed_by,
+            field=field,
+            old_value=old_s,
+            new_value=new_s,
+        ))
+    if rows:
+        RecordRevision.objects.bulk_create(rows)
+    return rows
+
+
 def _delete_omop_clinical_rows(person):
     """Delete all OMOP clinical rows for a person, in FK dependency order.
 
@@ -420,7 +464,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         except PatientUser.DoesNotExist:
             user_data = None
 
-        patient_serializer = PatientRecordSerializer(patient_info)
+        # Pass request in context so PH.1.2#05 demographic redaction can
+        # identify whether the reader is the account holder.
+        patient_serializer = PatientRecordSerializer(patient_info, context={'request': request})
 
         return Response({
             'patient_info': patient_serializer.data,  # legacy wire format — preserved for frontend/federation host compatibility
@@ -492,6 +538,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 if prov_source:
                     _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
                 sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
+                # PHR-S FM TI.1.2#04 — record field-level revision history.
+                _write_record_revisions(patient_info, previous_values, request)
                 if prov_source:
                     for field in changed_fields:
                         if field in LAB_FIELD_TO_LOINC:
@@ -549,6 +597,44 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 )
         records = ProvenanceRecord.objects.filter(q).select_related('content_type').order_by('-created_at')
         return Response(ProvenanceRecordSerializer(records, many=True).data)
+
+    @action(detail=True, methods=['get'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def revisions(self, request, pk=None):
+        """GET /api/v1/patient-records/{person_id}/revisions/ — field-level
+        revision history for a patient's record (PHR-S FM TI.1.2#04)."""
+        from omop_core.models import RecordRevision
+        try:
+            person = Person.objects.get(person_id=pk)
+            patient_info = PatientRecord.objects.get(person=person)
+        except Person.DoesNotExist:
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        except PatientRecord.DoesNotExist:
+            return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        org = get_request_org(request)
+        if org is not None:
+            if patient_info.organization != org:
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        elif not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+            from omop_core.authorization import can_access_patient
+            if not can_access_patient(request.user, person.person_id):
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        revisions = RecordRevision.objects.filter(
+            patient_record=patient_info,
+        ).order_by('-changed_at', 'field')
+        data = [
+            {
+                'id': r.id,
+                'field': r.field,
+                'old_value': r.old_value,
+                'new_value': r.new_value,
+                'changed_by': r.changed_by,
+                'changed_at': r.changed_at,
+            }
+            for r in revisions
+        ]
+        return Response(data)
 
     @action(detail=False, methods=['get', 'patch', 'delete'], permission_classes=[PatientDeletePermission, PatientSelfScopePermission])
     def me(self, request):
@@ -609,10 +695,26 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         serializer.is_valid(raise_exception=True)
 
         changed_fields = set(patch_data.keys())
+        # Capture previous values before save so revision history can record
+        # old/new (PHR-S FM TI.1.2#04). FK fields compared via {field}_id.
+        _read_only = set(PatientRecordSerializer.Meta.read_only_fields)
+
+        def _prev_val(obj, field):
+            fk_id = f'{field}_id'
+            if hasattr(obj, fk_id):
+                return getattr(obj, fk_id, None)
+            return getattr(obj, field, None)
+        previous_values = {
+            field: _prev_val(patient_info, field)
+            for field in patch_data
+            if field not in _read_only and hasattr(patient_info, field)
+        }
         try:
             with transaction.atomic():
                 serializer.save()
                 sync_to_omop(patient_info, changed_fields, changed_data=dict(patch_data))
+                # PHR-S FM TI.1.2#04 — record field-level revision history.
+                _write_record_revisions(patient_info, previous_values, request)
         except Exception as _sync_exc:
             logger.error(
                 'omop_write_through_failed patient=%s error=%s',
@@ -3727,6 +3829,16 @@ class _OmopFilterMixin:
         person_id = self.request.query_params.get('person_id')
         if person_id:
             qs = qs.filter(person_id=person_id)
+        # PHR-S FM PH.1.1#06 — exclude entered-in-error rows from normal reads
+        # by default. Applies only to models that carry the flag (clinical
+        # event tables); the row is RETAINED, never deleted. Pass
+        # ?include_erroneous=true to surface them (e.g. to review or un-flag).
+        if any(f.name == 'is_erroneous' for f in qs.model._meta.get_fields()):
+            include = str(
+                self.request.query_params.get('include_erroneous', '')
+            ).strip().lower() in ('1', 'true', 'yes')
+            if not include:
+                qs = qs.exclude(is_erroneous=True)
         # Trusted backend (service-token): full visibility. Already
         # validated at the permission layer (ScopedTokenPermission).
         if is_service_token(self.request):
@@ -4603,6 +4715,11 @@ class PatientDocumentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
         doc_type = self.request.query_params.get('doc_type')
         if doc_type:
             qs = qs.filter(doc_type=doc_type)
+        # PHR-S FM PH.1.4#04 — filter advance directives (and other docs) by
+        # effective status, e.g. ?status=active to list only in-effect documents.
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
         return qs
 
 

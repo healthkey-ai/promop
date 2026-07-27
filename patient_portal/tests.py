@@ -25,7 +25,7 @@ from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
     Person, PatientRecord, ProvenanceRecord,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
-    Death, PatientDocument,
+    Death, PatientDocument, RecordRevision,
     Relationship, ConceptRelationship, ConceptAncestor,
     SctEligibility,
     FhirConnection, FhirOauthState, Institution,
@@ -3595,6 +3595,225 @@ class PatientRecordPatchWriteThroughTest(_SmartBase):
             format='json',
         )
         self.assertEqual(resp.status_code, 403)
+
+
+# ---------------------------------------------------------------------------
+# Account-holder data management (issue #307 — PHR-S FM PH.1.1/PH.1.2/PH.1.4/TI.1.2)
+# ---------------------------------------------------------------------------
+
+class AccountHolderDataTest(_SmartBase):
+    """Issue #307: advance-directive effective status, entered-in-error,
+    revision history, and consent-driven demographic redaction."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        PatientRecord.objects.filter(person=cls.person).update(
+            disease='Breast Cancer', date_of_birth=date(1980, 5, 1), city='Boston',
+        )
+        cls.patient_info = PatientRecord.objects.get(person=cls.person)
+
+    # --- PH.1.4#04 : advance-directive effective status -------------------
+
+    def test_advance_directive_status_and_effective_date(self):
+        """AD document exposes status + effective_date, both settable and filterable."""
+        doc = PatientDocument.objects.create(
+            person=self.person, doc_type='ADVANCE_DIRECTIVE', title='Living Will',
+        )
+        # Default status is 'active', effective_date distinct from uploaded_at.
+        self.assertEqual(doc.status, PatientDocument.STATUS_ACTIVE)
+        self.assertIsNone(doc.effective_date)
+
+        # Both fields are exposed and writable via the documents viewset.
+        resp = self.write_client.patch(
+            f'/api/v1/documents/{doc.id}/',
+            {'status': 'revoked', 'effective_date': '2026-01-15'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['status'], 'revoked')
+        self.assertEqual(resp.data['effective_date'], '2026-01-15')
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, 'revoked')
+        self.assertEqual(str(doc.effective_date), '2026-01-15')
+
+    def test_document_status_filter(self):
+        """?status= filters documents by effective status."""
+        PatientDocument.objects.create(
+            person=self.person, doc_type='ADVANCE_DIRECTIVE', title='Active AD',
+            status='active',
+        )
+        PatientDocument.objects.create(
+            person=self.person, doc_type='ADVANCE_DIRECTIVE', title='Old AD',
+            status='superseded',
+        )
+        resp = self.read_client.get(
+            '/api/v1/documents/', {'person_id': self.person.person_id, 'status': 'active'},
+        )
+        self.assertEqual(resp.status_code, 200)
+        titles = [d['title'] for d in resp.data]
+        self.assertIn('Active AD', titles)
+        self.assertNotIn('Old AD', titles)
+
+    # --- PH.1.1#06 : entered-in-error ------------------------------------
+
+    def _make_condition(self, cid=70901):
+        return ConditionOccurrence.objects.create(
+            condition_occurrence_id=cid,
+            person=self.person,
+            condition_concept=self.condition_concept,
+            condition_start_date=date(2024, 1, 1),
+            condition_type_concept=self.type_concept,
+            condition_source_value='Test condition',
+        )
+
+    def test_mark_condition_erroneous_retains_but_excludes(self):
+        """A row marked entered-in-error is retained in the DB but excluded from normal reads."""
+        cond = self._make_condition()
+        # Visible before marking.
+        resp = self.read_client.get('/api/v1/conditions/', {'person_id': self.person.person_id})
+        self.assertIn(cond.pk, [r['condition_occurrence_id'] for r in resp.data])
+
+        # Mark it erroneous via the existing viewset (does NOT delete).
+        resp = self.write_client.patch(
+            f'/api/v1/conditions/{cond.pk}/',
+            {'is_erroneous': True, 'erroneous_reason': 'duplicate entry'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        # Retained in the DB.
+        cond.refresh_from_db()
+        self.assertTrue(cond.is_erroneous)
+        self.assertEqual(cond.erroneous_reason, 'duplicate entry')
+        self.assertTrue(ConditionOccurrence.objects.filter(pk=cond.pk).exists())
+
+        # Excluded from normal reads by default.
+        resp = self.read_client.get('/api/v1/conditions/', {'person_id': self.person.person_id})
+        self.assertNotIn(cond.pk, [r['condition_occurrence_id'] for r in resp.data])
+
+        # Surfaced with ?include_erroneous=true.
+        resp = self.read_client.get(
+            '/api/v1/conditions/',
+            {'person_id': self.person.person_id, 'include_erroneous': 'true'},
+        )
+        self.assertIn(cond.pk, [r['condition_occurrence_id'] for r in resp.data])
+
+    def test_erroneous_flag_defaults_false_and_shows_existing_data(self):
+        """New/existing rows default is_erroneous=False and remain visible."""
+        cond = self._make_condition(cid=70902)
+        self.assertFalse(cond.is_erroneous)
+        resp = self.read_client.get('/api/v1/conditions/', {'person_id': self.person.person_id})
+        self.assertIn(cond.pk, [r['condition_occurrence_id'] for r in resp.data])
+
+    # --- TI.1.2#04 : revision history ------------------------------------
+
+    def test_patient_record_update_writes_revision(self):
+        """PATCHing a PatientRecord field writes a RecordRevision with old/new values."""
+        RecordRevision.objects.filter(patient_record=self.patient_info).delete()
+        resp = self.write_client.patch(
+            f'/api/v1/patient-records/{self.person.person_id}/',
+            {'disease': 'Lung Cancer'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        rev = RecordRevision.objects.filter(
+            patient_record=self.patient_info, field='disease',
+        ).first()
+        self.assertIsNotNone(rev)
+        self.assertEqual(rev.old_value, 'Breast Cancer')
+        self.assertEqual(rev.new_value, 'Lung Cancer')
+
+    def test_revision_not_written_when_value_unchanged(self):
+        """No revision row is created when the submitted value equals the stored value."""
+        RecordRevision.objects.filter(patient_record=self.patient_info).delete()
+        self.write_client.patch(
+            f'/api/v1/patient-records/{self.person.person_id}/',
+            {'disease': self.patient_info.disease},
+            format='json',
+        )
+        self.assertEqual(
+            RecordRevision.objects.filter(patient_record=self.patient_info, field='disease').count(),
+            0,
+        )
+
+    def test_revisions_endpoint_returns_history(self):
+        """GET .../revisions/ returns the field-level change history."""
+        RecordRevision.objects.filter(patient_record=self.patient_info).delete()
+        self.write_client.patch(
+            f'/api/v1/patient-records/{self.person.person_id}/',
+            {'stage': 'IV'},
+            format='json',
+        )
+        resp = self.read_client.get(
+            f'/api/v1/patient-records/{self.person.person_id}/revisions/'
+        )
+        self.assertEqual(resp.status_code, 200)
+        fields = [r['field'] for r in resp.data]
+        self.assertIn('stage', fields)
+        entry = next(r for r in resp.data if r['field'] == 'stage')
+        self.assertEqual(entry['new_value'], 'IV')
+
+    def test_patch_write_through_still_succeeds_with_revision_logging(self):
+        """Revision logging must not break the OMOP write-through (lab PATCH still creates Measurement)."""
+        resp = self.write_client.patch(
+            f'/api/v1/patient-records/{self.person.person_id}/',
+            {'hemoglobin_g_dl': '12.5'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(
+            Measurement.objects.filter(person=self.person, measurement_source_value='718-7').exists()
+        )
+
+    # --- PH.1.2#05 : consent-driven demographic redaction ----------------
+
+    def test_demographics_redacted_for_non_owner_when_opted_in(self):
+        """With the preference set, a non-owner reader gets DOB/location redacted."""
+        PatientRecord.objects.filter(person=self.person).update(
+            suppress_demographics_for_others=True,
+        )
+        resp = self.read_client.get(f'/api/v1/patient-records/{self.person.person_id}/')
+        self.assertEqual(resp.status_code, 200)
+        info = resp.data['patient_info']
+        self.assertIsNone(info['date_of_birth'])
+        self.assertIsNone(info['city'])
+        self.assertTrue(info.get('demographics_redacted'))
+
+    def test_demographics_not_redacted_when_preference_off(self):
+        """Default (preference off) returns demographics in full."""
+        PatientRecord.objects.filter(person=self.person).update(
+            suppress_demographics_for_others=False,
+        )
+        resp = self.read_client.get(f'/api/v1/patient-records/{self.person.person_id}/')
+        self.assertEqual(resp.status_code, 200)
+        info = resp.data['patient_info']
+        self.assertEqual(info['date_of_birth'], '1980-05-01')
+        self.assertEqual(info['city'], 'Boston')
+
+    def test_demographics_visible_to_account_holder_despite_preference(self):
+        """The account holder always sees their own demographics, even with the preference set."""
+        from rest_framework.test import APIRequestFactory
+        from patient_portal.api.serializers import PatientRecordSerializer
+        from patient_portal.models import PatientUser
+
+        PatientRecord.objects.filter(person=self.person).update(
+            suppress_demographics_for_others=True,
+        )
+        pr = PatientRecord.objects.get(person=self.person)
+
+        owner_identity = Identity.objects.create_user(
+            email='owner307@test.com', password='pw',
+        )
+        PatientUser.objects.create(identity=owner_identity, person=self.person)
+
+        factory = APIRequestFactory()
+        request = factory.get('/')
+        request.user = owner_identity
+        data = PatientRecordSerializer(pr, context={'request': request}).data
+        self.assertEqual(data['date_of_birth'], '1980-05-01')
+        self.assertEqual(data['city'], 'Boston')
+        self.assertNotIn('demographics_redacted', data)
 
 
 # ---------------------------------------------------------------------------

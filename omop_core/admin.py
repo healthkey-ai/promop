@@ -1,7 +1,23 @@
 from django.contrib import admin
 from .models import (
-    Person, PatientRecord, Concept, Vocabulary, Domain, ConceptClass
+    Person, PatientRecord, Concept, Vocabulary, Domain, ConceptClass,
+    RecordRevision,
 )
+
+
+@admin.register(RecordRevision)
+class RecordRevisionAdmin(admin.ModelAdmin):
+    """Read-only view of PatientRecord field-level revision history (TI.1.2#04)."""
+    list_display = ['patient_record', 'field', 'old_value', 'new_value', 'changed_by', 'changed_at']
+    search_fields = ['patient_record__person__person_id', 'field', 'changed_by']
+    list_filter = ['field', 'changed_at']
+    readonly_fields = ['patient_record', 'field', 'old_value', 'new_value', 'changed_by', 'changed_at']
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 @admin.register(Person)
 class PersonAdmin(admin.ModelAdmin):
