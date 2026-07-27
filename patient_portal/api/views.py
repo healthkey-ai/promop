@@ -95,10 +95,15 @@ def smart_configuration(request):
     HL7 SMART on FHIR well-known configuration endpoint.
     Advertises authorization / token endpoints and supported scopes.
     """
+    from patient_portal.api.fhir.integrity import SUPPORTED_FHIR_VERSION
     base = request.build_absolute_uri('/').rstrip('/')
     oidc_issuer = getattr(settings, 'OAUTH2_PROVIDER', {}).get('OIDC_ISS_ENDPOINT', '') or base
     return Response({
         'issuer': oidc_issuer,
+        # Declared interchange version (TI.5.2#01). R4 only — no multi-version
+        # transforms; a request for another version is rejected with HTTP 406.
+        'fhirVersion': SUPPORTED_FHIR_VERSION,
+        'fhir_versions_supported': [SUPPORTED_FHIR_VERSION],
         'authorization_endpoint': f'{base}/o/authorize/',
         'token_endpoint': f'{base}/o/token/',
         'token_endpoint_auth_methods_supported': ['client_secret_basic', 'client_secret_post', 'none'],
@@ -159,6 +164,50 @@ def _record_provenance(record, source, source_user_id, target_patient_id=None, m
         content_type=ContentType.objects.get_for_model(record),
         object_id=record.pk,
     )
+
+
+def _write_record_revisions(patient_record, previous_values, request):
+    """Persist field-level revision-history rows for a PatientRecord update.
+
+    PHR-S FM TI.1.2#04. ``previous_values`` maps field name -> value BEFORE the
+    update (as captured by the PATCH path). We compare against the freshly saved
+    instance and write one RecordRevision per field whose value actually
+    changed, so a record's contents can be reconstructed over time.
+
+    Returns the list of created RecordRevision instances.
+    """
+    from omop_core.models import RecordRevision
+
+    def _norm(v):
+        # Normalize to a stable string form for storage + comparison.
+        return None if v is None else str(v)
+
+    user = getattr(request, 'user', None)
+    changed_by = (
+        str(user.pk) if getattr(user, 'is_authenticated', False) and user.pk is not None
+        else 'system'
+    )
+
+    patient_record.refresh_from_db()
+    rows = []
+    for field, old in previous_values.items():
+        # Resolve the new value the same way the PATCH path captured the old one
+        # (FK fields are stored/compared via their {field}_id attribute).
+        fk_id = f'{field}_id'
+        new = getattr(patient_record, fk_id, None) if hasattr(patient_record, fk_id) else getattr(patient_record, field, None)
+        old_s, new_s = _norm(old), _norm(new)
+        if old_s == new_s:
+            continue
+        rows.append(RecordRevision(
+            patient_record=patient_record,
+            changed_by=changed_by,
+            field=field,
+            old_value=old_s,
+            new_value=new_s,
+        ))
+    if rows:
+        RecordRevision.objects.bulk_create(rows)
+    return rows
 
 
 def _delete_omop_clinical_rows(person):
@@ -420,7 +469,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         except PatientUser.DoesNotExist:
             user_data = None
 
-        patient_serializer = PatientRecordSerializer(patient_info)
+        # Pass request in context so PH.1.2#05 demographic redaction can
+        # identify whether the reader is the account holder.
+        patient_serializer = PatientRecordSerializer(patient_info, context={'request': request})
 
         return Response({
             'patient_info': patient_serializer.data,  # legacy wire format — preserved for frontend/federation host compatibility
@@ -492,6 +543,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 if prov_source:
                     _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
                 sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
+                # PHR-S FM TI.1.2#04 — record field-level revision history.
+                _write_record_revisions(patient_info, previous_values, request)
                 if prov_source:
                     for field in changed_fields:
                         if field in LAB_FIELD_TO_LOINC:
@@ -549,6 +602,44 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 )
         records = ProvenanceRecord.objects.filter(q).select_related('content_type').order_by('-created_at')
         return Response(ProvenanceRecordSerializer(records, many=True).data)
+
+    @action(detail=True, methods=['get'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def revisions(self, request, pk=None):
+        """GET /api/v1/patient-records/{person_id}/revisions/ — field-level
+        revision history for a patient's record (PHR-S FM TI.1.2#04)."""
+        from omop_core.models import RecordRevision
+        try:
+            person = Person.objects.get(person_id=pk)
+            patient_info = PatientRecord.objects.get(person=person)
+        except Person.DoesNotExist:
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        except PatientRecord.DoesNotExist:
+            return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        org = get_request_org(request)
+        if org is not None:
+            if patient_info.organization != org:
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        elif not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+            from omop_core.authorization import can_access_patient
+            if not can_access_patient(request.user, person.person_id):
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        revisions = RecordRevision.objects.filter(
+            patient_record=patient_info,
+        ).order_by('-changed_at', 'field')
+        data = [
+            {
+                'id': r.id,
+                'field': r.field,
+                'old_value': r.old_value,
+                'new_value': r.new_value,
+                'changed_by': r.changed_by,
+                'changed_at': r.changed_at,
+            }
+            for r in revisions
+        ]
+        return Response(data)
 
     @action(detail=False, methods=['get', 'patch', 'delete'], permission_classes=[PatientDeletePermission, PatientSelfScopePermission])
     def me(self, request):
@@ -609,10 +700,26 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         serializer.is_valid(raise_exception=True)
 
         changed_fields = set(patch_data.keys())
+        # Capture previous values before save so revision history can record
+        # old/new (PHR-S FM TI.1.2#04). FK fields compared via {field}_id.
+        _read_only = set(PatientRecordSerializer.Meta.read_only_fields)
+
+        def _prev_val(obj, field):
+            fk_id = f'{field}_id'
+            if hasattr(obj, fk_id):
+                return getattr(obj, fk_id, None)
+            return getattr(obj, field, None)
+        previous_values = {
+            field: _prev_val(patient_info, field)
+            for field in patch_data
+            if field not in _read_only and hasattr(patient_info, field)
+        }
         try:
             with transaction.atomic():
                 serializer.save()
                 sync_to_omop(patient_info, changed_fields, changed_data=dict(patch_data))
+                # PHR-S FM TI.1.2#04 — record field-level revision history.
+                _write_record_revisions(patient_info, previous_values, request)
         except Exception as _sync_exc:
             logger.error(
                 'omop_write_through_failed patient=%s error=%s',
@@ -676,7 +783,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         ``pk`` is interpreted as ``person_id`` (consistent with ``retrieve``).
         """
-        from omop_core.services.fhir_export import build_fhir_bundle
+        from omop_core.services.fhir_export import serialize_signed_fhir_bundle
+        from patient_portal.api.fhir.integrity import (
+            check_fhir_version, EXPORT_DIGEST_HEADER, EXPORT_SIGNATURE_HEADER,
+        )
+        from django.http import HttpResponse
+
+        # Bounded multi-version interchange (TI.5.2#01): only R4 is served.
+        version_error = check_fhir_version(request)
+        if version_error:
+            return Response({'error': version_error}, status=status.HTTP_406_NOT_ACCEPTABLE)
 
         try:
             person = Person.objects.get(person_id=pk)
@@ -687,8 +803,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # Object-level permission check (PatientSelfScopePermission)
         self.check_object_permissions(request, patient_record)
 
-        bundle = build_fhir_bundle(person)
-        return Response(bundle, content_type='application/fhir+json')
+        # Content integrity + non-repudiation (S.3.6#10 / PH.2.3#09): serialize
+        # the bundle to canonical bytes, then emit a SHA-256 digest and an HMAC
+        # signature over EXACTLY those bytes so the recipient can verify content
+        # integrity. We return an HttpResponse (not DRF Response) so the digest
+        # matches the body verbatim.
+        body_bytes, digest, signature = serialize_signed_fhir_bundle(person)
+        response = HttpResponse(body_bytes, content_type='application/fhir+json')
+        response[EXPORT_DIGEST_HEADER] = digest
+        response[EXPORT_SIGNATURE_HEADER] = signature
+        return response
 
     @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def upload_csv(self, request):
@@ -775,9 +899,27 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         file = request.FILES['file']
         if not file.name.endswith('.json'):
             return Response({'error': 'File must be a JSON file'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
+        # Bounded multi-version interchange (TI.5.2#01): decline unsupported
+        # FHIR versions cleanly rather than mis-parsing them.
+        from patient_portal.api.fhir.integrity import (
+            check_fhir_version, verify_content_digest,
+        )
+        version_error = check_fhir_version(request)
+        if version_error:
+            return Response({'error': version_error}, status=status.HTTP_406_NOT_ACCEPTABLE)
+
         try:
-            fhir_data = json.load(file)
+            raw_bytes = file.read()
+
+            # Content integrity (S.3.6#10 / PH.2.3#09): if the client asserted a
+            # SHA-256 digest of the payload, verify it against the received bytes.
+            # Opt-in — no header means current behavior is unchanged.
+            digest_error = verify_content_digest(request, raw_bytes)
+            if digest_error:
+                return Response({'error': digest_error}, status=status.HTTP_400_BAD_REQUEST)
+
+            fhir_data = json.loads(raw_bytes)
 
             if fhir_data.get('resourceType') != 'Bundle':
                 return Response({'error': 'FHIR file must be a Bundle'}, status=status.HTTP_400_BAD_REQUEST)
@@ -3424,6 +3566,46 @@ def login_view(request):
 
 @csrf_exempt
 @api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def change_password(request):
+    """Change the authenticated local account's password (PHR-S FM TI.1.1).
+
+    Enforces the password validators, the no-reuse policy, and clears the
+    force-change flag. Used both for a routine change and to satisfy a
+    must_change_password requirement after an admin reset.
+    """
+    from django.contrib.auth import update_session_auth_hash
+    from patient_portal.services import (
+        password_reuse_error, password_validation_errors, set_new_password,
+    )
+
+    identity = request.user
+    current = request.data.get('current_password') or ''
+    new = request.data.get('new_password') or ''
+
+    if not new:
+        return Response({'error': 'new_password is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Verify the current password for accounts that have one (OIDC/service
+    # identities carry an unusable password and set one for the first time here).
+    if identity.has_usable_password() and not identity.check_password(current):
+        return Response({'error': 'Current password is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    pw_errors = password_validation_errors(new, email=getattr(identity, 'email', None))
+    if pw_errors:
+        return Response({'error': ' '.join(pw_errors)}, status=status.HTTP_400_BAD_REQUEST)
+
+    reuse_error = password_reuse_error(identity, new)
+    if reuse_error:
+        return Response({'error': reuse_error}, status=status.HTTP_400_BAD_REQUEST)
+
+    set_new_password(identity, new, must_change=False)
+    update_session_auth_hash(request, identity)  # keep the session valid after the change
+    return Response({'detail': 'Password updated.'}, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['POST'])
 @permission_classes([AllowAny])
 def logout_view(request):
     """Logout the user and clear session"""
@@ -3687,6 +3869,16 @@ class _OmopFilterMixin:
         person_id = self.request.query_params.get('person_id')
         if person_id:
             qs = qs.filter(person_id=person_id)
+        # PHR-S FM PH.1.1#06 — exclude entered-in-error rows from normal reads
+        # by default. Applies only to models that carry the flag (clinical
+        # event tables); the row is RETAINED, never deleted. Pass
+        # ?include_erroneous=true to surface them (e.g. to review or un-flag).
+        if any(f.name == 'is_erroneous' for f in qs.model._meta.get_fields()):
+            include = str(
+                self.request.query_params.get('include_erroneous', '')
+            ).strip().lower() in ('1', 'true', 'yes')
+            if not include:
+                qs = qs.exclude(is_erroneous=True)
         # Trusted backend (service-token): full visibility. Already
         # validated at the permission layer (ScopedTokenPermission).
         if is_service_token(self.request):
@@ -4481,6 +4673,44 @@ def concept_synonym_search(request):
     return paginator.get_paginated_response(results)
 
 
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_replacement(request, concept_id):
+    """
+    Resolve a (possibly deprecated) concept to its active replacement.
+
+    Embedded-term substitution (PHR-S FM TI.4.2#07) in an OMOP-based store
+    reduces to a concept-replacement lookup: when a terminology release retires
+    a concept, Athena loads a `'Concept replaced by'` edge to the successor.
+    This endpoint walks that chain and returns the terminal active concept.
+
+    Response 200: {
+        "concept_id": N,                 # requested concept
+        "replaced": true|false,          # whether a substitution was applied
+        "resolved_concept": { concept_id, concept_name, concept_code,
+                              vocabulary_id, concept_class_id, domain_id,
+                              standard_concept, invalid_reason },
+        "chain": [id0, id1, ...]         # traversal order (>=1 entry)
+    }
+    Response 404: concept_id not found.
+    """
+    from omop_core.models import resolve_concept_replacement
+
+    resolved, chain = resolve_concept_replacement(concept_id)
+    if resolved is None:
+        return Response({'detail': 'Concept not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    versions = _vocab_version_map()
+    return Response({
+        'concept_id': concept_id,
+        'replaced': resolved.concept_id != concept_id,
+        'resolved_concept': _serialize_concept_graph_node(
+            resolved, versions, invalid_reason=resolved.invalid_reason,
+        ),
+        'chain': chain,
+    })
+
+
 # =============================================================================
 # Controlled vocabulary endpoints
 # GET /api/vocabularies/<model_name>/ → [{code, title}, ...]
@@ -4563,6 +4793,11 @@ class PatientDocumentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
         doc_type = self.request.query_params.get('doc_type')
         if doc_type:
             qs = qs.filter(doc_type=doc_type)
+        # PHR-S FM PH.1.4#04 — filter advance directives (and other docs) by
+        # effective status, e.g. ?status=active to list only in-effect documents.
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
         return qs
 
 
@@ -4802,7 +5037,19 @@ class PatientMessageViewSet(viewsets.ModelViewSet):
         ).annotate(_reply_count=Count('replies')).order_by('-created_at')
         person = patient_person_for(self.request.user)
         if person is not None:
+            # The account holder sees their own thread at every confidentiality level.
             qs = qs.filter(patient_user__person=person)
+        else:
+            # Staff/providers: restricted & very-restricted messages are visible only
+            # to their sender — sensitive content is not broadly visible to other
+            # staff (PHR-S FM PH.6.3#08). Service tokens/superusers are unrestricted.
+            from django.db.models import Q
+            if not (is_service_token(self.request)
+                    or getattr(self.request.user, 'is_superuser', False)):
+                qs = qs.filter(
+                    Q(confidentiality=PatientMessage.CONFIDENTIALITY_NORMAL)
+                    | Q(sender=self.request.user)
+                )
 
         # Optional filters
         parent = self.request.query_params.get('parent')
@@ -4879,3 +5126,21 @@ class PatientMessageViewSet(viewsets.ModelViewSet):
             msg.save(update_fields=['read_at', 'is_read'])
         serializer = self.get_serializer(msg)
         return Response(serializer.data)
+
+
+class InterchangeAgreementViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only list/detail of documented data-interchange agreements (TI.5.4#01).
+
+    A formal, described agreement artifact governing electronic exchange with
+    external partners. Exposed under /api/v1/interchange-agreements/.
+    """
+    permission_classes = [IsAuthenticated]
+    pagination_class = PatientRecordPagination
+
+    def get_queryset(self):
+        from omop_core.models import InterchangeAgreement
+        return InterchangeAgreement.objects.all().select_related('partner_organization')
+
+    def get_serializer_class(self):
+        from .serializers import InterchangeAgreementSerializer
+        return InterchangeAgreementSerializer

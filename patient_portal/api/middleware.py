@@ -4,6 +4,8 @@ import logging
 import time
 from email.utils import parsedate_to_datetime
 
+from django.http import JsonResponse
+
 logger = logging.getLogger('audit')
 
 _SUNSET_DATE = 'Tue, 01 Sep 2026 00:00:00 GMT'
@@ -40,7 +42,60 @@ class DeprecationWarningMiddleware:
             response['Link'] = _SUCCESSOR
         return response
 
-_SAFE_METHODS = frozenset({'GET', 'HEAD', 'OPTIONS', 'TRACE'})
+# Only these methods are audited. HEAD/OPTIONS/TRACE (CORS preflight, health probes)
+# are intentionally excluded as noise; GET is audited as a record_view (TI.2).
+_AUDITED_METHODS = frozenset({'GET', 'POST', 'PUT', 'PATCH', 'DELETE'})
+
+# Paths whose prefixes carry auditable activity: the API, OAuth, and the Django
+# admin (privileged/security-config actions — TI.2.1). Static assets, the SPA
+# shell, and health checks are skipped.
+_AUDITED_PREFIXES = ('/api/', '/o/', '/admin/')
+
+
+def _classify_event_type(request):
+    """Map a request to a TI.2 audit event_type.
+
+    Auth and consent are recognised by path first (a login is a POST but an
+    auth event, not a create); everything else falls back to CRUD-by-method,
+    with reads recorded as record_view.
+    """
+    from patient_portal.models import AuditEvent
+
+    path = request.path
+    method = request.method
+
+    # Access to the audit trail itself is auditable (TI.2.2#04).
+    if '/audit-events' in path:
+        return AuditEvent.EVENT_AUDIT_REVIEW
+    # Emergency-access authorization (TI.2.3#04).
+    if '/break-glass' in path:
+        return AuditEvent.EVENT_BREAK_GLASS
+    # Django-admin activity (privileged / security-config actions — TI.2.1).
+    if path.startswith('/admin/'):
+        return AuditEvent.EVENT_ADMIN
+
+    if (
+        '/auth/login' in path
+        or '/auth/logout' in path
+        or '/patients/signup' in path
+        or '/patient-invitations/accept' in path
+        or path.startswith('/o/token')
+        or path.startswith('/o/authorize')
+        or path.startswith('/o/revoke')
+        or path.startswith('/o/introspect')
+    ):
+        return AuditEvent.EVENT_AUTH
+    if 'consent' in path:
+        return AuditEvent.EVENT_CONSENT
+    if method == 'GET':
+        return AuditEvent.EVENT_VIEW
+    if method == 'POST':
+        return AuditEvent.EVENT_CREATE
+    if method in ('PUT', 'PATCH'):
+        return AuditEvent.EVENT_UPDATE
+    if method == 'DELETE':
+        return AuditEvent.EVENT_DELETE
+    return AuditEvent.EVENT_OTHER
 
 
 def _get_client_id(request):
@@ -66,12 +121,23 @@ def _get_resource_id(request):
     return None
 
 
+def _should_audit(request):
+    """True when this request is on an auditable path (API / OAuth / admin) with
+    an audited method. Access to the audit trail itself IS audited (TI.2.2#04)."""
+    if request.method not in _AUDITED_METHODS:
+        return False
+    return request.path.startswith(_AUDITED_PREFIXES)
+
+
 class AuditLogMiddleware:
     """
-    Emits a structured JSON audit log line for every mutating API request
-    (POST, PUT, PATCH, DELETE). Reads are not logged.
+    Persists an audit-trail entry (HL7 PHR-S FM TI.2) for every audited API
+    request — reads (record_view) as well as writes — dual-writing a structured
+    JSON line to stdout (SIEM-friendly) and an AuditEvent row (reviewable via
+    /api/v1/audit-events/).
 
-    Never raises — failures are swallowed so the API response is never blocked.
+    Never raises — stdout and DB writes are independently guarded so a logging
+    or database failure can never block the API response.
     """
 
     def __init__(self, get_response):
@@ -81,18 +147,21 @@ class AuditLogMiddleware:
         start = time.monotonic()
         response = self.get_response(request)
 
-        if request.method in _SAFE_METHODS:
+        if not _should_audit(request):
             return response
 
+        entry = None
         try:
-            user = request.user
+            user = getattr(request, 'user', None)
+            authed = bool(user and user.is_authenticated)
             entry = {
-                'event': 'api_write',
+                'event': _classify_event_type(request),
                 'method': request.method,
                 'path': request.path,
                 'status_code': response.status_code,
                 'client_id': _get_client_id(request),
-                'user_id': str(user.pk) if user and user.is_authenticated else None,
+                'user_id': str(user.pk) if authed else None,
+                'user_email': (getattr(user, 'email', '') or None) if authed else None,
                 'resource_id': _get_resource_id(request),
                 'ip_address': (
                     request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
@@ -100,8 +169,89 @@ class AuditLogMiddleware:
                 ),
                 'duration_ms': round((time.monotonic() - start) * 1000),
             }
+        except Exception:
+            logger.warning("AuditLogMiddleware failed to build audit entry", exc_info=True)
+            return response
+
+        # stdout (SIEM) and DB (review API) are written independently so one
+        # failing never suppresses the other, and neither blocks the response.
+        try:
             logger.info(json.dumps(entry))
         except Exception:
-            logger.warning("AuditLogMiddleware internal error", exc_info=True)
+            logger.warning("AuditLogMiddleware stdout write failed", exc_info=True)
+
+        try:
+            self._persist(entry)
+        except Exception:
+            logger.warning("AuditLogMiddleware DB write failed", exc_info=True)
 
         return response
+
+    @staticmethod
+    def _persist(entry):
+        from patient_portal.models import AuditEvent
+
+        AuditEvent.objects.create(
+            event_type=entry['event'],
+            method=entry['method'],
+            path=entry['path'][:512],
+            status_code=entry['status_code'],
+            user_id=entry['user_id'],
+            user_email=(entry['user_email'] or '')[:254] or None,
+            client_id=entry['client_id'],
+            resource_id=entry['resource_id'],
+            ip_address=(entry['ip_address'] or '')[:64] or None,
+            duration_ms=entry['duration_ms'],
+        )
+
+
+# Endpoints that stay reachable while a force-change is pending, so the client
+# can read the flag (/user/), clear it (change-password), or leave (logout/login).
+# Matched as substrings after /api/ so both /api/ and /api/v1/ forms are covered.
+_FORCE_CHANGE_EXEMPT = (
+    '/auth/change-password',
+    '/auth/logout',
+    '/auth/login',
+    '/auth/reset-password',
+    '/user/',
+)
+
+
+class ForcePasswordChangeMiddleware:
+    """
+    Enforce Identity.must_change_password (HL7 PHR-S FM TI.1.1#09).
+
+    When a session-authenticated account is flagged for a forced password change
+    (e.g. after an administrative reset), every /api/ request is refused with 403
+    and a machine-readable ``code: password_change_required`` until the password
+    is changed — except the handful of endpoints the client needs to resolve the
+    state (read the flag, change the password, or sign out).
+
+    Only session-authenticated identities are gated. Token/OAuth clients
+    authenticate inside the view (request.user is anonymous here) and carry an
+    unusable local password, so the flag never applies to them.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if self._is_blocked(request):
+            return JsonResponse(
+                {'detail': 'Password change required before continuing.',
+                 'code': 'password_change_required'},
+                status=403,
+            )
+        return self.get_response(request)
+
+    @staticmethod
+    def _is_blocked(request):
+        path = request.path
+        if not path.startswith('/api/'):
+            return False
+        user = getattr(request, 'user', None)
+        if not (user and user.is_authenticated):
+            return False
+        if not getattr(user, 'must_change_password', False):
+            return False
+        return not any(frag in path for frag in _FORCE_CHANGE_EXEMPT)

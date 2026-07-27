@@ -12,6 +12,7 @@ from django.db import connection
 from omop_core.models import (
     Vocabulary, Domain, ConceptClass, Concept,
     Relationship, ConceptRelationship, ConceptAncestor, CdmSource,
+    VocabularyVersionHistory, record_vocabulary_version_history,
 )
 
 VOCAB_SCOPE = frozenset({
@@ -166,6 +167,7 @@ class Command(BaseCommand):
         if not dry_run:
             self._seed_concept_zero()
             self._sync_cdm_source_metadata()
+            self._record_version_history(replace)
         elapsed = time.monotonic() - t0
         verb = 'would load' if dry_run else 'loaded'
         total = sum(counts.values())
@@ -703,3 +705,34 @@ class Command(BaseCommand):
             fields['cdm_version_concept_id'] = version_concept_id
         if fields and CdmSource.objects.filter(pk=row.pk).update(**fields):
             self._log(f'  cdm_source: updated {fields}')
+
+    def _record_version_history(self, replace):
+        """Append an immutable version-history row per loaded vocabulary.
+
+        Because --replace TRUNCATEs the vocabulary snapshot, the only durable
+        record of which release was implemented when is this append-only table
+        (promop#305, TI.4.2#01/#09). action='replaced' when --replace cleared a
+        prior snapshot, else 'loaded'. cdm_release_date is taken from the
+        self-describing cdm_source row.
+        """
+        action = (
+            VocabularyVersionHistory.ACTION_REPLACED if replace
+            else VocabularyVersionHistory.ACTION_LOADED
+        )
+        cdm_release_date = (
+            CdmSource.objects.filter(cdm_source_abbreviation='PRomop')
+            .values_list('cdm_release_date', flat=True).first()
+        )
+        recorded = 0
+        for vid, version in (
+            Vocabulary.objects.order_by('vocabulary_id')
+            .values_list('vocabulary_id', 'vocabulary_version')
+        ):
+            record_vocabulary_version_history(
+                vocabulary_id=vid,
+                version=version,
+                action=action,
+                cdm_release_date=cdm_release_date,
+            )
+            recorded += 1
+        self._log(f'  vocabulary_version_history: recorded {recorded} {action} row(s)')

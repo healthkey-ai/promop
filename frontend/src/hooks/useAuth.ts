@@ -21,6 +21,10 @@ export interface User {
   // true, person_id is the patient's own record and the UI runs in patient mode.
   is_patient?: boolean;
   person_id?: number | null;
+  // Force-change-at-next-login (PHR-S FM TI.1.1#09). When true, the backend
+  // refuses every /api/ request except change-password until the password is
+  // reset, and the SPA shows a blocking change-password screen.
+  must_change_password?: boolean;
 }
 
 export const useAuth = () => {

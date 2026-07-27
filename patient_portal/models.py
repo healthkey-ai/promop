@@ -3,6 +3,7 @@ import uuid
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
 from django.db.models import Q
+from django.utils import timezone
 
 
 class IdentityManager(BaseUserManager):
@@ -60,7 +61,21 @@ class Identity(AbstractBaseUser, PermissionsMixin):
     is_premium = models.BooleanField(default=False, help_text="Grants premium-tier feature access (e.g. data export) across all connected apps.")
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # Authentication-policy state (PHR-S FM TI.1.1). Applies to local
+    # (email/password) accounts; OIDC/service identities carry an unusable password.
+    must_change_password = models.BooleanField(
+        default=False, help_text="Force a password change on next successful login (e.g. after an admin reset).",
+    )
+    failed_login_count = models.PositiveIntegerField(default=0)
+    locked_until = models.DateTimeField(
+        null=True, blank=True, help_text="If set and in the future, local logins are refused (lockout).",
+    )
+
     objects = IdentityManager()
+
+    @property
+    def is_locked(self) -> bool:
+        return bool(self.locked_until and self.locked_until > timezone.now())
 
     USERNAME_FIELD = "uid"
     REQUIRED_FIELDS = ["email"]
@@ -93,6 +108,24 @@ class Identity(AbstractBaseUser, PermissionsMixin):
         if self.email:
             return self.email
         return f"{self.issuer}|{self.sub}"
+
+
+class PasswordHistory(models.Model):
+    """Prior password hashes for an Identity, to enforce no-reuse policy
+    (PHR-S FM TI.1.1#04 time-based and #05 count-based reuse limits)."""
+    identity = models.ForeignKey(
+        Identity, on_delete=models.CASCADE, related_name='password_history',
+    )
+    password = models.CharField(max_length=128)  # the hashed password
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'password_history'
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['identity', '-created_at'], name='pwhist_identity_ts_idx')]
+
+    def __str__(self):
+        return f"PasswordHistory({self.identity_id} @ {self.created_at:%Y-%m-%d})"
 
 
 class PatientUser(models.Model):
@@ -192,6 +225,15 @@ class PatientConsent(models.Model):
 
 class PatientMessage(models.Model):
     """Messages between patients and healthcare providers"""
+    CONFIDENTIALITY_NORMAL = 'normal'
+    CONFIDENTIALITY_RESTRICTED = 'restricted'
+    CONFIDENTIALITY_VERY_RESTRICTED = 'very_restricted'
+    CONFIDENTIALITY_CHOICES = [
+        (CONFIDENTIALITY_NORMAL, 'Normal'),
+        (CONFIDENTIALITY_RESTRICTED, 'Restricted'),
+        (CONFIDENTIALITY_VERY_RESTRICTED, 'Very restricted'),
+    ]
+
     patient_user = models.ForeignKey(PatientUser, on_delete=models.CASCADE, related_name='messages')
     parent = models.ForeignKey(
         'self', on_delete=models.CASCADE, null=True, blank=True, related_name='replies',
@@ -206,6 +248,11 @@ class PatientMessage(models.Model):
     sender_is_patient = models.BooleanField(default=True)
     is_read = models.BooleanField(default=False)
     read_at = models.DateTimeField(null=True, blank=True, help_text='When the message was read')
+    confidentiality = models.CharField(
+        max_length=20, choices=CONFIDENTIALITY_CHOICES, default=CONFIDENTIALITY_NORMAL, db_index=True,
+        help_text='Sensitivity level (PHR-S FM PH.6.3#08); restricted messages are hidden '
+                  'from staff other than the sender.',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -214,3 +261,155 @@ class PatientMessage(models.Model):
 
     def __str__(self):
         return f"{self.subject} - {self.created_at}"
+
+
+class AuditEvent(models.Model):
+    """A persisted audit-trail entry — HL7 PHR-S FM TI.2 (Audit).
+
+    One row per audited API request (reads and writes), written by
+    AuditLogMiddleware in addition to the stdout JSON line. Reviewable via
+    the read-only /api/v1/audit-events/ endpoint (TI.2.3).
+
+    `user_id` is the string form of the acting Identity's PK (matching the
+    stdout log), so it is comparable even after the Identity is deleted.
+    """
+    EVENT_VIEW = 'record_view'
+    EVENT_CREATE = 'record_create'
+    EVENT_UPDATE = 'record_update'
+    EVENT_DELETE = 'record_delete'
+    EVENT_AUTH = 'auth'
+    EVENT_CONSENT = 'consent'
+    EVENT_ADMIN = 'admin'                # Django-admin / background system activity (TI.2.1)
+    EVENT_AUDIT_REVIEW = 'audit_review'  # access to the audit trail itself (TI.2.2#04)
+    EVENT_BREAK_GLASS = 'break_glass'    # emergency-access authorization (TI.2.3#04)
+    EVENT_OTHER = 'other'
+    EVENT_TYPES = [
+        (EVENT_VIEW, 'Record view'),
+        (EVENT_CREATE, 'Record create'),
+        (EVENT_UPDATE, 'Record update'),
+        (EVENT_DELETE, 'Record delete'),
+        (EVENT_AUTH, 'Authentication'),
+        (EVENT_CONSENT, 'Consent'),
+        (EVENT_ADMIN, 'Administrative / system'),
+        (EVENT_AUDIT_REVIEW, 'Audit-log access'),
+        (EVENT_BREAK_GLASS, 'Break-glass emergency access'),
+        (EVENT_OTHER, 'Other'),
+    ]
+
+    event_type = models.CharField(max_length=32, choices=EVENT_TYPES, db_index=True)
+    timestamp = models.DateTimeField(default=timezone.now, db_index=True)
+    method = models.CharField(max_length=8)
+    path = models.CharField(max_length=512)
+    status_code = models.PositiveSmallIntegerField(null=True, blank=True)
+    user_id = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    user_email = models.CharField(max_length=254, null=True, blank=True)
+    client_id = models.CharField(max_length=255, null=True, blank=True)
+    resource_id = models.CharField(max_length=255, null=True, blank=True)
+    ip_address = models.CharField(max_length=64, null=True, blank=True)
+    duration_ms = models.PositiveIntegerField(null=True, blank=True)
+    detail = models.JSONField(null=True, blank=True)
+    # Tamper-evidence: HMAC over the row's immutable content (TI.2.2.1#01). Any
+    # later alteration is detectable by recomputing and comparing (see
+    # `verify_audit_integrity`). Set automatically on first save.
+    signature = models.CharField(max_length=64, blank=True, default='')
+    # Hash chain: HMAC over (previous row's chain_hash + this row's signature),
+    # so deletion or insertion of a row breaks the chain and is detectable
+    # (TI.2.2.1#01). Empty on pre-chain rows and when AUDIT_HASH_CHAIN_ENABLED is off.
+    chain_hash = models.CharField(max_length=64, blank=True, default='', db_index=True)
+
+    class Meta:
+        db_table = 'audit_event'
+        ordering = ['-timestamp']
+        indexes = [
+            models.Index(fields=['user_id', '-timestamp'], name='audit_user_ts_idx'),
+            models.Index(fields=['event_type', '-timestamp'], name='audit_type_ts_idx'),
+        ]
+
+    def compute_signature(self) -> str:
+        """HMAC-SHA256 over the immutable content fields (excludes id/signature)."""
+        import hashlib
+        import hmac
+        import json as _json
+        from django.conf import settings
+
+        ts = self.timestamp.isoformat() if self.timestamp else ''
+        canonical = '|'.join(str(v) for v in [
+            ts, self.event_type, self.method, self.path, self.status_code,
+            self.user_id, self.user_email, self.client_id, self.resource_id,
+            self.ip_address, self.duration_ms,
+            _json.dumps(self.detail, sort_keys=True, default=str),
+        ])
+        key = (getattr(settings, 'AUDIT_HMAC_KEY', '') or settings.SECRET_KEY).encode()
+        return hmac.new(key, canonical.encode(), hashlib.sha256).hexdigest()
+
+    def compute_chain_hash(self, prev_chain_hash: str) -> str:
+        """HMAC over (previous row's chain_hash | this row's signature). Linking each
+        row to its predecessor makes row deletion/insertion detectable (TI.2.2.1#01)."""
+        import hashlib
+        import hmac
+        from django.conf import settings
+
+        key = (getattr(settings, 'AUDIT_HMAC_KEY', '') or settings.SECRET_KEY).encode()
+        material = f"{prev_chain_hash}|{self.signature}".encode()
+        return hmac.new(key, material, hashlib.sha256).hexdigest()
+
+    # Advisory-lock key that serializes chain appends (Postgres) so concurrent
+    # audit writes can't fork the chain.
+    _CHAIN_LOCK_KEY = 728143
+
+    def save(self, *args, **kwargs):
+        from django.conf import settings
+
+        if not self.signature:
+            self.signature = self.compute_signature()
+
+        chain_on = getattr(settings, 'AUDIT_HASH_CHAIN_ENABLED', True)
+        if self.pk is None and not self.chain_hash and chain_on:
+            # Seal into the tamper-evident chain: serialize the "read latest → link →
+            # insert" so concurrent writers extend one linear chain rather than forking.
+            from django.db import connection, transaction
+            with transaction.atomic():
+                if connection.vendor == 'postgresql':
+                    with connection.cursor() as cur:
+                        cur.execute('SELECT pg_advisory_xact_lock(%s)', [self._CHAIN_LOCK_KEY])
+                prev = (
+                    AuditEvent.objects.order_by('-id').values_list('chain_hash', flat=True).first()
+                    or ''
+                )
+                self.chain_hash = self.compute_chain_hash(prev)
+                super().save(*args, **kwargs)
+            return
+        super().save(*args, **kwargs)
+
+    def signature_valid(self) -> bool:
+        import hmac
+        return bool(self.signature) and hmac.compare_digest(self.signature, self.compute_signature())
+
+    def __str__(self):
+        return f"{self.timestamp:%Y-%m-%d %H:%M:%S} {self.event_type} {self.method} {self.path}"
+
+
+class BreakGlassGrant(models.Model):
+    """A time-boxed emergency-access ("break-glass") authorization (PHR-S FM
+    TI.2.3#04). Grants the requesting identity emergency visibility of a specific
+    patient's audit-log entries, with a captured reason, for a short window.
+    Creating a grant is itself audited."""
+    identity = models.ForeignKey(
+        Identity, on_delete=models.CASCADE, related_name='break_glass_grants',
+    )
+    person_id = models.BigIntegerField(db_index=True)
+    reason = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'break_glass_grant'
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['identity', 'expires_at'], name='breakglass_identity_exp_idx')]
+
+    @property
+    def is_active(self) -> bool:
+        return self.expires_at > timezone.now()
+
+    def __str__(self):
+        return f"BreakGlass({self.identity_id} -> Person {self.person_id})"
