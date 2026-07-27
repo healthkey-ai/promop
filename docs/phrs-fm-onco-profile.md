@@ -100,7 +100,8 @@ conformant**.
   (agreement records descriptive, not enforcement-bound) — do not affect the claim.
 - **Disclosed caveats** (see the claim §7): S.3.6 non-repudiation is symmetric HMAC (not asymmetric);
   PH.2.3#09 content-digest is opt-in (transport auth carries it); PH.1.2#05 redaction is a bounded
-  hook; TI.1.1#09 `must_change_password` flag is inert (#319); TI.4.2 versioning is sequential.
+  hook; TI.4.2 versioning is sequential. (The TI.1.1#09 `must_change_password` flag, previously inert,
+  is now wired end to end — #319/#321.)
 
 Backend suite green at 1010 tests. The authoritative per-function determination is in
 [`phrs-fm-conformance-claim.md`](phrs-fm-conformance-claim.md) §5/§6 + Appendix A.

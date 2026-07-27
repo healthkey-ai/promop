@@ -99,10 +99,11 @@ profile claim. As of #318 **every Essential function of the profile is fully con
    SHALL, with the digest as an additional verifiable layer.
 5. **PH.1.2#05 rendering** — consent/preference-driven demographic redaction is a **bounded hook** on
    the primary `PatientRecordSerializer` read path; extension to other read paths is deferred.
-6. **TI.1.1#09** — the `must_change_password` flag exists and is exposed but is currently **inert**
-   (never set `True`, not consumed by the client). The SHALL's "ability to update password at next
-   logon" is met via the change-password endpoint + admin email-link reset; wiring the flag is a
-   recommended hardening → #319.
+6. **TI.1.1#09** — the `must_change_password` force-change flag is **wired end to end** (#319/#321):
+   an admin action sets it, `ForcePasswordChangeMiddleware` refuses every `/api/` request from a
+   flagged session (403 `password_change_required`) except the change-password path, and
+   `change-password` clears it; the SPA shows a blocking change-password screen. (Previously inert —
+   the SHALL was already met via the change-password endpoint + admin email-link reset.)
 7. **TI.4.2 versioning** is **sequential** (not concurrent live multi-version); embedded-term
    substitution (#07/#08) applies to the coded data store — promop has no template/formulary
    authoring layer.
@@ -168,7 +169,7 @@ TI.5.4#01 (agreement records descriptive, not enforcement-bound). Both are in Op
 | #307 | #316 | PH.1/PH.2/TI.1.2 entered-in-error, redaction, AD status, revision history |
 | #308 | #309 + #317 | PH.6.3 proxy-authorization render API + message confidentiality |
 | #318 | #320 | TI.2.2.1 audit **hash chain** — detect audit-row deletion (Essential set → 25/25) |
+| #319 | #321 | TI.1.1#09 wire the `must_change_password` force-change flag (set / enforce / clear) |
 
-**Residual follow-ups (from re-verification):** #319 wire the `must_change_password` force-change flag
-(TI.1.1#09, §7.6); external `chain_hash` anchoring to close tail-truncation (TI.2.2.1 limit, §7.2).
-TI.5.2 / TI.5.4 remain Optional.
+**Residual follow-ups:** external `chain_hash` anchoring to close audit tail-truncation (TI.2.2.1
+limit, §7.2). TI.5.2 / TI.5.4 remain Optional. No open Essential residuals.
