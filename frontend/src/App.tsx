@@ -10,6 +10,7 @@ import { AuthCallback } from "@/components/Auth/AuthCallback";
 import AcceptInvite from "@/components/Auth/AcceptInvite";
 import AcceptPatientInvite from "@/components/Auth/AcceptPatientInvite";
 import ResetPassword from "@/components/Auth/ResetPassword";
+import ChangePassword from "@/components/Auth/ChangePassword";
 import PatientList from "@/components/Patient/PatientList";
 import PatientDetail from "@/components/Patient/PatientDetail";
 import PatientHome from "@/components/Patient/PatientHome";
@@ -38,6 +39,19 @@ function AppRoutes() {
         <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
       </div>
     );
+  }
+
+  // Force-change gate (PHR-S FM TI.1.1#09): a signed-in account flagged for a
+  // password change is held on a blocking screen until it sets a new one. The
+  // backend independently refuses every other /api/ request meanwhile, so this
+  // is a UX affordance over a server-enforced rule. Public auth pages (reset
+  // link, invite acceptance) are exempt so those flows can still complete.
+  const forceChangeExemptPaths = ['/reset-password', '/accept-invite', '/accept-patient-invite'];
+  if (
+    currentUser?.must_change_password &&
+    !forceChangeExemptPaths.includes(location.pathname)
+  ) {
+    return <ChangePassword onChanged={refresh} onLogout={logout} />;
   }
 
   const isPatient = !!currentUser?.is_patient;

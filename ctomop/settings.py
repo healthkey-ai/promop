@@ -101,6 +101,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'patient_portal.api.middleware.AuditLogMiddleware',
+    'patient_portal.api.middleware.ForcePasswordChangeMiddleware',
     'patient_portal.api.middleware.DeprecationWarningMiddleware',
 ]
 

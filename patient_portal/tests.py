@@ -12778,6 +12778,47 @@ class AuthControlsTest(TestCase):
         self.identity.refresh_from_db()
         self.assertFalse(self.identity.must_change_password)
 
+    # --- force-change enforcement (TI.1.1#09) — via a real session so the
+    #     ForcePasswordChangeMiddleware sees the resolved request.user. ---
+
+    def test_force_change_blocks_api_and_change_clears_it(self):
+        from patient_portal.services import set_new_password
+        set_new_password(self.identity, 'Tmp-reset-9021', must_change=True)
+        # Login itself is allowed; the block applies to subsequent /api/ calls.
+        self.assertEqual(self._login('Tmp-reset-9021').status_code, status.HTTP_200_OK)
+        blocked = self.client.get('/api/v1/patient-records/')
+        self.assertEqual(blocked.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(blocked.json().get('code'), 'password_change_required')
+        # Exempt endpoints stay reachable so the client can resolve the state.
+        self.assertEqual(self.client.get('/api/v1/user/').status_code, status.HTTP_200_OK)
+        # Changing the password clears the flag and unblocks the API.
+        changed = self.client.post('/api/v1/auth/change-password/',
+                                   {'current_password': 'Tmp-reset-9021', 'new_password': 'Cq2-badger-mint'},
+                                   format='json')
+        self.assertEqual(changed.status_code, status.HTTP_200_OK, changed.data)
+        self.identity.refresh_from_db()
+        self.assertFalse(self.identity.must_change_password)
+        self.assertNotEqual(self.client.get('/api/v1/patient-records/').status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unflagged_session_is_not_blocked(self):
+        self.assertEqual(self._login(self.password).status_code, status.HTTP_200_OK)
+        resp = self.client.get('/api/v1/patient-records/')
+        self.assertNotEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_admin_action_sets_force_change_flag(self):
+        from django.contrib.admin.sites import site
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+        from patient_portal.admin import IdentityAdmin
+        request = RequestFactory().post('/admin/')
+        request.user = self.identity
+        setattr(request, 'session', 'session')
+        setattr(request, '_messages', FallbackStorage(request))
+        IdentityAdmin(Identity, site).require_password_change(
+            request, Identity.objects.filter(pk=self.identity.pk))
+        self.identity.refresh_from_db()
+        self.assertTrue(self.identity.must_change_password)
+
 
 @override_settings(
     EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
