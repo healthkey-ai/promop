@@ -129,7 +129,7 @@ class Command(BaseCommand):
 
         # ── Phase 3-4: Build & bulk-create OMOP rows ──────────────────
         t2 = time.time()
-        stats = self._build_and_create(patient_groups, org, concept_cache, options['batch_size'])
+        stats, fhir_patches = self._build_and_create(patient_groups, org, concept_cache, options['batch_size'])
         self._print(f'Phase 3-4: OMOP rows created in {time.time()-t2:.1f}s')
         for table, count in sorted(stats.items()):
             self._print(f'  {table}: {count}')
@@ -139,6 +139,12 @@ class Command(BaseCommand):
             self._refresh_patients(org)
         else:
             self._print('Phase 5: Skipped (--skip-refresh)')
+
+        # ── Phase 5b: Patch FHIR-derived fields onto PatientRecord ────
+        if fhir_patches:
+            self._patch_patient_records(fhir_patches)
+        else:
+            self._print('Phase 5b: No FHIR patch data to apply')
 
         # ── Phase 6: Summary ──────────────────────────────────────────
         total_time = time.time() - t0
@@ -387,6 +393,9 @@ class Command(BaseCommand):
         episode_events = []
         patient_records = []
         deaths = []
+
+        # Collect per-person FHIR patch data (fields not derived by refresh)
+        fhir_patches = {}  # person_id → dict of PatientRecord field overrides
 
         # Track FHIR ID → OMOP PK for cross-references within each patient
         for group_idx, group in enumerate(patient_groups):
@@ -915,6 +924,57 @@ class Command(BaseCommand):
                     route_source_value='VACCINE',
                 ))
 
+            # ── Collect FHIR patch data ───────────────────────────────
+            # Fields from Patient extensions (not stored in OMOP tables)
+            patch = {}
+            if ext_data.get('weight') is not None:
+                patch['weight'] = ext_data['weight']
+                patch['weight_units'] = 'kg'
+            if ext_data.get('height') is not None:
+                patch['height'] = ext_data['height']
+                patch['height_units'] = 'cm'
+            if ext_data.get('systolic_blood_pressure') is not None:
+                patch['systolic_blood_pressure'] = ext_data['systolic_blood_pressure']
+            if ext_data.get('diastolic_blood_pressure') is not None:
+                patch['diastolic_blood_pressure'] = ext_data['diastolic_blood_pressure']
+            if ext_data.get('heartrate') is not None:
+                patch['heartrate'] = ext_data['heartrate']
+            if ext_data.get('ecog_performance_status') is not None:
+                patch['ecog_performance_status'] = ext_data['ecog_performance_status']
+            if ext_data.get('cytogenic_markers') is not None:
+                patch['cytogenic_markers'] = ext_data['cytogenic_markers']
+            if ext_data.get('measurable_disease_imwg') is not None:
+                patch['measurable_disease_imwg'] = ext_data['measurable_disease_imwg']
+            if ext_data.get('sct_date_str'):
+                try:
+                    parsed_sct_date = datetime.strptime(ext_data['sct_date_str'], '%Y-%m-%d').date()
+                    if parsed_sct_date <= date.today():
+                        patch['sct_date'] = parsed_sct_date
+                except ValueError:
+                    pass
+            if ext_data.get('sct_history_str'):
+                patch['stem_cell_transplant_history'] = [
+                    t.strip() for t in ext_data['sct_history_str'].split(',')
+                    if t.strip()
+                ]
+            if ext_data.get('sct_eligibility_str'):
+                patch['sct_eligibility'] = [
+                    t.strip() for t in ext_data['sct_eligibility_str'].split(',')
+                    if t.strip()
+                ]
+            # Date of birth for PatientRecord
+            if birth_date_str:
+                try:
+                    patch['date_of_birth'] = datetime.strptime(birth_date_str, '%Y-%m-%d').date()
+                except ValueError:
+                    pass
+            # Fields from Observations (behavioral, assessment, labs not in OMOP)
+            obs_patch = self._extract_fhir_patch_fields(observation_list)
+            patch.update(obs_patch)
+
+            if patch:
+                fhir_patches[person_id] = patch
+
             # ── PatientRecord stub ──────────────────────────────────────
             patient_records.append(PatientRecord(
                 person_id=person_id,
@@ -941,7 +1001,7 @@ class Command(BaseCommand):
                                                   ignore_conflicts=True)
                 PatientRecord.objects.bulk_create(patient_records, batch_size=batch_size)
 
-        return {
+        stats = {
             'Person': len(persons),
             'Location': len(locations),
             'Death': len(deaths),
@@ -956,14 +1016,42 @@ class Command(BaseCommand):
             'EpisodeEvent': len(episode_events),
             'PatientRecord': len(patient_records),
         }
+        return stats, fhir_patches
 
     def _parse_patient_extensions(self, patient_res):
-        """Extract HealthKey and US Core extensions from Patient resource."""
+        """Extract HealthKey and US Core extensions from Patient resource.
+
+        Returns a dict with keys matching PatientRecord fields where possible:
+        race, ethnicity, weight, height, systolic_blood_pressure,
+        diastolic_blood_pressure, heartrate, ecog_performance_status,
+        cytogenic_markers, measurable_disease_imwg, sct_date, sct_history,
+        sct_eligibility.
+        """
         data = {}
+        base = 'https://healthkey.ai/fhir/StructureDefinition/'
+        _HK_EXTENSIONS = {
+            f'{base}bodyWeight': ('weight', lambda e: e.get('valueQuantity', {}).get('value')),
+            f'{base}bodyHeight': ('height', lambda e: e.get('valueQuantity', {}).get('value')),
+            f'{base}systolic-bp': ('systolic_blood_pressure', lambda e: e.get('valueQuantity', {}).get('value')),
+            f'{base}diastolic-bp': ('diastolic_blood_pressure', lambda e: e.get('valueQuantity', {}).get('value')),
+            f'{base}heartRate': ('heartrate', lambda e: e.get('valueQuantity', {}).get('value')),
+            f'{base}ecog-performance-status': ('ecog_performance_status', lambda e: e.get('valueInteger')),
+            f'{base}mm-cytogenetic-markers': ('cytogenic_markers', lambda e: e.get('valueString')),
+            f'{base}mm-measurable-disease-imwg': ('measurable_disease_imwg', lambda e: e.get('valueBoolean')),
+            f'{base}mm-sct-date': ('sct_date_str', lambda e: e.get('valueString')),
+            f'{base}mm-sct-history': ('sct_history_str', lambda e: e.get('valueString')),
+            f'{base}mm-sct-eligibility': ('sct_eligibility_str', lambda e: e.get('valueString')),
+        }
         for ext in patient_res.get('extension', []):
             url = ext.get('url', '')
-            if 'ethnicity' in url:
-                # HealthKey: direct valueString; US Core: nested
+            # HealthKey typed extensions
+            if url in _HK_EXTENSIONS:
+                field, parser = _HK_EXTENSIONS[url]
+                val = parser(ext)
+                if val is not None:
+                    data[field] = val
+            # Race / ethnicity — HealthKey or US Core
+            elif 'ethnicity' in url:
                 if 'valueString' in ext:
                     data['ethnicity'] = ext['valueString']
                 else:
@@ -978,6 +1066,112 @@ class Command(BaseCommand):
                         if sub.get('url') == 'text':
                             data['race'] = sub.get('valueString', '')
         return data
+
+    def _extract_fhir_patch_fields(self, observation_list):
+        """Extract observation-derived fields that go directly to PatientRecord.
+
+        These fields are parsed from FHIR Observations but are NOT derived by
+        refresh_patient_record — they must be patched onto PatientRecord after
+        refresh, mirroring the upload handler's post-refresh patch block.
+        """
+        patch = {}
+        for obs in observation_list:
+            obs_code = obs.get('code', {})
+            obs_codings = obs_code.get('coding', [])
+            loinc_code = None
+            for coding in obs_codings:
+                if coding.get('system', '') == 'http://loinc.org':
+                    loinc_code = coding.get('code')
+                    break
+            if not loinc_code:
+                continue
+
+            value_number = None
+            value_codeable = None
+            if obs.get('valueQuantity'):
+                value_number = obs['valueQuantity'].get('value')
+            if obs.get('valueCodeableConcept'):
+                value_codeable = obs['valueCodeableConcept'].get('text')
+            elif obs.get('valueString'):
+                value_codeable = obs['valueString']
+            if obs.get('valueInteger') is not None:
+                value_number = obs['valueInteger']
+
+            # Behavioral: Lifestyle
+            if loinc_code == '72166-2':  # Smoking Status
+                patch['smoking_status'] = (value_codeable[:50] if value_codeable else value_codeable)
+            elif loinc_code == '63640-7':  # Pack Years
+                patch['pack_years'] = value_number
+            elif loinc_code == '74013-4':  # Alcohol Use
+                patch['alcohol_use'] = (value_codeable[:50] if value_codeable else value_codeable)
+            elif loinc_code == '11286-7':  # Drinks per Week
+                patch['drinks_per_week'] = value_number
+            elif loinc_code == '68516-4':  # Exercise Frequency
+                patch['exercise_frequency'] = (value_codeable[:50] if value_codeable else value_codeable)
+            elif loinc_code == '89555-7':  # Exercise Minutes per Week
+                patch['exercise_minutes_per_week'] = value_number
+            elif loinc_code == '88365-2':  # Diet Type
+                patch['diet_type'] = value_codeable
+            # Behavioral: Sleep & Wellbeing
+            elif loinc_code == '93832-4':  # Sleep Hours per Night
+                patch['sleep_hours_per_night'] = value_number
+            elif loinc_code == '93831-6':  # Sleep Quality
+                patch['sleep_quality'] = (value_codeable[:50] if value_codeable else value_codeable)
+            elif loinc_code == '73985-4':  # Stress Level
+                patch['stress_level'] = (value_codeable[:50] if value_codeable else value_codeable)
+            elif loinc_code == '93033-9':  # Social Support
+                patch['social_support'] = (value_codeable[:50] if value_codeable else value_codeable)
+            # Behavioral: Socioeconomic
+            elif loinc_code == '74165-2':  # Employment Status
+                patch['employment_status'] = (value_codeable[:50] if value_codeable else value_codeable)
+            elif loinc_code == '82589-3':  # Education Level
+                patch['education_level'] = value_codeable
+            elif loinc_code == '45404-1':  # Marital Status
+                patch['marital_status'] = (value_codeable[:50] if value_codeable else value_codeable)
+            elif loinc_code == '76513-1':  # Insurance Type
+                patch['insurance_type'] = value_codeable
+            elif loinc_code == '63512-8':  # Number of Dependents
+                patch['number_of_dependents'] = value_number
+            elif loinc_code == '77243-3':  # Annual Household Income
+                patch['annual_household_income'] = value_number
+            # Cancer Assessment
+            elif loinc_code == '89247-1':  # ECOG Assessment Date
+                if obs.get('effectiveDateTime'):
+                    patch['ecog_assessment_date'] = obs['effectiveDateTime'][:10]
+            elif loinc_code == '85337-4':  # Test Methodology
+                patch['test_methodology'] = (value_codeable[:50] if value_codeable else value_codeable)
+                if value_number is not None:
+                    patch['oncotype_dx_score'] = value_number
+            elif loinc_code == '31208-2':  # Specimen Source
+                patch['test_specimen_type'] = (value_codeable[:50] if value_codeable else value_codeable)
+                if obs.get('effectiveDateTime'):
+                    patch['test_date'] = obs['effectiveDateTime'][:10]
+            elif loinc_code == '69548-6':  # Test Interpretation
+                patch['report_interpretation'] = (value_codeable[:50] if value_codeable else value_codeable)
+            # Labs not derived by refresh
+            elif loinc_code == '2532-0':  # LDH
+                patch['ldh'] = value_number
+            elif loinc_code == '6768-6':  # Alkaline Phosphatase
+                patch['alkaline_phosphatase'] = value_number
+            elif loinc_code == '19123-9':  # Magnesium
+                patch['magnesium'] = value_number
+            elif loinc_code == '1968-7':  # Direct Bilirubin
+                patch['serum_bilirubin_level_direct'] = value_number
+            elif loinc_code == '6301-6':  # INR
+                patch['inr'] = value_number
+            elif loinc_code == '5902-2':  # PT
+                patch['pt_seconds'] = value_number
+            elif loinc_code == '3173-2':  # PTT
+                patch['ptt_seconds'] = value_number
+            elif loinc_code == '2039-6':  # CEA
+                patch['cea_ng_ml'] = value_number
+            elif loinc_code == '25390-6':  # CA 19-9
+                patch['ca19_9_u_ml'] = value_number
+            elif loinc_code == '2857-1':  # PSA
+                patch['psa_ng_ml'] = value_number
+
+        # Strip None values
+        return {k: v for k, v in patch.items() if v is not None}
 
     def _refresh_patients(self, org):
         """Phase 5: Refresh PatientRecord for all imported patients."""
@@ -1012,6 +1206,41 @@ class Command(BaseCommand):
                 close_old_connections()
 
         self._print(f'Phase 5: {refreshed} refreshed, {errors} errors in {time.time()-t0:.1f}s')
+
+    def _patch_patient_records(self, fhir_patches):
+        """Phase 5b: Patch FHIR-derived fields onto PatientRecord.
+
+        These fields come from FHIR Patient extensions and Observations that
+        are NOT stored in OMOP tables and therefore NOT derived by
+        refresh_patient_record. This mirrors the post-refresh patch block in
+        the upload_fhir view (views.py lines 3149-3328).
+        """
+        from omop_core.models import PatientRecord
+
+        self._print(f'Phase 5b: Patching {len(fhir_patches)} PatientRecords with FHIR-derived fields…')
+        t0 = time.time()
+        close_old_connections()
+
+        patched = errors = 0
+        for person_id, patch in fhir_patches.items():
+            try:
+                pr = PatientRecord.objects.get(person_id=person_id)
+                for field, value in patch.items():
+                    setattr(pr, field, value)
+                pr.save(update_fields=list(patch.keys()))
+                patched += 1
+            except PatientRecord.DoesNotExist:
+                errors += 1
+                if errors <= 5:
+                    self._print(f'  PatientRecord not found for person_id={person_id}', err=True)
+            except Exception as exc:
+                errors += 1
+                if errors <= 5:
+                    self._print(f'  patch failed person {person_id}: {exc}', err=True)
+            if (patched + errors) % 200 == 0:
+                close_old_connections()
+
+        self._print(f'Phase 5b: {patched} patched, {errors} errors in {time.time()-t0:.1f}s')
 
 
 # ======================================================================
