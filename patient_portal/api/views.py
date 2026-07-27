@@ -95,10 +95,15 @@ def smart_configuration(request):
     HL7 SMART on FHIR well-known configuration endpoint.
     Advertises authorization / token endpoints and supported scopes.
     """
+    from patient_portal.api.fhir.integrity import SUPPORTED_FHIR_VERSION
     base = request.build_absolute_uri('/').rstrip('/')
     oidc_issuer = getattr(settings, 'OAUTH2_PROVIDER', {}).get('OIDC_ISS_ENDPOINT', '') or base
     return Response({
         'issuer': oidc_issuer,
+        # Declared interchange version (TI.5.2#01). R4 only — no multi-version
+        # transforms; a request for another version is rejected with HTTP 406.
+        'fhirVersion': SUPPORTED_FHIR_VERSION,
+        'fhir_versions_supported': [SUPPORTED_FHIR_VERSION],
         'authorization_endpoint': f'{base}/o/authorize/',
         'token_endpoint': f'{base}/o/token/',
         'token_endpoint_auth_methods_supported': ['client_secret_basic', 'client_secret_post', 'none'],
@@ -676,7 +681,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         ``pk`` is interpreted as ``person_id`` (consistent with ``retrieve``).
         """
-        from omop_core.services.fhir_export import build_fhir_bundle
+        from omop_core.services.fhir_export import serialize_signed_fhir_bundle
+        from patient_portal.api.fhir.integrity import (
+            check_fhir_version, EXPORT_DIGEST_HEADER, EXPORT_SIGNATURE_HEADER,
+        )
+        from django.http import HttpResponse
+
+        # Bounded multi-version interchange (TI.5.2#01): only R4 is served.
+        version_error = check_fhir_version(request)
+        if version_error:
+            return Response({'error': version_error}, status=status.HTTP_406_NOT_ACCEPTABLE)
 
         try:
             person = Person.objects.get(person_id=pk)
@@ -687,8 +701,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # Object-level permission check (PatientSelfScopePermission)
         self.check_object_permissions(request, patient_record)
 
-        bundle = build_fhir_bundle(person)
-        return Response(bundle, content_type='application/fhir+json')
+        # Content integrity + non-repudiation (S.3.6#10 / PH.2.3#09): serialize
+        # the bundle to canonical bytes, then emit a SHA-256 digest and an HMAC
+        # signature over EXACTLY those bytes so the recipient can verify content
+        # integrity. We return an HttpResponse (not DRF Response) so the digest
+        # matches the body verbatim.
+        body_bytes, digest, signature = serialize_signed_fhir_bundle(person)
+        response = HttpResponse(body_bytes, content_type='application/fhir+json')
+        response[EXPORT_DIGEST_HEADER] = digest
+        response[EXPORT_SIGNATURE_HEADER] = signature
+        return response
 
     @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def upload_csv(self, request):
@@ -775,9 +797,27 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         file = request.FILES['file']
         if not file.name.endswith('.json'):
             return Response({'error': 'File must be a JSON file'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
+        # Bounded multi-version interchange (TI.5.2#01): decline unsupported
+        # FHIR versions cleanly rather than mis-parsing them.
+        from patient_portal.api.fhir.integrity import (
+            check_fhir_version, verify_content_digest,
+        )
+        version_error = check_fhir_version(request)
+        if version_error:
+            return Response({'error': version_error}, status=status.HTTP_406_NOT_ACCEPTABLE)
+
         try:
-            fhir_data = json.load(file)
+            raw_bytes = file.read()
+
+            # Content integrity (S.3.6#10 / PH.2.3#09): if the client asserted a
+            # SHA-256 digest of the payload, verify it against the received bytes.
+            # Opt-in — no header means current behavior is unchanged.
+            digest_error = verify_content_digest(request, raw_bytes)
+            if digest_error:
+                return Response({'error': digest_error}, status=status.HTTP_400_BAD_REQUEST)
+
+            fhir_data = json.loads(raw_bytes)
 
             if fhir_data.get('resourceType') != 'Bundle':
                 return Response({'error': 'FHIR file must be a Bundle'}, status=status.HTTP_400_BAD_REQUEST)
@@ -4957,3 +4997,21 @@ class PatientMessageViewSet(viewsets.ModelViewSet):
             msg.save(update_fields=['read_at', 'is_read'])
         serializer = self.get_serializer(msg)
         return Response(serializer.data)
+
+
+class InterchangeAgreementViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only list/detail of documented data-interchange agreements (TI.5.4#01).
+
+    A formal, described agreement artifact governing electronic exchange with
+    external partners. Exposed under /api/v1/interchange-agreements/.
+    """
+    permission_classes = [IsAuthenticated]
+    pagination_class = PatientRecordPagination
+
+    def get_queryset(self):
+        from omop_core.models import InterchangeAgreement
+        return InterchangeAgreement.objects.all().select_related('partner_organization')
+
+    def get_serializer_class(self):
+        from .serializers import InterchangeAgreementSerializer
+        return InterchangeAgreementSerializer

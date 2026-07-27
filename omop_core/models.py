@@ -106,6 +106,82 @@ class OrgTrust(models.Model):
         return f"{self.granting_org.slug} trusts domain {self.trusted_domain}"
 
 
+class InterchangeAgreement(models.Model):
+    """A documented data-interchange agreement with an external partner (TI.5.4#01).
+
+    A formal, described artifact governing electronic exchange: which partner,
+    which standards + versions are agreed, and the effective window. Complements
+    the runtime access controls (``OrgTrust`` / OAuth scopes) with a describable
+    agreement record rather than replacing them.
+    """
+    STATUS_ACTIVE = 'active'
+    STATUS_SUSPENDED = 'suspended'
+    STATUS_EXPIRED = 'expired'
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, 'Active'),
+        (STATUS_SUSPENDED, 'Suspended'),
+        (STATUS_EXPIRED, 'Expired'),
+    ]
+
+    partner_name = models.CharField(
+        max_length=255,
+        help_text="Name of the external partner / counterparty to the agreement.",
+    )
+    partner_organization = models.ForeignKey(
+        Organization, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='interchange_agreements',
+        help_text="Local Organization this agreement is associated with, if any.",
+    )
+    standards_supported = models.JSONField(
+        default=list, blank=True,
+        help_text='Interchange standards covered, e.g. ["FHIR", "HL7v2"].',
+    )
+    standard_versions = models.JSONField(
+        default=list, blank=True,
+        help_text='Standard versions covered, e.g. ["R4"].',
+    )
+    effective_date = models.DateField(
+        help_text="Date the agreement takes effect.",
+    )
+    expiry_date = models.DateField(
+        null=True, blank=True,
+        help_text="Date the agreement expires (null = open-ended).",
+    )
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE,
+    )
+    active = models.BooleanField(
+        default=True,
+        help_text="Convenience flag; false disables the agreement regardless of dates.",
+    )
+    notes = models.TextField(blank=True, default='')
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'interchange_agreement'
+        ordering = ['partner_name', '-effective_date']
+
+    def is_in_effect(self, on_date=None):
+        """True if the agreement is active and within its effective window."""
+        from django.utils import timezone
+        if not self.active or self.status != self.STATUS_ACTIVE:
+            return False
+        on_date = on_date or timezone.now().date()
+        if self.effective_date and on_date < self.effective_date:
+            return False
+        if self.expiry_date and on_date > self.expiry_date:
+            return False
+        return True
+
+    def __str__(self):
+        return f"Interchange agreement with {self.partner_name} ({self.status})"
+
+
 class OrgInvitation(models.Model):
     """An email invitation to join an org with a specific role."""
     STATUS_PENDING = 'pending'

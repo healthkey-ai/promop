@@ -12806,3 +12806,255 @@ class BreakGlassTest(TestCase):
             expires_at=tz.now() - timedelta(seconds=1))
         expired = self._rows(self._c(self.org_admin).get('/api/v1/audit-events/'))
         self.assertNotIn('96001', {r['resource_id'] for r in expired})
+
+
+# ---------------------------------------------------------------------------
+# Data-exchange integrity, non-repudiation, multi-version interchange, and
+# interchange agreements (PHR-S FM S.3.6#10 / PH.2.3#09 / TI.5.2#01 / TI.5.4#01,
+# issue #306).
+# ---------------------------------------------------------------------------
+
+class ExchangeIntegrityTest(FhirUploadBase):
+    """Content-integrity verification on import, digest/signature on export, FHIR
+    version negotiation."""
+
+    def _post_bundle(self, extra_headers=None, query=''):
+        bundle_bytes = json.dumps(_make_fhir_bundle()).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'test_bundle.json'
+        headers = extra_headers or {}
+        return bundle_bytes, self.client.post(
+            f'/api/patient-info/upload_fhir/{query}',
+            {'file': fhir_file},
+            format='multipart',
+            **headers,
+        )
+
+    # --- Import: content integrity (S.3.6#10 / PH.2.3#09) ---
+
+    def test_import_without_digest_header_unchanged(self):
+        """No integrity header -> current behavior preserved (opt-in)."""
+        _, resp = self._post_bundle()
+        self.assertIn(resp.status_code,
+                      [status.HTTP_200_OK, status.HTTP_201_CREATED],
+                      msg=f'Upload without digest failed: {resp.data}')
+
+    def test_import_matching_digest_accepted(self):
+        import hashlib as _hashlib
+        bundle_bytes = json.dumps(_make_fhir_bundle()).encode('utf-8')
+        digest = _hashlib.sha256(bundle_bytes).hexdigest()
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'test_bundle.json'
+        resp = self.client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+            HTTP_X_CONTENT_SHA256=digest,
+        )
+        self.assertIn(resp.status_code,
+                      [status.HTTP_200_OK, status.HTTP_201_CREATED],
+                      msg=f'Upload with matching digest failed: {resp.data}')
+
+    def test_import_mismatched_digest_rejected(self):
+        bundle_bytes = json.dumps(_make_fhir_bundle()).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'test_bundle.json'
+        resp = self.client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+            HTTP_X_CONTENT_SHA256='deadbeef' * 8,  # wrong 64-char hex
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('integrity', str(resp.data).lower())
+        # And nothing was ingested.
+        self.assertIsNone(self._get_person())
+
+    def test_import_rfc3230_base64_digest_accepted(self):
+        import hashlib as _hashlib, base64 as _b64
+        bundle_bytes = json.dumps(_make_fhir_bundle()).encode('utf-8')
+        b64 = _b64.b64encode(_hashlib.sha256(bundle_bytes).digest()).decode()
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'test_bundle.json'
+        resp = self.client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+            HTTP_DIGEST=f'sha-256={b64}',
+        )
+        self.assertIn(resp.status_code,
+                      [status.HTTP_200_OK, status.HTTP_201_CREATED],
+                      msg=f'RFC3230 digest upload failed: {resp.data}')
+
+    # --- Export: digest + signature (S.3.6#10 / PH.2.3#09) ---
+
+    def _uploaded_person_id(self):
+        _, resp = self._post_bundle()
+        self.assertIn(resp.status_code,
+                      [status.HTTP_200_OK, status.HTTP_201_CREATED])
+        person = self._get_person()
+        self.assertIsNotNone(person)
+        return person.person_id
+
+    def test_export_emits_digest_and_signature(self):
+        import hashlib as _hashlib
+        from patient_portal.api.fhir.integrity import (
+            EXPORT_DIGEST_HEADER, EXPORT_SIGNATURE_HEADER, signature_valid,
+        )
+        person_id = self._uploaded_person_id()
+        resp = self.client.get(f'/api/v1/patient-records/{person_id}/export-fhir/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        digest = resp.headers.get(EXPORT_DIGEST_HEADER)
+        signature = resp.headers.get(EXPORT_SIGNATURE_HEADER)
+        self.assertIsNotNone(digest, 'export missing digest header')
+        self.assertIsNotNone(signature, 'export missing signature header')
+        # Digest must match the exact serialized body.
+        self.assertEqual(digest, _hashlib.sha256(resp.content).hexdigest())
+        # Signature must verify against the body.
+        self.assertTrue(signature_valid(resp.content, signature))
+
+    def test_export_body_is_fhir_bundle(self):
+        person_id = self._uploaded_person_id()
+        resp = self.client.get(f'/api/v1/patient-records/{person_id}/export-fhir/')
+        body = json.loads(resp.content)
+        self.assertEqual(body.get('resourceType'), 'Bundle')
+
+    # --- Multi-version interchange (TI.5.2#01) ---
+
+    def test_import_unsupported_version_rejected(self):
+        _, resp = self._post_bundle(query='?fhirVersion=STU3')
+        self.assertEqual(resp.status_code, status.HTTP_406_NOT_ACCEPTABLE)
+
+    def test_import_supported_version_accepted(self):
+        _, resp = self._post_bundle(query='?fhirVersion=R4')
+        self.assertIn(resp.status_code,
+                      [status.HTTP_200_OK, status.HTTP_201_CREATED])
+
+    def test_export_unsupported_version_rejected(self):
+        person_id = self._uploaded_person_id()
+        resp = self.client.get(
+            f'/api/v1/patient-records/{person_id}/export-fhir/?fhirVersion=3.0')
+        self.assertEqual(resp.status_code, status.HTTP_406_NOT_ACCEPTABLE)
+
+    def test_smart_configuration_advertises_fhir_version(self):
+        from patient_portal.api.fhir.integrity import SUPPORTED_FHIR_VERSION
+        resp = self.client.get('/.well-known/smart-configuration')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data.get('fhirVersion'), SUPPORTED_FHIR_VERSION)
+
+
+class IntegrityHelperUnitTest(TestCase):
+    """Unit coverage for the integrity helper (shared by upload + sync paths)."""
+
+    def setUp(self):
+        from django.test import RequestFactory
+        self.factory = RequestFactory()
+
+    def test_verify_no_header_returns_none(self):
+        from patient_portal.api.fhir.integrity import verify_content_digest
+        req = self.factory.post('/x')
+        self.assertIsNone(verify_content_digest(req, b'{"a":1}'))
+
+    def test_verify_matching_hex_ok(self):
+        import hashlib as _hashlib
+        from patient_portal.api.fhir.integrity import verify_content_digest
+        payload = b'{"resourceType":"Bundle"}'
+        digest = _hashlib.sha256(payload).hexdigest()
+        req = self.factory.post('/x', HTTP_X_CONTENT_SHA256=digest)
+        self.assertIsNone(verify_content_digest(req, payload))
+
+    def test_verify_mismatch_returns_error(self):
+        from patient_portal.api.fhir.integrity import verify_content_digest
+        req = self.factory.post('/x', HTTP_X_CONTENT_SHA256='00' * 32)
+        self.assertIsNotNone(verify_content_digest(req, b'payload'))
+
+    def test_signature_roundtrip(self):
+        from patient_portal.api.fhir.integrity import export_signature, signature_valid
+        data = b'some bundle bytes'
+        sig = export_signature(data)
+        self.assertTrue(signature_valid(data, sig))
+        self.assertFalse(signature_valid(b'tampered', sig))
+
+    def test_check_fhir_version(self):
+        from patient_portal.api.fhir.integrity import check_fhir_version
+        self.assertIsNone(check_fhir_version(self.factory.get('/x')))
+        self.assertIsNone(check_fhir_version(self.factory.get('/x?fhirVersion=4.0.1')))
+        self.assertIsNone(check_fhir_version(self.factory.get('/x?fhirVersion=R4')))
+        self.assertIsNotNone(check_fhir_version(self.factory.get('/x?fhirVersion=STU3')))
+
+
+class InterchangeAgreementTest(TestCase):
+    """Documented interchange-agreement artifact (TI.5.4#01)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = Identity.objects.create_superuser(
+            email='ia-admin@test.com', password='testpass')
+        from omop_core.models import InterchangeAgreement
+        cls.agreement = InterchangeAgreement.objects.create(
+            partner_name='Acme Health Information Exchange',
+            standards_supported=['FHIR'],
+            standard_versions=['R4'],
+            effective_date=date(2026, 1, 1),
+            status=InterchangeAgreement.STATUS_ACTIVE,
+            active=True,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def _rows(self, resp):
+        data = resp.data
+        return data['results'] if isinstance(data, dict) and 'results' in data else data
+
+    def test_list_requires_authentication(self):
+        resp = self.client.get('/api/v1/interchange-agreements/')
+        self.assertIn(resp.status_code,
+                      [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_list_returns_agreements(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get('/api/v1/interchange-agreements/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        names = [r['partner_name'] for r in self._rows(resp)]
+        self.assertIn('Acme Health Information Exchange', names)
+
+    def test_detail_includes_in_effect_and_standards(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get(
+            f'/api/v1/interchange-agreements/{self.agreement.id}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['standard_versions'], ['R4'])
+        self.assertTrue(resp.data['in_effect'])
+
+    def test_endpoint_is_read_only(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.post(
+            '/api/v1/interchange-agreements/',
+            {'partner_name': 'X', 'effective_date': '2026-01-01'},
+            format='json')
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_is_in_effect_logic(self):
+        from omop_core.models import InterchangeAgreement
+        expired = InterchangeAgreement.objects.create(
+            partner_name='Expired Partner',
+            effective_date=date(2020, 1, 1),
+            expiry_date=date(2020, 12, 31),
+            status=InterchangeAgreement.STATUS_ACTIVE,
+            active=True,
+        )
+        self.assertFalse(expired.is_in_effect())
+        suspended = InterchangeAgreement.objects.create(
+            partner_name='Suspended Partner',
+            effective_date=date(2020, 1, 1),
+            status=InterchangeAgreement.STATUS_SUSPENDED,
+            active=False,
+        )
+        self.assertFalse(suspended.is_in_effect())
+        self.assertTrue(self.agreement.is_in_effect())
+
+    def test_registered_in_admin(self):
+        from django.contrib import admin as dj_admin
+        from omop_core.models import InterchangeAgreement
+        self.assertIn(InterchangeAgreement, dj_admin.site._registry)
