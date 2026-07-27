@@ -13341,3 +13341,56 @@ class PatientMessageConfidentialityTest(TestCase):
     def test_other_staff_cannot_retrieve_restricted(self):
         resp = self._c(self.staff_b).get(f'/api/v1/messages/{self.restricted.id}/')
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+# ---------------------------------------------------------------------------
+# #318 — audit hash chain (row-deletion detection, PHR-S FM TI.2.2.1)
+# ---------------------------------------------------------------------------
+
+class AuditHashChainTest(TestCase):
+    """Hash-chaining makes audit-row deletion/insertion detectable."""
+
+    def _mk(self, **kw):
+        from patient_portal.models import AuditEvent
+        d = dict(event_type='record_view', method='GET', path='/api/x/', status_code=200)
+        d.update(kw)
+        return AuditEvent.objects.create(**d)
+
+    def test_rows_are_chained_and_verify_clean(self):
+        from django.core.management import call_command
+        a, b, c = self._mk(), self._mk(), self._mk()
+        self.assertTrue(a.chain_hash and b.chain_hash and c.chain_hash)
+        self.assertNotEqual(a.chain_hash, b.chain_hash)  # chain advances even for identical content
+        call_command('verify_audit_integrity')  # must not raise
+
+    def test_middle_row_deletion_is_detected(self):
+        from django.core.management import call_command
+        from patient_portal.models import AuditEvent
+        a, b, c = self._mk(), self._mk(), self._mk()
+        AuditEvent.objects.filter(pk=b.pk).delete()  # excise the middle row
+        with self.assertRaises(SystemExit):
+            call_command('verify_audit_integrity')
+
+    def test_oldest_deletion_is_tolerated(self):
+        """Pruning the oldest rows (retention) must NOT be flagged — the earliest
+        surviving row is the chain anchor."""
+        from django.core.management import call_command
+        from patient_portal.models import AuditEvent
+        a, b, c = self._mk(), self._mk(), self._mk()
+        AuditEvent.objects.filter(pk=a.pk).delete()
+        call_command('verify_audit_integrity')  # must not raise
+
+    def test_alteration_still_detected_alongside_chain(self):
+        from django.core.management import call_command
+        from patient_portal.models import AuditEvent
+        a = self._mk()
+        self._mk()
+        AuditEvent.objects.filter(pk=a.pk).update(path='/api/HACKED/')  # content tamper
+        with self.assertRaises(SystemExit):
+            call_command('verify_audit_integrity')
+
+    def test_chaining_can_be_disabled(self):
+        from django.test import override_settings
+        with override_settings(AUDIT_HASH_CHAIN_ENABLED=False):
+            row = self._mk()
+        self.assertEqual(row.chain_hash, '')

@@ -312,6 +312,10 @@ class AuditEvent(models.Model):
     # later alteration is detectable by recomputing and comparing (see
     # `verify_audit_integrity`). Set automatically on first save.
     signature = models.CharField(max_length=64, blank=True, default='')
+    # Hash chain: HMAC over (previous row's chain_hash + this row's signature),
+    # so deletion or insertion of a row breaks the chain and is detectable
+    # (TI.2.2.1#01). Empty on pre-chain rows and when AUDIT_HASH_CHAIN_ENABLED is off.
+    chain_hash = models.CharField(max_length=64, blank=True, default='', db_index=True)
 
     class Meta:
         db_table = 'audit_event'
@@ -338,9 +342,43 @@ class AuditEvent(models.Model):
         key = (getattr(settings, 'AUDIT_HMAC_KEY', '') or settings.SECRET_KEY).encode()
         return hmac.new(key, canonical.encode(), hashlib.sha256).hexdigest()
 
+    def compute_chain_hash(self, prev_chain_hash: str) -> str:
+        """HMAC over (previous row's chain_hash | this row's signature). Linking each
+        row to its predecessor makes row deletion/insertion detectable (TI.2.2.1#01)."""
+        import hashlib
+        import hmac
+        from django.conf import settings
+
+        key = (getattr(settings, 'AUDIT_HMAC_KEY', '') or settings.SECRET_KEY).encode()
+        material = f"{prev_chain_hash}|{self.signature}".encode()
+        return hmac.new(key, material, hashlib.sha256).hexdigest()
+
+    # Advisory-lock key that serializes chain appends (Postgres) so concurrent
+    # audit writes can't fork the chain.
+    _CHAIN_LOCK_KEY = 728143
+
     def save(self, *args, **kwargs):
+        from django.conf import settings
+
         if not self.signature:
             self.signature = self.compute_signature()
+
+        chain_on = getattr(settings, 'AUDIT_HASH_CHAIN_ENABLED', True)
+        if self.pk is None and not self.chain_hash and chain_on:
+            # Seal into the tamper-evident chain: serialize the "read latest → link →
+            # insert" so concurrent writers extend one linear chain rather than forking.
+            from django.db import connection, transaction
+            with transaction.atomic():
+                if connection.vendor == 'postgresql':
+                    with connection.cursor() as cur:
+                        cur.execute('SELECT pg_advisory_xact_lock(%s)', [self._CHAIN_LOCK_KEY])
+                prev = (
+                    AuditEvent.objects.order_by('-id').values_list('chain_hash', flat=True).first()
+                    or ''
+                )
+                self.chain_hash = self.compute_chain_hash(prev)
+                super().save(*args, **kwargs)
+            return
         super().save(*args, **kwargs)
 
     def signature_valid(self) -> bool:
