@@ -35,35 +35,51 @@ authorization schema is identical in both modes.
 
 ## Roles
 
-| Role | Can upload/modify PHR | Can create patients | Can manage groups | Can invite professionals | Scope |
-|---|---|---|---|---|---|
-| **admin** | Yes (on behalf of group patients) | Yes | Yes | Yes | All patients in assigned groups |
-| **navigator** | Yes (on behalf of group patients) | Yes | No | No | Patients in assigned groups |
-| **doctor** | Yes (on behalf of group patients) | Yes | No | No | Patients in assigned groups |
-| **patient** | Yes (own + represented persons) | Yes (represented persons) | No | Yes (grant access to professionals) | Own data + personal representatives |
+| Role | Can read patient records | Can upload/modify PHR | Can create patients | Can manage groups | Can invite users | Scope |
+|---|---|---|---|---|---|---|
+| **org_admin** | Yes | Yes (on behalf of group patients) | Yes | Yes | Yes (all roles) | All patients in assigned org/groups |
+| **doctor** | Yes | Yes (on behalf of group patients) | Yes | No | No | Patients in assigned groups |
+| **analyst** | Yes (read-only) | No | No | No | No | Patients in assigned org; redirected to analytics by default |
+| **patient** | Own record only | Yes (own + represented persons) | Yes (represented persons) | No | Yes (grant access to professionals) | Own data + personal representatives |
 
 ### Role Semantics
 
-**admin** — organization administrator. Full access to all patients in their
-assigned groups. Can create patient groups, assign patients to groups, and
-invite other professionals.
+**org_admin** — organization administrator. Full access to all patients in
+their assigned org and groups. Can create patient groups, assign patients to
+groups, invite professionals and patients, and manage org settings.
 
-**navigator** — patient navigator / care coordinator. Uploads labs, modifies
-PHR records on behalf of patients in their assigned groups. Cannot create or
-modify groups themselves.
+**doctor** — clinician. Upload/modify PHR on behalf of group patients. Can
+create new patient records. Cannot create or manage groups.
 
-**doctor** — clinician. Same access as navigator: upload/modify PHR on behalf
-of group patients. Separated from navigator for audit trail clarity and
-potential future permission differentiation.
+**analyst** — data analyst. **Read-only** access to individual patient
+records within the org, which enables verification of the aggregated data
+they primarily work with. Cannot modify any patient data. By default,
+analysts are redirected to an external analytics URL (e.g. PRism Analytics).
+Analysts replaced the former "navigator" role (renamed in migration 0103).
 
-**patient** — the data owner. Can upload and modify their own PHR. Can join
-the system independently or be invited by a professional. Can grant access
-to professionals (invite a navigator/doctor to manage their records).
+**patient** — the data owner. Can view and modify their own PHR. Can join
+the system via org invitation or (if the org allows) self-registration.
+Can grant access to professionals (invite a doctor to manage their records).
+Patients log in at an org-scoped URL and land directly on their own record.
 
 A patient may also act as a **personal representative** for other people:
 a minor child, elderly parent, family member, friend, etc. In this case
 one Identity manages multiple Person records. See "Personal Representatives"
 below.
+
+### Navigator Role (Removed)
+
+The **navigator** role (patient navigator / care coordinator) was removed
+and renamed to **analyst** in migration `0103_rename_navigator_to_analyst`.
+The navigator role had identical permissions to doctor — upload/modify PHR
+on behalf of group patients. It was replaced by analyst because the primary
+non-clinical use case is data analysis, not care coordination.
+
+**Recommendation:** If a care-coordinator role is needed in the future
+(someone who can modify administrative patient data but not sign off on
+clinical records), re-introduce navigator as a distinct role with scoped
+write permissions rather than reusing analyst. For now, care coordinators
+should use the doctor role.
 
 ---
 
@@ -197,7 +213,7 @@ Professionals can still view members but should not add/remove manually
 ProfessionalGroupAccess
   identity        — FK → Identity (the professional)
   group           — FK → PatientGroup
-  role            — enum: admin | navigator | doctor
+  role            — enum: org_admin | doctor | analyst
   granted_at
   granted_by      — FK → Identity
 
@@ -317,7 +333,7 @@ the target patient.
 
 ```
 Host frontend
-  | IdP token: sub="nav789" (navigator)
+  | IdP token: sub="doc789" (doctor)
   | Target patient: person_id=1042
   |
   +-> hk-labs:
@@ -327,7 +343,7 @@ Host frontend
   |
   +-> promop sync endpoint:
         can_access_patient(actor, 1042) → validate (defense in depth)
-        Record provenance: source=ADMIN_CORRECTION, actor=nav789, target=1042
+        Record provenance: source=ADMIN_CORRECTION, actor=doc789, target=1042
         Create measurements for person_id=1042
 ```
 
@@ -362,7 +378,7 @@ different grouping criteria.
 ### Professional Creates Patient and Invites
 
 ```
-1. Professional (admin/navigator/doctor) creates a new Person record
+1. Professional (org_admin/doctor) creates a new Person record
 2. Professional assigns Person to one of their groups
 3. System generates invitation (email or link)
 4. Patient receives invitation → authenticates via IdP → Identity created
@@ -393,7 +409,7 @@ that group.
 3. System creates ProfessionalGroupAccess:
      identity = professional
      group = patient's group (or a new per-patient group is created)
-     role = navigator | doctor
+     role = doctor
      granted_by = patient's Identity
 4. Professional can now upload/modify on behalf of that patient
 ```
@@ -425,7 +441,7 @@ ProvenanceRecord
 |---|---|---|
 | Patient (self-upload) | `PATIENT_SELF` or `DOCUMENT_EXTRACTION` | patient's `issuer\|sub` |
 | Personal representative | `PATIENT_SELF` | representative's `issuer\|sub` |
-| Navigator/doctor | `ADMIN_CORRECTION` | professional's `issuer\|sub` |
+| Doctor | `ADMIN_CORRECTION` | professional's `issuer\|sub` |
 | Host app (rule sync) | `EHR_SYNC` | service token identifier |
 
 `source_user_id` always uses the `issuer|sub` format from the identity
@@ -503,9 +519,10 @@ tables would live in the `accounts` app with simplified models.
 
 ## Future Considerations
 
-- **Permission differentiation by role**: Currently admin/navigator/doctor
+- **Permission differentiation by role**: Currently org_admin and doctor
   have identical write permissions. The model supports adding granular
-  permissions (e.g. doctor can modify clinical notes, navigator cannot).
+  permissions (e.g. org_admin can only modify administrative records,
+  doctor can sign off on clinical records). Analyst is already read-only.
 
 - **Time-limited access**: Add `expires_at` to ProfessionalGroupAccess for
   temporary grants (clinical trial duration, consult period).
