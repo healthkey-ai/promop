@@ -9,7 +9,7 @@ Usage:
 import math
 import statistics
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from django.db import models
 from django.db.models import DateTimeField
 from django.db.models.functions import Cast, Coalesce
@@ -79,11 +79,13 @@ _OMOP_DERIVED_FIELDS = [
     'kappa_flc', 'lambda_flc', 'clonal_plasma_cells',
     # MM boolean/coded fields (derived by _get_mm_specific_data)
     'plasma_cell_leukemia', 'bone_lesions', 'meets_crab', 'meets_slim',
+    # MM cytogenetics + SCT (derived by _get_sct_cytogenetic_data)
+    'cytogenic_markers', 'sct_date', 'stem_cell_transplant_history', 'sct_eligibility',
     # Vitals
     'systolic_blood_pressure', 'diastolic_blood_pressure', 'heartrate',
     'weight', 'weight_units', 'height', 'height_units', 'temperature',
     # Performance
-    'ecog_performance_status', 'karnofsky_performance_score',
+    'ecog_performance_status', 'ecog_assessment_date', 'karnofsky_performance_score',
     # Biomarkers
     'pd_l1_tumor_cells', 'pd_l1_assay',
     'pd_l1_ic_percentage', 'pd_l1_combined_positive_score', 'ki67_proliferation_index',
@@ -276,6 +278,7 @@ def _clear_derived_fields(patient_info: PatientRecord) -> None:
                 'prior_procedures', 'later_therapies', 'genetic_mutations', 'later_therapy_ids',
                 'first_line_component_ids', 'second_line_component_ids',
                 'later_component_ids', 'therapy_component_ids',
+                'stem_cell_transplant_history', 'sct_eligibility',
             ) else None
             setattr(patient_info, field, default)
 
@@ -320,6 +323,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             _get_prior_procedures,
             _get_wearable_data,
             _get_mm_specific_data,
+            _get_sct_cytogenetic_data,
         ]:
             for field, value in section_fn(person).items():
                 setattr(patient_info, field, value)
@@ -1616,6 +1620,54 @@ def _get_mm_specific_data(person: Person) -> dict:
     return data
 
 
+def _get_sct_cytogenetic_data(person: Person) -> dict:
+    """Derive cytogenetic markers and SCT fields from OMOP Observation rows.
+
+    These values are written as Observation rows by the bulk FHIR import
+    (and eventually the upload handler) with custom observation_source_value
+    keys: mm-cytogenetic-markers, mm-sct-date, mm-sct-history, mm-sct-eligibility.
+    """
+    data = {}
+    _SOURCE_KEYS = [
+        'mm-cytogenetic-markers', 'mm-sct-date',
+        'mm-sct-history', 'mm-sct-eligibility',
+    ]
+    obs_qs = (
+        Observation.objects.filter(
+            person=person,
+            observation_source_value__in=_SOURCE_KEYS,
+        )
+        .order_by('-observation_date')
+    )
+    seen = set()
+    for obs in obs_qs:
+        src = obs.observation_source_value
+        if src in seen:
+            continue  # take most recent only
+        seen.add(src)
+        val = obs.value_as_string
+        if not val:
+            continue
+
+        if src == 'mm-cytogenetic-markers':
+            data['cytogenic_markers'] = val
+        elif src == 'mm-sct-date':
+            try:
+                data['sct_date'] = datetime.strptime(val[:10], '%Y-%m-%d').date()
+            except (ValueError, TypeError):
+                pass
+        elif src == 'mm-sct-history':
+            data['stem_cell_transplant_history'] = [
+                t.strip() for t in val.split(',') if t.strip()
+            ]
+        elif src == 'mm-sct-eligibility':
+            data['sct_eligibility'] = [
+                t.strip() for t in val.split(',') if t.strip()
+            ]
+
+    return data
+
+
 def _get_assessment_data(person: Person) -> dict:
     data = {}
 
@@ -1729,6 +1781,8 @@ def _get_performance_data(person: Person) -> dict:
     )
     if ecog:
         data['ecog_performance_status'] = int(ecog.value_as_number)
+        if ecog.observation_date:
+            data['ecog_assessment_date'] = ecog.observation_date
 
     karnofsky = (
         observations
