@@ -3100,3 +3100,76 @@ class FhirOauthState(models.Model):
 
     def __str__(self):
         return f"FhirOauthState({self.state[:8]}…, person={self.person_id})"
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary Release — versioned release manifest for vocabulary data
+# ---------------------------------------------------------------------------
+
+class VocabularyRelease(models.Model):
+    """
+    Immutable, append-only record of a vocabulary release.
+
+    Each row captures the full state of vocabulary data at the time of a load.
+    Consumers use the latest *published* release to detect changes (via ETag)
+    and to drive bulk-download / cache-refresh workflows.
+
+    No FK to vocabulary tables — survives TRUNCATE CASCADE during reloads.
+    """
+
+    STATUS_CHOICES = [
+        ('staged', 'Staged'),
+        ('published', 'Published'),
+        ('retired', 'Retired'),
+    ]
+
+    schema_version = models.CharField(
+        max_length=20, default='5.4',
+        help_text="OMOP CDM schema version this release targets.",
+    )
+    scope = models.JSONField(
+        default=list,
+        help_text="List of vocabulary_ids included in this release.",
+    )
+    build_timestamp = models.DateTimeField(
+        help_text="When the vocabulary load started.",
+    )
+    athena_version = models.CharField(
+        max_length=255, null=True, blank=True,
+        help_text="Athena download bundle version string, if known.",
+    )
+    vocab_versions = models.JSONField(
+        default=dict,
+        help_text="Mapping of {vocabulary_id: version} at time of load.",
+    )
+    row_counts = models.JSONField(
+        default=dict,
+        help_text="Mapping of {table_name: row_count} loaded in this release.",
+    )
+    checksums = models.JSONField(
+        default=dict,
+        help_text="Per-table fingerprints for drift detection.",
+    )
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='staged',
+        db_index=True,
+        help_text="Lifecycle state: staged → published → retired.",
+    )
+    published_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="When this release was promoted to published.",
+    )
+    notes = models.TextField(
+        null=True, blank=True,
+        help_text="Free-form operator notes about this release.",
+    )
+
+    class Meta:
+        db_table = 'vocabulary_release'
+        ordering = ['-published_at']
+
+    def __str__(self):
+        return (
+            f"VocabularyRelease(pk={self.pk}, status={self.status}, "
+            f"published_at={self.published_at})"
+        )
