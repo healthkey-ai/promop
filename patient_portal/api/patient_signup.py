@@ -45,7 +45,6 @@ class PatientSignupView(APIView):
         user = request.user
         is_privileged = (
             is_service_token(request)
-            or getattr(user, 'is_superuser', False)
             or getattr(user, 'is_staff', False)
         )
         if not is_privileged:

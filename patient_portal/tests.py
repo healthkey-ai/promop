@@ -5173,7 +5173,7 @@ class ScopedTokenPermissionTest(TestCase):
     # --- staff / superuser ---
 
     def test_superuser_allows_delete(self):
-        req = self._req("DELETE", None, self._user(is_superuser=True, is_staff=True))
+        req = self._req("DELETE", None, self._user(is_staff=True))
         self.assertTrue(self.permission.has_permission(req, None))
 
     def test_staff_allows_post(self):

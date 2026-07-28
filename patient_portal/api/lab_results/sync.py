@@ -181,10 +181,10 @@ class SyncView(APIView):
         # is always the authenticated user: ignore any actor identity supplied in
         # the request body. Every lab result stays tied to a real user, and a
         # patient cannot impersonate another actor. Trusted service tokens and
-        # superusers supply the actor explicitly for server-to-server / admin
+        # staff users supply the actor explicitly for server-to-server / admin
         # on-behalf-of writes.
         is_service = is_service_token(request)
-        is_privileged = is_service or getattr(request.user, 'is_superuser', False)
+        is_privileged = is_service or getattr(request.user, 'is_staff', False)
         if not is_privileged and getattr(request.user, 'is_authenticated', False):
             actor_iss = getattr(request.user, 'issuer', '') or ''
             actor_sub = getattr(request.user, 'sub', '') or ''
@@ -223,7 +223,7 @@ class SyncView(APIView):
                         {'detail': 'Actor does not have access to this patient.'},
                         status=status.HTTP_403_FORBIDDEN,
                     )
-            elif not has_explicit_actor and not getattr(request.user, 'is_superuser', False):
+            elif not has_explicit_actor and not getattr(request.user, 'is_staff', False):
                 return Response(
                     {'detail': 'actor_iss and actor_sub required when writing on behalf of another person.'},
                     status=status.HTTP_400_BAD_REQUEST,

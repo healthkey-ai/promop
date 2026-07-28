@@ -96,7 +96,7 @@ def patient_person_for(identity):
     """
     if identity is None or not getattr(identity, 'is_authenticated', False):
         return None
-    if getattr(identity, 'is_staff', False) or getattr(identity, 'is_superuser', False):
+    if getattr(identity, 'is_staff', False):
         return None
 
     pu = (

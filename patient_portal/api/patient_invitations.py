@@ -73,7 +73,7 @@ def _can_manage_patient(request, patient_record) -> bool:
     user = request.user
     if is_service_token(request):
         return True
-    if getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False):
+    if getattr(user, 'is_staff', False):
         return True
     org = get_request_org(request)
     if org is not None:

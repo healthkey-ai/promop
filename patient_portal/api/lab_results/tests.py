@@ -96,7 +96,7 @@ class SyncViewTest(TestCase):
     def setUp(self):
         _setup_vocab()
         self.user = Identity.objects.create_user(email='labsync@test.com', password='test')
-        self.user.is_superuser = True
+        self.user.is_staff = True
         self.user.save()
         self.person = Person.objects.create(person_id=1001)
         PatientRecord.objects.create(person=self.person)
@@ -521,7 +521,7 @@ class SyncOnBehalfOfTest(TestCase):
     def setUp(self):
         _setup_vocab()
         self.service_user = Identity.objects.create_user(email='service@test.com', password='test')
-        self.service_user.is_superuser = True
+        self.service_user.is_staff = True
         self.service_user.save()
 
         self.actor = Identity.objects.create_user(email='actor@test.com', password='test')
@@ -652,7 +652,7 @@ class PipeCharacterValidationTest(TestCase):
     def setUp(self):
         _setup_vocab()
         self.user = Identity.objects.create_user(email='pipe@test.com', password='test')
-        self.user.is_superuser = True
+        self.user.is_staff = True
         self.user.save()
         Person.objects.create(person_id=3001)
         self.client = APIClient()
@@ -1154,7 +1154,7 @@ class DedupSyncTest(TestCase):
     def setUp(self):
         _setup_vocab()
         self.user = Identity.objects.create_user(email='dedup@test.com', password='test')
-        self.user.is_superuser = True
+        self.user.is_staff = True
         self.user.save()
         self.person = Person.objects.create(person_id=3001)
         PatientRecord.objects.create(person=self.person)
@@ -1329,7 +1329,7 @@ class ResolvePersonIdEmailFallbackTest(TestCase):
 
     def test_superuser_without_org_can_use_email_fallback(self):
         """Superuser with no PatientUser link may still resolve by email."""
-        user = self._user(is_superuser=True, is_staff=True)
+        user = self._user(is_staff=True)
         client = APIClient()
         client.force_authenticate(user=user)
         resp = client.get('/api/lab-results/summary/')
@@ -1468,7 +1468,7 @@ class SyncVisitIdempotencyTest(TestCase):
     def setUp(self):
         _setup_vocab()
         self.user = Identity.objects.create_user(email='idemp@test.com', password='test')
-        self.user.is_superuser = True
+        self.user.is_staff = True
         self.user.save()
         self.person = Person.objects.create(person_id=19001)
         PatientRecord.objects.create(person=self.person)
@@ -1537,7 +1537,7 @@ class SyncProvenanceDedupTest(TestCase):
     def setUp(self):
         _setup_vocab()
         self.user = Identity.objects.create_user(email='prov@test.com', password='test')
-        self.user.is_superuser = True
+        self.user.is_staff = True
         self.user.save()
         self.person = Person.objects.create(person_id=20001)
         PatientRecord.objects.create(person=self.person)
