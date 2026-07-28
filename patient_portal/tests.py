@@ -13848,3 +13848,148 @@ class VocabReleaseAPITest(_SmartBase):
         resp = self.read_client.get('/api/v1/concepts/search/?q=test')
         self.assertEqual(resp.status_code, 200)
         self.assertIn('ETag', resp)
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary Snapshot (streaming NDJSON) tests
+# ---------------------------------------------------------------------------
+
+class VocabSnapshotTest(_SmartBase):
+    """Test /api/v1/vocab-releases/.../snapshot/<table>/ endpoints."""
+
+    def setUp(self):
+        super().setUp()
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone as tz
+        self.release = VocabularyRelease.objects.create(
+            build_timestamp=tz.now(),
+            status='published',
+            published_at=tz.now(),
+            scope=['TEST'],
+            vocab_versions={'TEST': '1.0'},
+            row_counts={'concept': 2, 'vocabulary': 1},
+            checksums={},
+        )
+        # Seed a concept with source='HealthKey' and one without
+        from omop_core.models import Concept, ConceptClass
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Clinical Finding',
+            defaults={'concept_class_name': 'Clinical Finding', 'concept_class_concept_id': 0},
+        )
+        vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        domain = Domain.objects.get(domain_id='Condition')
+        from datetime import date
+        self.concept_ext = Concept.objects.create(
+            concept_id=8880001,
+            concept_name='External Concept',
+            domain=domain,
+            vocabulary=vocab,
+            concept_class=cc,
+            concept_code='EXT001',
+            source=None,
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        self.concept_hk = Concept.objects.create(
+            concept_id=8880002,
+            concept_name='HealthKey Concept',
+            domain=domain,
+            vocabulary=vocab,
+            concept_class=cc,
+            concept_code='HK001',
+            source='HealthKey',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+
+    def tearDown(self):
+        super().tearDown()
+        from patient_portal.api.views import _vocab_version_cache
+        _vocab_version_cache['release_pk'] = None
+        _vocab_version_cache['map'] = None
+
+    def _snapshot_url(self, table, release_id=None):
+        if release_id is None:
+            return f'/api/v1/vocab-releases/latest/snapshot/{table}/'
+        return f'/api/v1/vocab-releases/{release_id}/snapshot/{table}/'
+
+    def test_returns_ndjson(self):
+        resp = self.read_client.get(self._snapshot_url('vocabulary', self.release.pk))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp['Content-Type'], 'application/x-ndjson')
+        content = b''.join(resp.streaming_content).decode()
+        lines = [l for l in content.strip().split('\n') if l]
+        self.assertGreater(len(lines), 0)
+
+    def test_each_line_valid_json(self):
+        import json
+        resp = self.read_client.get(self._snapshot_url('vocabulary', self.release.pk))
+        content = b''.join(resp.streaming_content).decode()
+        for line in content.strip().split('\n'):
+            if line:
+                row = json.loads(line)
+                self.assertIn('vocabulary_id', row)
+
+    def test_404_on_staged_release(self):
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone as tz
+        staged = VocabularyRelease.objects.create(
+            build_timestamp=tz.now(), status='staged',
+        )
+        resp = self.read_client.get(self._snapshot_url('vocabulary', staged.pk))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_404_on_nonexistent_release(self):
+        resp = self.read_client.get(self._snapshot_url('vocabulary', 99999))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_304_on_etag_match(self):
+        resp1 = self.read_client.get(self._snapshot_url('vocabulary', self.release.pk))
+        self.assertEqual(resp1.status_code, 200)
+        etag = resp1['ETag']
+        resp2 = self.read_client.get(
+            self._snapshot_url('vocabulary', self.release.pk),
+            HTTP_IF_NONE_MATCH=etag,
+        )
+        self.assertEqual(resp2.status_code, 304)
+
+    def test_400_on_unknown_table(self):
+        resp = self.read_client.get(self._snapshot_url('bogus_table', self.release.pk))
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Unknown table', resp.data['detail'])
+
+    def test_latest_resolves_to_published(self):
+        resp = self.read_client.get(self._snapshot_url('vocabulary'))
+        self.assertEqual(resp.status_code, 200)
+        content = b''.join(resp.streaming_content).decode()
+        self.assertGreater(len(content.strip()), 0)
+
+    def test_source_filter_healthkey(self):
+        import json
+        url = self._snapshot_url('concept', self.release.pk) + '?source=HealthKey'
+        resp = self.read_client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        content = b''.join(resp.streaming_content).decode()
+        rows = [json.loads(l) for l in content.strip().split('\n') if l]
+        concept_ids = {r['concept_id'] for r in rows}
+        self.assertIn(8880002, concept_ids)
+        self.assertNotIn(8880001, concept_ids)
+
+    def test_source_filter_external(self):
+        import json
+        url = self._snapshot_url('concept', self.release.pk) + '?source=external'
+        resp = self.read_client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        content = b''.join(resp.streaming_content).decode()
+        rows = [json.loads(l) for l in content.strip().split('\n') if l]
+        concept_ids = {r['concept_id'] for r in rows}
+        self.assertIn(8880001, concept_ids)
+        self.assertNotIn(8880002, concept_ids)
+
+    def test_content_disposition_header(self):
+        resp = self.read_client.get(self._snapshot_url('vocabulary', self.release.pk))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(
+            f'vocabulary_{self.release.pk}.ndjson',
+            resp['Content-Disposition'],
+        )

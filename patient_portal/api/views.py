@@ -2,6 +2,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
@@ -5267,3 +5268,94 @@ def _serialize_vocab_release(release, include_checksums=False):
     if include_checksums:
         data['checksums'] = release.checksums
     return data
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary Snapshot — streaming NDJSON bulk download
+# ---------------------------------------------------------------------------
+
+class VocabSnapshotView(APIView):
+    """Stream all rows from a vocabulary table as newline-delimited JSON.
+
+    Uses raw SQL ``row_to_json()`` to avoid ORM overhead on large tables.
+    The table name is validated against a whitelist before interpolation.
+    """
+    permission_classes = [ScopedTokenPermission]
+
+    ALLOWED_TABLES = {
+        'concept': 'concept',
+        'concept_relationship': 'concept_relationship',
+        'concept_ancestor': 'concept_ancestor',
+        'concept_synonym': 'concept_synonym',
+        'drug_strength': 'drug_strength',
+        'source_to_concept_map': 'source_to_concept_map',
+        'vocabulary': 'vocabulary',
+    }
+
+    def get(self, request, table, release_id=None):
+        from django.http import HttpResponseNotModified, StreamingHttpResponse
+        from omop_core.models import VocabularyRelease
+        from omop_core.services.vocab_release import get_latest_release, get_release_etag
+
+        # 1. Validate table name
+        if table not in self.ALLOWED_TABLES:
+            return Response(
+                {'detail': f'Unknown table. Valid tables: {", ".join(sorted(self.ALLOWED_TABLES))}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 2. Resolve release
+        if release_id is None:
+            release = get_latest_release()
+        else:
+            release = VocabularyRelease.objects.filter(
+                pk=release_id, status='published',
+            ).first()
+        if release is None:
+            return Response({'detail': 'Release not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # 3. ETag / conditional request
+        etag = get_release_etag(release)
+        if_none_match = request.META.get('HTTP_IF_NONE_MATCH', '')
+        if _etag_matches(if_none_match, etag):
+            return HttpResponseNotModified()
+
+        # 4. Build WHERE clause (source filter for concept table only)
+        db_table = self.ALLOWED_TABLES[table]
+        where = ''
+        if table == 'concept':
+            source_param = request.query_params.get('source')
+            if source_param == 'HealthKey':
+                where = "WHERE source = 'HealthKey'"
+            elif source_param == 'external':
+                where = 'WHERE source IS NULL'
+
+        # 5. Stream NDJSON
+        sql = f'SELECT row_to_json(t) FROM {db_table} t {where}'
+        response = StreamingHttpResponse(
+            self._stream_ndjson(sql),
+            content_type='application/x-ndjson',
+        )
+        response['Content-Disposition'] = (
+            f'attachment; filename="{table}_{release.pk}.ndjson"'
+        )
+        if etag:
+            response['ETag'] = etag
+            response['Cache-Control'] = 'public, max-age=86400'
+        return response
+
+    @staticmethod
+    def _stream_ndjson(sql):
+        import json as _json
+        from django.db import connection
+        with connection.cursor() as cursor:
+            cursor.execute(sql)
+            while True:
+                rows = cursor.fetchmany(1000)
+                if not rows:
+                    break
+                for (row_json,) in rows:
+                    if isinstance(row_json, dict):
+                        yield _json.dumps(row_json) + '\n'
+                    else:
+                        yield str(row_json) + '\n'
