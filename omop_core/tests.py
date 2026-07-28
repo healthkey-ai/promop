@@ -1481,3 +1481,413 @@ class ReportRegimenMappingGapsCommandTest(TestCase):
         call_command('report_regimen_mapping_gaps', stdout=out)
         self.assertIn('No mapping gaps recorded.', out.getvalue())
 
+
+# ---------------------------------------------------------------------------
+# TI.4.2 Terminology maintenance (promop#305)
+#   - vocabulary deprecation (#05)
+#   - append-only version change-history (#01/#09)
+#   - concept-replacement resolution / embedded-term substitution (#07)
+# ---------------------------------------------------------------------------
+
+class TerminologyMaintenanceTest(TestCase):
+    """Vocabulary deprecation, version history, concept-replacement resolution."""
+
+    def setUp(self):
+        from omop_core.models import Relationship, ConceptRelationship
+        (self.vocab, self.dom_cond, self.dom_meas, self.dom_drug,
+         self.dom_type, self.dom_obs, self.cc) = _make_vocab()
+        # A deprecated concept that is 'Concept replaced by' an active successor,
+        # via one intermediate hop to exercise chain-following.
+        self.old = _concept(880001, 'Old ingredient', self.dom_drug, self.vocab, self.cc, code='OLD')
+        self.old.invalid_reason = 'U'
+        self.old.save(update_fields=['invalid_reason'])
+        self.mid = _concept(880002, 'Interim ingredient', self.dom_drug, self.vocab, self.cc, code='MID')
+        self.mid.invalid_reason = 'U'
+        self.mid.save(update_fields=['invalid_reason'])
+        self.new = _concept(880003, 'Current ingredient', self.dom_drug, self.vocab, self.cc, code='NEW')
+
+        self.rel, _ = Relationship.objects.get_or_create(
+            relationship_id='Concept replaced by',
+            defaults={
+                'relationship_name': 'Concept replaced by',
+                'is_hierarchical': 0,
+                'defines_ancestry': 0,
+                'reverse_relationship_id': 'Concept replaces',
+                'relationship_concept_id': 0,
+            },
+        )
+        for a, b in ((self.old, self.mid), (self.mid, self.new)):
+            ConceptRelationship.objects.get_or_create(
+                concept_1=a, concept_2=b, relationship=self.rel,
+                defaults={'valid_start_date': date(1970, 1, 1),
+                          'valid_end_date': date(2099, 12, 31)},
+            )
+
+    # --- #05 vocabulary deprecation ---
+
+    def test_vocabulary_deprecation_command_sets_flag(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from omop_core.models import Vocabulary
+
+        call_command('deprecate_vocabulary', 'OMOP_TEST',
+                     reason='Superseded', stdout=StringIO())
+        v = Vocabulary.objects.get(vocabulary_id='OMOP_TEST')
+        self.assertTrue(v.is_deprecated)
+        self.assertEqual(v.deprecated_date, date.today())
+        self.assertEqual(v.deprecated_reason, 'Superseded')
+
+    def test_deprecate_command_records_history_and_undo(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from omop_core.models import Vocabulary, VocabularyVersionHistory
+
+        call_command('deprecate_vocabulary', 'OMOP_TEST',
+                     reason='Superseded', stdout=StringIO())
+        hist = VocabularyVersionHistory.objects.filter(
+            vocabulary_id='OMOP_TEST',
+            action=VocabularyVersionHistory.ACTION_DEPRECATED,
+        )
+        self.assertEqual(hist.count(), 1)
+        self.assertEqual(hist.first().note, 'Superseded')
+
+        call_command('deprecate_vocabulary', 'OMOP_TEST', undo=True, stdout=StringIO())
+        v = Vocabulary.objects.get(vocabulary_id='OMOP_TEST')
+        self.assertFalse(v.is_deprecated)
+        self.assertIsNone(v.deprecated_date)
+
+    def test_deprecate_command_unknown_vocabulary_errors(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError):
+            call_command('deprecate_vocabulary', 'NOPE', stdout=StringIO())
+
+    # --- #01/#09 version change-history helper ---
+
+    def test_version_history_helper_records_each_action(self):
+        from omop_core.models import (
+            record_vocabulary_version_history, VocabularyVersionHistory,
+        )
+        record_vocabulary_version_history(
+            'LOINC', version='2.77', action=VocabularyVersionHistory.ACTION_LOADED,
+            cdm_release_date=date(2026, 1, 1),
+        )
+        record_vocabulary_version_history(
+            'LOINC', version='2.78', action=VocabularyVersionHistory.ACTION_REPLACED,
+        )
+        record_vocabulary_version_history(
+            'LOINC', version='2.78', action=VocabularyVersionHistory.ACTION_DEPRECATED,
+            note='retired',
+        )
+        rows = VocabularyVersionHistory.objects.filter(vocabulary_id='LOINC')
+        self.assertEqual(rows.count(), 3)
+        self.assertEqual(
+            set(rows.values_list('action', flat=True)),
+            {'loaded', 'replaced', 'deprecated'},
+        )
+        # Append-only: replaced does not overwrite the loaded row.
+        self.assertEqual(rows.filter(version='2.77').count(), 1)
+
+    # --- #07 concept-replacement resolution ---
+
+    def test_resolve_concept_replacement_follows_chain_to_active(self):
+        from omop_core.models import resolve_concept_replacement
+
+        resolved, chain = resolve_concept_replacement(self.old.concept_id)
+        self.assertEqual(resolved.concept_id, self.new.concept_id)
+        self.assertIsNone(resolved.invalid_reason)
+        self.assertEqual(chain, [880001, 880002, 880003])
+
+    def test_resolve_concept_replacement_active_concept_is_identity(self):
+        from omop_core.models import resolve_concept_replacement
+
+        resolved, chain = resolve_concept_replacement(self.new.concept_id)
+        self.assertEqual(resolved.concept_id, self.new.concept_id)
+        self.assertEqual(chain, [self.new.concept_id])
+
+    def test_resolve_concept_replacement_unknown_returns_none(self):
+        from omop_core.models import resolve_concept_replacement
+
+        resolved, chain = resolve_concept_replacement(999999999)
+        self.assertIsNone(resolved)
+        self.assertEqual(chain, [])
+
+
+# ---------------------------------------------------------------------------
+# TEST-07: VocabularyRelease model + service tests
+# ---------------------------------------------------------------------------
+
+class VocabularyReleaseModelTest(TestCase):
+    """Test VocabularyRelease CRUD and field defaults."""
+
+    def test_create_with_defaults(self):
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone
+
+        now = timezone.now()
+        vr = VocabularyRelease.objects.create(build_timestamp=now)
+        self.assertEqual(vr.status, 'staged')
+        self.assertEqual(vr.schema_version, '5.4')
+        self.assertEqual(vr.scope, [])
+        self.assertEqual(vr.vocab_versions, {})
+        self.assertEqual(vr.row_counts, {})
+        self.assertEqual(vr.checksums, {})
+        self.assertIsNone(vr.published_at)
+        self.assertIsNone(vr.athena_version)
+        self.assertIsNone(vr.notes)
+
+    def test_create_published(self):
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone
+
+        now = timezone.now()
+        vr = VocabularyRelease.objects.create(
+            build_timestamp=now,
+            scope=['SNOMED', 'LOINC'],
+            athena_version='v5.0 2024-07-01',
+            vocab_versions={'SNOMED': '20240701', 'LOINC': '2.77'},
+            row_counts={'concept': 500000, 'concept_relationship': 1200000},
+            checksums={'concept': {'count': 500000, 'max_id': 999999, 'min_id': 1}},
+            status='published',
+            published_at=now,
+            notes='Initial load',
+        )
+        vr.refresh_from_db()
+        self.assertEqual(vr.scope, ['SNOMED', 'LOINC'])
+        self.assertEqual(vr.vocab_versions['LOINC'], '2.77')
+        self.assertEqual(vr.row_counts['concept'], 500000)
+        self.assertEqual(vr.status, 'published')
+        self.assertIn('concept', vr.checksums)
+
+    def test_str_representation(self):
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone
+
+        now = timezone.now()
+        vr = VocabularyRelease.objects.create(
+            build_timestamp=now, status='published', published_at=now,
+        )
+        s = str(vr)
+        self.assertIn('published', s)
+        self.assertIn(str(vr.pk), s)
+
+    def test_ordering_by_published_at(self):
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone
+        from datetime import timedelta
+
+        now = timezone.now()
+        older = VocabularyRelease.objects.create(
+            build_timestamp=now - timedelta(hours=2),
+            status='published', published_at=now - timedelta(hours=2),
+        )
+        newer = VocabularyRelease.objects.create(
+            build_timestamp=now,
+            status='published', published_at=now,
+        )
+        releases = list(VocabularyRelease.objects.all())
+        self.assertEqual(releases[0].pk, newer.pk)
+        self.assertEqual(releases[1].pk, older.pk)
+
+
+class VocabularyReleaseServiceTest(TestCase):
+    """Test get_latest_release() and get_release_etag()."""
+
+    def test_get_latest_release_empty(self):
+        from omop_core.services.vocab_release import get_latest_release
+        self.assertIsNone(get_latest_release())
+
+    def test_get_latest_release_ignores_staged(self):
+        from omop_core.models import VocabularyRelease
+        from omop_core.services.vocab_release import get_latest_release
+        from django.utils import timezone
+
+        VocabularyRelease.objects.create(
+            build_timestamp=timezone.now(), status='staged',
+        )
+        self.assertIsNone(get_latest_release())
+
+    def test_get_latest_release_returns_most_recent_published(self):
+        from omop_core.models import VocabularyRelease
+        from omop_core.services.vocab_release import get_latest_release
+        from django.utils import timezone
+        from datetime import timedelta
+
+        now = timezone.now()
+        VocabularyRelease.objects.create(
+            build_timestamp=now - timedelta(days=1),
+            status='published', published_at=now - timedelta(days=1),
+        )
+        newer = VocabularyRelease.objects.create(
+            build_timestamp=now,
+            status='published', published_at=now,
+        )
+        VocabularyRelease.objects.create(
+            build_timestamp=now, status='retired',
+            published_at=now - timedelta(hours=1),
+        )
+        result = get_latest_release()
+        self.assertEqual(result.pk, newer.pk)
+
+    def test_get_release_etag_none(self):
+        from omop_core.services.vocab_release import get_release_etag
+        self.assertIsNone(get_release_etag(None))
+
+    def test_get_release_etag_format(self):
+        from omop_core.models import VocabularyRelease
+        from omop_core.services.vocab_release import get_release_etag
+        from django.utils import timezone
+
+        now = timezone.now()
+        vr = VocabularyRelease.objects.create(
+            build_timestamp=now, status='published', published_at=now,
+        )
+        etag = get_release_etag(vr)
+        self.assertTrue(etag.startswith('"vr-'))
+        self.assertTrue(etag.endswith('"'))
+        self.assertIn(str(vr.pk), etag)
+
+    def test_get_release_etag_stable(self):
+        from omop_core.models import VocabularyRelease
+        from omop_core.services.vocab_release import get_release_etag
+        from django.utils import timezone
+
+        now = timezone.now()
+        vr = VocabularyRelease.objects.create(
+            build_timestamp=now, status='published', published_at=now,
+        )
+        self.assertEqual(get_release_etag(vr), get_release_etag(vr))
+
+    def test_get_release_etag_unique_across_releases(self):
+        from omop_core.models import VocabularyRelease
+        from omop_core.services.vocab_release import get_release_etag
+        from django.utils import timezone
+        from datetime import timedelta
+
+        now = timezone.now()
+        vr1 = VocabularyRelease.objects.create(
+            build_timestamp=now - timedelta(hours=1),
+            status='published', published_at=now - timedelta(hours=1),
+        )
+        vr2 = VocabularyRelease.objects.create(
+            build_timestamp=now,
+            status='published', published_at=now,
+        )
+        self.assertNotEqual(get_release_etag(vr1), get_release_etag(vr2))
+
+
+# ---------------------------------------------------------------------------
+# TEST-08: STCM loader + VocabularyRelease publication from loader
+# ---------------------------------------------------------------------------
+
+class LoadSTCMTest(_OmopBase):
+    """Test _load_source_to_concept_map in the Athena loader."""
+
+    PERSON_ID = 90290
+
+    def _run_loader(self, method_name, filename, header, rows):
+        import os
+        import tempfile
+        from io import StringIO
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, filename), 'w', encoding='utf-8', newline='') as f:
+            f.write('\t'.join(header) + '\n')
+            for r in rows:
+                f.write('\t'.join(str(x) for x in r) + '\n')
+        cmd = Command(stdout=StringIO())
+        cmd._base = d
+        cmd._gcs_bucket = None
+        cmd._direct = False
+        return getattr(cmd, method_name)(False)
+
+    def test_stcm_loads_and_filters_unloaded_refs(self):
+        from omop_core.models import SourceToConceptMap
+        src = _concept(960001, 'Source concept', self.dom_meas, self.vocab, self.cc, code='SRC1')
+        tgt = _concept(960002, 'Target concept', self.dom_meas, self.vocab, self.cc, code='TGT1')
+        header = [
+            'source_code', 'source_concept_id', 'source_vocabulary_id',
+            'source_code_description', 'target_concept_id', 'target_vocabulary_id',
+            'valid_start_date', 'valid_end_date', 'invalid_reason',
+        ]
+        count = self._run_loader(
+            '_load_source_to_concept_map', 'SOURCE_TO_CONCEPT_MAP.csv', header,
+            [
+                ('ABC', 960001, 'OMOP_TEST', 'desc', 960002, 'OMOP_TEST', '19700101', '20991231', ''),
+                ('DEF', 999998, 'OMOP_TEST', '', 960002, 'OMOP_TEST', '19700101', '20991231', ''),  # src not loaded
+                ('GHI', 960001, 'OMOP_TEST', '', 999997, 'OMOP_TEST', '19700101', '20991231', ''),  # tgt not loaded
+            ],
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual(SourceToConceptMap.objects.count(), 1)
+        row = SourceToConceptMap.objects.first()
+        self.assertEqual(row.source_code, 'ABC')
+        self.assertEqual(row.source_concept_id, 960001)
+        self.assertEqual(row.target_concept_id, 960002)
+
+    def test_stcm_dry_run_returns_count_without_writing(self):
+        import os
+        import tempfile
+        from io import StringIO
+        from omop_core.models import SourceToConceptMap
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        _concept(960001, 'Source concept', self.dom_meas, self.vocab, self.cc, code='SRC1')
+        _concept(960002, 'Target concept', self.dom_meas, self.vocab, self.cc, code='TGT1')
+        header = [
+            'source_code', 'source_concept_id', 'source_vocabulary_id',
+            'source_code_description', 'target_concept_id', 'target_vocabulary_id',
+            'valid_start_date', 'valid_end_date', 'invalid_reason',
+        ]
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, 'SOURCE_TO_CONCEPT_MAP.csv'), 'w', encoding='utf-8', newline='') as f:
+            f.write('\t'.join(header) + '\n')
+            f.write('\t'.join(str(x) for x in ('ABC', 960001, 'OMOP_TEST', '', 960002, 'OMOP_TEST', '19700101', '20991231', '')) + '\n')
+        cmd = Command(stdout=StringIO())
+        cmd._base = d
+        cmd._gcs_bucket = None
+        cmd._direct = False
+        count = cmd._load_source_to_concept_map(True)  # dry_run=True
+        self.assertEqual(count, 1)
+        self.assertEqual(SourceToConceptMap.objects.count(), 0)
+
+    def test_stcm_missing_file_returns_zero(self):
+        import tempfile
+        from io import StringIO
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        d = tempfile.mkdtemp()  # empty dir, no SOURCE_TO_CONCEPT_MAP.csv
+        cmd = Command(stdout=StringIO())
+        cmd._base = d
+        cmd._gcs_bucket = None
+        cmd._direct = False
+        count = cmd._load_source_to_concept_map(False)
+        self.assertEqual(count, 0)
+
+
+class PublishReleaseTest(_OmopBase):
+    """Test _publish_release creates a VocabularyRelease row."""
+
+    PERSON_ID = 90291
+
+    def test_publish_release_creates_row(self):
+        import time as _time
+        from io import StringIO
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        from omop_core.models import VocabularyRelease
+
+        cmd = Command(stdout=StringIO())
+        cmd._build_start = _time.time()
+        cmd._cdm_vocab_version = 'v5.0 2024-07-01'
+        counts = {'concept': 100, 'vocabulary': 5}
+        cmd._publish_release(counts)
+
+        self.assertEqual(VocabularyRelease.objects.count(), 1)
+        release = VocabularyRelease.objects.first()
+        self.assertEqual(release.status, 'published')
+        self.assertIsNotNone(release.published_at)
+        self.assertEqual(release.athena_version, 'v5.0 2024-07-01')
+        self.assertEqual(release.row_counts, {'concept': 100, 'vocabulary': 5})
+        self.assertIn('concept', release.checksums)
+        self.assertIn('vocabulary', release.checksums)
+

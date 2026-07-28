@@ -125,6 +125,32 @@ class LabSyncPermission(ScopedTokenPermission):
         return super().has_permission(request, view)
 
 
+_SURVEY_PATIENT_METHODS = frozenset(('GET', 'HEAD', 'OPTIONS', 'POST', 'PATCH'))
+
+
+class SurveyResponsePermission(ScopedTokenPermission):
+    """ScopedTokenPermission that also allows POST for patient survey responses.
+
+    Patients need to create survey responses (start a survey) and autosave
+    answers via PATCH. The viewset enforces per-person authorization via
+    _OmopFilterMixin and PatientSelfScopePermission, so allowing POST/PATCH
+    here is safe. Staff and superusers retain full access.
+
+    Service tokens and OAuth2 SMART scopes are handled exactly as in the
+    base class.
+    """
+
+    def has_permission(self, request, view):
+        token = request.auth
+        if token is None or isinstance(token, TokenClaims):
+            if not (request.user and request.user.is_authenticated):
+                return False
+            if request.user.is_superuser or getattr(request.user, 'is_staff', False):
+                return True
+            return request.method in _SURVEY_PATIENT_METHODS
+        return super().has_permission(request, view)
+
+
 class IsStaffPermission(BasePermission):
     """Allow access only to staff users (is_staff=True)."""
 
@@ -141,10 +167,12 @@ def _resolve_person_id(obj):
 
     Returns the person_id (int) or None if it cannot be determined.
 
-    Handles two patterns:
+    Handles three patterns:
     - Direct FK: obj.person_id (covers Person, PatientRecord, ConditionOccurrence,
       DrugExposure, Measurement, Observation, ProcedureOccurrence, Episode,
       PatientDocument, PatientTrialEnrollment, PatientSurveyResponse)
+    - PatientConsent/PatientMessage: has patient_user_id FK. Resolves via
+      PatientUser.objects.values_list('person_id', ...).
     - EpisodeEvent: has a bare episode_id (BigIntegerField, not a FK). Resolves
       via Episode.objects.values_list('person_id', ...).
     """
@@ -153,7 +181,16 @@ def _resolve_person_id(obj):
     if pid is not None:
         return pid
 
-    # Pattern 2: EpisodeEvent — resolve via Episode table
+    # Pattern 2: PatientConsent — resolve via PatientUser.person_id
+    patient_user_id = getattr(obj, 'patient_user_id', None)
+    if patient_user_id is not None:
+        from patient_portal.models import PatientUser
+        try:
+            return PatientUser.objects.values_list('person_id', flat=True).get(pk=patient_user_id)
+        except PatientUser.DoesNotExist:
+            return None
+
+    # Pattern 3: EpisodeEvent — resolve via Episode table
     episode_id = getattr(obj, 'episode_id', None)
     if episode_id is not None:
         from omop_oncology.models import Episode

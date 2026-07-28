@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from patient_portal.models import Identity
+from patient_portal.models import Identity, PatientConsent, PatientMessage
 from omop_core.models import (
     PatientRecord, Concept,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
@@ -7,6 +7,7 @@ from omop_core.models import (
     Survey, PatientSurveyResponse,
     StemCellTransplant, SctEligibility, PostTransformationOutcome,
     Organization, OrgTrust, OrgInvitation, GroupAccess,
+    InterchangeAgreement,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from datetime import date
@@ -26,7 +27,9 @@ class UserSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'sub', 'email', 'name', 'is_staff', 'is_superuser',
             'is_org_admin', 'org_accesses', 'is_patient', 'person_id',
+            'must_change_password',
         ]
+        read_only_fields = ['must_change_password']
 
     def _patient_person(self, obj):
         """Memoized patient-record lookup so is_patient/person_id share one query."""
@@ -70,7 +73,7 @@ class UserSerializer(serializers.ModelSerializer):
 class OrganizationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Organization
-        fields = ['id', 'name', 'slug', 'is_active', 'allows_public_aggregated_data', 'created_at']
+        fields = ['id', 'name', 'slug', 'is_active', 'allows_public_aggregated_data', 'allows_patient_signup', 'created_at']
         read_only_fields = ['id', 'created_at']
 
 
@@ -82,6 +85,18 @@ class PatientInvitationSerializer(serializers.ModelSerializer):
         from patient_portal.models import PatientInvitation
         model = PatientInvitation
         fields = ['id', 'person_id', 'email', 'status', 'created_at', 'expires_at', 'accepted_at']
+        read_only_fields = fields
+
+
+class AuditEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        from patient_portal.models import AuditEvent
+        model = AuditEvent
+        fields = [
+            'id', 'event_type', 'timestamp', 'method', 'path', 'status_code',
+            'user_id', 'user_email', 'client_id', 'resource_id', 'ip_address',
+            'duration_ms', 'detail',
+        ]
         read_only_fields = fields
 
 
@@ -128,14 +143,15 @@ class OrgInvitationSerializer(serializers.ModelSerializer):
     status = serializers.SerializerMethodField()
     org_slug = serializers.SlugRelatedField(source='org', slug_field='slug', read_only=True)
     redirect_url = serializers.SerializerMethodField()
+    person_id = serializers.IntegerField(source='person.person_id', read_only=True, default=None)
 
     class Meta:
         model = OrgInvitation
         fields = [
-            'id', 'org_slug', 'email', 'role', 'redirect_url', 'status',
+            'id', 'org_slug', 'email', 'role', 'redirect_url', 'person_id', 'status',
             'expires_at', 'created_at',
         ]
-        read_only_fields = ['id', 'org_slug', 'redirect_url', 'status', 'expires_at', 'created_at']
+        read_only_fields = ['id', 'org_slug', 'redirect_url', 'person_id', 'status', 'expires_at', 'created_at']
 
     def get_status(self, obj):
         return obj.status
@@ -282,7 +298,46 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             {c.concept_id: c for c in Concept.objects.filter(concept_id__in=concept_ids).only('concept_id', 'concept_name')}
             if concept_ids else {}
         )
-        return super().to_representation(instance)
+        data = super().to_representation(instance)
+        return self._apply_demographic_redaction(instance, data)
+
+    # PHR-S FM PH.1.2#05 — consent/preference-driven demographic rendering.
+    # Fields suppressed for non-owner readers when the patient has opted in via
+    # PatientRecord.suppress_demographics_for_others.
+    REDACTED_DEMOGRAPHIC_FIELDS = (
+        'date_of_birth', 'age', 'patient_age',
+        'country', 'region', 'city', 'postal_code', 'longitude', 'latitude',
+        'patient_name', 'name',
+    )
+
+    def _apply_demographic_redaction(self, instance, data):
+        """Redact selected demographics unless the reader is the account holder.
+
+        Bounded minimal hook (issue #307). Requires a ``request`` in serializer
+        context to identify the reader; when absent (internal/derivation code
+        paths) no redaction is applied. Wiring redaction into every read path
+        that omits serializer context is documented as deferred.
+        """
+        if not getattr(instance, 'suppress_demographics_for_others', False):
+            return data
+        request = self.context.get('request')
+        if request is None or self._is_account_holder(request, instance):
+            return data
+        for field in self.REDACTED_DEMOGRAPHIC_FIELDS:
+            if field in data:
+                data[field] = None
+        data['demographics_redacted'] = True
+        return data
+
+    @staticmethod
+    def _is_account_holder(request, instance):
+        user = getattr(request, 'user', None)
+        if user is None or not getattr(user, 'is_authenticated', False):
+            return False
+        from patient_portal.models import PatientUser
+        return PatientUser.objects.filter(
+            identity=user, person_id=instance.person_id,
+        ).exists()
 
     def get_age(self, obj):
         if obj.date_of_birth:
@@ -468,6 +523,7 @@ class ConditionOccurrenceSerializer(serializers.ModelSerializer):
             'condition_type_concept', 'condition_status_concept',
             'stop_reason', 'condition_source_value', 'condition_source_concept',
             'condition_status_source_value',
+            'is_erroneous', 'erroneous_reason',
         ]
         extra_kwargs = {'condition_occurrence_id': {'required': False}}
 
@@ -483,6 +539,7 @@ class DrugExposureSerializer(serializers.ModelSerializer):
             'route_concept', 'lot_number',
             'drug_source_value', 'drug_source_concept',
             'route_source_value', 'dose_unit_source_value',
+            'is_erroneous', 'erroneous_reason',
         ]
         extra_kwargs = {'drug_exposure_id': {'required': False}}
 
@@ -498,6 +555,7 @@ class MeasurementSerializer(serializers.ModelSerializer):
             'unit_concept', 'range_low', 'range_high',
             'measurement_source_value', 'measurement_source_concept',
             'unit_source_value', 'value_source_value',
+            'is_erroneous', 'erroneous_reason',
         ]
         extra_kwargs = {'measurement_id': {'required': False}}
 
@@ -513,6 +571,7 @@ class ObservationSerializer(serializers.ModelSerializer):
             'qualifier_concept', 'unit_concept',
             'observation_source_value', 'observation_source_concept',
             'unit_source_value', 'qualifier_source_value', 'value_source_value',
+            'is_erroneous', 'erroneous_reason',
         ]
         extra_kwargs = {'observation_id': {'required': False}}
 
@@ -527,6 +586,7 @@ class ProcedureOccurrenceSerializer(serializers.ModelSerializer):
             'procedure_type_concept', 'modifier_concept', 'quantity',
             'procedure_source_value', 'procedure_source_concept',
             'modifier_source_value',
+            'is_erroneous', 'erroneous_reason',
         ]
         extra_kwargs = {'procedure_occurrence_id': {'required': False}}
 
@@ -558,7 +618,8 @@ class PatientDocumentSerializer(serializers.ModelSerializer):
         model = PatientDocument
         fields = [
             'id', 'person', 'doc_type', 'title',
-            'file_url', 'file_name', 'verified', 'uploaded_at',
+            'file', 'file_url', 'file_name', 'verified', 'uploaded_at',
+            'status', 'effective_date',
         ]
 
 
@@ -621,10 +682,115 @@ class PatientSurveyResponseSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('values_dates must be a dict.')
         return value
 
+    def validate_completed_at(self, value):
+        if self.instance and self.instance.completed_at is not None and value is None:
+            raise serializers.ValidationError('Cannot re-open a completed survey.')
+        return value
+
     def update(self, instance, validated_data):
+        # Strip immutable identity fields — person and survey are set on create only.
+        validated_data.pop('person', None)
+        validated_data.pop('survey', None)
         # Merge incoming values/values_dates into existing dicts (autosave support).
         for field in ('values', 'values_dates'):
             if field in validated_data:
                 current = getattr(instance, field) or {}
                 validated_data[field] = {**current, **validated_data[field]}
         return super().update(instance, validated_data)
+
+
+# ---------------------------------------------------------------------------
+# Patient consent serializer
+# ---------------------------------------------------------------------------
+
+class PatientConsentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PatientConsent
+        fields = ['id', 'consent_type', 'consent_granted', 'consent_date', 'consent_document']
+        read_only_fields = ['id', 'consent_type', 'consent_date', 'consent_document']
+
+
+# ---------------------------------------------------------------------------
+# Patient message serializer (bidirectional messaging — Phase 4b)
+# ---------------------------------------------------------------------------
+
+class PatientMessageSerializer(serializers.ModelSerializer):
+    sender_name = serializers.SerializerMethodField()
+    reply_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PatientMessage
+        fields = ['id', 'patient_user', 'parent', 'sender', 'sender_name',
+                  'subject', 'message', 'sender_is_patient', 'is_read',
+                  'read_at', 'confidentiality', 'reply_count', 'created_at']
+        read_only_fields = ['id', 'sender', 'sender_is_patient', 'is_read',
+                            'read_at', 'sender_name', 'reply_count',
+                            'created_at']
+        extra_kwargs = {
+            'patient_user': {'required': False},  # Auto-set by perform_create for patients
+        }
+
+    def get_sender_name(self, obj):
+        if obj.sender:
+            return obj.sender.name or obj.sender.email or str(obj.sender)
+        return "Patient" if obj.sender_is_patient else "Provider"
+
+    def get_reply_count(self, obj):
+        if hasattr(obj, '_reply_count'):
+            return obj._reply_count
+        return obj.replies.count()
+
+    # Cross-thread reply validation is in PatientMessageViewSet.perform_create
+    # where the resolved patient_user is known (not in self.initial_data).
+
+
+class ImmunizationSerializer(serializers.ModelSerializer):
+    """Read-only serializer for immunization DrugExposure rows (route_source_value='VACCINE')."""
+    vaccine_name = serializers.SerializerMethodField()
+    date = serializers.DateField(source='drug_exposure_start_date')
+
+    class Meta:
+        model = DrugExposure
+        fields = ['drug_exposure_id', 'vaccine_name', 'date', 'lot_number']
+
+    def get_vaccine_name(self, obj):
+        if obj.drug_concept and obj.drug_concept.concept_name:
+            return obj.drug_concept.concept_name
+        return obj.drug_source_value or 'Unknown vaccine'
+
+
+class AllergySerializer(serializers.ModelSerializer):
+    """Read-only serializer for allergy Observation rows (qualifier_source_value='ALLERGY')."""
+    allergen_name = serializers.SerializerMethodField()
+    criticality = serializers.CharField(source='value_as_string', default='')
+    clinical_status = serializers.CharField(source='value_source_value', default='')
+    recorded_date = serializers.DateField(source='observation_date')
+
+    class Meta:
+        model = Observation
+        fields = ['observation_id', 'allergen_name', 'criticality', 'clinical_status', 'recorded_date']
+
+    def get_allergen_name(self, obj):
+        if obj.observation_concept and obj.observation_concept.concept_name:
+            return obj.observation_concept.concept_name
+        return obj.observation_source_value or 'Unknown allergen'
+
+
+class InterchangeAgreementSerializer(serializers.ModelSerializer):
+    """Read-only serializer for documented interchange agreements (TI.5.4#01)."""
+    partner_organization_name = serializers.CharField(
+        source='partner_organization.name', read_only=True, default=None,
+    )
+    in_effect = serializers.SerializerMethodField()
+
+    class Meta:
+        model = InterchangeAgreement
+        fields = [
+            'id', 'partner_name', 'partner_organization', 'partner_organization_name',
+            'standards_supported', 'standard_versions',
+            'effective_date', 'expiry_date', 'status', 'active', 'in_effect',
+            'notes', 'created_at', 'updated_at',
+        ]
+
+    def get_in_effect(self, obj):
+        return obj.is_in_effect()

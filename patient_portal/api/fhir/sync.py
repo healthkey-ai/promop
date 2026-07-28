@@ -185,6 +185,28 @@ class FhirSyncView(APIView):
 
     @transaction.atomic
     def post(self, request):
+        # Bounded multi-version interchange (TI.5.2#01): decline non-R4 requests.
+        from patient_portal.api.fhir.integrity import (
+            check_fhir_version, verify_content_digest,
+        )
+        version_error = check_fhir_version(request)
+        if version_error:
+            return Response({'detail': version_error},
+                            status=status.HTTP_406_NOT_ACCEPTABLE)
+
+        # Content integrity (S.3.6#10 / PH.2.3#09): opt-in digest of the raw
+        # request body. No integrity header → unchanged behavior. Guarded so a
+        # consumed request stream can never break existing (no-header) clients.
+        try:
+            raw_body = request.body
+        except Exception:
+            raw_body = None
+        if raw_body is not None:
+            digest_error = verify_content_digest(request, raw_body)
+            if digest_error:
+                return Response({'detail': digest_error},
+                                status=status.HTTP_400_BAD_REQUEST)
+
         serializer = FhirSyncRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -531,6 +553,7 @@ class FhirSyncView(APIView):
                 drug_exposure_start_date=date,
                 drug_type_concept=ehr_type,
                 drug_source_value=_source_text(imm.get('vaccineCode'))[:50],
+                route_source_value='VACCINE',
             ))
         return self._upsert_clinical(
             DrugExposure, 'drug_exposure_id', 'drug_concept_id',
@@ -538,15 +561,21 @@ class FhirSyncView(APIView):
 
     def _ingest_clinical_observations(self, person, allergies, reports, ehr_type, no_match, cache, source_user_id, org):
         # AllergyIntolerance + DiagnosticReport land in the OMOP observation table.
+        # Allergies are tagged with qualifier_source_value='ALLERGY' so they can
+        # be filtered separately for the allergy list endpoint (PHR-S FM PH.2.5).
         items = [
             {'code': a.get('code'),
              'effective': a.get('recordedDate') or a.get('onsetDateTime'),
-             'value': a.get('criticality') or _source_text(a.get('clinicalStatus'))}
+             'value': a.get('criticality') or '',
+             'qualifier': 'ALLERGY',
+             'value_source': _source_text(a.get('clinicalStatus'))[:50]}
             for a in allergies
         ] + [
             {'code': r.get('code'),
              'effective': r.get('effectiveDateTime') or r.get('issued'),
-             'value': r.get('conclusion') or ''}
+             'value': r.get('conclusion') or '',
+             'qualifier': None,
+             'value_source': None}
             for r in reports
         ]
         rows = []
@@ -563,6 +592,8 @@ class FhirSyncView(APIView):
                 observation_type_concept=ehr_type,
                 value_as_string=(item['value'] or '')[:60],
                 observation_source_value=_source_text(item['code'])[:50],
+                qualifier_source_value=item.get('qualifier'),
+                value_source_value=item.get('value_source'),
             ))
         return self._upsert_clinical(
             Observation, 'observation_id', 'observation_concept_id',

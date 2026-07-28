@@ -168,7 +168,7 @@ def _claim_placeholder_access(identity: Identity, email: str | None) -> None:
         issuer="urn:local",
     ).exclude(pk=identity.pk)
 
-    role_rank = {"org_admin": 3, "doctor": 2, "analyst": 1}
+    role_rank = {"org_admin": 3, "doctor": 2, "analyst": 1, "patient": 0}
     for placeholder in placeholders:
         if placeholder.has_usable_password():
             continue

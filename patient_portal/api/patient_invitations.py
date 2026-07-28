@@ -30,7 +30,6 @@ from .serializers import PatientInvitationSerializer
 logger = logging.getLogger(__name__)
 
 INVITE_TTL_DAYS = 7
-MIN_PASSWORD_LENGTH = 8
 
 
 class PatientInvitationEmailError(Exception):
@@ -198,9 +197,11 @@ def accept_patient_invitation(request):
     if err is not None:
         return err
 
-    if len(password) < MIN_PASSWORD_LENGTH:
+    from patient_portal.services import password_validation_errors
+    pw_errors = password_validation_errors(password, email=invitation.email)
+    if pw_errors:
         return Response(
-            {'error': f'Password must be at least {MIN_PASSWORD_LENGTH} characters.'},
+            {'error': ' '.join(pw_errors)},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -210,14 +211,17 @@ def accept_patient_invitation(request):
             identity = (
                 Identity.objects.filter(issuer='urn:local', email__iexact=email).order_by('id').first()
             )
+            from patient_portal.services import record_password
             if identity is None:
                 identity = Identity.objects.create_user(email=email, password=password)
+                record_password(identity)
             elif not identity.has_usable_password():
                 # Claim a placeholder local account (e.g. one created by an earlier
                 # invite with no password yet). Safe to set the chosen password.
                 identity.set_password(password)
                 identity.is_active = True
                 identity.save(update_fields=['password', 'is_active'])
+                record_password(identity)
             else:
                 # A real account already exists for this email — never overwrite its
                 # credentials from a token-gated public endpoint (that email could
