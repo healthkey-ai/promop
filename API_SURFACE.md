@@ -159,7 +159,7 @@ All field values originate from OMOP tables and are kept current by the signal c
 }
 ```
 
-`lines_of_therapy[]` is a read-only structured view of the flat `first/second/later_*` therapy fields. `regimen_source` is `asserted` or `inferred` (from `therapy_ids_provenance`). 3L+ lines are emitted one per `later_therapy_ids` entry (so `line` starts at 3 and may be non-contiguous if 2L is empty); their `component_ids`/dates/outcome are the aggregate `later_*` values, flagged `later_aggregate: true`.
+`lines_of_therapy[]` is a read-only structured view of the flat `first/second/later_*` therapy fields. `line` numbers reflect populated lines only, so the array may not start at 1 and may be non-contiguous (e.g. begins at 2 if 1L is empty, skips a gap if 2L is empty). `regimen_source` is `asserted` or `inferred` (from `therapy_ids_provenance`); while provenance is not yet populated by the derivation pipeline, a resolved `regimen_concept_id` is reported as `inferred` and is never labelled `asserted` — trust `asserted`, verify `inferred`. 3L+ lines are emitted one per later line (from `later_therapies`, including lines whose regimen did not resolve to a concept_id — so `regimen_concept_id` may be `null`), each naming its own regimen with its own dates; their `component_ids`/outcome are the aggregate `later_*` values, flagged `later_aggregate: true` (do not union `component_ids` across `later_aggregate` entries — they repeat the same aggregate set).
 
 ---
 

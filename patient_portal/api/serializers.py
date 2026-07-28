@@ -256,6 +256,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         read_only_fields = (
             'organization', 'person', 'created_at', 'updated_at',
             'first_line_therapy_display', 'second_line_therapy_display', 'later_therapy_display',
+            'lines_of_therapy',
             'death_date',
             # Derived therapy-id read model (issue #236): written only by the
             # derivation pipeline (refresh_patient_record / FHIR upload) from
@@ -265,6 +266,10 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             'first_line_component_ids', 'second_line_component_ids',
             'later_component_ids', 'therapy_component_ids',
             'therapy_ids_provenance',
+            # Per-line later-therapy structure (regimen/lineNumber/concept_id/
+            # dates) is derived from OMOP; lines_of_therapy surfaces its
+            # concept_ids as authoritative, so a client must never PATCH it.
+            'later_therapies',
             # Wearable summaries are written by the device-sync service, never by the client API.
             'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
             'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
@@ -376,13 +381,17 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         first/second/later_* read-model fields (promop#249).
 
         Each entry: line number, regimen text + HemOnc concept_id (with its
-        asserted-vs-inferred `regimen_source` and `release_id` from
-        `therapy_ids_provenance`), component concept_ids, dates, outcome, intent,
-        and discontinuation reason. 3L+ lines are emitted one-per
-        `later_therapy_ids` entry so a per-line regimen concept_id supersedes the
-        flat list; their `component_ids`/dates/outcome remain the aggregate
-        `later_*` values (source data is not per-later-line), flagged with
-        `later_aggregate: true`.
+        `regimen_source` and `release_id` from `therapy_ids_provenance`, falling
+        back to `regimen_source='inferred'` for a resolved concept_id until
+        provenance is recorded), component concept_ids, dates (ISO strings),
+        outcome, intent, and discontinuation reason. 3L+ lines are emitted
+        one-per `later_therapies` entry (the authoritative per-line list, which
+        includes lines whose regimen did not resolve to a concept_id), each
+        naming its own regimen and carrying its own concept_id (may be null) and
+        dates; the `component_ids`/outcome remain the aggregate `later_*` values
+        (not per-later-line), flagged with `later_aggregate: true`. Older records
+        derived before `later_therapies` carried per-line concept_ids fall back
+        to one entry per resolved `later_therapy_ids` id.
         """
         prov = obj.therapy_ids_provenance if isinstance(obj.therapy_ids_provenance, dict) else {}
 
@@ -390,17 +399,35 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             p = prov.get(field)
             return p.get(key) if isinstance(p, dict) else None
 
+        def _iso(v):
+            # DateField values load from the DB as date objects, but an
+            # in-memory instance may carry a raw string (Django does not coerce
+            # on attribute assignment). Emit ISO either way, never crash.
+            return v.isoformat() if hasattr(v, 'isoformat') else (v or None)
+
         def _line(n, regimen, cid, prov_field, comp, start, end,
                   outcome, intent, disc, later_aggregate=False):
+            origin = _prov(prov_field, 'origin')
+            # `therapy_ids_provenance` is written only where the derivation
+            # pipeline records it; today most paths leave it empty (promop#249
+            # follow-up). Rather than emit a misleading `null` for a resolved
+            # regimen, fall back to 'inferred' — the derivation infers regimen
+            # identity from drug exposures. We never default to 'asserted', so a
+            # consumer may trust an 'asserted' value but must verify 'inferred'.
+            if origin is None and cid:
+                origin = 'inferred'
             entry = {
                 'line': n,
                 'regimen': regimen,
                 'regimen_concept_id': cid,
-                'regimen_source': _prov(prov_field, 'origin'),
+                'regimen_source': origin,
                 'release_id': _prov(prov_field, 'release_id'),
                 'component_ids': comp or [],
-                'start_date': start,
-                'end_date': end,
+                # ISO strings on the wire, consistent with the flat *_date fields
+                # (DRF DateField); avoids raw date objects leaking to consumers
+                # that json.dumps the payload themselves.
+                'start_date': _iso(start),
+                'end_date': _iso(end),
                 'outcome': outcome,
                 'intent': intent,
                 'discontinuation_reason': disc,
@@ -414,31 +441,70 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             lines.append(_line(
                 1, obj.first_line_therapy, obj.first_line_therapy_id,
                 'first_line_therapy_id', obj.first_line_component_ids,
-                obj.first_line_start_date, obj.first_line_end_date,
+                obj.first_line_start_date or obj.first_line_date, obj.first_line_end_date,
                 obj.first_line_outcome, obj.first_line_intent,
                 obj.first_line_discontinuation_reason))
         if obj.second_line_therapy or obj.second_line_therapy_id:
             lines.append(_line(
                 2, obj.second_line_therapy, obj.second_line_therapy_id,
                 'second_line_therapy_id', obj.second_line_component_ids,
-                obj.second_line_start_date, obj.second_line_end_date,
+                obj.second_line_start_date or obj.second_line_date, obj.second_line_end_date,
                 obj.second_line_outcome, obj.second_line_intent,
                 obj.second_line_discontinuation_reason))
 
-        later_ids = obj.later_therapy_ids or []
-        if later_ids:
-            for i, cid in enumerate(later_ids):
+        # 3L+ lines: iterate the authoritative per-line `later_therapies` list,
+        # which includes lines whose regimen did not resolve to a concept_id, so
+        # no later line is dropped. Each entry names its own regimen and carries
+        # its own line number, concept_id, and dates; component_ids/outcome
+        # remain the aggregate `later_*` values (flagged later_aggregate).
+        later_therapies = [lt for lt in (obj.later_therapies or []) if isinstance(lt, dict)]
+        # Only the new shape carries a per-line `concept_id` key. Records derived
+        # before this change have `later_therapies` entries without that key and
+        # with resolved ids in the separate `later_therapy_ids` list.
+        has_per_line_ids = any('concept_id' in lt for lt in later_therapies)
+        if later_therapies:
+            if has_per_line_ids:
+                # New shape: line number and id are authoritative per entry.
+                aligned_ids = [lt.get('concept_id') for lt in later_therapies]
+                line_nums = [lt.get('lineNumber') for lt in later_therapies]
+            else:
+                # Legacy shape: no per-line id/line. Preserve the per-line
+                # entries (count, names, dates); align resolved ids positionally
+                # only when every later line resolved (equal counts) — otherwise
+                # the subset in later_therapy_ids can't be mapped to a line.
+                later_ids = obj.later_therapy_ids or []
+                aligned_ids = (later_ids if len(later_ids) == len(later_therapies)
+                               else [None] * len(later_therapies))
+                line_nums = [None] * len(later_therapies)
+            for i, lt in enumerate(later_therapies):
+                line_no = line_nums[i] if line_nums[i] is not None else (3 + i)
                 lines.append(_line(
-                    3 + i, obj.later_therapy, cid, 'later_therapy_ids',
+                    line_no, lt.get('therapy') or obj.later_therapy,
+                    aligned_ids[i], 'later_therapy_ids',
+                    obj.later_component_ids, lt.get('startDate'), lt.get('endDate'),
+                    obj.later_outcome, obj.later_intent,
+                    obj.later_discontinuation_reason, later_aggregate=True))
+        else:
+            # Oldest rows with no `later_therapies` list at all: emit one entry
+            # per resolved id (naming each from the concept cache), else a single
+            # aggregate entry from the flat `later_therapy` text.
+            later_ids = obj.later_therapy_ids or []
+            if later_ids:
+                cache = getattr(self, '_therapy_concept_cache', {})
+                for i, cid in enumerate(later_ids):
+                    c = cache.get(cid)
+                    regimen_name = c.concept_name if c else obj.later_therapy
+                    lines.append(_line(
+                        3 + i, regimen_name, cid, 'later_therapy_ids',
+                        obj.later_component_ids, obj.later_start_date or obj.later_date, obj.later_end_date,
+                        obj.later_outcome, obj.later_intent,
+                        obj.later_discontinuation_reason, later_aggregate=True))
+            elif obj.later_therapy:
+                lines.append(_line(
+                    3, obj.later_therapy, None, 'later_therapy_ids',
                     obj.later_component_ids, obj.later_start_date, obj.later_end_date,
                     obj.later_outcome, obj.later_intent,
                     obj.later_discontinuation_reason, later_aggregate=True))
-        elif obj.later_therapy:
-            lines.append(_line(
-                3, obj.later_therapy, None, 'later_therapy_ids',
-                obj.later_component_ids, obj.later_start_date, obj.later_end_date,
-                obj.later_outcome, obj.later_intent,
-                obj.later_discontinuation_reason, later_aggregate=True))
         return lines
 
     def validate_sct_date(self, value):

@@ -987,6 +987,26 @@ class TherapyComponentIdsAPITest(FhirUploadBase):
                 f'Client PATCH wrote to derived read-model field {field}',
             )
 
+    def test_later_therapies_read_only_via_patch(self):
+        """later_therapies is a derived per-line read model; lines_of_therapy
+        surfaces its concept_ids as authoritative, so a client PATCH carrying
+        nested concept_ids/lineNumbers must be ignored (not persisted)."""
+        record = PatientRecord.objects.get(person_id=self._pid)
+        record.later_therapies = []
+        record.save(update_fields=['later_therapies'])
+
+        resp = self.client.patch(
+            f'/api/v1/patient-records/{self._pid}/',
+            {'later_therapies': [{'lineNumber': 9, 'therapy': 'HACK', 'concept_id': 999}]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        record.refresh_from_db()
+        self.assertEqual(
+            record.later_therapies, [],
+            'Client PATCH wrote to derived read-model field later_therapies',
+        )
+
 
 class FhirUploadComponentIdsTest(FhirUploadBase):
     """End-to-end: a MedicationStatement carrying a HemOnc coding yields
@@ -11239,12 +11259,85 @@ class LinesOfTherapyPayloadTest(TestCase):
         self.assertEqual(lot[0]['component_ids'], [11, 12])
         self.assertEqual(lot[0]['regimen_source'], 'asserted')
         self.assertEqual(lot[0]['release_id'], 'rel-x')
-        self.assertEqual(str(lot[0]['start_date']), '2022-03-01')
+        # Dates are ISO strings on the wire, not raw date objects.
+        self.assertIsInstance(lot[0]['start_date'], str)
+        self.assertEqual(lot[0]['start_date'], '2022-03-01')
+        self.assertEqual(lot[0]['end_date'], '2022-09-01')
         self.assertEqual(lot[0]['outcome'], 'CR')
         self.assertEqual(lot[0]['intent'], 'Neoadjuvant')
         self.assertEqual(lot[0]['discontinuation_reason'], 'Completion')
         self.assertNotIn('later_aggregate', lot[0])
         self.assertEqual(lot[1]['regimen_source'], 'inferred')
+
+    def test_later_lines_preserve_true_line_number(self):
+        # New shape with non-contiguous line numbers (3 then 5, e.g. Episode
+        # gaps) must render as-is, not be renumbered to 3,4.
+        rec = self._record(
+            person_id=90259,
+            later_therapy='RegA',
+            later_therapies=[
+                {'lineNumber': 3, 'therapy': 'RegA', 'startDate': '2024-01-01',
+                 'endDate': None, 'concept_id': 401},
+                {'lineNumber': 5, 'therapy': 'RegC', 'startDate': '2024-06-01',
+                 'endDate': None, 'concept_id': None},
+            ],
+            later_therapy_ids=[401], later_component_ids=[41])
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [3, 5])
+        self.assertEqual(lot[0]['regimen_concept_id'], 401)
+        self.assertEqual(lot[1]['regimen'], 'RegC')
+        self.assertIsNone(lot[1]['regimen_concept_id'])
+        self.assertEqual(lot[1]['start_date'], '2024-06-01')
+
+    def test_legacy_later_therapies_multiline_uses_per_line_dates(self):
+        # Legacy shape (no concept_id key), all lines resolved → ids align
+        # positionally and each line keeps its own dates (not the aggregate).
+        rec = self._record(
+            person_id=90260,
+            later_therapy='RegA',
+            later_therapies=[
+                {'therapy': 'RegA', 'startDate': '2024-01-01', 'endDate': '2024-03-01'},
+                {'therapy': 'RegB', 'startDate': '2024-04-01', 'endDate': None},
+            ],
+            later_therapy_ids=[501, 502], later_component_ids=[51])
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [3, 4])
+        self.assertEqual(lot[0]['regimen_concept_id'], 501)
+        self.assertEqual(lot[0]['start_date'], '2024-01-01')
+        self.assertEqual(lot[1]['regimen_concept_id'], 502)
+        self.assertEqual(lot[1]['start_date'], '2024-04-01')
+
+    def test_legacy_later_therapies_partial_ids_not_misaligned(self):
+        # Legacy shape with more lines than resolved ids: the subset cannot be
+        # mapped to specific lines, so all ids are null — but no line is dropped
+        # and per-line dates are preserved.
+        rec = self._record(
+            person_id=90261,
+            later_therapy='RegA',
+            later_therapies=[
+                {'therapy': 'RegA', 'startDate': '2024-01-01', 'endDate': None},
+                {'therapy': 'RegB', 'startDate': '2024-04-01', 'endDate': None},
+            ],
+            later_therapy_ids=[502], later_component_ids=[51])
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [3, 4])
+        self.assertIsNone(lot[0]['regimen_concept_id'])
+        self.assertIsNone(lot[1]['regimen_concept_id'])
+
+    def test_legacy_later_therapies_without_concept_id_keeps_ids(self):
+        # Records derived before per-line concept_id existed: later_therapies has
+        # no 'concept_id' key and resolved ids live in later_therapy_ids. The
+        # payload must keep those ids via the legacy path, not null them out.
+        rec = self._record(
+            person_id=90258,
+            later_therapy='Pom-Dex',
+            later_therapies=[{'therapy': 'Pom-Dex', 'startDate': '2024-01-01',
+                              'endDate': None}],
+            later_therapy_ids=[301], later_component_ids=[31])
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [3])
+        self.assertEqual(lot[0]['regimen_concept_id'], 301)
+        self.assertEqual(lot[0]['regimen_source'], 'inferred')
 
     def test_later_lines_one_entry_per_concept_id_flagged_aggregate(self):
         rec = self._record(
@@ -11265,14 +11358,111 @@ class LinesOfTherapyPayloadTest(TestCase):
     def test_empty_when_no_therapy(self):
         self.assertEqual(self._lot(self._record(person_id=90251)), [])
 
+    def test_first_line_falls_back_to_legacy_date_field(self):
+        # Older records store first_line_date (not first_line_start_date); the
+        # payload must surface that date rather than null.
+        import datetime
+        rec = self._record(
+            person_id=90262, first_line_therapy='X', first_line_therapy_id=1,
+            first_line_date=datetime.date(2021, 5, 1))
+        lot = self._lot(rec)
+        self.assertEqual(lot[0]['start_date'], '2021-05-01')
+
+    def test_later_lines_from_later_therapies_preserve_unresolved(self):
+        # 3L regimen unresolved (concept_id None) followed by a resolved 4L:
+        # both lines must appear with correct numbering, not collapse into a
+        # single 3L entry. Iterating later_therapy_ids alone would drop the
+        # unresolved 3L and mislabel 4L as 3L.
+        rec = self._record(
+            person_id=90257,
+            later_therapy='UnresolvedRegimen',
+            later_therapies=[
+                {'therapy': 'UnresolvedRegimen', 'startDate': '2024-01-01',
+                 'endDate': '2024-03-01', 'concept_id': None},
+                {'therapy': 'Dara', 'startDate': '2024-04-01',
+                 'endDate': None, 'concept_id': 302},
+            ],
+            later_therapy_ids=[302], later_component_ids=[31])
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [3, 4])
+        self.assertEqual(lot[0]['regimen'], 'UnresolvedRegimen')
+        self.assertIsNone(lot[0]['regimen_concept_id'])
+        self.assertIsNone(lot[0]['regimen_source'])   # no cid → no source
+        self.assertEqual(lot[0]['start_date'], '2024-01-01')
+        self.assertEqual(lot[1]['regimen'], 'Dara')
+        self.assertEqual(lot[1]['regimen_concept_id'], 302)
+        self.assertEqual(lot[1]['regimen_source'], 'inferred')
+        self.assertTrue(lot[0]['later_aggregate'] and lot[1]['later_aggregate'])
+
+    def test_string_date_on_in_memory_instance_does_not_crash(self):
+        # An in-memory PatientRecord may carry a raw string on a DateField
+        # attribute (Django does not coerce on assignment); the payload must not
+        # 500 and should pass the ISO string straight through.
+        rec = self._record(
+            person_id=90256, first_line_therapy='X', first_line_therapy_id=1,
+            first_line_start_date='2022-03-01', first_line_end_date=None)
+        lot = self._lot(rec)
+        self.assertEqual(lot[0]['start_date'], '2022-03-01')
+        self.assertIsNone(lot[0]['end_date'])
+
     def test_malformed_provenance_does_not_crash(self):
-        # A non-dict therapy_ids_provenance must not 500 the payload.
+        # A non-dict therapy_ids_provenance must not 500 the payload. With a
+        # resolved concept_id but no usable provenance, regimen_source falls
+        # back to 'inferred' (never 'asserted') and release_id stays null.
         rec = self._record(
             person_id=90252, first_line_therapy='X', first_line_therapy_id=1,
             therapy_ids_provenance=['not', 'a', 'dict'])
         lot = self._lot(rec)
-        self.assertEqual(lot[0]['regimen_source'], None)
+        self.assertEqual(lot[0]['regimen_source'], 'inferred')
         self.assertEqual(lot[0]['release_id'], None)
+
+    def test_regimen_source_defaults_inferred_without_provenance(self):
+        # No provenance at all + a resolved concept_id → conservative 'inferred'.
+        rec = self._record(
+            person_id=90253, first_line_therapy='X', first_line_therapy_id=1)
+        lot = self._lot(rec)
+        self.assertEqual(lot[0]['regimen_source'], 'inferred')
+        # A line with no concept_id has nothing to attribute → null.
+        rec2 = self._record(person_id=90254, first_line_therapy='X only text')
+        self.assertIsNone(self._lot(rec2)[0]['regimen_source'])
+
+    def test_later_lines_name_their_own_regimen(self):
+        # Each later concept_id resolves to its own regimen name, rather than
+        # reusing the flat `later_therapy` text for every 3L+ entry.
+        from datetime import date as _date
+        from omop_core.models import (
+            Concept, Vocabulary, ConceptClass, Domain,
+        )
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc', 'vocabulary_concept_id': 0})
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0})
+        domain, _ = Domain.objects.get_or_create(
+            domain_id='Drug',
+            defaults={'domain_name': 'Drug', 'domain_concept_id': 0})
+
+        def _concept(cid, cname):
+            return Concept.objects.create(
+                concept_id=cid, concept_name=cname, domain=domain,
+                vocabulary=vocab, concept_class=cc, standard_concept='S',
+                concept_code=str(cid), valid_start_date=_date(1970, 1, 1),
+                valid_end_date=_date(2099, 12, 31))
+
+        _concept(301, 'Pom-Dex')
+        _concept(302, 'Dara')
+        rec = self._record(
+            person_id=90255,
+            later_therapy='Pom-Dex', later_therapy_ids=[301, 302],
+            later_component_ids=[31, 32])
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [3, 4])
+        self.assertEqual(lot[0]['regimen_concept_id'], 301)
+        self.assertEqual(lot[0]['regimen'], 'Pom-Dex')
+        self.assertEqual(lot[1]['regimen_concept_id'], 302)
+        # 4L names its own regimen, not the first later line's text.
+        self.assertEqual(lot[1]['regimen'], 'Dara')
 
 
 # ---------------------------------------------------------------------------
