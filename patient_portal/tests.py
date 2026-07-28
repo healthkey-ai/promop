@@ -9839,6 +9839,23 @@ class ServiceTokenOmopAccessTest(TestCase):
         self.assertIn(self.person_a.person_id, returned_pids)
         self.assertIn(self.person_b.person_id, returned_pids)
 
+    def test_service_token_patient_record_detail_reads_cross_org(self):
+        """GET /api/patient-info/{id}/ (and /provenance/, /revisions/) is
+        readable by the service token for any org — detail now honors the
+        service token, consistent with the list endpoint (#330/#332)."""
+        for person in (self.person_a, self.person_b):
+            resp = self.client.get(f'/api/patient-info/{person.person_id}/')
+            self.assertEqual(
+                resp.status_code, status.HTTP_200_OK,
+                f'retrieve {person.person_id}: got {resp.status_code}')
+            self.assertIn('patient_info', resp.data)
+        for suffix in ('provenance', 'revisions'):
+            resp = self.client.get(
+                f'/api/patient-info/{self.person_a.person_id}/{suffix}/')
+            self.assertEqual(
+                resp.status_code, status.HTTP_200_OK,
+                f'{suffix}: got {resp.status_code}')
+
 
 class MeEndpointGuardTest(TestCase):
     """Tests for the /api/patient-info/me/ auto-provisioning guard (PR #190)."""
