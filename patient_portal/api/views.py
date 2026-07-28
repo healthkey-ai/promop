@@ -4253,6 +4253,9 @@ def _concept_graph_filters(request):
     return relationship_ids, vocabulary_ids, concept_class_ids, max_levels
 
 
+import threading
+
+_vocab_cache_lock = threading.Lock()
 _vocab_version_cache = {'release_pk': None, 'map': None}
 
 
@@ -4270,17 +4273,38 @@ def _vocab_version_map():
         # No published release — skip caching, just query directly.
         return dict(Vocabulary.objects.values_list('vocabulary_id', 'vocabulary_version'))
     release_pk = release.pk
-    if _vocab_version_cache['release_pk'] == release_pk and _vocab_version_cache['map'] is not None:
-        return _vocab_version_cache['map']
-    result = dict(Vocabulary.objects.values_list('vocabulary_id', 'vocabulary_version'))
-    _vocab_version_cache['release_pk'] = release_pk
-    _vocab_version_cache['map'] = result
-    return result
+    with _vocab_cache_lock:
+        if _vocab_version_cache['release_pk'] == release_pk and _vocab_version_cache['map'] is not None:
+            return _vocab_version_cache['map']
+        result = dict(Vocabulary.objects.values_list('vocabulary_id', 'vocabulary_version'))
+        _vocab_version_cache['release_pk'] = release_pk
+        _vocab_version_cache['map'] = result
+        return result
+
+
+def _etag_matches(if_none_match, etag):
+    """RFC 7232 §3.2 weak comparison for If-None-Match on GET/HEAD."""
+    if not if_none_match or not etag:
+        return False
+    if if_none_match.strip() == '*':
+        return True
+
+    def _normalize(e):
+        e = e.strip()
+        if e.startswith('W/'):
+            e = e[2:]
+        return e
+    etag_norm = _normalize(etag)
+    for token in if_none_match.split(','):
+        if _normalize(token) == etag_norm:
+            return True
+    return False
 
 
 def _set_release_etag(request, response):
     """Set ETag and Cache-Control on a concept response based on the latest
-    published VocabularyRelease. Returns a 304 Response if If-None-Match matches."""
+    published VocabularyRelease. Returns a 304 if If-None-Match matches."""
+    from django.http import HttpResponseNotModified
     from omop_core.services.vocab_release import get_latest_release, get_release_etag
 
     release = get_latest_release()
@@ -4289,8 +4313,8 @@ def _set_release_etag(request, response):
         return response
 
     if_none_match = request.META.get('HTTP_IF_NONE_MATCH', '')
-    if if_none_match == etag:
-        return Response(status=304)
+    if _etag_matches(if_none_match, etag):
+        return HttpResponseNotModified()
 
     response['ETag'] = etag
     response['Cache-Control'] = 'public, max-age=300'
@@ -5203,11 +5227,11 @@ def vocab_release_list(request):
 @api_view(['GET'])
 @permission_classes([ScopedTokenPermission])
 def vocab_release_detail(request, release_id):
-    """Full manifest for a specific vocabulary release, including checksums."""
+    """Full manifest for a specific published vocabulary release, including checksums."""
     from omop_core.models import VocabularyRelease
 
     try:
-        release = VocabularyRelease.objects.get(pk=release_id)
+        release = VocabularyRelease.objects.get(pk=release_id, status='published')
     except VocabularyRelease.DoesNotExist:
         return Response({'detail': 'Release not found.'}, status=status.HTTP_404_NOT_FOUND)
     return Response(_serialize_vocab_release(release, include_checksums=True))
@@ -5217,22 +5241,14 @@ def vocab_release_detail(request, release_id):
 @permission_classes([ScopedTokenPermission])
 def vocab_release_latest(request):
     """Latest published vocabulary release. Supports If-None-Match → 304."""
-    from omop_core.services.vocab_release import get_latest_release, get_release_etag
+    from omop_core.services.vocab_release import get_latest_release
 
     release = get_latest_release()
     if release is None:
         return Response({'detail': 'No published releases.'}, status=status.HTTP_404_NOT_FOUND)
 
-    etag = get_release_etag(release)
-    if_none_match = request.META.get('HTTP_IF_NONE_MATCH', '')
-    if etag and if_none_match == etag:
-        return Response(status=304)
-
     resp = Response(_serialize_vocab_release(release, include_checksums=True))
-    if etag:
-        resp['ETag'] = etag
-        resp['Cache-Control'] = 'public, max-age=300'
-    return resp
+    return _set_release_etag(request, resp)
 
 
 def _serialize_vocab_release(release, include_checksums=False):
