@@ -13922,6 +13922,15 @@ class UserlessOAuthTokenDetailTest(TestCase):
             resp.status_code, status.HTTP_404_NOT_FOUND,
             f'read detail must fail closed (404), got {resp.status_code}')
 
+    def test_userless_token_read_detail_v1_404_not_500(self):
+        # The v1 path (what external consumers actually hit) routes to the same
+        # viewset and must fail closed identically.
+        resp = self._client(self.read_token.token).get(
+            f'/api/v1/patient-records/{self.person.person_id}/')
+        self.assertEqual(
+            resp.status_code, status.HTTP_404_NOT_FOUND,
+            f'v1 read detail must fail closed (404), got {resp.status_code}')
+
     def test_userless_token_write_404_not_500(self):
         resp = self._client(self.write_token.token).patch(
             f'/api/patient-info/{self.person.person_id}/',
@@ -13929,3 +13938,14 @@ class UserlessOAuthTokenDetailTest(TestCase):
         self.assertEqual(
             resp.status_code, status.HTTP_404_NOT_FOUND,
             f'write must fail closed (404), got {resp.status_code}')
+
+    def test_authorization_helpers_none_actor_fail_closed(self):
+        # The three authorization helpers must all fail closed for a None actor
+        # rather than dereferencing it.
+        from omop_core.authorization import (
+            can_access_patient, can_write_patient, get_actor_role,
+        )
+        pid = self.person.person_id
+        self.assertFalse(can_access_patient(None, pid))
+        self.assertFalse(can_write_patient(None, pid))
+        self.assertIsNone(get_actor_role(None, pid))

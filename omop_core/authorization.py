@@ -117,6 +117,11 @@ def get_actor_role(actor_identity, target_person_id: int) -> str | None:
     """
     from patient_portal.models import PatientUser
 
+    # No actor (e.g. a userless OAuth client_credentials token) has no role —
+    # fail closed instead of dereferencing None below.
+    if actor_identity is None:
+        return None
+
     try:
         if actor_identity.patient_user.person_id == target_person_id:
             return 'self'
