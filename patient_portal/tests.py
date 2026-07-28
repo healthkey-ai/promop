@@ -14152,6 +14152,88 @@ class VocabReleaseAPITest(_SmartBase):
         self.assertIn('ETag', resp)
 
 
+class UserlessOAuthTokenDetailTest(TestCase):
+    """An OAuth2 client_credentials token has no resource owner
+    (AccessToken.user is None), so request.user is None on the patient-record
+    detail/write handlers. They must fail *closed* (per-patient denial -> 404),
+    never 500. Regression for healthkey-ai/promop#330.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import Application, AccessToken
+        from django.utils import timezone as tz
+        import datetime as _dt
+        from omop_core.models import Organization
+
+        # Owner is a superuser on purpose: the crash is driven by the userless
+        # AccessToken, NOT by Application.user, so a superuser owner must not
+        # mask it.
+        owner = Identity.objects.create_superuser(
+            email='userless_owner@test.com', password='pw',
+        )
+        cls.app = Application.objects.create(
+            name='Userless Service',
+            client_id='userless-client-id',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=owner,
+        )
+        # No ApplicationOrganization -> get_request_org() is None -> execution
+        # reaches the can_access_patient / can_write_patient branch with a None
+        # actor (previously an AttributeError -> 500).
+        cls.read_token = AccessToken.objects.create(
+            user=None, application=cls.app, token='userless-read-tok',
+            expires=tz.now() + _dt.timedelta(hours=1), scope='patient/*.read',
+        )
+        cls.write_token = AccessToken.objects.create(
+            user=None, application=cls.app, token='userless-write-tok',
+            expires=tz.now() + _dt.timedelta(hours=1),
+            scope='patient/*.read patient/*.write',
+        )
+        org = Organization.objects.create(name='Userless Org', slug='userless-org')
+        cls.person = Person.objects.create(person_id=41001)
+        PatientRecord.objects.create(person=cls.person, organization=org)
+
+    def _client(self, token_str):
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f'Bearer {token_str}')
+        return c
+
+    def test_userless_token_read_detail_404_not_500(self):
+        resp = self._client(self.read_token.token).get(
+            f'/api/patient-info/{self.person.person_id}/')
+        self.assertEqual(
+            resp.status_code, status.HTTP_404_NOT_FOUND,
+            f'read detail must fail closed (404), got {resp.status_code}')
+
+    def test_userless_token_read_detail_v1_404_not_500(self):
+        # The v1 path (what external consumers actually hit) routes to the same
+        # viewset and must fail closed identically.
+        resp = self._client(self.read_token.token).get(
+            f'/api/v1/patient-records/{self.person.person_id}/')
+        self.assertEqual(
+            resp.status_code, status.HTTP_404_NOT_FOUND,
+            f'v1 read detail must fail closed (404), got {resp.status_code}')
+
+    def test_userless_token_write_404_not_500(self):
+        resp = self._client(self.write_token.token).patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'disease': 'x'}, format='json')
+        self.assertEqual(
+            resp.status_code, status.HTTP_404_NOT_FOUND,
+            f'write must fail closed (404), got {resp.status_code}')
+
+    def test_authorization_helpers_none_actor_fail_closed(self):
+        # The three authorization helpers must all fail closed for a None actor
+        # rather than dereferencing it.
+        from omop_core.authorization import (
+            can_access_patient, can_write_patient, get_actor_role,
+        )
+        pid = self.person.person_id
+        self.assertFalse(can_access_patient(None, pid))
+        self.assertFalse(can_write_patient(None, pid))
+        self.assertIsNone(get_actor_role(None, pid))
 # ---------------------------------------------------------------------------
 # Vocabulary Snapshot (streaming NDJSON) tests
 # ---------------------------------------------------------------------------

@@ -20,6 +20,12 @@ def can_access_patient(actor_identity, target_person_id: int) -> bool:
     """Check if actor has access to target patient's data."""
     from patient_portal.models import PatientUser
 
+    # No actor (e.g. an OAuth client_credentials token, whose AccessToken has no
+    # resource owner) has no per-patient access — fail closed instead of
+    # dereferencing None below.
+    if actor_identity is None:
+        return False
+
     if getattr(actor_identity, 'is_staff', False):
         return True
 
@@ -66,6 +72,10 @@ def can_write_patient(actor_identity, target_person_id: int) -> bool:
     """
     from patient_portal.models import PatientUser
 
+    # No actor (e.g. a userless OAuth client_credentials token) may write.
+    if actor_identity is None:
+        return False
+
     if getattr(actor_identity, 'is_staff', False):
         return True
 
@@ -106,6 +116,11 @@ def get_actor_role(actor_identity, target_person_id: int) -> str | None:
     Returns: 'self', 'representative', 'org_admin', 'doctor', 'analyst', or None.
     """
     from patient_portal.models import PatientUser
+
+    # No actor (e.g. a userless OAuth client_credentials token) has no role —
+    # fail closed instead of dereferencing None below.
+    if actor_identity is None:
+        return None
 
     try:
         if actor_identity.patient_user.person_id == target_person_id:
