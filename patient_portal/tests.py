@@ -9856,6 +9856,25 @@ class ServiceTokenOmopAccessTest(TestCase):
                 resp.status_code, status.HTTP_200_OK,
                 f'{suffix}: got {resp.status_code}')
 
+    def test_service_token_end_to_end_bearer_hmac_grants_cross_org_detail(self):
+        """The full ServiceTokenAuthentication path (real `Bearer <secret>`
+        header → HMAC compare), not just the injected sentinel, grants cross-org
+        detail read. The grant's entire security rests on this HMAC check, so a
+        wrong secret must NOT be treated as the service token."""
+        with self.settings(SERVICE_AUTH_TOKEN='test-service-secret'):
+            good = APIClient()
+            good.credentials(HTTP_AUTHORIZATION='Bearer test-service-secret')
+            resp = good.get(f'/api/patient-info/{self.person_b.person_id}/')
+            self.assertEqual(resp.status_code, status.HTTP_200_OK)
+            self.assertIn('patient_info', resp.data)
+
+            bad = APIClient()
+            bad.credentials(HTTP_AUTHORIZATION='Bearer wrong-secret')
+            resp = bad.get(f'/api/patient-info/{self.person_b.person_id}/')
+            self.assertNotEqual(
+                resp.status_code, status.HTTP_200_OK,
+                'a wrong secret must not authenticate as the service token')
+
 
 class MeEndpointGuardTest(TestCase):
     """Tests for the /api/patient-info/me/ auto-provisioning guard (PR #190)."""
