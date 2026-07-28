@@ -37,17 +37,12 @@ export default function UserProfilePage() {
         <div className="px-6 py-4">
           <p className="text-xs text-gray-500 uppercase tracking-wide mb-2">System Rights</p>
           <div className="flex gap-2 flex-wrap">
-            {currentUser.is_superuser && (
-              <span className="inline-flex items-center px-2.5 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">
-                Superuser
-              </span>
-            )}
             {currentUser.is_staff && (
               <span className="inline-flex items-center px-2.5 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-700">
                 Staff
               </span>
             )}
-            {!currentUser.is_staff && !currentUser.is_superuser && (
+            {!currentUser.is_staff && (
               <span className="inline-flex items-center px-2.5 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
                 Standard User
               </span>

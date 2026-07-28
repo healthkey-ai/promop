@@ -987,6 +987,26 @@ class TherapyComponentIdsAPITest(FhirUploadBase):
                 f'Client PATCH wrote to derived read-model field {field}',
             )
 
+    def test_later_therapies_read_only_via_patch(self):
+        """later_therapies is a derived per-line read model; lines_of_therapy
+        surfaces its concept_ids as authoritative, so a client PATCH carrying
+        nested concept_ids/lineNumbers must be ignored (not persisted)."""
+        record = PatientRecord.objects.get(person_id=self._pid)
+        record.later_therapies = []
+        record.save(update_fields=['later_therapies'])
+
+        resp = self.client.patch(
+            f'/api/v1/patient-records/{self._pid}/',
+            {'later_therapies': [{'lineNumber': 9, 'therapy': 'HACK', 'concept_id': 999}]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        record.refresh_from_db()
+        self.assertEqual(
+            record.later_therapies, [],
+            'Client PATCH wrote to derived read-model field later_therapies',
+        )
+
 
 class FhirUploadComponentIdsTest(FhirUploadBase):
     """End-to-end: a MedicationStatement carrying a HemOnc coding yields
@@ -3475,8 +3495,8 @@ class MultiTenantIsolationTest(_SmartBase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.json()), 0, "Org A must not see Org B's conditions even with explicit person_id")
 
-    def test_superuser_session_sees_all_patients(self):
-        """Superuser session auth bypasses org scoping and sees all patients."""
+    def test_staff_session_sees_all_patients(self):
+        """Staff session auth bypasses org scoping and sees all patients."""
         su = Identity.objects.create_superuser(email='su@test.com', password='su_pass')
         c = APIClient()
         c.force_authenticate(user=su)
@@ -5170,10 +5190,10 @@ class ScopedTokenPermissionTest(TestCase):
         req = self._req("GET", "service-token", self._user())
         self.assertTrue(self.permission.has_permission(req, None))
 
-    # --- staff / superuser ---
+    # --- staff ---
 
-    def test_superuser_allows_delete(self):
-        req = self._req("DELETE", None, self._user(is_superuser=True, is_staff=True))
+    def test_staff_allows_delete_via_is_staff(self):
+        req = self._req("DELETE", None, self._user(is_staff=True))
         self.assertTrue(self.permission.has_permission(req, None))
 
     def test_staff_allows_post(self):
@@ -7270,8 +7290,48 @@ class ConceptSearchTest(_ConceptFixtureBase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_short_q_returns_400(self):
-        resp = self.client.get(self.URL, {'q': 'c'}, **self._auth())
+        # 2 chars < 3-char trigram minimum (#262)
+        resp = self.client.get(self.URL, {'q': 'cc'}, **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_min_length_q_returns_200(self):
+        # Exactly 3 chars is the accepted lower boundary (#262) — guards against
+        # the threshold accidentally drifting to `< 4`.
+        resp = self.client.get(self.URL, {'q': 'cre'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_concept_name_search_uses_functional_trigram_index(self):
+        # #262: prove the functional GIN trigram index on UPPER(concept_name) is
+        # *selected* for `concept_name__icontains` (which Django compiles to
+        # `UPPER(concept_name::text) LIKE UPPER(...)`) when a seq-scan isn't
+        # preferred. A raw-column gin_trgm index could not serve `UPPER(col) LIKE`
+        # at all — so with enable_seqscan=off it would fall back to a Seq Scan and
+        # this assertion would fail. (enable_seqscan=off penalises, not bans, so a
+        # genuinely-unusable index is never chosen.)
+        import datetime
+        from django.db import connection
+        from omop_core.models import Concept, Vocabulary, Domain, ConceptClass
+        v, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='TRGMV', defaults={'vocabulary_name': 'trgm', 'vocabulary_concept_id': 0})
+        d, _ = Domain.objects.get_or_create(
+            domain_id='Drug', defaults={'domain_name': 'Drug', 'domain_concept_id': 13})
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Ingredient',
+            defaults={'concept_class_name': 'Ingredient', 'concept_class_concept_id': 0})
+        Concept.objects.bulk_create([
+            Concept(concept_id=880000 + i, concept_name=f'Trigram probe concept {i:04d}',
+                    domain=d, vocabulary=v, concept_class=cc, standard_concept='S',
+                    concept_code=f'TP{i}', valid_start_date=datetime.date(1970, 1, 1),
+                    valid_end_date=datetime.date(2099, 12, 31))
+            for i in range(600)
+        ])
+        with connection.cursor() as cur:
+            cur.execute('ANALYZE concept')
+            cur.execute('SET LOCAL enable_seqscan = off')
+            plan = Concept.objects.filter(
+                concept_name__icontains='probe concept 0421').explain()
+        self.assertIn('ix_concept_name_upper_trgm', plan,
+                      f'concepts/search did not use the trigram index:\n{plan}')
 
     def test_pagination_page_size(self):
         resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 2}, **self._auth())
@@ -7457,8 +7517,8 @@ class PatientRecordIDORTest(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_superuser_can_retrieve_any_patient(self):
-        """Superusers retain unrestricted read access."""
+    def test_staff_can_retrieve_any_patient(self):
+        """Staff retains unrestricted read access."""
         resp = self._client_as(self.superuser).get(
             f'/api/patient-info/{self.person_b.person_id}/'
         )
@@ -7558,8 +7618,8 @@ class OmopViewSetAccessTest(TestCase):
         person_ids = {r['person'] for r in results}
         self.assertNotIn(self.person_b.person_id, person_ids)
 
-    def test_superuser_can_list_any_patient_measurements(self):
-        """Superusers retain unrestricted access."""
+    def test_staff_can_list_any_patient_measurements(self):
+        """Staff retains unrestricted access."""
         resp = self._client_as(self.superuser).get(
             f'/api/measurements/?person_id={self.person_b.person_id}'
         )
@@ -9987,7 +10047,7 @@ class MeEndpointGuardTest(TestCase):
         resp = self._client(self.staff_user).get('/api/patient-info/me/')
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_superuser_without_patient_record_returns_404(self):
+    def test_staff_superuser_without_patient_record_returns_404(self):
         resp = self._client(self.super_user).get('/api/patient-info/me/')
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
@@ -11239,6 +11299,248 @@ class ConceptSynonymApiTest(_SmartBase):
                       [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
 
+class LinesOfTherapyPayloadTest(TestCase):
+    """PatientRecordSerializer.lines_of_therapy assembles structured per-line
+    therapy history from the flat read-model fields (promop#249)."""
+
+    def _record(self, person_id=90249, **kwargs):
+        from omop_core.models import Person, PatientRecord
+        person = Person.objects.create(person_id=person_id)
+        return PatientRecord(person=person, **kwargs)
+
+    def _lot(self, record):
+        from patient_portal.api.serializers import PatientRecordSerializer
+        return PatientRecordSerializer(record).data['lines_of_therapy']
+
+    def test_first_and_second_line_structured(self):
+        import datetime
+        rec = self._record(
+            first_line_therapy='AC-T', first_line_therapy_id=101,
+            first_line_component_ids=[11, 12],
+            first_line_start_date=datetime.date(2022, 3, 1),
+            first_line_end_date=datetime.date(2022, 9, 1),
+            first_line_outcome='CR', first_line_intent='Neoadjuvant',
+            first_line_discontinuation_reason='Completion',
+            second_line_therapy='Kadcyla', second_line_therapy_id=202,
+            second_line_component_ids=[21], second_line_outcome='PR',
+            therapy_ids_provenance={
+                'first_line_therapy_id': {'value': 101, 'origin': 'asserted', 'release_id': 'rel-x'},
+                'second_line_therapy_id': {'value': 202, 'origin': 'inferred', 'release_id': None},
+            },
+        )
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [1, 2])
+        self.assertEqual(lot[0]['regimen'], 'AC-T')
+        self.assertEqual(lot[0]['regimen_concept_id'], 101)
+        self.assertEqual(lot[0]['component_ids'], [11, 12])
+        self.assertEqual(lot[0]['regimen_source'], 'asserted')
+        self.assertEqual(lot[0]['release_id'], 'rel-x')
+        # Dates are ISO strings on the wire, not raw date objects.
+        self.assertIsInstance(lot[0]['start_date'], str)
+        self.assertEqual(lot[0]['start_date'], '2022-03-01')
+        self.assertEqual(lot[0]['end_date'], '2022-09-01')
+        self.assertEqual(lot[0]['outcome'], 'CR')
+        self.assertEqual(lot[0]['intent'], 'Neoadjuvant')
+        self.assertEqual(lot[0]['discontinuation_reason'], 'Completion')
+        self.assertNotIn('later_aggregate', lot[0])
+        self.assertEqual(lot[1]['regimen_source'], 'inferred')
+
+    def test_later_lines_preserve_true_line_number(self):
+        # New shape with non-contiguous line numbers (3 then 5, e.g. Episode
+        # gaps) must render as-is, not be renumbered to 3,4.
+        rec = self._record(
+            person_id=90259,
+            later_therapy='RegA',
+            later_therapies=[
+                {'lineNumber': 3, 'therapy': 'RegA', 'startDate': '2024-01-01',
+                 'endDate': None, 'concept_id': 401},
+                {'lineNumber': 5, 'therapy': 'RegC', 'startDate': '2024-06-01',
+                 'endDate': None, 'concept_id': None},
+            ],
+            later_therapy_ids=[401], later_component_ids=[41])
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [3, 5])
+        self.assertEqual(lot[0]['regimen_concept_id'], 401)
+        self.assertEqual(lot[1]['regimen'], 'RegC')
+        self.assertIsNone(lot[1]['regimen_concept_id'])
+        self.assertEqual(lot[1]['start_date'], '2024-06-01')
+
+    def test_legacy_later_therapies_multiline_uses_per_line_dates(self):
+        # Legacy shape (no concept_id key), all lines resolved → ids align
+        # positionally and each line keeps its own dates (not the aggregate).
+        rec = self._record(
+            person_id=90260,
+            later_therapy='RegA',
+            later_therapies=[
+                {'therapy': 'RegA', 'startDate': '2024-01-01', 'endDate': '2024-03-01'},
+                {'therapy': 'RegB', 'startDate': '2024-04-01', 'endDate': None},
+            ],
+            later_therapy_ids=[501, 502], later_component_ids=[51])
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [3, 4])
+        self.assertEqual(lot[0]['regimen_concept_id'], 501)
+        self.assertEqual(lot[0]['start_date'], '2024-01-01')
+        self.assertEqual(lot[1]['regimen_concept_id'], 502)
+        self.assertEqual(lot[1]['start_date'], '2024-04-01')
+
+    def test_legacy_later_therapies_partial_ids_not_misaligned(self):
+        # Legacy shape with more lines than resolved ids: the subset cannot be
+        # mapped to specific lines, so all ids are null — but no line is dropped
+        # and per-line dates are preserved.
+        rec = self._record(
+            person_id=90261,
+            later_therapy='RegA',
+            later_therapies=[
+                {'therapy': 'RegA', 'startDate': '2024-01-01', 'endDate': None},
+                {'therapy': 'RegB', 'startDate': '2024-04-01', 'endDate': None},
+            ],
+            later_therapy_ids=[502], later_component_ids=[51])
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [3, 4])
+        self.assertIsNone(lot[0]['regimen_concept_id'])
+        self.assertIsNone(lot[1]['regimen_concept_id'])
+
+    def test_legacy_later_therapies_without_concept_id_keeps_ids(self):
+        # Records derived before per-line concept_id existed: later_therapies has
+        # no 'concept_id' key and resolved ids live in later_therapy_ids. The
+        # payload must keep those ids via the legacy path, not null them out.
+        rec = self._record(
+            person_id=90258,
+            later_therapy='Pom-Dex',
+            later_therapies=[{'therapy': 'Pom-Dex', 'startDate': '2024-01-01',
+                              'endDate': None}],
+            later_therapy_ids=[301], later_component_ids=[31])
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [3])
+        self.assertEqual(lot[0]['regimen_concept_id'], 301)
+        self.assertEqual(lot[0]['regimen_source'], 'inferred')
+
+    def test_later_lines_one_entry_per_concept_id_flagged_aggregate(self):
+        rec = self._record(
+            person_id=90250,
+            first_line_therapy='X', first_line_therapy_id=1,
+            later_therapy='Pom-Dex / Dara', later_therapy_ids=[301, 302],
+            later_component_ids=[31, 32], later_outcome='PD',
+            therapy_ids_provenance={'later_therapy_ids': {'origin': 'asserted', 'release_id': None}},
+        )
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [1, 3, 4])
+        self.assertEqual(lot[1]['regimen_concept_id'], 301)
+        self.assertEqual(lot[2]['regimen_concept_id'], 302)
+        self.assertTrue(lot[1]['later_aggregate'])
+        self.assertEqual(lot[1]['component_ids'], [31, 32])  # aggregate shared across 3L+
+        self.assertEqual(lot[1]['regimen_source'], 'asserted')
+
+    def test_empty_when_no_therapy(self):
+        self.assertEqual(self._lot(self._record(person_id=90251)), [])
+
+    def test_first_line_falls_back_to_legacy_date_field(self):
+        # Older records store first_line_date (not first_line_start_date); the
+        # payload must surface that date rather than null.
+        import datetime
+        rec = self._record(
+            person_id=90262, first_line_therapy='X', first_line_therapy_id=1,
+            first_line_date=datetime.date(2021, 5, 1))
+        lot = self._lot(rec)
+        self.assertEqual(lot[0]['start_date'], '2021-05-01')
+
+    def test_later_lines_from_later_therapies_preserve_unresolved(self):
+        # 3L regimen unresolved (concept_id None) followed by a resolved 4L:
+        # both lines must appear with correct numbering, not collapse into a
+        # single 3L entry. Iterating later_therapy_ids alone would drop the
+        # unresolved 3L and mislabel 4L as 3L.
+        rec = self._record(
+            person_id=90257,
+            later_therapy='UnresolvedRegimen',
+            later_therapies=[
+                {'therapy': 'UnresolvedRegimen', 'startDate': '2024-01-01',
+                 'endDate': '2024-03-01', 'concept_id': None},
+                {'therapy': 'Dara', 'startDate': '2024-04-01',
+                 'endDate': None, 'concept_id': 302},
+            ],
+            later_therapy_ids=[302], later_component_ids=[31])
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [3, 4])
+        self.assertEqual(lot[0]['regimen'], 'UnresolvedRegimen')
+        self.assertIsNone(lot[0]['regimen_concept_id'])
+        self.assertIsNone(lot[0]['regimen_source'])   # no cid → no source
+        self.assertEqual(lot[0]['start_date'], '2024-01-01')
+        self.assertEqual(lot[1]['regimen'], 'Dara')
+        self.assertEqual(lot[1]['regimen_concept_id'], 302)
+        self.assertEqual(lot[1]['regimen_source'], 'inferred')
+        self.assertTrue(lot[0]['later_aggregate'] and lot[1]['later_aggregate'])
+
+    def test_string_date_on_in_memory_instance_does_not_crash(self):
+        # An in-memory PatientRecord may carry a raw string on a DateField
+        # attribute (Django does not coerce on assignment); the payload must not
+        # 500 and should pass the ISO string straight through.
+        rec = self._record(
+            person_id=90256, first_line_therapy='X', first_line_therapy_id=1,
+            first_line_start_date='2022-03-01', first_line_end_date=None)
+        lot = self._lot(rec)
+        self.assertEqual(lot[0]['start_date'], '2022-03-01')
+        self.assertIsNone(lot[0]['end_date'])
+
+    def test_malformed_provenance_does_not_crash(self):
+        # A non-dict therapy_ids_provenance must not 500 the payload. With a
+        # resolved concept_id but no usable provenance, regimen_source falls
+        # back to 'inferred' (never 'asserted') and release_id stays null.
+        rec = self._record(
+            person_id=90252, first_line_therapy='X', first_line_therapy_id=1,
+            therapy_ids_provenance=['not', 'a', 'dict'])
+        lot = self._lot(rec)
+        self.assertEqual(lot[0]['regimen_source'], 'inferred')
+        self.assertEqual(lot[0]['release_id'], None)
+
+    def test_regimen_source_defaults_inferred_without_provenance(self):
+        # No provenance at all + a resolved concept_id → conservative 'inferred'.
+        rec = self._record(
+            person_id=90253, first_line_therapy='X', first_line_therapy_id=1)
+        lot = self._lot(rec)
+        self.assertEqual(lot[0]['regimen_source'], 'inferred')
+        # A line with no concept_id has nothing to attribute → null.
+        rec2 = self._record(person_id=90254, first_line_therapy='X only text')
+        self.assertIsNone(self._lot(rec2)[0]['regimen_source'])
+
+    def test_later_lines_name_their_own_regimen(self):
+        # Each later concept_id resolves to its own regimen name, rather than
+        # reusing the flat `later_therapy` text for every 3L+ entry.
+        from datetime import date as _date
+        from omop_core.models import (
+            Concept, Vocabulary, ConceptClass, Domain,
+        )
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc', 'vocabulary_concept_id': 0})
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Regimen',
+            defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0})
+        domain, _ = Domain.objects.get_or_create(
+            domain_id='Drug',
+            defaults={'domain_name': 'Drug', 'domain_concept_id': 0})
+
+        def _concept(cid, cname):
+            return Concept.objects.create(
+                concept_id=cid, concept_name=cname, domain=domain,
+                vocabulary=vocab, concept_class=cc, standard_concept='S',
+                concept_code=str(cid), valid_start_date=_date(1970, 1, 1),
+                valid_end_date=_date(2099, 12, 31))
+
+        _concept(301, 'Pom-Dex')
+        _concept(302, 'Dara')
+        rec = self._record(
+            person_id=90255,
+            later_therapy='Pom-Dex', later_therapy_ids=[301, 302],
+            later_component_ids=[31, 32])
+        lot = self._lot(rec)
+        self.assertEqual([l['line'] for l in lot], [3, 4])
+        self.assertEqual(lot[0]['regimen_concept_id'], 301)
+        self.assertEqual(lot[0]['regimen'], 'Pom-Dex')
+        self.assertEqual(lot[1]['regimen_concept_id'], 302)
+        # 4L names its own regimen, not the first later line's text.
+        self.assertEqual(lot[1]['regimen'], 'Dara')
+
+
 # ---------------------------------------------------------------------------
 # PatientSelfScopePermission tests
 # ---------------------------------------------------------------------------
@@ -11308,8 +11610,8 @@ class PatientSelfScopePermissionTest(TestCase):
         # so the object is not found rather than forbidden.
         self.assertIn(resp.status_code, [status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND])
 
-    def test_superuser_bypasses_scope(self):
-        """Superuser can access any patient's condition."""
+    def test_staff_bypasses_scope(self):
+        """Staff can access any patient's condition."""
         resp = self._client_as(self.superuser).get(
             f'/api/v1/conditions/{self.condition_b.condition_occurrence_id}/'
         )
@@ -13968,3 +14270,165 @@ class UserlessOAuthTokenDetailTest(TestCase):
         self.assertFalse(can_access_patient(None, pid))
         self.assertFalse(can_write_patient(None, pid))
         self.assertIsNone(get_actor_role(None, pid))
+# ---------------------------------------------------------------------------
+# Vocabulary Snapshot (streaming NDJSON) tests
+# ---------------------------------------------------------------------------
+
+class VocabSnapshotTest(_SmartBase):
+    """Test /api/v1/vocab-releases/.../snapshot/<table>/ endpoints."""
+
+    def setUp(self):
+        super().setUp()
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone as tz
+        self.release = VocabularyRelease.objects.create(
+            build_timestamp=tz.now(),
+            status='published',
+            published_at=tz.now(),
+            scope=['TEST'],
+            vocab_versions={'TEST': '1.0'},
+            row_counts={'concept': 2, 'vocabulary': 1},
+            checksums={},
+        )
+        # Seed a concept with source='HealthKey' and one without
+        from omop_core.models import Concept, ConceptClass
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Clinical Finding',
+            defaults={'concept_class_name': 'Clinical Finding', 'concept_class_concept_id': 0},
+        )
+        vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        domain = Domain.objects.get(domain_id='Condition')
+        from datetime import date
+        self.concept_ext = Concept.objects.create(
+            concept_id=8880001,
+            concept_name='External Concept',
+            domain=domain,
+            vocabulary=vocab,
+            concept_class=cc,
+            concept_code='EXT001',
+            source=None,
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        self.concept_hk = Concept.objects.create(
+            concept_id=8880002,
+            concept_name='HealthKey Concept',
+            domain=domain,
+            vocabulary=vocab,
+            concept_class=cc,
+            concept_code='HK001',
+            source='HealthKey',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+
+    def tearDown(self):
+        super().tearDown()
+        from patient_portal.api.views import _vocab_version_cache
+        _vocab_version_cache['release_pk'] = None
+        _vocab_version_cache['map'] = None
+
+    def _snapshot_url(self, table, release_id=None):
+        if release_id is None:
+            return f'/api/v1/vocab-releases/latest/snapshot/{table}/'
+        return f'/api/v1/vocab-releases/{release_id}/snapshot/{table}/'
+
+    def test_returns_ndjson(self):
+        resp = self.read_client.get(self._snapshot_url('vocabulary', self.release.pk))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp['Content-Type'], 'application/x-ndjson')
+        content = b''.join(resp.streaming_content).decode()
+        lines = [l for l in content.strip().split('\n') if l]
+        self.assertGreater(len(lines), 0)
+
+    def test_each_line_valid_json(self):
+        import json
+        resp = self.read_client.get(self._snapshot_url('vocabulary', self.release.pk))
+        content = b''.join(resp.streaming_content).decode()
+        for line in content.strip().split('\n'):
+            if line:
+                row = json.loads(line)
+                if row.get('__done'):
+                    continue
+                self.assertIn('vocabulary_id', row)
+
+    def test_404_on_staged_release(self):
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone as tz
+        staged = VocabularyRelease.objects.create(
+            build_timestamp=tz.now(), status='staged',
+        )
+        resp = self.read_client.get(self._snapshot_url('vocabulary', staged.pk))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_404_on_nonexistent_release(self):
+        resp = self.read_client.get(self._snapshot_url('vocabulary', 99999))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_304_on_etag_match(self):
+        resp1 = self.read_client.get(self._snapshot_url('vocabulary', self.release.pk))
+        self.assertEqual(resp1.status_code, 200)
+        etag = resp1['ETag']
+        resp2 = self.read_client.get(
+            self._snapshot_url('vocabulary', self.release.pk),
+            HTTP_IF_NONE_MATCH=etag,
+        )
+        self.assertEqual(resp2.status_code, 304)
+        # RFC 7232: 304 must include ETag
+        self.assertEqual(resp2['ETag'], etag)
+
+    def test_400_on_unknown_table(self):
+        resp = self.read_client.get(self._snapshot_url('bogus_table', self.release.pk))
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Unknown table', resp.data['detail'])
+
+    def test_latest_resolves_to_published(self):
+        resp = self.read_client.get(self._snapshot_url('vocabulary'))
+        self.assertEqual(resp.status_code, 200)
+        content = b''.join(resp.streaming_content).decode()
+        self.assertGreater(len(content.strip()), 0)
+
+    def test_source_filter_healthkey(self):
+        import json
+        url = self._snapshot_url('concept', self.release.pk) + '?source=HealthKey'
+        resp = self.read_client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        content = b''.join(resp.streaming_content).decode()
+        rows = [json.loads(l) for l in content.strip().split('\n') if l and '__done' not in l]
+        concept_ids = {r['concept_id'] for r in rows}
+        self.assertIn(8880002, concept_ids)
+        self.assertNotIn(8880001, concept_ids)
+
+    def test_source_filter_external(self):
+        import json
+        url = self._snapshot_url('concept', self.release.pk) + '?source=external'
+        resp = self.read_client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        content = b''.join(resp.streaming_content).decode()
+        rows = [json.loads(l) for l in content.strip().split('\n') if l and '__done' not in l]
+        concept_ids = {r['concept_id'] for r in rows}
+        self.assertIn(8880001, concept_ids)
+        self.assertNotIn(8880002, concept_ids)
+
+    def test_content_disposition_header(self):
+        resp = self.read_client.get(self._snapshot_url('vocabulary', self.release.pk))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(
+            f'vocabulary_{self.release.pk}.ndjson',
+            resp['Content-Disposition'],
+        )
+
+    def test_unauthenticated_returns_401(self):
+        from rest_framework.test import APIClient
+        anon = APIClient()
+        resp = anon.get(self._snapshot_url('vocabulary', self.release.pk))
+        self.assertIn(resp.status_code, [401, 403])
+
+    def test_done_sentinel_in_stream(self):
+        import json
+        resp = self.read_client.get(self._snapshot_url('vocabulary', self.release.pk))
+        content = b''.join(resp.streaming_content).decode()
+        lines = [l for l in content.strip().split('\n') if l]
+        last = json.loads(lines[-1])
+        self.assertTrue(last.get('__done'))
+        self.assertEqual(last['rows'], len(lines) - 1)

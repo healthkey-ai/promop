@@ -38,7 +38,6 @@ class PersonalRepresentativeViewSet(viewsets.ReadOnlyModelViewSet):
         user = request.user
         return bool(
             is_service_token(request)
-            or getattr(user, 'is_superuser', False)
             or getattr(user, 'is_staff', False)
         )
 

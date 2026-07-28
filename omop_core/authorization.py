@@ -26,7 +26,7 @@ def can_access_patient(actor_identity, target_person_id: int) -> bool:
     if actor_identity is None:
         return False
 
-    if getattr(actor_identity, 'is_superuser', False):
+    if getattr(actor_identity, 'is_staff', False):
         return True
 
     # 1. Self-access
@@ -76,7 +76,7 @@ def can_write_patient(actor_identity, target_person_id: int) -> bool:
     if actor_identity is None:
         return False
 
-    if getattr(actor_identity, 'is_superuser', False):
+    if getattr(actor_identity, 'is_staff', False):
         return True
 
     # Patients can write their own record

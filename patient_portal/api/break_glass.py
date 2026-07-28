@@ -23,7 +23,7 @@ from .permissions import is_service_token
 def _may_break_glass(request) -> bool:
     """Only professional/staff callers may break glass — never a plain patient."""
     user = request.user
-    if is_service_token(request) or getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False):
+    if is_service_token(request) or getattr(user, 'is_staff', False):
         return True
     from django.db.models import Q
     now = timezone.now()

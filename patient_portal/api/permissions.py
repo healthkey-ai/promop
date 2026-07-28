@@ -23,12 +23,12 @@ def get_request_org(request):
     Return the Organization associated with the current OAuth2 token, or None.
 
     Returns None (no scoping) for:
-      - superusers (can see all orgs)
+      - staff users (can see all orgs)
       - session-authenticated requests (backward compat)
       - partner-auth requests (Firebase, SAML — no org scoping)
       - service clients not linked to any organization
     """
-    if request.user and request.user.is_superuser:
+    if request.user and getattr(request.user, 'is_staff', False):
         return None
     token = getattr(request, 'auth', None)
     if token is None or isinstance(token, TokenClaims):
@@ -53,7 +53,7 @@ class ScopedTokenPermission(BasePermission):
     Role model for non-OAuth2 auth paths:
 
       service-token         → full access (trusted backend service)
-      is_superuser/is_staff → full access
+      is_staff              → full access
       other authenticated   → safe methods + PATCH only
                               (read + self-edit; POST/DELETE denied)
 
@@ -81,8 +81,8 @@ class ScopedTokenPermission(BasePermission):
         if token is None or isinstance(token, TokenClaims):
             if not (request.user and request.user.is_authenticated):
                 return False
-            # Staff and superusers retain full access.
-            if request.user.is_superuser or getattr(request.user, 'is_staff', False):
+            # Staff users retain full access.
+            if getattr(request.user, 'is_staff', False):
                 return True
             # Regular authenticated users (patients): read + PATCH own data only.
             # POST (sync, bulk upload) and DELETE (visits, measurements, bulk) are denied.
@@ -134,7 +134,7 @@ class SurveyResponsePermission(ScopedTokenPermission):
     Patients need to create survey responses (start a survey) and autosave
     answers via PATCH. The viewset enforces per-person authorization via
     _OmopFilterMixin and PatientSelfScopePermission, so allowing POST/PATCH
-    here is safe. Staff and superusers retain full access.
+    here is safe. Staff users retain full access.
 
     Service tokens and OAuth2 SMART scopes are handled exactly as in the
     base class.
@@ -145,7 +145,7 @@ class SurveyResponsePermission(ScopedTokenPermission):
         if token is None or isinstance(token, TokenClaims):
             if not (request.user and request.user.is_authenticated):
                 return False
-            if request.user.is_superuser or getattr(request.user, 'is_staff', False):
+            if getattr(request.user, 'is_staff', False):
                 return True
             return request.method in _SURVEY_PATIENT_METHODS
         return super().has_permission(request, view)
@@ -213,7 +213,7 @@ class PatientSelfScopePermission(BasePermission):
 
     Bypass rules (allow access regardless of object ownership):
     - Service tokens (trusted backend)
-    - Staff / superuser
+    - Staff users
     - Non-patient identities (no PatientUser link, or has provider GroupAccess)
     """
 
@@ -227,7 +227,7 @@ class PatientSelfScopePermission(BasePermission):
         from patient_portal.services import patient_person_for
         patient_person = patient_person_for(request.user)
         if patient_person is None:
-            # Not a patient (staff, superuser, provider, or unauthenticated).
+            # Not a patient (staff, provider, or unauthenticated).
             return True
 
         obj_person_id = _resolve_person_id(obj)

@@ -2,6 +2,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
@@ -240,10 +241,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         org = get_request_org(self.request)
         if org is not None:
             qs = qs.filter(organization=org)
-        elif not (self.request.user and (
-            getattr(self.request.user, 'is_superuser', False) or
+        elif not (self.request.user and
             getattr(self.request.user, 'is_staff', False)
-        )):
+        ):
             # Session / partner-auth users: scope to only the patients they can
             # access — their own record (PatientUser) and any patients in their
             # professional groups (GroupAccess). Doctors/admins with
@@ -458,7 +458,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if org is not None:
                 if patient_info.organization != org:
                     return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-            elif not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
+            elif not getattr(request.user, 'is_staff', False):
                 from omop_core.authorization import can_access_patient
                 if not can_access_patient(request.user, person.person_id):
                     return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -495,7 +495,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if org is not None:
             if patient_info.organization != org:
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        elif not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
+        elif not getattr(request.user, 'is_staff', False):
             from omop_core.authorization import can_access_patient, can_write_patient
             if not can_access_patient(request.user, person.person_id):
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -588,7 +588,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if org is not None:
                 if patient_info.organization != org:
                     return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-            elif not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
+            elif not getattr(request.user, 'is_staff', False):
                 from omop_core.authorization import can_access_patient
                 if not can_access_patient(request.user, person.person_id):
                     return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -629,7 +629,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if org is not None:
                 if patient_info.organization != org:
                     return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-            elif not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
+            elif not getattr(request.user, 'is_staff', False):
                 from omop_core.authorization import can_access_patient
                 if not can_access_patient(request.user, person.person_id):
                     return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -672,7 +672,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             now = timezone.now()
             is_clinical = (
                 getattr(request.user, 'is_staff', False)
-                or getattr(request.user, 'is_superuser', False)
                 or GroupAccess.objects.filter(
                     identity=request.user,
                     role__in=['org_admin', 'doctor', 'analyst'],
@@ -1463,7 +1462,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             )
 
                     # Block analysts from updating existing patients via FHIR upload.
-                    if not person_is_new and not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
+                    if not person_is_new and not getattr(request.user, 'is_staff', False):
                         request_org = get_request_org(request)
                         same_org_upload = (
                             request_org is not None
@@ -3427,10 +3426,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             errors = []
             
             org = get_request_org(request)
-            _is_privileged = request.user and (
-                getattr(request.user, 'is_superuser', False) or
-                getattr(request.user, 'is_staff', False)
-            )
+            _is_privileged = request.user and getattr(request.user, 'is_staff', False)
             for person_id in person_ids:
                 try:
                     person = Person.objects.get(person_id=person_id)
@@ -3712,8 +3708,8 @@ def org_disease_stats(request):
             'disease_counts': counts,
         })
 
-    # For staff/superusers: also surface patients not assigned to any org.
-    if getattr(request.user, 'is_staff', False) or getattr(request.user, 'is_superuser', False):
+    # For staff users: also surface patients not assigned to any org.
+    if getattr(request.user, 'is_staff', False):
         counts = _disease_counts(PatientRecord.objects.filter(organization__isnull=True))
         if counts:
             unassigned_total = sum(d['count'] for d in counts)
@@ -3829,7 +3825,7 @@ class PersonViewSet(viewsets.GenericViewSet):
             if org is not None:
                 if not PatientRecord.objects.filter(person=person, organization=org).exists():
                     return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-            elif not (getattr(request.user, 'is_superuser', False) or getattr(request.user, 'is_staff', False)):
+            elif not getattr(request.user, 'is_staff', False):
                 from omop_core.authorization import can_access_patient
                 if not can_access_patient(request.user, person.person_id):
                     return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -3897,10 +3893,9 @@ class _OmopFilterMixin:
             from omop_core.models import PatientRecord
             allowed = PatientRecord.objects.filter(organization=org).values('person_id')
             qs = qs.filter(person_id__in=allowed)
-        elif not (self.request.user and (
-            getattr(self.request.user, 'is_superuser', False) or
+        elif not (self.request.user and
             getattr(self.request.user, 'is_staff', False)
-        )):
+        ):
             # Session / partner-auth (Firebase, SAML): no org token.
             # Enforce per-patient access using can_access_patient.
             from omop_core.authorization import can_access_patient
@@ -3957,7 +3952,7 @@ class _ProvenanceMixin:
                         and existing_pi.organization is not None
                         and existing_pi.organization != org):
                     raise PermissionDenied('Person does not belong to your organization.')
-        elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
+        elif not getattr(self.request.user, 'is_staff', False):
             from omop_core.authorization import can_write_patient
             from rest_framework.exceptions import PermissionDenied
             person = serializer.validated_data.get('person')
@@ -3988,7 +3983,7 @@ class _ProvenanceMixin:
                 raise NotFound('Person not found.')
             if existing_pi.organization is not None and existing_pi.organization != org:
                 raise PermissionDenied('Person does not belong to your organization.')
-        elif not (getattr(self.request.user, 'is_superuser', False) or getattr(self.request.user, 'is_staff', False)):
+        elif not getattr(self.request.user, 'is_staff', False):
             from omop_core.authorization import can_write_patient
             from rest_framework.exceptions import PermissionDenied
             person = serializer.validated_data.get('person') or serializer.instance.person
@@ -4104,10 +4099,7 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
             ).values('person_id')
             allowed_episodes = Episode.objects.filter(person_id__in=allowed_pids).values('episode_id')
             qs = qs.filter(episode_id__in=allowed_episodes)
-        elif self.request.user and not (
-            getattr(self.request.user, 'is_superuser', False) or
-            getattr(self.request.user, 'is_staff', False)
-        ):
+        elif self.request.user and not getattr(self.request.user, 'is_staff', False):
             from omop_core.authorization import can_access_patient
             from patient_portal.models import PatientUser
             person_id = self.request.query_params.get('person_id')
@@ -4148,10 +4140,7 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
             pi = PatientRecord.objects.filter(person_id=episode.person_id).first()
             if pi is not None and pi.organization is not None and pi.organization != org:
                 raise PermissionDenied('Episode does not belong to your organization.')
-        elif self.request.user and not (
-            getattr(self.request.user, 'is_superuser', False) or
-            getattr(self.request.user, 'is_staff', False)
-        ):
+        elif self.request.user and not getattr(self.request.user, 'is_staff', False):
             # Non-org path (partner-auth / session patients): enforce per-patient ownership.
             from omop_core.authorization import can_access_patient
             if episode_id is not None:
@@ -4619,7 +4608,7 @@ def concept_search(request):
     Search OMOP concepts by name (case-insensitive substring).
 
     Query params:
-        q                 required, minimum 2 characters
+        q                 required, minimum 3 characters
         vocabulary_id     optional exact-match filter (e.g. LOINC, SNOMED)
         domain_id         optional exact-match filter (e.g. Measurement)
         concept_class_id  optional exact-match filter (e.g. Lab Test)
@@ -4628,10 +4617,13 @@ def concept_search(request):
 
     Response 200: paginated {count, next, previous, results: [concept, ...]}
     """
+    # Minimum 3 chars: a pg_trgm trigram is 3 chars, so shorter queries can't use
+    # the GIN trigram index on UPPER(concept_name) and would seq-scan the (large)
+    # concept table (#262). Matches concepts/synonyms/ minimum.
     query = (request.query_params.get('q') or '').strip()
-    if len(query) < 2:
+    if len(query) < 3:
         return Response(
-            {'detail': "Query parameter 'q' is required and must be at least 2 characters."},
+            {'detail': "Query parameter 'q' is required and must be at least 3 characters."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -4954,7 +4946,7 @@ class SurveyViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('Survey templates can only be modified by staff or service tokens.')
         # Session / Firebase / SAML: require staff.
         user = request.user
-        if not (user and (getattr(user, 'is_staff', False) or getattr(user, 'is_superuser', False))):
+        if not (user and getattr(user, 'is_staff', False)):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('Survey templates can only be modified by staff or service tokens.')
 
@@ -5011,7 +5003,7 @@ class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.
             org = get_request_org(self.request)
             person_id = self.request.query_params.get('person_id')
             user = self.request.user
-            is_privileged = user and (getattr(user, 'is_staff', False) or getattr(user, 'is_superuser', False))
+            is_privileged = user and getattr(user, 'is_staff', False)
             if org is None and not person_id and not is_privileged:
                 return qs.none()
         return qs
@@ -5111,11 +5103,10 @@ class PatientMessageViewSet(viewsets.ModelViewSet):
             qs = qs.filter(patient_user__person=person)
         else:
             # Staff/providers: restricted & very-restricted messages are visible only
-            # to their sender — sensitive content is not broadly visible to other
-            # staff (PHR-S FM PH.6.3#08). Service tokens/superusers are unrestricted.
+            # to their sender — sensitive content is not broadly visible to
+            # staff (PHR-S FM PH.6.3#08). Only service tokens are unrestricted.
             from django.db.models import Q
-            if not (is_service_token(self.request)
-                    or getattr(self.request.user, 'is_superuser', False)):
+            if not is_service_token(self.request):
                 qs = qs.filter(
                     Q(confidentiality=PatientMessage.CONFIDENTIALITY_NORMAL)
                     | Q(sender=self.request.user)
@@ -5276,3 +5267,108 @@ def _serialize_vocab_release(release, include_checksums=False):
     if include_checksums:
         data['checksums'] = release.checksums
     return data
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary Snapshot — streaming NDJSON bulk download
+# ---------------------------------------------------------------------------
+
+class VocabSnapshotView(APIView):
+    """Stream all rows from a vocabulary table as newline-delimited JSON.
+
+    Uses raw SQL ``row_to_json()`` to avoid ORM overhead on large tables.
+    The table name is validated against a whitelist before interpolation.
+    """
+    permission_classes = [ScopedTokenPermission]
+
+    # SECURITY: db_table values are hardcoded; never interpolate user input.
+    ALLOWED_TABLES = {
+        'concept': 'concept',
+        'concept_ancestor': 'concept_ancestor',
+        'concept_class': 'concept_class',
+        'concept_relationship': 'concept_relationship',
+        'concept_synonym': 'concept_synonym',
+        'domain': 'domain',
+        'drug_strength': 'drug_strength',
+        'relationship': 'relationship',
+        'source_to_concept_map': 'source_to_concept_map',
+        'vocabulary': 'vocabulary',
+    }
+
+    def get(self, request, table, release_id=None):
+        from django.http import HttpResponseNotModified, StreamingHttpResponse
+        from omop_core.models import VocabularyRelease
+        from omop_core.services.vocab_release import get_latest_release, get_release_etag
+
+        # 1. Validate table name
+        if table not in self.ALLOWED_TABLES:
+            return Response(
+                {'detail': f'Unknown table. Valid tables: {", ".join(sorted(self.ALLOWED_TABLES))}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 2. Resolve release
+        if release_id is None:
+            release = get_latest_release()
+        else:
+            release = VocabularyRelease.objects.filter(
+                pk=release_id, status='published',
+            ).first()
+        if release is None:
+            return Response({'detail': 'Release not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # 3. ETag / conditional request
+        etag = get_release_etag(release)
+        if_none_match = request.META.get('HTTP_IF_NONE_MATCH', '')
+        if _etag_matches(if_none_match, etag):
+            resp = HttpResponseNotModified()
+            if etag:
+                resp['ETag'] = etag
+            return resp
+
+        # 4. Build WHERE clause (source filter for concept table only)
+        db_table = self.ALLOWED_TABLES[table]
+        where = ''
+        params = []
+        source_param = None
+        if table == 'concept':
+            source_param = request.query_params.get('source')
+            if source_param == 'HealthKey':
+                where = 'WHERE source = %s'
+                params = ['HealthKey']
+            elif source_param == 'external':
+                where = 'WHERE source IS NULL'
+
+        # Vary ETag by source filter so different queries don't share ETags
+        if source_param and etag:
+            etag = etag.rstrip('"') + f'-{source_param}"'
+
+        # 5. Stream NDJSON
+        sql = f'SELECT row_to_json(t) FROM {db_table} t {where}'
+        response = StreamingHttpResponse(
+            self._stream_ndjson(sql, params),
+            content_type='application/x-ndjson',
+        )
+        response['Content-Disposition'] = (
+            f'attachment; filename="{table}_{release.pk}.ndjson"'
+        )
+        if etag:
+            response['ETag'] = etag
+            response['Cache-Control'] = 'private, max-age=86400'
+        return response
+
+    @staticmethod
+    def _stream_ndjson(sql, params=None):
+        import json as _json
+        from django.db import connection
+        count = 0
+        with connection.connection.cursor(name='vocab_snapshot') as cursor:
+            cursor.itersize = 1000
+            cursor.execute(sql, params or [])
+            for (row_json,) in cursor:
+                if isinstance(row_json, dict):
+                    yield _json.dumps(row_json) + '\n'
+                else:
+                    yield str(row_json) + '\n'
+                count += 1
+        yield _json.dumps({'__done': True, 'rows': count}) + '\n'

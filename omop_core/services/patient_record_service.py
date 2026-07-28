@@ -694,7 +694,13 @@ def _apply_inferred_lots(data: dict, lots) -> None:
                 data['later_date'] = start
                 data['later_start_date'] = start
                 data['later_end_date'] = end
-            later.append({'therapy': name, 'startDate': start, 'endDate': end})
+            # Carry the actual line number and per-line concept_id (may be None
+            # when the regimen did not resolve) so the structured
+            # lines_of_therapy payload keeps the true line number, pairs each
+            # later line with its own id, and never drops an unresolved line.
+            later.append({'lineNumber': lot.lot_number, 'therapy': name,
+                          'startDate': start, 'endDate': end,
+                          'concept_id': concept_id})
             if concept_id:
                 later_ids.append(concept_id)
     if later:
@@ -850,7 +856,12 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         elif lot >= 3:
             later_components |= components
             later = data.get('later_therapies', [])
-            later.append({'therapy': drug_names, 'startDate': start_date, 'endDate': end_date})
+            # Keep the true episode line number and per-line concept_id (may be
+            # None for an unresolved regimen) so lines_of_therapy renders the
+            # correct line number and pairs each later line with its own id.
+            later.append({'lineNumber': lot, 'therapy': drug_names,
+                          'startDate': start_date, 'endDate': end_date,
+                          'concept_id': concept_id})
             data['later_therapies'] = later
             if concept_id:
                 ids = data.get('later_therapy_ids') or []

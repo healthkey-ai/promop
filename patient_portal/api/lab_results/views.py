@@ -134,9 +134,9 @@ def _resolve_person_id(request):
         email_qs = PatientRecord.objects.filter(email=email)
         if org is not None:
             pi = email_qs.filter(organization=org).first()
-        elif getattr(request.user, 'is_superuser', False):
+        elif getattr(request.user, 'is_staff', False):
             pi = email_qs.first()
-        # else: non-superuser without org scope — email fallback disabled
+        # else: non-staff without org scope — email fallback disabled
     if pi is None:
         return None, Response(
             {'detail': 'No patient record linked to your account.'},
