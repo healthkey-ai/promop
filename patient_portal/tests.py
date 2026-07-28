@@ -13688,6 +13688,7 @@ class OrgPatientSignupTest(TestCase):
 
     def test_signup_missing_email_returns_400(self):
         resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
+            'email': '',
             'password': 'Str0ng!Pass99',
         })
         self.assertEqual(resp.status_code, 400)
@@ -13740,3 +13741,110 @@ class OrganizationSerializerTest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.org.refresh_from_db()
         self.assertTrue(self.org.allows_patient_signup)
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary Release API tests
+# ---------------------------------------------------------------------------
+
+class VocabReleaseAPITest(_SmartBase):
+    """Test /api/v1/vocab-releases/ endpoints and ETag on concept endpoints."""
+
+    def tearDown(self):
+        super().tearDown()
+        # Reset module-level cache so stale release PKs don't leak into other tests
+        from patient_portal.api.views import _vocab_version_cache
+        _vocab_version_cache['release_pk'] = None
+        _vocab_version_cache['map'] = None
+
+    def _make_release(self, **kwargs):
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone
+        defaults = {
+            'build_timestamp': timezone.now(),
+            'status': 'published',
+            'published_at': timezone.now(),
+            'scope': ['SNOMED', 'LOINC'],
+            'vocab_versions': {'SNOMED': '20240701'},
+            'row_counts': {'concept': 100},
+            'checksums': {'concept': {'count': 100}},
+        }
+        defaults.update(kwargs)
+        return VocabularyRelease.objects.create(**defaults)
+
+    def test_list_returns_published_only(self):
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone
+        self._make_release()
+        VocabularyRelease.objects.create(
+            build_timestamp=timezone.now(), status='staged',
+        )
+        VocabularyRelease.objects.create(
+            build_timestamp=timezone.now(), status='retired',
+            published_at=timezone.now(),
+        )
+        resp = self.read_client.get('/api/v1/vocab-releases/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['count'], 1)
+
+    def test_detail_returns_checksums(self):
+        release = self._make_release()
+        resp = self.read_client.get(f'/api/v1/vocab-releases/{release.pk}/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('checksums', resp.data)
+        self.assertEqual(resp.data['checksums']['concept']['count'], 100)
+
+    def test_detail_404_for_nonexistent(self):
+        resp = self.read_client.get('/api/v1/vocab-releases/99999/')
+        self.assertEqual(resp.status_code, 404)
+
+    def test_latest_returns_most_recent_published(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        now = timezone.now()
+        self._make_release(published_at=now - timedelta(days=1))
+        newer = self._make_release(published_at=now)
+        resp = self.read_client.get('/api/v1/vocab-releases/latest/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['id'], newer.pk)
+
+    def test_latest_returns_etag(self):
+        self._make_release()
+        resp = self.read_client.get('/api/v1/vocab-releases/latest/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('ETag', resp)
+        self.assertTrue(resp['ETag'].startswith('"vr-'))
+
+    def test_latest_304_on_matching_etag(self):
+        self._make_release()
+        resp1 = self.read_client.get('/api/v1/vocab-releases/latest/')
+        etag = resp1['ETag']
+        resp2 = self.read_client.get(
+            '/api/v1/vocab-releases/latest/', HTTP_IF_NONE_MATCH=etag,
+        )
+        self.assertEqual(resp2.status_code, 304)
+
+    def test_latest_404_when_empty(self):
+        resp = self.read_client.get('/api/v1/vocab-releases/latest/')
+        self.assertEqual(resp.status_code, 404)
+
+    def test_concept_list_returns_etag_when_release_exists(self):
+        self._make_release()
+        resp = self.read_client.get('/api/v1/concepts/?vocabulary_id=SNOMED')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('ETag', resp)
+
+    def test_concept_list_304_on_matching_etag(self):
+        self._make_release()
+        resp1 = self.read_client.get('/api/v1/concepts/?vocabulary_id=SNOMED')
+        etag = resp1['ETag']
+        resp2 = self.read_client.get(
+            '/api/v1/concepts/?vocabulary_id=SNOMED', HTTP_IF_NONE_MATCH=etag,
+        )
+        self.assertEqual(resp2.status_code, 304)
+
+    def test_concept_search_returns_etag(self):
+        self._make_release()
+        resp = self.read_client.get('/api/v1/concepts/search/?q=test')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('ETag', resp)

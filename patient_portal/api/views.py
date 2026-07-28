@@ -4224,7 +4224,7 @@ def concept_lookup(request):
         version_map = _vocab_version_map()
         result['_vocabulary_versions'] = {v: version_map.get(v) for v in by_vocab}
 
-    return Response(result)
+    return _set_release_etag(request, Response(result))
 
 
 # Caps for concept graph traversal: bound any single source concept's result
@@ -4253,12 +4253,72 @@ def _concept_graph_filters(request):
     return relationship_ids, vocabulary_ids, concept_class_ids, max_levels
 
 
+import threading
+
+_vocab_cache_lock = threading.Lock()
+_vocab_version_cache = {'release_pk': None, 'map': None}
+
+
 def _vocab_version_map():
     """``{vocabulary_id: vocabulary_version}`` for every vocabulary (small table,
     one query). Lets concept responses carry the release/version each concept
-    came from, so consumers can pin a release and detect drift (promop#240)."""
+    came from, so consumers can pin a release and detect drift (promop#240).
+
+    Cached per-process, invalidated when a new VocabularyRelease is published."""
     from omop_core.models import Vocabulary
-    return dict(Vocabulary.objects.values_list('vocabulary_id', 'vocabulary_version'))
+    from omop_core.services.vocab_release import get_latest_release
+
+    release = get_latest_release()
+    if release is None:
+        # No published release — skip caching, just query directly.
+        return dict(Vocabulary.objects.values_list('vocabulary_id', 'vocabulary_version'))
+    release_pk = release.pk
+    with _vocab_cache_lock:
+        if _vocab_version_cache['release_pk'] == release_pk and _vocab_version_cache['map'] is not None:
+            return _vocab_version_cache['map']
+        result = dict(Vocabulary.objects.values_list('vocabulary_id', 'vocabulary_version'))
+        _vocab_version_cache['release_pk'] = release_pk
+        _vocab_version_cache['map'] = result
+        return result
+
+
+def _etag_matches(if_none_match, etag):
+    """RFC 7232 §3.2 weak comparison for If-None-Match on GET/HEAD."""
+    if not if_none_match or not etag:
+        return False
+    if if_none_match.strip() == '*':
+        return True
+
+    def _normalize(e):
+        e = e.strip()
+        if e.startswith('W/'):
+            e = e[2:]
+        return e
+    etag_norm = _normalize(etag)
+    for token in if_none_match.split(','):
+        if _normalize(token) == etag_norm:
+            return True
+    return False
+
+
+def _set_release_etag(request, response):
+    """Set ETag and Cache-Control on a concept response based on the latest
+    published VocabularyRelease. Returns a 304 if If-None-Match matches."""
+    from django.http import HttpResponseNotModified
+    from omop_core.services.vocab_release import get_latest_release, get_release_etag
+
+    release = get_latest_release()
+    etag = get_release_etag(release)
+    if etag is None:
+        return response
+
+    if_none_match = request.META.get('HTTP_IF_NONE_MATCH', '')
+    if _etag_matches(if_none_match, etag):
+        return HttpResponseNotModified()
+
+    response['ETag'] = etag
+    response['Cache-Control'] = 'public, max-age=300'
+    return response
 
 
 def _serialize_concept_graph_node(concept, versions=None, **extra):
@@ -4415,13 +4475,13 @@ def _concept_graph_single_response(request, concept_id, direction):
         max_levels,
     )
     results = grouped[concept_id]
-    return Response({
+    return _set_release_etag(request, Response({
         'concept_id': concept_id,
         'direction': direction,
         'count': len(results),
         'truncated': concept_id in truncated,
         'results': results,
-    })
+    }))
 
 
 @api_view(['GET'])
@@ -4480,14 +4540,14 @@ def concept_graph_batch(request):
         concept_class_ids,
         max_levels,
     )
-    return Response({
+    return _set_release_etag(request, Response({
         'direction': direction,
         'results': {
             str(concept_id): grouped.get(concept_id, [])
             for concept_id in concept_ids
         },
         'truncated': sorted(truncated),
-    })
+    }))
 
 
 # =============================================================================
@@ -4539,7 +4599,8 @@ def _paginated_concept_response(queryset, request):
     paginator = ConceptPagination()
     page = paginator.paginate_queryset(queryset.order_by('concept_id'), request)
     versions = _vocab_version_map()
-    return paginator.get_paginated_response([_serialize_concept(c, versions) for c in page])
+    response = paginator.get_paginated_response([_serialize_concept(c, versions) for c in page])
+    return _set_release_etag(request, response)
 
 
 @api_view(['GET'])
@@ -4620,7 +4681,7 @@ def concept_synonyms(request, concept_id):
         .order_by('concept_synonym_name')
         .values('concept_synonym_name', 'language_concept_id')
     )
-    return Response({'concept_id': concept_id, 'count': len(rows), 'results': rows})
+    return _set_release_etag(request, Response({'concept_id': concept_id, 'count': len(rows), 'results': rows}))
 
 
 @api_view(['GET'])
@@ -4670,7 +4731,7 @@ def concept_synonym_search(request):
         'standard_concept': s.concept.standard_concept,
         'concept_synonym_name': s.concept_synonym_name,
     } for s in page]
-    return paginator.get_paginated_response(results)
+    return _set_release_etag(request, paginator.get_paginated_response(results))
 
 
 @api_view(['GET'])
@@ -5144,3 +5205,65 @@ class InterchangeAgreementViewSet(viewsets.ReadOnlyModelViewSet):
     def get_serializer_class(self):
         from .serializers import InterchangeAgreementSerializer
         return InterchangeAgreementSerializer
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary Release — versioned release manifest API
+# ---------------------------------------------------------------------------
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def vocab_release_list(request):
+    """Paginated list of published vocabulary releases (newest first)."""
+    from omop_core.models import VocabularyRelease
+
+    qs = VocabularyRelease.objects.filter(status='published').order_by('-published_at')
+    paginator = ConceptPagination()
+    page = paginator.paginate_queryset(qs, request)
+    results = [_serialize_vocab_release(r) for r in page]
+    return paginator.get_paginated_response(results)
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def vocab_release_detail(request, release_id):
+    """Full manifest for a specific published vocabulary release, including checksums."""
+    from omop_core.models import VocabularyRelease
+
+    try:
+        release = VocabularyRelease.objects.get(pk=release_id, status='published')
+    except VocabularyRelease.DoesNotExist:
+        return Response({'detail': 'Release not found.'}, status=status.HTTP_404_NOT_FOUND)
+    return Response(_serialize_vocab_release(release, include_checksums=True))
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def vocab_release_latest(request):
+    """Latest published vocabulary release. Supports If-None-Match → 304."""
+    from omop_core.services.vocab_release import get_latest_release
+
+    release = get_latest_release()
+    if release is None:
+        return Response({'detail': 'No published releases.'}, status=status.HTTP_404_NOT_FOUND)
+
+    resp = Response(_serialize_vocab_release(release, include_checksums=True))
+    return _set_release_etag(request, resp)
+
+
+def _serialize_vocab_release(release, include_checksums=False):
+    data = {
+        'id': release.pk,
+        'schema_version': release.schema_version,
+        'scope': release.scope,
+        'build_timestamp': release.build_timestamp.isoformat() if release.build_timestamp else None,
+        'athena_version': release.athena_version,
+        'vocab_versions': release.vocab_versions,
+        'row_counts': release.row_counts,
+        'status': release.status,
+        'published_at': release.published_at.isoformat() if release.published_at else None,
+        'notes': release.notes,
+    }
+    if include_checksums:
+        data['checksums'] = release.checksums
+    return data
