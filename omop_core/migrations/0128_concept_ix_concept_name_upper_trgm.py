@@ -12,7 +12,7 @@ class Migration(migrations.Migration):
     # UPPER(...)`, which the raw index cannot serve — the index expression must
     # match the query expression.
     #
-    # Add (here) and drop (0122) are split into two recorded migrations, and the
+    # Add (here) and drop (0129) are split into two recorded migrations, and the
     # add is made idempotent, so a partial failure is fully recoverable:
     #   - CREATE INDEX CONCURRENTLY can't run in a transaction (hence
     #     atomic=False) and is NOT idempotent — a cancelled/failed build leaves
@@ -22,12 +22,12 @@ class Migration(migrations.Migration):
     #     retries cleanly without manual intervention.
     #   - Building the new index before dropping the old one means the old index
     #     keeps serving search throughout; a failed build never leaves the table
-    #     unindexed, and 0122 removes the old index only once this migration is
+    #     unindexed, and 0129 removes the old index only once this migration is
     #     recorded as applied.
     atomic = False
 
     dependencies = [
-        ('omop_core', '0120_merge_0119_branches'),
+        ('omop_core', '0127_patient_role_phase1'),
     ]
 
     operations = [
