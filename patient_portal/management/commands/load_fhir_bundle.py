@@ -51,9 +51,9 @@ class Command(BaseCommand):
         if created:
             self.stdout.write(f"Created organization '{org.name}' (slug={org_slug})")
 
-        identity = Identity.objects.filter(is_superuser=True).first()
+        identity = Identity.objects.filter(is_staff=True).first()
         if not identity:
-            raise CommandError("No superuser found. Create one first.")
+            raise CommandError("No staff user found. Create one first.")
 
         self.stdout.write(f"Loading {file_path} → org={org.name} (as {identity.email})")
 

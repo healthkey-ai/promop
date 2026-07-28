@@ -20,7 +20,7 @@ def can_access_patient(actor_identity, target_person_id: int) -> bool:
     """Check if actor has access to target patient's data."""
     from patient_portal.models import PatientUser
 
-    if getattr(actor_identity, 'is_superuser', False):
+    if getattr(actor_identity, 'is_staff', False):
         return True
 
     # 1. Self-access
@@ -66,7 +66,7 @@ def can_write_patient(actor_identity, target_person_id: int) -> bool:
     """
     from patient_portal.models import PatientUser
 
-    if getattr(actor_identity, 'is_superuser', False):
+    if getattr(actor_identity, 'is_staff', False):
         return True
 
     # Patients can write their own record

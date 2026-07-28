@@ -3475,8 +3475,8 @@ class MultiTenantIsolationTest(_SmartBase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.json()), 0, "Org A must not see Org B's conditions even with explicit person_id")
 
-    def test_superuser_session_sees_all_patients(self):
-        """Superuser session auth bypasses org scoping and sees all patients."""
+    def test_staff_session_sees_all_patients(self):
+        """Staff session auth bypasses org scoping and sees all patients."""
         su = Identity.objects.create_superuser(email='su@test.com', password='su_pass')
         c = APIClient()
         c.force_authenticate(user=su)
@@ -5170,10 +5170,10 @@ class ScopedTokenPermissionTest(TestCase):
         req = self._req("GET", "service-token", self._user())
         self.assertTrue(self.permission.has_permission(req, None))
 
-    # --- staff / superuser ---
+    # --- staff ---
 
-    def test_superuser_allows_delete(self):
-        req = self._req("DELETE", None, self._user(is_superuser=True, is_staff=True))
+    def test_staff_allows_delete_via_is_staff(self):
+        req = self._req("DELETE", None, self._user(is_staff=True))
         self.assertTrue(self.permission.has_permission(req, None))
 
     def test_staff_allows_post(self):
@@ -7457,8 +7457,8 @@ class PatientRecordIDORTest(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_superuser_can_retrieve_any_patient(self):
-        """Superusers retain unrestricted read access."""
+    def test_staff_can_retrieve_any_patient(self):
+        """Staff retains unrestricted read access."""
         resp = self._client_as(self.superuser).get(
             f'/api/patient-info/{self.person_b.person_id}/'
         )
@@ -7558,8 +7558,8 @@ class OmopViewSetAccessTest(TestCase):
         person_ids = {r['person'] for r in results}
         self.assertNotIn(self.person_b.person_id, person_ids)
 
-    def test_superuser_can_list_any_patient_measurements(self):
-        """Superusers retain unrestricted access."""
+    def test_staff_can_list_any_patient_measurements(self):
+        """Staff retains unrestricted access."""
         resp = self._client_as(self.superuser).get(
             f'/api/measurements/?person_id={self.person_b.person_id}'
         )
@@ -9951,7 +9951,7 @@ class MeEndpointGuardTest(TestCase):
         resp = self._client(self.staff_user).get('/api/patient-info/me/')
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_superuser_without_patient_record_returns_404(self):
+    def test_staff_superuser_without_patient_record_returns_404(self):
         resp = self._client(self.super_user).get('/api/patient-info/me/')
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
@@ -11272,8 +11272,8 @@ class PatientSelfScopePermissionTest(TestCase):
         # so the object is not found rather than forbidden.
         self.assertIn(resp.status_code, [status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND])
 
-    def test_superuser_bypasses_scope(self):
-        """Superuser can access any patient's condition."""
+    def test_staff_bypasses_scope(self):
+        """Staff can access any patient's condition."""
         resp = self._client_as(self.superuser).get(
             f'/api/v1/conditions/{self.condition_b.condition_occurrence_id}/'
         )
