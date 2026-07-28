@@ -4598,7 +4598,7 @@ def concept_search(request):
     Search OMOP concepts by name (case-insensitive substring).
 
     Query params:
-        q                 required, minimum 2 characters
+        q                 required, minimum 3 characters
         vocabulary_id     optional exact-match filter (e.g. LOINC, SNOMED)
         domain_id         optional exact-match filter (e.g. Measurement)
         concept_class_id  optional exact-match filter (e.g. Lab Test)
@@ -4607,10 +4607,13 @@ def concept_search(request):
 
     Response 200: paginated {count, next, previous, results: [concept, ...]}
     """
+    # Minimum 3 chars: a pg_trgm trigram is 3 chars, so shorter queries can't use
+    # the GIN trigram index on UPPER(concept_name) and would seq-scan the (large)
+    # concept table (#262). Matches concepts/synonyms/ minimum.
     query = (request.query_params.get('q') or '').strip()
-    if len(query) < 2:
+    if len(query) < 3:
         return Response(
-            {'detail': "Query parameter 'q' is required and must be at least 2 characters."},
+            {'detail': "Query parameter 'q' is required and must be at least 3 characters."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 

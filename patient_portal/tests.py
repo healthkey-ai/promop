@@ -7290,8 +7290,48 @@ class ConceptSearchTest(_ConceptFixtureBase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_short_q_returns_400(self):
-        resp = self.client.get(self.URL, {'q': 'c'}, **self._auth())
+        # 2 chars < 3-char trigram minimum (#262)
+        resp = self.client.get(self.URL, {'q': 'cc'}, **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_min_length_q_returns_200(self):
+        # Exactly 3 chars is the accepted lower boundary (#262) — guards against
+        # the threshold accidentally drifting to `< 4`.
+        resp = self.client.get(self.URL, {'q': 'cre'}, **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_concept_name_search_uses_functional_trigram_index(self):
+        # #262: prove the functional GIN trigram index on UPPER(concept_name) is
+        # *selected* for `concept_name__icontains` (which Django compiles to
+        # `UPPER(concept_name::text) LIKE UPPER(...)`) when a seq-scan isn't
+        # preferred. A raw-column gin_trgm index could not serve `UPPER(col) LIKE`
+        # at all — so with enable_seqscan=off it would fall back to a Seq Scan and
+        # this assertion would fail. (enable_seqscan=off penalises, not bans, so a
+        # genuinely-unusable index is never chosen.)
+        import datetime
+        from django.db import connection
+        from omop_core.models import Concept, Vocabulary, Domain, ConceptClass
+        v, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='TRGMV', defaults={'vocabulary_name': 'trgm', 'vocabulary_concept_id': 0})
+        d, _ = Domain.objects.get_or_create(
+            domain_id='Drug', defaults={'domain_name': 'Drug', 'domain_concept_id': 13})
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Ingredient',
+            defaults={'concept_class_name': 'Ingredient', 'concept_class_concept_id': 0})
+        Concept.objects.bulk_create([
+            Concept(concept_id=880000 + i, concept_name=f'Trigram probe concept {i:04d}',
+                    domain=d, vocabulary=v, concept_class=cc, standard_concept='S',
+                    concept_code=f'TP{i}', valid_start_date=datetime.date(1970, 1, 1),
+                    valid_end_date=datetime.date(2099, 12, 31))
+            for i in range(600)
+        ])
+        with connection.cursor() as cur:
+            cur.execute('ANALYZE concept')
+            cur.execute('SET LOCAL enable_seqscan = off')
+            plan = Concept.objects.filter(
+                concept_name__icontains='probe concept 0421').explain()
+        self.assertIn('ix_concept_name_upper_trgm', plan,
+                      f'concepts/search did not use the trigram index:\n{plan}')
 
     def test_pagination_page_size(self):
         resp = self.client.get(self.URL, {'q': 'creatinine', 'page_size': 2}, **self._auth())
