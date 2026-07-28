@@ -426,6 +426,32 @@ def build_fhir_bundle(person: Person) -> dict[str, Any]:
     return {
         "resourceType": "Bundle",
         "type": "searchset",
+        "meta": {
+            # Declare the interchange version so recipients can verify they are
+            # negotiating the version this system speaks (TI.5.2#01).
+            "profile": ["http://hl7.org/fhir/4.0/StructureDefinition/Bundle"],
+        },
         "total": len(entries),
         "entry": entries,
     }
+
+
+def serialize_signed_fhir_bundle(person: Person) -> tuple[bytes, str, str]:
+    """Build, serialize, digest, and sign a FHIR bundle for content integrity.
+
+    Returns ``(body_bytes, sha256_hex, hmac_signature_hex)`` where the digest and
+    signature are computed over ``body_bytes`` EXACTLY as returned, so a recipient
+    that hashes the response body reproduces the digest (S.3.6#10 / PH.2.3#09).
+
+    The signature is an HMAC-SHA256 keyed by ``EXPORT_SIGNING_KEY`` (falls back to
+    ``SECRET_KEY``) providing non-repudiation of the exported content.
+    """
+    import json as _json
+    from patient_portal.api.fhir.integrity import export_signature, sha256_hex
+
+    bundle = build_fhir_bundle(person)
+    # Canonical, deterministic serialization so the digest is reproducible.
+    body_bytes = _json.dumps(
+        bundle, sort_keys=True, separators=(',', ':'), default=str
+    ).encode('utf-8')
+    return body_bytes, sha256_hex(body_bytes), export_signature(body_bytes)

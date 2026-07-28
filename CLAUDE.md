@@ -384,12 +384,14 @@ cd frontend && npm test -- --run
 
 **Never commit directly to `dev` or `main`.** All fixes, enhancements, and refactors must go on a feature branch and land via a pull request.
 
-1. `git checkout -b <descriptive-branch-name>` before writing any code
-2. Commit the work on the feature branch
-3. Run the test suites (see below)
-4. Open a PR targeting `dev`
-5. Perform a code review on the PR before merging — the only exception is if a full code review was done immediately before opening the PR in the same work session (no need to review twice)
-6. **After the PR merges into `dev` successfully, delete the feature branch.** Prefer `gh pr merge --delete-branch`, which removes the remote branch as part of the merge. Then delete the local copy (`git branch -d <branch>`) and remove any worktree created for it (`git worktree remove <path>`). Do not leave merged feature branches lingering locally or on the remote.
+1. File a GitHub issue describing the work item
+2. `git checkout -b <descriptive-branch-name>` before writing any code
+3. Commit the work on the feature branch
+4. Run the test suites (see below)
+5. Open a PR targeting `dev`
+6. Perform a code review on the PR. **Stop and present the review to the user before merging** — the user must read the review and approve the merge.
+   - **Exception — small, local, low-risk fixes** (typos, docstring updates, single-line bug fixes, config tweaks): these may proceed all the way through to a merge into `dev` without waiting for user review, provided the code review found no unfixable issues.
+7. **After the PR merges into `dev` successfully, delete the feature branch.** Prefer `gh pr merge --delete-branch`, which removes the remote branch as part of the merge. Then delete the local copy (`git branch -d <branch>`) and remove any worktree created for it (`git worktree remove <path>`). Do not leave merged feature branches lingering locally or on the remote.
 
 ### Rule: Run Tests Before Every Push
 

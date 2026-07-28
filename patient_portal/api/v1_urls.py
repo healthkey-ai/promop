@@ -3,28 +3,38 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     CurrentUserViewSet, PatientRecordViewSet, login_view, logout_view, auth_test,
+    change_password,
     PersonViewSet,
     ConditionOccurrenceViewSet, DrugExposureViewSet, MeasurementViewSet,
     ObservationViewSet, ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
     PatientDocumentViewSet,
     PatientTrialEnrollmentViewSet,
+    ImmunizationListViewSet, AllergyListViewSet,
     SurveyViewSet, PatientSurveyResponseViewSet,
+    PatientConsentViewSet,
+    PatientMessageViewSet,
     vocabulary_list, concept_lookup, concept_search, concept_list,
     concept_ancestors, concept_descendants, concept_graph_batch,
-    concept_synonyms, concept_synonym_search,
+    concept_synonyms, concept_synonym_search, concept_replacement,
+    vocab_release_list, vocab_release_detail, vocab_release_latest,
     org_disease_stats,
+    InterchangeAgreementViewSet,
 )
 from .org_views import (
     OrgListCreateView, OrgDetailView,
     OrgInviteView, OrgInvitationListView, OrgInvitationDetailView,
     OrgTrustListCreateView, OrgTrustDetailView,
     OrgAccessListView, OrgAccessDetailView,
-    confirm_invitation,
+    confirm_invitation, org_public_info, OrgPatientSignupView,
 )
 from .patient_invitations import (
     PatientInviteView, accept_patient_invitation, patient_invitation_lookup,
 )
 from .patient_signup import PatientSignupView
+from .audit_views import AuditEventViewSet
+from .representatives import PersonalRepresentativeViewSet
+from .password_reset import reset_password
+from .break_glass import break_glass
 
 router = DefaultRouter()
 
@@ -42,16 +52,29 @@ router.register(r'documents', PatientDocumentViewSet, basename='v1-documents')
 router.register(r'trial-enrollments', PatientTrialEnrollmentViewSet, basename='v1-trial-enrollments')
 router.register(r'surveys', SurveyViewSet, basename='v1-surveys')
 router.register(r'survey-responses', PatientSurveyResponseViewSet, basename='v1-survey-responses')
+router.register(r'consents', PatientConsentViewSet, basename='v1-consents')
+router.register(r'messages', PatientMessageViewSet, basename='v1-messages')
+router.register(r'immunizations', ImmunizationListViewSet, basename='v1-immunizations')
+router.register(r'allergies', AllergyListViewSet, basename='v1-allergies')
+router.register(r'audit-events', AuditEventViewSet, basename='v1-audit-events')
+router.register(r'personal-representatives', PersonalRepresentativeViewSet, basename='v1-personal-representatives')
+router.register(r'interchange-agreements', InterchangeAgreementViewSet, basename='v1-interchange-agreements')
 
 urlpatterns = [
     path('', include(router.urls)),
     path('auth/login/', login_view, name='v1-login'),
     path('auth/logout/', logout_view, name='v1-logout'),
+    path('auth/change-password/', change_password, name='v1-change-password'),
+    path('auth/reset-password/', reset_password, name='v1-reset-password'),
+    path('break-glass/', break_glass, name='v1-break-glass'),
     path('auth/test/', auth_test, name='v1-auth-test'),
     path('patients/signup/', PatientSignupView.as_view(), name='v1-patient-signup'),
     path('patients/<int:person_id>/invite/', PatientInviteView.as_view(), name='v1-patient-invite'),
     path('patient-invitations/lookup/', patient_invitation_lookup, name='v1-patient-invitation-lookup'),
     path('patient-invitations/accept/', accept_patient_invitation, name='v1-patient-invitation-accept'),
+    path('vocab-releases/', vocab_release_list, name='v1-vocab-release-list'),
+    path('vocab-releases/latest/', vocab_release_latest, name='v1-vocab-release-latest'),
+    path('vocab-releases/<int:release_id>/', vocab_release_detail, name='v1-vocab-release-detail'),
     path('vocabularies/<str:model_name>/', vocabulary_list, name='v1-vocabulary-list'),
     path('concepts/lookup/', concept_lookup, name='v1-concept-lookup'),
     path('concepts/search/', concept_search, name='v1-concept-search'),
@@ -60,6 +83,7 @@ urlpatterns = [
     path('concepts/<int:concept_id>/ancestors/', concept_ancestors, name='v1-concept-ancestors'),
     path('concepts/<int:concept_id>/descendants/', concept_descendants, name='v1-concept-descendants'),
     path('concepts/<int:concept_id>/synonyms/', concept_synonyms, name='v1-concept-synonyms'),
+    path('concepts/<int:concept_id>/replacement/', concept_replacement, name='v1-concept-replacement'),
     path('concepts/', concept_list, name='v1-concept-list'),
     path('stats/org-disease/', org_disease_stats, name='v1-stats-org-disease'),
     path('orgs/', OrgListCreateView.as_view(), name='v1-org-list'),
@@ -72,4 +96,6 @@ urlpatterns = [
     path('orgs/<slug:slug>/trusts/<int:trust_id>/', OrgTrustDetailView.as_view(), name='v1-org-trust-detail'),
     path('orgs/<slug:slug>/access/', OrgAccessListView.as_view(), name='v1-org-access-list'),
     path('orgs/<slug:slug>/access/<int:access_id>/', OrgAccessDetailView.as_view(), name='v1-org-access-detail'),
+    path('orgs/<slug:slug>/public/', org_public_info, name='v1-org-public-info'),
+    path('orgs/<slug:slug>/patient-signup/', OrgPatientSignupView.as_view(), name='v1-org-patient-signup'),
 ]

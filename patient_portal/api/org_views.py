@@ -38,7 +38,8 @@ class InvitationEmailError(Exception):
 
 
 def _send_invitation_email(invitation) -> None:
-    accept_url = f"{settings.APP_BASE_URL}/accept-invite?token={invitation.token}"
+    slug = invitation.org.slug
+    accept_url = f"{settings.APP_BASE_URL}/org/{slug}/accept-invite?token={invitation.token}"
     subject = f"You've been invited to join {invitation.org.name} on PROMOP"
     body = (
         f"Hi,\n\n"
@@ -84,7 +85,8 @@ def _send_invitation_email(invitation) -> None:
 from omop_core.models import Organization, OrgTrust, OrgInvitation, GroupAccess
 from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
 from omop_core.services.access import get_admin_orgs
-from patient_portal.models import Identity
+from omop_core.services.pk import next_pk
+from patient_portal.models import Identity, PatientUser
 from omop_core.models import Person, PatientRecord
 from .permissions import IsStaffPermission, IsStaffOrOrgAdmin
 from .serializers import (
@@ -123,7 +125,7 @@ def _get_or_create_invitee_identity(email):
     return Identity.objects.create_user(email=email, password=None)
 
 
-ROLE_RANK = {'org_admin': 3, 'doctor': 2, 'analyst': 1}
+ROLE_RANK = {'org_admin': 3, 'doctor': 2, 'analyst': 1, 'patient': 0}
 
 
 def _normalize_redirect_url(role, redirect_url):
@@ -226,6 +228,7 @@ class OrgInviteView(APIView):
         email = request.data.get('email', '').strip().lower()
         role = request.data.get('role', 'doctor')
         redirect_url = request.data.get('redirect_url', '')
+        person_id = request.data.get('person_id')
 
         if not email:
             return Response({'error': 'email is required'}, status=status.HTTP_400_BAD_REQUEST)
@@ -238,6 +241,21 @@ class OrgInviteView(APIView):
                 {'error': 'redirect_url must be a valid http(s) URL.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # Validate optional person_id for patient invites
+        linked_person = None
+        if person_id is not None:
+            if role != 'patient':
+                return Response(
+                    {'error': 'person_id can only be set for patient invites.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            linked_person = Person.objects.filter(person_id=person_id).first()
+            if not linked_person:
+                return Response(
+                    {'error': f'Person {person_id} not found.'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
         with transaction.atomic():
             invitation = OrgInvitation.objects.select_for_update().filter(
@@ -253,8 +271,9 @@ class OrgInviteView(APIView):
                 invitation.token = token
                 invitation.invited_by = request.user
                 invitation.expires_at = expires_at
+                invitation.person = linked_person
                 invitation.save(
-                    update_fields=['role', 'redirect_url', 'token', 'invited_by', 'expires_at']
+                    update_fields=['role', 'redirect_url', 'token', 'invited_by', 'expires_at', 'person']
                 )
             else:
                 invitation = OrgInvitation.objects.create(
@@ -263,6 +282,7 @@ class OrgInviteView(APIView):
                     role=role,
                     redirect_url=normalized_redirect_url,
                     token=token,
+                    person=linked_person,
                     invited_by=request.user,
                     expires_at=expires_at,
                 )
@@ -343,24 +363,51 @@ def confirm_invitation(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Grant access — use get_or_create rather than update_or_create to avoid
-    # silently downgrading an existing higher-privilege role (e.g. org_admin → doctor).
-    # If the grant already exists, leave it unchanged; the invitation is still
-    # marked confirmed so it can't be replayed.
-    grant = _grant_org_access(
-        identity,
-        invitation.org,
-        invitation.role,
-        invitation.invited_by,
-        redirect_url=invitation.redirect_url,
-    )
+    with transaction.atomic():
+        # Grant access — use get_or_create rather than update_or_create to avoid
+        # silently downgrading an existing higher-privilege role (e.g. org_admin → doctor).
+        # If the grant already exists, leave it unchanged; the invitation is still
+        # marked confirmed so it can't be replayed.
+        grant = _grant_org_access(
+            identity,
+            invitation.org,
+            invitation.role,
+            invitation.invited_by,
+            redirect_url=invitation.redirect_url,
+        )
 
-    invitation.confirmed_at = timezone.now()
-    invitation.save(update_fields=['confirmed_at'])
+        # For patient invites, create the PatientUser link
+        if invitation.role == 'patient':
+            existing_pu = PatientUser.objects.filter(identity=identity).first()
+            if existing_pu:
+                person = existing_pu.person
+            elif invitation.person:
+                person = invitation.person
+                PatientUser.objects.create(identity=identity, person=person)
+            else:
+                # No pre-existing person — create a new one
+                new_id = next_pk(Person, 'person_id')
+                person = Person.objects.create(
+                    person_id=new_id,
+                    year_of_birth=1900,
+                    gender_source_value='unknown',
+                    race_source_value='unknown',
+                    ethnicity_source_value='unknown',
+                )
+                PatientRecord.objects.create(
+                    person=person, email=invitation.email,
+                    organization=invitation.org,
+                )
+                PatientUser.objects.create(identity=identity, person=person)
+
+        invitation.confirmed_at = timezone.now()
+        invitation.save(update_fields=['confirmed_at'])
 
     response_data = {'detail': f'Invitation confirmed. Access granted to {invitation.org.name}.'}
     if grant.redirect_url:
         response_data['redirect_url'] = grant.redirect_url
+    if invitation.role == 'patient':
+        response_data['redirect_url'] = f'/org/{invitation.org.slug}/'
     return Response(response_data)
 
 
@@ -424,6 +471,11 @@ class OrgAccessDetailView(APIView):
                 {'error': 'Cannot modify org_admin grants via this endpoint.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if grant.role == 'patient':
+            return Response(
+                {'error': 'Cannot modify patient grants via this endpoint.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         changed_grant = []
         changed_identity = []
@@ -461,3 +513,117 @@ class OrgAccessDetailView(APIView):
         grant = get_object_or_404(GroupAccess, id=access_id, org=org)
         grant.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Public org info (unauthenticated)
+# ---------------------------------------------------------------------------
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def org_public_info(request, slug):
+    """Return minimal public info about an org for the login/signup pages."""
+    org = get_object_or_404(Organization, slug=slug, is_active=True)
+    return Response({
+        'name': org.name,
+        'slug': org.slug,
+        'allows_patient_signup': org.allows_patient_signup,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Patient self-signup (public, rate-limited)
+# ---------------------------------------------------------------------------
+
+class OrgPatientSignupView(APIView):
+    """Public endpoint for patient self-registration on orgs that allow it."""
+    permission_classes = [AllowAny]
+    throttle_scope = 'patient_signup'
+
+    def post(self, request, slug):
+        org = get_object_or_404(Organization, slug=slug, is_active=True)
+        if not org.allows_patient_signup:
+            return Response(
+                {'error': 'This organization does not allow direct patient signup.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        email = (request.data.get('email') or '').strip().lower()
+        password = request.data.get('password', '')
+        given_name = (request.data.get('given_name') or '').strip()
+        family_name = (request.data.get('family_name') or '').strip()
+
+        if not email:
+            return Response({'error': 'email is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            from django.core.validators import validate_email as _validate_email
+            _validate_email(email)
+        except ValidationError:
+            return Response({'error': 'Invalid email address.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not password:
+            return Response({'error': 'password is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from patient_portal.services import password_validation_errors, set_new_password
+        pw_errors = password_validation_errors(password, email=email)
+        if pw_errors:
+            return Response({'error': pw_errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check for existing account with this email
+        existing = _find_identity_by_email(email)
+        if existing and existing.has_usable_password():
+            return Response(
+                {'error': 'An account with this email already exists. Please log in instead.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        with transaction.atomic():
+            if existing:
+                # Placeholder identity from a prior invitation — set its password
+                identity = existing
+                set_new_password(identity, password)
+                if given_name:
+                    identity.name = f"{given_name} {family_name}".strip()
+                    identity.save(update_fields=['name'])
+            else:
+                identity = Identity.objects.create_user(
+                    email=email,
+                    password=password,
+                    name=f"{given_name} {family_name}".strip(),
+                )
+
+            # Reuse existing PatientUser link if present (e.g. from a prior invitation)
+            existing_pu = PatientUser.objects.filter(identity=identity).first()
+            if existing_pu:
+                person = existing_pu.person
+            else:
+                new_id = next_pk(Person, 'person_id')
+                person = Person.objects.create(
+                    person_id=new_id,
+                    given_name=given_name or None,
+                    family_name=family_name or None,
+                    year_of_birth=1900,
+                    gender_source_value='unknown',
+                    race_source_value='unknown',
+                    ethnicity_source_value='unknown',
+                )
+                PatientRecord.objects.create(person=person, email=email, organization=org)
+                PatientUser.objects.create(identity=identity, person=person)
+
+            # Grant patient access to this org
+            GroupAccess.objects.get_or_create(
+                identity=identity,
+                org=org,
+                defaults={'role': 'patient'},
+            )
+
+        # Auto-login via session
+        from django.contrib.auth import login
+        login(request, identity, backend='patient_portal.backends.EmailBackend')
+
+        return Response(
+            {
+                'person_id': person.person_id,
+                'redirect_url': f'/org/{slug}/',
+            },
+            status=status.HTTP_201_CREATED,
+        )

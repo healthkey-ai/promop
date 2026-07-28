@@ -55,10 +55,12 @@ original draft required; the concrete API guarantees are folded into *Consequenc
   (`first_line_component_ids` and `second_line_component_ids` per line;
   `later_component_ids` unions lines 3+), and per-line regimen concept_ids
   (`first_line_therapy_id` …). All are exposed on the patient serializer. **Caveat on
-  regimen identity:** these concept_ids are today *derived by inference* from the line's drug
-  exposures, not source-asserted; the `therapy_ids_provenance` field designed to carry the
-  `asserted`-vs-`inferred` origin exists but is **not yet populated** by the derivation
-  pipeline — so a consumer cannot currently distinguish asserted from inferred regimens.
+  regimen identity:** these concept_ids are a *mixture* of **source-asserted** (a validated
+  `Episode.episode_source_concept`, which the derivation uses preferentially) and **inferred**
+  (drug-exposure name matching, when no asserted concept is present). The catch is that the
+  `therapy_ids_provenance` field designed to carry the `asserted`-vs-`inferred` origin exists
+  but is **not yet populated** by the derivation pipeline — so a consumer cannot currently
+  tell which ids are asserted and which are inferred.
   EXACT consumes the aggregate for component matching as of exact#239 (Phase P — the matcher
   no longer derives components locally); the line-structured groups are available for
   trial-side superset matching but not yet consumed. Not yet release-stamped.
@@ -81,10 +83,12 @@ original draft required; the concrete API guarantees are folded into *Consequenc
        for later-line criteria: components from separate 3L+ regimens can combine to falsely
        match a trial regimen the patient never received as a single line. Later-line superset
        matching stays **blocked** until promop emits per-3L-line groups.
-    2. **Regimen identity is inferred, not asserted, and unstamped.** The `*_therapy_id`
-       concept_ids are inferred from drug exposures; `therapy_ids_provenance` (the
-       asserted-vs-inferred carrier) is not yet populated. A consumer cannot yet tell an
-       asserted regimen from an inferred one — material precisely for VRd vs VRd Lite.
+    2. **Regimen identity is asserted-or-inferred but unstamped.** The `*_therapy_id`
+       concept_ids mix source-asserted (a validated `Episode.episode_source_concept`) and
+       inferred (drug-exposure name matching) values; `therapy_ids_provenance` (the
+       asserted-vs-inferred carrier) is not yet populated, so a consumer cannot tell which is
+       which — material precisely for VRd vs VRd Lite. The asserted path exists; it just is
+       not yet labelled, so EXACT must not discard it, only avoid *assuming* assertion.
   So Phase T's **1L/2L component matching is not blocked on a promop data-model change** (the
   remaining 1L/2L work is EXACT-side — consume the line-structured fields and do a per-line
   superset); later-line matching, asserted-identity, and the cross-cutting **release_id /

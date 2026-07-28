@@ -94,3 +94,6 @@ db.sqlite3.backup
 
 # Generated Synthea export artifacts
 /synthea_bc_*.json
+
+# Large synthea CLI jar (not tracked)
+synthea-with-dependencies.jar
