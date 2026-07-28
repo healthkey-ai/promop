@@ -79,7 +79,8 @@ export const useAuth = () => {
       await api.post("/auth/logout/");
     } finally {
       setCurrentUser(null);
-      window.location.href = "/login";
+      const orgMatch = window.location.pathname.match(/^\/org\/([^/]+)/);
+      window.location.href = orgMatch ? `/org/${orgMatch[1]}/login` : "/login";
     }
   };
 

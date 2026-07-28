@@ -33,6 +33,7 @@ export default function AcceptPatientInvite() {
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [loginUrl, setLoginUrl] = useState('/login');
 
   useEffect(() => {
     // No synchronous setState in the effect body — the no-token branch lives in
@@ -71,6 +72,9 @@ export default function AcceptPatientInvite() {
     try {
       const res = await publicApi.post('/v1/patient-invitations/accept/', { token, password });
       setMessage(res.data.detail ?? 'Account created. You can now sign in.');
+      if (res.data.redirect_url) {
+        setLoginUrl(`${res.data.redirect_url}login`);
+      }
       setState('success');
     } catch (err: unknown) {
       setMessage(errorMessage(err, 'Could not create your account. The link may have expired.'));
@@ -149,7 +153,7 @@ export default function AcceptPatientInvite() {
           <>
             <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded p-3">{message}</p>
             <button
-              onClick={() => navigate('/login')}
+              onClick={() => navigate(loginUrl)}
               className="w-full py-2 px-4 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm font-medium"
             >
               Go to sign in

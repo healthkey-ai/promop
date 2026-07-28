@@ -257,4 +257,7 @@ def accept_patient_invitation(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    return Response({'detail': 'Account created. You can now sign in with your email and password.'})
+    resp = {'detail': 'Account created. You can now sign in with your email and password.'}
+    if pr and pr.organization:
+        resp['redirect_url'] = f'/org/{pr.organization.slug}/'
+    return Response(resp)
