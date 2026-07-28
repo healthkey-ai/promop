@@ -56,7 +56,7 @@ class Command(BaseCommand):
             owner = Identity.objects.filter(is_staff=True).first()
             if not owner:
                 self.stderr.write(self.style.WARNING(
-                    'No staff user found. Create one first with: manage.py createsuperuser'
+                    'No staff user found. Create one first with: manage.py createsuperuser (or set is_staff=True on an existing user)'
                 ))
                 return
 

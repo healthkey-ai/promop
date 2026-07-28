@@ -102,7 +102,7 @@ class Command(BaseCommand):
         else:
             user = User.objects.filter(is_staff=True).order_by('pk').first()
             if user is None:
-                raise CommandError('No staff user found. Run: manage.py createsuperuser')
+                raise CommandError('No staff user found. Run: manage.py createsuperuser (or set is_staff=True on an existing user)')
 
         # ── Org setup ───────────────────────────────────────────────────
         from omop_core.models import Organization

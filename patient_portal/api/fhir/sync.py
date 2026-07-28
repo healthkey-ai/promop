@@ -719,7 +719,7 @@ class FhirSyncView(APIView):
                 if not can_access_patient(actor_identity, person_id):
                     return Response({'detail': 'Actor does not have access to this patient.'},
                                     status=status.HTTP_403_FORBIDDEN)
-            elif not has_explicit_actor and not getattr(request.user, 'is_staff', False):
+            elif not has_explicit_actor and not is_service_token(request):
                 return Response(
                     {'detail': 'actor_iss and actor_sub required when writing on behalf of another person.'},
                     status=status.HTTP_400_BAD_REQUEST)
