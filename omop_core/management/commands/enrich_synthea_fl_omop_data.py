@@ -62,10 +62,21 @@ class Command(BaseCommand):
             return
 
         self.stdout.write(f'Refreshing PatientRecord for {len(records)} patient(s)...')
+        refreshed = []
+        failed = 0
         with suppress_patient_record_refresh():
-            refreshed = [
-                refresh_patient_record(rec.person) for rec in records
-            ]
+            for idx, rec in enumerate(records, 1):
+                try:
+                    refreshed.append(refresh_patient_record(rec.person))
+                except Exception as exc:
+                    failed += 1
+                    self.stderr.write(
+                        self.style.WARNING(
+                            f'  [{idx}/{len(records)}] person_id={rec.person_id} failed: {exc}'
+                        )
+                    )
+        if failed:
+            self.stderr.write(self.style.WARNING(f'{failed} patient(s) failed to refresh — see warnings above.'))
 
         self.stdout.write('Deriving observation_period rows...')
         call_command('populate_observation_period', org_slugs=','.join(slugs))

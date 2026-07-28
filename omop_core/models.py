@@ -56,6 +56,10 @@ class Organization(models.Model):
                   "available for analysis in PRism Analytics to any signed-up user. "
                   "Does not grant access to individual patient records in PRomop.",
     )
+    allows_patient_signup = models.BooleanField(
+        default=False,
+        help_text="When true, patients may self-register via the org's public page.",
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='+',
@@ -106,6 +110,82 @@ class OrgTrust(models.Model):
         return f"{self.granting_org.slug} trusts domain {self.trusted_domain}"
 
 
+class InterchangeAgreement(models.Model):
+    """A documented data-interchange agreement with an external partner (TI.5.4#01).
+
+    A formal, described artifact governing electronic exchange: which partner,
+    which standards + versions are agreed, and the effective window. Complements
+    the runtime access controls (``OrgTrust`` / OAuth scopes) with a describable
+    agreement record rather than replacing them.
+    """
+    STATUS_ACTIVE = 'active'
+    STATUS_SUSPENDED = 'suspended'
+    STATUS_EXPIRED = 'expired'
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, 'Active'),
+        (STATUS_SUSPENDED, 'Suspended'),
+        (STATUS_EXPIRED, 'Expired'),
+    ]
+
+    partner_name = models.CharField(
+        max_length=255,
+        help_text="Name of the external partner / counterparty to the agreement.",
+    )
+    partner_organization = models.ForeignKey(
+        Organization, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='interchange_agreements',
+        help_text="Local Organization this agreement is associated with, if any.",
+    )
+    standards_supported = models.JSONField(
+        default=list, blank=True,
+        help_text='Interchange standards covered, e.g. ["FHIR", "HL7v2"].',
+    )
+    standard_versions = models.JSONField(
+        default=list, blank=True,
+        help_text='Standard versions covered, e.g. ["R4"].',
+    )
+    effective_date = models.DateField(
+        help_text="Date the agreement takes effect.",
+    )
+    expiry_date = models.DateField(
+        null=True, blank=True,
+        help_text="Date the agreement expires (null = open-ended).",
+    )
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE,
+    )
+    active = models.BooleanField(
+        default=True,
+        help_text="Convenience flag; false disables the agreement regardless of dates.",
+    )
+    notes = models.TextField(blank=True, default='')
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'interchange_agreement'
+        ordering = ['partner_name', '-effective_date']
+
+    def is_in_effect(self, on_date=None):
+        """True if the agreement is active and within its effective window."""
+        from django.utils import timezone
+        if not self.active or self.status != self.STATUS_ACTIVE:
+            return False
+        on_date = on_date or timezone.now().date()
+        if self.effective_date and on_date < self.effective_date:
+            return False
+        if self.expiry_date and on_date > self.expiry_date:
+            return False
+        return True
+
+    def __str__(self):
+        return f"Interchange agreement with {self.partner_name} ({self.status})"
+
+
 class OrgInvitation(models.Model):
     """An email invitation to join an org with a specific role."""
     STATUS_PENDING = 'pending'
@@ -122,6 +202,7 @@ class OrgInvitation(models.Model):
         ('org_admin', 'Org Admin'),
         ('doctor', 'Doctor'),
         ('analyst', 'Analyst'),
+        ('patient', 'Patient'),
     ]
     org = models.ForeignKey(
         Organization, on_delete=models.CASCADE, related_name='invitations',
@@ -130,6 +211,11 @@ class OrgInvitation(models.Model):
     role = models.CharField(max_length=20, choices=ROLE, default='doctor')
     redirect_url = models.URLField(max_length=500, blank=True, default='')
     token = models.CharField(max_length=64, unique=True)
+    person = models.ForeignKey(
+        'Person', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+        help_text="If set, accepting the invite links the patient to this person record.",
+    )
     invited_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='+',
@@ -248,6 +334,7 @@ class GroupAccess(models.Model):
         ('org_admin', 'Org Admin'),
         ('doctor',    'Doctor'),
         ('analyst',   'Analyst'),
+        ('patient',   'Patient'),
     ]
     identity = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
@@ -342,18 +429,94 @@ class PersonalRepresentative(models.Model):
 
 
 class Vocabulary(models.Model):
-    """OMOP CDM Vocabulary table - standardized vocabularies."""
+    """OMOP CDM Vocabulary table - standardized vocabularies.
+
+    Extended (promop#305, PHR-S FM TI.4.2#05) with a deprecation state so an
+    entire code system can be marked retired/withdrawn without deleting its
+    concepts. The base OMOP DDL has no such column; these fields are additive
+    and default to "not deprecated" so external Athena loads are unaffected.
+    """
     vocabulary_id = models.CharField(max_length=20, primary_key=True)
     vocabulary_name = models.CharField(max_length=255)
     vocabulary_reference = models.CharField(max_length=255, null=True, blank=True)
     vocabulary_version = models.CharField(max_length=255, null=True, blank=True)
     vocabulary_concept_id = models.IntegerField()
+    # --- Deprecation / retirement state (TI.4.2#05) ---
+    is_deprecated = models.BooleanField(
+        default=False, db_default=False, db_index=True,
+        help_text="True when this entire code system is retired/withdrawn.",
+    )
+    deprecated_date = models.DateField(
+        null=True, blank=True,
+        help_text="Date the vocabulary was marked deprecated.",
+    )
+    deprecated_reason = models.TextField(
+        null=True, blank=True,
+        help_text="Optional human-readable reason for deprecation.",
+    )
 
     class Meta:
         db_table = 'vocabulary'
 
     def __str__(self):
         return f"{self.vocabulary_id}: {self.vocabulary_name}"
+
+
+class VocabularyVersionHistory(models.Model):
+    """Append-only change-history for vocabulary releases (promop#305, TI.4.2#01/#09).
+
+    The OMOP CDM stores only the single active ``vocabulary_version`` per
+    vocabulary, and ``load_athena_vocabularies --replace`` TRUNCATEs the prior
+    snapshot — so there is no persistent record of which version was implemented
+    or updated when. This table is written (never truncated) on every load,
+    replace, or deprecation event to preserve that trail. It is not part of the
+    OMOP DDL; it is a HealthKey extension table.
+    """
+    ACTION_LOADED = 'loaded'
+    ACTION_REPLACED = 'replaced'
+    ACTION_DEPRECATED = 'deprecated'
+    ACTION_CHOICES = [
+        (ACTION_LOADED, 'Loaded'),
+        (ACTION_REPLACED, 'Replaced'),
+        (ACTION_DEPRECATED, 'Deprecated'),
+    ]
+
+    # Plain CharField rather than an FK: history rows must survive a --replace
+    # TRUNCATE of the vocabulary table and outlive vocabularies that are dropped.
+    vocabulary_id = models.CharField(max_length=20, db_index=True)
+    version = models.CharField(max_length=255, null=True, blank=True)
+    cdm_release_date = models.DateField(null=True, blank=True)
+    action = models.CharField(max_length=20, choices=ACTION_CHOICES)
+    note = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'vocabulary_version_history'
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['vocabulary_id', 'created_at'],
+                         name='ix_vocab_ver_hist_vocab_time'),
+        ]
+
+    def __str__(self):
+        return f"{self.vocabulary_id} {self.action} {self.version or ''} @ {self.created_at:%Y-%m-%d}"
+
+
+def record_vocabulary_version_history(vocabulary_id, version=None, action=VocabularyVersionHistory.ACTION_LOADED,
+                                      cdm_release_date=None, note=None):
+    """Append one immutable row to the vocabulary version change-history.
+
+    Small, side-effect-only helper so the loader (and the deprecate command)
+    record a trail without duplicating logic. Returns the created row. Callable
+    directly in tests — no Athena data required (promop#305, TI.4.2#01/#09).
+    """
+    return VocabularyVersionHistory.objects.create(
+        vocabulary_id=vocabulary_id,
+        version=version or None,
+        action=action,
+        cdm_release_date=cdm_release_date,
+        note=note or None,
+    )
 
 
 class Domain(models.Model):
@@ -468,6 +631,50 @@ class ConceptRelationship(models.Model):
 
     def __str__(self):
         return f'{self.concept_1_id} --[{self.relationship_id}]--> {self.concept_2_id}'
+
+
+# Athena relationship_id linking a deprecated/updated concept to its successor.
+CONCEPT_REPLACED_BY = 'Concept replaced by'
+
+
+def resolve_concept_replacement(concept_id, max_hops=10):
+    """Resolve a (possibly deprecated) concept to its active replacement.
+
+    In an OMOP-based store, "embedded-term substitution" (PHR-S FM TI.4.2#07)
+    reduces to a concept-replacement lookup: when a terminology release retires
+    a concept, Athena loads a ``'Concept replaced by'`` edge to the successor.
+    This walks that chain (guarding against loops / broken chains with
+    ``max_hops``) until it reaches a concept with no further replacement.
+
+    Returns ``(resolved_concept, chain)`` where ``resolved_concept`` is the
+    terminal ``Concept`` (the original when nothing replaces it) and ``chain``
+    is the ordered list of concept_ids traversed to get there. Returns
+    ``(None, [])`` when the starting concept_id does not exist.
+    """
+    start = Concept.objects.filter(concept_id=concept_id).first()
+    if start is None:
+        return None, []
+
+    chain = [start.concept_id]
+    current = start
+    seen = {start.concept_id}
+    for _ in range(max_hops):
+        successor_id = (
+            ConceptRelationship.objects
+            .filter(concept_1_id=current.concept_id, relationship_id=CONCEPT_REPLACED_BY)
+            .exclude(concept_2_id=current.concept_id)
+            .values_list('concept_2_id', flat=True)
+            .first()
+        )
+        if successor_id is None or successor_id in seen:
+            break
+        successor = Concept.objects.filter(concept_id=successor_id).first()
+        if successor is None:
+            break
+        chain.append(successor.concept_id)
+        seen.add(successor.concept_id)
+        current = successor
+    return current, chain
 
 
 class ConceptAncestor(models.Model):
@@ -689,6 +896,11 @@ class ConditionOccurrence(models.Model):
     condition_source_value = models.CharField(max_length=50, null=True, blank=True)
     condition_source_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='condition_source_occurrences', db_column='condition_source_concept_id', null=True, blank=True)
     condition_status_source_value = models.CharField(max_length=50, null=True, blank=True)
+    # PHR-S FM PH.1.1#06 — entered-in-error. Flag a row as erroneous while
+    # RETAINING it (FHIR status=entered-in-error semantics). Excluded from
+    # normal reads by default; never deleted.
+    is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
+    erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
 
     class Meta:
         db_table = 'condition_occurrence'
@@ -722,9 +934,15 @@ class DrugExposure(models.Model):
     drug_source_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='drug_source_exposures', db_column='drug_source_concept_id', null=True, blank=True)
     route_source_value = models.CharField(max_length=50, null=True, blank=True)
     dose_unit_source_value = models.CharField(max_length=50, null=True, blank=True)
+    # PHR-S FM PH.1.1#06 — entered-in-error (retain, exclude from normal reads).
+    is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
+    erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
 
     class Meta:
         db_table = 'drug_exposure'
+        indexes = [
+            models.Index(fields=['route_source_value'], name='ix_de_route_src'),
+        ]
 
     def __str__(self):
         return f"Drug Exposure {self.drug_exposure_id} for Person {self.person_id}"
@@ -748,6 +966,9 @@ class ProcedureOccurrence(models.Model):
     procedure_source_value = models.CharField(max_length=50, null=True, blank=True)
     procedure_source_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='procedure_sources', db_column='procedure_source_concept_id', null=True, blank=True)
     modifier_source_value = models.CharField(max_length=50, null=True, blank=True)
+    # PHR-S FM PH.1.1#06 — entered-in-error (retain, exclude from normal reads).
+    is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
+    erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
 
     class Meta:
         db_table = 'procedure_occurrence'
@@ -784,6 +1005,9 @@ class Measurement(models.Model):
     value_source_value = models.CharField(max_length=50, null=True, blank=True)
     measurement_event_id = models.BigIntegerField(null=True, blank=True)
     meas_event_field_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='measurement_event_fields', db_column='meas_event_field_concept_id', null=True, blank=True)
+    # PHR-S FM PH.1.1#06 — entered-in-error (retain, exclude from normal reads).
+    is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
+    erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
 
     class Meta:
         db_table = 'measurement'
@@ -843,9 +1067,15 @@ class Observation(models.Model):
     value_source_value = models.CharField(max_length=50, null=True, blank=True)
     observation_event_id = models.BigIntegerField(null=True, blank=True)
     obs_event_field_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='observation_event_fields', db_column='obs_event_field_concept_id', null=True, blank=True)
+    # PHR-S FM PH.1.1#06 — entered-in-error (retain, exclude from normal reads).
+    is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
+    erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
 
     class Meta:
         db_table = 'observation'
+        indexes = [
+            models.Index(fields=['qualifier_source_value'], name='ix_obs_qual_src'),
+        ]
 
     def __str__(self):
         return f"Observation {self.observation_id} for Person {self.person_id}"
@@ -2268,6 +2498,16 @@ class PatientRecord(models.Model):
         help_text="Owning organization — scopes API access for service clients",
     )
 
+    # PHR-S FM PH.1.2#05 — consent/preference-driven demographic rendering.
+    # When True, sensitive demographics (date of birth, geographic location,
+    # patient name) are redacted from serialized output for readers who are NOT
+    # the account holder themselves. The account holder always sees their own
+    # data in full.  Default False preserves existing behavior.
+    suppress_demographics_for_others = models.BooleanField(
+        default=False,
+        help_text="If set, redact DOB/location/name from responses served to non-owner readers",
+    )
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -2461,11 +2701,62 @@ class PatientRecord(models.Model):
 
 
 # =============================================================================
+# Revision history (PHR-S FM TI.1.2#04)
+# =============================================================================
+
+class RecordRevision(models.Model):
+    """Field-level change history for account-holder entities (PHR-S FM TI.1.2#04).
+
+    A lightweight, custom change-log (mirrors the ``PasswordHistory`` pattern)
+    rather than a general-purpose history library, so it adds no new
+    third-party dependency. One row per changed field per update, capturing the
+    old and new value so a record's contents can be reconstructed over time.
+
+    ``changed_by`` is the string form of the acting Identity's PK (matching the
+    ``AuditEvent.user_id`` convention), so it remains meaningful even after the
+    Identity is deleted.  Values are stored as text (``str(value)``) for a
+    uniform, queryable representation across field types.
+    """
+    patient_record = models.ForeignKey(
+        'PatientRecord', on_delete=models.CASCADE, related_name='revisions',
+    )
+    changed_by = models.CharField(
+        max_length=255, null=True, blank=True,
+        help_text="String form of the acting Identity PK (or 'system')",
+    )
+    changed_at = models.DateTimeField(auto_now_add=True)
+    field = models.CharField(max_length=100)
+    old_value = models.TextField(null=True, blank=True)
+    new_value = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'record_revision'
+        ordering = ['-changed_at', 'field']
+        indexes = [
+            models.Index(fields=['patient_record', '-changed_at'], name='recrev_pr_ts_idx'),
+        ]
+
+    def __str__(self):
+        return f"RecordRevision(pr={self.patient_record_id}, {self.field} @ {self.changed_at:%Y-%m-%d})"
+
+
+# =============================================================================
 # Document Storage
 # =============================================================================
 
 class PatientDocument(models.Model):
     """Scanned/uploaded medical documents. File binary lives in external storage; URL stored here."""
+    # PHR-S FM PH.1.4#04 — advance-directive effective status. An advance
+    # directive (or any document) needs a "currently in effect" status and an
+    # effective date distinct from the technical upload timestamp (uploaded_at).
+    STATUS_ACTIVE = 'active'
+    STATUS_SUPERSEDED = 'superseded'
+    STATUS_REVOKED = 'revoked'
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, 'Active / In effect'),
+        (STATUS_SUPERSEDED, 'Superseded'),
+        (STATUS_REVOKED, 'Revoked'),
+    ]
     DOC_TYPE_CHOICES = [
         ('FISH', 'FISH'),
         ('GEP', 'GEP'),
@@ -2478,15 +2769,26 @@ class PatientDocument(models.Model):
         ('BONE_MARROW', 'Bone Marrow'),
         ('CONSENT', 'Consent'),
         ('IMAGING', 'Imaging'),
+        ('ADVANCE_DIRECTIVE', 'Advance Directive'),
         ('OTHER', 'Other'),
     ]
     person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='documents')
     doc_type = models.CharField(max_length=50, choices=DOC_TYPE_CHOICES)
     title = models.CharField(max_length=255, blank=True, null=True)
+    file = models.FileField(upload_to='patient_documents/%Y/%m/', blank=True, null=True)
     file_url = models.URLField(blank=True, null=True)
     file_name = models.CharField(max_length=255, blank=True, null=True)
     verified = models.BooleanField(default=False)
     uploaded_at = models.DateTimeField(auto_now_add=True)
+    # PH.1.4#04 — "in effect" status + effective date (distinct from uploaded_at).
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE,
+        help_text="Effective status of the document (advance directives: active/superseded/revoked)",
+    )
+    effective_date = models.DateField(
+        null=True, blank=True,
+        help_text="Date the document takes/took effect (distinct from the upload timestamp)",
+    )
 
     class Meta:
         db_table = 'patient_document'
@@ -2813,3 +3115,76 @@ class FhirOauthState(models.Model):
 
     def __str__(self):
         return f"FhirOauthState({self.state[:8]}…, person={self.person_id})"
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary Release — versioned release manifest for vocabulary data
+# ---------------------------------------------------------------------------
+
+class VocabularyRelease(models.Model):
+    """
+    Immutable, append-only record of a vocabulary release.
+
+    Each row captures the full state of vocabulary data at the time of a load.
+    Consumers use the latest *published* release to detect changes (via ETag)
+    and to drive bulk-download / cache-refresh workflows.
+
+    No FK to vocabulary tables — survives TRUNCATE CASCADE during reloads.
+    """
+
+    STATUS_CHOICES = [
+        ('staged', 'Staged'),
+        ('published', 'Published'),
+        ('retired', 'Retired'),
+    ]
+
+    schema_version = models.CharField(
+        max_length=20, default='5.4',
+        help_text="OMOP CDM schema version this release targets.",
+    )
+    scope = models.JSONField(
+        default=list,
+        help_text="List of vocabulary_ids included in this release.",
+    )
+    build_timestamp = models.DateTimeField(
+        help_text="When the vocabulary load started.",
+    )
+    athena_version = models.CharField(
+        max_length=255, null=True, blank=True,
+        help_text="Athena download bundle version string, if known.",
+    )
+    vocab_versions = models.JSONField(
+        default=dict,
+        help_text="Mapping of {vocabulary_id: version} at time of load.",
+    )
+    row_counts = models.JSONField(
+        default=dict,
+        help_text="Mapping of {table_name: row_count} loaded in this release.",
+    )
+    checksums = models.JSONField(
+        default=dict,
+        help_text="Per-table fingerprints for drift detection.",
+    )
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='staged',
+        db_index=True,
+        help_text="Lifecycle state: staged → published → retired.",
+    )
+    published_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="When this release was promoted to published.",
+    )
+    notes = models.TextField(
+        null=True, blank=True,
+        help_text="Free-form operator notes about this release.",
+    )
+
+    class Meta:
+        db_table = 'vocabulary_release'
+        ordering = ['-published_at']
+
+    def __str__(self):
+        return (
+            f"VocabularyRelease(pk={self.pk}, status={self.status}, "
+            f"published_at={self.published_at})"
+        )

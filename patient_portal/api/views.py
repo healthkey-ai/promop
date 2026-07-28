@@ -59,7 +59,7 @@ import json
 import logging
 import re
 from io import StringIO
-from .permissions import ScopedTokenPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
+from .permissions import ScopedTokenPermission, SurveyResponsePermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
@@ -68,6 +68,9 @@ from .serializers import (
     EpisodeSerializer, EpisodeEventSerializer,
     PatientDocumentSerializer, PatientTrialEnrollmentSerializer,
     SurveySerializer, PatientSurveyResponseSerializer,
+    PatientConsentSerializer,
+    PatientMessageSerializer,
+    ImmunizationSerializer, AllergySerializer,
 )
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
@@ -92,10 +95,15 @@ def smart_configuration(request):
     HL7 SMART on FHIR well-known configuration endpoint.
     Advertises authorization / token endpoints and supported scopes.
     """
+    from patient_portal.api.fhir.integrity import SUPPORTED_FHIR_VERSION
     base = request.build_absolute_uri('/').rstrip('/')
     oidc_issuer = getattr(settings, 'OAUTH2_PROVIDER', {}).get('OIDC_ISS_ENDPOINT', '') or base
     return Response({
         'issuer': oidc_issuer,
+        # Declared interchange version (TI.5.2#01). R4 only — no multi-version
+        # transforms; a request for another version is rejected with HTTP 406.
+        'fhirVersion': SUPPORTED_FHIR_VERSION,
+        'fhir_versions_supported': [SUPPORTED_FHIR_VERSION],
         'authorization_endpoint': f'{base}/o/authorize/',
         'token_endpoint': f'{base}/o/token/',
         'token_endpoint_auth_methods_supported': ['client_secret_basic', 'client_secret_post', 'none'],
@@ -156,6 +164,50 @@ def _record_provenance(record, source, source_user_id, target_patient_id=None, m
         content_type=ContentType.objects.get_for_model(record),
         object_id=record.pk,
     )
+
+
+def _write_record_revisions(patient_record, previous_values, request):
+    """Persist field-level revision-history rows for a PatientRecord update.
+
+    PHR-S FM TI.1.2#04. ``previous_values`` maps field name -> value BEFORE the
+    update (as captured by the PATCH path). We compare against the freshly saved
+    instance and write one RecordRevision per field whose value actually
+    changed, so a record's contents can be reconstructed over time.
+
+    Returns the list of created RecordRevision instances.
+    """
+    from omop_core.models import RecordRevision
+
+    def _norm(v):
+        # Normalize to a stable string form for storage + comparison.
+        return None if v is None else str(v)
+
+    user = getattr(request, 'user', None)
+    changed_by = (
+        str(user.pk) if getattr(user, 'is_authenticated', False) and user.pk is not None
+        else 'system'
+    )
+
+    patient_record.refresh_from_db()
+    rows = []
+    for field, old in previous_values.items():
+        # Resolve the new value the same way the PATCH path captured the old one
+        # (FK fields are stored/compared via their {field}_id attribute).
+        fk_id = f'{field}_id'
+        new = getattr(patient_record, fk_id, None) if hasattr(patient_record, fk_id) else getattr(patient_record, field, None)
+        old_s, new_s = _norm(old), _norm(new)
+        if old_s == new_s:
+            continue
+        rows.append(RecordRevision(
+            patient_record=patient_record,
+            changed_by=changed_by,
+            field=field,
+            old_value=old_s,
+            new_value=new_s,
+        ))
+    if rows:
+        RecordRevision.objects.bulk_create(rows)
+    return rows
 
 
 def _delete_omop_clinical_rows(person):
@@ -417,7 +469,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         except PatientUser.DoesNotExist:
             user_data = None
 
-        patient_serializer = PatientRecordSerializer(patient_info)
+        # Pass request in context so PH.1.2#05 demographic redaction can
+        # identify whether the reader is the account holder.
+        patient_serializer = PatientRecordSerializer(patient_info, context={'request': request})
 
         return Response({
             'patient_info': patient_serializer.data,  # legacy wire format — preserved for frontend/federation host compatibility
@@ -489,6 +543,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 if prov_source:
                     _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
                 sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
+                # PHR-S FM TI.1.2#04 — record field-level revision history.
+                _write_record_revisions(patient_info, previous_values, request)
                 if prov_source:
                     for field in changed_fields:
                         if field in LAB_FIELD_TO_LOINC:
@@ -546,6 +602,44 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 )
         records = ProvenanceRecord.objects.filter(q).select_related('content_type').order_by('-created_at')
         return Response(ProvenanceRecordSerializer(records, many=True).data)
+
+    @action(detail=True, methods=['get'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def revisions(self, request, pk=None):
+        """GET /api/v1/patient-records/{person_id}/revisions/ — field-level
+        revision history for a patient's record (PHR-S FM TI.1.2#04)."""
+        from omop_core.models import RecordRevision
+        try:
+            person = Person.objects.get(person_id=pk)
+            patient_info = PatientRecord.objects.get(person=person)
+        except Person.DoesNotExist:
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        except PatientRecord.DoesNotExist:
+            return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        org = get_request_org(request)
+        if org is not None:
+            if patient_info.organization != org:
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        elif not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+            from omop_core.authorization import can_access_patient
+            if not can_access_patient(request.user, person.person_id):
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        revisions = RecordRevision.objects.filter(
+            patient_record=patient_info,
+        ).order_by('-changed_at', 'field')
+        data = [
+            {
+                'id': r.id,
+                'field': r.field,
+                'old_value': r.old_value,
+                'new_value': r.new_value,
+                'changed_by': r.changed_by,
+                'changed_at': r.changed_at,
+            }
+            for r in revisions
+        ]
+        return Response(data)
 
     @action(detail=False, methods=['get', 'patch', 'delete'], permission_classes=[PatientDeletePermission, PatientSelfScopePermission])
     def me(self, request):
@@ -606,10 +700,26 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         serializer.is_valid(raise_exception=True)
 
         changed_fields = set(patch_data.keys())
+        # Capture previous values before save so revision history can record
+        # old/new (PHR-S FM TI.1.2#04). FK fields compared via {field}_id.
+        _read_only = set(PatientRecordSerializer.Meta.read_only_fields)
+
+        def _prev_val(obj, field):
+            fk_id = f'{field}_id'
+            if hasattr(obj, fk_id):
+                return getattr(obj, fk_id, None)
+            return getattr(obj, field, None)
+        previous_values = {
+            field: _prev_val(patient_info, field)
+            for field in patch_data
+            if field not in _read_only and hasattr(patient_info, field)
+        }
         try:
             with transaction.atomic():
                 serializer.save()
                 sync_to_omop(patient_info, changed_fields, changed_data=dict(patch_data))
+                # PHR-S FM TI.1.2#04 — record field-level revision history.
+                _write_record_revisions(patient_info, previous_values, request)
         except Exception as _sync_exc:
             logger.error(
                 'omop_write_through_failed patient=%s error=%s',
@@ -673,7 +783,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         ``pk`` is interpreted as ``person_id`` (consistent with ``retrieve``).
         """
-        from omop_core.services.fhir_export import build_fhir_bundle
+        from omop_core.services.fhir_export import serialize_signed_fhir_bundle
+        from patient_portal.api.fhir.integrity import (
+            check_fhir_version, EXPORT_DIGEST_HEADER, EXPORT_SIGNATURE_HEADER,
+        )
+        from django.http import HttpResponse
+
+        # Bounded multi-version interchange (TI.5.2#01): only R4 is served.
+        version_error = check_fhir_version(request)
+        if version_error:
+            return Response({'error': version_error}, status=status.HTTP_406_NOT_ACCEPTABLE)
 
         try:
             person = Person.objects.get(person_id=pk)
@@ -684,8 +803,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # Object-level permission check (PatientSelfScopePermission)
         self.check_object_permissions(request, patient_record)
 
-        bundle = build_fhir_bundle(person)
-        return Response(bundle, content_type='application/fhir+json')
+        # Content integrity + non-repudiation (S.3.6#10 / PH.2.3#09): serialize
+        # the bundle to canonical bytes, then emit a SHA-256 digest and an HMAC
+        # signature over EXACTLY those bytes so the recipient can verify content
+        # integrity. We return an HttpResponse (not DRF Response) so the digest
+        # matches the body verbatim.
+        body_bytes, digest, signature = serialize_signed_fhir_bundle(person)
+        response = HttpResponse(body_bytes, content_type='application/fhir+json')
+        response[EXPORT_DIGEST_HEADER] = digest
+        response[EXPORT_SIGNATURE_HEADER] = signature
+        return response
 
     @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def upload_csv(self, request):
@@ -772,9 +899,27 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         file = request.FILES['file']
         if not file.name.endswith('.json'):
             return Response({'error': 'File must be a JSON file'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
+        # Bounded multi-version interchange (TI.5.2#01): decline unsupported
+        # FHIR versions cleanly rather than mis-parsing them.
+        from patient_portal.api.fhir.integrity import (
+            check_fhir_version, verify_content_digest,
+        )
+        version_error = check_fhir_version(request)
+        if version_error:
+            return Response({'error': version_error}, status=status.HTTP_406_NOT_ACCEPTABLE)
+
         try:
-            fhir_data = json.load(file)
+            raw_bytes = file.read()
+
+            # Content integrity (S.3.6#10 / PH.2.3#09): if the client asserted a
+            # SHA-256 digest of the payload, verify it against the received bytes.
+            # Opt-in — no header means current behavior is unchanged.
+            digest_error = verify_content_digest(request, raw_bytes)
+            if digest_error:
+                return Response({'error': digest_error}, status=status.HTTP_400_BAD_REQUEST)
+
+            fhir_data = json.loads(raw_bytes)
 
             if fhir_data.get('resourceType') != 'Bundle':
                 return Response({'error': 'FHIR file must be a Bundle'}, status=status.HTTP_400_BAD_REQUEST)
@@ -828,6 +973,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         'medication_requests': [],
                         'immunizations': [],
                         'diagnostic_reports': [],
+                        'allergy_intolerances': [],
                         'encounters': [],
                     }
                     if patient_id:
@@ -884,6 +1030,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     patient_id = _resolve_patient_ref(patient_ref)
                     if patient_id in patients_data:
                         patients_data[patient_id]['diagnostic_reports'].append(resource)
+                elif resource_type == 'AllergyIntolerance':
+                    patient_ref = resource.get('patient', {}).get('reference', '')
+                    patient_id = _resolve_patient_ref(patient_ref)
+                    if patient_id in patients_data:
+                        patients_data[patient_id]['allergy_intolerances'].append(resource)
                 elif resource_type == 'Encounter':
                     patient_ref = resource.get('subject', {}).get('reference', '')
                     patient_id = _resolve_patient_ref(patient_ref)
@@ -2346,8 +2497,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         if therapy_line is None:
                             continue
                         
-                        # Check if this is a regimen (parent) or individual drug (partOf)
-                        if not medication.get('partOf'):
+                        # Check if this is a regimen (parent) or individual drug (partOf).
+                        # Only treat as sub-resource when partOf references a MedicationStatement;
+                        # a Procedure/ reference (radiation 1L + maintenance) should NOT suppress
+                        # processing of the maintenance MedicationStatement.
+                        _part_of = medication.get('partOf', [])
+                        _is_med_sub_resource = any(
+                            ref.get('reference', '').startswith('MedicationStatement/')
+                            for ref in _part_of
+                        )
+                        if not _is_med_sub_resource:
                             # This is the named regimen
                             regimen_name = medication.get('medicationCodeableConcept', {}).get('text', '')
                             effective_period = medication.get('effectivePeriod', {})
@@ -2370,16 +2529,18 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     'regimen': regimen_name,
                                     'start_date': start_date,
                                     'end_date': end_date,
-                                    'outcome': therapy_outcome,
                                     'hemonc_concept_id': hemonc_concept_id,
                                 }
+                                if therapy_outcome is not None:
+                                    therapy_lines[therapy_line]['outcome'] = therapy_outcome
                             else:
                                 therapy_lines[therapy_line]['regimen'] = regimen_name
                                 if start_date:
                                     therapy_lines[therapy_line]['start_date'] = start_date
                                 if end_date:
                                     therapy_lines[therapy_line]['end_date'] = end_date
-                                therapy_lines[therapy_line]['outcome'] = therapy_outcome
+                                if therapy_outcome is not None:
+                                    therapy_lines[therapy_line]['outcome'] = therapy_outcome
                                 if hemonc_concept_id:
                                     therapy_lines[therapy_line]['hemonc_concept_id'] = hemonc_concept_id
                     
@@ -2419,7 +2580,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 first_line_end_date = datetime.strptime(therapy_lines[1]['end_date'][:10], '%Y-%m-%d').date()
                             except:
                                 pass
-                        first_line_outcome = therapy_lines[1]['outcome']
+                        first_line_outcome = therapy_lines[1].get('outcome')
                     
                     if 2 in therapy_lines:
                         second_line_therapy = therapy_lines[2]['regimen']
@@ -2434,7 +2595,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 second_line_end_date = datetime.strptime(therapy_lines[2]['end_date'][:10], '%Y-%m-%d').date()
                             except:
                                 pass
-                        second_line_outcome = therapy_lines[2]['outcome']
+                        second_line_outcome = therapy_lines[2].get('outcome')
                     
                     # Map line 3 and 4 to "later" field (prioritize most recent)
                     if 4 in therapy_lines:
@@ -2450,7 +2611,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 later_end_date = datetime.strptime(therapy_lines[4]['end_date'][:10], '%Y-%m-%d').date()
                             except:
                                 pass
-                        later_outcome = therapy_lines[4]['outcome']
+                        later_outcome = therapy_lines[4].get('outcome')
                     elif 3 in therapy_lines:
                         later_therapy = therapy_lines[3]['regimen']
                         if therapy_lines[3].get('start_date'):
@@ -2464,7 +2625,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 later_end_date = datetime.strptime(therapy_lines[3]['end_date'][:10], '%Y-%m-%d').date()
                             except:
                                 pass
-                        later_outcome = therapy_lines[3]['outcome']
+                        later_outcome = therapy_lines[3].get('outcome')
                     
                     # Match therapy intent and discontinuation observations to therapy lines by date
                     for intent_obs in therapy_intent_observations:
@@ -2701,7 +2862,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         for d in DrugExposure.objects.filter(person=person)
                     }
 
-                    def _write_drug_exposure(codeable, start_str, end_str=None, sig=None):
+                    def _write_drug_exposure(codeable, start_str, end_str=None, sig=None, route_source_value=None):
                         if not start_str:
                             return
                         try:
@@ -2740,6 +2901,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             drug_source_value=source_value,
                             drug_source_concept=drug_concept,
                             sig=(sig or '')[:255],
+                            route_source_value=route_source_value,
                         )
                         _de._skip_patient_record_refresh = True
                         _de.save()
@@ -2770,6 +2932,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _write_drug_exposure(
                             _immunization.get('vaccineCode'),
                             _immunization.get('occurrenceDateTime') or _immunization.get('recorded'),
+                            route_source_value='VACCINE',
                         )
 
                     logger.info(
@@ -2779,7 +2942,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
                     # --- Write DiagnosticReport rows into OMOP Observation ---
                     _existing_report_keys = {
-                        (o.observation_source_value, o.observation_date, o.value_as_string)
+                        (o.observation_source_value, o.observation_date, o.value_as_string, o.qualifier_source_value)
                         for o in Observation.objects.filter(person=person)
                     }
                     for _report in data.get('diagnostic_reports', []):
@@ -2813,7 +2976,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             )
                         _value = (_report.get('conclusion') or _display or 'Diagnostic report')[:60]
                         _source = (_code or _display or 'DiagnosticReport')[:50]
-                        _report_key = (_source, _report_date, _value)
+                        _report_key = (_source, _report_date, _value, None)
                         if _report_key in _existing_report_keys:
                             continue
                         _obs = Observation(
@@ -2837,6 +3000,59 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         "TIMING patient=%s phase=diagnostic_reports elapsed=%.1fs count=%d",
                         _timing_hash, _time.monotonic() - _pt_start, len(data.get('diagnostic_reports', [])),
                     )
+
+                    # --- Write AllergyIntolerance rows into OMOP Observation ---
+                    # Tagged with qualifier_source_value='ALLERGY' for the allergy
+                    # list endpoint (PHR-S FM PH.2.5).
+                    for _allergy in data.get('allergy_intolerances', []):
+                        _allergy_date_str = _allergy.get('recordedDate') or _allergy.get('onsetDateTime')
+                        if not _allergy_date_str:
+                            continue
+                        try:
+                            _allergy_dt = datetime.fromisoformat(_allergy_date_str[:10])
+                        except (ValueError, TypeError):
+                            continue
+                        _allergy_date = _allergy_dt.date()
+                        _system, _code, _display = _coding_parts(_allergy.get('code'))
+                        _vocab = _vocab_from_system(_system)
+                        _allergy_concept = None
+                        if _code:
+                            if _vocab == 'LOINC':
+                                _allergy_concept = _cc_by_loinc(_code)
+                            else:
+                                _allergy_concept = _cc_by_vocab(_vocab, _code)
+                        if _allergy_concept is None:
+                            _allergy_concept = get_or_create_quarantine_observation(
+                                source_vocabulary_id=_vocab,
+                                concept_code=_code,
+                                concept_name=_display or 'FHIR AllergyIntolerance',
+                                source_system='fhir-upload',
+                            )
+                        _criticality = (_allergy.get('criticality') or '')[:60]
+                        _, _cs_code, _cs_display = _coding_parts(_allergy.get('clinicalStatus'))
+                        _clinical_status = (_cs_display or _cs_code or '')[:50]
+                        _allergy_source = (_code or _display or 'AllergyIntolerance')[:50]
+                        _allergy_key = (_allergy_source, _allergy_date, _criticality, 'ALLERGY')
+                        if _allergy_key in _existing_report_keys:
+                            continue
+                        _obs = Observation(
+                            observation_id=next_pk(Observation, 'observation_id'),
+                            person=person,
+                            observation_concept=_allergy_concept,
+                            observation_date=_allergy_date,
+                            observation_datetime=timezone.make_aware(_allergy_dt) if _allergy_dt.tzinfo is None else _allergy_dt,
+                            observation_type_concept=_concept_ehr_type or _allergy_concept,
+                            value_as_string=_criticality,
+                            observation_source_value=_allergy_source,
+                            observation_source_concept=_allergy_concept,
+                            qualifier_source_value='ALLERGY',
+                            value_source_value=_clinical_status,
+                        )
+                        _obs._skip_patient_record_refresh = True
+                        _obs.save()
+                        _existing_report_keys.add(_allergy_key)
+                        if prov_source:
+                            _record_provenance(_obs, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
 
                     # --- Write ProcedureOccurrence records ---
                     _existing_proc_keys = {
@@ -3350,6 +3566,46 @@ def login_view(request):
 
 @csrf_exempt
 @api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def change_password(request):
+    """Change the authenticated local account's password (PHR-S FM TI.1.1).
+
+    Enforces the password validators, the no-reuse policy, and clears the
+    force-change flag. Used both for a routine change and to satisfy a
+    must_change_password requirement after an admin reset.
+    """
+    from django.contrib.auth import update_session_auth_hash
+    from patient_portal.services import (
+        password_reuse_error, password_validation_errors, set_new_password,
+    )
+
+    identity = request.user
+    current = request.data.get('current_password') or ''
+    new = request.data.get('new_password') or ''
+
+    if not new:
+        return Response({'error': 'new_password is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Verify the current password for accounts that have one (OIDC/service
+    # identities carry an unusable password and set one for the first time here).
+    if identity.has_usable_password() and not identity.check_password(current):
+        return Response({'error': 'Current password is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    pw_errors = password_validation_errors(new, email=getattr(identity, 'email', None))
+    if pw_errors:
+        return Response({'error': ' '.join(pw_errors)}, status=status.HTTP_400_BAD_REQUEST)
+
+    reuse_error = password_reuse_error(identity, new)
+    if reuse_error:
+        return Response({'error': reuse_error}, status=status.HTTP_400_BAD_REQUEST)
+
+    set_new_password(identity, new, must_change=False)
+    update_session_auth_hash(request, identity)  # keep the session valid after the change
+    return Response({'detail': 'Password updated.'}, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['POST'])
 @permission_classes([AllowAny])
 def logout_view(request):
     """Logout the user and clear session"""
@@ -3613,6 +3869,16 @@ class _OmopFilterMixin:
         person_id = self.request.query_params.get('person_id')
         if person_id:
             qs = qs.filter(person_id=person_id)
+        # PHR-S FM PH.1.1#06 — exclude entered-in-error rows from normal reads
+        # by default. Applies only to models that carry the flag (clinical
+        # event tables); the row is RETAINED, never deleted. Pass
+        # ?include_erroneous=true to surface them (e.g. to review or un-flag).
+        if any(f.name == 'is_erroneous' for f in qs.model._meta.get_fields()):
+            include = str(
+                self.request.query_params.get('include_erroneous', '')
+            ).strip().lower() in ('1', 'true', 'yes')
+            if not include:
+                qs = qs.exclude(is_erroneous=True)
         # Trusted backend (service-token): full visibility. Already
         # validated at the permission layer (ScopedTokenPermission).
         if is_service_token(self.request):
@@ -3958,7 +4224,7 @@ def concept_lookup(request):
         version_map = _vocab_version_map()
         result['_vocabulary_versions'] = {v: version_map.get(v) for v in by_vocab}
 
-    return Response(result)
+    return _set_release_etag(request, Response(result))
 
 
 # Caps for concept graph traversal: bound any single source concept's result
@@ -3987,12 +4253,72 @@ def _concept_graph_filters(request):
     return relationship_ids, vocabulary_ids, concept_class_ids, max_levels
 
 
+import threading
+
+_vocab_cache_lock = threading.Lock()
+_vocab_version_cache = {'release_pk': None, 'map': None}
+
+
 def _vocab_version_map():
     """``{vocabulary_id: vocabulary_version}`` for every vocabulary (small table,
     one query). Lets concept responses carry the release/version each concept
-    came from, so consumers can pin a release and detect drift (promop#240)."""
+    came from, so consumers can pin a release and detect drift (promop#240).
+
+    Cached per-process, invalidated when a new VocabularyRelease is published."""
     from omop_core.models import Vocabulary
-    return dict(Vocabulary.objects.values_list('vocabulary_id', 'vocabulary_version'))
+    from omop_core.services.vocab_release import get_latest_release
+
+    release = get_latest_release()
+    if release is None:
+        # No published release — skip caching, just query directly.
+        return dict(Vocabulary.objects.values_list('vocabulary_id', 'vocabulary_version'))
+    release_pk = release.pk
+    with _vocab_cache_lock:
+        if _vocab_version_cache['release_pk'] == release_pk and _vocab_version_cache['map'] is not None:
+            return _vocab_version_cache['map']
+        result = dict(Vocabulary.objects.values_list('vocabulary_id', 'vocabulary_version'))
+        _vocab_version_cache['release_pk'] = release_pk
+        _vocab_version_cache['map'] = result
+        return result
+
+
+def _etag_matches(if_none_match, etag):
+    """RFC 7232 §3.2 weak comparison for If-None-Match on GET/HEAD."""
+    if not if_none_match or not etag:
+        return False
+    if if_none_match.strip() == '*':
+        return True
+
+    def _normalize(e):
+        e = e.strip()
+        if e.startswith('W/'):
+            e = e[2:]
+        return e
+    etag_norm = _normalize(etag)
+    for token in if_none_match.split(','):
+        if _normalize(token) == etag_norm:
+            return True
+    return False
+
+
+def _set_release_etag(request, response):
+    """Set ETag and Cache-Control on a concept response based on the latest
+    published VocabularyRelease. Returns a 304 if If-None-Match matches."""
+    from django.http import HttpResponseNotModified
+    from omop_core.services.vocab_release import get_latest_release, get_release_etag
+
+    release = get_latest_release()
+    etag = get_release_etag(release)
+    if etag is None:
+        return response
+
+    if_none_match = request.META.get('HTTP_IF_NONE_MATCH', '')
+    if _etag_matches(if_none_match, etag):
+        return HttpResponseNotModified()
+
+    response['ETag'] = etag
+    response['Cache-Control'] = 'public, max-age=300'
+    return response
 
 
 def _serialize_concept_graph_node(concept, versions=None, **extra):
@@ -4149,13 +4475,13 @@ def _concept_graph_single_response(request, concept_id, direction):
         max_levels,
     )
     results = grouped[concept_id]
-    return Response({
+    return _set_release_etag(request, Response({
         'concept_id': concept_id,
         'direction': direction,
         'count': len(results),
         'truncated': concept_id in truncated,
         'results': results,
-    })
+    }))
 
 
 @api_view(['GET'])
@@ -4214,14 +4540,14 @@ def concept_graph_batch(request):
         concept_class_ids,
         max_levels,
     )
-    return Response({
+    return _set_release_etag(request, Response({
         'direction': direction,
         'results': {
             str(concept_id): grouped.get(concept_id, [])
             for concept_id in concept_ids
         },
         'truncated': sorted(truncated),
-    })
+    }))
 
 
 # =============================================================================
@@ -4273,7 +4599,8 @@ def _paginated_concept_response(queryset, request):
     paginator = ConceptPagination()
     page = paginator.paginate_queryset(queryset.order_by('concept_id'), request)
     versions = _vocab_version_map()
-    return paginator.get_paginated_response([_serialize_concept(c, versions) for c in page])
+    response = paginator.get_paginated_response([_serialize_concept(c, versions) for c in page])
+    return _set_release_etag(request, response)
 
 
 @api_view(['GET'])
@@ -4357,7 +4684,7 @@ def concept_synonyms(request, concept_id):
         .order_by('concept_synonym_name')
         .values('concept_synonym_name', 'language_concept_id')
     )
-    return Response({'concept_id': concept_id, 'count': len(rows), 'results': rows})
+    return _set_release_etag(request, Response({'concept_id': concept_id, 'count': len(rows), 'results': rows}))
 
 
 @api_view(['GET'])
@@ -4407,7 +4734,45 @@ def concept_synonym_search(request):
         'standard_concept': s.concept.standard_concept,
         'concept_synonym_name': s.concept_synonym_name,
     } for s in page]
-    return paginator.get_paginated_response(results)
+    return _set_release_etag(request, paginator.get_paginated_response(results))
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def concept_replacement(request, concept_id):
+    """
+    Resolve a (possibly deprecated) concept to its active replacement.
+
+    Embedded-term substitution (PHR-S FM TI.4.2#07) in an OMOP-based store
+    reduces to a concept-replacement lookup: when a terminology release retires
+    a concept, Athena loads a `'Concept replaced by'` edge to the successor.
+    This endpoint walks that chain and returns the terminal active concept.
+
+    Response 200: {
+        "concept_id": N,                 # requested concept
+        "replaced": true|false,          # whether a substitution was applied
+        "resolved_concept": { concept_id, concept_name, concept_code,
+                              vocabulary_id, concept_class_id, domain_id,
+                              standard_concept, invalid_reason },
+        "chain": [id0, id1, ...]         # traversal order (>=1 entry)
+    }
+    Response 404: concept_id not found.
+    """
+    from omop_core.models import resolve_concept_replacement
+
+    resolved, chain = resolve_concept_replacement(concept_id)
+    if resolved is None:
+        return Response({'detail': 'Concept not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    versions = _vocab_version_map()
+    return Response({
+        'concept_id': concept_id,
+        'replaced': resolved.concept_id != concept_id,
+        'resolved_concept': _serialize_concept_graph_node(
+            resolved, versions, invalid_reason=resolved.invalid_reason,
+        ),
+        'chain': chain,
+    })
 
 
 # =============================================================================
@@ -4486,6 +4851,46 @@ class PatientDocumentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = PatientDocumentSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientDocument.objects.all()
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        doc_type = self.request.query_params.get('doc_type')
+        if doc_type:
+            qs = qs.filter(doc_type=doc_type)
+        # PHR-S FM PH.1.4#04 — filter advance directives (and other docs) by
+        # effective status, e.g. ?status=active to list only in-effect documents.
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        return qs
+
+
+class ImmunizationListViewSet(_OmopFilterMixin, viewsets.ReadOnlyModelViewSet):
+    """Read-only list of immunization records (PHR-S FM PH.2.5).
+
+    Immunizations are stored as DrugExposure rows tagged with
+    route_source_value='VACCINE'. Filter by person: GET /v1/immunizations/?person_id=42
+    """
+    serializer_class = ImmunizationSerializer
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    pagination_class = PatientRecordPagination
+    queryset = DrugExposure.objects.filter(
+        route_source_value='VACCINE',
+    ).select_related('drug_concept')
+
+
+class AllergyListViewSet(_OmopFilterMixin, viewsets.ReadOnlyModelViewSet):
+    """Read-only list of allergy records (PHR-S FM PH.2.5).
+
+    Allergies are stored as Observation rows tagged with
+    qualifier_source_value='ALLERGY'. Filter by person: GET /v1/allergies/?person_id=42
+    """
+    serializer_class = AllergySerializer
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    pagination_class = PatientRecordPagination
+    queryset = Observation.objects.filter(
+        qualifier_source_value='ALLERGY',
+    ).select_related('observation_concept')
 
 
 class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
@@ -4585,7 +4990,7 @@ class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.
     PUT is disabled: values/values_dates are append-only dicts; use PATCH.
     """
     serializer_class = PatientSurveyResponseSerializer
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [SurveyResponsePermission, PatientSelfScopePermission]
     queryset = PatientSurveyResponse.objects.select_related('survey').all()
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
@@ -4608,3 +5013,260 @@ class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.
     def partial_update(self, request, *args, **kwargs):
         kwargs['partial'] = True
         return self.update(request, *args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Patient Consent management (PHR-S FM Phase 3)
+# ---------------------------------------------------------------------------
+
+class PatientConsentViewSet(viewsets.ModelViewSet):
+    """Patient consent grants — auto-created for each consent type.
+
+    Patients toggle ``consent_granted`` via PATCH; consents are never
+    created or deleted by patients directly.
+
+    GET  /api/v1/consents/         → list (auto-creates missing types)
+    PATCH /api/v1/consents/{id}/   → toggle consent_granted
+    """
+    serializer_class = PatientConsentSerializer
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    CONSENT_TYPES = ['data_sharing', 'clinical_trial', 'research']
+
+    def get_queryset(self):
+        from patient_portal.models import PatientConsent
+        from patient_portal.services import patient_person_for
+
+        person = patient_person_for(self.request.user)
+        if person is not None:
+            return PatientConsent.objects.filter(patient_user__person=person)
+        # Staff / superuser — return all consents
+        return PatientConsent.objects.all()
+
+    def list(self, request, *args, **kwargs):
+        from patient_portal.models import PatientConsent, PatientUser
+        from patient_portal.services import patient_person_for
+
+        person = patient_person_for(request.user)
+        if person is not None:
+            try:
+                patient_user = PatientUser.objects.get(person=person)
+            except PatientUser.DoesNotExist:
+                return Response([], status=status.HTTP_200_OK)
+            # Auto-create missing consent types
+            for consent_type in self.CONSENT_TYPES:
+                PatientConsent.objects.get_or_create(
+                    patient_user=patient_user,
+                    consent_type=consent_type,
+                    defaults={'consent_granted': False},
+                )
+        return super().list(request, *args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Patient messages — bidirectional messaging (PHR-S FM Phase 4b)
+# ---------------------------------------------------------------------------
+
+class MessagePagination(PageNumberPagination):
+    page_size = 50
+
+
+class PatientMessageViewSet(viewsets.ModelViewSet):
+    """Bidirectional patient–provider messaging with threading.
+
+    GET   /api/v1/messages/               → list (patients see only their own)
+    POST  /api/v1/messages/               → create a new message or reply
+    PATCH /api/v1/messages/{id}/           → edit own message text
+    PATCH /api/v1/messages/{id}/mark-read/ → mark a message as read
+
+    Query params:
+      - parent=null       → top-level threads only
+      - parent={id}       → replies to a specific message
+      - is_read=false     → unread messages only
+      - is_read=true      → read messages only
+    """
+    serializer_class = PatientMessageSerializer
+    permission_classes = [SurveyResponsePermission, PatientSelfScopePermission]
+    pagination_class = MessagePagination
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+
+    def get_queryset(self):
+        from patient_portal.models import PatientMessage
+        from patient_portal.services import patient_person_for
+
+        from django.db.models import Count
+        qs = PatientMessage.objects.select_related(
+            'sender', 'parent', 'patient_user',
+        ).annotate(_reply_count=Count('replies')).order_by('-created_at')
+        person = patient_person_for(self.request.user)
+        if person is not None:
+            # The account holder sees their own thread at every confidentiality level.
+            qs = qs.filter(patient_user__person=person)
+        else:
+            # Staff/providers: restricted & very-restricted messages are visible only
+            # to their sender — sensitive content is not broadly visible to other
+            # staff (PHR-S FM PH.6.3#08). Service tokens/superusers are unrestricted.
+            from django.db.models import Q
+            if not (is_service_token(self.request)
+                    or getattr(self.request.user, 'is_superuser', False)):
+                qs = qs.filter(
+                    Q(confidentiality=PatientMessage.CONFIDENTIALITY_NORMAL)
+                    | Q(sender=self.request.user)
+                )
+
+        # Optional filters
+        parent = self.request.query_params.get('parent')
+        if parent == 'null':
+            qs = qs.filter(parent__isnull=True)  # Top-level threads only
+        elif parent:
+            try:
+                qs = qs.filter(parent_id=int(parent))
+            except (ValueError, TypeError):
+                qs = qs.none()
+
+        is_read = self.request.query_params.get('is_read')
+        if is_read is not None:
+            qs = qs.filter(read_at__isnull=(is_read.lower() == 'false'))
+
+        return qs
+
+    def perform_create(self, serializer):
+        from patient_portal.models import PatientUser
+        from patient_portal.services import patient_person_for
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+
+        user = self.request.user
+        person = patient_person_for(user)
+
+        # Auto-set sender and sender_is_patient
+        kwargs = {
+            'sender': user,
+            'sender_is_patient': person is not None,
+        }
+
+        if person is not None:
+            # Patient: force patient_user to their own record
+            try:
+                pu = PatientUser.objects.get(identity=user, person=person)
+            except PatientUser.DoesNotExist:
+                raise PermissionDenied('No patient record linked to this account.')
+            kwargs['patient_user'] = pu
+        else:
+            # Staff: inherit patient_user from parent on reply, require on new thread
+            parent = serializer.validated_data.get('parent')
+            if parent:
+                kwargs['patient_user'] = parent.patient_user
+            elif not serializer.validated_data.get('patient_user'):
+                raise ValidationError({'patient_user': 'Staff must specify patient_user when starting a new thread.'})
+
+        # Validate parent belongs to the same patient thread
+        parent = serializer.validated_data.get('parent')
+        resolved_pu = kwargs.get('patient_user') or serializer.validated_data.get('patient_user')
+        if parent and resolved_pu:
+            if parent.patient_user_id != resolved_pu.pk:
+                raise PermissionDenied('Cannot reply to another patient\'s message.')
+
+        serializer.save(**kwargs)
+
+    def perform_update(self, serializer):
+        from rest_framework.exceptions import PermissionDenied
+        # Only the sender can edit message text; prevent patients from altering
+        # provider messages.
+        obj = serializer.instance
+        if obj.sender_id != self.request.user.pk:
+            raise PermissionDenied('You can only edit your own messages.')
+        # Strip immutable fields on update
+        for field in ('patient_user', 'parent', 'subject'):
+            serializer.validated_data.pop(field, None)
+        serializer.save()
+
+    @action(detail=True, methods=['patch'], url_path='mark-read')
+    def mark_read(self, request, pk=None):
+        msg = self.get_object()
+        if msg.read_at is None:
+            msg.read_at = timezone.now()
+            msg.is_read = True  # Keep legacy field in sync
+            msg.save(update_fields=['read_at', 'is_read'])
+        serializer = self.get_serializer(msg)
+        return Response(serializer.data)
+
+
+class InterchangeAgreementViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only list/detail of documented data-interchange agreements (TI.5.4#01).
+
+    A formal, described agreement artifact governing electronic exchange with
+    external partners. Exposed under /api/v1/interchange-agreements/.
+    """
+    permission_classes = [IsAuthenticated]
+    pagination_class = PatientRecordPagination
+
+    def get_queryset(self):
+        from omop_core.models import InterchangeAgreement
+        return InterchangeAgreement.objects.all().select_related('partner_organization')
+
+    def get_serializer_class(self):
+        from .serializers import InterchangeAgreementSerializer
+        return InterchangeAgreementSerializer
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary Release — versioned release manifest API
+# ---------------------------------------------------------------------------
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def vocab_release_list(request):
+    """Paginated list of published vocabulary releases (newest first)."""
+    from omop_core.models import VocabularyRelease
+
+    qs = VocabularyRelease.objects.filter(status='published').order_by('-published_at')
+    paginator = ConceptPagination()
+    page = paginator.paginate_queryset(qs, request)
+    results = [_serialize_vocab_release(r) for r in page]
+    return paginator.get_paginated_response(results)
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def vocab_release_detail(request, release_id):
+    """Full manifest for a specific published vocabulary release, including checksums."""
+    from omop_core.models import VocabularyRelease
+
+    try:
+        release = VocabularyRelease.objects.get(pk=release_id, status='published')
+    except VocabularyRelease.DoesNotExist:
+        return Response({'detail': 'Release not found.'}, status=status.HTTP_404_NOT_FOUND)
+    return Response(_serialize_vocab_release(release, include_checksums=True))
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def vocab_release_latest(request):
+    """Latest published vocabulary release. Supports If-None-Match → 304."""
+    from omop_core.services.vocab_release import get_latest_release
+
+    release = get_latest_release()
+    if release is None:
+        return Response({'detail': 'No published releases.'}, status=status.HTTP_404_NOT_FOUND)
+
+    resp = Response(_serialize_vocab_release(release, include_checksums=True))
+    return _set_release_etag(request, resp)
+
+
+def _serialize_vocab_release(release, include_checksums=False):
+    data = {
+        'id': release.pk,
+        'schema_version': release.schema_version,
+        'scope': release.scope,
+        'build_timestamp': release.build_timestamp.isoformat() if release.build_timestamp else None,
+        'athena_version': release.athena_version,
+        'vocab_versions': release.vocab_versions,
+        'row_counts': release.row_counts,
+        'status': release.status,
+        'published_at': release.published_at.isoformat() if release.published_at else None,
+        'notes': release.notes,
+    }
+    if include_checksums:
+        data['checksums'] = release.checksums
+    return data

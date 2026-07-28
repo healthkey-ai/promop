@@ -101,6 +101,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'patient_portal.api.middleware.AuditLogMiddleware',
+    'patient_portal.api.middleware.ForcePasswordChangeMiddleware',
     'patient_portal.api.middleware.DeprecationWarningMiddleware',
 ]
 
@@ -151,6 +152,14 @@ LOGGING = {
         },
     },
 }
+
+# Audit-event retention (HL7 PHR-S FM TI.2.2 — Audit Log Management).
+# AuditEvent rows older than this many days are eligible for pruning by the
+# `prune_audit_events` management command (typically run as a scheduled job).
+# Default 2190 days (~6 years): a common minimum retention for healthcare audit
+# logs (e.g. HIPAA record-retention practice). Override per-deployment via the
+# AUDIT_EVENT_RETENTION_DAYS env var, or per-run via `--days N`.
+AUDIT_EVENT_RETENTION_DAYS = int(os.environ.get('AUDIT_EVENT_RETENTION_DAYS', '2190'))
 
 ROOT_URLCONF = 'ctomop.urls'
 
@@ -212,6 +221,25 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+# Authentication-policy controls for local (email/password) accounts — PHR-S FM TI.1.1.
+# All env-configurable per organizational policy.
+AUTH_LOCKOUT_THRESHOLD = int(os.environ.get('AUTH_LOCKOUT_THRESHOLD', '5'))   # #03 consecutive failures before lockout
+AUTH_LOCKOUT_SECONDS = int(os.environ.get('AUTH_LOCKOUT_SECONDS', '900'))     # #03 lockout duration (15 min)
+PASSWORD_HISTORY_SIZE = int(os.environ.get('PASSWORD_HISTORY_SIZE', '5'))     # #05 last-N passwords that may not be reused
+PASSWORD_REUSE_DAYS = int(os.environ.get('PASSWORD_REUSE_DAYS', '180'))       # #04 no reuse within this many days
+
+# Audit tamper-evidence (TI.2.2.1) and break-glass (TI.2.3#04).
+AUDIT_HMAC_KEY = os.environ.get('AUDIT_HMAC_KEY', '')                          # falls back to SECRET_KEY when empty
+BREAK_GLASS_TTL_SECONDS = int(os.environ.get('BREAK_GLASS_TTL_SECONDS', '3600'))  # emergency-access window (1h)
+# Hash-chain audit rows so row deletion/insertion is detectable (TI.2.2.1). Serializes
+# audit writes via an advisory lock; can be disabled under extreme write load.
+AUDIT_HASH_CHAIN_ENABLED = os.environ.get('AUDIT_HASH_CHAIN_ENABLED', 'true').lower() in ('1', 'true', 'yes')
+
+# Data-exchange integrity & non-repudiation (S.3.6#10 / PH.2.3#09, issue #306).
+# Key used to sign exported FHIR bundles (HMAC-SHA256). Falls back to SECRET_KEY
+# when empty, mirroring the AUDIT_HMAC_KEY pattern.
+EXPORT_SIGNING_KEY = os.environ.get('EXPORT_SIGNING_KEY', '')
+
 _mailgun_configured = bool(
     os.environ.get('MAILGUN_API_KEY') and os.environ.get('MAILGUN_SENDER_DOMAIN')
 )
@@ -250,6 +278,9 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = []
+
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
@@ -325,6 +356,7 @@ REST_FRAMEWORK = {
         # Patient self-service ingest (/api/fhir/patient-sync/) — per-patient, so
         # a more generous bucket than the shared service-token /sync/ endpoint.
         'patient_sync': os.environ.get('PATIENT_SYNC_THROTTLE_RATE', '120/minute'),
+        'patient_signup': '10/hour',
     },
 }
 
