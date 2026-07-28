@@ -575,12 +575,16 @@ class Concept(models.Model):
                 fields=['vocabulary_id', 'concept_code'],
                 name='ix_concept_vocab_code',
             ),
-            # GIN trigram index — makes concept_name__icontains fast on large vocab tables.
-            # Requires pg_trgm extension (added via TrigramExtension() in migration).
+            # Functional GIN trigram index on UPPER(concept_name): Django compiles
+            # `concept_name__icontains` (concepts/search) to `UPPER(col::text) LIKE
+            # UPPER(...)`, which a raw-column gin_trgm index cannot serve — the index
+            # expression must match. (pg_trgm enabled in migration 0094; #262.)
+            # Named `_upper_` (not the old `ix_concept_name_trgm`) so the concurrent
+            # swap builds this one before dropping the raw one — see migrations
+            # 0121 (add) / 0122 (drop).
             GinIndex(
-                fields=['concept_name'],
-                name='ix_concept_name_trgm',
-                opclasses=['gin_trgm_ops'],
+                OpClass(Upper('concept_name'), name='gin_trgm_ops'),
+                name='ix_concept_name_upper_trgm',
             ),
         ]
 

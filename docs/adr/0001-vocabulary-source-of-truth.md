@@ -50,25 +50,52 @@ committed mechanism. This decision replaces the snapshot/delta distribution mech
 original draft required; the concrete API guarantees are folded into *Consequences* below.
 
 **EXACT #233 is the first consumer to conform** (informative):
-- Patient side: promop is to pre-expand component concept_ids onto the patient record
-  (`therapy_component_ids`, promop#189) so EXACT reads them without request-path traversal.
-  **Not yet wired:** the EXACT matcher still derives components locally today, and
-  `therapy_component_ids` is not yet release-stamped.
+- Patient side: promop pre-expands component concept_ids onto the patient record — the
+  aggregate `therapy_component_ids` (promop#189), line-structured groups
+  (`first_line_component_ids` and `second_line_component_ids` per line;
+  `later_component_ids` unions lines 3+), and per-line regimen concept_ids
+  (`first_line_therapy_id` …). All are exposed on the patient serializer. **Caveat on
+  regimen identity:** these concept_ids are a *mixture* of **source-asserted** (a validated
+  `Episode.episode_source_concept`, which the derivation uses preferentially) and **inferred**
+  (drug-exposure name matching, when no asserted concept is present). The catch is that the
+  `therapy_ids_provenance` field designed to carry the `asserted`-vs-`inferred` origin exists
+  but is **not yet populated** by the derivation pipeline — so a consumer cannot currently
+  tell which ids are asserted and which are inferred.
+  EXACT consumes the aggregate for component matching as of exact#239 (Phase P — the matcher
+  no longer derives components locally); the line-structured groups are available for
+  trial-side superset matching but not yet consumed. Not yet release-stamped.
 - Trial side: regimen→component expansion via the graph API at **backfill**, cached,
   release-pinned, fail-closed; stored in a **dedicated** column, never unioned into authored
   component requirements.
 - Matching: the expansion is a regimen-level **OR-alternative** evaluated by **superset**
   (a complete patient therapy line ⊇ a per-regimen expansion group), not any-overlap;
   **excluded** regimens are not expanded.
-- **Data-model prerequisites this exposes for promop** (resolve before EXACT Phase T ships):
-  (1) `therapy_component_ids` is today an **unstamped aggregate union across all therapy
-  lines** — superset on the aggregate mis-infers a regimen; promop must emit
-  **line/episode-scoped component groups** with completeness and release/provenance stamping;
-  (2) components are **mixed-vocabulary** (HemOnc / RxNorm / ingredient), and distinct
-  regimens can share a drug *set* (e.g. VRd vs VRd Lite), so a component-set superset alone
-  can equate different regimens. promop must supply **source-asserted regimen identity**, not
-  only the component concept set, and the expansion output and patient components must be
-  reconcilable at a common concept granularity.
+- **Phase T data prerequisites — met for 1L/2L, partially met for 3L+** (corrects an earlier
+  draft that wrongly listed the line-structured data as entirely unbuilt). A superset on the
+  *aggregate* `therapy_component_ids` alone would mis-infer a regimen (components smear across
+  lines; VRd vs VRd Lite share a drug set), so a safe superset needs line-structured data —
+  which promop **already emits and exposes** for the first two lines:
+  `first_line_component_ids` and `second_line_component_ids` (per line), with per-line regimen
+  concept_ids (`first_line_therapy_id` …). That is enough for a per-line superset on **1L/2L**.
+  Two prerequisites remain genuinely unmet, and EXACT must not treat them as done:
+    1. **3L+ is not per-line.** `later_component_ids` is a **union across all 3L+ lines**, so it
+       cannot satisfy the "complete patient therapy line ⊇ per-regimen expansion" superset rule
+       for later-line criteria: components from separate 3L+ regimens can combine to falsely
+       match a trial regimen the patient never received as a single line. Later-line superset
+       matching stays **blocked** until promop emits per-3L-line groups.
+    2. **Regimen identity is asserted-or-inferred but unstamped.** The `*_therapy_id`
+       concept_ids mix source-asserted (a validated `Episode.episode_source_concept`) and
+       inferred (drug-exposure name matching) values; `therapy_ids_provenance` (the
+       asserted-vs-inferred carrier) is not yet populated, so a consumer cannot tell which is
+       which — material precisely for VRd vs VRd Lite. The asserted path exists; it just is
+       not yet labelled, so EXACT must not discard it, only avoid *assuming* assertion.
+  So Phase T's **1L/2L component matching is not blocked on a promop data-model change** (the
+  remaining 1L/2L work is EXACT-side — consume the line-structured fields and do a per-line
+  superset); later-line matching, asserted-identity, and the cross-cutting **release_id /
+  version stamping** (a core deliverable in *Consequences* below) remain promop-side work.
+  Note `therapy_component_ids` is derived from the therapy lines (empty when there are none),
+  so a "component-only" patient is one whose *line's regimen is unresolved to a concept_id*,
+  not one with no therapy at all.
 
 ## Consequences (what promop must build)
 

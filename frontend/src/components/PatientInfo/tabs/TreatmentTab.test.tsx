@@ -60,4 +60,24 @@ describe('TreatmentTab - component concept ids', () => {
     );
     expect(screen.queryByText(/Component concept IDs:/)).not.toBeInTheDocument();
   });
+
+  it('labels each later line with its own line number (not always 3)', () => {
+    render(
+      <TreatmentTab
+        formData={{
+          ...baseFormData,
+          therapy_lines_count: 5,
+          later_therapy: 'RegA',
+          later_therapies: [
+            { lineNumber: 3, therapy: 'RegA', startDate: '2024-01-01', endDate: null },
+            { lineNumber: 5, therapy: 'RegC', startDate: '2024-06-01', endDate: null },
+          ],
+        }}
+        onChange={vi.fn()}
+        diseaseType="myeloma"
+      />,
+    );
+    expect(screen.getByText('Line 3:')).toBeInTheDocument();
+    expect(screen.getByText('Line 5:')).toBeInTheDocument();
+  });
 });
