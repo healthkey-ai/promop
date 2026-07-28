@@ -13928,6 +13928,8 @@ class VocabSnapshotTest(_SmartBase):
         for line in content.strip().split('\n'):
             if line:
                 row = json.loads(line)
+                if row.get('__done'):
+                    continue
                 self.assertIn('vocabulary_id', row)
 
     def test_404_on_staged_release(self):
@@ -13952,6 +13954,8 @@ class VocabSnapshotTest(_SmartBase):
             HTTP_IF_NONE_MATCH=etag,
         )
         self.assertEqual(resp2.status_code, 304)
+        # RFC 7232: 304 must include ETag
+        self.assertEqual(resp2['ETag'], etag)
 
     def test_400_on_unknown_table(self):
         resp = self.read_client.get(self._snapshot_url('bogus_table', self.release.pk))
@@ -13970,7 +13974,7 @@ class VocabSnapshotTest(_SmartBase):
         resp = self.read_client.get(url)
         self.assertEqual(resp.status_code, 200)
         content = b''.join(resp.streaming_content).decode()
-        rows = [json.loads(l) for l in content.strip().split('\n') if l]
+        rows = [json.loads(l) for l in content.strip().split('\n') if l and '__done' not in l]
         concept_ids = {r['concept_id'] for r in rows}
         self.assertIn(8880002, concept_ids)
         self.assertNotIn(8880001, concept_ids)
@@ -13981,7 +13985,7 @@ class VocabSnapshotTest(_SmartBase):
         resp = self.read_client.get(url)
         self.assertEqual(resp.status_code, 200)
         content = b''.join(resp.streaming_content).decode()
-        rows = [json.loads(l) for l in content.strip().split('\n') if l]
+        rows = [json.loads(l) for l in content.strip().split('\n') if l and '__done' not in l]
         concept_ids = {r['concept_id'] for r in rows}
         self.assertIn(8880001, concept_ids)
         self.assertNotIn(8880002, concept_ids)
@@ -13993,3 +13997,18 @@ class VocabSnapshotTest(_SmartBase):
             f'vocabulary_{self.release.pk}.ndjson',
             resp['Content-Disposition'],
         )
+
+    def test_unauthenticated_returns_401(self):
+        from rest_framework.test import APIClient
+        anon = APIClient()
+        resp = anon.get(self._snapshot_url('vocabulary', self.release.pk))
+        self.assertIn(resp.status_code, [401, 403])
+
+    def test_done_sentinel_in_stream(self):
+        import json
+        resp = self.read_client.get(self._snapshot_url('vocabulary', self.release.pk))
+        content = b''.join(resp.streaming_content).decode()
+        lines = [l for l in content.strip().split('\n') if l]
+        last = json.loads(lines[-1])
+        self.assertTrue(last.get('__done'))
+        self.assertEqual(last['rows'], len(lines) - 1)

@@ -5282,12 +5282,16 @@ class VocabSnapshotView(APIView):
     """
     permission_classes = [ScopedTokenPermission]
 
+    # SECURITY: db_table values are hardcoded; never interpolate user input.
     ALLOWED_TABLES = {
         'concept': 'concept',
-        'concept_relationship': 'concept_relationship',
         'concept_ancestor': 'concept_ancestor',
+        'concept_class': 'concept_class',
+        'concept_relationship': 'concept_relationship',
         'concept_synonym': 'concept_synonym',
+        'domain': 'domain',
         'drug_strength': 'drug_strength',
+        'relationship': 'relationship',
         'source_to_concept_map': 'source_to_concept_map',
         'vocabulary': 'vocabulary',
     }
@@ -5318,22 +5322,32 @@ class VocabSnapshotView(APIView):
         etag = get_release_etag(release)
         if_none_match = request.META.get('HTTP_IF_NONE_MATCH', '')
         if _etag_matches(if_none_match, etag):
-            return HttpResponseNotModified()
+            resp = HttpResponseNotModified()
+            if etag:
+                resp['ETag'] = etag
+            return resp
 
         # 4. Build WHERE clause (source filter for concept table only)
         db_table = self.ALLOWED_TABLES[table]
         where = ''
+        params = []
+        source_param = None
         if table == 'concept':
             source_param = request.query_params.get('source')
             if source_param == 'HealthKey':
-                where = "WHERE source = 'HealthKey'"
+                where = 'WHERE source = %s'
+                params = ['HealthKey']
             elif source_param == 'external':
                 where = 'WHERE source IS NULL'
+
+        # Vary ETag by source filter so different queries don't share ETags
+        if source_param and etag:
+            etag = etag.rstrip('"') + f'-{source_param}"'
 
         # 5. Stream NDJSON
         sql = f'SELECT row_to_json(t) FROM {db_table} t {where}'
         response = StreamingHttpResponse(
-            self._stream_ndjson(sql),
+            self._stream_ndjson(sql, params),
             content_type='application/x-ndjson',
         )
         response['Content-Disposition'] = (
@@ -5341,21 +5355,21 @@ class VocabSnapshotView(APIView):
         )
         if etag:
             response['ETag'] = etag
-            response['Cache-Control'] = 'public, max-age=86400'
+            response['Cache-Control'] = 'private, max-age=86400'
         return response
 
     @staticmethod
-    def _stream_ndjson(sql):
+    def _stream_ndjson(sql, params=None):
         import json as _json
         from django.db import connection
-        with connection.cursor() as cursor:
-            cursor.execute(sql)
-            while True:
-                rows = cursor.fetchmany(1000)
-                if not rows:
-                    break
-                for (row_json,) in rows:
-                    if isinstance(row_json, dict):
-                        yield _json.dumps(row_json) + '\n'
-                    else:
-                        yield str(row_json) + '\n'
+        count = 0
+        with connection.connection.cursor(name='vocab_snapshot') as cursor:
+            cursor.itersize = 1000
+            cursor.execute(sql, params or [])
+            for (row_json,) in cursor:
+                if isinstance(row_json, dict):
+                    yield _json.dumps(row_json) + '\n'
+                else:
+                    yield str(row_json) + '\n'
+                count += 1
+        yield _json.dumps({'__done': True, 'rows': count}) + '\n'
