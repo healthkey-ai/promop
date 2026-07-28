@@ -451,14 +451,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
 
         # AUTH-04: enforce per-patient row-level access
-        org = get_request_org(request)
-        if org is not None:
-            if patient_info.organization != org:
-                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        elif not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
-            from omop_core.authorization import can_access_patient
-            if not can_access_patient(request.user, person.person_id):
-                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        # Trusted service tokens (HMAC) get full access, consistent with the
+        # list endpoint's get_queryset. See healthkey-ai/promop#330.
+        if not is_service_token(request):
+            org = get_request_org(request)
+            if org is not None:
+                if patient_info.organization != org:
+                    return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+            elif not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
+                from omop_core.authorization import can_access_patient
+                if not can_access_patient(request.user, person.person_id):
+                    return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
         # Get the Identity associated with this person (not the logged-in user)
         from patient_portal.models import PatientUser
@@ -578,14 +581,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         except PatientRecord.DoesNotExist:
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        org = get_request_org(request)
-        if org is not None:
-            if patient_info.organization != org:
-                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        elif not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
-            from omop_core.authorization import can_access_patient
-            if not can_access_patient(request.user, person.person_id):
-                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        # Trusted service tokens (HMAC) get full access, consistent with the
+        # list endpoint's get_queryset. See healthkey-ai/promop#330.
+        if not is_service_token(request):
+            org = get_request_org(request)
+            if org is not None:
+                if patient_info.organization != org:
+                    return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+            elif not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
+                from omop_core.authorization import can_access_patient
+                if not can_access_patient(request.user, person.person_id):
+                    return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
         from django.db.models import Q
         # Build a single query for all provenance records across PatientRecord + OMOP tables
@@ -616,14 +622,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         except PatientRecord.DoesNotExist:
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        org = get_request_org(request)
-        if org is not None:
-            if patient_info.organization != org:
-                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        elif not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
-            from omop_core.authorization import can_access_patient
-            if not can_access_patient(request.user, person.person_id):
-                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        # Trusted service tokens (HMAC) get full access, consistent with the
+        # list endpoint's get_queryset. See healthkey-ai/promop#330.
+        if not is_service_token(request):
+            org = get_request_org(request)
+            if org is not None:
+                if patient_info.organization != org:
+                    return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+            elif not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
+                from omop_core.authorization import can_access_patient
+                if not can_access_patient(request.user, person.person_id):
+                    return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
         revisions = RecordRevision.objects.filter(
             patient_record=patient_info,
