@@ -455,7 +455,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if org is not None:
             if patient_info.organization != org:
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        elif not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+        elif not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
             from omop_core.authorization import can_access_patient
             if not can_access_patient(request.user, person.person_id):
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -492,7 +492,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if org is not None:
             if patient_info.organization != org:
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        elif not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+        elif not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
             from omop_core.authorization import can_access_patient, can_write_patient
             if not can_access_patient(request.user, person.person_id):
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -582,7 +582,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if org is not None:
             if patient_info.organization != org:
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        elif not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+        elif not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
             from omop_core.authorization import can_access_patient
             if not can_access_patient(request.user, person.person_id):
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -620,7 +620,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if org is not None:
             if patient_info.organization != org:
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        elif not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+        elif not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
             from omop_core.authorization import can_access_patient
             if not can_access_patient(request.user, person.person_id):
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -1454,7 +1454,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             )
 
                     # Block analysts from updating existing patients via FHIR upload.
-                    if not person_is_new and not request.user.is_superuser and not getattr(request.user, 'is_staff', False):
+                    if not person_is_new and not getattr(request.user, 'is_superuser', False) and not getattr(request.user, 'is_staff', False):
                         request_org = get_request_org(request)
                         same_org_upload = (
                             request_org is not None
