@@ -17,6 +17,7 @@ from .views import (
     concept_ancestors, concept_descendants, concept_graph_batch,
     concept_synonyms, concept_synonym_search, concept_replacement,
     vocab_release_list, vocab_release_detail, vocab_release_latest,
+    VocabSnapshotView,
     org_disease_stats,
     InterchangeAgreementViewSet,
 )
@@ -75,6 +76,8 @@ urlpatterns = [
     path('vocab-releases/', vocab_release_list, name='v1-vocab-release-list'),
     path('vocab-releases/latest/', vocab_release_latest, name='v1-vocab-release-latest'),
     path('vocab-releases/<int:release_id>/', vocab_release_detail, name='v1-vocab-release-detail'),
+    path('vocab-releases/<int:release_id>/snapshot/<str:table>/', VocabSnapshotView.as_view(), name='v1-vocab-snapshot'),
+    path('vocab-releases/latest/snapshot/<str:table>/', VocabSnapshotView.as_view(), {'release_id': None}, name='v1-vocab-snapshot-latest'),
     path('vocabularies/<str:model_name>/', vocabulary_list, name='v1-vocabulary-list'),
     path('concepts/lookup/', concept_lookup, name='v1-concept-lookup'),
     path('concepts/search/', concept_search, name='v1-concept-search'),
