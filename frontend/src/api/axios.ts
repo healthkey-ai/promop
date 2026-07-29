@@ -72,7 +72,8 @@ api.interceptors.response.use(
 
       clearTokens();
       if (!window.location.pathname.includes('/login')) {
-        window.location.href = '/login';
+        const orgMatch = window.location.pathname.match(/^\/org\/([^/]+)/);
+        window.location.href = orgMatch ? `/org/${orgMatch[1]}/login` : '/login';
       }
     }
 

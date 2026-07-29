@@ -1,13 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import axios from 'axios';
+import { publicApi } from '@/api/publicAxios';
 
 type State = 'loading' | 'ready' | 'success' | 'error';
-
-const publicApi = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || '/api',
-  headers: { 'Content-Type': 'application/json' },
-});
 
 const MIN_PASSWORD_LENGTH = 8;
 
@@ -33,6 +28,7 @@ export default function AcceptPatientInvite() {
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [loginUrl, setLoginUrl] = useState('/login');
 
   useEffect(() => {
     // No synchronous setState in the effect body — the no-token branch lives in
@@ -48,6 +44,9 @@ export default function AcceptPatientInvite() {
         const res = await publicApi.get('/v1/patient-invitations/lookup/', { params: { token } });
         setEmail(res.data.email ?? '');
         setPatientName(res.data.patient_name ?? '');
+        if (res.data.org_slug) {
+          setLoginUrl(`/org/${res.data.org_slug}/login`);
+        }
         setState('ready');
       } catch (err: unknown) {
         setMessage(errorMessage(err, 'This invitation link is invalid or has expired.'));
@@ -71,6 +70,10 @@ export default function AcceptPatientInvite() {
     try {
       const res = await publicApi.post('/v1/patient-invitations/accept/', { token, password });
       setMessage(res.data.detail ?? 'Account created. You can now sign in.');
+      if (res.data.redirect_url) {
+        const base = res.data.redirect_url.replace(/\/?$/, '/');
+        setLoginUrl(`${base}login`);
+      }
       setState('success');
     } catch (err: unknown) {
       setMessage(errorMessage(err, 'Could not create your account. The link may have expired.'));
@@ -149,7 +152,7 @@ export default function AcceptPatientInvite() {
           <>
             <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded p-3">{message}</p>
             <button
-              onClick={() => navigate('/login')}
+              onClick={() => navigate(loginUrl)}
               className="w-full py-2 px-4 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm font-medium"
             >
               Go to sign in
@@ -161,7 +164,7 @@ export default function AcceptPatientInvite() {
           <>
             <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded p-3">{message}</p>
             <button
-              onClick={() => navigate('/login')}
+              onClick={() => navigate(loginUrl)}
               className="w-full py-2 px-4 border border-gray-300 rounded text-sm text-gray-700 hover:bg-gray-50"
             >
               Back to sign in
