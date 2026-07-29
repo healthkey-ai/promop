@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ArrowLeft, Trash2, X } from 'lucide-react';
 import api from '@/api/axios';
 
 const DEFAULT_ANALYST_REDIRECT_URL = 'https://analytics.healthkey.ai';
@@ -16,6 +16,7 @@ interface Org {
   slug: string;
   is_active: boolean;
   allows_public_aggregated_data: boolean;
+  allows_patient_signup: boolean;
   created_at: string;
 }
 
@@ -33,9 +34,15 @@ interface Invitation {
   email: string;
   role: string;
   redirect_url: string | null;
+  person_id: number | null;
   status: string;
   expires_at: string;
   created_at: string;
+}
+
+interface PatientSearchResult {
+  person_id: number;
+  patient_name: string;
 }
 
 interface InviteResponse extends Invitation {
@@ -87,6 +94,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   const [orgName, setOrgName] = useState('');
   const [isActive, setIsActive] = useState(true);
   const [allowsPublicData, setAllowsPublicData] = useState(false);
+  const [allowsPatientSignup, setAllowsPatientSignup] = useState(false);
   const [settingsSaved, setSettingsSaved] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
 
@@ -106,6 +114,21 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteSuccess, setInviteSuccess] = useState<string | null>(null);
 
+  // Patient search state (for patient invites)
+  const [patientSearchQuery, setPatientSearchQuery] = useState('');
+  const [patientSearchResults, setPatientSearchResults] = useState<PatientSearchResult[]>([]);
+  const [selectedPerson, setSelectedPerson] = useState<PatientSearchResult | null>(null);
+  const [patientSearchLoading, setPatientSearchLoading] = useState(false);
+  const patientSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const patientSearchSeq = useRef(0);
+
+  // Clean up debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (patientSearchTimer.current) clearTimeout(patientSearchTimer.current);
+    };
+  }, []);
+
   const base = `/orgs/${slug}`;
 
   const fetchAll = useCallback(async () => {
@@ -122,6 +145,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       setOrgName(orgRes.data.name);
       setIsActive(orgRes.data.is_active);
       setAllowsPublicData(orgRes.data.allows_public_aggregated_data ?? false);
+      setAllowsPatientSignup(orgRes.data.allows_patient_signup ?? false);
       setTrusts(trustRes.data);
       setInvitations(invRes.data);
       setAccessGrants(accessRes.data);
@@ -155,6 +179,42 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     } catch {
       setAllowsPublicData(!checked); // revert on error
     }
+  };
+
+  const handlePatientSignupToggle = async (checked: boolean) => {
+    setAllowsPatientSignup(checked);
+    try {
+      await api.patch(`${base}/`, { allows_patient_signup: checked });
+    } catch {
+      setAllowsPatientSignup(!checked);
+    }
+  };
+
+  const handlePatientSearch = (query: string) => {
+    setPatientSearchQuery(query);
+    if (patientSearchTimer.current) clearTimeout(patientSearchTimer.current);
+    if (query.length < 2) {
+      setPatientSearchResults([]);
+      setPatientSearchLoading(false);
+      return;
+    }
+    const seq = ++patientSearchSeq.current;
+    patientSearchTimer.current = setTimeout(async () => {
+      setPatientSearchLoading(true);
+      try {
+        const res = await api.get(
+          `/v1/patient-records/?org=${encodeURIComponent(slug)}&search=${encodeURIComponent(query)}`
+        );
+        if (seq !== patientSearchSeq.current) return; // stale response
+        const data = res.data;
+        const results: PatientSearchResult[] = Array.isArray(data) ? data : (data.results ?? []);
+        setPatientSearchResults(results);
+      } catch {
+        if (seq === patientSearchSeq.current) setPatientSearchResults([]);
+      } finally {
+        if (seq === patientSearchSeq.current) setPatientSearchLoading(false);
+      }
+    }, 300);
   };
 
   const handleAddTrust = async () => {
@@ -198,9 +258,12 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     try {
       setInviteError(null);
       setInviteSuccess(null);
-      const payload: Record<string, string> = { email: inviteEmail, role: inviteRole };
+      const payload: Record<string, unknown> = { email: inviteEmail, role: inviteRole };
       if (inviteRole === 'analyst') {
         payload.redirect_url = inviteRedirectUrl;
+      }
+      if (inviteRole === 'patient' && selectedPerson) {
+        payload.person_id = selectedPerson.person_id;
       }
       const res = await api.post<InviteResponse>(`${base}/invite/`, payload);
       if (res.data.email_warning) {
@@ -212,6 +275,9 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       }
       setInviteEmail('');
       setInviteRedirectUrl(DEFAULT_ANALYST_REDIRECT_URL);
+      setSelectedPerson(null);
+      setPatientSearchQuery('');
+      setPatientSearchResults([]);
       fetchAll();
     } catch {
       setInviteError('Failed to send invitation.');
@@ -321,6 +387,15 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
               <label htmlFor="is_active" className="text-sm text-gray-700">Active</label>
             </div>
           )}
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={allowsPatientSignup}
+              onChange={(e) => handlePatientSignupToggle(e.target.checked)}
+              className="h-4 w-4 rounded border-gray-300 text-blue-600"
+            />
+            <span className="text-sm text-gray-700">Allow direct patient signup</span>
+          </label>
           <button
             onClick={handleSaveSettings}
             className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
@@ -571,12 +646,18 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                   if (nextRole !== 'analyst') {
                     setInviteRedirectUrl(DEFAULT_ANALYST_REDIRECT_URL);
                   }
+                  if (nextRole !== 'patient') {
+                    setSelectedPerson(null);
+                    setPatientSearchQuery('');
+                    setPatientSearchResults([]);
+                  }
                 }}
                 className="border border-gray-300 rounded px-2 py-1.5 text-sm"
               >
                 <option value="org_admin">Org Admin</option>
                 <option value="doctor">Doctor</option>
                 <option value="analyst">Analyst</option>
+                <option value="patient">Patient</option>
               </select>
               <button
                 onClick={handleInvite}
@@ -597,6 +678,65 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                 />
               </div>
             )}
+            {inviteRole === 'patient' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Link to patient record <span className="font-normal text-gray-400">(optional)</span>
+                </label>
+                {selectedPerson ? (
+                  <div className="flex items-center gap-2 border border-gray-300 rounded px-3 py-1.5 text-sm bg-gray-50">
+                    <span className="flex-1 truncate">
+                      {selectedPerson.patient_name} <span className="text-gray-400">(#{selectedPerson.person_id})</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedPerson(null);
+                        setPatientSearchQuery('');
+                        setPatientSearchResults([]);
+                      }}
+                      className="text-gray-400 hover:text-gray-600"
+                      title="Clear selection"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="relative">
+                    <input
+                      type="text"
+                      placeholder="Search by name or ID..."
+                      value={patientSearchQuery}
+                      onChange={e => handlePatientSearch(e.target.value)}
+                      onBlur={() => setTimeout(() => setPatientSearchResults([]), 150)}
+                      className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                    />
+                    {patientSearchLoading && (
+                      <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-gray-400">...</span>
+                    )}
+                    {patientSearchResults.length > 0 && (
+                      <ul className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded shadow-lg max-h-40 overflow-y-auto">
+                        {patientSearchResults.map(p => (
+                          <li key={p.person_id}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedPerson(p);
+                                setPatientSearchQuery('');
+                                setPatientSearchResults([]);
+                              }}
+                              className="w-full text-left px-3 py-1.5 text-sm hover:bg-blue-50"
+                            >
+                              {p.patient_name} <span className="text-gray-400">(#{p.person_id})</span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -615,6 +755,9 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                   <span className="text-sm">
                     <span className="font-medium">{inv.email}</span>
                     <span className="text-gray-400 ml-2">({inv.role})</span>
+                    {inv.role === 'patient' && inv.person_id && (
+                      <span className="text-gray-400 ml-1">#{inv.person_id}</span>
+                    )}
                     <span className={`ml-2 text-xs px-1.5 py-0.5 rounded font-medium ${
                       inv.status === 'pending' ? 'bg-yellow-100 text-yellow-700'
                         : inv.status === 'confirmed' ? 'bg-green-100 text-green-700'
