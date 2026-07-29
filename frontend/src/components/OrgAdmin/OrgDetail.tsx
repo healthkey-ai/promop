@@ -120,6 +120,14 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   const [selectedPerson, setSelectedPerson] = useState<PatientSearchResult | null>(null);
   const [patientSearchLoading, setPatientSearchLoading] = useState(false);
   const patientSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const patientSearchSeq = useRef(0);
+
+  // Clean up debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (patientSearchTimer.current) clearTimeout(patientSearchTimer.current);
+    };
+  }, []);
 
   const base = `/orgs/${slug}`;
 
@@ -187,21 +195,24 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     if (patientSearchTimer.current) clearTimeout(patientSearchTimer.current);
     if (query.length < 2) {
       setPatientSearchResults([]);
+      setPatientSearchLoading(false);
       return;
     }
-    setPatientSearchLoading(true);
+    const seq = ++patientSearchSeq.current;
     patientSearchTimer.current = setTimeout(async () => {
+      setPatientSearchLoading(true);
       try {
         const res = await api.get(
-          `/patient-records/?org=${encodeURIComponent(slug)}&search=${encodeURIComponent(query)}`
+          `/v1/patient-records/?org=${encodeURIComponent(slug)}&search=${encodeURIComponent(query)}`
         );
+        if (seq !== patientSearchSeq.current) return; // stale response
         const data = res.data;
         const results: PatientSearchResult[] = Array.isArray(data) ? data : (data.results ?? []);
         setPatientSearchResults(results);
       } catch {
-        setPatientSearchResults([]);
+        if (seq === patientSearchSeq.current) setPatientSearchResults([]);
       } finally {
-        setPatientSearchLoading(false);
+        if (seq === patientSearchSeq.current) setPatientSearchLoading(false);
       }
     }, 300);
   };
@@ -697,6 +708,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                       placeholder="Search by name or ID..."
                       value={patientSearchQuery}
                       onChange={e => handlePatientSearch(e.target.value)}
+                      onBlur={() => setTimeout(() => setPatientSearchResults([]), 150)}
                       className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
                     />
                     {patientSearchLoading && (

@@ -35,7 +35,7 @@ function setupMocks(overrides: Partial<typeof ORG_DATA> = {}) {
     if (url.includes("/orgs/acme/")) return Promise.resolve({ data: orgData });
     if (url.includes("/stats/org-disease/")) return Promise.resolve({ data: [] });
     if (url.includes("/orgs/")) return Promise.resolve({ data: [] });
-    if (url.includes("/patient-records/"))
+    if (url.includes("/v1/patient-records/"))
       return Promise.resolve({
         data: [
           { person_id: 42, patient_name: "Jane Doe" },
