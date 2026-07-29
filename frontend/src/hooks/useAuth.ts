@@ -65,12 +65,16 @@ export const useAuth = () => {
       setCurrentUser(userData);
       return { success: true as const, user: userData };
     } catch (error) {
-      const msg =
+      let errorMessage = "Login failed";
+      if (
         error &&
         typeof error === "object" &&
-        "response" in error &&
-        (error as { response?: { data?: { error?: string } } }).response?.data?.error;
-      return { success: false as const, error: msg || "Login failed" };
+        "response" in error
+      ) {
+        const serverMsg = (error as { response?: { data?: { error?: string } } }).response?.data?.error;
+        if (serverMsg) errorMessage = serverMsg;
+      }
+      return { success: false as const, error: errorMessage };
     }
   };
 
