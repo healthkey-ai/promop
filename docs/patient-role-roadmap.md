@@ -86,7 +86,7 @@ Patients with a `GroupAccess(role='patient')` should only see their own record w
 
 ---
 
-## Phase 2 — Frontend: Org-Scoped URLs & Patient Pages
+## Phase 2 — Frontend: Org-Scoped URLs & Patient Pages ✅ Done (PR #336)
 
 ### 2.1 Org-scoped URL routing
 
@@ -131,7 +131,7 @@ After accepting, doctors/analysts are redirected to the main app (`/`) while pat
 
 ---
 
-## Phase 3 — Org Admin UI for Patient Invitations
+## Phase 3 — Org Admin UI for Patient Invitations ✅ Done (PR #339)
 
 ### 3.1 Patient invite form in Org Admin page
 
@@ -148,7 +148,7 @@ In Org Admin settings, add a toggle for "Allow direct patient signup". Requires 
 
 ---
 
-## Phase 4 — Tests
+## Phase 4 — Tests ✅ Done (covered inline with Phases 1-3)
 
 ### Backend tests
 
@@ -168,7 +168,7 @@ In Org Admin settings, add a toggle for "Allow direct patient signup". Requires 
 
 ---
 
-## Phase 5 — Migration & Rollout
+## Phase 5 — Migration & Rollout ✅ Ready (deploy ordering only, no code changes)
 
 1. Deploy backend (model + migration + endpoints) first.
 2. Deploy frontend with new routes.
