@@ -1,13 +1,8 @@
 import { useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import axios from 'axios';
+import { publicApi } from '@/api/publicAxios';
 
 type State = 'ready' | 'success' | 'error';
-
-const publicApi = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || '/api',
-  headers: { 'Content-Type': 'application/json' },
-});
 
 const MIN_PASSWORD_LENGTH = 8;
 

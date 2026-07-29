@@ -1,11 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import axios from "axios";
-
-const publicApi = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "/api",
-  headers: { "Content-Type": "application/json" },
-});
+import { publicApi } from "@/api/publicAxios";
 
 const MIN_PASSWORD_LENGTH = 8;
 
@@ -135,7 +130,7 @@ export default function OrgSignup() {
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label htmlFor="givenName" className="block text-sm font-medium text-foreground">
-                  First name
+                  First name <span className="font-normal text-muted-foreground">(optional)</span>
                 </label>
                 <input
                   id="givenName"
@@ -147,7 +142,7 @@ export default function OrgSignup() {
               </div>
               <div>
                 <label htmlFor="familyName" className="block text-sm font-medium text-foreground">
-                  Last name
+                  Last name <span className="font-normal text-muted-foreground">(optional)</span>
                 </label>
                 <input
                   id="familyName"
@@ -191,6 +186,9 @@ export default function OrgSignup() {
                 className="mt-1 block w-full rounded-md border border-input px-3 py-2 shadow-sm placeholder:text-muted-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
                 placeholder="At least 8 characters"
               />
+              <p className="mt-1 text-xs text-muted-foreground">
+                Must be at least 8 characters, not a common password, and not entirely numeric.
+              </p>
             </div>
 
             <div>

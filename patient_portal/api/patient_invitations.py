@@ -180,10 +180,15 @@ def patient_invitation_lookup(request):
     invitation, err = _resolve_invitation(token)
     if err is not None:
         return err
-    return Response({
+    data = {
         'email': invitation.email,
         'patient_name': _patient_display_name(invitation.person),
-    })
+    }
+    # Include org slug so the frontend can build org-scoped URLs (login redirect on error).
+    pr = PatientRecord.objects.filter(person=invitation.person).select_related('organization').first()
+    if pr and pr.organization:
+        data['org_slug'] = pr.organization.slug
+    return Response(data)
 
 
 @api_view(['POST'])

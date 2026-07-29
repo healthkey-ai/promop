@@ -1,12 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import axios from "axios";
+import { publicApi } from "@/api/publicAxios";
 import { useAuth } from "@/hooks/useAuth";
-
-const publicApi = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "/api",
-  headers: { "Content-Type": "application/json" },
-});
 
 export default function OrgLogin() {
   const { slug } = useParams<{ slug: string }>();

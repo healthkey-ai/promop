@@ -1,15 +1,8 @@
 import { useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import axios from 'axios';
+import { publicApi } from '@/api/publicAxios';
 
 type State = 'loading' | 'ready' | 'success' | 'error';
-
-const publicApi = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || '/api',
-  headers: {
-    'Content-Type': 'application/json',
-  },
-});
 
 // Module-local (not exported): the file must export only the component so
 // react-refresh/only-export-components / Fast Refresh stays happy.

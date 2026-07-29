@@ -1,13 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import axios from 'axios';
+import { publicApi } from '@/api/publicAxios';
 
 type State = 'loading' | 'ready' | 'success' | 'error';
-
-const publicApi = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || '/api',
-  headers: { 'Content-Type': 'application/json' },
-});
 
 const MIN_PASSWORD_LENGTH = 8;
 
@@ -49,6 +44,9 @@ export default function AcceptPatientInvite() {
         const res = await publicApi.get('/v1/patient-invitations/lookup/', { params: { token } });
         setEmail(res.data.email ?? '');
         setPatientName(res.data.patient_name ?? '');
+        if (res.data.org_slug) {
+          setLoginUrl(`/org/${res.data.org_slug}/login`);
+        }
         setState('ready');
       } catch (err: unknown) {
         setMessage(errorMessage(err, 'This invitation link is invalid or has expired.'));
@@ -166,7 +164,7 @@ export default function AcceptPatientInvite() {
           <>
             <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded p-3">{message}</p>
             <button
-              onClick={() => navigate('/login')}
+              onClick={() => navigate(loginUrl)}
               className="w-full py-2 px-4 border border-gray-300 rounded text-sm text-gray-700 hover:bg-gray-50"
             >
               Back to sign in
