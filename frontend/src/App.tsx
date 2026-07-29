@@ -42,6 +42,13 @@ function OrgHome({
   }
   if (!currentUser) return <Navigate to={`/org/${slug}/login`} replace />;
   if (!currentUser.is_patient) return <Navigate to="/" replace />;
+  // Verify the patient belongs to this org; redirect to their own org if not.
+  if (!currentUser.org_accesses?.some(a => a.org_slug === slug)) {
+    const myOrg = currentUser.org_accesses?.find(a => a.role === 'patient');
+    return myOrg
+      ? <Navigate to={`/org/${myOrg.org_slug}/`} replace />
+      : <Navigate to="/" replace />;
+  }
   return <PatientHome user={currentUser} onLogout={logout} />;
 }
 

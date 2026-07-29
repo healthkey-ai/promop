@@ -206,6 +206,7 @@ def accept_patient_invitation(request):
         )
 
     email = invitation.email
+    pr = None
     try:
         with transaction.atomic():
             identity = (

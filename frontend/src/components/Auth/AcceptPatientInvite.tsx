@@ -73,7 +73,8 @@ export default function AcceptPatientInvite() {
       const res = await publicApi.post('/v1/patient-invitations/accept/', { token, password });
       setMessage(res.data.detail ?? 'Account created. You can now sign in.');
       if (res.data.redirect_url) {
-        setLoginUrl(`${res.data.redirect_url}login`);
+        const base = res.data.redirect_url.replace(/\/?$/, '/');
+        setLoginUrl(`${base}login`);
       }
       setState('success');
     } catch (err: unknown) {

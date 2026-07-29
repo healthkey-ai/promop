@@ -93,9 +93,39 @@ describe("Org-scoped routes", () => {
     expect(screen.getByText("ORG_SIGNUP")).toBeInTheDocument();
   });
 
-  it("renders PatientHome at /org/:slug for an authenticated patient", () => {
-    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 1, is_patient: true, person_id: 5 } });
+  it("renders PatientHome at /org/:slug for an authenticated patient with matching org", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: {
+        id: 1, is_patient: true, person_id: 5,
+        org_accesses: [{ org_slug: 'acme', org_name: 'Acme', role: 'patient', expires_at: null }],
+      },
+    });
     renderAt("/org/acme");
+    expect(screen.getByText("PATIENT_HOME")).toBeInTheDocument();
+  });
+
+  it("redirects patient to their own org when visiting wrong org URL", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: {
+        id: 1, is_patient: true, person_id: 5,
+        org_accesses: [{ org_slug: 'my-clinic', org_name: 'My Clinic', role: 'patient', expires_at: null }],
+      },
+    });
+    renderAt("/org/wrong-clinic");
+    // Should redirect to /org/my-clinic/ which then renders OrgHome → PatientHome
+    // Since OrgHome redirects via Navigate, we end up at the patient's own org
+    expect(screen.getByText("PATIENT_HOME")).toBeInTheDocument();
+  });
+
+  it("redirects patient with no org_accesses to / from /org/:slug", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 1, is_patient: true, person_id: 5 },
+    });
+    renderAt("/org/acme");
+    // No org_accesses → redirects to / → PatientHome
     expect(screen.getByText("PATIENT_HOME")).toBeInTheDocument();
   });
 

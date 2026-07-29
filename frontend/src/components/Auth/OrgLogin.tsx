@@ -43,7 +43,12 @@ export default function OrgLogin() {
     try {
       const result = await login(email, password);
       if (result.success) {
-        window.location.href = `/org/${slug}/`;
+        if (!result.user?.is_patient) {
+          setError("This login page is for patients. Staff members should use the main login.");
+        } else {
+          // Full page reload to re-fetch auth state from the server.
+          window.location.href = `/org/${slug}/`;
+        }
       } else {
         setError(result.error);
       }

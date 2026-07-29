@@ -24,7 +24,6 @@ export default function OrgSignup() {
   const [familyName, setFamilyName] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [success, setSuccess] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -61,12 +60,14 @@ export default function OrgSignup() {
         given_name: givenName,
         family_name: familyName,
       });
-      setSuccess(true);
+      // Backend auto-logs in via session cookie — redirect directly to patient home.
+      window.location.href = `/org/${slug}/`;
     } catch (err: unknown) {
       let msg = "Signup failed. Please try again.";
       if (err && typeof err === "object" && "response" in err) {
         const resp = (err as { response?: { data?: { error?: string }; status?: number } }).response;
-        if (resp?.data?.error) msg = resp.data.error;
+        const rawError = resp?.data?.error;
+        if (rawError) msg = Array.isArray(rawError) ? rawError.join(' ') : rawError;
       }
       setError(msg);
     } finally {
@@ -105,25 +106,6 @@ export default function OrgSignup() {
             className="inline-block text-sm font-medium text-primary hover:text-primary/80"
           >
             Back to sign in
-          </Link>
-        </div>
-      </div>
-    );
-  }
-
-  if (success) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-muted/40">
-        <div className="w-full max-w-md space-y-6 rounded-lg bg-background p-8 shadow-lg">
-          <h2 className="text-center text-2xl font-semibold text-foreground">{orgName}</h2>
-          <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded p-3">
-            Account created successfully. You can now sign in.
-          </p>
-          <Link
-            to={`/org/${slug}/login`}
-            className="flex w-full justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90"
-          >
-            Go to sign in
           </Link>
         </div>
       </div>
