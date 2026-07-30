@@ -1887,7 +1887,13 @@ class PublishReleaseTest(_OmopBase):
         self.assertEqual(release.status, 'published')
         self.assertIsNotNone(release.published_at)
         self.assertEqual(release.athena_version, 'v5.0 2024-07-01')
-        self.assertEqual(release.row_counts, {'concept': 100, 'vocabulary': 5})
+        # row_counts reflects the ACTUAL table COUNT(*) the snapshot streams, NOT
+        # the per-run load counts passed in — so a consumer cross-checking streamed
+        # rows against the manifest matches. It therefore equals the count captured
+        # in checksums for the same table.
+        self.assertEqual(set(release.row_counts), {'concept', 'vocabulary'})
+        self.assertEqual(release.row_counts['concept'], release.checksums['concept']['count'])
+        self.assertEqual(release.row_counts['vocabulary'], release.checksums['vocabulary']['count'])
         self.assertIn('concept', release.checksums)
         self.assertIn('vocabulary', release.checksums)
 
