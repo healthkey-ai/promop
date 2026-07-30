@@ -282,7 +282,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         if obj.person:
             full_name = f"{obj.person.given_name or ''} {obj.person.family_name or ''}".strip()
             return full_name if full_name else f"Patient {obj.person.person_id}"
-        return f"Patient {obj.person.person_id}"
+        return f"Patient {obj.pk}"
 
     def get_name(self, obj):
         return self.get_patient_name(obj)

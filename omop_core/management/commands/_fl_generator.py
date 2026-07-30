@@ -159,17 +159,10 @@ def _pick_regimen(regimen_list, early_stage=False):
 
 
 class FLBundleGenerator:
-    """Generates a FHIR R4 Bundle for Follicular Lymphoma patients.
-
-    Each instantiation produces a unique run_id that is appended to every
-    patient's family name (e.g. "Smith-a3f7").  This guarantees that two
-    separate generate runs can never produce matching patients and therefore
-    can never overwrite each other's org assignment on re-import.
-    """
+    """Generates a FHIR R4 Bundle for Follicular Lymphoma patients."""
 
     def __init__(self, watch_wait_ratio=0.20):
         self.watch_wait_ratio = watch_wait_ratio
-        self.run_id = uuid.uuid4().hex[:4]   # e.g. "a3f7" — unique per generate run
         self._first_line_regimens, self._later_line_regimens = self._build_regimen_lists()
 
     def _build_regimen_lists(self):
@@ -348,7 +341,7 @@ class FLBundleGenerator:
         p['age']        = int(random.triangular(42, 82, 62))
         p['ethnicity']  = _wc(_ETHNICITIES, _ETHNICITY_WEIGHTS)
         p['first_name'] = random.choice(_FIRST_NAMES)
-        p['last_name']  = random.choice(_LAST_NAMES) + '-' + self.run_id
+        p['last_name']  = random.choice(_LAST_NAMES)
         p['city'], p['state'] = random.choice(_US_LOCATIONS)
 
         if p['gender'] == 'male':
