@@ -214,9 +214,9 @@ export default function PatientDetail({
         setEditedInfo(d);
 
         const user = res.data.user;
-        const name = user
-          ? (user.name || user.email || `Patient ${personId}`)
-          : `Patient ${personId}`;
+        const name = d.patient_name
+          || (user ? (user.name || user.email) : null)
+          || `Patient ${personId}`;
         setPatientName(name);
         setEditedName(name);
         setFetchError(null);
