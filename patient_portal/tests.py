@@ -14165,6 +14165,93 @@ class OrgPatientSignupTest(TestCase):
         })
         self.assertEqual(resp.status_code, 400)
 
+    def test_signup_cross_org_reuses_person(self):
+        """A patient who already signed up at Org A can sign up at Org B
+        without creating a duplicate Person or PatientUser."""
+        from patient_portal.models import PatientUser
+        org_b = Organization.objects.create(
+            name='Org B', slug='org-b', allows_patient_signup=True,
+        )
+        # First signup at Org A
+        APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
+            'email': 'cross-org@test.com',
+            'password': 'Str0ng!Pass99',
+            'given_name': 'Cross',
+            'family_name': 'Org',
+        })
+        identity = Identity.objects.get(email='cross-org@test.com')
+        pu = PatientUser.objects.get(identity=identity)
+        person = pu.person
+
+        # Second signup at Org B — should reuse the same Person and PatientUser
+        resp = APIClient().post('/api/v1/orgs/org-b/patient-signup/', {
+            'email': 'cross-org@test.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 201)
+
+        # No duplicate Person or PatientUser created
+        self.assertEqual(PatientUser.objects.filter(identity=identity).count(), 1)
+        self.assertEqual(PatientUser.objects.get(identity=identity).person, person)
+
+        # PatientRecord exists in both orgs
+        from omop_core.models import PatientRecord
+        self.assertTrue(PatientRecord.objects.filter(person=person, organization=self.org).exists())
+        self.assertTrue(PatientRecord.objects.filter(person=person, organization=org_b).exists())
+
+        # GroupAccess exists for both orgs
+        self.assertTrue(GroupAccess.objects.filter(identity=identity, org=self.org, role='patient').exists())
+        self.assertTrue(GroupAccess.objects.filter(identity=identity, org=org_b, role='patient').exists())
+
+
+@override_settings(
+    EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+    APP_BASE_URL='https://app.test',
+)
+class SelfServicePasswordResetTest(TestCase):
+    """Test the public POST /api/v1/auth/request-reset/ endpoint."""
+
+    def setUp(self):
+        from django.core import mail
+        self.identity = Identity.objects.create_user(
+            email='self-reset@test.com', password='Zr7-quokka-vale',
+        )
+        mail.outbox = []
+
+    def test_known_email_returns_200_and_sends_email(self):
+        from django.core import mail
+        resp = APIClient().post('/api/v1/auth/request-reset/', {
+            'email': 'self-reset@test.com',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn('self-reset@test.com', mail.outbox[0].to)
+
+    def test_unknown_email_returns_200_no_email(self):
+        from django.core import mail
+        resp = APIClient().post('/api/v1/auth/request-reset/', {
+            'email': 'no-such-user@test.com',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_missing_email_returns_400(self):
+        resp = APIClient().post('/api/v1/auth/request-reset/', {
+            'email': '',
+        })
+        self.assertEqual(resp.status_code, 400)
+
+    def test_reachable_during_force_change(self):
+        """The request-reset endpoint must not be blocked by ForcePasswordChangeMiddleware."""
+        self.identity.must_change_password = True
+        self.identity.save(update_fields=['must_change_password'])
+        client = APIClient()
+        client.force_authenticate(user=self.identity)
+        resp = client.post('/api/v1/auth/request-reset/', {
+            'email': 'self-reset@test.com',
+        })
+        self.assertEqual(resp.status_code, 200)
+
 
 class OrgPublicInfoTest(TestCase):
     """Test the public org info endpoint."""

@@ -771,18 +771,20 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if episode_ids:
                 EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
 
-            # Log out the current session before deleting the identity.
-            # Any other open sessions will resolve to AnonymousUser once the
-            # Identity row is deleted (Django's session middleware loads the
-            # user by PK and falls back to AnonymousUser on DoesNotExist).
-            from django.contrib.auth import logout
-            logout(request)
-
             # Delete Person — cascades to all OMOP tables, PatientRecord, PatientUser
             patient_person.delete()
 
             # Delete the Identity (auth credential)
             identity.delete()
+
+        # Log out the current session AFTER the transaction succeeds. If the
+        # transaction rolled back, the identity would still exist and we must
+        # not have flushed the session. Other open sessions resolve to
+        # AnonymousUser once the Identity row is gone (Django's session
+        # middleware loads the user by PK and falls back to AnonymousUser on
+        # DoesNotExist).
+        from django.contrib.auth import logout
+        logout(request)
 
         logger.info(
             'patient_account_deleted person_id=%s identity_id=%s',
