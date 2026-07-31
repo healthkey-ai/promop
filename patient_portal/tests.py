@@ -14165,10 +14165,9 @@ class OrgPatientSignupTest(TestCase):
         })
         self.assertEqual(resp.status_code, 400)
 
-    def test_signup_cross_org_reuses_person(self):
-        """A patient who already signed up at Org A can sign up at Org B
-        without creating a duplicate Person or PatientUser."""
-        from patient_portal.models import PatientUser
+    def test_signup_cross_org_rejects_existing_account(self):
+        """A patient who already signed up at Org A gets 409 when trying to
+        sign up at Org B — they should log in instead."""
         org_b = Organization.objects.create(
             name='Org B', slug='org-b', allows_patient_signup=True,
         )
@@ -14179,29 +14178,14 @@ class OrgPatientSignupTest(TestCase):
             'given_name': 'Cross',
             'family_name': 'Org',
         })
-        identity = Identity.objects.get(email='cross-org@test.com')
-        pu = PatientUser.objects.get(identity=identity)
-        person = pu.person
 
-        # Second signup at Org B — should reuse the same Person and PatientUser
+        # Second signup at Org B — rejected because account already exists
         resp = APIClient().post('/api/v1/orgs/org-b/patient-signup/', {
             'email': 'cross-org@test.com',
             'password': 'Str0ng!Pass99',
         })
-        self.assertEqual(resp.status_code, 201)
-
-        # No duplicate Person or PatientUser created
-        self.assertEqual(PatientUser.objects.filter(identity=identity).count(), 1)
-        self.assertEqual(PatientUser.objects.get(identity=identity).person, person)
-
-        # PatientRecord exists in both orgs
-        from omop_core.models import PatientRecord
-        self.assertTrue(PatientRecord.objects.filter(person=person, organization=self.org).exists())
-        self.assertTrue(PatientRecord.objects.filter(person=person, organization=org_b).exists())
-
-        # GroupAccess exists for both orgs
-        self.assertTrue(GroupAccess.objects.filter(identity=identity, org=self.org, role='patient').exists())
-        self.assertTrue(GroupAccess.objects.filter(identity=identity, org=org_b, role='patient').exists())
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn('already exists', resp.data['error'])
 
 
 @override_settings(

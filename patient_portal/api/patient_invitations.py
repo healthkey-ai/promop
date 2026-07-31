@@ -23,8 +23,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from omop_core.models import Person, PatientRecord
-from patient_portal.models import Identity, GroupAccess, PatientInvitation, PatientUser
+from omop_core.models import Person, PatientRecord, GroupAccess
+from patient_portal.models import Identity, PatientInvitation, PatientUser
 from .permissions import get_request_org, is_service_token
 from .serializers import PatientInvitationSerializer
 
