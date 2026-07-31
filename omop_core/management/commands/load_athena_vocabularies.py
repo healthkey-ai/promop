@@ -823,7 +823,13 @@ class Command(BaseCommand):
             Vocabulary.objects.order_by('vocabulary_id')
             .values_list('vocabulary_id', 'vocabulary_version')
         )
+        # row_counts must reflect the ACTUAL table content the snapshot streams
+        # (SELECT COUNT(*)), not this run's load counts — the table can hold rows
+        # from prior loads / seed data / metadata vocabularies, so a consumer that
+        # cross-checks streamed rows against the manifest (EXACT's fail-closed
+        # completeness gate) would otherwise always mismatch.
         checksums = {}
+        real_counts = {}
         for table_name in counts:
             try:
                 with connection.cursor() as cur:
@@ -832,12 +838,23 @@ class Command(BaseCommand):
                         f'FROM {table_name}'
                     )
                     row = cur.fetchone()
+                    real_counts[table_name] = row[0]
                     checksums[table_name] = {
                         'count': row[0],
                         'min_ctid': row[1],
                         'max_ctid': row[2],
                     }
-            except Exception:
+            except Exception as exc:
+                # Fall back to this run's load count, but never silently: a bare
+                # swallow here reintroduces the manifest↔stream mismatch (#343)
+                # with no server-side signal for the consumer's fail-closed gate.
+                logger.warning(
+                    "vocabulary_release: COUNT(*)/ctid probe failed for %s (%s); "
+                    "falling back to this run's load count — the manifest may "
+                    "disagree with the streamed table for %s.",
+                    table_name, exc, table_name, exc_info=True,
+                )
+                real_counts[table_name] = counts[table_name]
                 checksums[table_name] = {'count': counts[table_name]}
 
         now = timezone.now()
@@ -848,7 +865,7 @@ class Command(BaseCommand):
             build_timestamp=build_ts,
             athena_version=getattr(self, '_cdm_vocab_version', None),
             vocab_versions=vocab_versions,
-            row_counts=counts,
+            row_counts=real_counts,
             checksums=checksums,
             status='published',
             published_at=now,

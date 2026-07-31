@@ -50,6 +50,7 @@ appropriate OMOP table write, then the signal chain re-derives PatientRecord.
    - [Document & trial endpoints](#document--trial-endpoints)
    - [Vocabulary & concept lookup endpoints](#vocabulary--concept-lookup-endpoints)
    - [Concept graph endpoints](#concept-graph-endpoints)
+   - [Vocabulary release & snapshot (consumer mirror)](#vocabulary-release--snapshot-consumer-mirror)
    - [OAuth2 endpoints](#oauth2-endpoints)
 5. [OMOP write internals](#omop-write-internals) — _upsert_omop_measurement, _LAB_FIELD_TO_LOINC, FHIR pipeline, signal chain
 6. [Provenance tagging](#provenance-tagging)
@@ -817,6 +818,42 @@ Returns every entry in a controlled vocabulary table.
 Available `model_name` slugs (37 total):
 
 `binet-stage` · `cancer-stage` · `disease` · `disease-activity` · `disease-progression` · `distant-metastasis-stage` · `ecog-status` · `estrogen-receptor-status` · `ethnicity` · `flipi-score` · `follicular-lymphoma-grade` · `gelf-criteria` · `her2-status` · `histologic-type` · `hr-status` · `hrd-status` · `infection-status` · `karnofsky-score` · `language` · `language-skill-level` · `measurable-disease` · `morphologic-variant` · `mutation-code` · `mutation-gene` · `mutation-interpretation` · `mutation-origin` · `nodes-stage` · `peripheral-neuropathy-grade` · `pre-existing-condition-category` · `protein-expression` · `richter-transformation` · `staging-modality` · `stem-cell-transplant` · `toxicity-grade` · `tumor-burden` · `tumor-stage`
+
+---
+
+## Vocabulary release & snapshot (consumer mirror)
+
+A consumer (e.g. EXACT) mirrors promop's vocabulary by pinning a **release** and
+cross-checking a streamed **snapshot** against the release **manifest**.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v1/vocab-releases/` | List published releases |
+| GET | `/api/v1/vocab-releases/latest/` | Current release pointer |
+| GET | `/api/v1/vocab-releases/{id}/` | **Manifest** for a release: `id`, `vocab_versions`, `row_counts` (per table), `checksums`, `schema_version`, `scope`, `status`, `published_at` |
+| GET | `/api/v1/vocab-releases/{id}/snapshot/{table}/` | **Snapshot**: streaming NDJSON, one row per line, terminated by a `{"__done": true, "rows": N}` sentinel |
+| GET | `/api/v1/vocab-releases/latest/snapshot/{table}/` | Snapshot of the current release |
+
+**Snapshot response** is `Content-Type: application/x-ndjson`, `Content-Disposition:
+attachment`, carries an `ETag` (supports `If-None-Match` → **304**), and is streamed
+from a server-side cursor (constant memory for large tables).
+
+**Completeness gate (consumer side).** A consumer counts the streamed rows and
+compares against `row_counts[table]` in the manifest; a missing `__done` sentinel
+means the stream was truncated (fail closed). Note the following:
+
+- **Only unfiltered downloads are completeness-checkable.** The `concept` snapshot
+  accepts `?source=HealthKey` / `?source=external`, which streams a **subset**;
+  `row_counts` is the **full-table** count, so a filtered download will (correctly)
+  not match it. Use the unfiltered snapshot for the full-mirror completeness check.
+- **The snapshot reads the live table, not an isolated view of the pinned release.**
+  If a `load_athena_vocabularies` run mutates a table between a release's publish and
+  the consumer's download, the streamed rows can disagree with that release's
+  manifest. Loads are infrequent and each publishes a fresh release/ETag, so the
+  window is small; treat a mismatch as fail-closed and re-pin to `latest`.
+- **Auth is coarse today.** Any token with `patient/*.read` or `user/*.read` can read
+  the manifest and snapshot — there is no dedicated system scope for reference data.
+  Tightening this is tracked separately (**#344**).
 
 ---
 

@@ -5369,15 +5369,21 @@ class VocabSnapshotView(APIView):
     @staticmethod
     def _stream_ndjson(sql, params=None):
         import json as _json
-        from django.db import connection
+        from django.db import connection, transaction
         count = 0
-        with connection.connection.cursor(name='vocab_snapshot') as cursor:
-            cursor.itersize = 1000
-            cursor.execute(sql, params or [])
-            for (row_json,) in cursor:
-                if isinstance(row_json, dict):
-                    yield _json.dumps(row_json) + '\n'
-                else:
-                    yield str(row_json) + '\n'
-                count += 1
+        # A server-side (named) cursor issues DECLARE CURSOR, which Postgres only
+        # allows inside a transaction block. The streaming generator runs after the
+        # view returns, in Django's default autocommit — so wrap it in an explicit
+        # transaction spanning the whole stream, or the first fetch raises
+        # NoActiveSqlTransaction.
+        with transaction.atomic():
+            with connection.connection.cursor(name='vocab_snapshot') as cursor:
+                cursor.itersize = 1000
+                cursor.execute(sql, params or [])
+                for (row_json,) in cursor:
+                    if isinstance(row_json, dict):
+                        yield _json.dumps(row_json) + '\n'
+                    else:
+                        yield str(row_json) + '\n'
+                    count += 1
         yield _json.dumps({'__done': True, 'rows': count}) + '\n'
