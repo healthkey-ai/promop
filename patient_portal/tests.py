@@ -14287,6 +14287,14 @@ class VocabSnapshotStreamTransactionTest(TransactionTestCase):
     the stream fails on Postgres if the fix is reverted.
     """
 
+    # TransactionTestCase truncates all tables on teardown and does NOT restore
+    # migration-seeded reference data (concept-zero, vocab rows, lookups, ...).
+    # This is currently the only non-TestCase DB test, and Django runs all
+    # TestCase subclasses first, so nothing DB-touching runs after this truncation
+    # — but serialize+restore removes the reliance on that ordering luck so a
+    # future TransactionTestCase can't inherit emptied reference tables.
+    serialized_rollback = True
+
     def setUp(self):
         from oauth2_provider.models import Application, AccessToken
         from django.utils import timezone as tz

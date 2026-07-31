@@ -852,7 +852,7 @@ class Command(BaseCommand):
                     "vocabulary_release: COUNT(*)/ctid probe failed for %s (%s); "
                     "falling back to this run's load count — the manifest may "
                     "disagree with the streamed table for %s.",
-                    table_name, exc, table_name,
+                    table_name, exc, table_name, exc_info=True,
                 )
                 real_counts[table_name] = counts[table_name]
                 checksums[table_name] = {'count': counts[table_name]}
