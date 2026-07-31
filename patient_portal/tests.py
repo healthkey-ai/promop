@@ -16,7 +16,7 @@ import tempfile
 from datetime import date, timedelta
 
 from patient_portal.models import Identity
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -14273,6 +14273,68 @@ class UserlessOAuthTokenDetailTest(TestCase):
 # ---------------------------------------------------------------------------
 # Vocabulary Snapshot (streaming NDJSON) tests
 # ---------------------------------------------------------------------------
+
+class VocabSnapshotStreamTransactionTest(TransactionTestCase):
+    """Regression for #342 — the snapshot stream must not raise
+    NoActiveSqlTransaction.
+
+    Deliberately a TransactionTestCase, not TestCase: the server-side (named)
+    cursor's DECLARE CURSOR requires an open transaction, and the streaming
+    generator runs *after* the view returns, in Django's autocommit. A plain
+    TestCase wraps every test in an ambient transaction that masks a missing
+    `transaction.atomic()` wrap in the view — so the other snapshot tests pass
+    with or without the fix. This base has no ambient transaction, so consuming
+    the stream fails on Postgres if the fix is reverted.
+    """
+
+    def setUp(self):
+        from oauth2_provider.models import Application, AccessToken
+        from django.utils import timezone as tz
+        import datetime
+        from omop_core.models import VocabularyRelease
+        _make_vocab_fixtures()
+        user = Identity.objects.create_user(email='snap_svc@test.com', password='pw')
+        app = Application.objects.create(
+            name='Snap EHR', client_id='snap-client-id',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=user,
+        )
+        AccessToken.objects.create(
+            user=user, application=app, token='snap-read-token',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='patient/*.read openid launch/patient',
+        )
+        self.release = VocabularyRelease.objects.create(
+            build_timestamp=tz.now(), status='published', published_at=tz.now(),
+            scope=['TEST'], vocab_versions={'TEST': '1.0'},
+            row_counts={'vocabulary': 1}, checksums={},
+        )
+        self.client = APIClient()
+        self.client.credentials(HTTP_AUTHORIZATION='Bearer snap-read-token')
+
+    def tearDown(self):
+        from patient_portal.api.views import _vocab_version_cache
+        _vocab_version_cache['release_pk'] = None
+        _vocab_version_cache['map'] = None
+
+    def test_stream_consumes_without_ambient_transaction(self):
+        # No ambient transaction here: iterating the server-side cursor relies on
+        # the view's own transaction.atomic() wrap. Consuming to completion + the
+        # __done sentinel proves the fix; removing the wrap raises
+        # NoActiveSqlTransaction on Postgres and this fails.
+        import json
+        resp = self.client.get(
+            f'/api/v1/vocab-releases/{self.release.pk}/snapshot/vocabulary/')
+        self.assertEqual(resp.status_code, 200)
+        content = b''.join(resp.streaming_content).decode()
+        lines = [l for l in content.strip().split('\n') if l]
+        self.assertTrue(lines, 'stream produced no lines')
+        self.assertTrue(
+            json.loads(lines[-1]).get('__done'),
+            'stream must end with the __done sentinel',
+        )
+
 
 class VocabSnapshotTest(_SmartBase):
     """Test /api/v1/vocab-releases/.../snapshot/<table>/ endpoints."""

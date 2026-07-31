@@ -844,7 +844,16 @@ class Command(BaseCommand):
                         'min_ctid': row[1],
                         'max_ctid': row[2],
                     }
-            except Exception:
+            except Exception as exc:
+                # Fall back to this run's load count, but never silently: a bare
+                # swallow here reintroduces the manifest↔stream mismatch (#343)
+                # with no server-side signal for the consumer's fail-closed gate.
+                logger.warning(
+                    "vocabulary_release: COUNT(*)/ctid probe failed for %s (%s); "
+                    "falling back to this run's load count — the manifest may "
+                    "disagree with the streamed table for %s.",
+                    table_name, exc, table_name,
+                )
                 real_counts[table_name] = counts[table_name]
                 checksums[table_name] = {'count': counts[table_name]}
 
