@@ -16,6 +16,7 @@ from django.core.mail import send_mail
 from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -51,7 +52,7 @@ def _send_patient_invitation_email(invitation) -> None:
         f"  {accept_url}\n\n"
         f"This link expires in {INVITE_TTL_DAYS} days.\n\n"
         f"If you weren't expecting this invitation, you can ignore this email.\n\n"
-        f"— The PROMOP team"
+        f"— The HealthKey team"
     )
     if settings.DEBUG:
         logger.info(
@@ -114,6 +115,19 @@ class PatientInviteView(APIView):
         if PatientUser.objects.filter(person=person, is_active=True).exists():
             return Response(
                 {'error': 'This patient already has an active account.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Reject if the email already belongs to an existing account — the
+        # invite would be sent but acceptance would fail with "account already
+        # exists", wasting time and confusing both parties.
+        existing_identity = Identity.objects.filter(
+            email__iexact=email,
+        ).first()
+        if existing_identity and existing_identity.has_usable_password():
+            return Response(
+                {'error': 'This email is already associated with an existing account. '
+                          'Use a different email address.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -191,6 +205,7 @@ def patient_invitation_lookup(request):
     return Response(data)
 
 
+@csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def accept_patient_invitation(request):

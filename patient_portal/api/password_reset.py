@@ -12,6 +12,7 @@ from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import send_mail
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
+from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
@@ -44,7 +45,7 @@ def send_password_reset_email(identity) -> None:
         f"  {url}\n\n"
         "The link can be used once and expires. If you weren't expecting this, you can "
         "ignore this email — your password stays unchanged.\n\n"
-        "— The PROMOP team"
+        "— The HealthKey team"
     )
     if settings.DEBUG:
         logger.info("Password reset email preview\nTo: %s\n\n%s", identity.email, body)
@@ -57,6 +58,39 @@ def send_password_reset_email(identity) -> None:
         raise PasswordResetEmailError('Email backend did not report the reset email as sent.')
 
 
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def request_password_reset(request):
+    """Public: patient requests a password reset link by email (TI.1.1#08).
+
+    Always returns 200 regardless of whether the email exists — prevents
+    account enumeration.
+    """
+    email = (request.data.get('email') or '').strip().lower()
+    if not email:
+        return Response(
+            {'error': 'email is required.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    success_msg = {'detail': 'If an account exists with that email, a reset link has been sent.'}
+    try:
+        identity = Identity.objects.get(email__iexact=email)
+    except Identity.DoesNotExist:
+        return Response(success_msg)
+
+    if not identity.has_usable_password():
+        return Response(success_msg)
+
+    try:
+        send_password_reset_email(identity)
+    except PasswordResetEmailError:
+        pass  # Don't reveal failure — same response either way
+    return Response(success_msg)
+
+
+@csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def reset_password(request):

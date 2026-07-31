@@ -22,6 +22,8 @@ from django.db import transaction
 from django.db.models import Q
 from django.core.exceptions import ValidationError
 from django.utils import timezone
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -49,7 +51,7 @@ def _send_invitation_email(invitation) -> None:
         f"This link expires in 7 days. If you don't have a PROMOP account yet, "
         f"please contact your administrator — account creation requires admin approval.\n\n"
         f"If you weren't expecting this invitation, you can ignore this email.\n\n"
-        f"— The PROMOP team"
+        f"— The HealthKey team"
     )
     if settings.DEBUG:
         logger.info(
@@ -334,6 +336,7 @@ class OrgInvitationDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def confirm_invitation(request):
@@ -535,6 +538,7 @@ def org_public_info(request, slug):
 # Patient self-signup (public, rate-limited)
 # ---------------------------------------------------------------------------
 
+@method_decorator(csrf_exempt, name='dispatch')
 class OrgPatientSignupView(APIView):
     """Public endpoint for patient self-registration on orgs that allow it."""
     permission_classes = [AllowAny]
@@ -591,10 +595,17 @@ class OrgPatientSignupView(APIView):
                     name=f"{given_name} {family_name}".strip(),
                 )
 
-            # Reuse existing PatientUser link if present (e.g. from a prior invitation)
+            # Reuse existing PatientUser link if present (e.g. from a prior invitation
+            # or signup at another org)
             existing_pu = PatientUser.objects.filter(identity=identity).first()
             if existing_pu:
                 person = existing_pu.person
+                # Ensure a PatientRecord exists for this person in the new org
+                PatientRecord.objects.get_or_create(
+                    person=person,
+                    organization=org,
+                    defaults={'email': email},
+                )
             else:
                 new_id = next_pk(Person, 'person_id')
                 person = Person.objects.create(

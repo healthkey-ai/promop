@@ -60,7 +60,7 @@ import json
 import logging
 import re
 from io import StringIO
-from .permissions import ScopedTokenPermission, SurveyResponsePermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
+from .permissions import ScopedTokenPermission, PatientCrudPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
@@ -771,6 +771,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if episode_ids:
                 EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
 
+            # Log out the current session before deleting the identity.
+            # Any other open sessions will resolve to AnonymousUser once the
+            # Identity row is deleted (Django's session middleware loads the
+            # user by PK and falls back to AnonymousUser on DoesNotExist).
+            from django.contrib.auth import logout
+            logout(request)
+
             # Delete Person — cascades to all OMOP tables, PatientRecord, PatientUser
             patient_person.delete()
 
@@ -778,8 +785,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             identity.delete()
 
         logger.info(
-            'patient_account_deleted person_id=%s identity_email=%s',
-            person_id, getattr(identity, 'email', '?'),
+            'patient_account_deleted person_id=%s identity_id=%s',
+            person_id, identity.pk,
         )
 
         return Response({'detail': 'Account and all associated data have been permanently deleted.'})
@@ -4988,7 +4995,7 @@ class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.
     PUT is disabled: values/values_dates are append-only dicts; use PATCH.
     """
     serializer_class = PatientSurveyResponseSerializer
-    permission_classes = [SurveyResponsePermission, PatientSelfScopePermission]
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = PatientSurveyResponse.objects.select_related('survey').all()
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
@@ -5085,7 +5092,7 @@ class PatientMessageViewSet(viewsets.ModelViewSet):
       - is_read=true      → read messages only
     """
     serializer_class = PatientMessageSerializer
-    permission_classes = [SurveyResponsePermission, PatientSelfScopePermission]
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     pagination_class = MessagePagination
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
