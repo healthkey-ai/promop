@@ -207,7 +207,7 @@ boolean-per-type model is adequate for the oncology use case.
 **FM:** PH.2.1 (Account-Holder-Originated Data), PH.3.1.
 
 **Status:** Delivered in PR #285 (issue #284), merged to `dev` 2026-07-25. Shipped:
-`SurveyResponsePermission` allowing session-auth patients to POST (start surveys),
+`PatientCrudPermission` allowing session-auth patients to POST (start surveys),
 `PatientSurveys` list component with status badges and start/continue/view actions,
 `SurveyForm` multi-page renderer with autosave on page navigation, progress tracking,
 and read-only completed view. Review hardening: `completed_at` validation (no re-open),

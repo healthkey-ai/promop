@@ -207,13 +207,21 @@ class AuditLogMiddleware:
 
 # Endpoints that stay reachable while a force-change is pending, so the client
 # can read the flag (/user/), clear it (change-password), or leave (logout/login).
-# Matched as substrings after /api/ so both /api/ and /api/v1/ forms are covered.
-_FORCE_CHANGE_EXEMPT = (
+# Each entry is a suffix matched against the path (after verifying the /api/ prefix)
+# to prevent false positives from substring matching.
+_FORCE_CHANGE_EXEMPT_SUFFIXES = (
+    '/auth/change-password/',
     '/auth/change-password',
+    '/auth/logout/',
     '/auth/logout',
+    '/auth/login/',
     '/auth/login',
+    '/auth/request-reset/',
+    '/auth/request-reset',
+    '/auth/reset-password/',
     '/auth/reset-password',
     '/user/',
+    '/user',
 )
 
 
@@ -254,4 +262,4 @@ class ForcePasswordChangeMiddleware:
             return False
         if not getattr(user, 'must_change_password', False):
             return False
-        return not any(frag in path for frag in _FORCE_CHANGE_EXEMPT)
+        return not any(path.endswith(s) for s in _FORCE_CHANGE_EXEMPT_SUFFIXES)

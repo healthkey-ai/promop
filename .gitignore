@@ -96,5 +96,9 @@ db.sqlite3.backup
 /synthea_bc_*.json
 /synthea-bc.json
 
+# Benchmark/test result artifacts
+benchmark-*-results.json
+trial-eligibility-results.json
+
 # Large synthea CLI jar (not tracked)
 synthea-with-dependencies.jar

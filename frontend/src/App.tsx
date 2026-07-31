@@ -20,6 +20,7 @@ import UploadCSV from "@/components/Patient/UploadCSV";
 import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
 import OrgLogin from "@/components/Auth/OrgLogin";
 import OrgSignup from "@/components/Auth/OrgSignup";
+import ForgotPassword from "@/components/Auth/ForgotPassword";
 import UserProfilePage from "@/components/User/UserProfilePage";
 import { useAuth } from "@/hooks/useAuth";
 
@@ -66,7 +67,7 @@ function AppRoutes() {
 
   const publicPaths = ['/accept-invite', '/accept-patient-invite', '/reset-password', '/login', '/auth/callback'];
   const isPublicPath = (path: string) =>
-    publicPaths.includes(path) || /^\/org\/[^/]+\/(login|signup)$/.test(path);
+    publicPaths.includes(path) || /^\/org\/[^/]+\/(login|signup|forgot-password)$/.test(path);
   if (authLoading && !isPublicPath(location.pathname)) {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -82,7 +83,7 @@ function AppRoutes() {
   // link, invite acceptance) are exempt so those flows can still complete.
   const forceChangeExemptPaths = ['/reset-password', '/accept-invite', '/accept-patient-invite'];
   const isForceChangeExempt = (path: string) =>
-    forceChangeExemptPaths.includes(path) || /^\/org\/[^/]+\/(login|signup)$/.test(path);
+    forceChangeExemptPaths.includes(path) || /^\/org\/[^/]+\/(login|signup|forgot-password)$/.test(path);
   if (
     currentUser?.must_change_password &&
     !isForceChangeExempt(location.pathname)
@@ -110,6 +111,7 @@ function AppRoutes() {
 
       <Route path="/org/:slug/login" element={<OrgLogin />} />
       <Route path="/org/:slug/signup" element={<OrgSignup />} />
+      <Route path="/org/:slug/forgot-password" element={<ForgotPassword />} />
       <Route path="/org/:slug" element={<OrgHome currentUser={currentUser} authLoading={authLoading} logout={logout} />} />
 
       <Route

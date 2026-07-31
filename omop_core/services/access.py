@@ -143,8 +143,10 @@ def get_admin_orgs(user) -> QuerySet:
     Admin access is granted via:
       - is_staff → all orgs
       - direct org_admin grants
-      - OrgTrust rows that match the user's email domain
-      - OrgTrust rows that trust an org the user already belongs to
+      - OrgTrust expansion (org-to-org or domain trust) of professional-role
+        grants (org_admin, doctor, analyst).  Patients are excluded from
+        trust expansion — a ``role='patient'`` grant at Org A does NOT
+        confer admin access to Org B even if B trusts A.
 
     Public aggregated-data visibility does not confer admin rights.
     """
@@ -158,36 +160,48 @@ def get_admin_orgs(user) -> QuerySet:
         Q(expires_at__isnull=True) | Q(expires_at__gt=now)
     )
 
+    # Direct org_admin grants (needed to always include the user's directly-
+    # administered orgs even if no trust relationships exist).
     admin_ids = set(
-        active.filter(role='org_admin', org__isnull=False)
-              .values_list('org_id', flat=True)
+        active.filter(
+            role='org_admin',
+            org__isnull=False,
+        ).values_list('org_id', flat=True)
     )
-    direct_ids = set(
-        active.filter(org__isnull=False)
-              .values_list('org_id', flat=True)
-    )
-    group_org_ids = set(
-        active.exclude(role='org_admin')
-              .values_list('group__organization_id', flat=True)
-    )
-    group_org_ids.discard(None)
-    direct_ids |= group_org_ids
 
+    # All non-patient org-level grants — used only for trust expansion.
+    professional_ids = set(
+        active.exclude(role='patient').filter(
+            org__isnull=False,
+        ).values_list('org_id', flat=True)
+    )
+
+    # Org-to-org trusts: active orgs that trust any org the user has a
+    # professional role in.
     trusted_by_org = set(
         OrgTrust.objects.filter(
-            trusted_org_id__in=direct_ids,
+            trusted_org_id__in=professional_ids,
             granting_org__is_active=True,
         ).values_list('granting_org_id', flat=True)
-    ) if direct_ids else set()
+    ) if professional_ids else set()
 
+    # Domain trusts: active orgs that trust the user's email domain.
+    # Suppressed when the user's only grants are patient-role (a patient who
+    # happens to share a trusted domain must not gain admin access).
     email = (getattr(user, 'email', '') or '')
     user_domain = email.split('@')[1] if '@' in email else ''
-    trusted_by_domain = set(
-        OrgTrust.objects.filter(
-            trusted_domain=user_domain,
-            granting_org__is_active=True,
-        ).values_list('granting_org_id', flat=True)
-    ) if user_domain else set()
+    is_patient_only = (
+        active.filter(org__isnull=False).exists()
+        and not active.exclude(role='patient').filter(org__isnull=False).exists()
+    )
+    trusted_by_domain = set()
+    if user_domain and not is_patient_only:
+        trusted_by_domain = set(
+            OrgTrust.objects.filter(
+                trusted_domain=user_domain,
+                granting_org__is_active=True,
+            ).values_list('granting_org_id', flat=True)
+        )
 
     all_ids = admin_ids | trusted_by_org | trusted_by_domain
     if not all_ids:

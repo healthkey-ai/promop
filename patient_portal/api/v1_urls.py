@@ -34,7 +34,7 @@ from .patient_invitations import (
 from .patient_signup import PatientSignupView
 from .audit_views import AuditEventViewSet
 from .representatives import PersonalRepresentativeViewSet
-from .password_reset import reset_password
+from .password_reset import request_password_reset, reset_password
 from .break_glass import break_glass
 
 router = DefaultRouter()
@@ -66,6 +66,7 @@ urlpatterns = [
     path('auth/login/', login_view, name='v1-login'),
     path('auth/logout/', logout_view, name='v1-logout'),
     path('auth/change-password/', change_password, name='v1-change-password'),
+    path('auth/request-reset/', request_password_reset, name='v1-request-reset'),
     path('auth/reset-password/', reset_password, name='v1-reset-password'),
     path('break-glass/', break_glass, name='v1-break-glass'),
     path('auth/test/', auth_test, name='v1-auth-test'),

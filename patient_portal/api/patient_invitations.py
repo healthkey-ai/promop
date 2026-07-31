@@ -16,6 +16,7 @@ from django.core.mail import send_mail
 from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -23,7 +24,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from omop_core.models import Person, PatientRecord
-from patient_portal.models import Identity, PatientInvitation, PatientUser
+from patient_portal.models import Identity, GroupAccess, PatientInvitation, PatientUser
 from .permissions import get_request_org, is_service_token
 from .serializers import PatientInvitationSerializer
 
@@ -51,7 +52,7 @@ def _send_patient_invitation_email(invitation) -> None:
         f"  {accept_url}\n\n"
         f"This link expires in {INVITE_TTL_DAYS} days.\n\n"
         f"If you weren't expecting this invitation, you can ignore this email.\n\n"
-        f"— The PROMOP team"
+        f"— The HealthKey team"
     )
     if settings.DEBUG:
         logger.info(
@@ -117,6 +118,19 @@ class PatientInviteView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Reject if the email already belongs to an existing account — the
+        # invite would be sent but acceptance would fail with "account already
+        # exists", wasting time and confusing both parties.
+        existing_identity = Identity.objects.filter(
+            email__iexact=email,
+        ).first()
+        if existing_identity and existing_identity.has_usable_password():
+            return Response(
+                {'error': 'This email is already associated with an existing account. '
+                          'Use a different email address.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         with transaction.atomic():
             if patient_record is None:
                 patient_record = PatientRecord.objects.create(person=person, email=email)
@@ -151,6 +165,21 @@ class PatientInviteView(APIView):
         if email_warning:
             data['email_warning'] = email_warning
         return Response(data, status=status.HTTP_201_CREATED)
+
+
+def _find_local_or_any_identity(email):
+    """Find the best existing Identity for an email, across all issuers.
+
+    Preference order: local with usable password → local placeholder → any issuer.
+    Returns None if no identity exists for this email.
+    """
+    identities = list(Identity.objects.filter(email__iexact=email).order_by('id'))
+    return (
+        next((i for i in identities if i.issuer == 'urn:local' and i.has_usable_password()), None)
+        or next((i for i in identities if i.issuer == 'urn:local'), None)
+        or next((i for i in identities if i.issuer != 'urn:local'), None)
+        or None
+    )
 
 
 def _resolve_invitation(token):
@@ -191,6 +220,7 @@ def patient_invitation_lookup(request):
     return Response(data)
 
 
+@csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def accept_patient_invitation(request):
@@ -214,9 +244,9 @@ def accept_patient_invitation(request):
     pr = None
     try:
         with transaction.atomic():
-            identity = (
-                Identity.objects.filter(issuer='urn:local', email__iexact=email).order_by('id').first()
-            )
+            # Search all issuers — not just urn:local — so we don't create a
+            # duplicate Identity when the email already has an SSO/OAuth account.
+            identity = _find_local_or_any_identity(email)
             from patient_portal.services import record_password
             if identity is None:
                 identity = Identity.objects.create_user(email=email, password=password)
@@ -255,9 +285,20 @@ def accept_patient_invitation(request):
                 pr.email = email
                 pr.save(update_fields=['email'])
 
+            # Grant patient-level access to the record's org so the patient
+            # can use org-scoped views after signing in.
+            if pr and pr.organization:
+                GroupAccess.objects.get_or_create(
+                    identity=identity,
+                    org=pr.organization,
+                    defaults={'role': 'patient'},
+                )
+
             invitation.accepted_at = timezone.now()
             invitation.save(update_fields=['accepted_at'])
     except IntegrityError:
+        logger.exception('IntegrityError during patient invitation acceptance for token=%s…%s',
+                         token[:8], token[-4:])
         return Response(
             {'error': 'Could not create the account. Please contact your care team.'},
             status=status.HTTP_400_BAD_REQUEST,

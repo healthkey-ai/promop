@@ -27,7 +27,9 @@ def _may_break_glass(request) -> bool:
         return True
     from django.db.models import Q
     now = timezone.now()
-    return GroupAccess.objects.filter(identity=user).filter(
+    return GroupAccess.objects.filter(identity=user).exclude(
+        role='patient',
+    ).filter(
         Q(expires_at__isnull=True) | Q(expires_at__gt=now)
     ).exists()
 

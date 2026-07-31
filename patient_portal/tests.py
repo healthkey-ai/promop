@@ -8363,6 +8363,121 @@ class OrgAdminPatientListScopingTest(TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Patient Record Isolation Tests
+# ---------------------------------------------------------------------------
+
+class PatientRecordIsolationTest(TestCase):
+    """Patients must only see their own record — never another patient's."""
+
+    def setUp(self):
+        from patient_portal.models import PatientUser
+        self.client = APIClient()
+        self.org = _make_org('Isolation Org', 'isolation-org')
+
+        # Patient A
+        self.person_a = Person.objects.create(person_id=9901)
+        self.record_a = PatientRecord.objects.create(
+            person=self.person_a, organization=self.org,
+        )
+        self.identity_a = Identity.objects.create_user(
+            email='patient_a@example.com', password='testpass',
+        )
+        GroupAccess.objects.create(
+            identity=self.identity_a, org=self.org, role='patient',
+        )
+        PatientUser.objects.create(
+            identity=self.identity_a, person=self.person_a, is_active=True,
+        )
+
+        # Patient B (same org)
+        self.person_b = Person.objects.create(person_id=9902)
+        self.record_b = PatientRecord.objects.create(
+            person=self.person_b, organization=self.org,
+        )
+        self.identity_b = Identity.objects.create_user(
+            email='patient_b@example.com', password='testpass',
+        )
+        GroupAccess.objects.create(
+            identity=self.identity_b, org=self.org, role='patient',
+        )
+        PatientUser.objects.create(
+            identity=self.identity_b, person=self.person_b, is_active=True,
+        )
+
+    def _get_list(self, user):
+        self.client.force_authenticate(user=user)
+        return self.client.get('/api/patient-info/')
+
+    def _list_ids(self, user):
+        resp = self._get_list(user)
+        self.assertEqual(resp.status_code, 200)
+        results = resp.data.get('results', resp.data) if isinstance(resp.data, dict) else resp.data
+        return {p['id'] for p in results}
+
+    def _get_detail(self, user, record_id):
+        self.client.force_authenticate(user=user)
+        return self.client.get(f'/api/patient-info/{record_id}/')
+
+    def test_patient_sees_only_own_record_in_list(self):
+        ids = self._list_ids(self.identity_a)
+        self.assertIn(self.record_a.id, ids)
+        self.assertNotIn(self.record_b.id, ids)
+
+    def test_patient_cannot_see_other_patients_record_in_list(self):
+        ids = self._list_ids(self.identity_b)
+        self.assertIn(self.record_b.id, ids)
+        self.assertNotIn(self.record_a.id, ids)
+
+    def test_patient_can_access_own_record_detail(self):
+        # retrieve() uses person_id as the URL pk, not PatientRecord.id
+        resp = self._get_detail(self.identity_a, self.person_a.person_id)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_patient_cannot_access_other_patients_record_detail(self):
+        resp = self._get_detail(self.identity_a, self.person_b.person_id)
+        self.assertIn(resp.status_code, [403, 404])
+
+    def test_patient_cannot_patch_other_patients_record(self):
+        self.client.force_authenticate(user=self.identity_a)
+        resp = self.client.patch(
+            f'/api/patient-info/{self.person_b.person_id}/',
+            {'disease': 'Hacked'},
+            format='json',
+        )
+        self.assertIn(resp.status_code, [403, 404])
+        self.record_b.refresh_from_db()
+        self.assertNotEqual(self.record_b.disease, 'Hacked')
+
+    def test_patient_with_domain_trust_cannot_see_other_org_patients(self):
+        """A patient whose email domain is trusted by another org must NOT
+        gain admin access to that org's patients."""
+        other_org = _make_org('Trusted Target', 'trusted-target')
+        other_person = Person.objects.create(person_id=9903)
+        other_record = PatientRecord.objects.create(
+            person=other_person, organization=other_org,
+        )
+        OrgTrust.objects.create(
+            granting_org=other_org, trusted_domain='example.com',
+        )
+        ids = self._list_ids(self.identity_a)
+        self.assertNotIn(other_record.id, ids)
+
+    def test_patient_with_org_trust_cannot_see_other_org_patients(self):
+        """A patient at Org A where Org B trusts Org A must NOT gain admin
+        access to Org B's patients."""
+        other_org = _make_org('Trusting Org', 'trusting-org')
+        other_person = Person.objects.create(person_id=9904)
+        other_record = PatientRecord.objects.create(
+            person=other_person, organization=other_org,
+        )
+        OrgTrust.objects.create(
+            granting_org=other_org, trusted_org=self.org,
+        )
+        ids = self._list_ids(self.identity_a)
+        self.assertNotIn(other_record.id, ids)
+
+
+# ---------------------------------------------------------------------------
 # bulk_delete_filtered Tests
 # ---------------------------------------------------------------------------
 
@@ -10800,6 +10915,18 @@ class PatientInvitationTest(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_invite_rejects_email_already_tied_to_existing_account(self):
+        """Invite should fail at creation time if the email already has an active account."""
+        Identity.objects.create_user(email='existing-provider@test.com', password='Str0ng!Pass')
+        resp = self._client_as(self.staff).post(
+            self._invite_url(self.person),
+            {'email': 'existing-provider@test.com'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('already associated', resp.data['error'])
+        self.assertEqual(len(_django_mail.outbox), 0)
+
     # --- Lookup ---
 
     def test_lookup_returns_email_and_patient_name(self):
@@ -10875,8 +11002,15 @@ class PatientInvitationTest(TestCase):
 
     def test_accept_does_not_overwrite_existing_real_account(self):
         """A pre-existing local account with a real password must not be reset by accept."""
+        from patient_portal.models import PatientInvitation
         existing = Identity.objects.create_user(email='rae@example.com', password='original-pw')
-        inv = self._create_invite('rae@example.com')
+        # Create the invitation directly (the invite endpoint now rejects emails
+        # already tied to existing accounts, which is the correct behavior).
+        inv = PatientInvitation.objects.create(
+            person=self.person, email='rae@example.com',
+            token=_secrets.token_hex(32), invited_by=self.staff,
+            expires_at=timezone.now() + timedelta(days=7),
+        )
         resp = APIClient().post(
             '/api/v1/patient-invitations/accept/',
             {'token': inv.token, 'password': 'attacker-chosen'}, format='json',
@@ -14030,6 +14164,93 @@ class OrgPatientSignupTest(TestCase):
             'password': 'Str0ng!Pass99',
         })
         self.assertEqual(resp.status_code, 400)
+
+    def test_signup_cross_org_reuses_person(self):
+        """A patient who already signed up at Org A can sign up at Org B
+        without creating a duplicate Person or PatientUser."""
+        from patient_portal.models import PatientUser
+        org_b = Organization.objects.create(
+            name='Org B', slug='org-b', allows_patient_signup=True,
+        )
+        # First signup at Org A
+        APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
+            'email': 'cross-org@test.com',
+            'password': 'Str0ng!Pass99',
+            'given_name': 'Cross',
+            'family_name': 'Org',
+        })
+        identity = Identity.objects.get(email='cross-org@test.com')
+        pu = PatientUser.objects.get(identity=identity)
+        person = pu.person
+
+        # Second signup at Org B — should reuse the same Person and PatientUser
+        resp = APIClient().post('/api/v1/orgs/org-b/patient-signup/', {
+            'email': 'cross-org@test.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 201)
+
+        # No duplicate Person or PatientUser created
+        self.assertEqual(PatientUser.objects.filter(identity=identity).count(), 1)
+        self.assertEqual(PatientUser.objects.get(identity=identity).person, person)
+
+        # PatientRecord exists in both orgs
+        from omop_core.models import PatientRecord
+        self.assertTrue(PatientRecord.objects.filter(person=person, organization=self.org).exists())
+        self.assertTrue(PatientRecord.objects.filter(person=person, organization=org_b).exists())
+
+        # GroupAccess exists for both orgs
+        self.assertTrue(GroupAccess.objects.filter(identity=identity, org=self.org, role='patient').exists())
+        self.assertTrue(GroupAccess.objects.filter(identity=identity, org=org_b, role='patient').exists())
+
+
+@override_settings(
+    EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+    APP_BASE_URL='https://app.test',
+)
+class SelfServicePasswordResetTest(TestCase):
+    """Test the public POST /api/v1/auth/request-reset/ endpoint."""
+
+    def setUp(self):
+        from django.core import mail
+        self.identity = Identity.objects.create_user(
+            email='self-reset@test.com', password='Zr7-quokka-vale',
+        )
+        mail.outbox = []
+
+    def test_known_email_returns_200_and_sends_email(self):
+        from django.core import mail
+        resp = APIClient().post('/api/v1/auth/request-reset/', {
+            'email': 'self-reset@test.com',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn('self-reset@test.com', mail.outbox[0].to)
+
+    def test_unknown_email_returns_200_no_email(self):
+        from django.core import mail
+        resp = APIClient().post('/api/v1/auth/request-reset/', {
+            'email': 'no-such-user@test.com',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_missing_email_returns_400(self):
+        resp = APIClient().post('/api/v1/auth/request-reset/', {
+            'email': '',
+        })
+        self.assertEqual(resp.status_code, 400)
+
+    def test_reachable_during_force_change(self):
+        """The request-reset endpoint must not be blocked by ForcePasswordChangeMiddleware."""
+        self.identity.must_change_password = True
+        self.identity.save(update_fields=['must_change_password'])
+        client = APIClient()
+        client.force_authenticate(user=self.identity)
+        resp = client.post('/api/v1/auth/request-reset/', {
+            'email': 'self-reset@test.com',
+        })
+        self.assertEqual(resp.status_code, 200)
 
 
 class OrgPublicInfoTest(TestCase):
