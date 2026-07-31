@@ -14,6 +14,26 @@ import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
+function ErrorToast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  useEffect(() => {
+    const timer = setTimeout(onDismiss, 8000);
+    return () => clearTimeout(timer);
+  }, [onDismiss]);
+
+  return (
+    <div className="fixed bottom-6 right-6 z-50 flex max-w-sm items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 shadow-lg animate-fade-in">
+      <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-500" />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-red-800">Save failed</p>
+        <p className="mt-0.5 text-sm text-red-700">{message}</p>
+      </div>
+      <button onClick={onDismiss} className="shrink-0 text-red-400 hover:text-red-600" aria-label="Dismiss">
+        ×
+      </button>
+    </div>
+  );
+}
+
 function getInitials(name: string) {
   return name.split(" ").filter(Boolean).map((n) => n[0]).slice(0, 2).join("").toUpperCase() || "?";
 }
@@ -166,7 +186,8 @@ export default function PatientDetail({
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
-   
+  const [saveErrorMsg, setSaveErrorMsg] = useState<string | null>(null);
+
   const [patientInfo, setPatientInfo] = useState<Record<string, unknown> | null>(null);
    
   const [editedInfo, setEditedInfo] = useState<Record<string, unknown>>({});
@@ -244,8 +265,30 @@ export default function PatientDetail({
         setSaveStatus("saved");
         setTimeout(() => setSaveStatus((s) => (s === "saved" ? "idle" : s)), 1200);
       }
-    } catch {
-      if (seq === saveSeqRef.current) setSaveStatus("error");
+    } catch (err) {
+      if (seq === saveSeqRef.current) {
+        setSaveStatus("error");
+        let detail = "An unexpected error occurred.";
+        if (err && typeof err === "object" && "response" in err) {
+          const resp = (err as { response?: { data?: Record<string, unknown>; status?: number } }).response;
+          const data = resp?.data;
+          if (data) {
+            // DRF returns {field: [errors]} for validation, or {detail: "..."} / {error: "..."}
+            if (typeof data.detail === "string") detail = data.detail;
+            else if (typeof data.error === "string") detail = data.error;
+            else {
+              const fieldErrors = Object.entries(data)
+                .filter(([, v]) => Array.isArray(v))
+                .map(([k, v]) => `${k}: ${(v as string[]).join(", ")}`)
+                .join("; ");
+              if (fieldErrors) detail = fieldErrors;
+            }
+          } else if (resp?.status) {
+            detail = `Server returned ${resp.status}.`;
+          }
+        }
+        setSaveErrorMsg(detail);
+      }
     }
   }, [personId]);
 
@@ -537,6 +580,10 @@ export default function PatientDetail({
           </div>
         </div>
       </div>
+
+      {saveErrorMsg && (
+        <ErrorToast message={saveErrorMsg} onDismiss={() => setSaveErrorMsg(null)} />
+      )}
     </div>
   );
 }
