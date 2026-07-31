@@ -650,6 +650,86 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         ]
         return Response(data)
 
+    @action(
+        detail=True,
+        methods=['get'],
+        url_path=r'field-provenance/(?P<field_name>[a-z_][a-z0-9_]*)',
+        url_name='field-provenance',
+        permission_classes=[ScopedTokenPermission, PatientSelfScopePermission],
+    )
+    def field_provenance(self, request, pk=None, field_name=None):
+        """GET /api/v1/patient-records/{person_id}/field-provenance/{field_name}/
+
+        Return the OMOP source rows that produced a specific PatientRecord field.
+        """
+        person, patient_info, err = self._resolve_patient_for_provenance(request, pk)
+        if err:
+            return err
+
+        from omop_core.services.provenance_service import get_field_provenance
+
+        result = get_field_provenance(person, field_name)
+        if result is None:
+            return Response(
+                {'error': f'Unknown field: {field_name}'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(result)
+
+    @action(
+        detail=True,
+        methods=['get'],
+        url_path='field-provenance',
+        url_name='field-provenance-bulk',
+        permission_classes=[ScopedTokenPermission, PatientSelfScopePermission],
+    )
+    def field_provenance_bulk(self, request, pk=None):
+        """GET /api/v1/patient-records/{person_id}/field-provenance/?fields=f1,f2
+
+        Bulk provenance lookup for multiple fields.
+        """
+        person, patient_info, err = self._resolve_patient_for_provenance(request, pk)
+        if err:
+            return err
+
+        from omop_core.services.provenance_service import get_fields_provenance
+
+        fields_param = request.query_params.get('fields', '')
+        if not fields_param:
+            return Response(
+                {'error': 'Provide ?fields=field1,field2'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        field_names = [f.strip() for f in fields_param.split(',') if f.strip()]
+        results = get_fields_provenance(person, field_names)
+        return Response(results)
+
+    def _resolve_patient_for_provenance(self, request, pk):
+        """Shared auth/lookup logic for field-provenance endpoints.
+
+        Returns (person, patient_info, None) on success, or
+        (None, None, Response) on error.
+        """
+        try:
+            person = Person.objects.get(person_id=pk)
+            patient_info = PatientRecord.objects.get(person=person)
+        except Person.DoesNotExist:
+            return None, None, Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        except PatientRecord.DoesNotExist:
+            return None, None, Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not is_service_token(request):
+            org = get_request_org(request)
+            if org is not None:
+                if patient_info.organization != org:
+                    return None, None, Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+            elif not getattr(request.user, 'is_staff', False):
+                from omop_core.authorization import can_access_patient
+                if not can_access_patient(request.user, person.person_id):
+                    return None, None, Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        return person, patient_info, None
+
     @action(detail=False, methods=['get', 'patch', 'delete'], permission_classes=[PatientDeletePermission, PatientSelfScopePermission])
     def me(self, request):
         """GET/PATCH/DELETE /api/patient-info/me/ — current user's own PatientRecord."""

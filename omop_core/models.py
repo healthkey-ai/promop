@@ -2508,6 +2508,16 @@ class PatientRecord(models.Model):
         help_text="If set, redact DOB/location/name from responses served to non-owner readers",
     )
 
+    # Derivation versioning
+    derivation_version = models.IntegerField(
+        default=1,
+        help_text="Version of the derivation logic that last computed this row",
+    )
+    derived_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Timestamp when this row was last derived from OMOP tables",
+    )
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

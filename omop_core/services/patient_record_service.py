@@ -37,6 +37,10 @@ from omop_core.services.lot_regimens import (
 # Public API
 # ---------------------------------------------------------------------------
 
+# Bump this whenever aggregation or computation logic changes in any section
+# extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
+DERIVATION_VERSION = 1
+
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
 _OMOP_DERIVED_FIELDS = [
@@ -329,6 +333,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                 setattr(patient_info, field, value)
 
         _compute_derived_fields(patient_info)
+
+        patient_info.derivation_version = DERIVATION_VERSION
+        patient_info.derived_at = timezone.now()
+
         patient_info.save()
         return patient_info
 

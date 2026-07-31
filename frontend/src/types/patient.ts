@@ -275,6 +275,10 @@ export interface PatientInfo {
   oxygen_saturation_min_30d?: string | number;
   respiratory_rate_avg_30d?: string | number;
   sleep_duration_hours_avg_30d?: string | number;
+
+  // Derivation versioning (read-only)
+  derivation_version?: number;
+  derived_at?: string;
 }
 
 export interface PatientDocument {
