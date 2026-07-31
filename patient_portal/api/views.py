@@ -60,7 +60,7 @@ import json
 import logging
 import re
 from io import StringIO
-from .permissions import ScopedTokenPermission, PatientCrudPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
+from .permissions import ScopedTokenPermission, VocabReadPermission, PatientCrudPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
@@ -5221,7 +5221,7 @@ class InterchangeAgreementViewSet(viewsets.ReadOnlyModelViewSet):
 # ---------------------------------------------------------------------------
 
 @api_view(['GET'])
-@permission_classes([ScopedTokenPermission])
+@permission_classes([VocabReadPermission])
 def vocab_release_list(request):
     """Paginated list of published vocabulary releases (newest first)."""
     from omop_core.models import VocabularyRelease
@@ -5234,7 +5234,7 @@ def vocab_release_list(request):
 
 
 @api_view(['GET'])
-@permission_classes([ScopedTokenPermission])
+@permission_classes([VocabReadPermission])
 def vocab_release_detail(request, release_id):
     """Full manifest for a specific published vocabulary release, including checksums."""
     from omop_core.models import VocabularyRelease
@@ -5247,7 +5247,7 @@ def vocab_release_detail(request, release_id):
 
 
 @api_view(['GET'])
-@permission_classes([ScopedTokenPermission])
+@permission_classes([VocabReadPermission])
 def vocab_release_latest(request):
     """Latest published vocabulary release. Supports If-None-Match → 304."""
     from omop_core.services.vocab_release import get_latest_release
@@ -5288,7 +5288,7 @@ class VocabSnapshotView(APIView):
     Uses raw SQL ``row_to_json()`` to avoid ORM overhead on large tables.
     The table name is validated against a whitelist before interpolation.
     """
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [VocabReadPermission]
 
     # SECURITY: db_table values are hardcoded; never interpolate user input.
     ALLOWED_TABLES = {

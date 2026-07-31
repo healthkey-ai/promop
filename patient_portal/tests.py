@@ -14549,6 +14549,88 @@ class VocabSnapshotStreamTransactionTest(TransactionTestCase):
         )
 
 
+class VocabSystemScopeTest(_SmartBase):
+    """#344 — vocabulary release/snapshot endpoints are reference (system) data,
+    so they accept a `system/*.read` scope in addition to patient/user read
+    scopes, while still rejecting a token that carries no read scope."""
+
+    def setUp(self):
+        super().setUp()
+        from oauth2_provider.models import AccessToken
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone as tz
+        import datetime
+        self.release = VocabularyRelease.objects.create(
+            build_timestamp=tz.now(), status='published', published_at=tz.now(),
+            scope=['TEST'], vocab_versions={'TEST': '1.0'},
+            row_counts={'vocabulary': 1}, checksums={})
+
+        def _tok(token, scope):
+            return AccessToken.objects.create(
+                user=self.foundation_user, application=self.app, token=token,
+                expires=tz.now() + datetime.timedelta(hours=1), scope=scope)
+        _tok('sys-read-tok', 'system/*.read')
+        _tok('noread-tok', 'openid')
+        _tok('writeonly-tok', 'patient/*.write')
+
+    def tearDown(self):
+        super().tearDown()
+        from patient_portal.api.views import _vocab_version_cache
+        _vocab_version_cache['release_pk'] = None
+        _vocab_version_cache['map'] = None
+
+    def _client(self, token):
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+        return c
+
+    def _urls(self):
+        rid = self.release.pk
+        return [
+            '/api/v1/vocab-releases/',
+            '/api/v1/vocab-releases/latest/',
+            f'/api/v1/vocab-releases/{rid}/',
+            f'/api/v1/vocab-releases/{rid}/snapshot/vocabulary/',
+        ]
+
+    def test_system_read_scope_allowed(self):
+        for url in self._urls():
+            resp = self._client('sys-read-tok').get(url)
+            self.assertEqual(resp.status_code, 200, f'{url}: {resp.status_code}')
+
+    def test_patient_read_scope_still_allowed(self):
+        for url in self._urls():
+            resp = self._client(self.read_token.token).get(url)
+            self.assertEqual(resp.status_code, 200, f'{url}: {resp.status_code}')
+
+    def test_token_without_read_scope_denied(self):
+        for url in self._urls():
+            resp = self._client('noread-tok').get(url)
+            self.assertEqual(resp.status_code, 403, f'{url}: {resp.status_code}')
+
+    def test_write_only_scope_denied_on_read(self):
+        for url in self._urls():
+            resp = self._client('writeonly-tok').get(url)
+            self.assertEqual(resp.status_code, 403, f'{url}: {resp.status_code}')
+
+    def test_expired_system_token_denied(self):
+        from oauth2_provider.models import AccessToken
+        from django.utils import timezone as tz
+        import datetime
+        AccessToken.objects.create(
+            user=self.foundation_user, application=self.app, token='sys-expired-tok',
+            expires=tz.now() - datetime.timedelta(seconds=1), scope='system/*.read')
+        resp = self._client('sys-expired-tok').get('/api/v1/vocab-releases/latest/')
+        self.assertIn(resp.status_code, (401, 403), resp.status_code)
+
+    def test_system_scope_denied_on_patient_data_endpoint(self):
+        # Isolation: system/*.read is a reference-data scope and must NOT grant
+        # access to patient data. Guards against a future refactor accidentally
+        # folding system/*.read into the base _READ_SCOPES.
+        resp = self._client('sys-read-tok').get('/api/v1/patient-records/')
+        self.assertEqual(resp.status_code, 403, resp.status_code)
+
+
 class VocabSnapshotTest(_SmartBase):
     """Test /api/v1/vocab-releases/.../snapshot/<table>/ endpoints."""
 

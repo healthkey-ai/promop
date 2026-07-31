@@ -41,6 +41,10 @@ def get_request_org(request):
 _SAFE_METHODS = frozenset(('GET', 'HEAD', 'OPTIONS'))
 _READ_SCOPES = frozenset(('patient/*.read', 'user/*.read'))
 _WRITE_SCOPES = frozenset(('patient/*.write', 'user/*.write'))
+# Vocabulary/concept data is reference (system) data, not patient data, so a
+# service consumer may read it with a system/reference scope in addition to the
+# patient/user read scopes. See healthkey-ai/promop#344.
+_VOCAB_READ_SCOPES = _READ_SCOPES | frozenset(('system/*.read',))
 
 
 class ScopedTokenPermission(BasePermission):
@@ -97,6 +101,30 @@ class ScopedTokenPermission(BasePermission):
         if request.method in _SAFE_METHODS:
             return bool(token_scopes & _READ_SCOPES)
         return bool(token_scopes & _WRITE_SCOPES)
+
+
+class VocabReadPermission(ScopedTokenPermission):
+    """Read permission for the vocabulary release + snapshot endpoints.
+
+    Vocabulary/concept data is reference (system) data, not patient data, so an
+    OAuth2 consumer may read it with a ``system/*.read`` scope in addition to the
+    patient/user read scopes the base class accepts (#344). All views using this
+    class are GET-only; service-token, staff, and partner/session auth are handled
+    by the base class exactly as before — only the OAuth2 safe-method read-scope
+    set is broadened here.
+    """
+
+    def has_permission(self, request, view):
+        token = request.auth
+        # OAuth2 bearer token on a safe method: accept the broadened read-scope
+        # set. Everything else (service token, staff, partner/session, expired
+        # tokens, non-safe methods) falls through to the base class unchanged.
+        if (token is not None and not isinstance(token, TokenClaims)
+                and hasattr(token, 'scope')
+                and request.method in _SAFE_METHODS
+                and timezone.now() < token.expires):
+            return bool(frozenset(token.scope.split()) & _VOCAB_READ_SCOPES)
+        return super().has_permission(request, view)
 
 
 class LabSyncPermission(ScopedTokenPermission):
