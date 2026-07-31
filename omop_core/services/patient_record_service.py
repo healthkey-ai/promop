@@ -605,34 +605,92 @@ def _expand_component_ids(regimen_concept_ids, drug_concept_ids):
     return base | hop1 | hop2
 
 
+def _latest_published_release_id():
+    """The current published vocabulary release identity, or None.
+
+    Stamped into therapy-id provenance so a consumer knows which vocabulary
+    release a regimen concept_id was resolved against. Until a content-addressed
+    release id exists (ADR 0001), the identity is the VocabularyRelease pk (an
+    int, not the string `rel-...` shape the field comment shows as the target).
+    """
+    try:
+        from django.db.models import F
+        from omop_core.models import VocabularyRelease
+        return (VocabularyRelease.objects
+                .filter(status='published')
+                # published_at is nullable; nulls_last so a stray null-timestamp
+                # published row can't sort ahead of a real one under DESC.
+                .order_by(F('published_at').desc(nulls_last=True))
+                .values_list('pk', flat=True)
+                .first())
+    except Exception:
+        return None
+
+
+def _is_asserted_regimen(concept) -> bool:
+    """True only for a source-asserted HemOnc *regimen* concept — the one case a
+    consumer is told it may trust without re-verifying.
+
+    Requires a HemOnc, Regimen-class, standard, non-invalid concept. A HemOnc
+    concept that is a component drug (not a Regimen), non-standard, or retired is
+    NOT asserted: its id may still be used as the line's regimen, but the origin
+    is reported as 'inferred' so a consumer verifies it. Guards the dangerous
+    inferred→asserted direction.
+    """
+    return bool(
+        concept is not None
+        and getattr(concept, 'vocabulary_id', None) == 'HemOnc'
+        and getattr(concept, 'concept_class_id', None) == 'Regimen'
+        and getattr(concept, 'standard_concept', None) == 'S'
+        and not getattr(concept, 'invalid_reason', None)
+    )
+
+
+def _prov_entry(concept_id, origin, release_id):
+    """A therapy_ids_provenance entry, or None when there is nothing to record.
+
+    origin is 'asserted' only when the source supplied a validated HemOnc regimen
+    concept via Episode.episode_source_concept; otherwise 'inferred' (resolved by
+    matching the line's drug-name set, or from a text/synthetic exposure backfill).
+    """
+    if not concept_id:
+        return None
+    return {'value': concept_id, 'origin': origin, 'release_id': release_id}
+
+
 def _regimen_from_exposures(exposure_ids, de_info_by_id):
-    """Resolve (display_name, concept_id) from a LOT's backing DrugExposures.
+    """Resolve (display_name, concept_id, origin) from a LOT's backing DrugExposures.
 
     de_info_by_id maps drug_exposure_id -> (concept_id, vocabulary_id, name).
 
-    If an exposure's drug_concept is itself a HemOnc regimen concept (e.g. a
-    regimen-level row from BC therapy backfill), use it directly. Otherwise
-    mirror the Episode-derivation naming: a HemOnc regimen concept resolved from
-    the drug-name set, else the canonical regimen name, else the joined original
-    concept names (preserving casing).
+    This is the no-Episode inference path, so origin is 'inferred' for any
+    resolved concept_id (None when nothing resolves) — never 'asserted'. Even a
+    HemOnc regimen concept sitting on a DrugExposure is not a source assertion
+    here: those rows can come from a text/synthetic backfill (e.g. breast-cancer
+    enrichment, fill_org_analytics_gaps), not from the source's own regimen code.
+    Only the Episode path's episode_source_concept is treated as asserted.
+
+    If an exposure's drug_concept is itself a HemOnc concept, use it directly;
+    otherwise a regimen resolved from the drug-name set, else the canonical
+    regimen name, else the joined original concept names (preserving casing).
     """
     infos = [de_info_by_id[e] for e in exposure_ids if e in de_info_by_id]
     if not infos:
-        return 'Unknown', None
+        return 'Unknown', None, None
     for concept_id, vocab_id, name in infos:
         if concept_id and vocab_id == 'HemOnc':
-            return name, concept_id
+            return name, concept_id, 'inferred'
     display_names = [name for _, _, name in infos]
     norm_key = {normalize_drug_name(n).lower().strip() for n in display_names}
     concept_id = get_regimen_concept_id(norm_key)
     if concept_id:
         concept = _cc_by_id(concept_id)
         if concept:
-            return concept.concept_name, concept_id
+            return concept.concept_name, concept_id, 'inferred'
     regimen_name = get_regimen_name(norm_key)
     if regimen_name:
-        return regimen_name, concept_id
-    return ' + '.join(display_names), concept_id
+        return regimen_name, concept_id, ('inferred' if concept_id else None)
+    return ' + '.join(display_names), concept_id, ('inferred' if concept_id else None)
 
 
 def _apply_inferred_lots(data: dict, lots) -> None:
@@ -656,12 +714,15 @@ def _apply_inferred_lots(data: dict, lots) -> None:
             else:
                 de_info_by_id[de.drug_exposure_id] = (None, None, de.drug_source_value or 'Unknown')
 
+    release_id = _latest_published_release_id()
+    prov: dict = {}
     later = []
     later_ids = []
+    later_origins = []
     later_components = set()
     all_components = set()
     for lot in lots:
-        name, concept_id = _regimen_from_exposures(lot.exposure_ids, de_info_by_id)
+        name, concept_id, origin = _regimen_from_exposures(lot.exposure_ids, de_info_by_id)
         exposure_concept_ids = [
             de_info_by_id[e][0]
             for e in lot.exposure_ids
@@ -680,6 +741,8 @@ def _apply_inferred_lots(data: dict, lots) -> None:
             data['first_line_date'] = start
             data['first_line_start_date'] = start
             data['first_line_end_date'] = end
+            if concept_id:
+                prov['first_line_therapy_id'] = _prov_entry(concept_id, origin, release_id)
         elif lot.lot_number == 2:
             data['second_line_therapy'] = name
             data['second_line_therapy_id'] = concept_id
@@ -687,6 +750,8 @@ def _apply_inferred_lots(data: dict, lots) -> None:
             data['second_line_date'] = start
             data['second_line_start_date'] = start
             data['second_line_end_date'] = end
+            if concept_id:
+                prov['second_line_therapy_id'] = _prov_entry(concept_id, origin, release_id)
         else:  # lot_number >= 3
             later_components |= components
             if not data.get('later_therapy'):
@@ -694,23 +759,32 @@ def _apply_inferred_lots(data: dict, lots) -> None:
                 data['later_date'] = start
                 data['later_start_date'] = start
                 data['later_end_date'] = end
-            # Carry the actual line number and per-line concept_id (may be None
-            # when the regimen did not resolve) so the structured
+            # Carry the actual line number, per-line concept_id (may be None when
+            # the regimen did not resolve) and origin so the structured
             # lines_of_therapy payload keeps the true line number, pairs each
-            # later line with its own id, and never drops an unresolved line.
+            # later line with its own id, and reports per-line asserted/inferred.
             later.append({'lineNumber': lot.lot_number, 'therapy': name,
                           'startDate': start, 'endDate': end,
-                          'concept_id': concept_id})
+                          'concept_id': concept_id, 'origin': origin})
             if concept_id:
                 later_ids.append(concept_id)
+                later_origins.append(origin)
     if later:
         data['later_therapies'] = later
     if later_ids:
         data['later_therapy_ids'] = later_ids
+        # Field-level provenance is a single origin for the aggregate list, so
+        # report 'asserted' only when every resolved later line is asserted —
+        # never over-claim assertion for a mixed set. Per-line origins live in
+        # later_therapies for the payload's per-line regimen_source.
+        _later_origin = 'asserted' if later_origins and all(o == 'asserted' for o in later_origins) else 'inferred'
+        prov['later_therapy_ids'] = {'value': later_ids, 'origin': _later_origin, 'release_id': release_id}
     if later_components:
         data['later_component_ids'] = sorted(later_components)
     if all_components:
         data['therapy_component_ids'] = sorted(all_components)
+    if prov:
+        data['therapy_ids_provenance'] = prov
 
 
 def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
@@ -760,23 +834,31 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         # concept is from a different vocabulary (e.g. a generic Drug domain fallback),
         # it does not represent the MM regimen — skip it and resolve from drug names.
         concept_id = None
+        origin = None
         src_concept = episode.episode_source_concept
         if (episode.episode_source_concept_id and src_concept and
                 getattr(src_concept, 'vocabulary_id', None) == 'HemOnc'):
             concept_id = episode.episode_source_concept_id
+            # Only a validated HemOnc Regimen concept is 'asserted'; a HemOnc
+            # component / non-standard / retired source concept keeps the id but
+            # is reported 'inferred' — never over-claim assertion.
+            origin = 'asserted' if _is_asserted_regimen(src_concept) else 'inferred'
         elif drug_name_set:
             concept_id = get_regimen_concept_id(drug_name_set)
+            if concept_id:
+                origin = 'inferred'  # resolved by matching the line's drug names
         # Final fallback: treat each drug_source_value as an abbreviated regimen name
         if not concept_id and source_value_set:
             for sv in source_value_set:
                 cid = get_regimen_concept_id_by_name(sv)
                 if cid:
                     concept_id = cid
+                    origin = 'inferred'
                     break
 
         if concept_id:
             needed_concept_ids.add(concept_id)
-        episode_rows.append((episode, drugs_in_episode, concept_id, source_value_set))
+        episode_rows.append((episode, drugs_in_episode, concept_id, source_value_set, origin))
 
     # ── Bulk-fetch Concept names in one query ──────────────────────────────
     # Concept rows already loaded via select_related are re-used directly.
@@ -793,11 +875,14 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         )
 
     # ── Second pass: populate data dict ───────────────────────────────────
+    release_id = _latest_published_release_id()
+    prov: dict = {}
+    later_origins = []
     therapy_line_numbers = set()
     later_components = set()
     all_components = set()
 
-    for episode, drugs_in_episode, concept_id, source_value_set in episode_rows:
+    for episode, drugs_in_episode, concept_id, source_value_set, origin in episode_rows:
         lot = episode.episode_number
         if lot is None:
             continue
@@ -806,6 +891,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         # Nullify dangling FK concept_ids (not in Concept table)
         if concept_id and concept_id not in concept_name_map:
             concept_id = None
+            origin = None
 
         # Component drug concept_ids for this line: HemOnc regimen expansion
         # unioned with the line's exposure drug concepts, leveled to ingredients.
@@ -845,6 +931,8 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             data['first_line_start_date'] = start_date
             if end_date:
                 data['first_line_end_date'] = end_date
+            if concept_id:
+                prov['first_line_therapy_id'] = _prov_entry(concept_id, origin, release_id)
         elif lot == 2:
             data['second_line_therapy'] = drug_names
             data['second_line_therapy_id'] = concept_id
@@ -853,14 +941,19 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             data['second_line_start_date'] = start_date
             if end_date:
                 data['second_line_end_date'] = end_date
+            if concept_id:
+                prov['second_line_therapy_id'] = _prov_entry(concept_id, origin, release_id)
         elif lot >= 3:
             later_components |= components
+            if concept_id:
+                later_origins.append(origin)
             later = data.get('later_therapies', [])
-            # Keep the true episode line number and per-line concept_id (may be
-            # None for an unresolved regimen) so lines_of_therapy renders the
-            # correct line number and pairs each later line with its own id.
+            # Keep the true episode line number, per-line concept_id (may be None
+            # for an unresolved regimen) and origin so lines_of_therapy renders
+            # the correct line number, pairs each later line with its own id, and
+            # reports per-line asserted/inferred.
             later.append({'lineNumber': lot, 'therapy': drug_names,
-                          'startDate': start_date, 'endDate': end_date,
+                          'startDate': start_date, 'endDate': end_date, 'origin': origin,
                           'concept_id': concept_id})
             data['later_therapies'] = later
             if concept_id:
@@ -882,6 +975,14 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         data['later_component_ids'] = sorted(later_components)
     if all_components:
         data['therapy_component_ids'] = sorted(all_components)
+    if data.get('later_therapy_ids'):
+        # One field-level origin for the aggregate list: 'asserted' only when
+        # every resolved later line is asserted; per-line origins live in
+        # later_therapies for the payload's per-line regimen_source.
+        _later_origin = 'asserted' if later_origins and all(o == 'asserted' for o in later_origins) else 'inferred'
+        prov['later_therapy_ids'] = {'value': data['later_therapy_ids'], 'origin': _later_origin, 'release_id': release_id}
+    if prov:
+        data['therapy_ids_provenance'] = prov
 
     # ── Per-line outcomes from LOT-N-outcome Observations ─────────────────
     # Written by the synthetic enrichment commands (and any future ingest path

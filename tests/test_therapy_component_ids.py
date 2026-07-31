@@ -234,3 +234,108 @@ def test_component_id_fields_persist_and_default():
     assert record.therapy_component_ids == [COMPONENT_A_ID, COMPONENT_B_ID, RXNORM_ING_ID]
     assert record.second_line_component_ids == []
     assert record.later_component_ids == []
+
+
+# ---------------------------------------------------------------------------
+# therapy_ids_provenance (issue: populate provenance during derivation)
+# ---------------------------------------------------------------------------
+
+def test_episode_path_records_asserted_provenance_and_release_id():
+    """A validated HemOnc episode_source_concept yields origin='asserted', and
+    the current published vocabulary release id is stamped."""
+    from django.utils import timezone
+    from omop_core.models import VocabularyRelease
+    rel = VocabularyRelease.objects.create(
+        build_timestamp=timezone.now(), status='published', published_at=timezone.now())
+
+    from omop_core.models import ConceptClass
+    person = PersonFactory()
+    hemonc = _hemonc_vocab()
+    _regimen_graph(hemonc)
+    # The episode source concept must be a validated HemOnc *Regimen* to count
+    # as asserted (standard 'S' + no invalid_reason come from ConceptFactory).
+    regimen_class, _ = ConceptClass.objects.get_or_create(
+        concept_class_id='Regimen',
+        defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0})
+    regimen1 = Concept.objects.get(concept_id=REGIMEN_ID)
+    regimen1.concept_class = regimen_class
+    regimen1.save(update_fields=['concept_class'])
+    concepts = {
+        'episode': ConceptFactory(concept_name='Treatment Regimen', vocabulary=hemonc),
+        'object': ConceptFactory(concept_name='Disease Episode', vocabulary=hemonc),
+        'type': ConceptFactory(concept_name='Derived Episode', vocabulary=hemonc),
+        'field': ConceptFactory(concept_name='Episode event field'),
+    }
+    drug1 = DrugExposureFactory(
+        person=person, drug_concept=Concept.objects.get(concept_id=COMPONENT_A_ID),
+        drug_exposure_start_date=date(2024, 1, 1), drug_exposure_end_date=date(2024, 3, 1))
+    _make_episode(person, 1, 1, regimen1, drug1, concepts)
+
+    prov = _get_treatment_data(person)['therapy_ids_provenance']
+    assert prov['first_line_therapy_id'] == {
+        'value': REGIMEN_ID, 'origin': 'asserted', 'release_id': rel.pk}
+
+    # A HemOnc source concept that is NOT a Regimen class is reported inferred.
+    person2 = PersonFactory(person_id=person.person_id + 1)
+    non_regimen = Concept.objects.get(concept_id=COMPONENT_A_ID)  # HemOnc, not Regimen class
+    drug2 = DrugExposureFactory(
+        person=person2, drug_concept=Concept.objects.get(concept_id=COMPONENT_B_ID),
+        drug_exposure_start_date=date(2024, 1, 1), drug_exposure_end_date=date(2024, 3, 1))
+    _make_episode(person2, 10, 1, non_regimen, drug2, concepts)
+    prov2 = _get_treatment_data(person2)['therapy_ids_provenance']
+    assert prov2['first_line_therapy_id']['origin'] == 'inferred'
+
+
+def test_regimen_from_exposures_reports_origin(monkeypatch):
+    # de_info tuple: (concept_id, vocabulary_id, name). The no-Episode inference
+    # path never asserts — even a HemOnc regimen concept on an exposure is
+    # 'inferred' (it may come from a text/synthetic backfill, not a source code).
+    from omop_core.services import patient_record_service as prs
+    _n, cid, origin = prs._regimen_from_exposures([1], {1: (REGIMEN_ID, 'HemOnc', 'RVD')})
+    assert (cid, origin) == (REGIMEN_ID, 'inferred')
+    # inferred via drug-name matching
+    monkeypatch.setattr(prs, 'get_regimen_concept_id', lambda _keys: REGIMEN_ID)
+    _n2, cid2, origin2 = prs._regimen_from_exposures([2], {2: (555, 'RxNorm', 'bortezomib')})
+    assert (cid2, origin2) == (REGIMEN_ID, 'inferred')
+    # unresolved: nothing matches → no concept_id, no origin
+    monkeypatch.setattr(prs, 'get_regimen_concept_id', lambda _keys: None)
+    monkeypatch.setattr(prs, 'get_regimen_name', lambda _keys: None)
+    _n3, cid3, origin3 = prs._regimen_from_exposures([2], {2: (555, 'RxNorm', 'bortezomib')})
+    assert (cid3, origin3) == (None, None)
+
+
+def test_apply_inferred_lots_records_inferred_provenance(monkeypatch):
+    from omop_core.services import patient_record_service as prs
+    monkeypatch.setattr(prs, 'get_regimen_concept_id', lambda _keys: REGIMEN_ID)
+    person = PersonFactory()
+    drug = DrugExposureFactory(
+        person=person, drug_concept=ConceptFactory(concept_name='bortezomib'),
+        drug_exposure_start_date=date(2024, 1, 1), drug_exposure_end_date=date(2024, 1, 21))
+    lots = [SimpleNamespace(lot_number=1, exposure_ids=[drug.drug_exposure_id],
+                            start=date(2024, 1, 1), end=date(2024, 1, 21))]
+    data = {}
+    prs._apply_inferred_lots(data, lots)
+    assert data['first_line_therapy_id'] == REGIMEN_ID
+    entry = data['therapy_ids_provenance']['first_line_therapy_id']
+    assert entry['origin'] == 'inferred'
+    assert entry['release_id'] is None  # no published release in this test
+
+
+def test_is_asserted_regimen_guards():
+    """asserted requires HemOnc + Regimen class + standard + non-invalid; any
+    miss (wrong vocab/class, non-standard, retired, or None) is not asserted."""
+    from types import SimpleNamespace
+    from omop_core.services.patient_record_service import _is_asserted_regimen
+
+    def c(**kw):
+        d = dict(vocabulary_id='HemOnc', concept_class_id='Regimen',
+                 standard_concept='S', invalid_reason=None)
+        d.update(kw)
+        return SimpleNamespace(**d)
+
+    assert _is_asserted_regimen(c()) is True
+    assert _is_asserted_regimen(c(vocabulary_id='RxNorm')) is False
+    assert _is_asserted_regimen(c(concept_class_id='Ingredient')) is False
+    assert _is_asserted_regimen(c(standard_concept='C')) is False   # non-standard
+    assert _is_asserted_regimen(c(invalid_reason='D')) is False      # retired
+    assert _is_asserted_regimen(None) is False

@@ -11479,6 +11479,24 @@ class LinesOfTherapyPayloadTest(TestCase):
         self.assertNotIn('later_aggregate', lot[0])
         self.assertEqual(lot[1]['regimen_source'], 'inferred')
 
+    def test_later_line_regimen_source_from_per_line_origin(self):
+        # Each later_therapies entry carries its own provenance origin; the
+        # payload's per-line regimen_source reflects it (asserted vs inferred),
+        # not a single field-level value.
+        rec = self._record(
+            person_id=90263,
+            later_therapy='RegA',
+            later_therapies=[
+                {'lineNumber': 3, 'therapy': 'RegA', 'startDate': None,
+                 'endDate': None, 'concept_id': 401, 'origin': 'asserted'},
+                {'lineNumber': 4, 'therapy': 'RegB', 'startDate': None,
+                 'endDate': None, 'concept_id': 402, 'origin': 'inferred'},
+            ],
+            later_therapy_ids=[401, 402], later_component_ids=[41])
+        lot = self._lot(rec)
+        self.assertEqual(lot[0]['regimen_source'], 'asserted')
+        self.assertEqual(lot[1]['regimen_source'], 'inferred')
+
     def test_later_lines_preserve_true_line_number(self):
         # New shape with non-contiguous line numbers (3 then 5, e.g. Episode
         # gaps) must render as-is, not be renumbered to 3,4.
