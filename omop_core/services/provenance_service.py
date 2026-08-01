@@ -36,18 +36,56 @@ def get_field_provenance(person: Person, field_name: str) -> dict[str, Any] | No
     if entry is None:
         return None
 
-    # Get the current projected value.
     try:
         record = PatientRecord.objects.get(person=person)
+    except PatientRecord.DoesNotExist:
+        record = None
+
+    return _build_provenance(person, record, field_name, entry, registry)
+
+
+def get_fields_provenance(
+    person: Person, field_names: list[str]
+) -> dict[str, dict[str, Any] | None]:
+    """Bulk provenance lookup for multiple fields.
+
+    Fetches the PatientRecord and registry once, then reuses them
+    across all field lookups to avoid N+1 queries.
+    """
+    registry = get_registry()
+
+    try:
+        record = PatientRecord.objects.get(person=person)
+    except PatientRecord.DoesNotExist:
+        record = None
+
+    results: dict[str, dict[str, Any] | None] = {}
+    for name in field_names:
+        entry = registry.get(name)
+        if entry is None:
+            results[name] = None
+        else:
+            results[name] = _build_provenance(person, record, name, entry, registry)
+    return results
+
+
+def _build_provenance(
+    person: Person,
+    record: PatientRecord | None,
+    field_name: str,
+    entry: FieldProvenance,
+    registry: dict[str, FieldProvenance],
+) -> dict[str, Any]:
+    """Shared logic for building a provenance dict for a single field."""
+    if record is not None:
         current_value = getattr(record, field_name, None)
         derivation_version = record.derivation_version
         derived_at = record.derived_at.isoformat() if record.derived_at else None
-    except PatientRecord.DoesNotExist:
+    else:
         current_value = None
         derivation_version = None
         derived_at = None
 
-    # For composite fields, recurse into constituent fields.
     if entry.selection_rule == "composite" and entry.constituent_fields:
         source_rows = _lookup_composite(person, entry)
     else:
@@ -62,13 +100,6 @@ def get_field_provenance(person: Person, field_name: str) -> dict[str, Any] | No
         "description": entry.description,
         "source_rows": source_rows,
     }
-
-
-def get_fields_provenance(
-    person: Person, field_names: list[str]
-) -> dict[str, dict[str, Any] | None]:
-    """Bulk provenance lookup for multiple fields."""
-    return {name: get_field_provenance(person, name) for name in field_names}
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +132,7 @@ def _lookup_measurement(person: Person, entry: FieldProvenance) -> list[dict]:
     from django.db.models import Q
 
     qs = (
-        Measurement.objects.filter(person=person)
+        Measurement.objects.filter(person=person, value_as_number__isnull=False)
         .select_related("measurement_concept")
         .order_by("-measurement_date")
     )
@@ -121,6 +152,10 @@ def _lookup_measurement(person: Person, entry: FieldProvenance) -> list[dict]:
 
     if entry.source_values:
         filters |= Q(measurement_source_value__in=entry.source_values)
+
+    if entry.concept_name_patterns:
+        for pattern in entry.concept_name_patterns:
+            filters |= Q(measurement_concept__concept_name__icontains=pattern)
 
     if not filters:
         return []
@@ -146,18 +181,27 @@ def _lookup_measurement(person: Person, entry: FieldProvenance) -> list[dict]:
 
 def _lookup_observation(person: Person, entry: FieldProvenance) -> list[dict]:
     """Return Observation rows matching the extractor's query pattern."""
+    from django.db.models import Q
+
     qs = (
         Observation.objects.filter(person=person)
         .select_related("observation_concept")
         .order_by("-observation_date")
     )
 
+    filters = Q()
     if entry.concept_codes:
-        from django.db.models import Q
-
-        filters = Q(observation_concept__concept_code__in=entry.concept_codes)
+        filters |= Q(observation_concept__concept_code__in=entry.concept_codes)
         filters |= Q(observation_source_value__in=entry.concept_codes)
-        qs = qs.filter(filters)
+
+    if entry.concept_name_patterns:
+        for pattern in entry.concept_name_patterns:
+            filters |= Q(observation_concept__concept_name__icontains=pattern)
+
+    if not filters:
+        return []
+
+    qs = qs.filter(filters)
 
     rows = qs[:20]
     result = []
@@ -180,12 +224,14 @@ def _lookup_observation(person: Person, entry: FieldProvenance) -> list[dict]:
 
 def _lookup_condition(person: Person, entry: FieldProvenance) -> list[dict]:
     """Return ConditionOccurrence rows."""
+    # Order so the "selected" row (latest or earliest) is always at index 0.
+    order = "condition_start_date" if entry.selection_rule == "earliest" else "-condition_start_date"
     qs = (
         ConditionOccurrence.objects.filter(person=person)
         .select_related("condition_concept")
-        .order_by("-condition_start_date")
+        .order_by(order)
     )
-    rows = qs[:20]
+    rows = list(qs[:20])
     result = []
     for i, c in enumerate(rows):
         concept_name = (
@@ -198,9 +244,7 @@ def _lookup_condition(person: Person, entry: FieldProvenance) -> list[dict]:
             "concept_name": concept_name,
             "value": concept_name,
             "date": str(c.condition_start_date) if c.condition_start_date else None,
-            "selected": i == 0 if entry.selection_rule == "latest" else (
-                i == len(rows) - 1 if entry.selection_rule == "earliest" else True
-            ),
+            "selected": i == 0 if entry.selection_rule in ("latest", "earliest") else True,
         })
     return result
 

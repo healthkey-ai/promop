@@ -22,6 +22,9 @@ class FieldProvenance:
     concept_codes: list[str] | None = None
     """LOINC or SNOMED codes used in the section extractor."""
 
+    concept_name_patterns: list[str] | None = None
+    """Substring patterns matched via concept_name__icontains in the extractor."""
+
     source_values: list[str] | None = None
     """Fallback source_value strings for name-based lookups."""
 
@@ -166,20 +169,23 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
     "ecog_performance_status": FieldProvenance(
         omop_table="Observation",
         lookup_strategy="snomed",
+        concept_name_patterns=["ecog"],
         extractor="_get_performance_data",
         selection_rule="latest",
-        description="Latest ECOG performance status from Observation",
+        description="Latest ECOG performance status from Observation (concept_name icontains 'ecog')",
     ),
     "karnofsky_performance_score": FieldProvenance(
         omop_table="Observation",
         lookup_strategy="snomed",
+        concept_name_patterns=["karnofsky"],
         extractor="_get_performance_data",
         selection_rule="latest",
-        description="Latest Karnofsky score from Observation",
+        description="Latest Karnofsky score from Observation (concept_name icontains 'karnofsky')",
     ),
     "ecog_assessment_date": FieldProvenance(
         omop_table="Observation",
         lookup_strategy="snomed",
+        concept_name_patterns=["ecog"],
         extractor="_get_performance_data",
         selection_rule="latest",
         description="Date of most recent ECOG assessment",
@@ -187,69 +193,176 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
 
     # --- Staging ---
     "stage": FieldProvenance(
-        omop_table="Observation",
-        lookup_strategy="snomed",
+        omop_table="Measurement,Observation",
+        lookup_strategy="loinc",
+        concept_codes=["21908-9"],
+        source_values=["21908-9", "21908-9-riss"],
         extractor="_get_staging_data",
         selection_rule="latest",
-        description="Overall cancer stage from Observation",
+        description="Overall cancer stage by LOINC 21908-9",
     ),
     "tumor_stage": FieldProvenance(
-        omop_table="Observation",
-        lookup_strategy="snomed",
+        omop_table="Measurement,Observation",
+        lookup_strategy="loinc",
+        concept_codes=["21905-5"],
+        source_values=["21905-5"],
         extractor="_get_staging_data",
         selection_rule="latest",
-        description="T component of TNM staging",
+        description="T component of TNM staging by LOINC 21905-5",
     ),
     "nodes_stage": FieldProvenance(
-        omop_table="Observation",
-        lookup_strategy="snomed",
+        omop_table="Measurement,Observation",
+        lookup_strategy="loinc",
+        concept_codes=["21906-3"],
+        source_values=["21906-3"],
         extractor="_get_staging_data",
         selection_rule="latest",
-        description="N component of TNM staging",
+        description="N component of TNM staging by LOINC 21906-3",
     ),
     "distant_metastasis_stage": FieldProvenance(
-        omop_table="Observation",
-        lookup_strategy="snomed",
+        omop_table="Measurement,Observation",
+        lookup_strategy="loinc",
+        concept_codes=["21901-4"],
+        source_values=["21901-4"],
         extractor="_get_staging_data",
         selection_rule="latest",
-        description="M component of TNM staging",
+        description="M component of TNM staging by LOINC 21901-4",
     ),
 
     # --- Biomarkers ---
     "estrogen_receptor_status": FieldProvenance(
-        omop_table="Observation",
-        lookup_strategy="snomed",
+        omop_table="Measurement",
+        lookup_strategy="loinc",
+        concept_codes=["16112-5"],
         extractor="_get_biomarker_data",
         selection_rule="latest",
-        description="ER status from Observation",
+        description="ER status by LOINC 16112-5",
     ),
     "progesterone_receptor_status": FieldProvenance(
-        omop_table="Observation",
-        lookup_strategy="snomed",
+        omop_table="Measurement",
+        lookup_strategy="loinc",
+        concept_codes=["16113-3"],
         extractor="_get_biomarker_data",
         selection_rule="latest",
-        description="PR status from Observation",
+        description="PR status by LOINC 16113-3",
     ),
     "her2_status": FieldProvenance(
-        omop_table="Observation",
-        lookup_strategy="snomed",
+        omop_table="Measurement",
+        lookup_strategy="loinc",
+        concept_codes=["48676-1"],
         extractor="_get_biomarker_data",
         selection_rule="latest",
-        description="HER2 status from Observation",
+        description="HER2 status by LOINC 48676-1",
     ),
     "ki67_proliferation_index": FieldProvenance(
-        omop_table="Observation",
-        lookup_strategy="snomed",
+        omop_table="Measurement",
+        lookup_strategy="loinc",
+        concept_codes=["85319-2"],
         extractor="_get_biomarker_data",
         selection_rule="latest",
-        description="Ki-67 proliferation index from Observation",
+        description="Ki-67 proliferation index by LOINC 85319-2",
     ),
     "pd_l1_tumor_cells": FieldProvenance(
-        omop_table="Observation",
-        lookup_strategy="snomed",
+        omop_table="Measurement",
+        lookup_strategy="loinc",
+        concept_codes=["85337-4"],
         extractor="_get_biomarker_data",
         selection_rule="latest",
-        description="PD-L1 tumor proportion score from Observation",
+        description="PD-L1 tumor proportion score by LOINC 85337-4",
+    ),
+    "pd_l1_ic_percentage": FieldProvenance(
+        omop_table="Measurement",
+        lookup_strategy="loinc",
+        concept_codes=["85336-6"],
+        extractor="_get_biomarker_data",
+        selection_rule="latest",
+        description="PD-L1 immune cell percentage by LOINC 85336-6",
+    ),
+    "pd_l1_combined_positive_score": FieldProvenance(
+        omop_table="Measurement",
+        lookup_strategy="loinc",
+        concept_codes=["96893-3"],
+        extractor="_get_biomarker_data",
+        selection_rule="latest",
+        description="PD-L1 combined positive score by LOINC 96893-3",
+    ),
+    "histologic_type": FieldProvenance(
+        omop_table="Measurement",
+        lookup_strategy="loinc",
+        concept_codes=["59847-4"],
+        extractor="_get_biomarker_data",
+        selection_rule="latest",
+        description="Histologic type by LOINC 59847-4",
+    ),
+    "biopsy_grade": FieldProvenance(
+        omop_table="Measurement",
+        lookup_strategy="loinc",
+        concept_codes=["44648-4"],
+        extractor="_get_biomarker_data",
+        selection_rule="latest",
+        description="Biopsy/Nottingham grade by LOINC 44648-4",
+    ),
+    "menopausal_status": FieldProvenance(
+        omop_table="Measurement,Observation",
+        lookup_strategy="loinc",
+        concept_codes=["76690-7"],
+        extractor="_get_biomarker_data",
+        selection_rule="latest",
+        description="Menopausal status by LOINC 76690-7",
+    ),
+    "hrd_status": FieldProvenance(
+        omop_table="Observation",
+        lookup_strategy="snomed",
+        concept_name_patterns=["homologous recombination"],
+        extractor="_get_biomarker_data",
+        selection_rule="latest",
+        description="HRD status from Observation (concept_name icontains 'homologous recombination')",
+    ),
+
+    # --- MM-specific fields ---
+    "plasma_cell_leukemia": FieldProvenance(
+        omop_table="Measurement,Observation",
+        lookup_strategy="loinc",
+        concept_codes=["47082-2"],
+        source_values=["47082-2"],
+        extractor="_get_mm_specific_data",
+        selection_rule="latest",
+        description="Plasma cell leukemia by LOINC 47082-2",
+    ),
+    "bone_lesions": FieldProvenance(
+        omop_table="Measurement,Observation",
+        lookup_strategy="loinc",
+        concept_codes=["24646-7"],
+        source_values=["24646-7"],
+        extractor="_get_mm_specific_data",
+        selection_rule="latest",
+        description="Bone lesions by LOINC 24646-7",
+    ),
+
+    # --- Lymphoma-specific fields ---
+    "flipi_score": FieldProvenance(
+        omop_table="Observation",
+        lookup_strategy="snomed",
+        concept_name_patterns=["flipi"],
+        extractor="_get_lymphoma_data",
+        selection_rule="latest",
+        description="FLIPI score from Observation (concept_name icontains 'flipi')",
+    ),
+    "gelf_criteria_status": FieldProvenance(
+        omop_table="Observation",
+        lookup_strategy="snomed",
+        concept_name_patterns=["gelf"],
+        extractor="_get_lymphoma_data",
+        selection_rule="latest",
+        description="GELF criteria status from Observation (concept_name icontains 'gelf')",
+    ),
+    "tumor_grade": FieldProvenance(
+        omop_table="Measurement",
+        lookup_strategy="snomed",
+        concept_name_patterns=["grade"],
+        extractor="_get_lymphoma_data",
+        selection_rule="latest",
+        description="Tumor grade from Measurement (concept_name icontains 'grade')",
     ),
 
     # --- Treatment lines ---
@@ -408,8 +521,13 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
 }
 
 
+_REGISTRY_CACHE: dict[str, FieldProvenance] | None = None
+
+
 def get_registry() -> dict[str, FieldProvenance]:
-    """Return the complete field→provenance registry, lazily built."""
-    registry = _auto_register_loinc_labs()
-    registry.update(_MANUAL_ENTRIES)
-    return registry
+    """Return the complete field→provenance registry, lazily built and cached."""
+    global _REGISTRY_CACHE
+    if _REGISTRY_CACHE is None:
+        _REGISTRY_CACHE = _auto_register_loinc_labs()
+        _REGISTRY_CACHE.update(_MANUAL_ENTRIES)
+    return _REGISTRY_CACHE

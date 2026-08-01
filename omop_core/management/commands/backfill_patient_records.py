@@ -6,7 +6,7 @@ Usage:
     python manage.py backfill_patient_records
 
     # Re-derive records older than a specific version
-    python manage.py backfill_patient_records --version 3
+    python manage.py backfill_patient_records --target-version 3
 
     # Re-derive every record regardless of version
     python manage.py backfill_patient_records --all
@@ -63,7 +63,7 @@ class Command(BaseCommand):
         )
 
     def handle(self, **options):
-        target = options["target_version"] or DERIVATION_VERSION
+        target = options["target_version"] if options["target_version"] is not None else DERIVATION_VERSION
         backfill_all = options["backfill_all"]
         batch_size = options["batch_size"]
         dry_run = options["dry_run"]
