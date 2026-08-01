@@ -14707,3 +14707,256 @@ class VocabSnapshotTest(_SmartBase):
         last = json.loads(lines[-1])
         self.assertTrue(last.get('__done'))
         self.assertEqual(last['rows'], len(lines) - 1)
+
+
+# ---------------------------------------------------------------------------
+# Derivation versioning & field-provenance tests (issues #358 & #360)
+# ---------------------------------------------------------------------------
+
+
+class DerivationVersioningTest(TestCase):
+    """Test that refresh_patient_record stamps derivation_version and derived_at."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(
+            person_id=99801,
+            year_of_birth=1985,
+            gender_source_value='male',
+        )
+
+    def test_refresh_stamps_version_and_timestamp(self):
+        from omop_core.services.patient_record_service import (
+            DERIVATION_VERSION,
+            refresh_patient_record,
+        )
+        pr = refresh_patient_record(self.person)
+        self.assertEqual(pr.derivation_version, DERIVATION_VERSION)
+        self.assertIsNotNone(pr.derived_at)
+
+    def test_derivation_fields_default_values(self):
+        """A PatientRecord created directly (not via refresh) gets default version=1."""
+        pr = PatientRecord.objects.create(person=self.person)
+        self.assertEqual(pr.derivation_version, 1)
+        self.assertIsNone(pr.derived_at)
+
+
+class DerivationVersionReadOnlyAPITest(TestCase):
+    """Test that derivation_version and derived_at are read-only via API."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.user = Identity.objects.create_user(
+            email='v_ro_test@test.com', password='testpass', is_staff=True,
+        )
+        cls.person = Person.objects.create(
+            person_id=99802, year_of_birth=1990,
+        )
+        from omop_core.services.patient_record_service import refresh_patient_record
+        cls.pr = refresh_patient_record(cls.person)
+
+    def test_patch_cannot_change_derivation_version(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        resp = client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'derivation_version': 999},
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 400])
+        self.pr.refresh_from_db()
+        self.assertNotEqual(self.pr.derivation_version, 999)
+
+
+class BackfillCommandTest(TestCase):
+    """Test the backfill_patient_records management command."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(
+            person_id=99803, year_of_birth=1975,
+        )
+
+    def test_dry_run_does_not_modify(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        pr = refresh_patient_record(self.person)
+        original_derived_at = pr.derived_at
+
+        from django.core.management import call_command
+        from io import StringIO
+        out = StringIO()
+        # Force stale by setting version to 0
+        PatientRecord.objects.filter(pk=pr.pk).update(derivation_version=0)
+        call_command('backfill_patient_records', dry_run=True, stdout=out)
+        pr.refresh_from_db()
+        self.assertEqual(pr.derivation_version, 0)  # Not modified
+
+    def test_backfill_updates_stale_records(self):
+        from omop_core.services.patient_record_service import (
+            DERIVATION_VERSION,
+            refresh_patient_record,
+        )
+        pr = refresh_patient_record(self.person)
+        PatientRecord.objects.filter(pk=pr.pk).update(derivation_version=0)
+
+        from django.core.management import call_command
+        from io import StringIO
+        out = StringIO()
+        call_command('backfill_patient_records', stdout=out)
+        pr.refresh_from_db()
+        self.assertEqual(pr.derivation_version, DERIVATION_VERSION)
+
+
+class FieldProvenanceRegistryTest(TestCase):
+    """Test that the provenance registry covers key fields."""
+
+    def test_registry_covers_loinc_lab_fields(self):
+        from omop_core.services.provenance_registry import get_registry
+        from omop_core.services.patient_record_service import _LOINC_LAB_FIELDS
+        registry = get_registry()
+        for _code, (field_name, _cast) in _LOINC_LAB_FIELDS.items():
+            self.assertIn(
+                field_name, registry,
+                f'{field_name} not in provenance registry',
+            )
+
+    def test_registry_covers_composite_fields(self):
+        from omop_core.services.provenance_registry import get_registry
+        registry = get_registry()
+        for field in ['bmi', 'hr_status', 'metastatic_status', 'meets_crab']:
+            self.assertIn(field, registry)
+            self.assertEqual(registry[field].selection_rule, 'composite')
+
+
+class FieldProvenanceServiceTest(TestCase):
+    """Test that get_field_provenance returns correct source rows."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        from omop_core.models import Vocabulary, Domain, ConceptClass
+
+        vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        domain_meas = Domain.objects.get(domain_id='Measurement')
+        cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
+        today = date.today()
+        far_future = date(2099, 12, 31)
+
+        cls.hgb_concept, _ = Concept.objects.get_or_create(
+            concept_id=8099001,
+            defaults={
+                'concept_name': 'Hemoglobin [Mass/volume] in Blood',
+                'domain': domain_meas,
+                'vocabulary': vocab,
+                'concept_class': cc,
+                'concept_code': '718-7',
+                'valid_start_date': today,
+                'valid_end_date': far_future,
+            },
+        )
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.person = Person.objects.create(
+            person_id=99804, year_of_birth=1988,
+        )
+
+    def test_provenance_returns_measurement_rows(self):
+        # Create two hemoglobin measurements
+        Measurement.objects.create(
+            measurement_id=990001,
+            person=self.person,
+            measurement_concept=self.hgb_concept,
+            measurement_date=date(2026, 5, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_number=11.5,
+            unit_source_value='g/dL',
+        )
+        Measurement.objects.create(
+            measurement_id=990002,
+            person=self.person,
+            measurement_concept=self.hgb_concept,
+            measurement_date=date(2026, 6, 15),
+            measurement_type_concept=self.type_concept,
+            value_as_number=12.5,
+            unit_source_value='g/dL',
+        )
+        # Refresh to populate PatientRecord
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(self.person)
+
+        from omop_core.services.provenance_service import get_field_provenance
+        result = get_field_provenance(self.person, 'hemoglobin_g_dl')
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result['field'], 'hemoglobin_g_dl')
+        self.assertEqual(result['current_value'], 12.5)
+        self.assertEqual(result['selection_rule'], 'latest')
+        self.assertGreaterEqual(len(result['source_rows']), 2)
+        # The first (latest) row should be selected
+        self.assertTrue(result['source_rows'][0]['selected'])
+        self.assertEqual(result['source_rows'][0]['value'], 12.5)
+
+    def test_provenance_unknown_field_returns_none(self):
+        from omop_core.services.provenance_service import get_field_provenance
+        result = get_field_provenance(self.person, 'nonexistent_field_xyz')
+        self.assertIsNone(result)
+
+    def test_provenance_composite_field(self):
+        from omop_core.services.provenance_service import get_field_provenance
+        result = get_field_provenance(self.person, 'bmi')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['selection_rule'], 'composite')
+
+
+class FieldProvenanceAPITest(TestCase):
+    """Test the field-provenance API endpoint."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.user = Identity.objects.create_user(
+            email='fp_api_test@test.com', password='testpass', is_staff=True,
+        )
+        cls.person = Person.objects.create(
+            person_id=99805, year_of_birth=1992,
+        )
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(cls.person)
+
+    def test_field_provenance_endpoint(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        resp = client.get(
+            f'/api/v1/patient-records/{self.person.person_id}/field-provenance/hemoglobin_g_dl/',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['field'], 'hemoglobin_g_dl')
+
+    def test_field_provenance_unknown_field_404(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        resp = client.get(
+            f'/api/v1/patient-records/{self.person.person_id}/field-provenance/nonexistent_xyz/',
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_field_provenance_bulk_endpoint(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        resp = client.get(
+            f'/api/v1/patient-records/{self.person.person_id}/field-provenance/',
+            {'fields': 'hemoglobin_g_dl,bmi'},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('hemoglobin_g_dl', resp.data)
+        self.assertIn('bmi', resp.data)
+
+    def test_field_provenance_access_control(self):
+        """Unauthenticated requests should be rejected."""
+        client = APIClient()
+        resp = client.get(
+            f'/api/v1/patient-records/{self.person.person_id}/field-provenance/hemoglobin_g_dl/',
+        )
+        self.assertIn(resp.status_code, [401, 403])
