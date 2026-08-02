@@ -54,8 +54,8 @@ describe('AcceptPatientInvite', () => {
     render(<AcceptPatientInvite />);
     await screen.findByDisplayValue('rae@example.com');
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText('Password'), 'sup3rsecret');
-    await user.type(screen.getByLabelText('Confirm password'), 'different1');
+    await user.type(screen.getByLabelText('Password'), 'sup3r-secret-pass');
+    await user.type(screen.getByLabelText('Confirm password'), 'different-pass-99');
     await user.click(screen.getByRole('button', { name: /create account/i }));
     expect(await screen.findByText(/passwords do not match/i)).toBeInTheDocument();
     expect(mockPost).not.toHaveBeenCalled();
@@ -68,13 +68,13 @@ describe('AcceptPatientInvite', () => {
     render(<AcceptPatientInvite />);
     await screen.findByDisplayValue('rae@example.com');
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText('Password'), 'sup3rsecret');
-    await user.type(screen.getByLabelText('Confirm password'), 'sup3rsecret');
+    await user.type(screen.getByLabelText('Password'), 'sup3r-secret-pass');
+    await user.type(screen.getByLabelText('Confirm password'), 'sup3r-secret-pass');
     await user.click(screen.getByRole('button', { name: /create account/i }));
     await waitFor(() =>
       expect(mockPost).toHaveBeenCalledWith('/v1/patient-invitations/accept/', {
         token: 'a'.repeat(64),
-        password: 'sup3rsecret',
+        password: 'sup3r-secret-pass',
       })
     );
     expect(await screen.findByText(/account created/i)).toBeInTheDocument();

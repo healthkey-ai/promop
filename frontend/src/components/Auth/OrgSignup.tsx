@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { publicApi } from "@/api/publicAxios";
 
-const MIN_PASSWORD_LENGTH = 8;
+const MIN_PASSWORD_LENGTH = 12;
 
 export default function OrgSignup() {
   const { slug } = useParams<{ slug: string }>();
@@ -187,7 +187,7 @@ export default function OrgSignup() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   className="block w-full rounded-md border border-input px-3 py-2 pr-10 shadow-sm placeholder:text-muted-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
-                  placeholder="At least 8 characters"
+                  placeholder="At least 12 characters"
                 />
                 <button
                   type="button"
@@ -204,7 +204,7 @@ export default function OrgSignup() {
                 </button>
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
-                Must be at least 8 characters, not a common password, and not entirely numeric.
+                Must be at least 12 characters, not a common password, and not entirely numeric.
               </p>
             </div>
 

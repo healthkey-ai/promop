@@ -11044,14 +11044,14 @@ class PatientInvitationTest(TestCase):
         inv = self._create_invite()
         resp = APIClient().post(
             '/api/v1/patient-invitations/accept/',
-            {'token': inv.token, 'password': 'sup3rsecret'}, format='json',
+            {'token': inv.token, 'password': 'sup3r-secret-pass'}, format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         inv.refresh_from_db()
         self.assertEqual(inv.status, 'accepted')
         pu = PatientUser.objects.get(person=self.person)
         self.assertTrue(pu.identity.has_usable_password())
-        self.assertTrue(pu.identity.check_password('sup3rsecret'))
+        self.assertTrue(pu.identity.check_password('sup3r-secret-pass'))
         # The new account is a first-class patient.
         self.assertEqual(patient_person_for(pu.identity), self.person)
 
@@ -11066,7 +11066,7 @@ class PatientInvitationTest(TestCase):
     def test_accept_rejects_unknown_token(self):
         resp = APIClient().post(
             '/api/v1/patient-invitations/accept/',
-            {'token': 'a' * 64, 'password': 'sup3rsecret'}, format='json',
+            {'token': 'a' * 64, 'password': 'sup3r-secret-pass'}, format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
@@ -11076,13 +11076,13 @@ class PatientInvitationTest(TestCase):
         inv.save(update_fields=['expires_at'])
         resp = APIClient().post(
             '/api/v1/patient-invitations/accept/',
-            {'token': inv.token, 'password': 'sup3rsecret'}, format='json',
+            {'token': inv.token, 'password': 'sup3r-secret-pass'}, format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_accept_cannot_be_replayed(self):
         inv = self._create_invite()
-        body = {'token': inv.token, 'password': 'sup3rsecret'}
+        body = {'token': inv.token, 'password': 'sup3r-secret-pass'}
         APIClient().post('/api/v1/patient-invitations/accept/', body, format='json')
         resp = APIClient().post('/api/v1/patient-invitations/accept/', body, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
@@ -11118,11 +11118,11 @@ class PatientInvitationTest(TestCase):
         inv = self._create_invite('rae@example.com')
         resp = APIClient().post(
             '/api/v1/patient-invitations/accept/',
-            {'token': inv.token, 'password': 'sup3rsecret'}, format='json',
+            {'token': inv.token, 'password': 'sup3r-secret-pass'}, format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         placeholder.refresh_from_db()
-        self.assertTrue(placeholder.check_password('sup3rsecret'))
+        self.assertTrue(placeholder.check_password('sup3r-secret-pass'))
         self.assertEqual(PatientUser.objects.get(person=self.person).identity, placeholder)
 
     # --- Email editable (lock-in) ---
@@ -11166,7 +11166,7 @@ class PatientSignupTest(TestCase):
     def test_staff_signup_local_creates_account_in_org(self):
         from patient_portal.models import PatientUser
         resp = self._staff().post(self.SIGNUP_URL, {
-            'org': 'acme-onc', 'email': 'newpt@example.com', 'password': 'sup3rsecret',
+            'org': 'acme-onc', 'email': 'newpt@example.com', 'password': 'sup3r-secret-pass',
             'given_name': 'New', 'family_name': 'Patient',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
@@ -11174,7 +11174,7 @@ class PatientSignupTest(TestCase):
         pid = resp.data['person_id']
         pu = PatientUser.objects.get(person__person_id=pid)
         self.assertTrue(pu.identity.has_usable_password())
-        self.assertTrue(pu.identity.check_password('sup3rsecret'))
+        self.assertTrue(pu.identity.check_password('sup3r-secret-pass'))
         record = PatientRecord.objects.get(person__person_id=pid)
         self.assertEqual(record.organization, self.org)
         self.assertEqual(record.email, 'newpt@example.com')
@@ -11216,7 +11216,7 @@ class PatientSignupTest(TestCase):
 
     def test_staff_signup_requires_org_when_none_bound(self):
         resp = self._staff().post(self.SIGNUP_URL, {
-            'email': 'noorg@example.com', 'password': 'sup3rsecret',
+            'email': 'noorg@example.com', 'password': 'sup3r-secret-pass',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
@@ -11224,7 +11224,7 @@ class PatientSignupTest(TestCase):
         c = APIClient()
         c.force_authenticate(user=self.patient)
         resp = c.post(self.SIGNUP_URL, {
-            'org': 'acme-onc', 'email': 'x@example.com', 'password': 'sup3rsecret',
+            'org': 'acme-onc', 'email': 'x@example.com', 'password': 'sup3r-secret-pass',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 

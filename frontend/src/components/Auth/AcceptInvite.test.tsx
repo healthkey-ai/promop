@@ -88,7 +88,7 @@ describe('AcceptInvite', () => {
     const user = userEvent.setup();
     await type(user, 'short');
     await user.click(acceptButton());
-    expect(await screen.findByText(/at least 8 characters/i)).toBeInTheDocument();
+    expect(await screen.findByText(/at least 12 characters/i)).toBeInTheDocument();
     expect(mockAxiosPost).not.toHaveBeenCalled();
   });
 

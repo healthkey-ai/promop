@@ -212,6 +212,9 @@ AUTH_PASSWORD_VALIDATORS = [
     },
     {
         'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+        # 12 chars — matches the analytics (PRism) app, which shares this identity
+        # table, so a credential set in promop always satisfies the analytics bar.
+        'OPTIONS': {'min_length': 12},
     },
     {
         'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
