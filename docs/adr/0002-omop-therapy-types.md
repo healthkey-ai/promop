@@ -1,6 +1,8 @@
 # ADR 0002 — OMOP-native therapy *types* (drug-class matching)
 
-**Status:** Draft / Proposed (for cross-repo discussion — do not implement past Phase 0 until accepted).
+**Status:** Draft / Proposed (for cross-repo discussion). Feasibility gate (Phase 0) is
+**preliminarily green** — the `component → class` derivation exists and is queryable; the
+remaining validation is a rollout-time shadow-compare, not a blocking upfront study.
 **Extends:** [ADR 0001 — promop is the vocabulary source of truth](0001-vocabulary-source-of-truth.md).
 **Deciders:** promop, EXACT/CB, SoC maintainers.
 **Context repos:** promop (owner, vocab SoT + patient derivation), EXACT (`~/exact`, trial authoring/CB + matcher), SoC (`~/soc`).
@@ -46,10 +48,20 @@ concept. Keep the rest on the CB-category path (**hybrid**, not a big-bang cutov
 2. **Matching semantics** follow the existing type matcher: **`required` = any-overlap (OR)**,
    **`excluded` = any-hit** — *not* the regimen-level superset rule.
 3. **No locally-minted concepts** (ADR 0001 §Integrity). Class concepts are licensed HemOnc/ATC.
-4. **Gated by a vocabulary spike (Phase 0):** the *patient-side* `component-concept → class-concept`
-   derivation must be proven against a pinned promop release before any code cutover.
-5. **Fail-closed:** an unmapped/lossy `required` type criterion must **never** degrade to an empty
-   requirement (which would silently drop the eligibility gate) — it stays legacy or fails closed.
+4. **promop pre-expands the patient's type values** and ships them to consumers, symmetric with
+   components. The patient's per-line **class concept_ids** are derived once in the SoT (the
+   `component concept → class concept` graph walk), release-stamped, and consumed as-is by EXACT —
+   EXACT does **not** traverse the vocabulary to derive types, and does **not** need the type edges
+   in its snapshot mirror. This is the ADR 0001 pre-expand stance, applied to types.
+5. **Fail-closed is the one hard invariant.** An unmapped/lossy `required` type criterion must
+   **never** degrade to an empty requirement (which would silently drop the eligibility gate) — it
+   stays legacy or fails closed. This is enforced by engineering (explicit `no_omop` marking +
+   matcher guard), not by an upfront comparison study.
+6. **Feasibility, not agreement, was the open question — and it is answered.** The spike proved the
+   derivation exists (Phase 0, green). We do **not** gate on the new OMOP mapping matching the old
+   CB lookup: the SME-curated OMOP crosswalk is the intended *replacement* for the legacy CB
+   taxonomy, so divergence is not by itself a defect. Any new-vs-old comparison is a rollout-time
+   **shadow-compare** (Phase 4), informational, not a blocking gate.
 
 ## Coverage (from the SME-reviewed crosswalk)
 
@@ -78,19 +90,20 @@ from promop's graph and is the subject of Phase 0.
 Mirrors the component cutover (#4447 → #228). Each phase is a ticket set; **do not start a phase
 before its predecessor's gate passes.**
 
-### Phase 0 — Vocab spike (PROMOP, BLOCKING GATE, no prod change)
-- **P0.1** For each of the ~20 mapped class concepts, resolve its member drugs
+### Phase 0 — Vocab feasibility spike (PROMOP, no prod change) — **DONE, green**
+- **P0.1** For each mapped class concept, resolve its member drugs
   (`class concept → component/ingredient concept_ids`) by traversing promop's `concept_relationship`
-  and/or `concept_ancestor` on a **pinned** release. Do **not** assume `concept_ancestor` carries
-  the non-hierarchical HemOnc class edges — verify.
-- **P0.2** Invert to the patient direction (`component concept_id → class concept_ids`) and
-  **audit precision/recall per active criterion** against EXACT's current
-  `component_concept_id → CB category` lookup (`ComponentCategoryOmopLookup`), **preserving
-  exclusions**.
-- **P0.3** Publish the definitive **lossless vs legacy** split (subset of the ~20 that pass).
-- **Gate:** no downstream phase until P0.2 meets an agreed precision/recall bar. *This is the one
-  unproven dependency; if the edges don't exist on the pinned release, the cutover stalls even
-  with a perfect CB mapping.*
+  on a **pinned** release. Do **not** assume `concept_ancestor` carries the non-hierarchical HemOnc
+  class edges — verify. *(Result: the edge is `Component --[Is a]--> Component Class`; see below.)*
+- **P0.2** Confirm the **corpus scope** on the pinned release includes what the patient payload
+  actually contains (promop emits HemOnc Component ids → single `Is a` hop; no RxNorm bridge needed
+  for those). Decide the ~2 ATC classes with no HemOnc `Is a` graph.
+- **P0.3** Publish the definitive **lossless vs legacy** split (the subset that resolves).
+- **What Phase 0 is NOT:** it is *not* a precision/recall study against the legacy
+  `ComponentCategoryOmopLookup`. The legacy CB lookup is the thing being *replaced*; requiring the
+  new mapping to reproduce it is backwards. New-vs-old comparison lives in Phase 4 (shadow-compare,
+  informational). The only Phase-0 gate is **"does the derivation exist and cover the intended
+  classes?"** — and it does.
 
 #### Phase 0 — preliminary spike results (run against a local Athena/HemOnc export)
 
@@ -137,8 +150,9 @@ queryable. Key findings:
   must confirm the corpus scope on the *pinned release* includes what the patient payload actually
   contains.
 
-Still to close before the gate is fully green: transitive-closure precision/recall **per active CB
-criterion** vs the current `ComponentCategoryOmopLookup`, and a decision on the 2 ATC classes.
+Still to close (housekeeping, not gates): confirm corpus scope on the *pinned* production release
+(this run used a local Athena/HemOnc export), and decide the 2 ATC classes (keep legacy, or find a
+HemOnc equivalent). Neither blocks starting the engineering.
 
 ### Phase 1 — CB / EXACT authoring (trial + mapping)
 - **P1.1** Load the category→OMOP-class-concept crosswalk into the CB vocab model — add
@@ -148,17 +162,25 @@ criterion** vs the current `ComponentCategoryOmopLookup`, and a decision on the 
   `[]` (fail-closed guard starts here).
 - **P1.3** CB owns the upstream conversion (ADR 0001 §Governance).
 
-### Phase 2 — PROMOP (patient-side class projection + release-stamp)
-- **P2.1** At refresh, derive per-line **therapy-class concept_ids** for the patient from the
-  line's component concept_ids, using the P0-proven edges. Add a read-model field
-  (`*_component_class_ids` / `therapy_class_ids`), **release-stamped via the [#362]
-  provenance/release_id machinery** (origin + `release_id`).
-- **P2.2** Expose it read-only on the patient serializer (like `*_component_ids`); add to
-  `read_only_fields`.
-- **Alternative (lighter):** do not pre-expand — instead **guarantee the `component→class` edges
-  are in the vocab-snapshot corpus** so EXACT derives types by traversing its own release-pinned
-  mirror. Same ADR 0001 tension (pre-expand vs consumer-traverse); pre-expand is symmetric with
-  components and centralizes the graph walk in the SoT.
+### Phase 2 — PROMOP (patient-side class projection + release-stamp) — **the substantive promop work**
+
+This is where the patient's type values come from. **Decided: promop pre-expands and ships them**
+(not EXACT-side mirror traversal) — symmetric with `*_component_ids`, centralizes the graph walk
+in the SoT, and removes any need for EXACT to carry the type edges in its mirror. Directly
+continues the #362 (provenance) / #270 (component expansion) patterns and is **self-contained**
+(no CB/EXACT dependency) — buildable now.
+
+- **P2.1** At refresh, derive per-line **therapy-class concept_ids** for the patient from the line's
+  component concept_ids via the P0-proven `Component --[Is a]--> Component Class` closure. Add a
+  read-model field (`*_component_class_ids` + aggregate `therapy_class_ids`), mirroring the
+  `*_component_ids` shape. Reuse `_expand_component_ids`' output as the input set (it already carries
+  the HemOnc Component ids → single `Is a` hop).
+- **P2.2** **Release-stamp** the derivation via the [#362] provenance/release_id machinery so a
+  consumer can assert patient↔trial release equality.
+- **P2.3** Expose read-only on the patient serializer (like `*_component_ids`); add to
+  `read_only_fields`. Cover both derivation paths (Episodes `_get_treatment_data` and inferred-LOT
+  `_apply_inferred_lots`), matching the component-id test structure in
+  `tests/test_therapy_component_ids.py`.
 
 ### Phase 3 — EXACT (schema + mapper + consumer + matcher)
 - **P3.1 (schema, prerequisite):** restore `omop_therapy_types_required/excluded` + GIN index
@@ -166,8 +188,8 @@ criterion** vs the current `ComponentCategoryOmopLookup`, and a decision on the 
 - **P3.2 (mapper):** `therapy_concept_mapper.build_omop_columns` emits `omop_therapy_types_*` from
   the CB category→class-concept mapping (today explicitly skipped).
 - **P3.3 (consumer):** `therapy_graph.derive_component_and_type_values` returns `type_values` as
-  **class concept_ids** in OMOP mode — from the promop field (P2.1) or the mirror-traversal
-  (P2.2 alternative). Legacy mode unchanged.
+  **class concept_ids** in OMOP mode — read **as-is from the promop patient field (P2.1)**, no local
+  traversal, no mirror dependency for types. Legacy mode unchanged.
 - **P3.4 (matcher):** overlap patient class concept_ids vs `omop_therapy_types_*` —
   `required` = any-overlap, `excluded` = any-hit — behind a **new flag `EXACT_OMOP_THERAPY_TYPES`**,
   dependent on component-id availability, dual-mode like `EXACT_OMOP_THERAPY`. One shared patient
@@ -176,10 +198,14 @@ criterion** vs the current `ComponentCategoryOmopLookup`, and a decision on the 
   #362 provides it). A `required` criterion mapping to `[]` must be treated fail-closed, never
   dropped.
 
-### Phase 4 — Validation & flip
+### Phase 4 — Shadow-compare & flip
 - **P4.1** Shadow-compare OMOP-type matching alongside CB-category matching on real trials/patients;
-  compare **both `required` and `excluded`** outcomes; zero divergence on the covered subset.
-- **P4.2** Coverage validation under the fail-closed rule.
+  log **both `required` and `excluded`** divergences. This is the *only* place new-vs-old is
+  compared — and it is **informational**: divergence surfaces cases for SME review (the OMOP mapping
+  may be the more-correct one), it does not by itself block the flip. **Exclusion divergences are
+  the exception** — any case where OMOP matching would *weaken* an exclusion (fail-open) is a hard
+  stop until resolved.
+- **P4.2** Coverage validation under the fail-closed rule (no `required` criterion resolves to `[]`).
 - **P4.3** Hybrid flip per environment (like #228): OMOP types for the lossless subset, CB
   categories retained for the ~10 legacy criteria.
 
@@ -198,14 +224,16 @@ criterion** vs the current `ComponentCategoryOmopLookup`, and a decision on the 
 
 ## Risks
 
-1. **Phase 0 is the real gate.** If `concept_relationship`/`concept_ancestor` do not cleanly give
-   `component → class` for the ~20 classes on the pinned release, the patient side can't be
-   derived and the cutover stalls regardless of the CB mapping.
-2. **Fail-open on partial coverage.** The current EXACT mapper drops unmapped values; for types a
-   dropped `required` criterion silently removes an eligibility gate. Must be fail-closed (P1.2,
-   P3.5).
+1. **Fail-open on partial coverage — the primary risk.** The current EXACT mapper drops unmapped
+   values; for types a dropped `required` criterion silently removes an eligibility gate, and a
+   dropped `excluded` value silently weakens an exclusion. Must be fail-closed (P1.2, P3.5) and is
+   the one hard stop in the Phase 4 shadow-compare.
+2. **Corpus-scope drift on the pinned release.** Feasibility is proven on a local export; the
+   pinned production release must actually carry the `Component --Is a--> Component Class` edges for
+   the classes patients present. Confirmed as P0.2 housekeeping before the promop derivation ships.
 3. **Granularity/semantic drift.** A CB category may be finer/coarser than its nearest class
-   concept; only criteria that are provably lossless (P0.2) may flip — the rest stay legacy.
+   concept; only the lossless subset flips — the rest stay legacy. Divergence here is surfaced (not
+   gated) by the Phase 4 shadow-compare for SME adjudication.
 
 ## Links
 
