@@ -14993,3 +14993,103 @@ class FieldProvenanceAPITest(TestCase):
             f'/api/v1/patient-records/{self.person.person_id}/field-provenance/hemoglobin_g_dl/',
         )
         self.assertIn(resp.status_code, [401, 403])
+
+
+class AdminDeletePatientTest(TestCase):
+    """Administrator single-patient deletion — staff (any org) or org_admin
+    (own org only), distinct from the patient self-service `me` DELETE."""
+
+    def setUp(self):
+        from omop_core.models import GroupAccess, PatientGroup
+        self.client = APIClient()
+        self.staff = _make_user('staff-del@test.com', is_staff=True)
+        self.org_a = _make_org('Org A Del', 'org-a-del')
+        self.org_b = _make_org('Org B Del', 'org-b-del')
+        self.admin_a = _make_user('admin-a-del@test.com')
+        GroupAccess.objects.create(identity=self.admin_a, org=self.org_a, role='org_admin')
+        self.doctor_a = _make_user('doctor-a-del@test.com')
+        self.group_a = PatientGroup.objects.create(
+            organization=self.org_a, name='Panel A', slug='panel-a')
+        # GroupAccess is org-XOR-group; a group panel grant sets group only.
+        GroupAccess.objects.create(identity=self.doctor_a, role='doctor', group=self.group_a)
+
+    def _make_patient(self, org, pid, in_group=None):
+        from omop_core.models import PatientGroupMembership
+        person = Person.objects.create(
+            person_id=pid, year_of_birth=1980, gender_source_value='unknown',
+            race_source_value='unknown', ethnicity_source_value='unknown',
+        )
+        PatientRecord.objects.create(person=person, organization=org)
+        if in_group is not None:
+            PatientGroupMembership.objects.create(group=in_group, person_id=person.person_id)
+        return person
+
+    def _url(self, person_id):
+        return f'/api/v1/patient-records/{person_id}/admin-delete/'
+
+    def _delete(self, user, person_id, body={'confirm': 'DELETE'}):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        return self.client.delete(self._url(person_id), body, format='json')
+
+    def test_staff_can_delete_any_patient(self):
+        p = self._make_patient(self.org_b, 700001)  # even another org
+        resp = self._delete(self.staff, 700001)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(Person.objects.filter(person_id=700001).exists())
+        self.assertFalse(PatientRecord.objects.filter(person_id=700001).exists())
+
+    def test_org_admin_can_delete_own_org_patient(self):
+        self._make_patient(self.org_a, 700002)
+        resp = self._delete(self.admin_a, 700002)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(Person.objects.filter(person_id=700002).exists())
+
+    def test_org_admin_cannot_delete_other_org_patient(self):
+        self._make_patient(self.org_b, 700003)
+        resp = self._delete(self.admin_a, 700003)
+        self.assertIn(resp.status_code, (403, 404))
+        self.assertTrue(Person.objects.filter(person_id=700003).exists())
+
+    def test_doctor_with_view_access_cannot_delete(self):
+        """A doctor who can *see* the patient (group panel) still can't delete —
+        view access is not delete authority."""
+        self._make_patient(self.org_a, 700004, in_group=self.group_a)
+        resp = self._delete(self.doctor_a, 700004)
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(Person.objects.filter(person_id=700004).exists())
+
+    def test_requires_confirm(self):
+        self._make_patient(self.org_a, 700005)
+        resp = self._delete(self.staff, 700005, body={})
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(Person.objects.filter(person_id=700005).exists())
+
+    def test_unauthenticated_denied(self):
+        self._make_patient(self.org_a, 700006)
+        resp = APIClient().delete(self._url(700006), {'confirm': 'DELETE'}, format='json')
+        self.assertIn(resp.status_code, (401, 403))
+        self.assertTrue(Person.objects.filter(person_id=700006).exists())
+
+    def test_deletes_patient_login_identity(self):
+        from patient_portal.models import PatientUser
+        p = self._make_patient(self.org_a, 700007)
+        pt_ident = Identity.objects.create_user(email='pt7-del@test.com', password=None)
+        PatientUser.objects.create(identity=pt_ident, person=p)
+        resp = self._delete(self.staff, 700007)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(Identity.objects.filter(pk=pt_ident.pk).exists())
+
+    def test_preserves_identity_that_also_has_provider_access(self):
+        """If the patient's linked identity is also a provider (holds GroupAccess),
+        delete the record but keep the identity so provider access isn't revoked."""
+        from omop_core.models import GroupAccess
+        from patient_portal.models import PatientUser
+        p = self._make_patient(self.org_a, 700008)
+        dual = _make_user('dual-del@test.com')
+        GroupAccess.objects.create(identity=dual, org=self.org_a, role='doctor')
+        PatientUser.objects.create(identity=dual, person=p)
+        resp = self._delete(self.staff, 700008)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(Person.objects.filter(person_id=700008).exists())
+        self.assertTrue(Identity.objects.filter(pk=dual.pk).exists())

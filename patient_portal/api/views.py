@@ -830,6 +830,87 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response({'detail': 'Account and all associated data have been permanently deleted.'})
 
+    @action(detail=True, methods=['delete'], url_path='admin-delete',
+            permission_classes=[IsAuthenticated])
+    def admin_delete(self, request, pk=None):
+        """DELETE /api/v1/patient-records/{person_id}/admin-delete/ — administrator
+        deletion of a patient and all associated data (PHR-S FM TI.1.7, admin-initiated).
+
+        ``pk`` is the person_id (consistent with retrieve/export_fhir). Distinct from
+        the patient self-service ``me`` DELETE.
+
+        Authorization:
+          - staff / superuser: may delete any patient.
+          - org_admin: may delete only when EVERY org the patient has a record in is
+            one they administer (``get_admin_orgs``). This prevents cascade-deleting a
+            patient that is also owned by an org the caller does not administer.
+          - everyone else (doctors, analysts, patients): 403.
+
+        Requires body ``{"confirm": "DELETE"}``. The request is audited by
+        AuditLogMiddleware (record_delete); an explicit log line is also emitted.
+        """
+        from patient_portal.models import PatientUser
+        from omop_core.models import GroupAccess, Person
+
+        # Resolve by person_id directly — authorization here is the explicit
+        # staff/org-admin check below, which is stricter than mere view access
+        # (a viewer is not necessarily allowed to delete).
+        try:
+            person = Person.objects.get(person_id=pk)
+        except (Person.DoesNotExist, ValueError, TypeError):
+            return Response({'detail': 'Patient not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        actor = request.user
+        is_staff_actor = bool(getattr(actor, 'is_staff', False))
+        if not is_staff_actor:
+            admin_org_ids = set(get_admin_orgs(actor).values_list('id', flat=True))
+            person_org_ids = set(
+                PatientRecord.objects.filter(person=person)
+                .values_list('organization_id', flat=True)
+            )
+            # Every org this patient belongs to must be one the caller administers;
+            # an org-less patient (empty set) is staff-only.
+            if not person_org_ids or not person_org_ids.issubset(admin_org_ids):
+                return Response(
+                    {'detail': 'You do not have permission to delete this patient.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+        if request.data.get('confirm') != 'DELETE':
+            return Response(
+                {'detail': 'Request body must include {"confirm": "DELETE"}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        person_id = person.person_id
+        # Remove a purely-patient login alongside the record; keep an Identity that
+        # also holds provider access (GroupAccess) so we don't revoke a provider.
+        linked_identity = None
+        pu = PatientUser.objects.filter(person=person).select_related('identity').first()
+        if pu and not GroupAccess.objects.filter(identity=pu.identity).exists():
+            linked_identity = pu.identity
+
+        with transaction.atomic():
+            # EpisodeEvent has a bare integer FK not covered by CASCADE.
+            episode_ids = list(
+                Episode.objects.filter(person=person).values_list('episode_id', flat=True)
+            )
+            if episode_ids:
+                EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
+            # Person delete cascades to OMOP rows, PatientRecord(s), PatientUser.
+            person.delete()
+            if linked_identity is not None:
+                linked_identity.delete()
+
+        logger.info(
+            'admin_patient_deleted person_id=%s by_identity_id=%s is_staff=%s',
+            person_id, actor.pk, is_staff_actor,
+        )
+        return Response(
+            {'detail': 'Patient and all associated data have been permanently deleted.'}
+        )
+
     @action(detail=True, methods=['get'], url_path='export-fhir',
             permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def export_fhir(self, request, pk=None):
