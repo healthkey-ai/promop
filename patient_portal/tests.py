@@ -9097,7 +9097,8 @@ class OrgInvitationFlowTest(TestCase):
         })
         self.assertEqual(resp.status_code, 201)
         invitation = OrgInvitation.objects.get(org=self.org, email='repro-analyst@example.com')
-        confirm = APIClient().post('/api/orgs/confirm-invitation/', {'token': invitation.token})
+        confirm = APIClient().post('/api/orgs/confirm-invitation/',
+                                   {'token': invitation.token, 'password': 'Str0ng-pass-42'})
         self.assertEqual(confirm.status_code, 200, confirm.data)
         self.assertEqual(confirm.data.get('redirect_url'), 'https://analytics.healthkey.ai')
 
@@ -9116,6 +9117,63 @@ class OrgInvitationFlowTest(TestCase):
         body = mail.outbox[0].body
         self.assertIn(f'{settings.APP_BASE_URL}/accept-invite?token={invitation.token}', body)
         self.assertNotIn(f'/org/{self.org.slug}/accept-invite', body)
+
+    # --- password-on-accept (mirrors the patient-invite flow) ---
+
+    def _invite(self, email, role='analyst'):
+        resp = self.client.post('/api/orgs/invite-org/invite/', {'email': email, 'role': role})
+        self.assertEqual(resp.status_code, 201, resp.data)
+        return OrgInvitation.objects.get(org=self.org, email=email)
+
+    def test_confirm_sets_password_on_placeholder(self):
+        invitation = self._invite('pw-analyst@example.com')
+        resp = APIClient().post('/api/orgs/confirm-invitation/',
+                                {'token': invitation.token, 'password': 'Str0ng-pass-42'})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        identity = Identity.objects.get(email='pw-analyst@example.com', issuer='urn:local')
+        self.assertTrue(identity.has_usable_password())
+        self.assertTrue(identity.check_password('Str0ng-pass-42'))
+
+    def test_confirm_rejects_weak_password_for_placeholder(self):
+        invitation = self._invite('weak-pw@example.com')
+        resp = APIClient().post('/api/orgs/confirm-invitation/',
+                                {'token': invitation.token, 'password': 'short'})
+        self.assertEqual(resp.status_code, 400)
+        identity = Identity.objects.get(email='weak-pw@example.com', issuer='urn:local')
+        self.assertFalse(identity.has_usable_password())
+        invitation.refresh_from_db()
+        self.assertIsNone(invitation.confirmed_at)  # not accepted
+
+    def test_confirm_requires_password_for_placeholder(self):
+        invitation = self._invite('needs-pw@example.com')
+        resp = APIClient().post('/api/orgs/confirm-invitation/', {'token': invitation.token})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_confirm_does_not_overwrite_existing_account_password(self):
+        existing = Identity.objects.create_user(
+            email='has-acct@example.com', password='Existing-pass-1')
+        invitation = self._invite('has-acct@example.com')
+        resp = APIClient().post('/api/orgs/confirm-invitation/',
+                                {'token': invitation.token, 'password': 'Attempt-override-9'})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        existing.refresh_from_db()
+        self.assertTrue(existing.check_password('Existing-pass-1'))
+        self.assertFalse(existing.check_password('Attempt-override-9'))
+
+    def test_lookup_reports_needs_password_for_new_invite(self):
+        invitation = self._invite('lookup-new@example.com')
+        resp = APIClient().get('/api/v1/orgs/invitation-lookup/', {'token': invitation.token})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(resp.data['needs_password'])
+        self.assertEqual(resp.data['email'], 'lookup-new@example.com')
+        self.assertEqual(resp.data['org_name'], self.org.name)
+
+    def test_lookup_no_password_for_existing_account(self):
+        Identity.objects.create_user(email='lookup-existing@example.com', password='Existing-pass-1')
+        invitation = self._invite('lookup-existing@example.com')
+        resp = APIClient().get('/api/v1/orgs/invitation-lookup/', {'token': invitation.token})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(resp.data['needs_password'])
 
     def test_invite_analyst_allows_custom_redirect_url(self):
         resp = self.client.post('/api/orgs/invite-org/invite/', {
