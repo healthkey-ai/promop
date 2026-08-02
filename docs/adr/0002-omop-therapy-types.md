@@ -1,8 +1,12 @@
 # ADR 0002 — OMOP-native therapy *types* (drug-class matching)
 
-**Status:** Draft / Proposed (for cross-repo discussion). Feasibility gate (Phase 0) is
-**preliminarily green** — the `component → class` derivation exists and is queryable; the
-remaining validation is a rollout-time shadow-compare, not a blocking upfront study.
+**Status:** **Accepted 2026-08-03** (cross-repo: promop / CancerBot / EXACT). Supersedes the
+"types are not OMOP-mapped" decision (**EXACT ADR 0001 decision A / CB #4502**): its premise —
+*"a patient never carries a class concept"* — no longer holds now that promop pre-expands the
+patient's class concept_ids (`*_component_class_ids`, [#370]). Feasibility gate (Phase 0) is
+**green** — the `component → class` derivation exists and is queryable; remaining validation is a
+rollout-time shadow-compare, not a blocking upfront study. Implementation tracked in the epic
+[healthkey-ai/exact#283]: CB-side cancerbot#4631–4634, EXACT-side exact#284–288.
 **Extends:** [ADR 0001 — promop is the vocabulary source of truth](0001-vocabulary-source-of-truth.md).
 **Deciders:** promop, EXACT/CB, SoC maintainers.
 **Context repos:** promop (owner, vocab SoT + patient derivation), EXACT (`~/exact`, trial authoring/CB + matcher), SoC (`~/soc`).
