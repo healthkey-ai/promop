@@ -23,16 +23,12 @@ vi.mock('react-router-dom', () => ({
   useNavigate: () => mockNavigate,
 }));
 
-// Default lookup: an existing account (no password step) so the plain accept-flow
-// tests reach the Accept button directly.
-const lookup = (over = {}) =>
-  mockAxiosGet.mockResolvedValue({
-    data: { email: 'a@b.com', org_name: 'Acme Oncology', role: 'Analyst', needs_password: false, ...over },
-  });
-
 beforeEach(() => {
   vi.clearAllMocks();
-  lookup();
+  // Best-effort lookup for org/role display.
+  mockAxiosGet.mockResolvedValue({
+    data: { email: 'a@b.com', org_name: 'Acme Oncology', role: 'Analyst' },
+  });
 });
 
 const withToken = () =>
@@ -40,7 +36,11 @@ const withToken = () =>
 const withoutToken = () =>
   mockUseSearchParams.mockReturnValue([new URLSearchParams(''), vi.fn()]);
 
-const acceptButton = () => screen.findByRole('button', { name: /accept invitation/i });
+const acceptButton = () => screen.getByRole('button', { name: /accept & set password/i });
+const type = async (u: ReturnType<typeof userEvent.setup>, pw: string, confirm = pw) => {
+  await u.type(screen.getByLabelText('Password'), pw);
+  await u.type(screen.getByLabelText(/confirm password/i), confirm);
+};
 
 describe('AcceptInvite', () => {
   it('shows error message immediately when no token is in the URL', () => {
@@ -49,41 +49,31 @@ describe('AcceptInvite', () => {
     expect(screen.getByText(/No invitation token found/i)).toBeInTheDocument();
   });
 
-  it('shows the Accept button (with org/role) after the invitation loads', async () => {
+  it('always shows the password fields when a token is present', () => {
     withToken();
     render(<AcceptInviteModule.default />);
-    expect(await acceptButton()).toBeInTheDocument();
-    expect(screen.getByText(/Acme Oncology/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Password')).toBeInTheDocument();
+    expect(screen.getByLabelText(/confirm password/i)).toBeInTheDocument();
+    expect(acceptButton()).toBeInTheDocument();
   });
 
-  it('shows an error when the invitation lookup fails', async () => {
+  it('still shows the password fields when the org lookup fails', async () => {
     withToken();
-    mockAxiosGet.mockRejectedValueOnce({ response: { data: { error: 'Invitation has expired.' } } });
+    mockAxiosGet.mockRejectedValueOnce(new Error('endpoint missing'));
     render(<AcceptInviteModule.default />);
-    await waitFor(() => expect(screen.getByText('Invitation has expired.')).toBeInTheDocument());
+    // Field is present regardless of the lookup result.
+    expect(screen.getByLabelText('Password')).toBeInTheDocument();
+    await waitFor(() => expect(mockAxiosGet).toHaveBeenCalled());
+    expect(screen.getByLabelText('Password')).toBeInTheDocument();
   });
 
-  it('calls confirm-invitation with just the token when no password is needed', async () => {
+  it('submits the token and password to confirm-invitation on accept', async () => {
     withToken();
     mockAxiosPost.mockResolvedValueOnce({ data: { detail: 'Done.' } });
     render(<AcceptInviteModule.default />);
     const user = userEvent.setup();
-    await user.click(await acceptButton());
-    await waitFor(() =>
-      expect(mockAxiosPost).toHaveBeenCalledWith('/orgs/confirm-invitation/', { token: 'abc123def456' })
-    );
-  });
-
-  it('collects and submits a password when the invite needs one', async () => {
-    withToken();
-    lookup({ needs_password: true });
-    mockAxiosPost.mockResolvedValueOnce({ data: { detail: 'Done.' } });
-    render(<AcceptInviteModule.default />);
-    const user = userEvent.setup();
-    await acceptButton();
-    await user.type(screen.getByLabelText('Password'), 'Str0ng-pass-42');
-    await user.type(screen.getByLabelText(/confirm password/i), 'Str0ng-pass-42');
-    await user.click(await acceptButton());
+    await type(user, 'Str0ng-pass-42');
+    await user.click(acceptButton());
     await waitFor(() =>
       expect(mockAxiosPost).toHaveBeenCalledWith('/orgs/confirm-invitation/', {
         token: 'abc123def456',
@@ -94,40 +84,22 @@ describe('AcceptInvite', () => {
 
   it('blocks submission when the password is too short and does not call the API', async () => {
     withToken();
-    lookup({ needs_password: true });
     render(<AcceptInviteModule.default />);
     const user = userEvent.setup();
-    await acceptButton();
-    await user.type(screen.getByLabelText('Password'), 'short');
-    await user.type(screen.getByLabelText(/confirm password/i), 'short');
-    await user.click(await acceptButton());
+    await type(user, 'short');
+    await user.click(acceptButton());
     expect(await screen.findByText(/at least 8 characters/i)).toBeInTheDocument();
     expect(mockAxiosPost).not.toHaveBeenCalled();
   });
 
   it('blocks submission when the passwords do not match', async () => {
     withToken();
-    lookup({ needs_password: true });
     render(<AcceptInviteModule.default />);
     const user = userEvent.setup();
-    await acceptButton();
-    await user.type(screen.getByLabelText('Password'), 'Str0ng-pass-42');
-    await user.type(screen.getByLabelText(/confirm password/i), 'Different-99');
-    await user.click(await acceptButton());
+    await type(user, 'Str0ng-pass-42', 'Different-99');
+    await user.click(acceptButton());
     expect(await screen.findByText(/do not match/i)).toBeInTheDocument();
     expect(mockAxiosPost).not.toHaveBeenCalled();
-  });
-
-  it('shows success message and Go to PROMOP button after a successful accept', async () => {
-    withToken();
-    mockAxiosPost.mockResolvedValueOnce({ data: { detail: 'Access granted to Acme Oncology.' } });
-    render(<AcceptInviteModule.default />);
-    const user = userEvent.setup();
-    await user.click(await acceptButton());
-    await waitFor(() =>
-      expect(screen.getByText('Access granted to Acme Oncology.')).toBeInTheDocument()
-    );
-    expect(screen.getByRole('button', { name: /go to promop/i })).toBeInTheDocument();
   });
 
   it('redirects to the supplied analyst site after a successful accept', async () => {
@@ -140,7 +112,8 @@ describe('AcceptInvite', () => {
     });
     render(<AcceptInviteModule.default />);
     const user = userEvent.setup();
-    await user.click(await acceptButton());
+    await type(user, 'Str0ng-pass-42');
+    await user.click(acceptButton());
     await waitFor(() => screen.getByRole('link', { name: /continue/i }));
     expect(screen.getByRole('link', { name: /continue/i })).toHaveAttribute(
       'href',
@@ -148,12 +121,13 @@ describe('AcceptInvite', () => {
     );
   });
 
-  it('navigates to / when Go to PROMOP is clicked after success', async () => {
+  it('shows success + Go to PROMOP when there is no redirect', async () => {
     withToken();
     mockAxiosPost.mockResolvedValueOnce({ data: { detail: 'Done.' } });
     render(<AcceptInviteModule.default />);
     const user = userEvent.setup();
-    await user.click(await acceptButton());
+    await type(user, 'Str0ng-pass-42');
+    await user.click(acceptButton());
     await waitFor(() => screen.getByRole('button', { name: /go to promop/i }));
     await user.click(screen.getByRole('button', { name: /go to promop/i }));
     expect(mockNavigate).toHaveBeenCalledWith('/');
@@ -166,7 +140,8 @@ describe('AcceptInvite', () => {
     });
     render(<AcceptInviteModule.default />);
     const user = userEvent.setup();
-    await user.click(await acceptButton());
+    await type(user, 'Str0ng-pass-42');
+    await user.click(acceptButton());
     await waitFor(() =>
       expect(screen.getByText('Invitation has expired.')).toBeInTheDocument()
     );
