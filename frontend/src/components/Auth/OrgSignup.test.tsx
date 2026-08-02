@@ -77,7 +77,7 @@ describe("OrgSignup", () => {
     fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "short" } });
     fireEvent.click(screen.getByRole("button", { name: "Create account" }));
 
-    expect(screen.getByText("Password must be at least 8 characters.")).toBeInTheDocument();
+    expect(screen.getByText("Password must be at least 12 characters.")).toBeInTheDocument();
     expect(mockPost).not.toHaveBeenCalled();
   });
 
@@ -92,8 +92,8 @@ describe("OrgSignup", () => {
     });
 
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "test@test.com" } });
-    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "password123" } });
-    fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "password456" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "password-alpha-1" } });
+    fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "password-bravo-2" } });
     fireEvent.click(screen.getByRole("button", { name: "Create account" }));
 
     expect(screen.getByText("Passwords do not match.")).toBeInTheDocument();
@@ -114,8 +114,8 @@ describe("OrgSignup", () => {
     });
 
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "exists@test.com" } });
-    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "password123" } });
-    fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "password123" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "password-alpha-1" } });
+    fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "password-alpha-1" } });
     fireEvent.click(screen.getByRole("button", { name: "Create account" }));
 
     await waitFor(() => {
@@ -137,8 +137,8 @@ describe("OrgSignup", () => {
     });
 
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "test@test.com" } });
-    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "12345678" } });
-    fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "12345678" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "123456789012" } });
+    fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "123456789012" } });
     fireEvent.click(screen.getByRole("button", { name: "Create account" }));
 
     await waitFor(() => {
