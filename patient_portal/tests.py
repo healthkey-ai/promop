@@ -9088,6 +9088,35 @@ class OrgInvitationFlowTest(TestCase):
         self.assertEqual(invitation.redirect_url, 'https://analytics.healthkey.ai')
         self.assertEqual(grant.redirect_url, 'https://analytics.healthkey.ai')
 
+    def test_invite_then_confirm_analyst_returns_default_redirect(self):
+        """End-to-end: invite analyst (no redirect_url given) → confirm → the
+        confirm response carries the default analytics redirect."""
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'repro-analyst@example.com',
+            'role': 'analyst',
+        })
+        self.assertEqual(resp.status_code, 201)
+        invitation = OrgInvitation.objects.get(org=self.org, email='repro-analyst@example.com')
+        confirm = APIClient().post('/api/orgs/confirm-invitation/', {'token': invitation.token})
+        self.assertEqual(confirm.status_code, 200, confirm.data)
+        self.assertEqual(confirm.data.get('redirect_url'), 'https://analytics.healthkey.ai')
+
+    def test_invitation_email_links_to_bare_accept_invite_route(self):
+        """The emailed link must point at the SPA's /accept-invite route (which
+        runs the accept + redirect), not an org-scoped path that no route matches."""
+        from django.conf import settings
+        from django.core import mail
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'link-check@example.com',
+            'role': 'analyst',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(len(mail.outbox), 1)
+        invitation = OrgInvitation.objects.get(org=self.org, email='link-check@example.com')
+        body = mail.outbox[0].body
+        self.assertIn(f'{settings.APP_BASE_URL}/accept-invite?token={invitation.token}', body)
+        self.assertNotIn(f'/org/{self.org.slug}/accept-invite', body)
+
     def test_invite_analyst_allows_custom_redirect_url(self):
         resp = self.client.post('/api/orgs/invite-org/invite/', {
             'email': 'analyst-custom@example.com',
@@ -14092,14 +14121,18 @@ class PatientInviteViaOrgTest(TestCase):
         pu = PatientUser.objects.get(identity=identity)
         self.assertEqual(pu.person_id, person.pk)
 
-    def test_invitation_email_uses_org_scoped_url(self):
+    def test_invitation_email_uses_bare_accept_invite_url(self):
+        # The link must hit the SPA's /accept-invite route (which runs the accept +
+        # post-accept redirect). An /org/<slug>/accept-invite path matches no route
+        # and is swallowed by the catch-all, so the accept page never renders.
         from django.core import mail
         self.client.post('/api/orgs/pt-inv-org/invite/', {
             'email': 'email-check@test.com',
             'role': 'doctor',
         })
         self.assertEqual(len(mail.outbox), 1)
-        self.assertIn('/org/pt-inv-org/accept-invite?token=', mail.outbox[0].body)
+        self.assertIn('/accept-invite?token=', mail.outbox[0].body)
+        self.assertNotIn('/org/pt-inv-org/accept-invite', mail.outbox[0].body)
 
 
 @override_settings(
