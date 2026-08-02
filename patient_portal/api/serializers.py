@@ -429,7 +429,10 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 'component_ids': comp or [],
                 # Therapy-class ("type") concept_ids for the line (ADR 0002),
                 # derived from component_ids; parity with the flat
-                # *_component_class_ids fields.
+                # *_component_class_ids fields. For 3L+ lines this is the shared
+                # later-line aggregate (like component_ids), flagged by
+                # later_aggregate — an individual later line may show classes
+                # from a sibling later line.
                 'component_class_ids': comp_class or [],
                 # ISO strings on the wire, consistent with the flat *_date fields
                 # (DRF DateField); avoids raw date objects leaking to consumers

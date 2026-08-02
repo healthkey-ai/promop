@@ -51,8 +51,11 @@ REGIMEN_RVD_ID = 35_800_501
 REGIMEN_KD_ID = 35_800_502
 
 
-def _link(c1, c2, rel_id):
-    """Create a concept_relationship row (plus its Relationship fixture row)."""
+def _link(c1, c2, rel_id, invalid_reason=None):
+    """Create a concept_relationship row (plus its Relationship fixture row).
+
+    invalid_reason='D'/'U' marks the edge retired (Athena preserves these).
+    """
     Relationship.objects.get_or_create(
         relationship_id=rel_id,
         defaults=dict(
@@ -63,6 +66,7 @@ def _link(c1, c2, rel_id):
     return ConceptRelationship.objects.create(
         concept_1_id=c1, concept_2_id=c2, relationship_id=rel_id,
         valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        invalid_reason=invalid_reason,
     )
 
 
@@ -161,6 +165,28 @@ def test_expand_depth_cap_truncates_and_warns(caplog):
     assert any('depth cap' in r.message for r in caplog.records)
 
 
+def test_expand_chain_exactly_at_cap_does_not_warn(caplog):
+    """A chain whose deepest class sits at exactly _CLASS_MAX_HOPS is complete,
+    not truncated — it must return all levels and emit no warning."""
+    import logging
+    from omop_core.services import patient_record_service as svc
+
+    _component(BORTEZOMIB_ID, 'Bortezomib')
+    # Exactly _CLASS_MAX_HOPS classes: drug --Is a--> c1 --> ... --> cN.
+    chain = [35_808_101 + i for i in range(svc._CLASS_MAX_HOPS)]
+    for cid in chain:
+        _component_class(cid, f'Class {cid}')
+    _link(BORTEZOMIB_ID, chain[0], 'Is a')
+    for a, b in zip(chain, chain[1:]):
+        _link(a, b, 'Is a')
+
+    with caplog.at_level(logging.WARNING, logger=svc.__name__):
+        result = _expand_class_ids([BORTEZOMIB_ID])
+
+    assert result == set(chain)  # every level resolved
+    assert not any('depth cap' in r.message for r in caplog.records)
+
+
 def test_expand_within_depth_cap_does_not_warn(caplog):
     """A chain that fully resolves before the cap must not emit the warning."""
     import logging
@@ -177,6 +203,22 @@ def test_expand_within_depth_cap_does_not_warn(caplog):
 
     assert result == {PROTEASOME_INHIBITOR_ID, TARGETED_THERAPY_ID}
     assert not any('depth cap' in r.message for r in caplog.records)
+
+
+def test_expand_ignores_retired_edge_and_retired_class():
+    """Retired 'Is a' edges and retired class-concept targets (invalid_reason
+    set) must not contribute type-ids — they would cause false matches."""
+    _component(BORTEZOMIB_ID, 'Bortezomib')
+    _component(LENALIDOMIDE_ID, 'Lenalidomide')
+    # Valid class, but reached only by a RETIRED edge → excluded.
+    _component_class(PROTEASOME_INHIBITOR_ID, 'Proteasome inhibitor')
+    _link(BORTEZOMIB_ID, PROTEASOME_INHIBITOR_ID, 'Is a', invalid_reason='D')
+    # RETIRED class concept, reached by a valid edge → excluded.
+    retired_class = _component_class(IMID_ID, 'IMiD (retired)')
+    retired_class.invalid_reason = 'D'
+    retired_class.save(update_fields=['invalid_reason'])
+    _link(LENALIDOMIDE_ID, IMID_ID, 'Is a')
+    assert _expand_class_ids([BORTEZOMIB_ID, LENALIDOMIDE_ID]) == set()
 
 
 def test_expand_empty_and_miss():

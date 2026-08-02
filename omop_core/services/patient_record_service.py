@@ -650,34 +650,43 @@ def _expand_class_ids(component_ids):
     _CLASS_MAX_HOPS backstops any pathological graph. Returns a set of
     class concept_ids (never includes the seed component ids themselves).
     """
-    seen = {int(c) for c in (component_ids or ()) if c}
-    if not seen:
+    def _class_parents(ids):
+        # Exclude retired edges and retired class targets: Athena preserves
+        # invalid_reason on historical rows, and an obsolete class id in a
+        # patient's set would produce a false type-criterion match downstream.
+        return set(
+            ConceptRelationship.objects.filter(
+                concept_1_id__in=ids,
+                relationship_id=_TYPE_RELATIONSHIP_ID,
+                concept_2__concept_class_id=_TYPE_CONCEPT_CLASS_ID,
+                invalid_reason__isnull=True,
+                concept_2__invalid_reason__isnull=True,
+            ).values_list('concept_2_id', flat=True)
+        )
+
+    seed_size = len({int(c) for c in (component_ids or ()) if c})
+    if not seed_size:
         return set()
+    seen = {int(c) for c in (component_ids or ()) if c}
     classes = set()
     frontier = seen
     for _ in range(_CLASS_MAX_HOPS):
-        hits = set(
-            ConceptRelationship.objects.filter(
-                concept_1_id__in=frontier,
-                relationship_id=_TYPE_RELATIONSHIP_ID,
-                concept_2__concept_class_id=_TYPE_CONCEPT_CLASS_ID,
-            ).values_list('concept_2_id', flat=True)
-        )
-        new = hits - seen
+        new = _class_parents(frontier) - seen
         if not new:
-            break
+            return classes          # graph fully resolved within the cap
         classes |= new
         seen |= new
         frontier = new
-    else:
-        # Range exhausted without an empty-frontier break: a class chain deeper
-        # than _CLASS_MAX_HOPS may exist and its top levels were not expanded.
-        # Never drop silently (project convention) — surface it for triage.
+    # Cap reached with a non-empty frontier. Probe one more hop to tell
+    # "chain ended exactly at the cap" (complete) from a genuine truncation —
+    # only the latter is worth a warning. Never drop silently (project
+    # convention): surface real truncations for triage.
+    if _class_parents(frontier) - seen:
         logger.warning(
-            "therapy-class BFS hit depth cap _CLASS_MAX_HOPS=%d without "
-            "exhausting the 'Is a' → Component Class graph; deeper class "
-            "ancestors may be missing (seed size %d, classes so far %d)",
-            _CLASS_MAX_HOPS, len(seen) - len(classes), len(classes),
+            "therapy-class BFS hit depth cap _CLASS_MAX_HOPS=%d with deeper "
+            "'Is a' → Component Class ancestors still unexpanded (seed size %d, "
+            "classes so far %d)",
+            _CLASS_MAX_HOPS, seed_size, len(classes),
         )
     return classes
 
