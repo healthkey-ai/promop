@@ -67,7 +67,7 @@ function AppRoutes() {
 
   const publicPaths = ['/accept-invite', '/accept-patient-invite', '/reset-password', '/login', '/auth/callback'];
   const isPublicPath = (path: string) =>
-    publicPaths.includes(path) || /^\/org\/[^/]+\/(login|signup|forgot-password)$/.test(path);
+    publicPaths.includes(path) || /^\/org\/[^/]+\/(login|signup|forgot-password|accept-invite)$/.test(path);
   if (authLoading && !isPublicPath(location.pathname)) {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -83,7 +83,7 @@ function AppRoutes() {
   // link, invite acceptance) are exempt so those flows can still complete.
   const forceChangeExemptPaths = ['/reset-password', '/accept-invite', '/accept-patient-invite'];
   const isForceChangeExempt = (path: string) =>
-    forceChangeExemptPaths.includes(path) || /^\/org\/[^/]+\/(login|signup|forgot-password)$/.test(path);
+    forceChangeExemptPaths.includes(path) || /^\/org\/[^/]+\/(login|signup|forgot-password|accept-invite)$/.test(path);
   if (
     currentUser?.must_change_password &&
     !isForceChangeExempt(location.pathname)
@@ -106,6 +106,9 @@ function AppRoutes() {
       <Route path="/login" element={<Login />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
       <Route path="/accept-invite" element={<AcceptInvite />} />
+      {/* Alias for invitation emails sent before the link was un-nested — the
+          token in the query string carries everything; the slug is cosmetic. */}
+      <Route path="/org/:slug/accept-invite" element={<AcceptInvite />} />
       <Route path="/accept-patient-invite" element={<AcceptPatientInvite />} />
       <Route path="/reset-password" element={<ResetPassword />} />
 
