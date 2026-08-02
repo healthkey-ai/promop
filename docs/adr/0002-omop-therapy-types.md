@@ -92,6 +92,54 @@ before its predecessor's gate passes.**
   unproven dependency; if the edges don't exist on the pinned release, the cutover stalls even
   with a perfect CB mapping.*
 
+#### Phase 0 — preliminary spike results (run against a local Athena/HemOnc export)
+
+**Gate is preliminarily GREEN for the HemOnc subset.** The `component → class` edge exists and is
+queryable. Key findings:
+
+- **Mechanism = `HemOnc Component --[Is a]--> HemOnc Component Class` (transitive), NOT
+  `concept_ancestor`.** The drug-class concepts are `concept_class_id='Component Class'`. A
+  concept's class membership is the `Is a` edge (e.g. `Bortezomib (35802928) —Is a→ Proteasome
+  inhibitor (35807295)`; multiple memberships are normal). `concept_ancestor` is the *wrong* tool
+  here: a class's descendants are the ~170 **regimens** that *use* the class, not its member drugs.
+- **18/18 HemOnc target classes resolve to drug members** via the transitive `Is a` closure
+  (member concepts are HemOnc Component / sub-Component-Class). Drug-member counts:
+
+  | class | concept_id | drug members (transitive) |
+  |---|---|---|
+  | Targeted therapy | 912163 | 277 |
+  | Immunotherapy | 35807189 | 83 |
+  | Alkylating agent | 35807238 | 39 |
+  | Anti-CD20 | 35807389 | 16 |
+  | ADC | 35807221 | 15 |
+  | Bispecific antibody | 35807364 | 15 |
+  | Anthracycline | 35807214 | 12 |
+  | CAR-T | 35807448 | 8 |
+  | PI3K inhibitor | 35807303 | 8 |
+  | Anti-CD38 | 35807345 | 6 |
+  | Bisphosphonate | 35807233 | 6 |
+  | Proteasome inhibitor | 35807295 | 4 |
+  | mTOR inhibitor | 35807369 | 4 |
+  | IMiD | 35807403 | 3 |
+  | Anti-SLAMF7 / BCL-2 / XPO1 / RANKL | 35807363/…456/…438/…351 | 1 each |
+
+- **Cleaner than expected:** promop's existing `_expand_component_ids` already carries **HemOnc
+  Component** concept_ids in the patient component set, so the class derivation is a **single `Is a`
+  hop** from data promop already emits (no extra RxNorm bridge needed for those).
+- **Two known gaps → stay legacy (or need a HemOnc equivalent):** the **2 ATC** target classes
+  (`HDAC inhibitor 947794`, `Monoclonal antibody 21603754`) have **0 usable descendants** in this
+  export's `concept_ancestor`; they don't participate in the HemOnc `Is a` graph. (`monoclonal
+  antibody` has HemOnc sub-classes — anti-CD38/CD20 etc. — that DO resolve, so only the broad ATC
+  umbrella is unmapped.)
+- **Scope caveat (RxNorm bridge):** this export carries **no `HemOnc Component → Maps to → RxNorm
+  Ingredient`** edges, so a patient carrying *only* RxNorm-ingredient component ids could not be
+  bridged from that export alone. Not a blocker (promop emits the HemOnc Component id), but P0.2
+  must confirm the corpus scope on the *pinned release* includes what the patient payload actually
+  contains.
+
+Still to close before the gate is fully green: transitive-closure precision/recall **per active CB
+criterion** vs the current `ComponentCategoryOmopLookup`, and a decision on the 2 ATC classes.
+
 ### Phase 1 — CB / EXACT authoring (trial + mapping)
 - **P1.1** Load the category→OMOP-class-concept crosswalk into the CB vocab model — add
   `TherapyComponentCategory.omop_concept_id(s)` (analogue of `Therapy.omop_concept_id` /
