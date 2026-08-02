@@ -265,6 +265,8 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             'first_line_therapy_id', 'second_line_therapy_id', 'later_therapy_ids',
             'first_line_component_ids', 'second_line_component_ids',
             'later_component_ids', 'therapy_component_ids',
+            'first_line_component_class_ids', 'second_line_component_class_ids',
+            'later_component_class_ids', 'therapy_component_class_ids',
             'therapy_ids_provenance',
             # Per-line later-therapy structure (regimen/lineNumber/concept_id/
             # dates) is derived from OMOP; lines_of_therapy surfaces its
