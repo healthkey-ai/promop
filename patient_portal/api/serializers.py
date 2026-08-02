@@ -410,7 +410,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             return v.isoformat() if hasattr(v, 'isoformat') else (v or None)
 
         def _line(n, regimen, cid, prov_field, comp, start, end,
-                  outcome, intent, disc, later_aggregate=False):
+                  outcome, intent, disc, later_aggregate=False, comp_class=None):
             origin = _prov(prov_field, 'origin')
             # `therapy_ids_provenance` is written only where the derivation
             # pipeline records it; today most paths leave it empty (promop#249
@@ -427,6 +427,10 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 'regimen_source': origin,
                 'release_id': _prov(prov_field, 'release_id'),
                 'component_ids': comp or [],
+                # Therapy-class ("type") concept_ids for the line (ADR 0002),
+                # derived from component_ids; parity with the flat
+                # *_component_class_ids fields.
+                'component_class_ids': comp_class or [],
                 # ISO strings on the wire, consistent with the flat *_date fields
                 # (DRF DateField); avoids raw date objects leaking to consumers
                 # that json.dumps the payload themselves.
@@ -447,14 +451,16 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 'first_line_therapy_id', obj.first_line_component_ids,
                 obj.first_line_start_date or obj.first_line_date, obj.first_line_end_date,
                 obj.first_line_outcome, obj.first_line_intent,
-                obj.first_line_discontinuation_reason))
+                obj.first_line_discontinuation_reason,
+                comp_class=obj.first_line_component_class_ids))
         if obj.second_line_therapy or obj.second_line_therapy_id:
             lines.append(_line(
                 2, obj.second_line_therapy, obj.second_line_therapy_id,
                 'second_line_therapy_id', obj.second_line_component_ids,
                 obj.second_line_start_date or obj.second_line_date, obj.second_line_end_date,
                 obj.second_line_outcome, obj.second_line_intent,
-                obj.second_line_discontinuation_reason))
+                obj.second_line_discontinuation_reason,
+                comp_class=obj.second_line_component_class_ids))
 
         # 3L+ lines: iterate the authoritative per-line `later_therapies` list,
         # which includes lines whose regimen did not resolve to a concept_id, so
@@ -487,7 +493,8 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                     aligned_ids[i], 'later_therapy_ids',
                     obj.later_component_ids, lt.get('startDate'), lt.get('endDate'),
                     obj.later_outcome, obj.later_intent,
-                    obj.later_discontinuation_reason, later_aggregate=True))
+                    obj.later_discontinuation_reason, later_aggregate=True,
+                    comp_class=obj.later_component_class_ids))
         else:
             # Oldest rows with no `later_therapies` list at all: emit one entry
             # per resolved id (naming each from the concept cache), else a single
@@ -502,13 +509,15 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                         3 + i, regimen_name, cid, 'later_therapy_ids',
                         obj.later_component_ids, obj.later_start_date or obj.later_date, obj.later_end_date,
                         obj.later_outcome, obj.later_intent,
-                        obj.later_discontinuation_reason, later_aggregate=True))
+                        obj.later_discontinuation_reason, later_aggregate=True,
+                        comp_class=obj.later_component_class_ids))
             elif obj.later_therapy:
                 lines.append(_line(
                     3, obj.later_therapy, None, 'later_therapy_ids',
                     obj.later_component_ids, obj.later_start_date, obj.later_end_date,
                     obj.later_outcome, obj.later_intent,
-                    obj.later_discontinuation_reason, later_aggregate=True))
+                    obj.later_discontinuation_reason, later_aggregate=True,
+                    comp_class=obj.later_component_class_ids))
         return lines
 
     def validate_sct_date(self, value):

@@ -10,3 +10,4 @@ stale records.
 | Version | Date       | Description                                      |
 |---------|------------|--------------------------------------------------|
 | 1       | 2026-07-31 | Baseline — all existing derivation logic          |
+| 2       | 2026-08-03 | Add per-line therapy-class ("type") concept_ids (`*_component_class_ids`) via HemOnc `Is a`→Component Class expansion (ADR 0002) |

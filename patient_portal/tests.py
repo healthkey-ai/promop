@@ -11538,6 +11538,7 @@ class LinesOfTherapyPayloadTest(TestCase):
         rec = self._record(
             first_line_therapy='AC-T', first_line_therapy_id=101,
             first_line_component_ids=[11, 12],
+            first_line_component_class_ids=[9101, 9102],
             first_line_start_date=datetime.date(2022, 3, 1),
             first_line_end_date=datetime.date(2022, 9, 1),
             first_line_outcome='CR', first_line_intent='Neoadjuvant',
@@ -11554,6 +11555,10 @@ class LinesOfTherapyPayloadTest(TestCase):
         self.assertEqual(lot[0]['regimen'], 'AC-T')
         self.assertEqual(lot[0]['regimen_concept_id'], 101)
         self.assertEqual(lot[0]['component_ids'], [11, 12])
+        # Per-line therapy-class ("type") concept_ids (ADR 0002), parity with
+        # component_ids; second line has none → empty list, never missing.
+        self.assertEqual(lot[0]['component_class_ids'], [9101, 9102])
+        self.assertEqual(lot[1]['component_class_ids'], [])
         self.assertEqual(lot[0]['regimen_source'], 'asserted')
         self.assertEqual(lot[0]['release_id'], 'rel-x')
         # Dates are ISO strings on the wire, not raw date objects.

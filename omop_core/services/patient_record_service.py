@@ -6,6 +6,7 @@ Usage:
     patient_info = refresh_patient_record(person)
 """
 
+import logging
 import math
 import statistics
 from collections import defaultdict
@@ -37,9 +38,11 @@ from omop_core.services.lot_regimens import (
 # Public API
 # ---------------------------------------------------------------------------
 
+logger = logging.getLogger(__name__)
+
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 1
+DERIVATION_VERSION = 2
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
@@ -633,12 +636,15 @@ def _expand_class_ids(component_ids):
     """Derive therapy-class ("type") concept_ids for one line's components.
 
     Given the line's component drug concept_ids (as produced by
-    _expand_component_ids), follow HemOnc
+    _expand_component_ids — which includes the HemOnc Component seeds plus any
+    'Maps to'/'Has ingredient'-leveled RxNorm concepts), follow HemOnc
     'Component --[Is a]--> Component Class' edges transitively, keeping only
     targets whose concept_class_id is 'Component Class' (the drug-class
-    concepts). Sub-class chains (narrow class --Is a--> broader class) are
-    followed so a patient carries *every* applicable class, not just the
-    narrowest — matching how trial type criteria are authored.
+    concepts). Non-class concepts in the input (e.g. leveled RxNorm ingredients)
+    simply contribute no 'Is a → Component Class' edges and fall away. Sub-class
+    chains (narrow class --Is a--> broader class) are followed so a patient
+    carries *every* applicable class, not just the narrowest — matching how
+    trial type criteria are authored.
 
     Bounded BFS: one query per hop, a visited set prevents cycles, and
     _CLASS_MAX_HOPS backstops any pathological graph. Returns a set of
@@ -663,6 +669,16 @@ def _expand_class_ids(component_ids):
         classes |= new
         seen |= new
         frontier = new
+    else:
+        # Range exhausted without an empty-frontier break: a class chain deeper
+        # than _CLASS_MAX_HOPS may exist and its top levels were not expanded.
+        # Never drop silently (project convention) — surface it for triage.
+        logger.warning(
+            "therapy-class BFS hit depth cap _CLASS_MAX_HOPS=%d without "
+            "exhausting the 'Is a' → Component Class graph; deeper class "
+            "ancestors may be missing (seed size %d, classes so far %d)",
+            _CLASS_MAX_HOPS, len(seen) - len(classes), len(classes),
+        )
     return classes
 
 

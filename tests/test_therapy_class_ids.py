@@ -137,6 +137,48 @@ def test_expand_cycle_is_safe():
     assert _expand_class_ids([BORTEZOMIB_ID]) == {PROTEASOME_INHIBITOR_ID, TARGETED_THERAPY_ID}
 
 
+def test_expand_depth_cap_truncates_and_warns(caplog):
+    """A class chain deeper than _CLASS_MAX_HOPS returns the reachable prefix
+    and logs a WARNING (never a silent drop — project convention)."""
+    import logging
+    from omop_core.services import patient_record_service as svc
+
+    # drug --Is a--> c1 --Is a--> c2 --> ... --> c6  (6 class hops)
+    _component(BORTEZOMIB_ID, 'Bortezomib')
+    chain = list(range(35_808_001, 35_808_007))  # c1..c6
+    for cid in chain:
+        _component_class(cid, f'Class {cid}')
+    _link(BORTEZOMIB_ID, chain[0], 'Is a')
+    for a, b in zip(chain, chain[1:]):
+        _link(a, b, 'Is a')
+
+    with caplog.at_level(logging.WARNING, logger=svc.__name__):
+        result = _expand_class_ids([BORTEZOMIB_ID])
+
+    # _CLASS_MAX_HOPS=5 reaches c1..c5 but not c6.
+    assert result == set(chain[:svc._CLASS_MAX_HOPS])
+    assert chain[svc._CLASS_MAX_HOPS] not in result
+    assert any('depth cap' in r.message for r in caplog.records)
+
+
+def test_expand_within_depth_cap_does_not_warn(caplog):
+    """A chain that fully resolves before the cap must not emit the warning."""
+    import logging
+    from omop_core.services import patient_record_service as svc
+
+    _component(BORTEZOMIB_ID, 'Bortezomib')
+    _component_class(PROTEASOME_INHIBITOR_ID, 'Proteasome inhibitor')
+    _component_class(TARGETED_THERAPY_ID, 'Targeted therapy')
+    _link(BORTEZOMIB_ID, PROTEASOME_INHIBITOR_ID, 'Is a')
+    _link(PROTEASOME_INHIBITOR_ID, TARGETED_THERAPY_ID, 'Is a')
+
+    with caplog.at_level(logging.WARNING, logger=svc.__name__):
+        result = _expand_class_ids([BORTEZOMIB_ID])
+
+    assert result == {PROTEASOME_INHIBITOR_ID, TARGETED_THERAPY_ID}
+    assert not any('depth cap' in r.message for r in caplog.records)
+
+
 def test_expand_empty_and_miss():
     assert _expand_class_ids([]) == set()
     assert _expand_class_ids(None) == set()
