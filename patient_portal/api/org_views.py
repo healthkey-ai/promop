@@ -40,8 +40,12 @@ class InvitationEmailError(Exception):
 
 
 def _send_invitation_email(invitation) -> None:
-    slug = invitation.org.slug
-    accept_url = f"{settings.APP_BASE_URL}/org/{slug}/accept-invite?token={invitation.token}"
+    # Bare /accept-invite path — matches the SPA route (App.tsx) and the emailed-link
+    # convention used by /reset-password and /accept-patient-invite. An org-scoped
+    # /org/<slug>/accept-invite path has no route and gets swallowed by the catch-all,
+    # so the accept page (and its post-accept redirect) never runs. The token alone
+    # identifies the invitation and its org; the slug is not needed here.
+    accept_url = f"{settings.APP_BASE_URL}/accept-invite?token={invitation.token}"
     subject = f"You've been invited to join {invitation.org.name} on PROMOP"
     body = (
         f"Hi,\n\n"
