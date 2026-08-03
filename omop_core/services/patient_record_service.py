@@ -58,8 +58,8 @@ _OMOP_DERIVED_FIELDS = [
     'later_therapies', 'later_therapy_ids',
     'first_line_component_ids', 'second_line_component_ids',
     'later_component_ids', 'therapy_component_ids',
-    'first_line_component_class_ids', 'second_line_component_class_ids',
-    'later_component_class_ids', 'therapy_component_class_ids',
+    'first_line_therapy_type_ids', 'second_line_therapy_type_ids',
+    'later_therapy_type_ids', 'therapy_type_ids',
     'therapy_ids_provenance',
     'therapy_lines_count', 'last_treatment',
     'concomitant_medications',
@@ -287,8 +287,8 @@ def _clear_derived_fields(patient_info: PatientRecord) -> None:
                 'prior_procedures', 'later_therapies', 'genetic_mutations', 'later_therapy_ids',
                 'first_line_component_ids', 'second_line_component_ids',
                 'later_component_ids', 'therapy_component_ids',
-                'first_line_component_class_ids', 'second_line_component_class_ids',
-                'later_component_class_ids', 'therapy_component_class_ids',
+                'first_line_therapy_type_ids', 'second_line_therapy_type_ids',
+                'later_therapy_type_ids', 'therapy_type_ids',
                 'stem_cell_transplant_history', 'sct_eligibility',
             ) else None
             setattr(patient_info, field, default)
@@ -767,7 +767,7 @@ def _apply_inferred_lots(data: dict, lots) -> None:
             data['first_line_therapy'] = name
             data['first_line_therapy_id'] = concept_id
             data['first_line_component_ids'] = sorted(components)
-            data['first_line_component_class_ids'] = sorted(classes)
+            data['first_line_therapy_type_ids'] = sorted(classes)
             data['first_line_date'] = start
             data['first_line_start_date'] = start
             data['first_line_end_date'] = end
@@ -775,7 +775,7 @@ def _apply_inferred_lots(data: dict, lots) -> None:
             data['second_line_therapy'] = name
             data['second_line_therapy_id'] = concept_id
             data['second_line_component_ids'] = sorted(components)
-            data['second_line_component_class_ids'] = sorted(classes)
+            data['second_line_therapy_type_ids'] = sorted(classes)
             data['second_line_date'] = start
             data['second_line_start_date'] = start
             data['second_line_end_date'] = end
@@ -805,9 +805,9 @@ def _apply_inferred_lots(data: dict, lots) -> None:
     if all_components:
         data['therapy_component_ids'] = sorted(all_components)
     if later_classes:
-        data['later_component_class_ids'] = sorted(later_classes)
+        data['later_therapy_type_ids'] = sorted(later_classes)
     if all_classes:
-        data['therapy_component_class_ids'] = sorted(all_classes)
+        data['therapy_type_ids'] = sorted(all_classes)
 
 
 def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
@@ -943,7 +943,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             data['first_line_therapy'] = drug_names
             data['first_line_therapy_id'] = concept_id
             data['first_line_component_ids'] = sorted(components)
-            data['first_line_component_class_ids'] = sorted(classes)
+            data['first_line_therapy_type_ids'] = sorted(classes)
             data['first_line_date'] = start_date
             data['first_line_start_date'] = start_date
             if end_date:
@@ -952,7 +952,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             data['second_line_therapy'] = drug_names
             data['second_line_therapy_id'] = concept_id
             data['second_line_component_ids'] = sorted(components)
-            data['second_line_component_class_ids'] = sorted(classes)
+            data['second_line_therapy_type_ids'] = sorted(classes)
             data['second_line_date'] = start_date
             data['second_line_start_date'] = start_date
             if end_date:
@@ -988,9 +988,9 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
     if all_components:
         data['therapy_component_ids'] = sorted(all_components)
     if later_classes:
-        data['later_component_class_ids'] = sorted(later_classes)
+        data['later_therapy_type_ids'] = sorted(later_classes)
     if all_classes:
-        data['therapy_component_class_ids'] = sorted(all_classes)
+        data['therapy_type_ids'] = sorted(all_classes)
 
     # ── Per-line outcomes from LOT-N-outcome Observations ─────────────────
     # Written by the synthetic enrichment commands (and any future ingest path

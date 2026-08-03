@@ -292,11 +292,11 @@ def test_episode_path_populates_per_line_and_aggregate_class_ids():
     data = _get_treatment_data(person)
 
     both = {PROTEASOME_INHIBITOR_ID, TARGETED_THERAPY_ID}
-    assert set(data['first_line_component_class_ids']) == both
-    assert set(data['second_line_component_class_ids']) == both
-    assert set(data['therapy_component_class_ids']) == both
+    assert set(data['first_line_therapy_type_ids']) == both
+    assert set(data['second_line_therapy_type_ids']) == both
+    assert set(data['therapy_type_ids']) == both
     # sorted lists on the wire, not sets
-    assert data['first_line_component_class_ids'] == sorted(both)
+    assert data['first_line_therapy_type_ids'] == sorted(both)
 
 
 # ---------------------------------------------------------------------------
@@ -331,9 +331,9 @@ def test_apply_inferred_lots_populates_class_ids():
     _apply_inferred_lots(data, lots)
 
     expected = {PROTEASOME_INHIBITOR_ID, IMID_ID}
-    assert set(data['first_line_component_class_ids']) == expected
-    assert set(data['therapy_component_class_ids']) == expected
-    assert 'later_component_class_ids' not in data
+    assert set(data['first_line_therapy_type_ids']) == expected
+    assert set(data['therapy_type_ids']) == expected
+    assert 'later_therapy_type_ids' not in data
 
 
 def test_apply_inferred_lots_later_line_class_ids():
@@ -361,10 +361,10 @@ def test_apply_inferred_lots_later_line_class_ids():
     data = {}
     _apply_inferred_lots(data, lots)
 
-    assert set(data['first_line_component_class_ids']) == {PROTEASOME_INHIBITOR_ID}
-    assert set(data['second_line_component_class_ids']) == {IMID_ID}
-    assert set(data['later_component_class_ids']) == {PROTEASOME_INHIBITOR_ID}
-    assert set(data['therapy_component_class_ids']) == {PROTEASOME_INHIBITOR_ID, IMID_ID}
+    assert set(data['first_line_therapy_type_ids']) == {PROTEASOME_INHIBITOR_ID}
+    assert set(data['second_line_therapy_type_ids']) == {IMID_ID}
+    assert set(data['later_therapy_type_ids']) == {PROTEASOME_INHIBITOR_ID}
+    assert set(data['therapy_type_ids']) == {PROTEASOME_INHIBITOR_ID, IMID_ID}
 
 
 # ---------------------------------------------------------------------------
@@ -375,11 +375,11 @@ def test_class_id_fields_persist_and_default():
     person = PersonFactory()
     record = PatientRecord.objects.create(
         person=person,
-        first_line_component_class_ids=[PROTEASOME_INHIBITOR_ID, TARGETED_THERAPY_ID],
-        therapy_component_class_ids=[PROTEASOME_INHIBITOR_ID, IMID_ID, TARGETED_THERAPY_ID],
+        first_line_therapy_type_ids=[PROTEASOME_INHIBITOR_ID, TARGETED_THERAPY_ID],
+        therapy_type_ids=[PROTEASOME_INHIBITOR_ID, IMID_ID, TARGETED_THERAPY_ID],
     )
     record.refresh_from_db()
-    assert record.first_line_component_class_ids == [PROTEASOME_INHIBITOR_ID, TARGETED_THERAPY_ID]
-    assert record.therapy_component_class_ids == [PROTEASOME_INHIBITOR_ID, IMID_ID, TARGETED_THERAPY_ID]
-    assert record.second_line_component_class_ids == []
-    assert record.later_component_class_ids == []
+    assert record.first_line_therapy_type_ids == [PROTEASOME_INHIBITOR_ID, TARGETED_THERAPY_ID]
+    assert record.therapy_type_ids == [PROTEASOME_INHIBITOR_ID, IMID_ID, TARGETED_THERAPY_ID]
+    assert record.second_line_therapy_type_ids == []
+    assert record.later_therapy_type_ids == []

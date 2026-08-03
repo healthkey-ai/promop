@@ -118,7 +118,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
               vocabSource={breastSource ? bcFirstLineSource : null} />
           </div>
           <ComponentIds ids={formData?.first_line_component_ids as number[] | null | undefined} />
-          <TypeClassIds ids={formData?.first_line_component_class_ids as number[] | null | undefined} />
+          <TypeClassIds ids={formData?.first_line_therapy_type_ids as number[] | null | undefined} />
           <Field label="First Line Start Date" name="first_line_start_date" type="date" value={formData?.first_line_start_date} onChange={onChange} />
           <Field label="First Line End Date" name="first_line_end_date" type="date" value={formData?.first_line_end_date} onChange={onChange} />
           <Field label="Therapy Intent" name="first_line_intent" type="select" value={formData?.first_line_intent} options={THERAPY_INTENT_OPTIONS} onChange={onChange} />
@@ -137,7 +137,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
               vocabSource={breastSource ? bcSecondLineSource : null} />
           </div>
           <ComponentIds ids={formData?.second_line_component_ids as number[] | null | undefined} />
-          <TypeClassIds ids={formData?.second_line_component_class_ids as number[] | null | undefined} />
+          <TypeClassIds ids={formData?.second_line_therapy_type_ids as number[] | null | undefined} />
           <Field label="Second Line Start Date" name="second_line_start_date" type="date" value={formData?.second_line_start_date} onChange={onChange} />
           <Field label="Second Line End Date" name="second_line_end_date" type="date" value={formData?.second_line_end_date} onChange={onChange} />
           <Field label="Therapy Intent" name="second_line_intent" type="select" value={formData?.second_line_intent} options={THERAPY_INTENT_OPTIONS} onChange={onChange} />
@@ -156,7 +156,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
               vocabSource={breastSource ? bcLaterLineSource : null} />
           </div>
           <ComponentIds ids={formData?.later_component_ids as number[] | null | undefined} />
-          <TypeClassIds ids={formData?.later_component_class_ids as number[] | null | undefined} />
+          <TypeClassIds ids={formData?.later_therapy_type_ids as number[] | null | undefined} />
           <Field label="Later Line Start Date" name="later_start_date" type="date" value={formData?.later_start_date} onChange={onChange} />
           <Field label="Later Line End Date" name="later_end_date" type="date" value={formData?.later_end_date} onChange={onChange} />
           <Field label="Therapy Intent" name="later_intent" type="select" value={formData?.later_intent} options={THERAPY_INTENT_OPTIONS} onChange={onChange} />

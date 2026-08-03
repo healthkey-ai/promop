@@ -66,8 +66,8 @@ describe('TreatmentTab - component concept ids', () => {
       <TreatmentTab
         formData={{
           ...baseFormData,
-          first_line_component_class_ids: [35807295, 35807403],
-          second_line_component_class_ids: [35807295],
+          first_line_therapy_type_ids: [35807295, 35807403],
+          second_line_therapy_type_ids: [35807295],
         }}
         onChange={vi.fn()}
         diseaseType="myeloma"

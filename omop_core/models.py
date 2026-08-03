@@ -2108,19 +2108,19 @@ class PatientRecord(models.Model):
     # concepts such as Proteasome inhibitor / IMiD / anti-CD38). promop
     # pre-expands these so consumers (EXACT) match trial type criteria by plain
     # class-concept_id overlap, without traversing the vocabulary themselves.
-    first_line_component_class_ids = models.JSONField(
+    first_line_therapy_type_ids = models.JSONField(
         null=True, blank=True, default=list,
         help_text="Therapy-class (drug-class 'type') concept_ids for the first-line regimen",
     )
-    second_line_component_class_ids = models.JSONField(
+    second_line_therapy_type_ids = models.JSONField(
         null=True, blank=True, default=list,
         help_text="Therapy-class (drug-class 'type') concept_ids for the second-line regimen",
     )
-    later_component_class_ids = models.JSONField(
+    later_therapy_type_ids = models.JSONField(
         null=True, blank=True, default=list,
         help_text="Therapy-class (drug-class 'type') concept_ids across all later-line (3L+) regimens",
     )
-    therapy_component_class_ids = models.JSONField(
+    therapy_type_ids = models.JSONField(
         null=True, blank=True, default=list,
         help_text="Aggregate union of therapy-class (drug-class 'type') concept_ids across all therapy lines",
     )
