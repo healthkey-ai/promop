@@ -2102,6 +2102,28 @@ class PatientRecord(models.Model):
         null=True, blank=True, default=list,
         help_text="Aggregate union of component drug concept_ids across all therapy lines",
     )
+    # Therapy-class ("type") concept_ids per therapy line (ADR 0002). Derived
+    # from each line's component concept_ids above by following HemOnc
+    # 'Component --[Is a]--> Component Class' edges transitively (drug-class
+    # concepts such as Proteasome inhibitor / IMiD / anti-CD38). promop
+    # pre-expands these so consumers (EXACT) match trial type criteria by plain
+    # class-concept_id overlap, without traversing the vocabulary themselves.
+    first_line_therapy_type_ids = models.JSONField(
+        null=True, blank=True, default=list,
+        help_text="Therapy-class (drug-class 'type') concept_ids for the first-line regimen",
+    )
+    second_line_therapy_type_ids = models.JSONField(
+        null=True, blank=True, default=list,
+        help_text="Therapy-class (drug-class 'type') concept_ids for the second-line regimen",
+    )
+    later_therapy_type_ids = models.JSONField(
+        null=True, blank=True, default=list,
+        help_text="Therapy-class (drug-class 'type') concept_ids across all later-line (3L+) regimens",
+    )
+    therapy_type_ids = models.JSONField(
+        null=True, blank=True, default=list,
+        help_text="Aggregate union of therapy-class (drug-class 'type') concept_ids across all therapy lines",
+    )
     # Provenance for each derived therapy-id field above.  Read model only —
     # written by the derivation pipeline (refresh_patient_record / FHIR
     # upload), never by API clients.  Shape:

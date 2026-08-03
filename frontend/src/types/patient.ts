@@ -95,6 +95,11 @@ export interface PatientInfo {
   second_line_component_ids?: number[] | null;
   later_component_ids?: number[] | null;
   therapy_component_ids?: number[] | null;
+  // Therapy-class ("type") concept_ids per line (HemOnc Is-a→Component Class expansion of the components above, ADR 0002)
+  first_line_therapy_type_ids?: number[] | null;
+  second_line_therapy_type_ids?: number[] | null;
+  later_therapy_type_ids?: number[] | null;
+  therapy_type_ids?: number[] | null;
   // Per-field provenance for the derived therapy-id fields above (read-only, written by the derivation pipeline)
   therapy_ids_provenance?: Record<string, { value?: unknown; origin?: 'asserted' | 'inferred'; release_id?: string | null }> | null;
   first_line_therapy_display?: string | null;

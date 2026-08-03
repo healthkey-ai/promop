@@ -61,6 +61,29 @@ describe('TreatmentTab - component concept ids', () => {
     expect(screen.queryByText(/Component concept IDs:/)).not.toBeInTheDocument();
   });
 
+  it('renders therapy-type class ids for lines that have them', () => {
+    render(
+      <TreatmentTab
+        formData={{
+          ...baseFormData,
+          first_line_therapy_type_ids: [35807295, 35807403],
+          second_line_therapy_type_ids: [35807295],
+        }}
+        onChange={vi.fn()}
+        diseaseType="myeloma"
+      />,
+    );
+    expect(screen.getByText('Therapy type concept IDs: 35807295, 35807403')).toBeInTheDocument();
+    expect(screen.getByText('Therapy type concept IDs: 35807295')).toBeInTheDocument();
+  });
+
+  it('renders nothing for lines without type class ids', () => {
+    render(
+      <TreatmentTab formData={baseFormData} onChange={vi.fn()} diseaseType="myeloma" />,
+    );
+    expect(screen.queryByText(/Therapy type concept IDs:/)).not.toBeInTheDocument();
+  });
+
   it('labels each later line with its own line number (not always 3)', () => {
     render(
       <TreatmentTab
