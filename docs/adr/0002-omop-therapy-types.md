@@ -3,10 +3,16 @@
 **Status:** **Accepted 2026-08-03** (cross-repo: promop / CancerBot / EXACT). Supersedes the
 "types are not OMOP-mapped" decision (**EXACT ADR 0001 decision A / CB #4502**): its premise —
 *"a patient never carries a class concept"* — no longer holds now that promop pre-expands the
-patient's class concept_ids (`*_component_class_ids`, [#370]). Feasibility gate (Phase 0) is
+patient's class concept_ids (`*_therapy_type_ids`, [#370]). Feasibility gate (Phase 0) is
 **green** — the `component → class` derivation exists and is queryable; remaining validation is a
-rollout-time shadow-compare, not a blocking upfront study. Implementation tracked in the epic
-[healthkey-ai/exact#283]: CB-side cancerbot#4631–4634, EXACT-side exact#284–288.
+rollout-time shadow-compare, not a blocking upfront study.
+
+**Implementation status** (epic [healthkey-ai/exact#283]): Phase 2 (promop patient projection)
+**merged** — [#370]. Phase 1 (CancerBot: cancerbot#4631–4634 → PRs #4635–#4638) and Phase 3 (EXACT:
+exact#284/#285 → PRs #289/#290) **in review**. Phase 4 pending: release-assert (exact#286),
+shadow-compare (exact#287), hybrid flip (exact#288). The patient field was named `*_therapy_type_ids`
+(not `*_component_class_ids`) to match the trial `omop_therapy_types_*` columns and the matcher's
+"TYPE" wording.
 **Extends:** [ADR 0001 — promop is the vocabulary source of truth](0001-vocabulary-source-of-truth.md).
 **Deciders:** promop, EXACT/CB, SoC maintainers.
 **Context repos:** promop (owner, vocab SoT + patient derivation), EXACT (`~/exact`, trial authoring/CB + matcher), SoC (`~/soc`).
@@ -174,11 +180,13 @@ in the SoT, and removes any need for EXACT to carry the type edges in its mirror
 continues the #362 (provenance) / #270 (component expansion) patterns and is **self-contained**
 (no CB/EXACT dependency) — buildable now.
 
-- **P2.1** At refresh, derive per-line **therapy-class concept_ids** for the patient from the line's
-  component concept_ids via the P0-proven `Component --[Is a]--> Component Class` closure. Add a
-  read-model field (`*_component_class_ids` + aggregate `therapy_class_ids`), mirroring the
-  `*_component_ids` shape. Reuse `_expand_component_ids`' output as the input set (it already carries
-  the HemOnc Component ids → single `Is a` hop).
+- **P2.1** At refresh, derive per-line **therapy-type (drug-class) concept_ids** for the patient from
+  the line's component concept_ids via the P0-proven `Component --[Is a]--> Component Class` closure.
+  Add a read-model field (`first/second/later_therapy_type_ids` + aggregate `therapy_type_ids`),
+  mirroring the `*_component_ids` shape. Reuse `_expand_component_ids`' output as the input set (it
+  already carries the HemOnc Component ids → single `Is a` hop). *(Internal derivation helper stays
+  `_expand_class_ids` — "class" is the OMOP Component Class concept level; "type" is the field/match
+  level.)*
 - **P2.2** **Release-stamp** the derivation via the [#362] provenance/release_id machinery so a
   consumer can assert patient↔trial release equality.
 - **P2.3** Expose read-only on the patient serializer (like `*_component_ids`); add to
