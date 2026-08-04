@@ -5434,15 +5434,36 @@ class VocabSnapshotView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 2. Resolve release
+        # 2. Resolve release. Resolve `latest` ONCE and reuse it for both the
+        # release_id=None branch and the non-latest guard below — two independent
+        # get_latest_release() reads could straddle a publish (or a published_at
+        # tie) and make the /latest/ URL 409 against itself.
+        latest = get_latest_release()
         if release_id is None:
-            release = get_latest_release()
+            release = latest
         else:
             release = VocabularyRelease.objects.filter(
                 pk=release_id, status='published',
             ).first()
         if release is None:
             return Response({'detail': 'Release not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # 2b. Refuse a non-latest published release. The vocab tables are reloaded
+        # wholesale per release (current-only), and the stream below filters only by
+        # `source`, not release_id — so serving an OLDER release's URL would stream
+        # the CURRENT rows under a stale label. Only the latest published release is
+        # truthful; the manifest API (vocab_release_detail) still serves historical
+        # metadata. See issue #371 / exact#286.
+        if latest is not None and release.pk != latest.pk:
+            return Response(
+                {'detail': (
+                    f'Snapshot for release {release.pk} is unavailable: vocabulary '
+                    f'tables are current-only, so only the latest published release '
+                    f'({latest.pk}) can be streamed. Use '
+                    f'/api/v1/vocab-releases/latest/snapshot/{table}/.'
+                )},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         # 3. ETag / conditional request
         etag = get_release_etag(release)
@@ -5451,6 +5472,7 @@ class VocabSnapshotView(APIView):
             resp = HttpResponseNotModified()
             if etag:
                 resp['ETag'] = etag
+            resp['X-Vocab-Release-Id'] = str(release.pk)
             return resp
 
         # 4. Build WHERE clause (source filter for concept table only)
@@ -5479,6 +5501,10 @@ class VocabSnapshotView(APIView):
         response['Content-Disposition'] = (
             f'attachment; filename="{table}_{release.pk}.ndjson"'
         )
+        # Name the release these rows reflect, so consumers capture it robustly
+        # (not by parsing the ETag/filename). Always the latest published release —
+        # non-latest is refused above. See issue #371 / cancerbot#4646.
+        response['X-Vocab-Release-Id'] = str(release.pk)
         if etag:
             response['ETag'] = etag
             response['Cache-Control'] = 'private, max-age=86400'
