@@ -33,7 +33,7 @@ multiplying effort and inconsistency.
 PRomop is an open-source longitudinal patient health record built on the OMOP Common Data Model
 (CDM 5.4) [@OHDSI2021] with oncology extensions. Its keystone is `PatientRecord`, a flattened,
 denormalized projection that collapses each patient's complete longitudinal history into a single
-decision-ready row of 286 columns. While the transactional CDM tables preserve everything that
+decision-ready row of over 300 columns. While the transactional CDM tables preserve everything that
 ever happened, `PatientRecord` represents what is true *now* — computing patient-state derivations
 once rather than repeatedly per consumer. Population analytics, clinical trial matching, and
 standard-of-care evaluation all operate on one shared substrate rather than maintaining divergent
@@ -50,26 +50,14 @@ PRomop is designed for clinical informaticists, data scientists, and developers 
 or integrate with a longitudinal patient health record — whether to power a trial matching engine,
 construct feature sets for clinical ML models, or deploy patient-level clinical decision support.
 
-The foundational standards address complementary but distinct problems and together do not fill
-this need. OMOP CDM provides a normalized, vocabulary-mapped schema optimized for population-level
-observational research. OHDSI tools built on it — ATLAS, HADES, ACHILLES — excel at cohort
-definition and epidemiological analysis across large databases [@OHDSI2021; @Overhage2012], but
-operate at the population level and do not provide a queryable per-patient state. Answering "what
-is this patient's current disease status, most recent lab values, and prior therapy lines?"
-requires assembling and aggregating across multiple OMOP tables at query time; every application
-that needs this must re-implement the derivation independently.
-
-FHIR R4 is an exchange protocol: it defines how clinical data moves between systems, not how it
-is stored for analytical queries [@HL7FHIR; @Mandel2016]. A FHIR server preserves resources in
-their original form; determining a patient's current clinical state still requires traversing and
-reconciling multiple resource types. Neither standard, nor the tools built on them, produces a
-pre-computed, per-patient record ready for trial matching criteria evaluation, CDS rule firing, or
-use as an ML feature vector.
-
-The consequence is repeated, redundant derivation. Each downstream application independently
-reconstructs patient state — resolving lines of therapy, determining current disease status,
+Today, answering "what is this patient's current disease status, most recent lab values, and prior
+therapy lines?" requires assembling and aggregating across multiple tables at query time. Every
+downstream application — analytics dashboards, trial matchers, CDS engines — independently
+reconstructs patient state: resolving lines of therapy, determining current disease status,
 normalizing biomarkers, reconciling conflicting source values. This re-derivation is expensive,
 error-prone, and a frequent source of inconsistency between applications that should agree.
+Neither OMOP CDM's normalized tables nor FHIR's resource-oriented exchange protocol (see *State
+of the Field*) produces a pre-computed, per-patient record ready for these use cases.
 
 PRomop fills this gap by:
 
@@ -113,7 +101,7 @@ PRomop's central design trade-off is **normalization for writes versus denormali
 Clinical data arrives as FHIR R4 Bundles and is written into normalized OMOP CDM 5.4 tables
 (`Measurement`, `ConditionOccurrence`, `DrugExposure`, `Episode`), preserving full longitudinal
 history and OHDSI-ecosystem compatibility. A Django `post_save` signal chain then derives
-`PatientRecord` — a 286-column materialized projection, one row per patient — on every write.
+`PatientRecord` — a wide materialized projection (currently over 300 columns), one row per patient — on every write.
 
 ```
 FHIR R4 Bundle ingest
@@ -122,7 +110,7 @@ FHIR R4 Bundle ingest
 OMOP CDM tables  (Measurement, ConditionOccurrence, DrugExposure, Episode …)
         │  post_save signal chain
         ▼
-  PatientRecord  (286-column denormalized projection, one row per patient)
+  PatientRecord  (300+ column denormalized projection, one row per patient)
         │
         ├── Population analytics (PRism)
         ├── Clinical trial matching (EXACT)
