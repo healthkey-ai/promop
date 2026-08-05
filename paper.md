@@ -10,14 +10,15 @@ tags:
   - electronic health records
   - oncology informatics
 authors:
-  - name: Adam Blum
+  - given-names: Adam
+    surname: Blum
     orcid: 0009-0009-4985-7615
     email: adam@healthkey.ai
     affiliation: 1
 affiliations:
   - name: HealthKey AI
     index: 1
-date: 2026-07-04
+date: 4 July 2026
 bibliography: paper.bib
 ---
 
@@ -40,8 +41,8 @@ copies of the truth.
 
 PRomop is deployed in production across the HealthTree Foundation (14,000 blood-cancer patients)
 and CancerBot (3,500 patients), supporting trial matching against 6,000 actively recruiting
-trials across five cancer types. A 20-criterion eligibility search that requires 27–39 joins over
-raw OMOP reduces to zero joins against the projection — an estimated 30–200× speedup.
+trials across five cancer types. Benchmarks show a ~37× speedup for eligibility screening
+compared to querying raw OMOP tables directly [@Blum2025].
 
 # Statement of Need
 
@@ -83,11 +84,36 @@ PRomop fills this gap by:
 - Providing a React-based clinician interface and synthetic FHIR data generators for each
   supported disease, enabling fully offline development and reproducible testing
 
-# Software Description
+# State of the Field
 
-## Architecture
+Several tools address parts of the problem PRomop targets, but none combines OMOP-native storage,
+FHIR ingestion, and a pre-computed per-patient projection in a single open-source package.
 
-PRomop separates a standards-based transactional record from a decision-ready projection.
+**OHDSI ATLAS / HADES / ACHILLES** [@OHDSI2021; @Overhage2012] are the reference tools for
+population-level observational research on OMOP CDM. They excel at cohort definition and
+epidemiological analysis but operate at the population level; they do not produce a queryable
+per-patient clinical state suitable for trial matching or point-of-care CDS.
+
+**TrialGPT** [@Jin2024] applies large language models to match patients to trials from
+unstructured text. It bypasses structured data entirely, trading reproducibility and auditability
+for flexibility. PRomop takes the complementary approach: structured, vocabulary-mapped data with
+deterministic derivation.
+
+**HAPI FHIR** [@HAPIFHIR] and other FHIR servers store and serve FHIR resources faithfully but do not map
+them into a common analytical schema. Querying current patient state still requires traversing
+and reconciling multiple resource types.
+
+PRomop's contribution is the `PatientRecord` projection layer: a single denormalized row per
+patient, derived automatically from OMOP writes, that eliminates repeated state reconstruction
+across consuming applications.
+
+# Software Design
+
+PRomop's central design trade-off is **normalization for writes versus denormalization for reads**.
+Clinical data arrives as FHIR R4 Bundles and is written into normalized OMOP CDM 5.4 tables
+(`Measurement`, `ConditionOccurrence`, `DrugExposure`, `Episode`), preserving full longitudinal
+history and OHDSI-ecosystem compatibility. A Django `post_save` signal chain then derives
+`PatientRecord` — a 286-column materialized projection, one row per patient — on every write.
 
 ```
 FHIR R4 Bundle ingest
@@ -103,50 +129,60 @@ OMOP CDM tables  (Measurement, ConditionOccurrence, DrugExposure, Episode …)
         └── Standard-of-care evaluation
 ```
 
-All clinical data is written to normalized OMOP tables. `PatientRecord` is derived automatically
-on every write and materialized in PostgreSQL. Every consuming application reads from
-`PatientRecord`; none reconstructs patient state independently.
+This design accepts higher write cost (the projection must be refreshed on each update) in
+exchange for dramatically lower read cost. A representative 20-criterion eligibility search
+over raw OMOP requires 27–39 joins; against `PatientRecord` it is a flat predicate over a
+single table. Benchmarks on a synthetic breast-cancer cohort measured a 37× speedup (0.30 ms
+vs. 11.0 ms per patient) for eligibility screening [@Blum2025] (\autoref{tab:benchmark}).
 
-## PatientRecord: Decision-Ready Projection
-
-`PatientRecord`'s 286 columns include demographics, current staging, lines of therapy, lab
-values, biomarkers, and derived clinical states. A representative 20-criterion eligibility
-search over raw OMOP requires 27–39 joins (laboratory criteria alone demand correlated subqueries
-to recover the most-recent value per test). Against `PatientRecord`, the same query is a flat
-predicate over a single table: zero joins, zero aggregation (Table 1).
-
-| Approach | Joins | Est. time (10k patients) |
+| Approach | Joins | Time per patient |
 |---|---|---|
-| Raw OMOP, 20 criteria | 27–39 | 15–120 s |
-| PatientRecord, 20 criteria | 0 | 50–500 ms |
-| **Effective speedup** | | **30–200×** |
+| Raw OMOP, 20 criteria | 27–39 | 11.0 ms |
+| PatientRecord, 20 criteria | 0 | 0.30 ms |
+| **Measured speedup** | | **~37×** |
 
-Table 1: Estimated query cost for a 20-criterion eligibility search (10,000 patients).
-Estimates are analytical, derived from OMOP table cardinality and query structure.
+: Eligibility screening cost per patient (synthetic breast-cancer cohort) [@Blum2025]. []{label="tab:benchmark"}
 
-## Key Components
+Key implementation components include:
 
-**OMOP data model** (`omop_core/models.py`): OMOP CDM 5.4 entities plus `PatientRecord` and
-disease-specific vocabulary lookup tables, extensible beyond oncology.
+- **FHIR-to-OMOP ingestion** mapping LOINC, SNOMED CT, and RxNorm codes into OMOP tables with
+  fallback to source value strings
+- **Line-of-therapy inference** supplementing the ARTEMIS approach [@Golozar2023] with
+  domain-specific rules for oncology regimen detection
+- **Synthetic data generators** producing reproducible FHIR R4 Bundles per disease type for
+  fully offline development and testing
+- **Versioned REST API** (`/api/v1/`) with OpenAPI 3.0 schema, OAuth2, and SMART on FHIR
+  authorization [@Mandel2016]
 
-**FHIR ingestion** (`patient_portal/api/views.py`): Maps FHIR R4 Bundle entries to OMOP tables
-using LOINC, SNOMED CT, and RxNorm; falls back to source value strings where standard codes are
-unavailable.
+# Research Impact Statement
 
-**Line-of-therapy inference** (`omop_oncology/`): Derives structured therapy line records from
-`DrugExposure` and `Episode` data, supplementing the ARTEMIS approach [@Golozar2023] with
-domain-specific rules.
+PRomop is deployed in production across two independent organizations — the HealthTree Foundation
+(approximately 14,000 blood-cancer patients) and CancerBot (approximately 3,500 patients) —
+totaling roughly 17,500 patient records. These deployments support clinical trial matching against
+6,000 actively recruiting trials across five cancer types (multiple myeloma, follicular lymphoma,
+chronic lymphocytic leukemia, breast cancer, and diffuse large B-cell lymphoma).
 
-**Versioned REST API**: Stable `/api/v1/` surface with OpenAPI 3.0 schema and Swagger UI.
-OAuth2 and SMART on FHIR authorization [@Mandel2016].
+The `PatientRecord` projection has enabled integration with two downstream systems: PRism, a
+population analytics dashboard, and EXACT, a clinical trial matching engine. Both consume the
+same pre-computed patient state rather than independently deriving it, eliminating a class of
+inconsistency bugs between applications that previously disagreed on patient status. A companion
+paper [@Blum2025] provides architectural details and empirical benchmarks of the projection
+approach.
 
-**Synthetic data generation** (`generate_fhir_bundle --disease {breast-cancer|mm|fl}`):
-Reproducible FHIR R4 Bundles for development and testing without access to real patient data.
+The software is openly available, includes synthetic FHIR data generators for each supported
+disease type, and can be deployed without access to real patient data — lowering the barrier for
+researchers and informaticists to adopt, extend, or benchmark against their own clinical
+data pipelines.
 
-## Deployment and Scale
+# AI Usage Disclosure
 
-PRomop is deployed across two independent organizations totaling approximately 17,500 patients.
-Trial matching covers 6,000 actively recruiting trials across five cancer types.
+Generative AI tools — primarily Anthropic Claude (via Claude Code) and GitHub Copilot — were used
+extensively throughout this project. AI assisted with software development (code generation,
+debugging, test authoring, and code review), documentation drafting (including portions of this
+paper), and architectural exploration. All AI-generated content was reviewed, tested, and edited
+by the author. Automated test suites (backend and frontend) were run against all code changes
+regardless of origin. The author accepts full responsibility for the correctness and scholarly
+integrity of the final software and manuscript.
 
 # Acknowledgements
 
