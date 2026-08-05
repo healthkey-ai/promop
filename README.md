@@ -3,9 +3,9 @@
 [![CI](https://github.com/healthkey-ai/promop/actions/workflows/ci.yml/badge.svg)](https://github.com/healthkey-ai/promop/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-**PRomop** is an open-source longitudinal patient health record built on the [OMOP CDM v5.4](https://ohdsi.github.io/CommonDataModel/) with FHIR R4 ingestion. Its central feature is `PatientRecord` — a denormalized, 286-column projection derived automatically from OMOP tables that gives analytics, trial matching, and clinical decision support a single shared substrate, eliminating the repeated re-derivation of patient state across applications.
+**PRomop** is an open-source longitudinal patient health record built on the [OMOP CDM v5.4](https://ohdsi.github.io/CommonDataModel/) with FHIR R4 ingestion. Its central feature is `PatientRecord` — a wide denormalized projection (300+ columns) derived automatically from OMOP tables that gives analytics, trial matching, and clinical decision support a single shared substrate, eliminating the repeated re-derivation of patient state across applications.
 
-Deployed across approximately 17,500 real oncology patients, with trial matching against 6,000 actively recruiting trials. A 20-criterion eligibility search over raw OMOP requires 27–39 joins; against `PatientRecord` it requires zero — an estimated 30–200× speedup.
+Deployed across approximately 17,500 real oncology patients, with trial matching against 6,000 actively recruiting trials. Benchmarks show a [~37× speedup](https://arxiv.org/abs/2607.13947) for eligibility screening compared to querying raw OMOP tables directly.
 
 See [paper.md](paper.md) for the full research description.
 
@@ -18,7 +18,7 @@ Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? S
 ## Key Features
 
 - **FHIR R4 ingestion** — Bundle uploads mapped to OMOP tables (observations → `Measurement`, conditions → `ConditionOccurrence`, medications → `DrugExposure` + `Episode`)
-- **PatientRecord projection** — 286-column decision-ready view, auto-rebuilt via signal chain on every OMOP write
+- **PatientRecord projection** — 300+ column decision-ready view, auto-rebuilt via signal chain on every OMOP write
 - **Versioned REST API** — `/api/v1/` with [OpenAPI 3.0 schema](API_SURFACE.md) and Swagger UI at `/api/v1/docs/`
 - **Multi-tenant access control** — OAuth2 and SMART on FHIR authorization, org-scoped role-based access
 - **Synthetic FHIR generator** — reproducible patient bundles for multiple diseases (MM, FL, breast cancer)
