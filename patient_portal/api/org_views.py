@@ -40,8 +40,12 @@ class InvitationEmailError(Exception):
 
 
 def _send_invitation_email(invitation) -> None:
-    slug = invitation.org.slug
-    accept_url = f"{settings.APP_BASE_URL}/org/{slug}/accept-invite?token={invitation.token}"
+    # Bare /accept-invite path — matches the SPA route (App.tsx) and the emailed-link
+    # convention used by /reset-password and /accept-patient-invite. An org-scoped
+    # /org/<slug>/accept-invite path has no route and gets swallowed by the catch-all,
+    # so the accept page (and its post-accept redirect) never runs. The token alone
+    # identifies the invitation and its org; the slug is not needed here.
+    accept_url = f"{settings.APP_BASE_URL}/accept-invite?token={invitation.token}"
     subject = f"You've been invited to join {invitation.org.name} on PROMOP"
     body = (
         f"Hi,\n\n"
@@ -342,6 +346,7 @@ class OrgInvitationDetailView(APIView):
 def confirm_invitation(request):
     """Public endpoint — confirms an invitation by token and creates a GroupAccess."""
     token = request.data.get('token', '').strip()
+    password = request.data.get('password') or ''
     if not token:
         return Response({'error': 'token is required'}, status=status.HTTP_400_BAD_REQUEST)
     # Reject malformed tokens before touching the DB (tokens are 64 lowercase hex chars)
@@ -360,13 +365,38 @@ def confirm_invitation(request):
     # Prefer a local-auth identity; fall back to any identity with this email
     # so that OIDC/SSO users can also confirm invitations.
     identity = _find_identity_by_email(invitation.email)
-    if not identity:
-        return Response(
-            {'error': 'No account found for this email. Please log in first, or contact your administrator.'},
-            status=status.HTTP_400_BAD_REQUEST,
+
+    # Mirror the patient-invite flow for professional-role invitees: someone with
+    # no account, or a local placeholder that has never set a password, sets one
+    # here. SSO/OIDC users (non-local issuer) authenticate via their provider and
+    # need no local password. The patient role has its own dedicated invite flow,
+    # so it is left untouched here.
+    needs_password = (
+        invitation.role != 'patient'
+        and (
+            identity is None
+            or (identity.issuer == 'urn:local' and not identity.has_usable_password())
         )
+    )
+    if needs_password:
+        from patient_portal.services import password_validation_errors
+        pw_errors = password_validation_errors(password, email=invitation.email)
+        if pw_errors:
+            return Response({'error': ' '.join(pw_errors)}, status=status.HTTP_400_BAD_REQUEST)
 
     with transaction.atomic():
+        if needs_password:
+            from patient_portal.services import record_password
+            if identity is None:
+                identity = Identity.objects.create_user(email=invitation.email, password=password)
+                record_password(identity)
+            else:
+                # Claim the placeholder account created at invite time.
+                identity.set_password(password)
+                identity.is_active = True
+                identity.save(update_fields=['password', 'is_active'])
+                record_password(identity)
+
         # Grant access — use get_or_create rather than update_or_create to avoid
         # silently downgrading an existing higher-privilege role (e.g. org_admin → doctor).
         # If the grant already exists, leave it unchanged; the invitation is still
@@ -412,6 +442,49 @@ def confirm_invitation(request):
     if invitation.role == 'patient':
         response_data['redirect_url'] = f'/org/{invitation.org.slug}/'
     return Response(response_data)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def org_invitation_lookup(request):
+    """Public: validate an org-invitation token and return what the accept page needs.
+
+    ``needs_password`` is True when the invitee must choose a password to accept —
+    i.e. there is no account yet, or only a local placeholder that has never set
+    one. It is False for existing accounts and for SSO/OIDC identities (which
+    authenticate via their provider), so the accept page only prompts for a
+    password when one is actually required.
+    """
+    token = (request.query_params.get('token') or '').strip()
+    if not token:
+        return Response({'error': 'token is required'}, status=status.HTTP_400_BAD_REQUEST)
+    if len(token) != 64 or not token.isalnum():
+        return Response({'error': 'Invalid token format.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    invitation = OrgInvitation.objects.filter(token=token).select_related('org').first()
+    if invitation is None:
+        return Response({'error': 'Invitation not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if invitation.status == OrgInvitation.STATUS_CONFIRMED:
+        return Response({'error': 'Invitation already confirmed.'}, status=status.HTTP_400_BAD_REQUEST)
+    if invitation.status == OrgInvitation.STATUS_CANCELLED:
+        return Response({'error': 'Invitation has been cancelled.'}, status=status.HTTP_400_BAD_REQUEST)
+    if invitation.status == OrgInvitation.STATUS_EXPIRED:
+        return Response({'error': 'Invitation has expired.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    identity = _find_identity_by_email(invitation.email)
+    needs_password = (
+        invitation.role != 'patient'
+        and (
+            identity is None
+            or (identity.issuer == 'urn:local' and not identity.has_usable_password())
+        )
+    )
+    return Response({
+        'email': invitation.email,
+        'org_name': invitation.org.name,
+        'role': invitation.get_role_display(),
+        'needs_password': needs_password,
+    })
 
 
 # ---------------------------------------------------------------------------

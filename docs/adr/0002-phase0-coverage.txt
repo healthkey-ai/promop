@@ -1,0 +1,31 @@
+# ADR 0002 — Phase 0 spike: component→class coverage
+# Source: local Athena/HemOnc export (CONCEPT/CONCEPT_RELATIONSHIP/CONCEPT_ANCESTOR).
+# Mechanism: transitive 'Is a' closure to HemOnc 'Component Class' (NOT concept_ancestor).
+# Columns: class | concept_id | vocab | derivation path | members(transitive) | drug_members | rxn_ingredient_mapped
+
+class                     concept_id  vocab   path          members  drug_members  rxn_mapped 
+----------------------------------------------------------------------------------------------
+Targeted therapy          912163      HemOnc  HemOnc/Is-a   441      277           0          
+Immunotherapy             35807189    HemOnc  HemOnc/Is-a   133      83            0          
+Alkylating agent          35807238    HemOnc  HemOnc/Is-a   43       39            0          
+Anti-CD20                 35807389    HemOnc  HemOnc/Is-a   17       16            0          
+ADC                       35807221    HemOnc  HemOnc/Is-a   26       15            0          
+Bispecific antibody       35807364    HemOnc  HemOnc/Is-a   30       15            0          
+Anthracycline             35807214    HemOnc  HemOnc/Is-a   12       12            0          
+CAR-T                     35807448    HemOnc  HemOnc/Is-a   11       8             0          
+PI3K inhibitor            35807303    HemOnc  HemOnc/Is-a   11       8             0          
+Anti-CD38                 35807345    HemOnc  HemOnc/Is-a   6        6             0          
+Bisphosphonate            35807233    HemOnc  HemOnc/Is-a   6        6             0          
+Proteasome inhibitor      35807295    HemOnc  HemOnc/Is-a   4        4             0          
+mTOR inhibitor            35807369    HemOnc  HemOnc/Is-a   4        4             0          
+IMiD                      35807403    HemOnc  HemOnc/Is-a   3        3             0          
+Anti-SLAMF7               35807363    HemOnc  HemOnc/Is-a   1        1             0          
+BCL-2 inhibitor           35807456    HemOnc  HemOnc/Is-a   1        1             0          
+XPO1 inhibitor            35807438    HemOnc  HemOnc/Is-a   1        1             0          
+RANKL inhibitor           35807351    HemOnc  HemOnc/Is-a   1        1             0          
+HDAC inhibitor (ATC)      947794              ATC/ancestor  0        0             0          
+Monoclonal antibody (ATC) 21603754            ATC/ancestor  0        0             0          
+
+SUMMARY: 18/18 HemOnc target classes resolve to >=1 drug member via transitive 'Is a'.
+         2/2 ATC classes (HDAC 947794, Monoclonal antibody 21603754) have 0 usable descendants -> legacy / need HemOnc equivalent.
+         rxn_ingredient_mapped=0 across the board: this export lacks HemOnc Component -> Maps to -> RxNorm Ingredient edges (scope caveat; promop emits the HemOnc Component id directly).

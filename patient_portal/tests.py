@@ -9088,6 +9088,93 @@ class OrgInvitationFlowTest(TestCase):
         self.assertEqual(invitation.redirect_url, 'https://analytics.healthkey.ai')
         self.assertEqual(grant.redirect_url, 'https://analytics.healthkey.ai')
 
+    def test_invite_then_confirm_analyst_returns_default_redirect(self):
+        """End-to-end: invite analyst (no redirect_url given) → confirm → the
+        confirm response carries the default analytics redirect."""
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'repro-analyst@example.com',
+            'role': 'analyst',
+        })
+        self.assertEqual(resp.status_code, 201)
+        invitation = OrgInvitation.objects.get(org=self.org, email='repro-analyst@example.com')
+        confirm = APIClient().post('/api/orgs/confirm-invitation/',
+                                   {'token': invitation.token, 'password': 'Str0ng-pass-42'})
+        self.assertEqual(confirm.status_code, 200, confirm.data)
+        self.assertEqual(confirm.data.get('redirect_url'), 'https://analytics.healthkey.ai')
+
+    def test_invitation_email_links_to_bare_accept_invite_route(self):
+        """The emailed link must point at the SPA's /accept-invite route (which
+        runs the accept + redirect), not an org-scoped path that no route matches."""
+        from django.conf import settings
+        from django.core import mail
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'link-check@example.com',
+            'role': 'analyst',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(len(mail.outbox), 1)
+        invitation = OrgInvitation.objects.get(org=self.org, email='link-check@example.com')
+        body = mail.outbox[0].body
+        self.assertIn(f'{settings.APP_BASE_URL}/accept-invite?token={invitation.token}', body)
+        self.assertNotIn(f'/org/{self.org.slug}/accept-invite', body)
+
+    # --- password-on-accept (mirrors the patient-invite flow) ---
+
+    def _invite(self, email, role='analyst'):
+        resp = self.client.post('/api/orgs/invite-org/invite/', {'email': email, 'role': role})
+        self.assertEqual(resp.status_code, 201, resp.data)
+        return OrgInvitation.objects.get(org=self.org, email=email)
+
+    def test_confirm_sets_password_on_placeholder(self):
+        invitation = self._invite('pw-analyst@example.com')
+        resp = APIClient().post('/api/orgs/confirm-invitation/',
+                                {'token': invitation.token, 'password': 'Str0ng-pass-42'})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        identity = Identity.objects.get(email='pw-analyst@example.com', issuer='urn:local')
+        self.assertTrue(identity.has_usable_password())
+        self.assertTrue(identity.check_password('Str0ng-pass-42'))
+
+    def test_confirm_rejects_weak_password_for_placeholder(self):
+        invitation = self._invite('weak-pw@example.com')
+        resp = APIClient().post('/api/orgs/confirm-invitation/',
+                                {'token': invitation.token, 'password': 'short'})
+        self.assertEqual(resp.status_code, 400)
+        identity = Identity.objects.get(email='weak-pw@example.com', issuer='urn:local')
+        self.assertFalse(identity.has_usable_password())
+        invitation.refresh_from_db()
+        self.assertIsNone(invitation.confirmed_at)  # not accepted
+
+    def test_confirm_requires_password_for_placeholder(self):
+        invitation = self._invite('needs-pw@example.com')
+        resp = APIClient().post('/api/orgs/confirm-invitation/', {'token': invitation.token})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_confirm_does_not_overwrite_existing_account_password(self):
+        existing = Identity.objects.create_user(
+            email='has-acct@example.com', password='Existing-pass-1')
+        invitation = self._invite('has-acct@example.com')
+        resp = APIClient().post('/api/orgs/confirm-invitation/',
+                                {'token': invitation.token, 'password': 'Attempt-override-9'})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        existing.refresh_from_db()
+        self.assertTrue(existing.check_password('Existing-pass-1'))
+        self.assertFalse(existing.check_password('Attempt-override-9'))
+
+    def test_lookup_reports_needs_password_for_new_invite(self):
+        invitation = self._invite('lookup-new@example.com')
+        resp = APIClient().get('/api/v1/orgs/invitation-lookup/', {'token': invitation.token})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(resp.data['needs_password'])
+        self.assertEqual(resp.data['email'], 'lookup-new@example.com')
+        self.assertEqual(resp.data['org_name'], self.org.name)
+
+    def test_lookup_no_password_for_existing_account(self):
+        Identity.objects.create_user(email='lookup-existing@example.com', password='Existing-pass-1')
+        invitation = self._invite('lookup-existing@example.com')
+        resp = APIClient().get('/api/v1/orgs/invitation-lookup/', {'token': invitation.token})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(resp.data['needs_password'])
+
     def test_invite_analyst_allows_custom_redirect_url(self):
         resp = self.client.post('/api/orgs/invite-org/invite/', {
             'email': 'analyst-custom@example.com',
@@ -10957,14 +11044,14 @@ class PatientInvitationTest(TestCase):
         inv = self._create_invite()
         resp = APIClient().post(
             '/api/v1/patient-invitations/accept/',
-            {'token': inv.token, 'password': 'sup3rsecret'}, format='json',
+            {'token': inv.token, 'password': 'sup3r-secret-pass'}, format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         inv.refresh_from_db()
         self.assertEqual(inv.status, 'accepted')
         pu = PatientUser.objects.get(person=self.person)
         self.assertTrue(pu.identity.has_usable_password())
-        self.assertTrue(pu.identity.check_password('sup3rsecret'))
+        self.assertTrue(pu.identity.check_password('sup3r-secret-pass'))
         # The new account is a first-class patient.
         self.assertEqual(patient_person_for(pu.identity), self.person)
 
@@ -10979,7 +11066,7 @@ class PatientInvitationTest(TestCase):
     def test_accept_rejects_unknown_token(self):
         resp = APIClient().post(
             '/api/v1/patient-invitations/accept/',
-            {'token': 'a' * 64, 'password': 'sup3rsecret'}, format='json',
+            {'token': 'a' * 64, 'password': 'sup3r-secret-pass'}, format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
@@ -10989,13 +11076,13 @@ class PatientInvitationTest(TestCase):
         inv.save(update_fields=['expires_at'])
         resp = APIClient().post(
             '/api/v1/patient-invitations/accept/',
-            {'token': inv.token, 'password': 'sup3rsecret'}, format='json',
+            {'token': inv.token, 'password': 'sup3r-secret-pass'}, format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_accept_cannot_be_replayed(self):
         inv = self._create_invite()
-        body = {'token': inv.token, 'password': 'sup3rsecret'}
+        body = {'token': inv.token, 'password': 'sup3r-secret-pass'}
         APIClient().post('/api/v1/patient-invitations/accept/', body, format='json')
         resp = APIClient().post('/api/v1/patient-invitations/accept/', body, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
@@ -11031,11 +11118,11 @@ class PatientInvitationTest(TestCase):
         inv = self._create_invite('rae@example.com')
         resp = APIClient().post(
             '/api/v1/patient-invitations/accept/',
-            {'token': inv.token, 'password': 'sup3rsecret'}, format='json',
+            {'token': inv.token, 'password': 'sup3r-secret-pass'}, format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         placeholder.refresh_from_db()
-        self.assertTrue(placeholder.check_password('sup3rsecret'))
+        self.assertTrue(placeholder.check_password('sup3r-secret-pass'))
         self.assertEqual(PatientUser.objects.get(person=self.person).identity, placeholder)
 
     # --- Email editable (lock-in) ---
@@ -11079,7 +11166,7 @@ class PatientSignupTest(TestCase):
     def test_staff_signup_local_creates_account_in_org(self):
         from patient_portal.models import PatientUser
         resp = self._staff().post(self.SIGNUP_URL, {
-            'org': 'acme-onc', 'email': 'newpt@example.com', 'password': 'sup3rsecret',
+            'org': 'acme-onc', 'email': 'newpt@example.com', 'password': 'sup3r-secret-pass',
             'given_name': 'New', 'family_name': 'Patient',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
@@ -11087,7 +11174,7 @@ class PatientSignupTest(TestCase):
         pid = resp.data['person_id']
         pu = PatientUser.objects.get(person__person_id=pid)
         self.assertTrue(pu.identity.has_usable_password())
-        self.assertTrue(pu.identity.check_password('sup3rsecret'))
+        self.assertTrue(pu.identity.check_password('sup3r-secret-pass'))
         record = PatientRecord.objects.get(person__person_id=pid)
         self.assertEqual(record.organization, self.org)
         self.assertEqual(record.email, 'newpt@example.com')
@@ -11129,7 +11216,7 @@ class PatientSignupTest(TestCase):
 
     def test_staff_signup_requires_org_when_none_bound(self):
         resp = self._staff().post(self.SIGNUP_URL, {
-            'email': 'noorg@example.com', 'password': 'sup3rsecret',
+            'email': 'noorg@example.com', 'password': 'sup3r-secret-pass',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
@@ -11137,7 +11224,7 @@ class PatientSignupTest(TestCase):
         c = APIClient()
         c.force_authenticate(user=self.patient)
         resp = c.post(self.SIGNUP_URL, {
-            'org': 'acme-onc', 'email': 'x@example.com', 'password': 'sup3rsecret',
+            'org': 'acme-onc', 'email': 'x@example.com', 'password': 'sup3r-secret-pass',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -11451,6 +11538,7 @@ class LinesOfTherapyPayloadTest(TestCase):
         rec = self._record(
             first_line_therapy='AC-T', first_line_therapy_id=101,
             first_line_component_ids=[11, 12],
+            first_line_therapy_type_ids=[9101, 9102],
             first_line_start_date=datetime.date(2022, 3, 1),
             first_line_end_date=datetime.date(2022, 9, 1),
             first_line_outcome='CR', first_line_intent='Neoadjuvant',
@@ -11467,6 +11555,10 @@ class LinesOfTherapyPayloadTest(TestCase):
         self.assertEqual(lot[0]['regimen'], 'AC-T')
         self.assertEqual(lot[0]['regimen_concept_id'], 101)
         self.assertEqual(lot[0]['component_ids'], [11, 12])
+        # Per-line therapy-class ("type") concept_ids (ADR 0002), parity with
+        # component_ids; second line has none → empty list, never missing.
+        self.assertEqual(lot[0]['type_ids'], [9101, 9102])
+        self.assertEqual(lot[1]['type_ids'], [])
         self.assertEqual(lot[0]['regimen_source'], 'asserted')
         self.assertEqual(lot[0]['release_id'], 'rel-x')
         # Dates are ISO strings on the wire, not raw date objects.
@@ -14110,14 +14202,18 @@ class PatientInviteViaOrgTest(TestCase):
         pu = PatientUser.objects.get(identity=identity)
         self.assertEqual(pu.person_id, person.pk)
 
-    def test_invitation_email_uses_org_scoped_url(self):
+    def test_invitation_email_uses_bare_accept_invite_url(self):
+        # The link must hit the SPA's /accept-invite route (which runs the accept +
+        # post-accept redirect). An /org/<slug>/accept-invite path matches no route
+        # and is swallowed by the catch-all, so the accept page never renders.
         from django.core import mail
         self.client.post('/api/orgs/pt-inv-org/invite/', {
             'email': 'email-check@test.com',
             'role': 'doctor',
         })
         self.assertEqual(len(mail.outbox), 1)
-        self.assertIn('/org/pt-inv-org/accept-invite?token=', mail.outbox[0].body)
+        self.assertIn('/accept-invite?token=', mail.outbox[0].body)
+        self.assertNotIn('/org/pt-inv-org/accept-invite', mail.outbox[0].body)
 
 
 @override_settings(
@@ -14725,3 +14821,356 @@ class VocabSnapshotTest(_SmartBase):
         last = json.loads(lines[-1])
         self.assertTrue(last.get('__done'))
         self.assertEqual(last['rows'], len(lines) - 1)
+
+
+# ---------------------------------------------------------------------------
+# Derivation versioning & field-provenance tests (issues #358 & #360)
+# ---------------------------------------------------------------------------
+
+
+class DerivationVersioningTest(TestCase):
+    """Test that refresh_patient_record stamps derivation_version and derived_at."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(
+            person_id=99801,
+            year_of_birth=1985,
+            gender_source_value='male',
+        )
+
+    def test_refresh_stamps_version_and_timestamp(self):
+        from omop_core.services.patient_record_service import (
+            DERIVATION_VERSION,
+            refresh_patient_record,
+        )
+        pr = refresh_patient_record(self.person)
+        self.assertEqual(pr.derivation_version, DERIVATION_VERSION)
+        self.assertIsNotNone(pr.derived_at)
+
+    def test_derivation_fields_default_values(self):
+        """A PatientRecord created directly (not via refresh) gets default version=1."""
+        pr = PatientRecord.objects.create(person=self.person)
+        self.assertEqual(pr.derivation_version, 1)
+        self.assertIsNone(pr.derived_at)
+
+
+class DerivationVersionReadOnlyAPITest(TestCase):
+    """Test that derivation_version and derived_at are read-only via API."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.user = Identity.objects.create_user(
+            email='v_ro_test@test.com', password='testpass', is_staff=True,
+        )
+        cls.person = Person.objects.create(
+            person_id=99802, year_of_birth=1990,
+        )
+        from omop_core.services.patient_record_service import refresh_patient_record
+        cls.pr = refresh_patient_record(cls.person)
+
+    def test_patch_cannot_change_derivation_version(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        resp = client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'derivation_version': 999},
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 400])
+        self.pr.refresh_from_db()
+        self.assertNotEqual(self.pr.derivation_version, 999)
+
+
+class BackfillCommandTest(TestCase):
+    """Test the backfill_patient_records management command."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(
+            person_id=99803, year_of_birth=1975,
+        )
+
+    def test_dry_run_does_not_modify(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        pr = refresh_patient_record(self.person)
+        original_derived_at = pr.derived_at
+
+        from django.core.management import call_command
+        from io import StringIO
+        out = StringIO()
+        # Force stale by setting version to 0
+        PatientRecord.objects.filter(pk=pr.pk).update(derivation_version=0)
+        call_command('backfill_patient_records', dry_run=True, stdout=out)
+        pr.refresh_from_db()
+        self.assertEqual(pr.derivation_version, 0)  # Not modified
+
+    def test_backfill_updates_stale_records(self):
+        from omop_core.services.patient_record_service import (
+            DERIVATION_VERSION,
+            refresh_patient_record,
+        )
+        pr = refresh_patient_record(self.person)
+        PatientRecord.objects.filter(pk=pr.pk).update(derivation_version=0)
+
+        from django.core.management import call_command
+        from io import StringIO
+        out = StringIO()
+        call_command('backfill_patient_records', stdout=out)
+        pr.refresh_from_db()
+        self.assertEqual(pr.derivation_version, DERIVATION_VERSION)
+
+
+class FieldProvenanceRegistryTest(TestCase):
+    """Test that the provenance registry covers key fields."""
+
+    def test_registry_covers_loinc_lab_fields(self):
+        from omop_core.services.provenance_registry import get_registry
+        from omop_core.services.patient_record_service import _LOINC_LAB_FIELDS
+        registry = get_registry()
+        for _code, (field_name, _cast) in _LOINC_LAB_FIELDS.items():
+            self.assertIn(
+                field_name, registry,
+                f'{field_name} not in provenance registry',
+            )
+
+    def test_registry_covers_composite_fields(self):
+        from omop_core.services.provenance_registry import get_registry
+        registry = get_registry()
+        for field in ['bmi', 'hr_status', 'metastatic_status', 'meets_crab']:
+            self.assertIn(field, registry)
+            self.assertEqual(registry[field].selection_rule, 'composite')
+
+
+class FieldProvenanceServiceTest(TestCase):
+    """Test that get_field_provenance returns correct source rows."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        from omop_core.models import Vocabulary, Domain, ConceptClass
+
+        vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        domain_meas = Domain.objects.get(domain_id='Measurement')
+        cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
+        today = date.today()
+        far_future = date(2099, 12, 31)
+
+        cls.hgb_concept, _ = Concept.objects.get_or_create(
+            concept_id=8099001,
+            defaults={
+                'concept_name': 'Hemoglobin [Mass/volume] in Blood',
+                'domain': domain_meas,
+                'vocabulary': vocab,
+                'concept_class': cc,
+                'concept_code': '718-7',
+                'valid_start_date': today,
+                'valid_end_date': far_future,
+            },
+        )
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.person = Person.objects.create(
+            person_id=99804, year_of_birth=1988,
+        )
+
+    def test_provenance_returns_measurement_rows(self):
+        # Create two hemoglobin measurements
+        Measurement.objects.create(
+            measurement_id=990001,
+            person=self.person,
+            measurement_concept=self.hgb_concept,
+            measurement_date=date(2026, 5, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_number=11.5,
+            unit_source_value='g/dL',
+        )
+        Measurement.objects.create(
+            measurement_id=990002,
+            person=self.person,
+            measurement_concept=self.hgb_concept,
+            measurement_date=date(2026, 6, 15),
+            measurement_type_concept=self.type_concept,
+            value_as_number=12.5,
+            unit_source_value='g/dL',
+        )
+        # Refresh to populate PatientRecord
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(self.person)
+
+        from omop_core.services.provenance_service import get_field_provenance
+        result = get_field_provenance(self.person, 'hemoglobin_g_dl')
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result['field'], 'hemoglobin_g_dl')
+        self.assertEqual(result['current_value'], 12.5)
+        self.assertEqual(result['selection_rule'], 'latest')
+        self.assertGreaterEqual(len(result['source_rows']), 2)
+        # The first (latest) row should be selected
+        self.assertTrue(result['source_rows'][0]['selected'])
+        self.assertEqual(result['source_rows'][0]['value'], 12.5)
+
+    def test_provenance_unknown_field_returns_none(self):
+        from omop_core.services.provenance_service import get_field_provenance
+        result = get_field_provenance(self.person, 'nonexistent_field_xyz')
+        self.assertIsNone(result)
+
+    def test_provenance_composite_field(self):
+        from omop_core.services.provenance_service import get_field_provenance
+        result = get_field_provenance(self.person, 'bmi')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['selection_rule'], 'composite')
+
+
+class FieldProvenanceAPITest(TestCase):
+    """Test the field-provenance API endpoint."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.user = Identity.objects.create_user(
+            email='fp_api_test@test.com', password='testpass', is_staff=True,
+        )
+        cls.person = Person.objects.create(
+            person_id=99805, year_of_birth=1992,
+        )
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(cls.person)
+
+    def test_field_provenance_endpoint(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        resp = client.get(
+            f'/api/v1/patient-records/{self.person.person_id}/field-provenance/hemoglobin_g_dl/',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['field'], 'hemoglobin_g_dl')
+
+    def test_field_provenance_unknown_field_404(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        resp = client.get(
+            f'/api/v1/patient-records/{self.person.person_id}/field-provenance/nonexistent_xyz/',
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_field_provenance_bulk_endpoint(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        resp = client.get(
+            f'/api/v1/patient-records/{self.person.person_id}/field-provenance/',
+            {'fields': 'hemoglobin_g_dl,bmi'},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('hemoglobin_g_dl', resp.data)
+        self.assertIn('bmi', resp.data)
+
+    def test_field_provenance_access_control(self):
+        """Unauthenticated requests should be rejected."""
+        client = APIClient()
+        resp = client.get(
+            f'/api/v1/patient-records/{self.person.person_id}/field-provenance/hemoglobin_g_dl/',
+        )
+        self.assertIn(resp.status_code, [401, 403])
+
+
+class AdminDeletePatientTest(TestCase):
+    """Administrator single-patient deletion — staff (any org) or org_admin
+    (own org only), distinct from the patient self-service `me` DELETE."""
+
+    def setUp(self):
+        from omop_core.models import GroupAccess, PatientGroup
+        self.client = APIClient()
+        self.staff = _make_user('staff-del@test.com', is_staff=True)
+        self.org_a = _make_org('Org A Del', 'org-a-del')
+        self.org_b = _make_org('Org B Del', 'org-b-del')
+        self.admin_a = _make_user('admin-a-del@test.com')
+        GroupAccess.objects.create(identity=self.admin_a, org=self.org_a, role='org_admin')
+        self.doctor_a = _make_user('doctor-a-del@test.com')
+        self.group_a = PatientGroup.objects.create(
+            organization=self.org_a, name='Panel A', slug='panel-a')
+        # GroupAccess is org-XOR-group; a group panel grant sets group only.
+        GroupAccess.objects.create(identity=self.doctor_a, role='doctor', group=self.group_a)
+
+    def _make_patient(self, org, pid, in_group=None):
+        from omop_core.models import PatientGroupMembership
+        person = Person.objects.create(
+            person_id=pid, year_of_birth=1980, gender_source_value='unknown',
+            race_source_value='unknown', ethnicity_source_value='unknown',
+        )
+        PatientRecord.objects.create(person=person, organization=org)
+        if in_group is not None:
+            PatientGroupMembership.objects.create(group=in_group, person_id=person.person_id)
+        return person
+
+    def _url(self, person_id):
+        return f'/api/v1/patient-records/{person_id}/admin-delete/'
+
+    def _delete(self, user, person_id, body={'confirm': 'DELETE'}):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        return self.client.delete(self._url(person_id), body, format='json')
+
+    def test_staff_can_delete_any_patient(self):
+        p = self._make_patient(self.org_b, 700001)  # even another org
+        resp = self._delete(self.staff, 700001)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(Person.objects.filter(person_id=700001).exists())
+        self.assertFalse(PatientRecord.objects.filter(person_id=700001).exists())
+
+    def test_org_admin_can_delete_own_org_patient(self):
+        self._make_patient(self.org_a, 700002)
+        resp = self._delete(self.admin_a, 700002)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(Person.objects.filter(person_id=700002).exists())
+
+    def test_org_admin_cannot_delete_other_org_patient(self):
+        self._make_patient(self.org_b, 700003)
+        resp = self._delete(self.admin_a, 700003)
+        self.assertIn(resp.status_code, (403, 404))
+        self.assertTrue(Person.objects.filter(person_id=700003).exists())
+
+    def test_doctor_with_view_access_cannot_delete(self):
+        """A doctor who can *see* the patient (group panel) still can't delete —
+        view access is not delete authority."""
+        self._make_patient(self.org_a, 700004, in_group=self.group_a)
+        resp = self._delete(self.doctor_a, 700004)
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(Person.objects.filter(person_id=700004).exists())
+
+    def test_requires_confirm(self):
+        self._make_patient(self.org_a, 700005)
+        resp = self._delete(self.staff, 700005, body={})
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(Person.objects.filter(person_id=700005).exists())
+
+    def test_unauthenticated_denied(self):
+        self._make_patient(self.org_a, 700006)
+        resp = APIClient().delete(self._url(700006), {'confirm': 'DELETE'}, format='json')
+        self.assertIn(resp.status_code, (401, 403))
+        self.assertTrue(Person.objects.filter(person_id=700006).exists())
+
+    def test_deletes_patient_login_identity(self):
+        from patient_portal.models import PatientUser
+        p = self._make_patient(self.org_a, 700007)
+        pt_ident = Identity.objects.create_user(email='pt7-del@test.com', password=None)
+        PatientUser.objects.create(identity=pt_ident, person=p)
+        resp = self._delete(self.staff, 700007)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(Identity.objects.filter(pk=pt_ident.pk).exists())
+
+    def test_preserves_identity_that_also_has_provider_access(self):
+        """If the patient's linked identity is also a provider (holds GroupAccess),
+        delete the record but keep the identity so provider access isn't revoked."""
+        from omop_core.models import GroupAccess
+        from patient_portal.models import PatientUser
+        p = self._make_patient(self.org_a, 700008)
+        dual = _make_user('dual-del@test.com')
+        GroupAccess.objects.create(identity=dual, org=self.org_a, role='doctor')
+        PatientUser.objects.create(identity=dual, person=p)
+        resp = self._delete(self.staff, 700008)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(Person.objects.filter(person_id=700008).exists())
+        self.assertTrue(Identity.objects.filter(pk=dual.pk).exists())

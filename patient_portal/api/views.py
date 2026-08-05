@@ -442,26 +442,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
     def retrieve(self, request, pk=None):
         """Get detailed patient info for a specific person"""
-        try:
-            person = Person.objects.get(person_id=pk)
-            patient_info = PatientRecord.objects.get(person=person)
-        except Person.DoesNotExist:
-            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        except PatientRecord.DoesNotExist:
-            return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        # AUTH-04: enforce per-patient row-level access
-        # Trusted service tokens (HMAC) get full access, consistent with the
-        # list endpoint's get_queryset. See healthkey-ai/promop#330.
-        if not is_service_token(request):
-            org = get_request_org(request)
-            if org is not None:
-                if patient_info.organization != org:
-                    return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-            elif not getattr(request.user, 'is_staff', False):
-                from omop_core.authorization import can_access_patient
-                if not can_access_patient(request.user, person.person_id):
-                    return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
 
         # Get the Identity associated with this person (not the logged-in user)
         from patient_portal.models import PatientUser
@@ -573,25 +556,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=['get'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def provenance(self, request, pk=None):
         """GET /api/patient-info/{person_id}/provenance/ — full provenance history for a patient."""
-        try:
-            person = Person.objects.get(person_id=pk)
-            patient_info = PatientRecord.objects.get(person=person)
-        except Person.DoesNotExist:
-            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        except PatientRecord.DoesNotExist:
-            return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        # Trusted service tokens (HMAC) get full access, consistent with the
-        # list endpoint's get_queryset. See healthkey-ai/promop#330.
-        if not is_service_token(request):
-            org = get_request_org(request)
-            if org is not None:
-                if patient_info.organization != org:
-                    return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-            elif not getattr(request.user, 'is_staff', False):
-                from omop_core.authorization import can_access_patient
-                if not can_access_patient(request.user, person.person_id):
-                    return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
 
         from django.db.models import Q
         # Build a single query for all provenance records across PatientRecord + OMOP tables
@@ -614,25 +581,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         """GET /api/v1/patient-records/{person_id}/revisions/ — field-level
         revision history for a patient's record (PHR-S FM TI.1.2#04)."""
         from omop_core.models import RecordRevision
-        try:
-            person = Person.objects.get(person_id=pk)
-            patient_info = PatientRecord.objects.get(person=person)
-        except Person.DoesNotExist:
-            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        except PatientRecord.DoesNotExist:
-            return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        # Trusted service tokens (HMAC) get full access, consistent with the
-        # list endpoint's get_queryset. See healthkey-ai/promop#330.
-        if not is_service_token(request):
-            org = get_request_org(request)
-            if org is not None:
-                if patient_info.organization != org:
-                    return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-            elif not getattr(request.user, 'is_staff', False):
-                from omop_core.authorization import can_access_patient
-                if not can_access_patient(request.user, person.person_id):
-                    return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
 
         revisions = RecordRevision.objects.filter(
             patient_record=patient_info,
@@ -649,6 +600,92 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             for r in revisions
         ]
         return Response(data)
+
+    @action(
+        detail=True,
+        methods=['get'],
+        url_path=r'field-provenance/(?P<field_name>[a-z_][a-z0-9_]*)',
+        url_name='field-provenance',
+        permission_classes=[ScopedTokenPermission, PatientSelfScopePermission],
+    )
+    def field_provenance(self, request, pk=None, field_name=None):
+        """GET /api/v1/patient-records/{person_id}/field-provenance/{field_name}/
+
+        Return the OMOP source rows that produced a specific PatientRecord field.
+        """
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+
+        from omop_core.services.provenance_service import get_field_provenance
+
+        result = get_field_provenance(person, field_name)
+        if result is None:
+            return Response(
+                {'error': f'Unknown field: {field_name}'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(result)
+
+    @action(
+        detail=True,
+        methods=['get'],
+        url_path='field-provenance',
+        url_name='field-provenance-bulk',
+        permission_classes=[ScopedTokenPermission, PatientSelfScopePermission],
+    )
+    def field_provenance_bulk(self, request, pk=None):
+        """GET /api/v1/patient-records/{person_id}/field-provenance/?fields=f1,f2
+
+        Bulk provenance lookup for multiple fields.
+        """
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+
+        from omop_core.services.provenance_service import get_fields_provenance
+
+        fields_param = request.query_params.get('fields', '')
+        if not fields_param:
+            return Response(
+                {'error': 'Provide ?fields=field1,field2'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        field_names = [f.strip() for f in fields_param.split(',') if f.strip()]
+        if len(field_names) > 20:
+            return Response(
+                {'error': 'Maximum 20 fields per request'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        results = get_fields_provenance(person, field_names)
+        return Response(results)
+
+    def _resolve_patient_with_auth(self, request, pk):
+        """Shared lookup + auth logic for detail-level patient endpoints.
+
+        Used by retrieve(), provenance(), revisions(), and field_provenance*().
+        Returns (person, patient_info, None) on success, or
+        (None, None, Response) on error.
+        """
+        try:
+            person = Person.objects.get(person_id=pk)
+            patient_info = PatientRecord.objects.get(person=person)
+        except Person.DoesNotExist:
+            return None, None, Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        except PatientRecord.DoesNotExist:
+            return None, None, Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not is_service_token(request):
+            org = get_request_org(request)
+            if org is not None:
+                if patient_info.organization != org:
+                    return None, None, Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+            elif not getattr(request.user, 'is_staff', False):
+                from omop_core.authorization import can_access_patient
+                if not can_access_patient(request.user, person.person_id):
+                    return None, None, Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        return person, patient_info, None
 
     @action(detail=False, methods=['get', 'patch', 'delete'], permission_classes=[PatientDeletePermission, PatientSelfScopePermission])
     def me(self, request):
@@ -792,6 +829,87 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
         return Response({'detail': 'Account and all associated data have been permanently deleted.'})
+
+    @action(detail=True, methods=['delete'], url_path='admin-delete',
+            permission_classes=[IsAuthenticated])
+    def admin_delete(self, request, pk=None):
+        """DELETE /api/v1/patient-records/{person_id}/admin-delete/ — administrator
+        deletion of a patient and all associated data (PHR-S FM TI.1.7, admin-initiated).
+
+        ``pk`` is the person_id (consistent with retrieve/export_fhir). Distinct from
+        the patient self-service ``me`` DELETE.
+
+        Authorization:
+          - staff / superuser: may delete any patient.
+          - org_admin: may delete only when EVERY org the patient has a record in is
+            one they administer (``get_admin_orgs``). This prevents cascade-deleting a
+            patient that is also owned by an org the caller does not administer.
+          - everyone else (doctors, analysts, patients): 403.
+
+        Requires body ``{"confirm": "DELETE"}``. The request is audited by
+        AuditLogMiddleware (record_delete); an explicit log line is also emitted.
+        """
+        from patient_portal.models import PatientUser
+        from omop_core.models import GroupAccess, Person
+
+        # Resolve by person_id directly — authorization here is the explicit
+        # staff/org-admin check below, which is stricter than mere view access
+        # (a viewer is not necessarily allowed to delete).
+        try:
+            person = Person.objects.get(person_id=pk)
+        except (Person.DoesNotExist, ValueError, TypeError):
+            return Response({'detail': 'Patient not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        actor = request.user
+        is_staff_actor = bool(getattr(actor, 'is_staff', False))
+        if not is_staff_actor:
+            admin_org_ids = set(get_admin_orgs(actor).values_list('id', flat=True))
+            person_org_ids = set(
+                PatientRecord.objects.filter(person=person)
+                .values_list('organization_id', flat=True)
+            )
+            # Every org this patient belongs to must be one the caller administers;
+            # an org-less patient (empty set) is staff-only.
+            if not person_org_ids or not person_org_ids.issubset(admin_org_ids):
+                return Response(
+                    {'detail': 'You do not have permission to delete this patient.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+        if request.data.get('confirm') != 'DELETE':
+            return Response(
+                {'detail': 'Request body must include {"confirm": "DELETE"}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        person_id = person.person_id
+        # Remove a purely-patient login alongside the record; keep an Identity that
+        # also holds provider access (GroupAccess) so we don't revoke a provider.
+        linked_identity = None
+        pu = PatientUser.objects.filter(person=person).select_related('identity').first()
+        if pu and not GroupAccess.objects.filter(identity=pu.identity).exists():
+            linked_identity = pu.identity
+
+        with transaction.atomic():
+            # EpisodeEvent has a bare integer FK not covered by CASCADE.
+            episode_ids = list(
+                Episode.objects.filter(person=person).values_list('episode_id', flat=True)
+            )
+            if episode_ids:
+                EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
+            # Person delete cascades to OMOP rows, PatientRecord(s), PatientUser.
+            person.delete()
+            if linked_identity is not None:
+                linked_identity.delete()
+
+        logger.info(
+            'admin_patient_deleted person_id=%s by_identity_id=%s is_staff=%s',
+            person_id, actor.pk, is_staff_actor,
+        )
+        return Response(
+            {'detail': 'Patient and all associated data have been permanently deleted.'}
+        )
 
     @action(detail=True, methods=['get'], url_path='export-fhir',
             permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])

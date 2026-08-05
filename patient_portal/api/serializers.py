@@ -265,6 +265,8 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             'first_line_therapy_id', 'second_line_therapy_id', 'later_therapy_ids',
             'first_line_component_ids', 'second_line_component_ids',
             'later_component_ids', 'therapy_component_ids',
+            'first_line_therapy_type_ids', 'second_line_therapy_type_ids',
+            'later_therapy_type_ids', 'therapy_type_ids',
             'therapy_ids_provenance',
             # Per-line later-therapy structure (regimen/lineNumber/concept_id/
             # dates) is derived from OMOP; lines_of_therapy surfaces its
@@ -276,6 +278,8 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             'resting_heart_rate_avg_30d', 'hrv_sdnn_avg_30d',
             'oxygen_saturation_min_30d', 'respiratory_rate_avg_30d',
             'sleep_duration_hours_avg_30d',
+            # Derivation versioning — set only by refresh_patient_record, never by client.
+            'derivation_version', 'derived_at',
         )
 
     def get_patient_name(self, obj):
@@ -406,7 +410,8 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             return v.isoformat() if hasattr(v, 'isoformat') else (v or None)
 
         def _line(n, regimen, cid, prov_field, comp, start, end,
-                  outcome, intent, disc, later_aggregate=False, origin_override=None):
+                  outcome, intent, disc, later_aggregate=False,
+                  origin_override=None, comp_class=None):
             # Prefer a per-line origin (later_therapies carries one per 3L+ line);
             # else the field-level `therapy_ids_provenance` origin.
             origin = origin_override or _prov(prov_field, 'origin')
@@ -424,6 +429,13 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 'regimen_source': origin,
                 'release_id': _prov(prov_field, 'release_id'),
                 'component_ids': comp or [],
+                # Therapy-class ("type") concept_ids for the line (ADR 0002),
+                # derived from component_ids; parity with the flat
+                # *_therapy_type_ids fields. For 3L+ lines this is the shared
+                # later-line aggregate (like component_ids), flagged by
+                # later_aggregate — an individual later line may show classes
+                # from a sibling later line.
+                'type_ids': comp_class or [],
                 # ISO strings on the wire, consistent with the flat *_date fields
                 # (DRF DateField); avoids raw date objects leaking to consumers
                 # that json.dumps the payload themselves.
@@ -444,14 +456,16 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 'first_line_therapy_id', obj.first_line_component_ids,
                 obj.first_line_start_date or obj.first_line_date, obj.first_line_end_date,
                 obj.first_line_outcome, obj.first_line_intent,
-                obj.first_line_discontinuation_reason))
+                obj.first_line_discontinuation_reason,
+                comp_class=obj.first_line_therapy_type_ids))
         if obj.second_line_therapy or obj.second_line_therapy_id:
             lines.append(_line(
                 2, obj.second_line_therapy, obj.second_line_therapy_id,
                 'second_line_therapy_id', obj.second_line_component_ids,
                 obj.second_line_start_date or obj.second_line_date, obj.second_line_end_date,
                 obj.second_line_outcome, obj.second_line_intent,
-                obj.second_line_discontinuation_reason))
+                obj.second_line_discontinuation_reason,
+                comp_class=obj.second_line_therapy_type_ids))
 
         # 3L+ lines: iterate the authoritative per-line `later_therapies` list,
         # which includes lines whose regimen did not resolve to a concept_id, so
@@ -485,7 +499,8 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                     obj.later_component_ids, lt.get('startDate'), lt.get('endDate'),
                     obj.later_outcome, obj.later_intent,
                     obj.later_discontinuation_reason, later_aggregate=True,
-                    origin_override=lt.get('origin')))
+                    origin_override=lt.get('origin'),
+                    comp_class=obj.later_therapy_type_ids))
         else:
             # Oldest rows with no `later_therapies` list at all: emit one entry
             # per resolved id (naming each from the concept cache), else a single
@@ -500,13 +515,15 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                         3 + i, regimen_name, cid, 'later_therapy_ids',
                         obj.later_component_ids, obj.later_start_date or obj.later_date, obj.later_end_date,
                         obj.later_outcome, obj.later_intent,
-                        obj.later_discontinuation_reason, later_aggregate=True))
+                        obj.later_discontinuation_reason, later_aggregate=True,
+                        comp_class=obj.later_therapy_type_ids))
             elif obj.later_therapy:
                 lines.append(_line(
                     3, obj.later_therapy, None, 'later_therapy_ids',
                     obj.later_component_ids, obj.later_start_date, obj.later_end_date,
                     obj.later_outcome, obj.later_intent,
-                    obj.later_discontinuation_reason, later_aggregate=True))
+                    obj.later_discontinuation_reason, later_aggregate=True,
+                    comp_class=obj.later_therapy_type_ids))
         return lines
 
     def validate_sct_date(self, value):

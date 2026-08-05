@@ -6,6 +6,7 @@ Usage:
     patient_info = refresh_patient_record(person)
 """
 
+import logging
 import math
 import statistics
 from collections import defaultdict
@@ -37,6 +38,12 @@ from omop_core.services.lot_regimens import (
 # Public API
 # ---------------------------------------------------------------------------
 
+logger = logging.getLogger(__name__)
+
+# Bump this whenever aggregation or computation logic changes in any section
+# extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
+DERIVATION_VERSION = 2
+
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
 _OMOP_DERIVED_FIELDS = [
@@ -51,6 +58,8 @@ _OMOP_DERIVED_FIELDS = [
     'later_therapies', 'later_therapy_ids',
     'first_line_component_ids', 'second_line_component_ids',
     'later_component_ids', 'therapy_component_ids',
+    'first_line_therapy_type_ids', 'second_line_therapy_type_ids',
+    'later_therapy_type_ids', 'therapy_type_ids',
     'therapy_ids_provenance',
     'therapy_lines_count', 'last_treatment',
     'concomitant_medications',
@@ -278,6 +287,8 @@ def _clear_derived_fields(patient_info: PatientRecord) -> None:
                 'prior_procedures', 'later_therapies', 'genetic_mutations', 'later_therapy_ids',
                 'first_line_component_ids', 'second_line_component_ids',
                 'later_component_ids', 'therapy_component_ids',
+                'first_line_therapy_type_ids', 'second_line_therapy_type_ids',
+                'later_therapy_type_ids', 'therapy_type_ids',
                 'stem_cell_transplant_history', 'sct_eligibility',
             ) else None
             setattr(patient_info, field, default)
@@ -329,6 +340,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                 setattr(patient_info, field, value)
 
         _compute_derived_fields(patient_info)
+
+        patient_info.derivation_version = DERIVATION_VERSION
+        patient_info.derived_at = timezone.now()
+
         patient_info.save()
         return patient_info
 
@@ -656,6 +671,75 @@ def _prov_entry(concept_id, origin, release_id):
     if not concept_id:
         return None
     return {'value': concept_id, 'origin': origin, 'release_id': release_id}
+# HemOnc concept_class_id for drug-class ("type") concepts, e.g. Proteasome
+# inhibitor / IMiD / anti-CD38. A drug's class membership is a 'Is a' edge
+# (HemOnc Component --[Is a]--> Component Class); classes themselves chain to
+# broader classes by the same edge. NOT concept_ancestor — a class's ancestry
+# there is the regimens that *use* it, not its member drugs (ADR 0002 Phase 0).
+_TYPE_CONCEPT_CLASS_ID = 'Component Class'
+_TYPE_RELATIONSHIP_ID = 'Is a'
+# Depth backstop for the class BFS. Real HemOnc class chains are ~2-3 deep
+# (drug → narrow class → broad class); the cap only guards pathological graphs.
+_CLASS_MAX_HOPS = 5
+
+
+def _expand_class_ids(component_ids):
+    """Derive therapy-class ("type") concept_ids for one line's components.
+
+    Given the line's component drug concept_ids (as produced by
+    _expand_component_ids — which includes the HemOnc Component seeds plus any
+    'Maps to'/'Has ingredient'-leveled RxNorm concepts), follow HemOnc
+    'Component --[Is a]--> Component Class' edges transitively, keeping only
+    targets whose concept_class_id is 'Component Class' (the drug-class
+    concepts). Non-class concepts in the input (e.g. leveled RxNorm ingredients)
+    simply contribute no 'Is a → Component Class' edges and fall away. Sub-class
+    chains (narrow class --Is a--> broader class) are followed so a patient
+    carries *every* applicable class, not just the narrowest — matching how
+    trial type criteria are authored.
+
+    Bounded BFS: one query per hop, a visited set prevents cycles, and
+    _CLASS_MAX_HOPS backstops any pathological graph. Returns a set of
+    class concept_ids (never includes the seed component ids themselves).
+    """
+    def _class_parents(ids):
+        # Exclude retired edges and retired class targets: Athena preserves
+        # invalid_reason on historical rows, and an obsolete class id in a
+        # patient's set would produce a false type-criterion match downstream.
+        return set(
+            ConceptRelationship.objects.filter(
+                concept_1_id__in=ids,
+                relationship_id=_TYPE_RELATIONSHIP_ID,
+                concept_2__concept_class_id=_TYPE_CONCEPT_CLASS_ID,
+                invalid_reason__isnull=True,
+                concept_2__invalid_reason__isnull=True,
+            ).values_list('concept_2_id', flat=True)
+        )
+
+    seed_size = len({int(c) for c in (component_ids or ()) if c})
+    if not seed_size:
+        return set()
+    seen = {int(c) for c in (component_ids or ()) if c}
+    classes = set()
+    frontier = seen
+    for _ in range(_CLASS_MAX_HOPS):
+        new = _class_parents(frontier) - seen
+        if not new:
+            return classes          # graph fully resolved within the cap
+        classes |= new
+        seen |= new
+        frontier = new
+    # Cap reached with a non-empty frontier. Probe one more hop to tell
+    # "chain ended exactly at the cap" (complete) from a genuine truncation —
+    # only the latter is worth a warning. Never drop silently (project
+    # convention): surface real truncations for triage.
+    if _class_parents(frontier) - seen:
+        logger.warning(
+            "therapy-class BFS hit depth cap _CLASS_MAX_HOPS=%d with deeper "
+            "'Is a' → Component Class ancestors still unexpanded (seed size %d, "
+            "classes so far %d)",
+            _CLASS_MAX_HOPS, seed_size, len(classes),
+        )
+    return classes
 
 
 def _regimen_from_exposures(exposure_ids, de_info_by_id):
@@ -721,6 +805,8 @@ def _apply_inferred_lots(data: dict, lots) -> None:
     later_origins = []
     later_components = set()
     all_components = set()
+    later_classes = set()
+    all_classes = set()
     for lot in lots:
         name, concept_id, origin = _regimen_from_exposures(lot.exposure_ids, de_info_by_id)
         exposure_concept_ids = [
@@ -732,12 +818,15 @@ def _apply_inferred_lots(data: dict, lots) -> None:
             [concept_id] if concept_id else [], exposure_concept_ids,
         )
         all_components |= components
+        classes = _expand_class_ids(components)
+        all_classes |= classes
         start = str(lot.start) if lot.start else None
         end = str(lot.end) if lot.end else None
         if lot.lot_number == 1:
             data['first_line_therapy'] = name
             data['first_line_therapy_id'] = concept_id
             data['first_line_component_ids'] = sorted(components)
+            data['first_line_therapy_type_ids'] = sorted(classes)
             data['first_line_date'] = start
             data['first_line_start_date'] = start
             data['first_line_end_date'] = end
@@ -747,6 +836,7 @@ def _apply_inferred_lots(data: dict, lots) -> None:
             data['second_line_therapy'] = name
             data['second_line_therapy_id'] = concept_id
             data['second_line_component_ids'] = sorted(components)
+            data['second_line_therapy_type_ids'] = sorted(classes)
             data['second_line_date'] = start
             data['second_line_start_date'] = start
             data['second_line_end_date'] = end
@@ -754,6 +844,7 @@ def _apply_inferred_lots(data: dict, lots) -> None:
                 prov['second_line_therapy_id'] = _prov_entry(concept_id, origin, release_id)
         else:  # lot_number >= 3
             later_components |= components
+            later_classes |= classes
             if not data.get('later_therapy'):
                 data['later_therapy'] = name
                 data['later_date'] = start
@@ -785,6 +876,10 @@ def _apply_inferred_lots(data: dict, lots) -> None:
         data['therapy_component_ids'] = sorted(all_components)
     if prov:
         data['therapy_ids_provenance'] = prov
+    if later_classes:
+        data['later_therapy_type_ids'] = sorted(later_classes)
+    if all_classes:
+        data['therapy_type_ids'] = sorted(all_classes)
 
 
 def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
@@ -881,6 +976,8 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
     therapy_line_numbers = set()
     later_components = set()
     all_components = set()
+    later_classes = set()
+    all_classes = set()
 
     for episode, drugs_in_episode, concept_id, source_value_set, origin in episode_rows:
         lot = episode.episode_number
@@ -900,6 +997,9 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             [de.drug_concept_id for de in drugs_in_episode if de.drug_concept_id],
         )
         all_components |= components
+        # Therapy-class ("type") concept_ids for this line (ADR 0002).
+        classes = _expand_class_ids(components)
+        all_classes |= classes
 
         if concept_id:
             drug_names = concept_name_map[concept_id]
@@ -927,6 +1027,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             data['first_line_therapy'] = drug_names
             data['first_line_therapy_id'] = concept_id
             data['first_line_component_ids'] = sorted(components)
+            data['first_line_therapy_type_ids'] = sorted(classes)
             data['first_line_date'] = start_date
             data['first_line_start_date'] = start_date
             if end_date:
@@ -937,6 +1038,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             data['second_line_therapy'] = drug_names
             data['second_line_therapy_id'] = concept_id
             data['second_line_component_ids'] = sorted(components)
+            data['second_line_therapy_type_ids'] = sorted(classes)
             data['second_line_date'] = start_date
             data['second_line_start_date'] = start_date
             if end_date:
@@ -947,6 +1049,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             later_components |= components
             if concept_id:
                 later_origins.append(origin)
+            later_classes |= classes
             later = data.get('later_therapies', [])
             # Keep the true episode line number, per-line concept_id (may be None
             # for an unresolved regimen) and origin so lines_of_therapy renders
@@ -983,6 +1086,10 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         prov['later_therapy_ids'] = {'value': data['later_therapy_ids'], 'origin': _later_origin, 'release_id': release_id}
     if prov:
         data['therapy_ids_provenance'] = prov
+    if later_classes:
+        data['later_therapy_type_ids'] = sorted(later_classes)
+    if all_classes:
+        data['therapy_type_ids'] = sorted(all_classes)
 
     # ── Per-line outcomes from LOT-N-outcome Observations ─────────────────
     # Written by the synthetic enrichment commands (and any future ingest path

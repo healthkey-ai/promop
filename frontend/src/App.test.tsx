@@ -93,6 +93,18 @@ describe("Org-scoped routes", () => {
     expect(screen.getByText("ORG_SIGNUP")).toBeInTheDocument();
   });
 
+  it("renders AcceptInvite at the bare /accept-invite route", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+    renderAt("/accept-invite?token=abc");
+    expect(screen.getByText("ACCEPT_INVITE")).toBeInTheDocument();
+  });
+
+  it("renders AcceptInvite at the legacy /org/:slug/accept-invite alias (older emails)", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+    renderAt("/org/acme/accept-invite?token=abc");
+    expect(screen.getByText("ACCEPT_INVITE")).toBeInTheDocument();
+  });
+
   it("renders PatientHome at /org/:slug for an authenticated patient with matching org", () => {
     mockUseAuth.mockReturnValue({
       ...baseAuth,
