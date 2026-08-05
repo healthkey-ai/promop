@@ -15197,3 +15197,76 @@ class AdminDeletePatientTest(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertFalse(Person.objects.filter(person_id=700008).exists())
         self.assertTrue(Identity.objects.filter(pk=dual.pk).exists())
+
+
+# ---------------------------------------------------------------------------
+# MeetsCRAB / MeetsSLiM / MyelomaType UI fields (#374)
+# ---------------------------------------------------------------------------
+
+class MyelomaTypeVocabularyTest(TestCase):
+    """Verify MyelomaType vocabulary is seeded and served via API."""
+
+    def test_myeloma_type_vocab_seeded(self):
+        from omop_core.models import MyelomaType
+        codes = list(MyelomaType.objects.values_list('code', flat=True))
+        self.assertIn('igg-kappa', codes)
+        self.assertIn('light-chain-kappa', codes)
+        self.assertIn('non-secretory', codes)
+        self.assertGreaterEqual(len(codes), 14)
+
+    def test_myeloma_type_api_endpoint(self):
+        user = Identity.objects.create_user(email='mmvocab@test.com', password='pass')
+        self.client.force_login(user)
+        resp = self.client.get('/api/v1/vocabularies/myeloma-type/')
+        self.assertEqual(resp.status_code, 200)
+        titles = [r['title'] for r in resp.json()]
+        self.assertIn('IgG Kappa', titles)
+        self.assertIn('Non-secretory', titles)
+
+
+class MeetsCrabSlimFieldTest(_SmartBase):
+    """Verify meets_crab and meets_slim are exposed in the API response."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.mm_person = Person.objects.create(person_id=374001)
+        cls.mm_record = PatientRecord.objects.create(
+            person=cls.mm_person,
+            organization=cls.organization,
+            meets_crab=True,
+            meets_slim=False,
+            myeloma_type='IgG Kappa',
+        )
+
+    def _get_patient_info(self):
+        resp = self.read_client.get(
+            f'/api/v1/patient-records/{self.mm_person.person_id}/',
+        )
+        self.assertEqual(resp.status_code, 200)
+        return resp.data.get('patient_info', resp.data)
+
+    def test_meets_crab_in_response(self):
+        data = self._get_patient_info()
+        self.assertIn('meets_crab', data)
+        self.assertTrue(data['meets_crab'])
+
+    def test_meets_slim_in_response(self):
+        data = self._get_patient_info()
+        self.assertIn('meets_slim', data)
+        self.assertFalse(data['meets_slim'])
+
+    def test_myeloma_type_in_response(self):
+        data = self._get_patient_info()
+        self.assertIn('myeloma_type', data)
+        self.assertEqual(data['myeloma_type'], 'IgG Kappa')
+
+    def test_myeloma_type_patchable(self):
+        resp = self.write_client.patch(
+            f'/api/v1/patient-records/{self.mm_person.person_id}/',
+            data=json.dumps({'myeloma_type': 'IgA Lambda'}),
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.mm_record.refresh_from_db()
+        self.assertEqual(self.mm_record.myeloma_type, 'IgA Lambda')

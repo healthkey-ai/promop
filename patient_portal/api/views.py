@@ -32,6 +32,7 @@ from omop_core.models import (
     InfectionStatus, DiseaseProgression, MeasurableDisease, GelfCriteria,
     FlipIScore, FollicularLymphomaGrade, PostTransformationOutcome,
     BreastCancerFirstLineTherapy, BreastCancerSecondLineTherapy, BreastCancerLaterLineTherapy,
+    MyelomaType,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.patient_record_service import refresh_patient_record
@@ -4948,6 +4949,7 @@ _VOCABULARY_REGISTRY = {
     'breast-cancer-first-line-therapy':      BreastCancerFirstLineTherapy,
     'breast-cancer-second-line-therapy':     BreastCancerSecondLineTherapy,
     'breast-cancer-later-line-therapy':      BreastCancerLaterLineTherapy,
+    'myeloma-type':                          MyelomaType,
 }
 
 

@@ -11,7 +11,7 @@ import {
   YES_NO_OPTIONS, ER_OPTIONS, PR_OPTIONS, HER2_OPTIONS, HR_OPTIONS, HRD_OPTIONS,
   DISEASE_OPTIONS,
   FLIPI_RISK_OPTIONS, FLIPI_FACTOR_OPTIONS, GELF_OPTIONS, FL_TUMOR_GRADE_OPTIONS,
-  ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS,
+  ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS, MYELOMA_TYPE_OPTIONS,
   MRD_STATUS_OPTIONS, CYTOGENETIC_RISK_OPTIONS,
   BINET_STAGE_OPTIONS, TUMOR_BURDEN_OPTIONS, DISEASE_ACTIVITY_OPTIONS,
   RICHTER_TRANSFORMATION_OPTIONS, PROTEIN_EXPRESSION_OPTIONS,
@@ -220,18 +220,21 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
   const { source: progressionSource } = useVocabulary('disease-progression', 'title');
   const { options: sctTypeOptions, source: sctTypeSource } = useVocabulary('stem-cell-transplant', 'title');
   const { options: sctEligibilityOptions, source: sctEligibilitySource } = useVocabulary('sct-eligibility', 'title');
+  const { options: myelomaTypeOptions, source: myelomaTypeSource } = useVocabulary('myeloma-type', 'title');
 
   return (
     <>
       <Section title="Disease Characteristics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Myeloma Type" name="myeloma_type" type="text" value={formData?.myeloma_type} onChange={onChange} />
+          <Field label="Myeloma Type" name="myeloma_type" type="select" value={formData?.myeloma_type} options={myelomaTypeOptions.length ? myelomaTypeOptions.map((o: { value: string }) => o.value) : MYELOMA_TYPE_OPTIONS} onChange={onChange} vocabSource={myelomaTypeSource} />
           <Field label="ISS Stage" name="stage" type="select" value={formData?.stage} options={ISS_STAGE_OPTIONS} onChange={onChange} />
           <Field label="R-ISS Stage" name="r_iss_stage" type="select" value={formData?.r_iss_stage} options={ISS_STAGE_OPTIONS} onChange={onChange} />
           <Field label="Durie-Salmon Stage" name="durie_salmon_stage" type="text" value={formData?.durie_salmon_stage} onChange={onChange} />
           <Field label="Progression Status" name="progression" type="select" value={formData?.progression} options={MM_PROGRESSION_OPTIONS} onChange={onChange} vocabSource={progressionSource} />
           <Field label="Measurable Disease (IMWG)" name="measurable_disease_imwg" type="boolean" value={formData?.measurable_disease_imwg} onChange={onChange} />
           <Field label="MRD Status" name="mrd_status" type="select" value={formData?.mrd_status} options={MRD_STATUS_OPTIONS} onChange={onChange} />
+          <Field label="Meets CRAB Criteria" name="meets_crab" type="boolean" value={formData?.meets_crab} onChange={onChange} readOnly />
+          <Field label="Meets SLiM Criteria" name="meets_slim" type="boolean" value={formData?.meets_slim} onChange={onChange} readOnly />
           <div className="sm:col-span-2">
             <Field label="Prior SCT Type" name="stem_cell_transplant_history" type="multiselect" value={formData?.stem_cell_transplant_history} options={sctTypeOptions.length ? sctTypeOptions.map((o: { value: string }) => o.value) : STEM_CELL_TRANSPLANT_OPTIONS} onChange={onChange} vocabSource={sctTypeSource} />
           </div>
