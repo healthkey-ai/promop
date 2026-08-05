@@ -3570,6 +3570,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         uploaded = request.FILES['file']
+        MAX_WEARABLE_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
+        if uploaded.size and uploaded.size > MAX_WEARABLE_UPLOAD_BYTES:
+            return Response(
+                {'error': f'File too large. Maximum size is {MAX_WEARABLE_UPLOAD_BYTES // (1024 * 1024)} MB.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         file_bytes = uploaded.read()
 
         # Validate file extension
@@ -3598,7 +3604,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 samples = parse_apple_health_export(file_bytes)
         except Exception as e:
             logger.exception('wearable_parse_error device=%s', device_type)
-            return Response({'error': f'Failed to parse file: {e}'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'Failed to parse file. Please ensure it is a valid '
+                          f'{"Garmin .fit" if device_type == "garmin" else "Apple Health export.zip"} file.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if not samples:
             return Response({'samples_created': 0, 'duplicates_skipped': 0})
@@ -3622,18 +3632,25 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         from django.db.models import Q
 
         existing_keys = set()
-        # Build set of (metric_key, date, value) that already exist
+        # Build set of (metric_key, date, value) that already exist.
+        # Most metrics live in Measurement; sleep_duration lives in Observation.
         for metric_key in set(s.metric_key for s in samples):
             concept = loinc_concepts.get(metric_key)
             if concept is None:
                 continue
-            existing_measurements = Measurement.objects.filter(
-                person=person,
-                measurement_concept=concept,
-            ).values_list('measurement_date', 'value_as_number')
-            for m_date, m_val in existing_measurements:
-                if m_val is not None:
-                    existing_keys.add((metric_key, m_date, float(m_val)))
+            if metric_key == 'sleep_duration':
+                existing_rows = Observation.objects.filter(
+                    person=person,
+                    observation_concept=concept,
+                ).values_list('observation_date', 'value_as_number')
+            else:
+                existing_rows = Measurement.objects.filter(
+                    person=person,
+                    measurement_concept=concept,
+                ).values_list('measurement_date', 'value_as_number')
+            for row_date, row_val in existing_rows:
+                if row_val is not None:
+                    existing_keys.add((metric_key, row_date, float(row_val)))
 
         pending_measurements = []
         pending_observations = []
@@ -3668,6 +3685,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     observation_source_value=WEARABLE_LOINC[sample.metric_key],
                     unit_source_value='h',
                 )
+                obs._skip_patient_record_refresh = True
                 pending_observations.append(obs)
             else:
                 # All other metrics go into Measurement table

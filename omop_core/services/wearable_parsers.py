@@ -43,6 +43,17 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
     # Accumulators: metric_key → date → list of values (aggregated per day)
     daily: dict[str, dict[date, list[float]]] = defaultdict(lambda: defaultdict(list))
 
+    # Separate step sources to avoid double-counting:
+    # monitoring_steps has incremental cycle counts; session_steps has activity totals.
+    # We prefer monitoring (full-day) over session (activity subset) when both exist.
+    monitoring_steps: dict[date, list[float]] = defaultdict(list)
+    session_steps: dict[date, list[float]] = defaultdict(list)
+
+    # Separate HR sources: monitoring HR includes active periods and overestimates
+    # resting HR. We collect monitoring HR separately and use the 10th percentile
+    # as a resting HR proxy (closest to true resting without dedicated resting HR data).
+    monitoring_hr: dict[date, list[float]] = defaultdict(list)
+
     for record in fitfile.get_messages():
         msg_type = record.name
         fields = {f.name: f.value for f in record.fields}
@@ -56,19 +67,19 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
             continue
 
         if msg_type == 'monitoring':
-            # Steps from monitoring messages
+            # Incremental step cycles throughout the day
             steps = fields.get('cycles')
             if steps is not None:
                 try:
-                    # Garmin stores steps as cycles*2 in some files
-                    daily['steps'][d].append(float(steps))
+                    monitoring_steps[d].append(float(steps))
                 except (TypeError, ValueError):
                     pass
 
+            # All-day HR samples — NOT resting HR; collected separately
             hr = fields.get('heart_rate')
             if hr is not None:
                 try:
-                    daily['resting_hr'][d].append(float(hr))
+                    monitoring_hr[d].append(float(hr))
                 except (TypeError, ValueError):
                     pass
 
@@ -81,11 +92,11 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
                 except (TypeError, ValueError):
                     pass
 
-            # Steps from session if available
+            # Session step totals (activity subset, used as fallback only)
             total_steps = fields.get('total_steps') or fields.get('total_cycles')
             if total_steps is not None:
                 try:
-                    daily['steps'][d].append(float(total_steps))
+                    session_steps[d].append(float(total_steps))
                 except (TypeError, ValueError):
                     pass
 
@@ -105,14 +116,6 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
             if rr is not None:
                 try:
                     daily['respiratory_rate'][d].append(float(rr))
-                except (TypeError, ValueError):
-                    pass
-
-        elif msg_type == 'record':
-            hr = fields.get('heart_rate')
-            if hr is not None:
-                try:
-                    daily['resting_hr'][d].append(float(hr))
                 except (TypeError, ValueError):
                     pass
 
@@ -142,6 +145,25 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
                     daily['hrv_sdnn'][d].append(float(sdnn))
                 except (TypeError, ValueError):
                     pass
+
+    # Merge step sources: prefer monitoring (full-day) over session (activity subset)
+    all_step_dates = set(monitoring_steps.keys()) | set(session_steps.keys())
+    for d in all_step_dates:
+        if monitoring_steps.get(d):
+            daily['steps'][d] = monitoring_steps[d]
+        elif session_steps.get(d):
+            daily['steps'][d] = session_steps[d]
+
+    # Approximate resting HR from monitoring data using the 10th percentile.
+    # All-day monitoring includes active HR which inflates the average. The
+    # 10th percentile captures the lower range (rest/sleep) without being
+    # as noisy as the absolute minimum.
+    for d, hr_values in monitoring_hr.items():
+        if hr_values:
+            sorted_hr = sorted(hr_values)
+            p10_idx = max(0, len(sorted_hr) // 10)
+            resting_estimate = sorted_hr[p10_idx]
+            daily['resting_hr'][d].append(resting_estimate)
 
     # Collapse daily lists to single values
     samples: list[WearableSample] = []
@@ -183,7 +205,7 @@ def parse_apple_health_export(zip_bytes: bytes) -> list[WearableSample]:
     Streams ``apple_health_export/export.xml`` using ``iterparse`` to keep
     memory usage low on large exports.
     """
-    import xml.etree.ElementTree as ET
+    import defusedxml.ElementTree as ET
 
     try:
         zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
@@ -232,7 +254,7 @@ def parse_apple_health_export(zip_bytes: bytes) -> list[WearableSample]:
                 end_str = elem.get('endDate', '')
                 # Only count "asleep" categories (skip InBed)
                 sleep_value = elem.get('value', '')
-                if 'Asleep' in sleep_value or 'asleep' in sleep_value.lower() if sleep_value else False:
+                if sleep_value and 'asleep' in sleep_value.lower():
                     if start_str and end_str:
                         try:
                             start_dt = _parse_apple_datetime(start_str)
