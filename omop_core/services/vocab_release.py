@@ -17,7 +17,11 @@ def get_latest_release():
     return (
         VocabularyRelease.objects
         .filter(status='published')
-        .order_by('-published_at')
+        # `-pk` is a deterministic tiebreaker: two releases can share a
+        # published_at (bulk publish, or one captured timestamp), and without it
+        # "latest" would be arbitrary per query — which can make the snapshot
+        # view's single-latest guard 409 the /latest/ URL against itself.
+        .order_by('-published_at', '-pk')
         .first()
     )
 

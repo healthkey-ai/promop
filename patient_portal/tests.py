@@ -14789,6 +14789,47 @@ class VocabSnapshotTest(_SmartBase):
             resp['Content-Disposition'],
         )
 
+    def test_x_vocab_release_id_header(self):
+        # Consumers capture the release_id from an explicit header, not the ETag.
+        resp = self.read_client.get(self._snapshot_url('vocabulary', self.release.pk))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp['X-Vocab-Release-Id'], str(self.release.pk))
+        # /latest/ resolves to the same release and carries the header too.
+        latest = self.read_client.get(self._snapshot_url('vocabulary'))
+        self.assertEqual(latest['X-Vocab-Release-Id'], str(self.release.pk))
+        # Present on a source-filtered concept request too (header is set before the
+        # source/etag mutation).
+        filtered = self.read_client.get(
+            self._snapshot_url('concept', self.release.pk) + '?source=HealthKey')
+        self.assertEqual(filtered['X-Vocab-Release-Id'], str(self.release.pk))
+
+    def test_x_vocab_release_id_header_on_304(self):
+        # The conditional 304 response must also name the release.
+        resp1 = self.read_client.get(self._snapshot_url('vocabulary', self.release.pk))
+        resp2 = self.read_client.get(
+            self._snapshot_url('vocabulary', self.release.pk),
+            HTTP_IF_NONE_MATCH=resp1['ETag'],
+        )
+        self.assertEqual(resp2.status_code, 304)
+        self.assertEqual(resp2['X-Vocab-Release-Id'], str(self.release.pk))
+
+    def test_409_on_non_latest_published_release(self):
+        # A newer published release makes self.release non-latest; the vocab tables
+        # are current-only, so the older release's snapshot is refused (not silently
+        # streamed under a stale label). The latest snapshot still works.
+        from datetime import timedelta
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone as tz
+        newer = VocabularyRelease.objects.create(
+            build_timestamp=tz.now(), status='published',
+            published_at=tz.now() + timedelta(hours=1),
+        )
+        resp = self.read_client.get(self._snapshot_url('vocabulary', self.release.pk))
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn(str(newer.pk), resp.data['detail'])
+        ok = self.read_client.get(self._snapshot_url('vocabulary', newer.pk))
+        self.assertEqual(ok.status_code, 200)
+
     def test_unauthenticated_returns_401(self):
         from rest_framework.test import APIClient
         anon = APIClient()

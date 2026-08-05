@@ -77,7 +77,7 @@ If-None-Match: "<your-cached-etag>"
 
 **Key fields for consumers:**
 
-- `id` — use to construct snapshot URLs for a pinned release
+- `id` — the release these snapshots reflect (snapshots are latest-only; see Step 2)
 - `row_counts` — expected row counts per table (for completeness verification)
 - `checksums` — per-table SHA-256 hashes (for integrity verification)
 - `published_at` — when this release was made available
@@ -98,11 +98,31 @@ JSON (NDJSON):
 GET /api/v1/vocab-releases/latest/snapshot/<table>/
 ```
 
-Or pin to a specific release:
+An explicit release id is also accepted, but **only if it is the latest
+published release** — the race-safe spelling of the line above:
 
 ```
 GET /api/v1/vocab-releases/<release_id>/snapshot/<table>/
 ```
+
+> **Snapshots serve the latest release only.** The vocabulary tables are reloaded
+> wholesale on each release (they are current-only; historical *row-data* is not
+> retained), so a snapshot can only truthfully represent the latest published
+> release. Requesting a **non-latest** release returns **`409 Conflict`** — the
+> body names the current latest and points back to `/latest/` — rather than
+> silently streaming current rows under a stale label. Historical *metadata*
+> (manifests, checksums, per-vocabulary versions) stays available via the manifest
+> API (`GET /api/v1/vocab-releases/<id>/`); only bulk row-level snapshots are
+> latest-only.
+>
+> Every snapshot response (both `200` and `304`) carries an **`X-Vocab-Release-Id`**
+> header naming the release the rows reflect — capture the release id from there
+> rather than parsing the `ETag` or the `Content-Disposition` filename.
+>
+> Consumers resolve the latest manifest and stream by its `id` immediately (see the
+> sync example below). If a new release publishes mid-sync, the in-flight id is no
+> longer latest and its snapshot returns `409` — treat that as "re-resolve `/latest`
+> and retry," never as a fatal error.
 
 ### Available tables
 
@@ -207,6 +227,8 @@ release = response.json()
 new_etag = response.headers["ETag"]
 
 for table in TABLES_I_NEED:
+    # release.id is the latest we just resolved; a 409 here means a newer release
+    # published mid-sync — restart from the /latest poll rather than failing.
     stream = GET /api/v1/vocab-releases/{release.id}/snapshot/{table}/
     write_to_local_db(stream)
     verify_sentinel(stream)
@@ -238,6 +260,8 @@ import requests
 def sync_table(base_url, token, release_id, table, local_cursor):
     url = f"{base_url}/api/v1/vocab-releases/{release_id}/snapshot/{table}/"
     resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, stream=True)
+    # 409 = release_id is no longer the latest (a newer release published);
+    # re-resolve /latest and restart the sync rather than treating it as fatal.
     resp.raise_for_status()
 
     local_cursor.execute(f"TRUNCATE {table}")  # or use a staging table
