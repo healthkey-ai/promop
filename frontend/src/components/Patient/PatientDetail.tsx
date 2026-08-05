@@ -415,7 +415,9 @@ export default function PatientDetail({
       const a = document.createElement("a");
       a.href = url;
       a.download = "my-health-record.fhir.json";
+      document.body.appendChild(a);
       a.click();
+      document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch {
       setDownloadError("Failed to download your health record. Please try again.");
@@ -459,6 +461,7 @@ export default function PatientDetail({
   }
 
   const baseTabs = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Behavior", "Wearable"];
+  const baseTabCount = baseTabs.length;
   const patientExtraTabs = patientMode ? ["Allergies", "Immunizations", "Settings"] : [];
   const tabLabels = [...baseTabs, ...patientExtraTabs];
   const baseDescriptions: Record<number, string> = {
@@ -471,9 +474,9 @@ export default function PatientDetail({
     6: "Apple wearable 30-day summaries derived from synced OMOP data.",
   };
   const patientExtraDescriptions: Record<number, string> = patientMode ? {
-    7: "Known allergies and intolerances from your health records.",
-    8: "Your vaccination history from linked health records.",
-    9: "Consent preferences and advance directive documents.",
+    [baseTabCount]: "Known allergies and intolerances from your health records.",
+    [baseTabCount + 1]: "Your vaccination history from linked health records.",
+    [baseTabCount + 2]: "Consent preferences and advance directive documents.",
   } : {};
   const tabDescriptions = { ...baseDescriptions, ...patientExtraDescriptions };
 
@@ -595,7 +598,7 @@ export default function PatientDetail({
           </nav>
         </div>
 
-        {activeTab <= 6 ? (
+        {activeTab < baseTabCount ? (
           <div className="rounded-2xl bg-background shadow-[0_1px_3px_rgba(0,0,0,0.06),0_6px_24px_rgba(0,0,0,0.06)]">
             <div className="px-8 pb-6 pt-8">
               <h2 className="text-xl font-bold text-foreground">{tabLabels[activeTab]}</h2>
@@ -631,9 +634,9 @@ export default function PatientDetail({
           </div>
         ) : (
           <div key={activeTab} className="animate-tab-in">
-            {patientMode && activeTab === 7 && <AllergyList user={user ?? null} />}
-            {patientMode && activeTab === 8 && <ImmunizationList user={user ?? null} />}
-            {patientMode && activeTab === 9 && (
+            {patientMode && activeTab === baseTabCount && <AllergyList user={user ?? null} />}
+            {patientMode && activeTab === baseTabCount + 1 && <ImmunizationList user={user ?? null} />}
+            {patientMode && activeTab === baseTabCount + 2 && (
               <div className="space-y-6">
                 <PatientConsents user={user ?? null} />
                 <AdvanceDirectives user={user ?? null} />
