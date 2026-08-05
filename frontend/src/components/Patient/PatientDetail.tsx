@@ -7,6 +7,7 @@ import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
 import AllergyList from "./AllergyList";
 import ImmunizationList from "./ImmunizationList";
+import PatientSurveys from "./PatientSurveys";
 import PatientConsents from "./PatientConsents";
 import AdvanceDirectives from "./AdvanceDirectives";
 import PatientMessages from "./PatientMessages";
@@ -495,24 +496,31 @@ export default function PatientDetail({
     );
   }
 
-  const baseTabs = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Behavior", "Wearables"];
-  const baseTabCount = baseTabs.length;
-  const patientExtraTabs = patientMode ? ["Allergies", "Immunizations"] : [];
-  const tabLabels = [...baseTabs, ...patientExtraTabs];
-  const baseDescriptions: Record<number, string> = {
+  // Build tab list dynamically — patient mode adds Allergies (after Labs) and Surveys (last).
+  // Immunizations are shown inside the Treatment tab, not as a separate tab.
+  const coreTabs = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs"];
+  const afterLabsTabs = patientMode ? ["Allergies"] : [];
+  const trailingTabs = ["Behavior", "Wearables"];
+  const surveyTabs = patientMode ? ["Surveys"] : [];
+  const tabLabels = [...coreTabs, ...afterLabsTabs, ...trailingTabs, ...surveyTabs];
+
+  // Compute dynamic indices
+  const allergiesIdx = patientMode ? coreTabs.length : -1;
+  const behaviorIdx = coreTabs.length + afterLabsTabs.length;
+  const wearablesIdx = behaviorIdx + 1;
+  const surveysIdx = patientMode ? wearablesIdx + 1 : -1;
+
+  const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
     1: "Disease-specific clinical information and genetic details.",
     2: "Therapy history, treatment lines, and planned therapies.",
     3: "Blood counts, electrolytes, coagulation, and cardiac markers.",
     4: "Chemistry panel, liver function tests, and other lab markers.",
-    5: "Lifestyle, socioeconomic, and behavioural health factors.",
-    6: "30 day summaries derived from synced OMOP data.",
+    ...(allergiesIdx >= 0 ? { [allergiesIdx]: "Known allergies and intolerances from your health records." } : {}),
+    [behaviorIdx]: "Lifestyle, socioeconomic, and behavioural health factors.",
+    [wearablesIdx]: "30 day summaries derived from synced OMOP data.",
+    ...(surveysIdx >= 0 ? { [surveysIdx]: "Surveys assigned to you by your care team." } : {}),
   };
-  const patientExtraDescriptions: Record<number, string> = patientMode ? {
-    [baseTabCount]: "Known allergies and intolerances from your health records.",
-    [baseTabCount + 1]: "Your vaccination history from linked health records.",
-  } : {};
-  const tabDescriptions = { ...baseDescriptions, ...patientExtraDescriptions };
 
   const initials = getInitials(patientName);
   const avatarBg = getAvatarBg(patientName);
@@ -642,46 +650,50 @@ export default function PatientDetail({
               </nav>
             </div>
 
-            {activeTab < baseTabCount ? (
-              <div className="rounded-2xl bg-background shadow-[0_1px_3px_rgba(0,0,0,0.06),0_6px_24px_rgba(0,0,0,0.06)]">
-                <div className="px-8 pb-6 pt-8">
-                  <h2 className="text-xl font-bold text-foreground">{tabLabels[activeTab]}</h2>
-                  <p className="mt-1 text-sm text-muted-foreground">{tabDescriptions[activeTab]}</p>
-                </div>
+            <div className="rounded-2xl bg-background shadow-[0_1px_3px_rgba(0,0,0,0.06),0_6px_24px_rgba(0,0,0,0.06)]">
+              <div className="px-8 pb-6 pt-8">
+                <h2 className="text-xl font-bold text-foreground">{tabLabels[activeTab]}</h2>
+                <p className="mt-1 text-sm text-muted-foreground">{tabDescriptions[activeTab]}</p>
+              </div>
 
-                <div key={activeTab} className="animate-tab-in px-8 pb-10">
-                  {activeTab === 0 && (
-                    <GeneralTab
-                      formData={editedInfo}
-                      onChange={handleFieldChange}
-                      editedName={editedName}
-                      onNameChange={handleNameChange}
-                      onZipcodeChange={handleZipcodeChange}
-                    />
-                  )}
-                  {activeTab === 1 && (
-                    <DiseaseTab
-                      formData={editedInfo}
-                      onChange={handleFieldChange}
-                      onMutationAdd={handleMutationAdd}
-                      onMutationRemove={handleMutationRemove}
-                      onMutationChange={handleMutationChange}
-                      diseaseType={getDiseaseType()}
-                    />
-                  )}
-                  {activeTab === 2 && <TreatmentTab formData={editedInfo} onChange={handleFieldChange} diseaseType={getDiseaseType()} />}
-                  {activeTab === 3 && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
-                  {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
-                  {activeTab === 5 && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
-                  {activeTab === 6 && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
-                </div>
+              <div key={activeTab} className="animate-tab-in px-8 pb-10">
+                {activeTab === 0 && (
+                  <GeneralTab
+                    formData={editedInfo}
+                    onChange={handleFieldChange}
+                    editedName={editedName}
+                    onNameChange={handleNameChange}
+                    onZipcodeChange={handleZipcodeChange}
+                  />
+                )}
+                {activeTab === 1 && (
+                  <DiseaseTab
+                    formData={editedInfo}
+                    onChange={handleFieldChange}
+                    onMutationAdd={handleMutationAdd}
+                    onMutationRemove={handleMutationRemove}
+                    onMutationChange={handleMutationChange}
+                    diseaseType={getDiseaseType()}
+                  />
+                )}
+                {activeTab === 2 && (
+                  <>
+                    <TreatmentTab formData={editedInfo} onChange={handleFieldChange} diseaseType={getDiseaseType()} />
+                    {patientMode && (
+                      <div className="mt-8 border-t border-gray-200 pt-6">
+                        <ImmunizationList user={user ?? null} />
+                      </div>
+                    )}
+                  </>
+                )}
+                {activeTab === 3 && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
+                {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
+                {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
+                {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
+                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={() => { if (personId) { api.get(`/patient-info/${personId}/`).then(res => { const d = res.data.patient_info; setPatientInfo(d); setEditedInfo(d); }).catch(() => {}); } }} />}
+                {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
               </div>
-            ) : (
-              <div key={activeTab} className="animate-tab-in">
-                {patientMode && activeTab === baseTabCount && <AllergyList user={user ?? null} />}
-                {patientMode && activeTab === baseTabCount + 1 && <ImmunizationList user={user ?? null} />}
-              </div>
-            )}
+            </div>
           </>
         )}
 

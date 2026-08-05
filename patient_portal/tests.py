@@ -15270,3 +15270,297 @@ class MeetsCrabSlimFieldTest(_SmartBase):
         self.assertEqual(resp.status_code, 200)
         self.mm_record.refresh_from_db()
         self.assertEqual(self.mm_record.myeloma_type, 'IgA Lambda')
+
+
+# =============================================================================
+# Wearable Upload Tests
+# =============================================================================
+
+class WearableParserUnitTest(TestCase):
+    """Unit tests for the Garmin FIT and Apple Health parsers."""
+
+    def test_parse_apple_health_export_basic(self):
+        """Parse a minimal Apple Health export.zip with step count records."""
+        import zipfile
+        from omop_core.services.wearable_parsers import parse_apple_health_export
+
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierStepCount"
+          startDate="2024-06-01 08:00:00 -0700"
+          endDate="2024-06-01 08:30:00 -0700"
+          value="1500"/>
+  <Record type="HKQuantityTypeIdentifierStepCount"
+          startDate="2024-06-01 12:00:00 -0700"
+          endDate="2024-06-01 12:30:00 -0700"
+          value="2000"/>
+  <Record type="HKQuantityTypeIdentifierRestingHeartRate"
+          startDate="2024-06-01 06:00:00 -0700"
+          endDate="2024-06-01 06:00:00 -0700"
+          value="62"/>
+  <Record type="HKQuantityTypeIdentifierOxygenSaturation"
+          startDate="2024-06-02 07:00:00 -0700"
+          endDate="2024-06-02 07:00:00 -0700"
+          value="0.97"/>
+</HealthData>
+"""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as zf:
+            zf.writestr('apple_health_export/export.xml', xml_content)
+        zip_bytes = buf.getvalue()
+
+        samples = parse_apple_health_export(zip_bytes)
+        self.assertTrue(len(samples) >= 3)
+
+        by_key = {}
+        for s in samples:
+            by_key.setdefault(s.metric_key, []).append(s)
+
+        # Steps should be summed for the day
+        steps = by_key.get('steps', [])
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].value, 3500.0)
+        self.assertEqual(steps[0].date, date(2024, 6, 1))
+
+        # Resting HR
+        hr = by_key.get('resting_hr', [])
+        self.assertEqual(len(hr), 1)
+        self.assertEqual(hr[0].value, 62.0)
+
+        # SpO2 should be converted from fraction to percentage
+        spo2 = by_key.get('spo2', [])
+        self.assertEqual(len(spo2), 1)
+        self.assertEqual(spo2[0].value, 97.0)
+
+    def test_parse_apple_health_bad_zip(self):
+        from omop_core.services.wearable_parsers import parse_apple_health_export
+        with self.assertRaises(ValueError):
+            parse_apple_health_export(b'not a zip file')
+
+    def test_parse_apple_health_no_export_xml(self):
+        import zipfile
+        from omop_core.services.wearable_parsers import parse_apple_health_export
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as zf:
+            zf.writestr('readme.txt', 'no export.xml here')
+        with self.assertRaises(ValueError):
+            parse_apple_health_export(buf.getvalue())
+
+
+class WearableUploadEndpointTest(TestCase):
+    """Integration tests for POST /api/v1/patient-records/upload-wearable/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        _make_vocab_fixtures()
+
+        # Create LOINC concepts for wearable metrics — must use vocabulary_id='LOINC'
+        # so concept_by_loinc() can find them.
+        from omop_core.services.mappings import WEARABLE_LOINC
+        from omop_core.services.concept_cache import concept_cache_clear
+        concept_cache_clear()
+
+        loinc_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_concept_id': 0},
+        )
+        cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
+        domain_m = Domain.objects.get(domain_id='Measurement')
+        today = date.today()
+        far_future = date(2099, 12, 31)
+
+        cls.wearable_concepts = {}
+        concept_id_base = 990000
+        for metric_key, loinc_code in WEARABLE_LOINC.items():
+            concept_id_base += 1
+            c, _ = Concept.objects.get_or_create(
+                concept_id=concept_id_base,
+                defaults={
+                    'concept_name': f'Wearable {metric_key}',
+                    'domain': domain_m,
+                    'vocabulary': loinc_vocab,
+                    'concept_class': cc,
+                    'concept_code': loinc_code,
+                    'valid_start_date': today,
+                    'valid_end_date': far_future,
+                },
+            )
+            cls.wearable_concepts[metric_key] = c
+
+        # Type concept for wearable measurements
+        type_domain = Domain.objects.get(domain_id='Type Concept')
+        test_vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        Concept.objects.get_or_create(
+            concept_id=32883,
+            defaults={
+                'concept_name': 'Patient self-report',
+                'domain': type_domain,
+                'vocabulary': test_vocab,
+                'concept_class': cc,
+                'concept_code': '32883',
+                'valid_start_date': today,
+                'valid_end_date': far_future,
+            },
+        )
+
+        cls.person = Person.objects.create(person_id=99001, family_name='Wearable', given_name='Wendy')
+        cls.patient_rec = PatientRecord.objects.create(person=cls.person)
+        cls.identity = Identity.objects.create_user(email='wendy-wearable@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.identity, person=cls.person)
+
+        # Unlinked user (no PatientUser)
+        cls.unlinked_identity = Identity.objects.create_user(email='nolink@test.com', password='pw')
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def _make_apple_zip(self, xml_content):
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as zf:
+            zf.writestr('apple_health_export/export.xml', xml_content)
+        buf.seek(0)
+        return buf
+
+    def test_upload_apple_health_creates_measurements(self):
+        """Uploading an Apple Health zip creates Measurement rows."""
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierStepCount"
+          startDate="2024-07-01 08:00:00 -0700"
+          endDate="2024-07-01 08:30:00 -0700"
+          value="5000"/>
+  <Record type="HKQuantityTypeIdentifierRestingHeartRate"
+          startDate="2024-07-01 06:00:00 -0700"
+          endDate="2024-07-01 06:00:00 -0700"
+          value="65"/>
+</HealthData>
+"""
+        zip_file = self._make_apple_zip(xml)
+        client = self._client_as(self.identity)
+        resp = client.post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': zip_file, 'device_type': 'apple'},
+            format='multipart',
+            HTTP_CONTENT_DISPOSITION='attachment; filename="export.zip"',
+        )
+        # Override the filename since SimpleUploadedFile isn't used here
+        self.assertIn(resp.status_code, [200, 400])
+        # If 400 it's because file extension validation — let's use proper file name
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        zip_file = self._make_apple_zip(xml)
+        uploaded = SimpleUploadedFile('export.zip', zip_file.read(), content_type='application/zip')
+        resp = client.post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': uploaded, 'device_type': 'apple'},
+            format='multipart',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertGreaterEqual(resp.data['samples_created'], 2)
+
+        # Verify Measurement rows created
+        steps_concept = self.wearable_concepts['steps']
+        steps_rows = Measurement.objects.filter(person=self.person, measurement_concept=steps_concept)
+        self.assertTrue(steps_rows.exists())
+
+    def test_upload_deduplication(self):
+        """Uploading the same file twice does not create duplicate rows."""
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierStepCount"
+          startDate="2024-08-01 08:00:00 -0700"
+          endDate="2024-08-01 08:30:00 -0700"
+          value="3000"/>
+</HealthData>
+"""
+        client = self._client_as(self.identity)
+
+        # First upload
+        zip_file = self._make_apple_zip(xml)
+        uploaded = SimpleUploadedFile('export.zip', zip_file.read(), content_type='application/zip')
+        resp1 = client.post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': uploaded, 'device_type': 'apple'},
+            format='multipart',
+        )
+        self.assertEqual(resp1.status_code, 200)
+        first_created = resp1.data['samples_created']
+
+        # Second upload — same data
+        zip_file = self._make_apple_zip(xml)
+        uploaded = SimpleUploadedFile('export.zip', zip_file.read(), content_type='application/zip')
+        resp2 = client.post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': uploaded, 'device_type': 'apple'},
+            format='multipart',
+        )
+        self.assertEqual(resp2.status_code, 200)
+        self.assertEqual(resp2.data['samples_created'], 0)
+        self.assertEqual(resp2.data['duplicates_skipped'], first_created)
+
+    def test_upload_missing_file(self):
+        """POST without a file returns 400."""
+        client = self._client_as(self.identity)
+        resp = client.post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'device_type': 'apple'},
+            format='multipart',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('error', resp.data)
+
+    def test_upload_invalid_device_type(self):
+        """POST with invalid device_type returns 400."""
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        uploaded = SimpleUploadedFile('export.zip', b'fake', content_type='application/zip')
+        client = self._client_as(self.identity)
+        resp = client.post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': uploaded, 'device_type': 'oura'},
+            format='multipart',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('device_type', resp.data['error'])
+
+    def test_upload_wrong_extension(self):
+        """POST with wrong file extension returns 400."""
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        uploaded = SimpleUploadedFile('data.csv', b'fake', content_type='text/csv')
+        client = self._client_as(self.identity)
+        resp = client.post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': uploaded, 'device_type': 'garmin'},
+            format='multipart',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('.fit', resp.data['error'])
+
+    def test_upload_no_patient_user(self):
+        """POST from unlinked user returns 403."""
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        uploaded = SimpleUploadedFile('export.zip', b'fake', content_type='application/zip')
+        client = self._client_as(self.unlinked_identity)
+        resp = client.post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': uploaded, 'device_type': 'apple'},
+            format='multipart',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_upload_unauthenticated(self):
+        """POST without authentication returns 401/403."""
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        uploaded = SimpleUploadedFile('export.zip', b'fake', content_type='application/zip')
+        client = APIClient()
+        resp = client.post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': uploaded, 'device_type': 'apple'},
+            format='multipart',
+        )
+        self.assertIn(resp.status_code, [401, 403])
