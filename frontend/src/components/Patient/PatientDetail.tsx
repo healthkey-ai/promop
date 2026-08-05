@@ -9,6 +9,7 @@ import AllergyList from "./AllergyList";
 import ImmunizationList from "./ImmunizationList";
 import PatientConsents from "./PatientConsents";
 import AdvanceDirectives from "./AdvanceDirectives";
+import PatientMessages from "./PatientMessages";
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
 import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
@@ -79,7 +80,21 @@ function SaveStatusIndicator({ status, onRetry }: { status: SaveStatus; onRetry:
   );
 }
 
-function ProfileDropdown({ onLogout }: { onLogout: () => void }) {
+type PatientView = "tabs" | "settings" | "messages";
+
+function ProfileDropdown({
+  onLogout,
+  initials,
+  avatarBg,
+  name,
+  onNavigate,
+}: {
+  onLogout: () => void;
+  initials: string;
+  avatarBg: string;
+  name: string;
+  onNavigate: (view: PatientView) => void;
+}) {
   const [open, setOpen] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -98,13 +113,32 @@ function ProfileDropdown({ onLogout }: { onLogout: () => void }) {
       <div className="relative" ref={ref}>
         <button
           onClick={() => setOpen((v) => !v)}
-          className="flex shrink-0 items-center gap-1 rounded-full border border-border px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground"
+          className="flex shrink-0 items-center gap-1.5 rounded-full border border-border px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground"
         >
-          Account
+          <div
+            className="flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-bold text-white"
+            style={{ backgroundColor: avatarBg }}
+          >
+            {initials}
+          </div>
+          <span className="max-w-[120px] truncate">{name}</span>
           <ChevronDown className="h-3 w-3" />
         </button>
         {open && (
-          <div className="absolute right-0 top-full z-40 mt-1 w-44 rounded-lg border border-border bg-background py-1 shadow-lg">
+          <div className="absolute right-0 top-full z-40 mt-1 w-48 rounded-lg border border-border bg-background py-1 shadow-lg">
+            <button
+              onClick={() => { setOpen(false); onNavigate("messages"); }}
+              className="w-full px-4 py-2 text-left text-sm text-foreground hover:bg-muted"
+            >
+              Messages
+            </button>
+            <button
+              onClick={() => { setOpen(false); onNavigate("settings"); }}
+              className="w-full px-4 py-2 text-left text-sm text-foreground hover:bg-muted"
+            >
+              Settings
+            </button>
+            <div className="my-1 border-t border-border" />
             <button
               onClick={() => { setOpen(false); onLogout(); }}
               className="w-full px-4 py-2 text-left text-sm text-foreground hover:bg-muted"
@@ -202,6 +236,7 @@ export default function PatientDetail({
   const [patientName, setPatientName] = useState("");
   const [editedName, setEditedName] = useState("");
   const [activeTab, setActiveTab] = useState(0);
+  const [patientView, setPatientView] = useState<PatientView>("tabs");
 
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
@@ -460,9 +495,9 @@ export default function PatientDetail({
     );
   }
 
-  const baseTabs = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Behavior", "Wearable"];
+  const baseTabs = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Behavior", "Wearables"];
   const baseTabCount = baseTabs.length;
-  const patientExtraTabs = patientMode ? ["Allergies", "Immunizations", "Settings"] : [];
+  const patientExtraTabs = patientMode ? ["Allergies", "Immunizations"] : [];
   const tabLabels = [...baseTabs, ...patientExtraTabs];
   const baseDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
@@ -471,12 +506,11 @@ export default function PatientDetail({
     3: "Blood counts, electrolytes, coagulation, and cardiac markers.",
     4: "Chemistry panel, liver function tests, and other lab markers.",
     5: "Lifestyle, socioeconomic, and behavioural health factors.",
-    6: "Apple wearable 30-day summaries derived from synced OMOP data.",
+    6: "30 day summaries derived from synced OMOP data.",
   };
   const patientExtraDescriptions: Record<number, string> = patientMode ? {
     [baseTabCount]: "Known allergies and intolerances from your health records.",
     [baseTabCount + 1]: "Your vaccination history from linked health records.",
-    [baseTabCount + 2]: "Consent preferences and advance directive documents.",
   } : {};
   const tabDescriptions = { ...baseDescriptions, ...patientExtraDescriptions };
 
@@ -526,25 +560,27 @@ export default function PatientDetail({
           </div>
 
           <div className="flex min-w-0 items-center gap-3">
-            <div
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white shadow-sm ring-2 ring-background"
-              style={{ backgroundColor: avatarBg }}
-            >
-              {initials}
-            </div>
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <span className="truncate text-sm font-semibold text-foreground">{patientName}</span>
-              {!patientMode && (
-                <span className="inline-flex shrink-0 items-center rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-indigo-600">
-                  #{personId}
-                </span>
-              )}
-              {typeof editedInfo?.disease === "string" && editedInfo.disease && (
-                <span className="hidden shrink-0 items-center rounded-full border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 sm:inline-flex">
-                  {editedInfo.disease}
-                </span>
-              )}
-            </div>
+            {!patientMode && (
+              <>
+                <div
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white shadow-sm ring-2 ring-background"
+                  style={{ backgroundColor: avatarBg }}
+                >
+                  {initials}
+                </div>
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <span className="truncate text-sm font-semibold text-foreground">{patientName}</span>
+                  <span className="inline-flex shrink-0 items-center rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-indigo-600">
+                    #{personId}
+                  </span>
+                  {typeof editedInfo?.disease === "string" && editedInfo.disease && (
+                    <span className="hidden shrink-0 items-center rounded-full border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 sm:inline-flex">
+                      {editedInfo.disease}
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
             <div className="h-5 w-px shrink-0 bg-border" />
             <div className="shrink-0">
               <SaveStatusIndicator status={saveStatus} onRetry={doSave} />
@@ -572,76 +608,109 @@ export default function PatientDetail({
               </div>
             )}
             {patientMode && onLogout && (
-              <ProfileDropdown onLogout={onLogout} />
+              <ProfileDropdown
+                onLogout={onLogout}
+                initials={initials}
+                avatarBg={avatarBg}
+                name={patientName}
+                onNavigate={setPatientView}
+              />
             )}
           </div>
         </div>
       </div>
 
       <div className="mx-auto max-w-5xl px-6 py-6">
-        <div className="mb-5 border-b border-border">
-          <nav className="flex gap-x-1 overflow-x-auto" aria-label="Patient info tabs">
-            {tabLabels.map((label, i) => (
-              <button
-                key={i}
-                onClick={() => setActiveTab(i)}
-                className={[
-                  "whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium -mb-px transition-colors focus:outline-none",
-                  activeTab === i
-                    ? "border-portal-brand text-portal-brand"
-                    : "border-transparent text-muted-foreground hover:text-foreground",
-                ].join(" ")}
-              >
-                {label}
-              </button>
-            ))}
-          </nav>
-        </div>
-
-        {activeTab < baseTabCount ? (
-          <div className="rounded-2xl bg-background shadow-[0_1px_3px_rgba(0,0,0,0.06),0_6px_24px_rgba(0,0,0,0.06)]">
-            <div className="px-8 pb-6 pt-8">
-              <h2 className="text-xl font-bold text-foreground">{tabLabels[activeTab]}</h2>
-              <p className="mt-1 text-sm text-muted-foreground">{tabDescriptions[activeTab]}</p>
+        {patientView === "tabs" && (
+          <>
+            <div className="mb-5 border-b border-border">
+              <nav className="flex gap-x-1 overflow-x-auto" aria-label="Patient info tabs">
+                {tabLabels.map((label, i) => (
+                  <button
+                    key={i}
+                    onClick={() => setActiveTab(i)}
+                    className={[
+                      "whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium -mb-px transition-colors focus:outline-none",
+                      activeTab === i
+                        ? "border-portal-brand text-portal-brand"
+                        : "border-transparent text-muted-foreground hover:text-foreground",
+                    ].join(" ")}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </nav>
             </div>
 
-            <div key={activeTab} className="animate-tab-in px-8 pb-10">
-              {activeTab === 0 && (
-                <GeneralTab
-                  formData={editedInfo}
-                  onChange={handleFieldChange}
-                  editedName={editedName}
-                  onNameChange={handleNameChange}
-                  onZipcodeChange={handleZipcodeChange}
-                />
-              )}
-              {activeTab === 1 && (
-                <DiseaseTab
-                  formData={editedInfo}
-                  onChange={handleFieldChange}
-                  onMutationAdd={handleMutationAdd}
-                  onMutationRemove={handleMutationRemove}
-                  onMutationChange={handleMutationChange}
-                  diseaseType={getDiseaseType()}
-                />
-              )}
-              {activeTab === 2 && <TreatmentTab formData={editedInfo} onChange={handleFieldChange} diseaseType={getDiseaseType()} />}
-              {activeTab === 3 && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
-              {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
-              {activeTab === 5 && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
-              {activeTab === 6 && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
-            </div>
-          </div>
-        ) : (
-          <div key={activeTab} className="animate-tab-in">
-            {patientMode && activeTab === baseTabCount && <AllergyList user={user ?? null} />}
-            {patientMode && activeTab === baseTabCount + 1 && <ImmunizationList user={user ?? null} />}
-            {patientMode && activeTab === baseTabCount + 2 && (
-              <div className="space-y-6">
-                <PatientConsents user={user ?? null} />
-                <AdvanceDirectives user={user ?? null} />
+            {activeTab < baseTabCount ? (
+              <div className="rounded-2xl bg-background shadow-[0_1px_3px_rgba(0,0,0,0.06),0_6px_24px_rgba(0,0,0,0.06)]">
+                <div className="px-8 pb-6 pt-8">
+                  <h2 className="text-xl font-bold text-foreground">{tabLabels[activeTab]}</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">{tabDescriptions[activeTab]}</p>
+                </div>
+
+                <div key={activeTab} className="animate-tab-in px-8 pb-10">
+                  {activeTab === 0 && (
+                    <GeneralTab
+                      formData={editedInfo}
+                      onChange={handleFieldChange}
+                      editedName={editedName}
+                      onNameChange={handleNameChange}
+                      onZipcodeChange={handleZipcodeChange}
+                    />
+                  )}
+                  {activeTab === 1 && (
+                    <DiseaseTab
+                      formData={editedInfo}
+                      onChange={handleFieldChange}
+                      onMutationAdd={handleMutationAdd}
+                      onMutationRemove={handleMutationRemove}
+                      onMutationChange={handleMutationChange}
+                      diseaseType={getDiseaseType()}
+                    />
+                  )}
+                  {activeTab === 2 && <TreatmentTab formData={editedInfo} onChange={handleFieldChange} diseaseType={getDiseaseType()} />}
+                  {activeTab === 3 && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
+                  {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
+                  {activeTab === 5 && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
+                  {activeTab === 6 && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
+                </div>
+              </div>
+            ) : (
+              <div key={activeTab} className="animate-tab-in">
+                {patientMode && activeTab === baseTabCount && <AllergyList user={user ?? null} />}
+                {patientMode && activeTab === baseTabCount + 1 && <ImmunizationList user={user ?? null} />}
               </div>
             )}
+          </>
+        )}
+
+        {patientView === "settings" && (
+          <div className="animate-tab-in">
+            <button
+              onClick={() => setPatientView("tabs")}
+              className="mb-4 inline-flex items-center gap-1.5 text-sm font-medium text-portal-brand hover:underline"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              Back to Health Record
+            </button>
+            <div className="space-y-6">
+              <PatientConsents user={user ?? null} />
+              <AdvanceDirectives user={user ?? null} />
+            </div>
+          </div>
+        )}
+
+        {patientView === "messages" && (
+          <div className="animate-tab-in">
+            <button
+              onClick={() => setPatientView("tabs")}
+              className="mb-4 inline-flex items-center gap-1.5 text-sm font-medium text-portal-brand hover:underline"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              Back to Health Record
+            </button>
+            <PatientMessages user={user ?? null} />
           </div>
         )}
       </div>

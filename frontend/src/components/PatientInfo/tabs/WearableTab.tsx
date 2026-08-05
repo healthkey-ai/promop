@@ -26,7 +26,7 @@ export default function WearableTab({ formData }: Props) {
     <div>
       {noData && (
         <p className="mb-4 text-sm text-gray-500 italic">
-          No wearable data synced yet. Connect an Apple Health source via the mobile app to populate these fields.
+          No wearable data synced yet. Click Upload to contribute wearable data to your record.
         </p>
       )}
 

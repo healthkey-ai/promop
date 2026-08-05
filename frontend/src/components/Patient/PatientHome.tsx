@@ -2,7 +2,6 @@ import { AlertCircle } from "lucide-react";
 import type { User } from "@/hooks/useAuth";
 import PatientDetail from "@/components/Patient/PatientDetail";
 import PatientSurveys from "@/components/Patient/PatientSurveys";
-import PatientMessages from "@/components/Patient/PatientMessages";
 
 /**
  * Patient (PHR Account Holder) landing view — PHR-S FM PH.1 / PH.2.
@@ -13,9 +12,9 @@ import PatientMessages from "@/components/Patient/PatientMessages";
  *
  * Layout (top → bottom):
  *   1. PatientDetail — "My Health Record" banner + clinical tabs
- *      (includes Allergies, Immunizations, Settings tabs and Download button)
+ *      (includes Allergies, Immunizations tabs and Download button;
+ *       Settings and Messages accessible via Account dropdown)
  *   2. PatientSurveys
- *   3. PatientMessages
  */
 export default function PatientHome({
   user,
@@ -53,9 +52,6 @@ export default function PatientHome({
       />
       <div className="mx-auto max-w-5xl px-6 py-4">
         <PatientSurveys user={user} />
-      </div>
-      <div className="mx-auto max-w-5xl px-6 py-4">
-        <PatientMessages user={user} />
       </div>
     </div>
   );
