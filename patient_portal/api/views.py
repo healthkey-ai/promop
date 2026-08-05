@@ -3570,20 +3570,21 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         uploaded = request.FILES['file']
-        MAX_WEARABLE_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
-        if uploaded.size and uploaded.size > MAX_WEARABLE_UPLOAD_BYTES:
-            return Response(
-                {'error': f'File too large. Maximum size is {MAX_WEARABLE_UPLOAD_BYTES // (1024 * 1024)} MB.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        file_bytes = uploaded.read()
 
-        # Validate file extension
+        # Validate file extension before reading the file body
         name = (uploaded.name or '').lower()
         if device_type == 'garmin' and not name.endswith('.fit'):
             return Response({'error': 'Garmin uploads must be .fit files'}, status=status.HTTP_400_BAD_REQUEST)
         if device_type == 'apple' and not name.endswith('.zip'):
             return Response({'error': 'Apple Health uploads must be .zip files'}, status=status.HTTP_400_BAD_REQUEST)
+
+        MAX_WEARABLE_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
+        if uploaded.size is not None and uploaded.size > MAX_WEARABLE_UPLOAD_BYTES:
+            return Response(
+                {'error': f'File too large. Maximum size is {MAX_WEARABLE_UPLOAD_BYTES // (1024 * 1024)} MB.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        file_bytes = uploaded.read()
 
         # Resolve the Person for the current user
         from patient_portal.models import PatientUser

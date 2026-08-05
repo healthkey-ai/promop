@@ -690,7 +690,7 @@ export default function PatientDetail({
                 {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
                 {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
-                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={() => { if (personId) { api.get(`/patient-info/${personId}/`).then(res => { const d = res.data.patient_info; setPatientInfo(d); setEditedInfo(d); }); } }} />}
+                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={() => { if (personId) { api.get(`/patient-info/${personId}/`).then(res => { const d = res.data.patient_info; setPatientInfo(d); setEditedInfo(d); }).catch(() => {}); } }} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
               </div>
             </div>

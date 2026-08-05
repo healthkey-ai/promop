@@ -6,6 +6,7 @@ Supported formats:
 """
 import io
 import logging
+import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
 from datetime import date, datetime, timedelta
@@ -146,11 +147,12 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
                 except (TypeError, ValueError):
                     pass
 
-    # Merge step sources: prefer monitoring (full-day) over session (activity subset)
+    # Merge step sources: prefer monitoring (full-day) over session (activity subset).
+    # monitoring.cycles is a cumulative counter, so take the max (= total) not the sum.
     all_step_dates = set(monitoring_steps.keys()) | set(session_steps.keys())
     for d in all_step_dates:
         if monitoring_steps.get(d):
-            daily['steps'][d] = monitoring_steps[d]
+            daily['steps'][d] = [max(monitoring_steps[d])]
         elif session_steps.get(d):
             daily['steps'][d] = session_steps[d]
 
@@ -199,14 +201,17 @@ _APPLE_TYPE_MAP = {
 _APPLE_SLEEP_TYPE = 'HKCategoryTypeIdentifierSleepAnalysis'
 
 
+_MAX_XML_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB zip bomb limit
+
+
 def parse_apple_health_export(zip_bytes: bytes) -> list[WearableSample]:
     """Parse an Apple Health export.zip and return daily wearable samples.
 
     Streams ``apple_health_export/export.xml`` using ``iterparse`` to keep
-    memory usage low on large exports.
+    memory usage low on large exports.  Uses stdlib ``xml.etree.ElementTree``
+    (defusedxml does not expose ``iterparse``).  The root element is cleared
+    after each record to prevent memory accumulation.
     """
-    import defusedxml.ElementTree as ET
-
     try:
         zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
     except zipfile.BadZipFile:
@@ -214,9 +219,15 @@ def parse_apple_health_export(zip_bytes: bytes) -> list[WearableSample]:
 
     # Find the export.xml inside the zip
     xml_name = None
-    for name in zf.namelist():
-        if name.endswith('export.xml'):
-            xml_name = name
+    for info in zf.infolist():
+        if info.filename.endswith('export.xml'):
+            # Zip bomb protection: reject implausibly large uncompressed XML
+            if info.file_size > _MAX_XML_UNCOMPRESSED_BYTES:
+                raise ValueError(
+                    f"export.xml uncompressed size ({info.file_size / (1024**3):.1f} GB) "
+                    f"exceeds the {_MAX_XML_UNCOMPRESSED_BYTES // (1024**3)} GB limit."
+                )
+            xml_name = info.filename
             break
     if xml_name is None:
         raise ValueError("ZIP does not contain export.xml. Please upload the Apple Health export.zip.")
@@ -224,7 +235,13 @@ def parse_apple_health_export(zip_bytes: bytes) -> list[WearableSample]:
     daily: dict[str, dict[date, list[float]]] = defaultdict(lambda: defaultdict(list))
 
     with zf.open(xml_name) as xml_file:
-        for event, elem in ET.iterparse(xml_file, events=('end',)):
+        context = ET.iterparse(xml_file, events=('start', 'end'))
+        root = None
+        for event, elem in context:
+            if root is None:
+                root = elem
+            if event != 'end':
+                continue
             if elem.tag != 'Record':
                 elem.clear()
                 continue
@@ -267,6 +284,8 @@ def parse_apple_health_export(zip_bytes: bytes) -> list[WearableSample]:
                             pass
 
             elem.clear()
+            if root is not None:
+                root.clear()
 
     # Collapse daily lists to single values
     samples: list[WearableSample] = []

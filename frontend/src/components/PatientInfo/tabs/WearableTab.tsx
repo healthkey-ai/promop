@@ -64,11 +64,11 @@ export default function WearableTab({ formData, onRefresh }: Props) {
 
     try {
       for (let i = 0; i < files.length; i++) {
-        const formData = new FormData();
-        formData.append('file', files[i]);
-        formData.append('device_type', selectedSource);
+        const payload = new FormData();
+        payload.append('file', files[i]);
+        payload.append('device_type', selectedSource);
 
-        const res = await api.post('/v1/patient-records/upload-wearable/', formData, {
+        const res = await api.post('/v1/patient-records/upload-wearable/', payload, {
           headers: { 'Content-Type': 'multipart/form-data' },
         });
 
