@@ -1,9 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, Check, AlertCircle, ChevronDown } from "lucide-react";
+import { ArrowLeft, Check, AlertCircle, ChevronDown, Download } from "lucide-react";
 import api from "@/api/axios";
 import { getActiveBranding } from "@/config/branding";
+import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
+import AllergyList from "./AllergyList";
+import ImmunizationList from "./ImmunizationList";
+import PatientSurveys from "./PatientSurveys";
+import PatientConsents from "./PatientConsents";
+import AdvanceDirectives from "./AdvanceDirectives";
+import PatientMessages from "./PatientMessages";
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
 import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
@@ -74,7 +81,21 @@ function SaveStatusIndicator({ status, onRetry }: { status: SaveStatus; onRetry:
   );
 }
 
-function ProfileDropdown({ onLogout }: { onLogout: () => void }) {
+type PatientView = "tabs" | "settings" | "messages";
+
+function ProfileDropdown({
+  onLogout,
+  initials,
+  avatarBg,
+  name,
+  onNavigate,
+}: {
+  onLogout: () => void;
+  initials: string;
+  avatarBg: string;
+  name: string;
+  onNavigate: (view: PatientView) => void;
+}) {
   const [open, setOpen] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -93,13 +114,32 @@ function ProfileDropdown({ onLogout }: { onLogout: () => void }) {
       <div className="relative" ref={ref}>
         <button
           onClick={() => setOpen((v) => !v)}
-          className="flex shrink-0 items-center gap-1 rounded-full border border-border px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground"
+          className="flex shrink-0 items-center gap-1.5 rounded-full border border-border px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground"
         >
-          Account
+          <div
+            className="flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-bold text-white"
+            style={{ backgroundColor: avatarBg }}
+          >
+            {initials}
+          </div>
+          <span className="max-w-[120px] truncate">{name}</span>
           <ChevronDown className="h-3 w-3" />
         </button>
         {open && (
-          <div className="absolute right-0 top-full z-40 mt-1 w-44 rounded-lg border border-border bg-background py-1 shadow-lg">
+          <div className="absolute right-0 top-full z-40 mt-1 w-48 rounded-lg border border-border bg-background py-1 shadow-lg">
+            <button
+              onClick={() => { setOpen(false); onNavigate("messages"); }}
+              className="w-full px-4 py-2 text-left text-sm text-foreground hover:bg-muted"
+            >
+              Messages
+            </button>
+            <button
+              onClick={() => { setOpen(false); onNavigate("settings"); }}
+              className="w-full px-4 py-2 text-left text-sm text-foreground hover:bg-muted"
+            >
+              Settings
+            </button>
+            <div className="my-1 border-t border-border" />
             <button
               onClick={() => { setOpen(false); onLogout(); }}
               className="w-full px-4 py-2 text-left text-sm text-foreground hover:bg-muted"
@@ -172,12 +212,15 @@ interface PatientDetailProps {
   patientMode?: boolean;
   /** Logout handler shown in the header when in patient mode. */
   onLogout?: () => void;
+  /** Authenticated user — needed for patient-mode tabs (Allergies, Immunizations, Settings). */
+  user?: User | null;
 }
 
 export default function PatientDetail({
   personIdOverride,
   patientMode = false,
   onLogout,
+  user,
 }: PatientDetailProps = {}) {
   const params = useParams<{ personId: string }>();
   const personId = personIdOverride ?? params.personId;
@@ -194,6 +237,10 @@ export default function PatientDetail({
   const [patientName, setPatientName] = useState("");
   const [editedName, setEditedName] = useState("");
   const [activeTab, setActiveTab] = useState(0);
+  const [patientView, setPatientView] = useState<PatientView>("tabs");
+
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   type InviteState = "idle" | "sending" | "sent" | "error";
   const [inviteState, setInviteState] = useState<InviteState>("idle");
@@ -393,6 +440,28 @@ export default function PatientDetail({
     }
   }, [handleFieldChange]);
 
+  const handleDownloadFhir = useCallback(async () => {
+    if (!personId) return;
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const response = await api.get(`/v1/patient-records/${personId}/export-fhir/`);
+      const blob = new Blob([JSON.stringify(response.data, null, 2)], { type: "application/fhir+json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "my-health-record.fhir.json";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+      setDownloadError("Failed to download your health record. Please try again.");
+    } finally {
+      setDownloading(false);
+    }
+  }, [personId]);
+
   const getDiseaseType = (): "breast" | "lymphoma" | "myeloma" | "cll" | "other" => {
     const d = (typeof editedInfo?.disease === "string" ? editedInfo.disease : "").toLowerCase();
     if (d.includes("breast")) return "breast";
@@ -427,15 +496,30 @@ export default function PatientDetail({
     );
   }
 
-  const tabLabels = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Behavior", "Wearable"];
+  // Build tab list dynamically — patient mode adds Allergies (after Labs) and Surveys (last).
+  // Immunizations are shown inside the Treatment tab, not as a separate tab.
+  const coreTabs = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs"];
+  const afterLabsTabs = patientMode ? ["Allergies"] : [];
+  const trailingTabs = ["Behavior", "Wearables"];
+  const surveyTabs = patientMode ? ["Surveys"] : [];
+  const tabLabels = [...coreTabs, ...afterLabsTabs, ...trailingTabs, ...surveyTabs];
+
+  // Compute dynamic indices
+  const allergiesIdx = patientMode ? coreTabs.length : -1;
+  const behaviorIdx = coreTabs.length + afterLabsTabs.length;
+  const wearablesIdx = behaviorIdx + 1;
+  const surveysIdx = patientMode ? wearablesIdx + 1 : -1;
+
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
     1: "Disease-specific clinical information and genetic details.",
     2: "Therapy history, treatment lines, and planned therapies.",
     3: "Blood counts, electrolytes, coagulation, and cardiac markers.",
     4: "Chemistry panel, liver function tests, and other lab markers.",
-    5: "Lifestyle, socioeconomic, and behavioural health factors.",
-    6: "Apple wearable 30-day summaries derived from synced OMOP data.",
+    ...(allergiesIdx >= 0 ? { [allergiesIdx]: "Known allergies and intolerances from your health records." } : {}),
+    [behaviorIdx]: "Lifestyle, socioeconomic, and behavioural health factors.",
+    [wearablesIdx]: "30 day summaries derived from synced OMOP data.",
+    ...(surveysIdx >= 0 ? { [surveysIdx]: "Surveys assigned to you by your care team." } : {}),
   };
 
   const initials = getInitials(patientName);
@@ -469,30 +553,42 @@ export default function PatientDetail({
               </button>
             )}
             {patientMode && (
-              <span className="text-sm font-semibold text-foreground">My Health Record</span>
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-semibold text-foreground">My Health Record</span>
+                <button
+                  onClick={handleDownloadFhir}
+                  disabled={downloading}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  {downloading ? "Downloading..." : "Download"}
+                </button>
+              </div>
             )}
           </div>
 
           <div className="flex min-w-0 items-center gap-3">
-            <div
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white shadow-sm ring-2 ring-background"
-              style={{ backgroundColor: avatarBg }}
-            >
-              {initials}
-            </div>
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <span className="truncate text-sm font-semibold text-foreground">{patientName}</span>
-              {!patientMode && (
-                <span className="inline-flex shrink-0 items-center rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-indigo-600">
-                  #{personId}
-                </span>
-              )}
-              {typeof editedInfo?.disease === "string" && editedInfo.disease && (
-                <span className="hidden shrink-0 items-center rounded-full border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 sm:inline-flex">
-                  {editedInfo.disease}
-                </span>
-              )}
-            </div>
+            {!patientMode && (
+              <>
+                <div
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white shadow-sm ring-2 ring-background"
+                  style={{ backgroundColor: avatarBg }}
+                >
+                  {initials}
+                </div>
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <span className="truncate text-sm font-semibold text-foreground">{patientName}</span>
+                  <span className="inline-flex shrink-0 items-center rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-indigo-600">
+                    #{personId}
+                  </span>
+                  {typeof editedInfo?.disease === "string" && editedInfo.disease && (
+                    <span className="hidden shrink-0 items-center rounded-full border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 sm:inline-flex">
+                      {editedInfo.disease}
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
             <div className="h-5 w-px shrink-0 bg-border" />
             <div className="shrink-0">
               <SaveStatusIndicator status={saveStatus} onRetry={doSave} />
@@ -520,69 +616,122 @@ export default function PatientDetail({
               </div>
             )}
             {patientMode && onLogout && (
-              <ProfileDropdown onLogout={onLogout} />
+              <ProfileDropdown
+                onLogout={onLogout}
+                initials={initials}
+                avatarBg={avatarBg}
+                name={patientName}
+                onNavigate={setPatientView}
+              />
             )}
           </div>
         </div>
       </div>
 
       <div className="mx-auto max-w-5xl px-6 py-6">
-        <div className="mb-5 border-b border-border">
-          <nav className="flex gap-x-1 overflow-x-auto" aria-label="Patient info tabs">
-            {tabLabels.map((label, i) => (
-              <button
-                key={i}
-                onClick={() => setActiveTab(i)}
-                className={[
-                  "whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium -mb-px transition-colors focus:outline-none",
-                  activeTab === i
-                    ? "border-portal-brand text-portal-brand"
-                    : "border-transparent text-muted-foreground hover:text-foreground",
-                ].join(" ")}
-              >
-                {label}
-              </button>
-            ))}
-          </nav>
-        </div>
+        {patientView === "tabs" && (
+          <>
+            <div className="mb-5 border-b border-border">
+              <nav className="flex gap-x-1 overflow-x-auto" aria-label="Patient info tabs">
+                {tabLabels.map((label, i) => (
+                  <button
+                    key={i}
+                    onClick={() => setActiveTab(i)}
+                    className={[
+                      "whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium -mb-px transition-colors focus:outline-none",
+                      activeTab === i
+                        ? "border-portal-brand text-portal-brand"
+                        : "border-transparent text-muted-foreground hover:text-foreground",
+                    ].join(" ")}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </nav>
+            </div>
 
-        <div className="rounded-2xl bg-background shadow-[0_1px_3px_rgba(0,0,0,0.06),0_6px_24px_rgba(0,0,0,0.06)]">
-          <div className="px-8 pb-6 pt-8">
-            <h2 className="text-xl font-bold text-foreground">{tabLabels[activeTab]}</h2>
-            <p className="mt-1 text-sm text-muted-foreground">{tabDescriptions[activeTab]}</p>
-          </div>
+            <div className="rounded-2xl bg-background shadow-[0_1px_3px_rgba(0,0,0,0.06),0_6px_24px_rgba(0,0,0,0.06)]">
+              <div className="px-8 pb-6 pt-8">
+                <h2 className="text-xl font-bold text-foreground">{tabLabels[activeTab]}</h2>
+                <p className="mt-1 text-sm text-muted-foreground">{tabDescriptions[activeTab]}</p>
+              </div>
 
-          <div key={activeTab} className="animate-tab-in px-8 pb-10">
-            {activeTab === 0 && (
-              <GeneralTab
-                formData={editedInfo}
-                onChange={handleFieldChange}
-                editedName={editedName}
-                onNameChange={handleNameChange}
-                onZipcodeChange={handleZipcodeChange}
-              />
-            )}
-            {activeTab === 1 && (
-              <DiseaseTab
-                formData={editedInfo}
-                onChange={handleFieldChange}
-                onMutationAdd={handleMutationAdd}
-                onMutationRemove={handleMutationRemove}
-                onMutationChange={handleMutationChange}
-                diseaseType={getDiseaseType()}
-              />
-            )}
-            {activeTab === 2 && <TreatmentTab formData={editedInfo} onChange={handleFieldChange} diseaseType={getDiseaseType()} />}
-            {activeTab === 3 && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
-            {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
-            {activeTab === 5 && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
-            {activeTab === 6 && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
+              <div key={activeTab} className="animate-tab-in px-8 pb-10">
+                {activeTab === 0 && (
+                  <GeneralTab
+                    formData={editedInfo}
+                    onChange={handleFieldChange}
+                    editedName={editedName}
+                    onNameChange={handleNameChange}
+                    onZipcodeChange={handleZipcodeChange}
+                  />
+                )}
+                {activeTab === 1 && (
+                  <DiseaseTab
+                    formData={editedInfo}
+                    onChange={handleFieldChange}
+                    onMutationAdd={handleMutationAdd}
+                    onMutationRemove={handleMutationRemove}
+                    onMutationChange={handleMutationChange}
+                    diseaseType={getDiseaseType()}
+                  />
+                )}
+                {activeTab === 2 && (
+                  <>
+                    <TreatmentTab formData={editedInfo} onChange={handleFieldChange} diseaseType={getDiseaseType()} />
+                    {patientMode && (
+                      <div className="mt-8 border-t border-gray-200 pt-6">
+                        <ImmunizationList user={user ?? null} />
+                      </div>
+                    )}
+                  </>
+                )}
+                {activeTab === 3 && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
+                {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
+                {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
+                {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
+                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={() => { if (personId) { api.get(`/patient-info/${personId}/`).then(res => { const d = res.data.patient_info; setPatientInfo(d); setEditedInfo(d); }).catch(() => {}); } }} />}
+                {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
+              </div>
+            </div>
+          </>
+        )}
+
+        {patientView === "settings" && (
+          <div className="animate-tab-in">
+            <button
+              onClick={() => setPatientView("tabs")}
+              className="mb-4 inline-flex items-center gap-1.5 text-sm font-medium text-portal-brand hover:underline"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              Back to Health Record
+            </button>
+            <div className="space-y-6">
+              <PatientConsents user={user ?? null} />
+              <AdvanceDirectives user={user ?? null} />
+            </div>
           </div>
-        </div>
+        )}
+
+        {patientView === "messages" && (
+          <div className="animate-tab-in">
+            <button
+              onClick={() => setPatientView("tabs")}
+              className="mb-4 inline-flex items-center gap-1.5 text-sm font-medium text-portal-brand hover:underline"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              Back to Health Record
+            </button>
+            <PatientMessages user={user ?? null} />
+          </div>
+        )}
       </div>
 
       {saveErrorMsg && (
         <ErrorToast message={saveErrorMsg} onDismiss={() => setSaveErrorMsg(null)} />
+      )}
+      {downloadError && (
+        <ErrorToast message={downloadError} onDismiss={() => setDownloadError(null)} />
       )}
     </div>
   );

@@ -281,6 +281,11 @@ export interface PatientInfo {
   respiratory_rate_avg_30d?: string | number;
   sleep_duration_hours_avg_30d?: string | number;
 
+  // Myeloma diagnostic criteria (computed, read-only)
+  meets_crab?: boolean | null;
+  meets_slim?: boolean | null;
+  myeloma_type?: string | null;
+
   // Derivation versioning (read-only)
   derivation_version?: number;
   derived_at?: string;

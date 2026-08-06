@@ -1960,6 +1960,11 @@ class BreastCancerLaterLineTherapy(VocabularyLookup):
         db_table = 'vocabulary_breast_cancer_later_line_therapy'
 
 
+class MyelomaType(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_myeloma_type'
+
+
 # ---------------------------------------------------------------------------
 # End controlled vocabulary models
 # ---------------------------------------------------------------------------
@@ -2036,6 +2041,7 @@ class PatientRecord(models.Model):
     sct_eligibility = models.JSONField(blank=True, null=True, default=list,
         help_text="Multi-select from SctEligibility vocabulary")
     plasma_cell_leukemia = models.BooleanField(blank=True, null=True, default=None)
+    myeloma_type = models.CharField(max_length=100, blank=True, null=True, help_text="Myeloma subtype from MyelomaType vocabulary")
     progression = models.TextField(blank=True, null=True)
 
     # Vital signs

@@ -100,6 +100,13 @@ export const FL_TUMOR_GRADE_OPTIONS = [
   'Grade 3a (>15 centroblasts/HPF, centrocytes present)',
   'Grade 3b (solid sheets of centroblasts)',
 ];
+export const MYELOMA_TYPE_OPTIONS = [
+  'IgG Kappa', 'IgG Lambda', 'IgA Kappa', 'IgA Lambda',
+  'IgD Kappa', 'IgD Lambda', 'IgE Kappa', 'IgE Lambda',
+  'IgM Kappa', 'IgM Lambda',
+  'Light Chain Only (Kappa)', 'Light Chain Only (Lambda)',
+  'Non-secretory', 'Biclonal',
+];
 export const ISS_STAGE_OPTIONS = ['Stage I', 'Stage II', 'Stage III'];
 export const MRD_STATUS_OPTIONS = [
   'MRD Negative (10⁻⁵)',

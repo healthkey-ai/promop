@@ -32,6 +32,7 @@ from omop_core.models import (
     InfectionStatus, DiseaseProgression, MeasurableDisease, GelfCriteria,
     FlipIScore, FollicularLymphomaGrade, PostTransformationOutcome,
     BreastCancerFirstLineTherapy, BreastCancerSecondLineTherapy, BreastCancerLaterLineTherapy,
+    MyelomaType,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.patient_record_service import refresh_patient_record
@@ -3540,6 +3541,207 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+    @action(detail=False, methods=['post'], url_path='upload-wearable',
+            permission_classes=[IsAuthenticated])
+    def upload_wearable(self, request):
+        """POST /api/v1/patient-records/upload-wearable/
+
+        Accept a wearable data file (Garmin .fit or Apple Health .zip) and
+        write parsed samples into OMOP Measurement/Observation rows, then
+        refresh the PatientRecord 30-day summaries.
+
+        Form fields:
+          - file: the uploaded file
+          - device_type: 'garmin' | 'apple'
+        """
+        from omop_core.services.wearable_parsers import parse_garmin_fit, parse_apple_health_export
+        from omop_core.services.pk import next_pk_batch as _next_pk_batch
+        from omop_core.services.mappings import WEARABLE_LOINC, WEARABLE_ARTIFACT_BOUNDS
+        from omop_core.services.concept_cache import concept_by_loinc as _cc_by_loinc
+
+        if 'file' not in request.FILES:
+            return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
+
+        device_type = request.data.get('device_type', '').strip().lower()
+        if device_type not in ('garmin', 'apple'):
+            return Response(
+                {'error': "device_type must be 'garmin' or 'apple'"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        uploaded = request.FILES['file']
+
+        # Validate file extension before reading the file body
+        name = (uploaded.name or '').lower()
+        if device_type == 'garmin' and not name.endswith('.fit'):
+            return Response({'error': 'Garmin uploads must be .fit files'}, status=status.HTTP_400_BAD_REQUEST)
+        if device_type == 'apple' and not name.endswith('.zip'):
+            return Response({'error': 'Apple Health uploads must be .zip files'}, status=status.HTTP_400_BAD_REQUEST)
+
+        MAX_WEARABLE_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
+        if uploaded.size is not None and uploaded.size > MAX_WEARABLE_UPLOAD_BYTES:
+            return Response(
+                {'error': f'File too large. Maximum size is {MAX_WEARABLE_UPLOAD_BYTES // (1024 * 1024)} MB.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        file_bytes = uploaded.read()
+
+        # Resolve the Person for the current user
+        from patient_portal.models import PatientUser
+        try:
+            patient_user = PatientUser.objects.get(identity=request.user)
+            person = patient_user.person
+        except PatientUser.DoesNotExist:
+            return Response(
+                {'error': 'No patient record linked to your account'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Parse the file
+        try:
+            if device_type == 'garmin':
+                samples = parse_garmin_fit(file_bytes)
+            else:
+                samples = parse_apple_health_export(file_bytes)
+        except Exception as e:
+            logger.exception('wearable_parse_error device=%s', device_type)
+            return Response(
+                {'error': 'Failed to parse file. Please ensure it is a valid '
+                          f'{"Garmin .fit" if device_type == "garmin" else "Apple Health export.zip"} file.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not samples:
+            return Response({'samples_created': 0, 'duplicates_skipped': 0})
+
+        # Look up LOINC concepts for each metric
+        loinc_concepts: dict[str, Concept | None] = {}
+        for metric_key, loinc_code in WEARABLE_LOINC.items():
+            loinc_concepts[metric_key] = _cc_by_loinc(loinc_code)
+
+        # Measurement type concept (wearable device = 32883 / Patient self-report)
+        type_concept = None
+        try:
+            type_concept = Concept.objects.get(concept_id=32883)
+        except Concept.DoesNotExist:
+            try:
+                type_concept = Concept.objects.get(concept_id=32856)  # Lab fallback
+            except Concept.DoesNotExist:
+                pass
+
+        # Filter out artifact values and deduplicate
+        from django.db.models import Q
+
+        existing_keys = set()
+        # Build set of (metric_key, date, value) that already exist.
+        # Most metrics live in Measurement; sleep_duration lives in Observation.
+        for metric_key in set(s.metric_key for s in samples):
+            concept = loinc_concepts.get(metric_key)
+            if concept is None:
+                continue
+            if metric_key == 'sleep_duration':
+                existing_rows = Observation.objects.filter(
+                    person=person,
+                    observation_concept=concept,
+                ).values_list('observation_date', 'value_as_number')
+            else:
+                existing_rows = Measurement.objects.filter(
+                    person=person,
+                    measurement_concept=concept,
+                ).values_list('measurement_date', 'value_as_number')
+            for row_date, row_val in existing_rows:
+                if row_val is not None:
+                    existing_keys.add((metric_key, row_date, float(row_val)))
+
+        pending_measurements = []
+        pending_observations = []
+        duplicates_skipped = 0
+
+        for sample in samples:
+            concept = loinc_concepts.get(sample.metric_key)
+            if concept is None:
+                continue
+
+            # Artifact filter
+            bounds = WEARABLE_ARTIFACT_BOUNDS.get(sample.metric_key)
+            if bounds and not (bounds[0] <= sample.value <= bounds[1]):
+                continue
+
+            # Dedup check
+            dedup_key = (sample.metric_key, sample.date, round(sample.value, 2))
+            if dedup_key in existing_keys:
+                duplicates_skipped += 1
+                continue
+            existing_keys.add(dedup_key)
+
+            if sample.metric_key == 'sleep_duration':
+                # Sleep goes into Observation table
+                obs = Observation(
+                    observation_id=0,  # allocated below
+                    person=person,
+                    observation_concept=concept,
+                    observation_date=sample.date,
+                    observation_type_concept=type_concept,
+                    value_as_number=sample.value,
+                    observation_source_value=WEARABLE_LOINC[sample.metric_key],
+                    unit_source_value='h',
+                )
+                obs._skip_patient_record_refresh = True
+                pending_observations.append(obs)
+            else:
+                # All other metrics go into Measurement table
+                unit_map = {
+                    'steps': '/d',
+                    'active_minutes': 'min',
+                    'resting_hr': '/min',
+                    'hrv_sdnn': 'ms',
+                    'spo2': '%',
+                    'respiratory_rate': '/min',
+                }
+                m = Measurement(
+                    measurement_id=0,  # allocated below
+                    person=person,
+                    measurement_concept=concept,
+                    measurement_date=sample.date,
+                    measurement_type_concept=type_concept,
+                    value_as_number=sample.value,
+                    measurement_source_value=WEARABLE_LOINC[sample.metric_key],
+                    unit_source_value=unit_map.get(sample.metric_key),
+                )
+                m._skip_patient_record_refresh = True
+                pending_measurements.append(m)
+
+        created_count = 0
+        with transaction.atomic():
+            if pending_measurements:
+                m_ids = _next_pk_batch(Measurement, 'measurement_id', len(pending_measurements))
+                for m, mid in zip(pending_measurements, m_ids):
+                    m.measurement_id = mid
+                Measurement.objects.bulk_create(pending_measurements)
+                created_count += len(pending_measurements)
+
+            if pending_observations:
+                obs_ids = _next_pk_batch(Observation, 'observation_id', len(pending_observations))
+                for obs, oid in zip(pending_observations, obs_ids):
+                    obs.observation_id = oid
+                Observation.objects.bulk_create(pending_observations)
+                created_count += len(pending_observations)
+
+        # Refresh the PatientRecord to recompute 30-day summaries
+        try:
+            refresh_patient_record(person)
+        except Exception:
+            logger.exception('wearable_refresh_failed person_id=%s', person.person_id)
+
+        logger.info(
+            'wearable_upload_complete device=%s person_id=%s created=%d duplicates=%d',
+            device_type, person.person_id, created_count, duplicates_skipped,
+        )
+        return Response({
+            'samples_created': created_count,
+            'duplicates_skipped': duplicates_skipped,
+        })
+
     @action(detail=False, methods=['delete'], permission_classes=[ScopedTokenPermission])
     def bulk_delete(self, request):
         """Delete multiple patients by person_ids"""
@@ -4948,6 +5150,7 @@ _VOCABULARY_REGISTRY = {
     'breast-cancer-first-line-therapy':      BreastCancerFirstLineTherapy,
     'breast-cancer-second-line-therapy':     BreastCancerSecondLineTherapy,
     'breast-cancer-later-line-therapy':      BreastCancerLaterLineTherapy,
+    'myeloma-type':                          MyelomaType,
 }
 
 
@@ -5434,15 +5637,36 @@ class VocabSnapshotView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 2. Resolve release
+        # 2. Resolve release. Resolve `latest` ONCE and reuse it for both the
+        # release_id=None branch and the non-latest guard below — two independent
+        # get_latest_release() reads could straddle a publish (or a published_at
+        # tie) and make the /latest/ URL 409 against itself.
+        latest = get_latest_release()
         if release_id is None:
-            release = get_latest_release()
+            release = latest
         else:
             release = VocabularyRelease.objects.filter(
                 pk=release_id, status='published',
             ).first()
         if release is None:
             return Response({'detail': 'Release not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # 2b. Refuse a non-latest published release. The vocab tables are reloaded
+        # wholesale per release (current-only), and the stream below filters only by
+        # `source`, not release_id — so serving an OLDER release's URL would stream
+        # the CURRENT rows under a stale label. Only the latest published release is
+        # truthful; the manifest API (vocab_release_detail) still serves historical
+        # metadata. See issue #371 / exact#286.
+        if latest is not None and release.pk != latest.pk:
+            return Response(
+                {'detail': (
+                    f'Snapshot for release {release.pk} is unavailable: vocabulary '
+                    f'tables are current-only, so only the latest published release '
+                    f'({latest.pk}) can be streamed. Use '
+                    f'/api/v1/vocab-releases/latest/snapshot/{table}/.'
+                )},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         # 3. ETag / conditional request
         etag = get_release_etag(release)
@@ -5451,6 +5675,7 @@ class VocabSnapshotView(APIView):
             resp = HttpResponseNotModified()
             if etag:
                 resp['ETag'] = etag
+            resp['X-Vocab-Release-Id'] = str(release.pk)
             return resp
 
         # 4. Build WHERE clause (source filter for concept table only)
@@ -5479,6 +5704,10 @@ class VocabSnapshotView(APIView):
         response['Content-Disposition'] = (
             f'attachment; filename="{table}_{release.pk}.ndjson"'
         )
+        # Name the release these rows reflect, so consumers capture it robustly
+        # (not by parsing the ETag/filename). Always the latest published release —
+        # non-latest is refused above. See issue #371 / cancerbot#4646.
+        response['X-Vocab-Release-Id'] = str(release.pk)
         if etag:
             response['ETag'] = etag
             response['Cache-Control'] = 'private, max-age=86400'
