@@ -420,7 +420,12 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             # 'inferred' for a resolved regimen rather than a misleading `null` —
             # never 'asserted', so a consumer may trust 'asserted' but must
             # verify 'inferred'.
-            if origin is None and cid:
+            if not cid:
+                # No resolved regimen concept_id → regimen_source is meaningless;
+                # a null-id line must NOT inherit an aggregate 'asserted'/'inferred'
+                # (e.g. an unresolved 3L+ line under an all-asserted later set).
+                origin = None
+            elif origin is None:
                 origin = 'inferred'
             entry = {
                 'line': n,

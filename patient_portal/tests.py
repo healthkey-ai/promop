@@ -11589,6 +11589,27 @@ class LinesOfTherapyPayloadTest(TestCase):
         self.assertEqual(lot[0]['regimen_source'], 'asserted')
         self.assertEqual(lot[1]['regimen_source'], 'inferred')
 
+    def test_unresolved_later_line_regimen_source_is_none(self):
+        # #362 review (LOW): a null-concept_id later line must NOT inherit the
+        # aggregate 'asserted' origin — regimen_source is meaningless without an id.
+        rec = self._record(
+            person_id=90264,
+            later_therapy='RegA',
+            later_therapies=[
+                {'lineNumber': 3, 'therapy': 'RegA', 'startDate': None,
+                 'endDate': None, 'concept_id': 401, 'origin': 'asserted'},
+                {'lineNumber': 4, 'therapy': 'RegB', 'startDate': None,
+                 'endDate': None, 'concept_id': None, 'origin': None},
+            ],
+            later_therapy_ids=[401],
+            therapy_ids_provenance={
+                'later_therapy_ids': {'value': [401], 'origin': 'asserted', 'release_id': None}})
+        lot = self._lot(rec)
+        self.assertEqual(lot[0]['regimen_concept_id'], 401)
+        self.assertEqual(lot[0]['regimen_source'], 'asserted')
+        self.assertIsNone(lot[1]['regimen_concept_id'])
+        self.assertIsNone(lot[1]['regimen_source'])       # not 'asserted'
+
     def test_later_lines_preserve_true_line_number(self):
         # New shape with non-contiguous line numbers (3 then 5, e.g. Episode
         # gaps) must render as-is, not be renumbered to 3,4.

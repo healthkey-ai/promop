@@ -2128,9 +2128,10 @@ class PatientRecord(models.Model):
     # written by the derivation pipeline (refresh_patient_record / FHIR
     # upload), never by API clients.  Shape:
     #   {"first_line_therapy_id": {"value": 35806260, "origin": "asserted"|"inferred",
-    #                              "release_id": <VocabularyRelease pk int>|null}, ...}
-    # release_id is the current published VocabularyRelease pk (int) as an interim
-    # identity until a content-addressed release id ("rel-...") exists (ADR 0001).
+    #                              "release_id": "<VocabularyRelease pk>"|null}, ...}
+    # release_id is the current published VocabularyRelease pk as a decimal STRING
+    # (to match the string API / frontend contract) — an interim identity until a
+    # content-addressed release id ("rel-...") exists (ADR 0001).
     therapy_ids_provenance = models.JSONField(
         null=True, blank=True, default=dict,
         help_text="Per-field provenance for derived therapy concept_id fields",

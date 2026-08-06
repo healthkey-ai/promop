@@ -447,7 +447,11 @@ def _ensure_mm_episodes(person, therapy_lines, ehr_type, dry_run=False):
             # clears, so passing None above won't remove an already-stored one, which
             # would keep old synthetic lines wrongly reported as `asserted` (#362).
             ep = result.episode
-            if ep is not None and ep.episode_source_concept_id is not None:
+            # Clear ONLY the stale concept a previous enrichment wrote (== this
+            # derived regimen), never a foreign/legitimately source-asserted one —
+            # so pointing this command at a real FHIR-asserted line can't wipe it.
+            if (ep is not None and regimen_concept is not None
+                    and ep.episode_source_concept_id == regimen_concept.concept_id):
                 ep.episode_source_concept = None
                 ep.save(update_fields=['episode_source_concept'])
             if result.created:
