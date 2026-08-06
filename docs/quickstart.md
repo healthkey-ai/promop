@@ -116,8 +116,8 @@ After each batch, PRomop automatically:
 
 Open `http://localhost:8000/admin/` and log in with your superuser credentials.
 
-Navigate to **Omop Core → Patient infos** to see the imported records. Each row is a
-`PatientRecord` — click any patient to see the full 286-column projection: demographics,
+Navigate to **Omop Core → Patient records** to see the imported records. Each row is a
+`PatientRecord` — click any patient to see the full projection: demographics,
 staging, lab values, therapy lines, and biomarkers all in one place.
 
 ---
@@ -220,7 +220,7 @@ FHIR Bundle (generated or from an EHR)
 OMOP tables — Measurement, ConditionOccurrence, DrugExposure, Episode
         │
         ▼  post_save signal chain (automatic)
-PatientRecord — 286-column projection, one row per patient
+PatientRecord — 300+ column projection, one row per patient
         │
         ▼
 REST API  /api/v1/patient-records/

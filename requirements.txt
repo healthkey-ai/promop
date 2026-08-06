@@ -30,6 +30,8 @@ whitenoise==6.7.0
 django-anymail[mailgun]==12.0
 drf-spectacular==0.28.0
 
+python-fitparse>=2.0.0
+
 # Testing
 pytest==8.4.2
 pytest-django==4.11.1

@@ -129,6 +129,17 @@ API contract. To honour the decision, promop must provide:
   `concept_synonym`, `concept_relationship` (incl. edge validity), `concept_ancestor`,
   `drug_strength`, `source_to_concept_map`, and vocabulary metadata — with source-asserted
   identity preserved.
+- **Bulk table snapshots are latest-only** (amended 2026-08-05, promop#371). Because the
+  loader reloads the vocabulary tables wholesale per release (retention of prior *row-data*
+  is not yet built — see "Release construction & publication" above), the streaming
+  snapshot endpoint can only truthfully serve the **latest** published release: it returns
+  `409 Conflict` for a non-latest release and stamps every response with an
+  `X-Vocab-Release-Id` header. Historical *manifests* remain addressable via the manifest
+  API. **Open fork for a future revision:** **(A)** keep snapshots latest-only — current
+  decision, honest and cheap; or **(B)** make snapshots genuinely release-scoped by
+  retaining per-release row-data, restoring addressable historical snapshots at a storage +
+  loader cost. Consumers pin a release id from the latest manifest and stream immediately;
+  a mid-stream publish surfaces as a transient `409` to re-resolve, never silent skew.
 
 ### Corpus boundary
 - The loader currently scopes `concept` to selected vocabularies/classes,

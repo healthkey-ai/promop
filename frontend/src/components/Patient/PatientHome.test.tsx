@@ -5,8 +5,8 @@ import type { User } from "@/hooks/useAuth";
 
 // Capture the props PatientHome hands to PatientDetail.
 vi.mock("@/components/Patient/PatientDetail", () => ({
-  default: (props: { personIdOverride?: string; patientMode?: boolean }) => (
-    <div>{`PATIENT_DETAIL:${props.personIdOverride}:${String(props.patientMode)}`}</div>
+  default: (props: { personIdOverride?: string; patientMode?: boolean; user?: User | null }) => (
+    <div>{`PATIENT_DETAIL:${props.personIdOverride}:${String(props.patientMode)}:${props.user?.person_id ?? "none"}`}</div>
   ),
 }));
 
@@ -30,7 +30,7 @@ describe("PatientHome", () => {
         onLogout={vi.fn()}
       />
     );
-    expect(screen.getByText("PATIENT_DETAIL:7:true")).toBeInTheDocument();
+    expect(screen.getByText("PATIENT_DETAIL:7:true:7")).toBeInTheDocument();
   });
 
   it("shows a no-record message when no person is linked", () => {
@@ -44,20 +44,20 @@ describe("PatientHome", () => {
     expect(screen.getByText(/no health record is linked/i)).toBeInTheDocument();
   });
 
-  it("renders the download FHIR button when patient has a person_id", () => {
+  it("passes user prop to PatientDetail (download is now inside PatientDetail)", () => {
     render(
       <PatientHome
         user={makeUser({ is_patient: true, person_id: 7 })}
         onLogout={vi.fn()}
       />
     );
-    const downloadBtn = screen.getByRole("button", { name: /download my record \(fhir\)/i });
-    expect(downloadBtn).toBeInTheDocument();
-    expect(downloadBtn).toBeEnabled();
+    // Download button is now rendered by PatientDetail, which is mocked here.
+    // Verify PatientDetail receives the user prop so it can render the download button.
+    expect(screen.getByText(/PATIENT_DETAIL:7:true:7/)).toBeInTheDocument();
   });
 
-  it("does not render the download FHIR button when no person is linked", () => {
+  it("does not render PatientDetail when no person is linked", () => {
     render(<PatientHome user={makeUser({ is_patient: true, person_id: null })} onLogout={vi.fn()} />);
-    expect(screen.queryByRole("button", { name: /download my record \(fhir\)/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/PATIENT_DETAIL/)).not.toBeInTheDocument();
   });
 });

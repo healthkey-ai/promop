@@ -25,13 +25,13 @@ keywords:
 abstract: >
   PRomop is an open-source longitudinal patient health record built on OMOP CDM v5.4
   with FHIR R4 ingestion. Its central feature is PatientRecord, a denormalized
-  286-column projection derived automatically from OMOP tables that enables
+  300+ column projection derived automatically from OMOP tables that enables
   population analytics, clinical trial matching, and clinical decision support to
   operate from a single shared substrate without re-deriving patient state. Deployed
   across approximately 17,500 real patients in two oncology organizations.
 preferred-citation:
   type: article
-  title: "PRomop: Building a Comprehensive Longitudinal Decision-Ready Patient Health Record"
+  title: "PRomop: A Longitudinal Decision-Ready Patient Health Record Built on OMOP CDM and FHIR R4"
   authors:
     - family-names: Blum
       given-names: Adam
