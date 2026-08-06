@@ -54,16 +54,17 @@ original draft required; the concrete API guarantees are folded into *Consequenc
   aggregate `therapy_component_ids` (promop#189), line-structured groups
   (`first_line_component_ids` and `second_line_component_ids` per line;
   `later_component_ids` unions lines 3+), and per-line regimen concept_ids
-  (`first_line_therapy_id` …). All are exposed on the patient serializer. **Caveat on
-  regimen identity:** these concept_ids are a *mixture* of **source-asserted** (a validated
-  `Episode.episode_source_concept`, which the derivation uses preferentially) and **inferred**
-  (drug-exposure name matching, when no asserted concept is present). The catch is that the
-  `therapy_ids_provenance` field designed to carry the `asserted`-vs-`inferred` origin exists
-  but is **not yet populated** by the derivation pipeline — so a consumer cannot currently
-  tell which ids are asserted and which are inferred.
+  (`first_line_therapy_id` …). All are exposed on the patient serializer. **Regimen
+  identity is now labelled:** these concept_ids are a *mixture* of **source-asserted** (a
+  validated `Episode.episode_source_concept`, which the derivation uses preferentially) and
+  **inferred** (drug-exposure name matching, when no asserted concept is present), and the
+  derivation now populates `therapy_ids_provenance` — recording each field's `origin`
+  (`asserted`/`inferred`) and the published vocabulary release id, with the per-line origin
+  carried on `later_therapies` for 3L+. So a consumer can now tell asserted from inferred.
   EXACT consumes the aggregate for component matching as of exact#239 (Phase P — the matcher
   no longer derives components locally); the line-structured groups are available for
-  trial-side superset matching but not yet consumed. Not yet release-stamped.
+  trial-side superset matching but not yet consumed. (The therapy-id provenance carries a
+  release id; the general concept/graph responses are not yet release-stamped — see below.)
 - Trial side: regimen→component expansion via the graph API at **backfill**, cached,
   release-pinned, fail-closed; stored in a **dedicated** column, never unioned into authored
   component requirements.
@@ -77,22 +78,23 @@ original draft required; the concrete API guarantees are folded into *Consequenc
   which promop **already emits and exposes** for the first two lines:
   `first_line_component_ids` and `second_line_component_ids` (per line), with per-line regimen
   concept_ids (`first_line_therapy_id` …). That is enough for a per-line superset on **1L/2L**.
-  Two prerequisites remain genuinely unmet, and EXACT must not treat them as done:
+  One prerequisite remains genuinely unmet, and EXACT must not treat it as done:
     1. **3L+ is not per-line.** `later_component_ids` is a **union across all 3L+ lines**, so it
        cannot satisfy the "complete patient therapy line ⊇ per-regimen expansion" superset rule
        for later-line criteria: components from separate 3L+ regimens can combine to falsely
        match a trial regimen the patient never received as a single line. Later-line superset
        matching stays **blocked** until promop emits per-3L-line groups.
-    2. **Regimen identity is asserted-or-inferred but unstamped.** The `*_therapy_id`
-       concept_ids mix source-asserted (a validated `Episode.episode_source_concept`) and
-       inferred (drug-exposure name matching) values; `therapy_ids_provenance` (the
-       asserted-vs-inferred carrier) is not yet populated, so a consumer cannot tell which is
-       which — material precisely for VRd vs VRd Lite. The asserted path exists; it just is
-       not yet labelled, so EXACT must not discard it, only avoid *assuming* assertion.
+  A second prerequisite — **asserted-vs-inferred regimen identity** — is now **met**:
+  `therapy_ids_provenance` records each `*_therapy_id`'s `origin` (`asserted` from a validated
+  `Episode.episode_source_concept`, `inferred` from drug-name matching) and the published
+  release id, with per-line origin on `later_therapies` for 3L+. A consumer can now tell the
+  two apart — material precisely for VRd vs VRd Lite — and should trust `asserted` but verify
+  `inferred`.
   So Phase T's **1L/2L component matching is not blocked on a promop data-model change** (the
   remaining 1L/2L work is EXACT-side — consume the line-structured fields and do a per-line
-  superset); later-line matching, asserted-identity, and the cross-cutting **release_id /
-  version stamping** (a core deliverable in *Consequences* below) remain promop-side work.
+  superset); later-line matching and the cross-cutting **release_id / version stamping** on the
+  general concept/graph responses (a core deliverable in *Consequences* below) remain
+  promop-side work.
   Note `therapy_component_ids` is derived from the therapy lines (empty when there are none),
   so a "component-only" patient is one whose *line's regimen is unresolved to a concept_id*,
   not one with no therapy at all.

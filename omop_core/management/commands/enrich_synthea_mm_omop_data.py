@@ -429,13 +429,27 @@ def _ensure_mm_episodes(person, therapy_lines, ehr_type, dry_run=False):
                 person,
                 line_number=lot_num,
                 regimen_concept=regimen_concept,
-                regimen_source_concept=regimen_concept if resolved_cid else None,
+                # NOT the source slot: this regimen is DERIVED (resolved by FHIR
+                # hint / name / drug set), not source-asserted, so it must not land
+                # in episode_source_concept — the derivation treats a HemOnc concept
+                # there as `asserted`. Left None; the derivation re-resolves the
+                # concept_id from drug_source_value (= regimen_name) and correctly
+                # labels it `inferred`. See therapy_ids_provenance (#362).
+                regimen_source_concept=None,
                 start_date=lot_start,
                 end_date=lot_end,
                 drug_exposure_ids=[_de.drug_exposure_id],
                 outcome=lot_data.get('outcome'),
                 today=datetime.utcnow().date(),
             )
+            # NOTE: we deliberately do NOT clear a pre-existing episode_source_concept
+            # here. Episodes written by a PREVIOUS enrichment carry a stale derived
+            # concept in that slot, but post-hoc it is indistinguishable from a genuine
+            # source assertion (a real FHIR-asserted regimen can equal the derived
+            # one), so clearing in-command could silently downgrade a legitimate
+            # assertion to inferred. Old stale rows are corrected by a one-off,
+            # cohort-scoped data migration / cohort regeneration, not as a side effect
+            # of this synthetic-data command (#362 review).
             if result.created:
                 created += 1
 

@@ -410,15 +410,22 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             return v.isoformat() if hasattr(v, 'isoformat') else (v or None)
 
         def _line(n, regimen, cid, prov_field, comp, start, end,
-                  outcome, intent, disc, later_aggregate=False, comp_class=None):
-            origin = _prov(prov_field, 'origin')
-            # `therapy_ids_provenance` is written only where the derivation
-            # pipeline records it; today most paths leave it empty (promop#249
-            # follow-up). Rather than emit a misleading `null` for a resolved
-            # regimen, fall back to 'inferred' — the derivation infers regimen
-            # identity from drug exposures. We never default to 'asserted', so a
-            # consumer may trust an 'asserted' value but must verify 'inferred'.
-            if origin is None and cid:
+                  outcome, intent, disc, later_aggregate=False,
+                  origin_override=None, comp_class=None):
+            # Prefer a per-line origin (later_therapies carries one per 3L+ line);
+            # else the field-level `therapy_ids_provenance` origin.
+            origin = origin_override or _prov(prov_field, 'origin')
+            # Provenance is populated by the derivation pipeline for refreshed
+            # rows. For a row derived before provenance existed, fall back to
+            # 'inferred' for a resolved regimen rather than a misleading `null` —
+            # never 'asserted', so a consumer may trust 'asserted' but must
+            # verify 'inferred'.
+            if not cid:
+                # No resolved regimen concept_id → regimen_source is meaningless;
+                # a null-id line must NOT inherit an aggregate 'asserted'/'inferred'
+                # (e.g. an unresolved 3L+ line under an all-asserted later set).
+                origin = None
+            elif origin is None:
                 origin = 'inferred'
             entry = {
                 'line': n,
@@ -497,6 +504,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                     obj.later_component_ids, lt.get('startDate'), lt.get('endDate'),
                     obj.later_outcome, obj.later_intent,
                     obj.later_discontinuation_reason, later_aggregate=True,
+                    origin_override=lt.get('origin'),
                     comp_class=obj.later_therapy_type_ids))
         else:
             # Oldest rows with no `later_therapies` list at all: emit one entry
