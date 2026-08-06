@@ -442,18 +442,14 @@ def _ensure_mm_episodes(person, therapy_lines, ehr_type, dry_run=False):
                 outcome=lot_data.get('outcome'),
                 today=datetime.utcnow().date(),
             )
-            # Idempotency: a rerun over Episodes created by the PREVIOUS version must
-            # also CLEAR a stale derived source concept — upsert only sets, never
-            # clears, so passing None above won't remove an already-stored one, which
-            # would keep old synthetic lines wrongly reported as `asserted` (#362).
-            ep = result.episode
-            # Clear ONLY the stale concept a previous enrichment wrote (== this
-            # derived regimen), never a foreign/legitimately source-asserted one —
-            # so pointing this command at a real FHIR-asserted line can't wipe it.
-            if (ep is not None and regimen_concept is not None
-                    and ep.episode_source_concept_id == regimen_concept.concept_id):
-                ep.episode_source_concept = None
-                ep.save(update_fields=['episode_source_concept'])
+            # NOTE: we deliberately do NOT clear a pre-existing episode_source_concept
+            # here. Episodes written by a PREVIOUS enrichment carry a stale derived
+            # concept in that slot, but post-hoc it is indistinguishable from a genuine
+            # source assertion (a real FHIR-asserted regimen can equal the derived
+            # one), so clearing in-command could silently downgrade a legitimate
+            # assertion to inferred. Old stale rows are corrected by a one-off,
+            # cohort-scoped data migration / cohort regeneration, not as a side effect
+            # of this synthetic-data command (#362 review).
             if result.created:
                 created += 1
 
