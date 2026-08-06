@@ -54,7 +54,7 @@ export default defineConfig(({ mode }) => {
     ],
     resolve: {
       alias: {
-        "@": path.resolve(__dirname, "./src"),
+        "@": path.resolve("src"),
       },
     },
     cacheDir: "node_modules/.vite-remote",

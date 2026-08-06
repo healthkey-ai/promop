@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y \
     gcc \
     postgresql-client \
     libpq-dev \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
@@ -26,7 +26,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy frontend package files and install Node dependencies
 COPY frontend/package*.json ./frontend/
 WORKDIR /app/frontend
-RUN npm install --legacy-peer-deps
+# npm ci: reproducible install from the lockfile — `npm install` drifted to
+# incompatible transitive versions and broke the vite build.
+RUN npm ci
 WORKDIR /app
 
 # Copy ALL application files
