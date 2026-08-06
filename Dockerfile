@@ -35,8 +35,12 @@ COPY . .
 # Verify patient_portal directory exists
 RUN ls -la /app/patient_portal/
 
-# Build frontend
-RUN cd frontend && npm run build && cd ..
+# Build frontend: standalone SPA at /, federation remote under /remote/
+# (WhiteNoise serves WHITENOISE_ROOT at the URL root, so nesting the remote
+# build inside the SPA build dir publishes /remote/remoteEntry.js for
+# Module Federation hosts while the SPA keeps working unchanged).
+RUN cd frontend && npm run build && npm run build:remote && \
+    cp -r dist/remote build/remote && cd ..
 
 # Collect Django static files
 RUN python manage.py collectstatic --noinput --clear || true
