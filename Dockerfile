@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y \
     gcc \
     postgresql-client \
     libpq-dev \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
@@ -26,7 +26,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy frontend package files and install Node dependencies
 COPY frontend/package*.json ./frontend/
 WORKDIR /app/frontend
-RUN npm install --legacy-peer-deps
+# npm ci: reproducible install from the lockfile — `npm install` drifted to
+# incompatible transitive versions and broke the vite build.
+RUN npm ci
 WORKDIR /app
 
 # Copy ALL application files
@@ -35,8 +37,12 @@ COPY . .
 # Verify patient_portal directory exists
 RUN ls -la /app/patient_portal/
 
-# Build frontend
-RUN cd frontend && npm run build && cd ..
+# Build frontend: standalone SPA at /, federation remote under /remote/
+# (WhiteNoise serves WHITENOISE_ROOT at the URL root, so nesting the remote
+# build inside the SPA build dir publishes /remote/remoteEntry.js for
+# Module Federation hosts while the SPA keeps working unchanged).
+RUN cd frontend && npm run build && npm run build:remote && \
+    cp -r dist/remote build/remote && cd ..
 
 # Collect Django static files
 RUN python manage.py collectstatic --noinput --clear || true

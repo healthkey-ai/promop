@@ -31,14 +31,14 @@ describe("LabsProvider", () => {
     expect(screen.getByTestId("basepath").textContent).toBe("/v2");
   });
 
-  it("renders with hk-labs-root class", () => {
+  it("renders with promop-root class", () => {
     const client = axios.create();
     const { container } = render(
       <LabsProvider apiClient={client}>
         <span>child</span>
       </LabsProvider>,
     );
-    expect(container.querySelector(".hk-labs-root")).toBeTruthy();
+    expect(container.querySelector(".promop-root")).toBeTruthy();
   });
 
   it("applies custom className", () => {
@@ -58,8 +58,8 @@ describe("LabsProvider", () => {
         <span>child</span>
       </LabsProvider>,
     );
-    const root = container.querySelector(".hk-labs-root") as HTMLElement;
-    expect(root.style.getPropertyValue("--hk-labs-brand-700")).toBe("200 80% 40%");
+    const root = container.querySelector(".promop-root") as HTMLElement;
+    expect(root.style.getPropertyValue("--promop-brand-700")).toBe("200 80% 40%");
   });
 
   it("uses external QueryClient when provided", () => {

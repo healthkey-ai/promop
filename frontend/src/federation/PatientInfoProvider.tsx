@@ -31,13 +31,13 @@ const defaultTheme: LabsThemeTokens = {
 function themeToVars(theme: Partial<LabsThemeTokens>): Record<string, string> {
   const merged = { ...defaultTheme, ...theme };
   return {
-    "--hk-labs-brand-700": merged.colorPrimary,
-    "--hk-labs-text-brand": merged.colorPrimary,
-    "--hk-labs-success-700": merged.colorSuccess,
-    "--hk-labs-warning-700": merged.colorWarning,
-    "--hk-labs-error-700": merged.colorDanger,
-    "--hk-labs-text-tertiary": merged.colorMuted,
-    "--hk-labs-radius": merged.borderRadius,
+    "--promop-brand-700": merged.colorPrimary,
+    "--promop-text-brand": merged.colorPrimary,
+    "--promop-success-700": merged.colorSuccess,
+    "--promop-warning-700": merged.colorWarning,
+    "--promop-error-700": merged.colorDanger,
+    "--promop-text-tertiary": merged.colorMuted,
+    "--promop-radius": merged.borderRadius,
   };
 }
 
@@ -67,7 +67,7 @@ export function PatientInfoProvider({
 
   return (
     <div
-      className={`hk-labs-root ${className ?? ""}`}
+      className={`promop-root ${className ?? ""}`}
       style={cssVars as React.CSSProperties}
     >
       <QueryClientProvider client={qc}>{content}</QueryClientProvider>

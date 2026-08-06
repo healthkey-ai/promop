@@ -316,7 +316,24 @@ CORS_ALLOW_CREDENTIALS = True
 # recognises the bearer token wins.
 PARTNER_AUTH_PROVIDERS = [
     "patient_portal.api.providers.firebase.FirebaseTokenProvider",
+    "patient_portal.api.providers.phr.PhrTokenProvider",
 ]
+
+# ── phr identity service (the accounts DB for the service family) ─────────
+# RS256 tokens verify offline via the JWKS document; HS256 deployments fall
+# back to introspection.
+PHR_ISSUER = os.environ.get("PHR_ISSUER", "healthkey-phr")
+PHR_BASE_URL = os.environ.get(
+    "PHR_BASE_URL", "http://127.0.0.1:9000" if DEBUG else ""
+).rstrip("/")
+PHR_JWKS_URL = os.environ.get(
+    "PHR_JWKS_URL", f"{PHR_BASE_URL}/api/v1/auth/jwks/" if PHR_BASE_URL else ""
+)
+PHR_INTROSPECT_URL = os.environ.get(
+    "PHR_INTROSPECT_URL",
+    f"{PHR_BASE_URL}/api/v1/auth/introspect/" if PHR_BASE_URL else "",
+)
+PHR_JWKS_CACHE_TTL = int(os.environ.get("PHR_JWKS_CACHE_TTL", "3600"))
 
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "promop-test" if DEBUG else "")
 FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(
