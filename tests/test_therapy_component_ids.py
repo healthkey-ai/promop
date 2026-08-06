@@ -318,6 +318,43 @@ def test_episode_without_source_concept_is_inferred(monkeypatch):
     assert entry['origin'] == 'inferred'      # never 'asserted' for a derived regimen
 
 
+def test_episode_recovers_regimen_from_object_concept_when_name_unaliased(monkeypatch):
+    """#362: enrichment puts the derived regimen in episode_object_concept, not the
+    source slot. When the name fallbacks can't recover it (a FHIR regimen with a
+    valid id but a display name outside the alias table), the id is still recovered
+    from the object slot — 'inferred', never 'asserted'. Guards the data-loss the
+    regimen_source_concept=None fix would otherwise cause."""
+    import omop_core.services.lot_regimens as lot_regimens
+    from omop_core.services import patient_record_service as prs
+    from omop_core.models import ConceptClass
+    person = PersonFactory()
+    hemonc = _hemonc_vocab()
+    _regimen_graph(hemonc)
+    regimen_class, _ = ConceptClass.objects.get_or_create(
+        concept_class_id='Regimen',
+        defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0})
+    regimen1 = Concept.objects.get(concept_id=REGIMEN_ID)
+    regimen1.concept_class = regimen_class
+    regimen1.save(update_fields=['concept_class'])
+    concepts = {
+        'episode': ConceptFactory(concept_name='Treatment Regimen', vocabulary=hemonc),
+        'object': regimen1,      # the derived regimen lives in the object slot
+        'type': ConceptFactory(concept_name='Derived Episode', vocabulary=hemonc),
+        'field': ConceptFactory(concept_name='Episode event field'),
+    }
+    drug = DrugExposureFactory(
+        person=person, drug_concept=Concept.objects.get(concept_id=COMPONENT_A_ID),
+        drug_source_value='UNALIASED-NAME',
+        drug_exposure_start_date=date(2024, 1, 1), drug_exposure_end_date=date(2024, 3, 1))
+    _make_episode(person, 1, 1, None, drug, concepts)      # source concept None
+    monkeypatch.setattr(lot_regimens, 'get_regimen_concept_id', lambda _keys: None)
+    monkeypatch.setattr(prs, 'get_regimen_concept_id_by_name', lambda _sv: None)
+
+    entry = _get_treatment_data(person)['therapy_ids_provenance']['first_line_therapy_id']
+    assert entry['value'] == REGIMEN_ID    # recovered from episode_object_concept
+    assert entry['origin'] == 'inferred'
+
+
 def test_regimen_from_exposures_reports_origin(monkeypatch):
     # de_info tuple: (concept_id, vocabulary_id, name). The no-Episode inference
     # path never asserts — even a HemOnc regimen concept on an exposure is

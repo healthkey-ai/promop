@@ -544,7 +544,8 @@ def _get_treatment_data(person: Person) -> dict:
     # Try Episode-based therapy line grouping first
     try:
         from omop_oncology.models import Episode
-        episodes = Episode.objects.filter(person=person).select_related('episode_source_concept').order_by('episode_number')
+        episodes = Episode.objects.filter(person=person).select_related(
+            'episode_source_concept', 'episode_object_concept').order_by('episode_number')
         if episodes.exists():
             return _get_treatment_data_from_episodes(person, data, episodes, drug_exposures)
     except Exception:
@@ -945,7 +946,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
             concept_id = get_regimen_concept_id(drug_name_set)
             if concept_id:
                 origin = 'inferred'  # resolved by matching the line's drug names
-        # Final fallback: treat each drug_source_value as an abbreviated regimen name
+        # Fallback: treat each drug_source_value as an abbreviated regimen name
         if not concept_id and source_value_set:
             for sv in source_value_set:
                 cid = get_regimen_concept_id_by_name(sv)
@@ -953,6 +954,19 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
                     concept_id = cid
                     origin = 'inferred'
                     break
+        # Last resort: an enrichment-built episode carries the (derived) regimen in
+        # episode_object_concept, not the source slot (#362). When the name fallbacks
+        # can't recover it — e.g. a FHIR regimen with a valid concept_id but a display
+        # name outside the alias table — take it from the object slot so the record
+        # doesn't silently lose its regimen id. Always 'inferred' (object ≠ a source
+        # assertion), never 'asserted'.
+        if not concept_id:
+            obj = episode.episode_object_concept
+            if (episode.episode_object_concept_id and obj
+                    and getattr(obj, 'vocabulary_id', None) == 'HemOnc'
+                    and getattr(obj, 'concept_class_id', None) == 'Regimen'):
+                concept_id = episode.episode_object_concept_id
+                origin = 'inferred'
 
         if concept_id:
             needed_concept_ids.add(concept_id)
