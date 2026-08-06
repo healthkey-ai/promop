@@ -621,23 +621,26 @@ def _expand_component_ids(regimen_concept_ids, drug_concept_ids):
 
 
 def _latest_published_release_id():
-    """The current published vocabulary release identity, or None.
+    """The current published vocabulary release identity as a string, or None.
 
     Stamped into therapy-id provenance so a consumer knows which vocabulary
-    release a regimen concept_id was resolved against. Until a content-addressed
-    release id exists (ADR 0001), the identity is the VocabularyRelease pk (an
-    int, not the string `rel-...` shape the field comment shows as the target).
+    release a regimen concept_id was resolved against. Returned as a **string** to
+    match the documented API contract / frontend type (`lines_of_therapy.release_id`
+    is a string). Until a content-addressed release id exists (ADR 0001), the value
+    is the decimal string of the VocabularyRelease pk (e.g. "7"), not yet the
+    `rel-...` shape the field comment shows as the eventual target.
     """
     try:
         from django.db.models import F
         from omop_core.models import VocabularyRelease
-        return (VocabularyRelease.objects
-                .filter(status='published')
-                # published_at is nullable; nulls_last so a stray null-timestamp
-                # published row can't sort ahead of a real one under DESC.
-                .order_by(F('published_at').desc(nulls_last=True))
-                .values_list('pk', flat=True)
-                .first())
+        pk = (VocabularyRelease.objects
+              .filter(status='published')
+              # published_at is nullable; nulls_last so a stray null-timestamp
+              # published row can't sort ahead of a real one under DESC.
+              .order_by(F('published_at').desc(nulls_last=True))
+              .values_list('pk', flat=True)
+              .first())
+        return str(pk) if pk is not None else None
     except Exception:
         return None
 

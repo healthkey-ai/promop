@@ -429,13 +429,27 @@ def _ensure_mm_episodes(person, therapy_lines, ehr_type, dry_run=False):
                 person,
                 line_number=lot_num,
                 regimen_concept=regimen_concept,
-                regimen_source_concept=regimen_concept if resolved_cid else None,
+                # NOT the source slot: this regimen is DERIVED (resolved by FHIR
+                # hint / name / drug set), not source-asserted, so it must not land
+                # in episode_source_concept — the derivation treats a HemOnc concept
+                # there as `asserted`. Left None; the derivation re-resolves the
+                # concept_id from drug_source_value (= regimen_name) and correctly
+                # labels it `inferred`. See therapy_ids_provenance (#362).
+                regimen_source_concept=None,
                 start_date=lot_start,
                 end_date=lot_end,
                 drug_exposure_ids=[_de.drug_exposure_id],
                 outcome=lot_data.get('outcome'),
                 today=datetime.utcnow().date(),
             )
+            # Idempotency: a rerun over Episodes created by the PREVIOUS version must
+            # also CLEAR a stale derived source concept — upsert only sets, never
+            # clears, so passing None above won't remove an already-stored one, which
+            # would keep old synthetic lines wrongly reported as `asserted` (#362).
+            ep = result.episode
+            if ep is not None and ep.episode_source_concept_id is not None:
+                ep.episode_source_concept = None
+                ep.save(update_fields=['episode_source_concept'])
             if result.created:
                 created += 1
 

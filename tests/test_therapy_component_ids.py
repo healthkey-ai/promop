@@ -273,7 +273,7 @@ def test_episode_path_records_asserted_provenance_and_release_id():
 
     prov = _get_treatment_data(person)['therapy_ids_provenance']
     assert prov['first_line_therapy_id'] == {
-        'value': REGIMEN_ID, 'origin': 'asserted', 'release_id': rel.pk}
+        'value': REGIMEN_ID, 'origin': 'asserted', 'release_id': str(rel.pk)}  # string per API contract
 
     # A HemOnc source concept that is NOT a Regimen class is reported inferred.
     person2 = PersonFactory(person_id=person.person_id + 1)
@@ -284,6 +284,38 @@ def test_episode_path_records_asserted_provenance_and_release_id():
     _make_episode(person2, 10, 1, non_regimen, drug2, concepts)
     prov2 = _get_treatment_data(person2)['therapy_ids_provenance']
     assert prov2['first_line_therapy_id']['origin'] == 'inferred'
+
+
+def test_episode_without_source_concept_is_inferred(monkeypatch):
+    """#362 P1 regression: enrichment leaves episode_source_concept UNSET (it derives
+    the regimen by name/drugs, not a source assertion). The derivation re-resolves the
+    concept_id from drug_source_value and must report 'inferred' — never over-claim
+    'asserted' for a derived regimen sitting on an enrichment-built episode."""
+    import omop_core.services.lot_regimens as lot_regimens
+    from omop_core.services import patient_record_service as prs
+    person = PersonFactory()
+    hemonc = _hemonc_vocab()
+    _regimen_graph(hemonc)
+    concepts = {
+        'episode': ConceptFactory(concept_name='Treatment Regimen', vocabulary=hemonc),
+        'object': ConceptFactory(concept_name='Disease Episode', vocabulary=hemonc),
+        'type': ConceptFactory(concept_name='Derived Episode', vocabulary=hemonc),
+        'field': ConceptFactory(concept_name='Episode event field'),
+    }
+    drug = DrugExposureFactory(
+        person=person, drug_concept=Concept.objects.get(concept_id=COMPONENT_A_ID),
+        drug_source_value='VRD',
+        drug_exposure_start_date=date(2024, 1, 1), drug_exposure_end_date=date(2024, 3, 1))
+    # regimen=None → episode_source_concept is NULL, exactly as the enrichment fix leaves it.
+    _make_episode(person, 1, 1, None, drug, concepts)
+    # drug-name path yields nothing; the regimen is only recoverable by name (drug_source_value).
+    monkeypatch.setattr(lot_regimens, 'get_regimen_concept_id', lambda _keys: None)
+    monkeypatch.setattr(prs, 'get_regimen_concept_id_by_name',
+                        lambda sv: REGIMEN_ID if sv == 'VRD' else None)
+
+    entry = _get_treatment_data(person)['therapy_ids_provenance']['first_line_therapy_id']
+    assert entry['value'] == REGIMEN_ID
+    assert entry['origin'] == 'inferred'      # never 'asserted' for a derived regimen
 
 
 def test_regimen_from_exposures_reports_origin(monkeypatch):
