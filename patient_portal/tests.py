@@ -11806,6 +11806,208 @@ class LinesOfTherapyPayloadTest(TestCase):
         self.assertEqual(lot[1]['regimen'], 'Dara')
 
 
+class TherapyReleaseIdAggregateTest(TestCase):
+    """PatientRecordSerializer.therapy_release_id reduces the per-line therapy
+    provenance release_ids to ONE aggregate patient release for EXACT #286
+    Gate 1: unanimous non-null across the class-contributing lines -> that
+    release; any such line with an unknown/null or divergent release -> null
+    (fail-closed). Only lines that contribute `type_ids` to the aggregate
+    `therapy_type_ids` overlap are considered."""
+
+    def _record(self, person_id=91000, **kwargs):
+        from omop_core.models import Person, PatientRecord
+        person = Person.objects.create(person_id=person_id)
+        return PatientRecord(person=person, **kwargs)
+
+    def _release(self, record):
+        from patient_portal.api.serializers import PatientRecordSerializer
+        return PatientRecordSerializer(record).data['therapy_release_id']
+
+    def test_field_present_in_payload(self):
+        # Additive, always-emitted patient-level field (null until provenance).
+        from patient_portal.api.serializers import PatientRecordSerializer
+        data = PatientRecordSerializer(self._record(person_id=91001)).data
+        self.assertIn('therapy_release_id', data)
+        self.assertIsNone(data['therapy_release_id'])
+
+    def test_unanimous_release_across_contributing_lines(self):
+        rec = self._record(
+            person_id=91002,
+            first_line_therapy='AC-T', first_line_therapy_id=101,
+            first_line_therapy_type_ids=[9101],
+            second_line_therapy='Kadcyla', second_line_therapy_id=202,
+            second_line_therapy_type_ids=[9102],
+            therapy_ids_provenance={
+                'first_line_therapy_id': {'value': 101, 'origin': 'asserted', 'release_id': 'rel-a'},
+                'second_line_therapy_id': {'value': 202, 'origin': 'inferred', 'release_id': 'rel-a'},
+            })
+        self.assertEqual(self._release(rec), 'rel-a')
+
+    def test_null_release_on_contributing_line_fails_closed(self):
+        rec = self._record(
+            person_id=91003,
+            first_line_therapy='AC-T', first_line_therapy_id=101,
+            first_line_therapy_type_ids=[9101],
+            second_line_therapy='Kadcyla', second_line_therapy_id=202,
+            second_line_therapy_type_ids=[9102],
+            therapy_ids_provenance={
+                'first_line_therapy_id': {'value': 101, 'origin': 'asserted', 'release_id': 'rel-a'},
+                'second_line_therapy_id': {'value': 202, 'origin': 'inferred', 'release_id': None},
+            })
+        self.assertIsNone(self._release(rec))
+
+    def test_disagreeing_releases_fail_closed(self):
+        rec = self._record(
+            person_id=91004,
+            first_line_therapy='AC-T', first_line_therapy_id=101,
+            first_line_therapy_type_ids=[9101],
+            second_line_therapy='Kadcyla', second_line_therapy_id=202,
+            second_line_therapy_type_ids=[9102],
+            therapy_ids_provenance={
+                'first_line_therapy_id': {'value': 101, 'origin': 'asserted', 'release_id': 'rel-a'},
+                'second_line_therapy_id': {'value': 202, 'origin': 'inferred', 'release_id': 'rel-b'},
+            })
+        self.assertIsNone(self._release(rec))
+
+    def test_only_type_id_lines_count_noncontributing_line_ignored(self):
+        # Second line has NO type_ids (does not contribute to the overlap), so
+        # its divergent release must NOT taint the aggregate.
+        rec = self._record(
+            person_id=91005,
+            first_line_therapy='AC-T', first_line_therapy_id=101,
+            first_line_therapy_type_ids=[9101],
+            second_line_therapy='Kadcyla', second_line_therapy_id=202,
+            second_line_therapy_type_ids=[],
+            therapy_ids_provenance={
+                'first_line_therapy_id': {'value': 101, 'origin': 'asserted', 'release_id': 'rel-a'},
+                'second_line_therapy_id': {'value': 202, 'origin': 'inferred', 'release_id': 'rel-b'},
+            })
+        self.assertEqual(self._release(rec), 'rel-a')
+
+    def test_classes_without_provenance_fail_closed(self):
+        # A line yields type_ids (from components) but its regimen didn't resolve,
+        # so no provenance entry exists -> release unknown -> null (fail-closed).
+        rec = self._record(
+            person_id=91006,
+            first_line_therapy='AC-T',
+            first_line_therapy_type_ids=[9101],
+            therapy_ids_provenance={})
+        self.assertIsNone(self._release(rec))
+
+    def test_no_type_ids_anywhere_is_null(self):
+        # Patient has a therapy line but no class ids -> no overlap to certify.
+        rec = self._record(
+            person_id=91007,
+            first_line_therapy='AC-T', first_line_therapy_id=101,
+            first_line_therapy_type_ids=[],
+            therapy_ids_provenance={
+                'first_line_therapy_id': {'value': 101, 'origin': 'asserted', 'release_id': 'rel-a'}})
+        self.assertIsNone(self._release(rec))
+
+    def test_later_lines_agree_with_earlier(self):
+        # Later lines share one provenance release_id and the later type aggregate;
+        # unanimous with the first line -> that release.
+        rec = self._record(
+            person_id=91008,
+            first_line_therapy='AC-T', first_line_therapy_id=101,
+            first_line_therapy_type_ids=[9101],
+            later_therapy='RegA',
+            later_therapies=[
+                {'lineNumber': 3, 'therapy': 'RegA', 'startDate': None,
+                 'endDate': None, 'concept_id': 401, 'origin': 'inferred'}],
+            later_therapy_ids=[401],
+            later_therapy_type_ids=[9200],
+            therapy_ids_provenance={
+                'first_line_therapy_id': {'value': 101, 'origin': 'asserted', 'release_id': 'rel-a'},
+                'later_therapy_ids': {'value': [401], 'origin': 'inferred', 'release_id': 'rel-a'}})
+        self.assertEqual(self._release(rec), 'rel-a')
+
+    def test_later_line_release_disagrees_fails_closed(self):
+        rec = self._record(
+            person_id=91009,
+            first_line_therapy='AC-T', first_line_therapy_id=101,
+            first_line_therapy_type_ids=[9101],
+            later_therapy='RegA',
+            later_therapies=[
+                {'lineNumber': 3, 'therapy': 'RegA', 'startDate': None,
+                 'endDate': None, 'concept_id': 401, 'origin': 'inferred'}],
+            later_therapy_ids=[401],
+            later_therapy_type_ids=[9200],
+            therapy_ids_provenance={
+                'first_line_therapy_id': {'value': 101, 'origin': 'asserted', 'release_id': 'rel-a'},
+                'later_therapy_ids': {'value': [401], 'origin': 'inferred', 'release_id': 'rel-b'}})
+        self.assertIsNone(self._release(rec))
+
+    def test_unresolved_later_sibling_fails_closed(self):
+        # #393 codex P1: a later set with one resolved + one unresolved line
+        # shares ONE later provenance release and the aggregate later type ids.
+        # The unresolved sibling (concept_id None) contributes class ids the
+        # shared release does not per-line certify -> null (fail-closed), even
+        # though the resolved sibling carries the release.
+        rec = self._record(
+            person_id=91010,
+            later_therapy='RegA',
+            later_therapies=[
+                {'lineNumber': 3, 'therapy': 'RegA', 'startDate': None,
+                 'endDate': None, 'concept_id': 401, 'origin': 'inferred'},
+                {'lineNumber': 4, 'therapy': 'RegB', 'startDate': None,
+                 'endDate': None, 'concept_id': None, 'origin': None}],
+            later_therapy_ids=[401],
+            later_therapy_type_ids=[9200],
+            therapy_ids_provenance={
+                'later_therapy_ids': {'value': [401], 'origin': 'inferred', 'release_id': 'rel-a'}})
+        self.assertIsNone(self._release(rec))
+
+    def test_multiple_resolved_later_lines_share_release(self):
+        # All later lines resolved and stamped with one release -> that release.
+        rec = self._record(
+            person_id=91011,
+            later_therapy='RegA',
+            later_therapies=[
+                {'lineNumber': 3, 'therapy': 'RegA', 'startDate': None,
+                 'endDate': None, 'concept_id': 401, 'origin': 'inferred'},
+                {'lineNumber': 4, 'therapy': 'RegB', 'startDate': None,
+                 'endDate': None, 'concept_id': 402, 'origin': 'inferred'}],
+            later_therapy_ids=[401, 402],
+            later_therapy_type_ids=[9200],
+            therapy_ids_provenance={
+                'later_therapy_ids': {'value': [401, 402], 'origin': 'inferred', 'release_id': 'rel-a'}})
+        self.assertEqual(self._release(rec), 'rel-a')
+
+    def test_malformed_provenance_is_null_no_crash(self):
+        # A non-dict therapy_ids_provenance must not 500; release reads null.
+        rec = self._record(
+            person_id=91012,
+            first_line_therapy='AC-T', first_line_therapy_id=101,
+            first_line_therapy_type_ids=[9101],
+            therapy_ids_provenance=['not', 'a', 'dict'])
+        self.assertIsNone(self._release(rec))
+
+    def test_unhashable_release_id_is_null_no_crash(self):
+        # #393 codex P2: a JSON-valid but non-scalar release_id (list/dict) must
+        # not reach set() and 500 the payload — reject as uncertified -> null.
+        rec = self._record(
+            person_id=91014,
+            first_line_therapy='AC-T', first_line_therapy_id=101,
+            first_line_therapy_type_ids=[9101],
+            therapy_ids_provenance={
+                'first_line_therapy_id': {'value': 101, 'origin': 'asserted', 'release_id': []}})
+        self.assertIsNone(self._release(rec))
+
+    def test_aggregate_class_not_covered_by_a_line_fails_closed(self):
+        # Defense-in-depth (#393 review P3): a class id in the stored aggregate
+        # therapy_type_ids that no emitted line vouches for -> null. Only a
+        # corrupt/hand-built row can reach this; the gate must not trust it.
+        rec = self._record(
+            person_id=91013,
+            first_line_therapy='AC-T', first_line_therapy_id=101,
+            first_line_therapy_type_ids=[9101],
+            therapy_type_ids=[9101, 9999],   # 9999 emitted by no line
+            therapy_ids_provenance={
+                'first_line_therapy_id': {'value': 101, 'origin': 'asserted', 'release_id': 'rel-a'}})
+        self.assertIsNone(self._release(rec))
+
+
 # ---------------------------------------------------------------------------
 # PatientSelfScopePermission tests
 # ---------------------------------------------------------------------------

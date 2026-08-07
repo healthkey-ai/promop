@@ -245,6 +245,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
     second_line_therapy_display = serializers.SerializerMethodField()
     later_therapy_display = serializers.SerializerMethodField()
     lines_of_therapy = serializers.SerializerMethodField()
+    therapy_release_id = serializers.SerializerMethodField()
 
     class Meta:
         model = PatientRecord
@@ -256,7 +257,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         read_only_fields = (
             'organization', 'person', 'created_at', 'updated_at',
             'first_line_therapy_display', 'second_line_therapy_display', 'later_therapy_display',
-            'lines_of_therapy',
+            'lines_of_therapy', 'therapy_release_id',
             'death_date',
             # Derived therapy-id read model (issue #236): written only by the
             # derivation pipeline (refresh_patient_record / FHIR upload) from
@@ -530,6 +531,68 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                     obj.later_discontinuation_reason, later_aggregate=True,
                     comp_class=obj.later_therapy_type_ids))
         return lines
+
+    def get_therapy_release_id(self, obj):
+        """Patient-level aggregate therapy-vocab release for the class ids the
+        patient emits (ADR 0002 / EXACT #286 Gate 1).
+
+        Each therapy line's `release_id` (`therapy_ids_provenance`) certifies the
+        vocabulary generation that line's regimen -> components -> classes were
+        derived against. EXACT matches drug-class "types" by OVERLAP against the
+        patient's AGGREGATE `therapy_type_ids` (the union across all lines), so a
+        single release must certify that whole union — it is well-defined only
+        when every class-contributing line agrees on one release.
+
+        Rule (unanimous-or-null, fail-closed): reduce over the lines that
+        contribute `type_ids`; unanimous non-null release -> that release;
+        anything weaker -> null ("overlap not release-consistent", so Gate 1
+        fails closed rather than trust a possibly-stale overlap). A line is
+        NOT individually release-certified — and therefore forces null — when:
+
+        - its `release_id` is null / has no provenance entry, OR
+        - its regimen did not resolve (`regimen_concept_id is None`): such a
+          line still contributes class ids (expanded from components), but
+          provenance is keyed by the resolved regimen id, so no per-line release
+          covers it. This matters for 3L+ lines especially: `get_lines_of_therapy`
+          smears the shared `later_therapy_ids` release onto EVERY later entry,
+          including an unresolved sibling whose class contribution that shared
+          release does not actually certify — gating on the null concept_id
+          keeps that case fail-closed (codex #393 review).
+
+        Normal derivation stamps every resolved line with the release active at
+        derivation time, so a fully-resolved patient converges to one value;
+        null is the safe default until per-line provenance is populated.
+        """
+        releases = []
+        covered = set()
+        for line in self.get_lines_of_therapy(obj):
+            tids = line.get('type_ids')
+            if not tids:
+                continue  # no class ids -> not part of the overlap to certify
+            rel = line.get('release_id')
+            # A valid release_id is a non-empty string token
+            # (_latest_published_release_id). Anything else — null, empty, or a
+            # non-string/unhashable JSON value from a malformed provenance row —
+            # is uncertified; reject BEFORE set() so a list/dict can't raise
+            # TypeError and 500 the payload (#393 codex review). Likewise a
+            # class-contributing line whose regimen did not resolve.
+            if not isinstance(rel, str) or not rel or line.get('regimen_concept_id') is None:
+                return None  # uncertified class-contributing line -> fail-closed
+            releases.append(rel)
+            covered.update(tids)
+        if not releases:
+            return None
+        distinct = set(releases)
+        if len(distinct) != 1:
+            return None
+        # Defense-in-depth: EXACT overlaps the stored aggregate `therapy_type_ids`.
+        # Every class id in it must be vouched for by a certified line above; a
+        # class present in the aggregate but emitted by no certified line (only
+        # reachable via a hand-built/corrupt row, never the derivation pipeline)
+        # would be un-certified -> fail closed rather than trust it (#393 review).
+        if not set(obj.therapy_type_ids or []).issubset(covered):
+            return None
+        return distinct.pop()
 
     def validate_sct_date(self, value):
         if value is not None and value > localdate():
