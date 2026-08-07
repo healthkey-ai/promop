@@ -13,13 +13,6 @@ interface Props {
   onRefresh?: () => void;
 }
 
-const SOURCES = [
-  { key: 'garmin', label: 'Garmin', accept: '.fit', enabled: true, multiple: true },
-  { key: 'apple', label: 'Apple Health', accept: '.zip', enabled: true, multiple: false },
-  { key: 'oura', label: 'Oura', accept: '', enabled: false, multiple: false },
-  { key: 'fitbit', label: 'Fitbit', accept: '', enabled: false, multiple: false },
-] as const;
-
 const METRIC_LABELS: Record<string, string> = {
   steps: 'Steps',
   active_minutes: 'Active Minutes',
@@ -70,12 +63,10 @@ function formatMetricValue(metric: string, value: number): string {
 
 export default function WearableTab({ formData, onRefresh }: Props) {
   const noData = !formData?.wearable_last_sync_at;
-  const [showPicker, setShowPicker] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [selectedSource, setSelectedSource] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const dragCounter = useRef(0);
 
@@ -141,23 +132,32 @@ export default function WearableTab({ formData, onRefresh }: Props) {
     }
   }, [onRefresh, fetchUploads]);
 
-  const handleSourceSelect = (sourceKey: string) => {
-    const source = SOURCES.find(s => s.key === sourceKey);
-    if (!source || !source.enabled) return;
-    setSelectedSource(sourceKey);
-    setShowPicker(false);
+  const handleUploadClick = () => {
     if (fileInputRef.current) {
-      fileInputRef.current.accept = source.accept;
-      fileInputRef.current.multiple = source.multiple;
       fileInputRef.current.click();
     }
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (!files || files.length === 0 || !selectedSource) return;
-    await uploadFiles(Array.from(files), selectedSource);
-    setSelectedSource(null);
+    if (!files || files.length === 0) return;
+    const fileList = Array.from(files);
+
+    // Auto-detect device type from file extensions
+    const types = new Set(fileList.map(f => detectDeviceType(f.name)));
+    if (types.has(null)) {
+      setUploadError('Unsupported file type. Please select .fit (Garmin) or .zip (Apple Health) files.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+    if (types.size > 1) {
+      setUploadError('Please upload one type at a time (.fit or .zip).');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
+    const deviceType = [...types][0]!;
+    await uploadFiles(fileList, deviceType);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -252,54 +252,29 @@ export default function WearableTab({ formData, onRefresh }: Props) {
 
       {/* Upload controls */}
       <div className="mb-4 flex items-center gap-3">
-        <div className="relative">
-          <button
-            type="button"
-            onClick={() => setShowPicker(!showPicker)}
-            disabled={uploading}
-            className="inline-flex items-center gap-2 rounded-md bg-portal-brand px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-portal-brand/90 disabled:opacity-50"
-          >
-            {uploading ? (
-              <>
-                <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                </svg>
-                Uploading...
-              </>
-            ) : (
-              <>
-                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5-5m0 0l5 5m-5-5v12" />
-                </svg>
-                Upload
-              </>
-            )}
-          </button>
-
-          {showPicker && (
-            <div className="absolute left-0 top-full z-10 mt-1 w-56 rounded-md border border-gray-200 bg-white py-1 shadow-lg">
-              {SOURCES.map(source => (
-                <button
-                  key={source.key}
-                  type="button"
-                  onClick={() => handleSourceSelect(source.key)}
-                  disabled={!source.enabled}
-                  className={`flex w-full items-center justify-between px-4 py-2 text-left text-sm ${
-                    source.enabled
-                      ? 'text-gray-700 hover:bg-gray-50'
-                      : 'cursor-not-allowed text-gray-400'
-                  }`}
-                >
-                  <span>{source.label}</span>
-                  {!source.enabled && (
-                    <span className="text-xs text-gray-400">Coming soon</span>
-                  )}
-                </button>
-              ))}
-            </div>
+        <button
+          type="button"
+          onClick={handleUploadClick}
+          disabled={uploading}
+          className="inline-flex items-center gap-2 rounded-md bg-portal-brand px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-portal-brand/90 disabled:opacity-50"
+        >
+          {uploading ? (
+            <>
+              <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Uploading...
+            </>
+          ) : (
+            <>
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5-5m0 0l5 5m-5-5v12" />
+              </svg>
+              Upload
+            </>
           )}
-        </div>
+        </button>
 
         <span className="text-xs text-gray-400">or drag &amp; drop files here</span>
 
@@ -311,10 +286,12 @@ export default function WearableTab({ formData, onRefresh }: Props) {
         )}
       </div>
 
-      {/* Hidden file input */}
+      {/* Hidden file input — accepts both .fit and .zip; device type auto-detected */}
       <input
         ref={fileInputRef}
         type="file"
+        accept=".fit,.zip"
+        multiple
         className="hidden"
         onChange={handleFileChange}
       />
