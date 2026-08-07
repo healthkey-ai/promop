@@ -2470,33 +2470,52 @@ def _get_wearable_data(person: Person) -> dict:
     """Derive 30-day wearable summaries from OMOP Measurement/Observation rows."""
     data = {}
 
-    measurement_rows = list(
-        Measurement.objects.filter(
+    # Prefer recent data (last 90 days) so stale/synthetic rows from years
+    # ago don't anchor the 30-day window. Fall back to all data if nothing
+    # exists within the recency window.
+    recency_cutoff = (timezone.now() - timedelta(days=90)).date()
+
+    def _wearable_measurements(date_filter=None):
+        qs = Measurement.objects.filter(
             person=person,
             value_as_number__isnull=False,
         )
-        .filter(
-            models.Q(measurement_concept__concept_code__in=WEARABLE_LOINC.values())
-            | models.Q(measurement_source_value__in=WEARABLE_LOINC.values())
+        if date_filter is not None:
+            qs = qs.filter(measurement_date__gte=date_filter)
+        return list(
+            qs.filter(
+                models.Q(measurement_concept__concept_code__in=WEARABLE_LOINC.values())
+                | models.Q(measurement_source_value__in=WEARABLE_LOINC.values())
+            )
+            .values_list(
+                'measurement_concept__concept_code',
+                'measurement_source_value',
+                'measurement_date',
+                'value_as_number',
+            )
         )
-        .values_list(
-            'measurement_concept__concept_code',
-            'measurement_source_value',
-            'measurement_date',
-            'value_as_number',
-        )
-    )
-    observation_rows = list(
-        Observation.objects.filter(
+
+    def _wearable_observations(date_filter=None):
+        qs = Observation.objects.filter(
             person=person,
             value_as_number__isnull=False,
         )
-        .filter(
-            models.Q(observation_concept__concept_code=WEARABLE_LOINC['sleep_duration'])
-            | models.Q(observation_source_value=WEARABLE_LOINC['sleep_duration'])
+        if date_filter is not None:
+            qs = qs.filter(observation_date__gte=date_filter)
+        return list(
+            qs.filter(
+                models.Q(observation_concept__concept_code=WEARABLE_LOINC['sleep_duration'])
+                | models.Q(observation_source_value=WEARABLE_LOINC['sleep_duration'])
+            )
+            .values_list('observation_date', 'value_as_number')
         )
-        .values_list('observation_date', 'value_as_number')
-    )
+
+    # Try recent data first; fall back to all data if nothing within 90 days
+    measurement_rows = _wearable_measurements(recency_cutoff)
+    observation_rows = _wearable_observations(recency_cutoff)
+    if not measurement_rows and not observation_rows:
+        measurement_rows = _wearable_measurements()
+        observation_rows = _wearable_observations()
 
     if not measurement_rows and not observation_rows:
         return data
@@ -2596,11 +2615,11 @@ def _get_wearable_data(person: Person) -> dict:
     data['wearable_coverage_ratio_30d'] = coverage
 
     # ---- Median daily steps ------------------------------------------
-    if len(steps_totals) >= WEARABLE_MIN_VALID_DAYS:
+    if steps_totals:
         data['median_daily_steps_30d'] = int(statistics.median(steps_totals.values()))
 
     # ---- Active minutes ----------------------------------------------
-    if len(active_totals) >= WEARABLE_MIN_VALID_DAYS:
+    if active_totals:
         data['active_minutes_per_day_30d'] = round(
             statistics.mean(active_totals.values()), 1
         )
@@ -2628,12 +2647,12 @@ def _get_wearable_data(person: Person) -> dict:
 
     # ---- Resting heart rate ------------------------------------------
     rhr_means = {d: statistics.mean(vs) for d, vs in rhr_daily.items()}
-    if len(rhr_means) >= WEARABLE_MIN_VALID_DAYS:
+    if rhr_means:
         data['resting_heart_rate_avg_30d'] = int(round(statistics.mean(rhr_means.values())))
 
     # ---- HRV SDNN ----------------------------------------------------
     hrv_means = {d: statistics.mean(vs) for d, vs in hrv_daily.items()}
-    if len(hrv_means) >= WEARABLE_MIN_VALID_DAYS:
+    if hrv_means:
         data['hrv_sdnn_avg_30d'] = round(statistics.mean(hrv_means.values()), 1)
 
     # ---- SpO2 minimum (single low reading is clinically significant) -
@@ -2643,11 +2662,11 @@ def _get_wearable_data(person: Person) -> dict:
 
     # ---- Respiratory rate -------------------------------------------
     rr_means = {d: statistics.mean(vs) for d, vs in rr_daily.items()}
-    if len(rr_means) >= WEARABLE_MIN_VALID_DAYS:
+    if rr_means:
         data['respiratory_rate_avg_30d'] = round(statistics.mean(rr_means.values()), 1)
 
     # ---- Sleep duration (from Observation) ---------------------------
-    if len(sleep_nightly) >= WEARABLE_MIN_VALID_DAYS:
+    if sleep_nightly:
         data['sleep_duration_hours_avg_30d'] = round(
             statistics.mean(sleep_nightly.values()), 1
         )

@@ -68,11 +68,21 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
             continue
 
         if msg_type == 'monitoring':
-            # Incremental step cycles throughout the day
-            steps = fields.get('cycles')
+            # Steps: newer devices (MARQ 2, Fenix 7+) use 'steps' directly;
+            # older devices use 'cycles' as an incremental step counter.
+            _steps = fields.get('steps')
+            steps = _steps if _steps is not None else fields.get('cycles')
             if steps is not None:
                 try:
                     monitoring_steps[d].append(float(steps))
+                except (TypeError, ValueError):
+                    pass
+
+            # Active time from monitoring messages (seconds)
+            active_time = fields.get('active_time')
+            if active_time is not None:
+                try:
+                    daily['active_minutes'][d].append(float(active_time) / 60.0)
                 except (TypeError, ValueError):
                     pass
 
@@ -81,6 +91,15 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
             if hr is not None:
                 try:
                     monitoring_hr[d].append(float(hr))
+                except (TypeError, ValueError):
+                    pass
+
+        elif msg_type == 'monitoring_hr_data':
+            # Dedicated resting HR message (MARQ 2, Fenix 7+, Venu, etc.)
+            rhr = fields.get('resting_heart_rate')
+            if rhr is not None:
+                try:
+                    daily['resting_hr'][d].append(float(rhr))
                 except (TypeError, ValueError):
                     pass
 
@@ -160,8 +179,11 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
     # All-day monitoring includes active HR which inflates the average. The
     # 10th percentile captures the lower range (rest/sleep) without being
     # as noisy as the absolute minimum.
+    # Skip p10 estimation for dates that already have a dedicated resting HR
+    # (from monitoring_hr_data messages on newer devices like MARQ 2, Fenix 7+).
+    dates_with_dedicated_rhr = {d for d, vs in daily['resting_hr'].items() if vs}
     for d, hr_values in monitoring_hr.items():
-        if hr_values:
+        if hr_values and d not in dates_with_dedicated_rhr:
             sorted_hr = sorted(hr_values)
             p10_idx = max(0, len(sorted_hr) // 10)
             resting_estimate = sorted_hr[p10_idx]

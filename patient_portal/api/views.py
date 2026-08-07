@@ -32,7 +32,7 @@ from omop_core.models import (
     InfectionStatus, DiseaseProgression, MeasurableDisease, GelfCriteria,
     FlipIScore, FollicularLymphomaGrade, PostTransformationOutcome,
     BreastCancerFirstLineTherapy, BreastCancerSecondLineTherapy, BreastCancerLaterLineTherapy,
-    MyelomaType,
+    MyelomaType, WearableUpload,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.patient_record_service import refresh_patient_record
@@ -3733,6 +3733,24 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception:
             logger.exception('wearable_refresh_failed person_id=%s', person.person_id)
 
+        # Record upload history
+        sample_summary = [
+            {'metric': s.metric_key, 'date': s.date.isoformat(), 'value': s.value}
+            for s in samples
+        ]
+        try:
+            WearableUpload.objects.create(
+                person=person,
+                device_type=device_type,
+                filename=uploaded.name or 'unknown',
+                samples_created=created_count,
+                duplicates_skipped=duplicates_skipped,
+                sample_summary=sample_summary,
+                uploaded_by=request.user,
+            )
+        except Exception:
+            logger.exception('wearable_upload_history_save_failed person_id=%s', person.person_id)
+
         logger.info(
             'wearable_upload_complete device=%s person_id=%s created=%d duplicates=%d',
             device_type, person.person_id, created_count, duplicates_skipped,
@@ -3741,6 +3759,29 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             'samples_created': created_count,
             'duplicates_skipped': duplicates_skipped,
         })
+
+    @action(detail=False, methods=['get'], url_path='wearable-uploads',
+            permission_classes=[IsAuthenticated])
+    def wearable_uploads(self, request):
+        """List wearable upload history for the current patient."""
+        patient_user = getattr(request.user, 'patient_user', None)
+        if not patient_user:
+            return Response([])
+        person = patient_user.person
+        uploads = WearableUpload.objects.filter(person=person)[:50]
+        data = [
+            {
+                'id': u.id,
+                'device_type': u.device_type,
+                'filename': u.filename,
+                'samples_created': u.samples_created,
+                'duplicates_skipped': u.duplicates_skipped,
+                'sample_summary': u.sample_summary,
+                'uploaded_at': u.uploaded_at.isoformat(),
+            }
+            for u in uploads
+        ]
+        return Response(data)
 
     @action(detail=False, methods=['delete'], permission_classes=[ScopedTokenPermission])
     def bulk_delete(self, request):
@@ -3879,6 +3920,13 @@ def login_view(request):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         user = authenticate(request, username=username, password=password)
+
+        # Fallback: if username lookup failed, try matching by email
+        if user is None:
+            from patient_portal.models import Identity
+            identity = Identity.objects.filter(email__iexact=username).first()
+            if identity:
+                user = authenticate(request, username=identity.uid, password=password)
 
         if user is not None:
             login(request, user)
