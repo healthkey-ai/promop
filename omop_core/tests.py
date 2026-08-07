@@ -7,9 +7,13 @@ TEST-03: Signal integration tests at omop_core level
 TEST-04: FLBundleGenerator unit tests
 """
 
+import tempfile
 from datetime import date
+from pathlib import Path
 from unittest.mock import patch
 
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase
 
 from omop_core.models import (
@@ -1897,3 +1901,59 @@ class PublishReleaseTest(_OmopBase):
         self.assertIn('concept', release.checksums)
         self.assertIn('vocabulary', release.checksums)
 
+
+
+class LoadLoincClassesArchiveTest(TestCase):
+    """Loading the LOINC class tables straight from a loinc.org archive.
+
+    The two CSVs are ~110MB unzipped and are kept zipped, so a deployment
+    holding the archive should not also need them unpacked beside it.
+    """
+
+    def _archive(self, tmpdir, names=('LoincClass.csv', 'Loinc.csv'), prefix=''):
+        import zipfile
+        path = Path(tmpdir) / 'loinc.zip'
+        with zipfile.ZipFile(path, 'w') as zf:
+            if 'LoincClass.csv' in names:
+                zf.writestr(prefix + 'LoincClass.csv', 'CLASS,DISPLAY_NAME\nCHEM,Chemistry\n')
+            if 'Loinc.csv' in names:
+                zf.writestr(
+                    prefix + 'Loinc.csv',
+                    'LOINC_NUM,CLASS,STATUS\n2160-0,CHEM,ACTIVE\n',
+                )
+        return path
+
+    def test_loads_both_tables_from_archive(self):
+        from omop_core.models import LoincClass, LoincCodeClass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            call_command('load_loinc_classes', archive=str(self._archive(tmp)))
+
+        self.assertEqual(LoincClass.objects.get(code='CHEM').display_name, 'Chemistry')
+        self.assertEqual(LoincCodeClass.objects.get(loinc_num='2160-0').loinc_class_id, 'CHEM')
+
+    def test_finds_files_nested_in_the_archive(self):
+        """Archives built from a directory carry a path prefix."""
+        from omop_core.models import LoincClass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            call_command(
+                'load_loinc_classes',
+                archive=str(self._archive(tmp, prefix='loinc-codes-aliases/')),
+            )
+
+        self.assertTrue(LoincClass.objects.filter(code='CHEM').exists())
+
+    def test_incomplete_archive_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = self._archive(tmp, names=('LoincClass.csv',))
+            with self.assertRaisesMessage(CommandError, 'Loinc.csv'):
+                call_command('load_loinc_classes', archive=str(archive))
+
+    def test_missing_archive_is_reported(self):
+        with self.assertRaisesMessage(CommandError, 'File not found'):
+            call_command('load_loinc_classes', archive='/nonexistent/loinc.zip')
+
+    def test_malformed_gcs_uri_is_reported(self):
+        with self.assertRaisesMessage(CommandError, 'bucket and an object'):
+            call_command('load_loinc_classes', archive='gs://bucket-only')
