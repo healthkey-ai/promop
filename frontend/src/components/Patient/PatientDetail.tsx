@@ -255,6 +255,18 @@ export default function PatientDetail({
   const editedNameRef = useRef("");
   const patientNameRef = useRef("");
 
+  // Prevent the browser from navigating away when files are dropped outside the
+  // WearableTab drop zone (browser default is to open the file as a new page).
+  useEffect(() => {
+    const prevent = (e: DragEvent) => { e.preventDefault(); };
+    document.addEventListener('dragover', prevent);
+    document.addEventListener('drop', prevent);
+    return () => {
+      document.removeEventListener('dragover', prevent);
+      document.removeEventListener('drop', prevent);
+    };
+  }, []);
+
   useEffect(() => { editedInfoRef.current = editedInfo; }, [editedInfo]);
   useEffect(() => { editedNameRef.current = editedName; }, [editedName]);
   useEffect(() => { patientNameRef.current = patientName; }, [patientName]);
