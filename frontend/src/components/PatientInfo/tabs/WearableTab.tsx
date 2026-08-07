@@ -380,7 +380,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
         </Section>
       )}
 
-      {noData && uploads.length === 0 && (
+      {noData && !uploadsLoading && uploads.length === 0 && (
         <p className="mb-4 text-sm text-gray-500 italic">
           No wearable data synced yet. Upload or drag &amp; drop wearable data files to contribute to your record.
         </p>

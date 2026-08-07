@@ -85,9 +85,11 @@ describe('WearableTab', () => {
     expect(screen.getByText(/or drag & drop files here/i)).toBeInTheDocument();
   });
 
-  it('shows no-data message when wearable_last_sync_at is absent', () => {
+  it('shows no-data message when wearable_last_sync_at is absent', async () => {
     renderTab({ formData: {} });
-    expect(screen.getByText(/no wearable data synced yet/i)).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText(/no wearable data synced yet/i)).toBeInTheDocument();
+    });
   });
 
   it('hides no-data message when wearable_last_sync_at is present', () => {

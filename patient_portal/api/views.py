@@ -3738,15 +3738,18 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             {'metric': s.metric_key, 'date': s.date.isoformat(), 'value': s.value}
             for s in samples
         ]
-        WearableUpload.objects.create(
-            person=person,
-            device_type=device_type,
-            filename=uploaded.name or 'unknown',
-            samples_created=created_count,
-            duplicates_skipped=duplicates_skipped,
-            sample_summary=sample_summary,
-            uploaded_by=request.user,
-        )
+        try:
+            WearableUpload.objects.create(
+                person=person,
+                device_type=device_type,
+                filename=uploaded.name or 'unknown',
+                samples_created=created_count,
+                duplicates_skipped=duplicates_skipped,
+                sample_summary=sample_summary,
+                uploaded_by=request.user,
+            )
+        except Exception:
+            logger.exception('wearable_upload_history_save_failed person_id=%s', person.person_id)
 
         logger.info(
             'wearable_upload_complete device=%s person_id=%s created=%d duplicates=%d',
@@ -3921,11 +3924,9 @@ def login_view(request):
         # Fallback: if username lookup failed, try matching by email
         if user is None:
             from patient_portal.models import Identity
-            try:
-                identity = Identity.objects.get(email__iexact=username)
+            identity = Identity.objects.filter(email__iexact=username).first()
+            if identity:
                 user = authenticate(request, username=identity.uid, password=password)
-            except Identity.DoesNotExist:
-                pass
 
         if user is not None:
             login(request, user)

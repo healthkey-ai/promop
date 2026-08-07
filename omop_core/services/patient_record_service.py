@@ -2470,39 +2470,52 @@ def _get_wearable_data(person: Person) -> dict:
     """Derive 30-day wearable summaries from OMOP Measurement/Observation rows."""
     data = {}
 
-    # Only consider the last 90 days of data so stale/synthetic rows from
-    # years ago don't anchor the 30-day window away from recent uploads.
+    # Prefer recent data (last 90 days) so stale/synthetic rows from years
+    # ago don't anchor the 30-day window. Fall back to all data if nothing
+    # exists within the recency window.
     recency_cutoff = (timezone.now() - timedelta(days=90)).date()
 
-    measurement_rows = list(
-        Measurement.objects.filter(
+    def _wearable_measurements(date_filter=None):
+        qs = Measurement.objects.filter(
             person=person,
             value_as_number__isnull=False,
-            measurement_date__gte=recency_cutoff,
         )
-        .filter(
-            models.Q(measurement_concept__concept_code__in=WEARABLE_LOINC.values())
-            | models.Q(measurement_source_value__in=WEARABLE_LOINC.values())
+        if date_filter is not None:
+            qs = qs.filter(measurement_date__gte=date_filter)
+        return list(
+            qs.filter(
+                models.Q(measurement_concept__concept_code__in=WEARABLE_LOINC.values())
+                | models.Q(measurement_source_value__in=WEARABLE_LOINC.values())
+            )
+            .values_list(
+                'measurement_concept__concept_code',
+                'measurement_source_value',
+                'measurement_date',
+                'value_as_number',
+            )
         )
-        .values_list(
-            'measurement_concept__concept_code',
-            'measurement_source_value',
-            'measurement_date',
-            'value_as_number',
-        )
-    )
-    observation_rows = list(
-        Observation.objects.filter(
+
+    def _wearable_observations(date_filter=None):
+        qs = Observation.objects.filter(
             person=person,
             value_as_number__isnull=False,
-            observation_date__gte=recency_cutoff,
         )
-        .filter(
-            models.Q(observation_concept__concept_code=WEARABLE_LOINC['sleep_duration'])
-            | models.Q(observation_source_value=WEARABLE_LOINC['sleep_duration'])
+        if date_filter is not None:
+            qs = qs.filter(observation_date__gte=date_filter)
+        return list(
+            qs.filter(
+                models.Q(observation_concept__concept_code=WEARABLE_LOINC['sleep_duration'])
+                | models.Q(observation_source_value=WEARABLE_LOINC['sleep_duration'])
+            )
+            .values_list('observation_date', 'value_as_number')
         )
-        .values_list('observation_date', 'value_as_number')
-    )
+
+    # Try recent data first; fall back to all data if nothing within 90 days
+    measurement_rows = _wearable_measurements(recency_cutoff)
+    observation_rows = _wearable_observations(recency_cutoff)
+    if not measurement_rows and not observation_rows:
+        measurement_rows = _wearable_measurements()
+        observation_rows = _wearable_observations()
 
     if not measurement_rows and not observation_rows:
         return data

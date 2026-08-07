@@ -70,7 +70,8 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
         if msg_type == 'monitoring':
             # Steps: newer devices (MARQ 2, Fenix 7+) use 'steps' directly;
             # older devices use 'cycles' as an incremental step counter.
-            steps = fields.get('steps') or fields.get('cycles')
+            _steps = fields.get('steps')
+            steps = _steps if _steps is not None else fields.get('cycles')
             if steps is not None:
                 try:
                     monitoring_steps[d].append(float(steps))
@@ -178,8 +179,11 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
     # All-day monitoring includes active HR which inflates the average. The
     # 10th percentile captures the lower range (rest/sleep) without being
     # as noisy as the absolute minimum.
+    # Skip p10 estimation for dates that already have a dedicated resting HR
+    # (from monitoring_hr_data messages on newer devices like MARQ 2, Fenix 7+).
+    dates_with_dedicated_rhr = {d for d, vs in daily['resting_hr'].items() if vs}
     for d, hr_values in monitoring_hr.items():
-        if hr_values:
+        if hr_values and d not in dates_with_dedicated_rhr:
             sorted_hr = sorted(hr_values)
             p10_idx = max(0, len(sorted_hr) // 10)
             resting_estimate = sorted_hr[p10_idx]
