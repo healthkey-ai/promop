@@ -86,9 +86,26 @@ export default function WearableTab({ formData, onRefresh }: Props) {
     }
   }, []);
 
+  // Load history on mount. The fetch is scoped to the effect and ignores a
+  // late response after unmount — calling fetchUploads() from the effect body
+  // reads to the linter as a synchronous setState, and left a real window
+  // where a slow request could resolve against a gone component.
   useEffect(() => {
-    fetchUploads();
-  }, [fetchUploads]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.get('/v1/patient-records/wearable-uploads/');
+        if (!cancelled) setUploads(res.data);
+      } catch {
+        // silently fail — upload history is non-critical
+      } finally {
+        if (!cancelled) setUploadsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   /** Upload a list of files with a given device type. Shared by file-picker and drag-and-drop. */
   const uploadFiles = useCallback(async (files: File[], deviceType: string) => {
