@@ -1,7 +1,6 @@
 import { AlertCircle } from "lucide-react";
 import type { User } from "@/hooks/useAuth";
 import PatientDetail from "@/components/Patient/PatientDetail";
-import PatientSurveys from "@/components/Patient/PatientSurveys";
 
 /**
  * Patient (PHR Account Holder) landing view — PHR-S FM PH.1 / PH.2.
@@ -10,11 +9,10 @@ import PatientSurveys from "@/components/Patient/PatientSurveys";
  * PatientDetail with a fixed person_id. Providers never reach this component;
  * routing in App.tsx sends them to the provider console instead.
  *
- * Layout (top → bottom):
- *   1. PatientDetail — "My Health Record" banner + clinical tabs
- *      (includes Allergies, Immunizations tabs and Download button;
- *       Settings and Messages accessible via Account dropdown)
- *   2. PatientSurveys
+ * Layout:
+ *   PatientDetail — "My Health Record" banner + clinical tabs
+ *   (includes Allergies, Immunizations, Surveys tabs and Download button;
+ *    Settings and Messages accessible via Account dropdown)
  */
 export default function PatientHome({
   user,
@@ -43,16 +41,11 @@ export default function PatientHome({
   }
 
   return (
-    <div>
-      <PatientDetail
-        personIdOverride={String(user.person_id)}
-        patientMode
-        onLogout={onLogout}
-        user={user}
-      />
-      <div className="mx-auto max-w-5xl px-6 py-4">
-        <PatientSurveys user={user} />
-      </div>
-    </div>
+    <PatientDetail
+      personIdOverride={String(user.person_id)}
+      patientMode
+      onLogout={onLogout}
+      user={user}
+    />
   );
 }

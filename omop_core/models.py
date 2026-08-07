@@ -1970,6 +1970,28 @@ class MyelomaType(VocabularyLookup):
 # ---------------------------------------------------------------------------
 
 
+class WearableUpload(models.Model):
+    """Tracks each wearable file upload so patients can review upload history."""
+    person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='wearable_uploads')
+    device_type = models.CharField(max_length=10)  # 'garmin' | 'apple'
+    filename = models.CharField(max_length=255)
+    samples_created = models.IntegerField(default=0)
+    duplicates_skipped = models.IntegerField(default=0)
+    sample_summary = models.JSONField(default=list, blank=True)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    uploaded_by = models.ForeignKey(
+        'patient_portal.Identity', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='wearable_uploads',
+    )
+
+    class Meta:
+        db_table = 'wearable_upload'
+        ordering = ['-uploaded_at']
+
+    def __str__(self):
+        return f'{self.device_type} upload {self.filename} ({self.samples_created} samples)'
+
+
 class PatientRecord(models.Model):
     """
     Comprehensive patient information model — OMOP CDM–aligned PatientRecord projection.

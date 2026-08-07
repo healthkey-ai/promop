@@ -68,11 +68,20 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
             continue
 
         if msg_type == 'monitoring':
-            # Incremental step cycles throughout the day
-            steps = fields.get('cycles')
+            # Steps: newer devices (MARQ 2, Fenix 7+) use 'steps' directly;
+            # older devices use 'cycles' as an incremental step counter.
+            steps = fields.get('steps') or fields.get('cycles')
             if steps is not None:
                 try:
                     monitoring_steps[d].append(float(steps))
+                except (TypeError, ValueError):
+                    pass
+
+            # Active time from monitoring messages (seconds)
+            active_time = fields.get('active_time')
+            if active_time is not None:
+                try:
+                    daily['active_minutes'][d].append(float(active_time) / 60.0)
                 except (TypeError, ValueError):
                     pass
 
@@ -81,6 +90,15 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
             if hr is not None:
                 try:
                     monitoring_hr[d].append(float(hr))
+                except (TypeError, ValueError):
+                    pass
+
+        elif msg_type == 'monitoring_hr_data':
+            # Dedicated resting HR message (MARQ 2, Fenix 7+, Venu, etc.)
+            rhr = fields.get('resting_heart_rate')
+            if rhr is not None:
+                try:
+                    daily['resting_hr'][d].append(float(rhr))
                 except (TypeError, ValueError):
                     pass
 

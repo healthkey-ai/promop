@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Field from '../Field';
 import Section from '../Section';
 import api from '@/api/axios';
@@ -20,6 +20,26 @@ const SOURCES = [
   { key: 'fitbit', label: 'Fitbit', accept: '', enabled: false, multiple: false },
 ] as const;
 
+const METRIC_LABELS: Record<string, string> = {
+  steps: 'Steps',
+  active_minutes: 'Active Minutes',
+  resting_hr: 'Resting Heart Rate',
+  hrv_sdnn: 'HRV SDNN',
+  spo2: 'SpO\u2082',
+  respiratory_rate: 'Respiratory Rate',
+  sleep_duration: 'Sleep Duration',
+};
+
+interface UploadRecord {
+  id: number;
+  device_type: string;
+  filename: string;
+  samples_created: number;
+  duplicates_skipped: number;
+  sample_summary: { metric: string; date: string; value: number }[];
+  uploaded_at: string;
+}
+
 function formatSyncDate(raw: unknown): string {
   if (!raw) return '';
   try {
@@ -37,6 +57,17 @@ function detectDeviceType(name: string): 'garmin' | 'apple' | null {
   return null;
 }
 
+function formatMetricValue(metric: string, value: number): string {
+  if (metric === 'steps') return value.toLocaleString();
+  if (metric === 'active_minutes') return `${value.toFixed(0)} min`;
+  if (metric === 'resting_hr') return `${value.toFixed(0)} bpm`;
+  if (metric === 'hrv_sdnn') return `${value.toFixed(1)} ms`;
+  if (metric === 'spo2') return `${value.toFixed(1)}%`;
+  if (metric === 'respiratory_rate') return `${value.toFixed(1)} breaths/min`;
+  if (metric === 'sleep_duration') return `${value.toFixed(1)} hrs`;
+  return String(value);
+}
+
 export default function WearableTab({ formData, onRefresh }: Props) {
   const noData = !formData?.wearable_last_sync_at;
   const [showPicker, setShowPicker] = useState(false);
@@ -47,6 +78,26 @@ export default function WearableTab({ formData, onRefresh }: Props) {
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const dragCounter = useRef(0);
+
+  // Upload history
+  const [uploads, setUploads] = useState<UploadRecord[]>([]);
+  const [uploadsLoading, setUploadsLoading] = useState(true);
+  const [expandedUpload, setExpandedUpload] = useState<number | null>(null);
+
+  const fetchUploads = useCallback(async () => {
+    try {
+      const res = await api.get('/v1/patient-records/wearable-uploads/');
+      setUploads(res.data);
+    } catch {
+      // silently fail — upload history is non-critical
+    } finally {
+      setUploadsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchUploads();
+  }, [fetchUploads]);
 
   /** Upload a list of files with a given device type. Shared by file-picker and drag-and-drop. */
   const uploadFiles = useCallback(async (files: File[], deviceType: string) => {
@@ -76,6 +127,8 @@ export default function WearableTab({ formData, onRefresh }: Props) {
         (totalDuplicates > 0 ? ` (${totalDuplicates} duplicate${totalDuplicates !== 1 ? 's' : ''} skipped)` : '')
       );
 
+      // Refresh upload history and patient record
+      fetchUploads();
       if (totalCreated > 0 && onRefresh) {
         onRefresh();
       }
@@ -86,7 +139,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
     } finally {
       setUploading(false);
     }
-  }, [onRefresh]);
+  }, [onRefresh, fetchUploads]);
 
   const handleSourceSelect = (sourceKey: string) => {
     const source = SOURCES.find(s => s.key === sourceKey);
@@ -144,7 +197,21 @@ export default function WearableTab({ formData, onRefresh }: Props) {
     if (uploading) return;
 
     const files = Array.from(e.dataTransfer.files);
-    if (files.length === 0) return;
+
+    if (files.length === 0) {
+      // MTP file managers (MacDroid, OpenMTP) provide URI/HTML references
+      // instead of File objects — the browser can't access MTP files directly.
+      const uriList = e.dataTransfer.getData('text/uri-list');
+      const html = e.dataTransfer.getData('text/html');
+
+      if (uriList || html) {
+        setUploadError(
+          'Files dragged from the Garmin MTP device cannot be read directly by the browser. ' +
+          'Please copy the files to a local folder first (e.g. Desktop), then drag them from there.'
+        );
+      }
+      return;
+    }
 
     // Detect device type from extensions — all files must be the same type
     const types = new Set(files.map(f => detectDeviceType(f.name)));
@@ -252,7 +319,68 @@ export default function WearableTab({ formData, onRefresh }: Props) {
         onChange={handleFileChange}
       />
 
-      {noData && (
+      {/* Upload history */}
+      {!uploadsLoading && uploads.length > 0 && (
+        <Section title="Upload History">
+          <div className="divide-y divide-gray-100">
+            {uploads.map(upload => (
+              <div key={upload.id}>
+                <button
+                  type="button"
+                  onClick={() => setExpandedUpload(expandedUpload === upload.id ? null : upload.id)}
+                  className="flex w-full items-center gap-3 px-2 py-2.5 text-left text-sm hover:bg-gray-50 rounded"
+                >
+                  <span className="inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-xs font-medium text-gray-600">
+                    {upload.device_type === 'garmin' ? 'Garmin' : 'Apple'}
+                  </span>
+                  <span className="flex-1 truncate text-gray-700">{upload.filename}</span>
+                  <span className="text-xs text-gray-500">
+                    {upload.samples_created} sample{upload.samples_created !== 1 ? 's' : ''}
+                  </span>
+                  <span className="text-xs text-gray-400">
+                    {new Date(upload.uploaded_at).toLocaleDateString()}
+                  </span>
+                  <svg
+                    className={`h-4 w-4 text-gray-400 transition-transform ${expandedUpload === upload.id ? 'rotate-180' : ''}`}
+                    fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {expandedUpload === upload.id && upload.sample_summary.length > 0 && (
+                  <div className="mb-2 ml-2 rounded border border-gray-100 bg-gray-50">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-gray-200 text-left text-xs text-gray-500">
+                          <th className="px-3 py-1.5 font-medium">Metric</th>
+                          <th className="px-3 py-1.5 font-medium">Date</th>
+                          <th className="px-3 py-1.5 font-medium text-right">Value</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {upload.sample_summary.map((sample, idx) => (
+                          <tr key={idx} className="border-b border-gray-100 last:border-0">
+                            <td className="px-3 py-1.5 text-gray-700">
+                              {METRIC_LABELS[sample.metric] || sample.metric}
+                            </td>
+                            <td className="px-3 py-1.5 text-gray-500">{sample.date}</td>
+                            <td className="px-3 py-1.5 text-right text-gray-700">
+                              {formatMetricValue(sample.metric, sample.value)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {noData && uploads.length === 0 && (
         <p className="mb-4 text-sm text-gray-500 italic">
           No wearable data synced yet. Upload or drag &amp; drop wearable data files to contribute to your record.
         </p>

@@ -7,8 +7,12 @@ import WearableTab from './WearableTab';
 // ---------------------------------------------------------------------------
 
 const mockPost = vi.fn();
+const mockGet = vi.fn();
 vi.mock('@/api/axios', () => ({
-  default: { post: (...args: unknown[]) => mockPost(...args) },
+  default: {
+    post: (...args: unknown[]) => mockPost(...args),
+    get: (...args: unknown[]) => mockGet(...args),
+  },
 }));
 
 // Stub Section and Field to simplify rendering
@@ -65,6 +69,9 @@ function createDragEnterEvent(): Partial<React.DragEvent> {
 
 beforeEach(() => {
   mockPost.mockReset();
+  mockGet.mockReset();
+  // Default: empty upload history
+  mockGet.mockResolvedValue({ data: [] });
 });
 
 describe('WearableTab', () => {
@@ -86,6 +93,75 @@ describe('WearableTab', () => {
   it('hides no-data message when wearable_last_sync_at is present', () => {
     renderTab({ formData: { wearable_last_sync_at: '2024-07-01T00:00:00Z' } });
     expect(screen.queryByText(/no wearable data synced yet/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('WearableTab — upload history', () => {
+  it('fetches upload history on mount', async () => {
+    renderTab();
+    await waitFor(() => {
+      expect(mockGet).toHaveBeenCalledWith('/v1/patient-records/wearable-uploads/');
+    });
+  });
+
+  it('renders upload history list when uploads exist', async () => {
+    mockGet.mockResolvedValue({
+      data: [
+        {
+          id: 1,
+          device_type: 'garmin',
+          filename: 'M87E3429.FIT',
+          samples_created: 3,
+          duplicates_skipped: 0,
+          sample_summary: [
+            { metric: 'steps', date: '2026-08-07', value: 11589 },
+            { metric: 'resting_hr', date: '2026-08-07', value: 48 },
+          ],
+          uploaded_at: '2026-08-07T13:50:00Z',
+        },
+      ],
+    });
+    renderTab();
+
+    await waitFor(() => {
+      expect(screen.getByText('M87E3429.FIT')).toBeInTheDocument();
+    });
+    expect(screen.getByText('3 samples')).toBeInTheDocument();
+    expect(screen.getByText('Garmin')).toBeInTheDocument();
+  });
+
+  it('expands upload to show sample details on click', async () => {
+    mockGet.mockResolvedValue({
+      data: [
+        {
+          id: 1,
+          device_type: 'garmin',
+          filename: 'test.FIT',
+          samples_created: 2,
+          duplicates_skipped: 0,
+          sample_summary: [
+            { metric: 'steps', date: '2026-08-07', value: 11589 },
+            { metric: 'resting_hr', date: '2026-08-07', value: 48 },
+          ],
+          uploaded_at: '2026-08-07T13:50:00Z',
+        },
+      ],
+    });
+    renderTab();
+
+    await waitFor(() => {
+      expect(screen.getByText('test.FIT')).toBeInTheDocument();
+    });
+
+    // Click to expand
+    fireEvent.click(screen.getByText('test.FIT'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Steps')).toBeInTheDocument();
+      expect(screen.getByText('Resting Heart Rate')).toBeInTheDocument();
+      expect(screen.getByText('11,589')).toBeInTheDocument();
+      expect(screen.getByText('48 bpm')).toBeInTheDocument();
+    });
   });
 });
 
@@ -186,6 +262,26 @@ describe('WearableTab — drag and drop', () => {
     await waitFor(() => {
       expect(screen.getByText(/uploaded 5 samples/i)).toBeInTheDocument();
       expect(screen.getByText(/1 duplicate.*skipped/i)).toBeInTheDocument();
+    });
+  });
+
+  it('shows MTP error when files array is empty but URI data present', async () => {
+    renderTab();
+    const container = screen.getByText(/or drag & drop files here/i).closest('div[class*="relative"]')!;
+
+    const mtpDropEvent: Partial<React.DragEvent> = {
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+      dataTransfer: {
+        files: [] as unknown as FileList,
+        types: ['text/uri-list', 'text/html'],
+        getData: (type: string) => type === 'text/uri-list' ? 'file:///some/path' : '',
+      } as unknown as DataTransfer,
+    };
+    fireEvent.drop(container, mtpDropEvent);
+
+    await waitFor(() => {
+      expect(screen.getByText(/cannot be read directly by the browser/i)).toBeInTheDocument();
     });
   });
 });
