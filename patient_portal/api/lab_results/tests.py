@@ -514,6 +514,38 @@ class VisitDeleteViewTest(TestCase):
         resp = self.client.delete('/api/lab-results/visits/9999/')
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_patient_can_delete_own_visit(self):
+        """hk-labs forwards the patient's own token when they delete a report.
+
+        Non-staff patients were denied DELETE, so the report vanished from
+        hk-labs while its measurements stayed in the record forever.
+        """
+        self.user.is_staff = False
+        self.user.save(update_fields=['is_staff'])
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+
+        resp = client.delete('/api/lab-results/visits/500/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['deleted_measurements'], 3)
+        self.assertFalse(VisitOccurrence.objects.filter(visit_occurrence_id=500).exists())
+
+    def test_patient_cannot_delete_another_persons_visit(self):
+        """Widening the permission must not widen who a patient can reach."""
+        other_person = Person.objects.create(person_id=5002)
+        PatientRecord.objects.create(person=other_person)
+        stranger = Identity.objects.create_user(email='stranger@test.com', password='test')
+        PatientUser.objects.create(identity=stranger, person=other_person)
+        client = APIClient()
+        client.force_authenticate(user=stranger)
+
+        resp = client.delete('/api/lab-results/visits/500/')
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(VisitOccurrence.objects.filter(visit_occurrence_id=500).exists())
+        self.assertEqual(Measurement.objects.filter(visit_occurrence_id=500).count(), 3)
+
 
 class SyncOnBehalfOfTest(TestCase):
     """Tests for actor_iss/actor_sub on-behalf-of sync flow.

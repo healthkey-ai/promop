@@ -12,7 +12,11 @@ from omop_core.models import (
     Measurement, MeasurementOwnership, PatientRecord,
     ProvenanceRecord, VisitOccurrence,
 )
-from patient_portal.api.permissions import ScopedTokenPermission, get_request_org
+from patient_portal.api.permissions import (
+    LabSyncPermission,
+    ScopedTokenPermission,
+    get_request_org,
+)
 
 from .serializers import LabResultCardSerializer, LabValueSerializer, MeasurementUpdateSerializer
 
@@ -679,8 +683,15 @@ class VisitDeleteView(APIView):
 
     Deletes a VisitOccurrence and all its associated Measurements.
     Used by hk-labs to cascade-delete when an upload is removed.
+
+    LabSyncPermission, not the base class: hk-labs calls this with the
+    patient's own token when they delete a report, and the base class
+    denies DELETE to non-staff patients. Removing results that came from
+    a report you are deleting is the same self-service write as committing
+    them. The per-patient ownership check below is what keeps a patient
+    from reaching anyone else's visit.
     """
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [LabSyncPermission]
 
     def delete(self, request, visit_id):
         from omop_core.authorization import can_access_patient
