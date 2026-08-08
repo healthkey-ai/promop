@@ -133,8 +133,12 @@ _OMOP_DERIVED_FIELDS = [
     'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
     'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
     'resting_heart_rate_avg_30d', 'hrv_sdnn_avg_30d',
-    'oxygen_saturation_min_30d', 'respiratory_rate_avg_30d',
-    'sleep_duration_hours_avg_30d',
+    'oxygen_saturation_min_30d', 'oxygen_saturation_avg_30d', 'respiratory_rate_avg_30d',
+    'sleep_duration_hours_avg_30d', 'vo2_max_avg_30d',
+    'distance_km_per_day_30d', 'walking_speed_avg_30d', 'walking_step_length_avg_30d',
+    'walking_double_support_pct_avg_30d', 'walking_hr_avg_30d',
+    'flights_climbed_per_day_30d', 'active_energy_per_day_30d', 'basal_energy_per_day_30d',
+    'body_mass_avg_30d',
 ]
 
 
@@ -2547,6 +2551,16 @@ def _get_wearable_data(person: Person) -> dict:
     hrv_daily = _metric_daily('hrv_sdnn')
     spo2_daily = _metric_daily('spo2')
     rr_daily = _metric_daily('respiratory_rate')
+    vo2_daily = _metric_daily('vo2_max')
+    distance_daily = _metric_daily('distance')
+    walk_speed_daily = _metric_daily('walking_speed')
+    walk_step_len_daily = _metric_daily('walking_step_length')
+    walk_dbl_sup_daily = _metric_daily('walking_double_support_pct')
+    walk_hr_daily = _metric_daily('walking_hr_avg')
+    flights_daily = _metric_daily('flights_climbed')
+    active_energy_daily = _metric_daily('active_energy')
+    basal_energy_daily = _metric_daily('basal_energy')
+    body_mass_daily = _metric_daily('body_mass')
 
     sleep_daily: dict[date, list[float]] = {}
     lo_s, hi_s = WEARABLE_ARTIFACT_BOUNDS['sleep_duration']
@@ -2562,7 +2576,12 @@ def _get_wearable_data(person: Person) -> dict:
         steps_daily.keys() | active_daily.keys()
         | rhr_daily.keys() | hrv_daily.keys()
         | spo2_daily.keys() | rr_daily.keys()
-        | sleep_daily.keys()
+        | sleep_daily.keys() | vo2_daily.keys()
+        | distance_daily.keys() | walk_speed_daily.keys()
+        | walk_step_len_daily.keys() | walk_dbl_sup_daily.keys()
+        | walk_hr_daily.keys() | flights_daily.keys()
+        | active_energy_daily.keys() | basal_energy_daily.keys()
+        | body_mass_daily.keys()
     )
     if not all_valid_days:
         return data
@@ -2599,6 +2618,16 @@ def _get_wearable_data(person: Person) -> dict:
     spo2_daily = _within_window(spo2_daily)
     rr_daily = _within_window(rr_daily)
     sleep_daily = _within_window(sleep_daily)
+    vo2_daily = _within_window(vo2_daily)
+    distance_daily = _within_window(distance_daily)
+    walk_speed_daily = _within_window(walk_speed_daily)
+    walk_step_len_daily = _within_window(walk_step_len_daily)
+    walk_dbl_sup_daily = _within_window(walk_dbl_sup_daily)
+    walk_hr_daily = _within_window(walk_hr_daily)
+    flights_daily = _within_window(flights_daily)
+    active_energy_daily = _within_window(active_energy_daily)
+    basal_energy_daily = _within_window(basal_energy_daily)
+    body_mass_daily = _within_window(body_mass_daily)
 
     steps_totals = {d: sum(vs) for d, vs in steps_daily.items()}
     active_totals = {d: sum(vs) for d, vs in active_daily.items()}
@@ -2609,7 +2638,12 @@ def _get_wearable_data(person: Person) -> dict:
         steps_totals.keys() | active_totals.keys()
         | rhr_daily.keys() | hrv_daily.keys()
         | spo2_daily.keys() | rr_daily.keys()
-        | sleep_nightly.keys()
+        | sleep_nightly.keys() | vo2_daily.keys()
+        | distance_daily.keys() | walk_speed_daily.keys()
+        | walk_step_len_daily.keys() | walk_dbl_sup_daily.keys()
+        | walk_hr_daily.keys() | flights_daily.keys()
+        | active_energy_daily.keys() | basal_energy_daily.keys()
+        | body_mass_daily.keys()
     )
     coverage = round(len(all_valid_days) / 30.0, 2)
     data['wearable_coverage_ratio_30d'] = coverage
@@ -2660,6 +2694,11 @@ def _get_wearable_data(person: Person) -> dict:
     if all_spo2:
         data['oxygen_saturation_min_30d'] = round(min(all_spo2), 2)
 
+    # ---- SpO2 average (baseline oxygen saturation tracking) ----------
+    spo2_means = {d: statistics.mean(vs) for d, vs in spo2_daily.items()}
+    if spo2_means:
+        data['oxygen_saturation_avg_30d'] = round(statistics.mean(spo2_means.values()), 2)
+
     # ---- Respiratory rate -------------------------------------------
     rr_means = {d: statistics.mean(vs) for d, vs in rr_daily.items()}
     if rr_means:
@@ -2670,6 +2709,56 @@ def _get_wearable_data(person: Person) -> dict:
         data['sleep_duration_hours_avg_30d'] = round(
             statistics.mean(sleep_nightly.values()), 1
         )
+
+    # ---- VO2 Max -----------------------------------------------------
+    vo2_means = {d: statistics.mean(vs) for d, vs in vo2_daily.items()}
+    if vo2_means:
+        data['vo2_max_avg_30d'] = round(statistics.mean(vo2_means.values()), 1)
+
+    # ---- Distance (sum-per-day metrics) --------------------------------
+    distance_totals = {d: sum(vs) for d, vs in distance_daily.items()}
+    if distance_totals:
+        data['distance_km_per_day_30d'] = round(statistics.mean(distance_totals.values()), 2)
+
+    # ---- Walking speed --------------------------------------------------
+    ws_means = {d: statistics.mean(vs) for d, vs in walk_speed_daily.items()}
+    if ws_means:
+        data['walking_speed_avg_30d'] = round(statistics.mean(ws_means.values()), 2)
+
+    # ---- Walking step length --------------------------------------------
+    wsl_means = {d: statistics.mean(vs) for d, vs in walk_step_len_daily.items()}
+    if wsl_means:
+        data['walking_step_length_avg_30d'] = round(statistics.mean(wsl_means.values()), 1)
+
+    # ---- Walking double support % ---------------------------------------
+    wds_means = {d: statistics.mean(vs) for d, vs in walk_dbl_sup_daily.items()}
+    if wds_means:
+        data['walking_double_support_pct_avg_30d'] = round(statistics.mean(wds_means.values()), 2)
+
+    # ---- Walking heart rate ---------------------------------------------
+    whr_means = {d: statistics.mean(vs) for d, vs in walk_hr_daily.items()}
+    if whr_means:
+        data['walking_hr_avg_30d'] = int(round(statistics.mean(whr_means.values())))
+
+    # ---- Flights climbed (sum-per-day) ----------------------------------
+    flights_totals = {d: sum(vs) for d, vs in flights_daily.items()}
+    if flights_totals:
+        data['flights_climbed_per_day_30d'] = round(statistics.mean(flights_totals.values()), 1)
+
+    # ---- Active energy (sum-per-day) ------------------------------------
+    ae_totals = {d: sum(vs) for d, vs in active_energy_daily.items()}
+    if ae_totals:
+        data['active_energy_per_day_30d'] = round(statistics.mean(ae_totals.values()), 1)
+
+    # ---- Basal energy (sum-per-day) -------------------------------------
+    be_totals = {d: sum(vs) for d, vs in basal_energy_daily.items()}
+    if be_totals:
+        data['basal_energy_per_day_30d'] = round(statistics.mean(be_totals.values()), 1)
+
+    # ---- Body mass ------------------------------------------------------
+    bm_means = {d: statistics.mean(vs) for d, vs in body_mass_daily.items()}
+    if bm_means:
+        data['body_mass_avg_30d'] = round(statistics.mean(bm_means.values()), 1)
 
     return data
 

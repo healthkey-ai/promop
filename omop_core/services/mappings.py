@@ -96,6 +96,16 @@ WEARABLE_LOINC = {
     'spo2':               '59408-5',   # Oxygen saturation by pulse oximetry
     'respiratory_rate':   '9279-1',    # Respiratory rate
     'sleep_duration':     '93832-4',   # Sleep duration
+    'vo2_max':            '94122-9',   # VO2 max (mL/kg/min)
+    'distance':           '41953-1',   # Walking distance
+    'walking_speed':      '41909-3',   # Gait speed
+    'walking_step_length': '96341-8',  # Step length
+    'walking_double_support_pct': '96343-4',  # Double support time percent
+    'walking_hr_avg':     '89270-3',   # Heart rate during walking
+    'flights_climbed':    '96340-0',   # Floors ascended
+    'active_energy':      '55424-6',   # Calories burned in exercise
+    'basal_energy':       '41982-0',   # Basal energy expenditure
+    'body_mass':          '29463-7',   # Body weight
 }
 
 # Artifact-filter bounds: readings outside [lo, hi] are discarded before aggregation
@@ -107,6 +117,16 @@ WEARABLE_ARTIFACT_BOUNDS = {
     'steps':            (0.0,  100_000.0),
     'active_minutes':   (0.0,  1440.0),
     'sleep_duration':   (0.0,  24.0),
+    'vo2_max':          (10.0, 100.0),
+    'distance':         (0.0,  100.0),     # km/day
+    'walking_speed':    (0.5,  15.0),      # km/hr
+    'walking_step_length': (20.0, 200.0),  # cm
+    'walking_double_support_pct': (5.0, 80.0),  # %
+    'walking_hr_avg':   (30.0, 220.0),     # bpm
+    'flights_climbed':  (0.0,  200.0),     # flights/day
+    'active_energy':    (0.0,  10000.0),   # kcal/day
+    'basal_energy':     (500.0, 5000.0),   # kcal/day
+    'body_mass':        (20.0, 300.0),     # kg
 }
 
 # Minimum valid days required to emit a metric (else field stays None)

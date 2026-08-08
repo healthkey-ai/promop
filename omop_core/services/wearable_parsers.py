@@ -29,9 +29,13 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
 
     Uses the ``fitparse`` library to iterate over FIT messages.  Extracts:
     - steps (from ``monitoring`` or ``session`` messages)
-    - resting heart rate, HRV, SpO2, respiratory rate (from ``session``/``record``)
-    - active minutes (from ``session`` duration)
-    - sleep duration (from ``sleep_level`` messages)
+    - resting heart rate (from ``monitoring_hr_data`` or p10 of monitoring HR)
+    - HRV SDNN (from ``hrv_status_summary``, ``hrv_value``, or legacy ``hrv``)
+    - SpO2 (from ``spo2_data`` or ``session``)
+    - respiratory rate (from ``respiration_rate`` messages or ``session``)
+    - active minutes (from ``monitoring`` active_time or ``session`` duration)
+    - sleep duration (from ``sleep_level`` timestamp spans)
+    - VO2 Max (from ``session`` enhanced_max_oxygen_consumption)
     """
     try:
         from fitparse import FitFile
@@ -41,7 +45,7 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
     fitfile = FitFile(io.BytesIO(file_bytes))
     fitfile.parse()
 
-    # Accumulators: metric_key → date → list of values (aggregated per day)
+    # Accumulators: metric_key -> date -> list of values (aggregated per day)
     daily: dict[str, dict[date, list[float]]] = defaultdict(lambda: defaultdict(list))
 
     # Separate step sources to avoid double-counting:
@@ -54,6 +58,9 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
     # resting HR. We collect monitoring HR separately and use the 10th percentile
     # as a resting HR proxy (closest to true resting without dedicated resting HR data).
     monitoring_hr: dict[date, list[float]] = defaultdict(list)
+
+    # Sleep level entries: collect (timestamp, level) to compute duration in post-processing
+    sleep_entries: list[tuple[datetime, int]] = []
 
     for record in fitfile.get_messages():
         msg_type = record.name
@@ -86,11 +93,40 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
                 except (TypeError, ValueError):
                     pass
 
-            # All-day HR samples — NOT resting HR; collected separately
+            # Distance from monitoring (meters → km)
+            dist = fields.get('distance')
+            if dist is not None:
+                try:
+                    daily['distance'][d].append(float(dist) / 1000.0)
+                except (TypeError, ValueError):
+                    pass
+
+            # Active calories from monitoring
+            acal = fields.get('active_calories')
+            if acal is not None:
+                try:
+                    val = float(acal)
+                    if val > 0:
+                        daily['active_energy'][d].append(val)
+                except (TypeError, ValueError):
+                    pass
+
+            # All-day HR samples -- NOT resting HR; collected separately
             hr = fields.get('heart_rate')
             if hr is not None:
                 try:
                     monitoring_hr[d].append(float(hr))
+                except (TypeError, ValueError):
+                    pass
+
+        elif msg_type == 'monitoring_info':
+            # Resting metabolic rate (kcal/day) — basal energy
+            rmr = fields.get('resting_metabolic_rate')
+            if rmr is not None:
+                try:
+                    val = float(rmr)
+                    if val > 0:
+                        daily['basal_energy'][d].append(val)
                 except (TypeError, ValueError):
                     pass
 
@@ -120,51 +156,147 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
                 except (TypeError, ValueError):
                     pass
 
-            # SpO2
+            # Session distance (meters → km)
+            total_dist = fields.get('total_distance')
+            if total_dist is not None:
+                try:
+                    daily['distance'][d].append(float(total_dist) / 1000.0)
+                except (TypeError, ValueError):
+                    pass
+
+            # Session calories (active energy from exercise)
+            total_cal = fields.get('total_calories')
+            if total_cal is not None:
+                try:
+                    val = float(total_cal)
+                    if val > 0:
+                        daily['active_energy'][d].append(val)
+                except (TypeError, ValueError):
+                    pass
+
+            # SpO2 from activity sessions (fallback; spo2_data is preferred)
             spo2 = fields.get('saturated_hemoglobin_percent') or fields.get('avg_saturated_hemoglobin_percent')
             if spo2 is not None:
                 try:
                     val = float(spo2)
                     if val <= 1.0:
                         val *= 100.0
-                    daily['spo2'][d].append(val)
+                    if 50 < val <= 100:
+                        daily['spo2'][d].append(val)
                 except (TypeError, ValueError):
                     pass
 
-            # Respiratory rate
+            # Respiratory rate from activity sessions (fallback; respiration_rate msg preferred)
             rr = fields.get('avg_respiration_rate') or fields.get('respiration_rate')
             if rr is not None:
                 try:
-                    daily['respiratory_rate'][d].append(float(rr))
+                    val = float(rr)
+                    if val > 0:
+                        daily['respiratory_rate'][d].append(val)
+                except (TypeError, ValueError):
+                    pass
+
+            # VO2 Max from activity sessions
+            vo2 = fields.get('enhanced_max_oxygen_consumption') or fields.get('vo2_max')
+            if vo2 is not None:
+                try:
+                    val = float(vo2)
+                    if 10 <= val <= 100:
+                        daily['vo2_max'][d].append(val)
+                except (TypeError, ValueError):
+                    pass
+
+        elif msg_type == 'respiration_rate':
+            # Top-level respiration rate messages (monitoring files)
+            rr = fields.get('respiration_rate')
+            if rr is not None:
+                try:
+                    val = float(rr)
+                    if val > 0:  # -1 or -2 means no valid reading
+                        daily['respiratory_rate'][d].append(val)
+                except (TypeError, ValueError):
+                    pass
+
+        elif msg_type == 'spo2_data':
+            # Pulse ox readings (monitoring files, when pulse ox is enabled)
+            spo2 = fields.get('reading_spo2')
+            if spo2 is not None:
+                try:
+                    val = float(spo2)
+                    if 50 < val <= 100:  # filter invalid readings (0, 255, etc.)
+                        daily['spo2'][d].append(val)
+                except (TypeError, ValueError):
+                    pass
+
+        elif msg_type == 'hrv_status_summary':
+            # Daily/weekly HRV summary (newer devices)
+            sdnn = fields.get('weekly_average') or fields.get('last_night_average')
+            if sdnn is not None:
+                try:
+                    val = float(sdnn)
+                    if val > 0:
+                        daily['hrv_sdnn'][d].append(val)
+                except (TypeError, ValueError):
+                    pass
+
+        elif msg_type == 'hrv_value':
+            # Individual 5-minute HRV readings (ms)
+            hrv_val = fields.get('value')
+            if hrv_val is not None:
+                try:
+                    val = float(hrv_val)
+                    if val > 0:
+                        daily['hrv_sdnn'][d].append(val)
                 except (TypeError, ValueError):
                     pass
 
         elif msg_type in ('sleep_level', 'sleep_data'):
-            # Sleep duration: compute from timestamp span if we see start/end
+            # Sleep level entries: collect timestamp + level for duration computation.
+            # level 0 = awake/unmeasured, 1-3 = light/deep/REM sleep stages.
+            # Also check total_timer_time as fallback (older format).
             duration_sec = fields.get('total_timer_time')
             if duration_sec is not None:
                 try:
                     daily['sleep_duration'][d].append(float(duration_sec) / 3600.0)
                 except (TypeError, ValueError):
                     pass
+            else:
+                # Newer format: individual sleep_level entries with timestamps
+                level = fields.get('sleep_level')
+                if level is not None:
+                    try:
+                        sleep_entries.append((ts, int(level)))
+                    except (TypeError, ValueError):
+                        pass
 
         elif msg_type == 'stress':
-            # HRV SDNN sometimes in stress messages
-            hrv = fields.get('heart_rate_variability')
-            if hrv is not None:
-                try:
-                    daily['hrv_sdnn'][d].append(float(hrv))
-                except (TypeError, ValueError):
-                    pass
+            # Stress messages contain stress_level_value, NOT usable HRV.
+            # Skip -- HRV comes from hrv_status_summary/hrv_value instead.
+            pass
 
         elif msg_type == 'hrv':
-            # Dedicated HRV message type
+            # Legacy HRV message type (fallback for older devices)
             sdnn = fields.get('weekly_average') or fields.get('sdnn')
             if sdnn is not None:
                 try:
-                    daily['hrv_sdnn'][d].append(float(sdnn))
+                    val = float(sdnn)
+                    if val > 0:
+                        daily['hrv_sdnn'][d].append(val)
                 except (TypeError, ValueError):
                     pass
+
+    # Compute sleep duration from sleep_level timestamp spans.
+    # Consecutive entries with level > 0 (not awake) contribute to sleep duration.
+    if sleep_entries:
+        sleep_entries.sort(key=lambda x: x[0])
+        for i in range(len(sleep_entries) - 1):
+            ts_curr, level_curr = sleep_entries[i]
+            ts_next = sleep_entries[i + 1][0]
+            if level_curr > 0:  # 1=light, 2=deep, 3=REM
+                span_hours = (ts_next - ts_curr).total_seconds() / 3600.0
+                if 0 < span_hours < 4:  # cap individual span at 4h to filter gaps
+                    d = ts_curr.date()
+                    daily['sleep_duration'][d].append(span_hours)
 
     # Merge step sources: prefer monitoring (full-day) over session (activity subset).
     # monitoring.cycles is a cumulative counter, so take the max (= total) not the sum.
@@ -193,11 +325,8 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
     samples: list[WearableSample] = []
     for metric_key, date_map in daily.items():
         for d, values in date_map.items():
-            if metric_key == 'steps':
-                # Sum steps across the day
-                agg = sum(values)
-            elif metric_key in ('active_minutes', 'sleep_duration'):
-                # Sum durations
+            if metric_key in ('steps', 'active_minutes', 'sleep_duration',
+                              'distance', 'flights_climbed', 'active_energy', 'basal_energy'):
                 agg = sum(values)
             else:
                 # Average for rates/percentages
@@ -210,7 +339,7 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
 
 # ── Apple Health ────────────────────────────────────────────────────────────
 
-# HKQuantityType → our metric key
+# HKQuantityType -> our metric key
 _APPLE_TYPE_MAP = {
     'HKQuantityTypeIdentifierStepCount': 'steps',
     'HKQuantityTypeIdentifierAppleExerciseTime': 'active_minutes',
@@ -218,9 +347,21 @@ _APPLE_TYPE_MAP = {
     'HKQuantityTypeIdentifierHeartRateVariabilitySDNN': 'hrv_sdnn',
     'HKQuantityTypeIdentifierOxygenSaturation': 'spo2',
     'HKQuantityTypeIdentifierRespiratoryRate': 'respiratory_rate',
+    'HKQuantityTypeIdentifierVO2Max': 'vo2_max',
+    'HKQuantityTypeIdentifierDistanceWalkingRunning': 'distance',
+    'HKQuantityTypeIdentifierWalkingSpeed': 'walking_speed',
+    'HKQuantityTypeIdentifierWalkingStepLength': 'walking_step_length',
+    'HKQuantityTypeIdentifierWalkingDoubleSupportPercentage': 'walking_double_support_pct',
+    'HKQuantityTypeIdentifierWalkingHeartRateAverage': 'walking_hr_avg',
+    'HKQuantityTypeIdentifierFlightsClimbed': 'flights_climbed',
+    'HKQuantityTypeIdentifierActiveEnergyBurned': 'active_energy',
+    'HKQuantityTypeIdentifierBasalEnergyBurned': 'basal_energy',
+    'HKQuantityTypeIdentifierBodyMass': 'body_mass',
 }
 
 _APPLE_SLEEP_TYPE = 'HKCategoryTypeIdentifierSleepAnalysis'
+# General HeartRate can be used to derive resting HR when RestingHeartRate isn't available
+_APPLE_GENERAL_HR_TYPE = 'HKQuantityTypeIdentifierHeartRate'
 
 
 _MAX_XML_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB zip bomb limit
@@ -255,6 +396,9 @@ def parse_apple_health_export(zip_bytes: bytes) -> list[WearableSample]:
         raise ValueError("ZIP does not contain export.xml. Please upload the Apple Health export.zip.")
 
     daily: dict[str, dict[date, list[float]]] = defaultdict(lambda: defaultdict(list))
+    # Collect general HeartRate readings separately; used to derive resting HR
+    # when the device doesn't export RestingHeartRate directly.
+    general_hr: dict[date, list[float]] = defaultdict(list)
 
     with zf.open(xml_name) as xml_file:
         context = ET.iterparse(xml_file, events=('start', 'end'))
@@ -271,7 +415,24 @@ def parse_apple_health_export(zip_bytes: bytes) -> list[WearableSample]:
             record_type = elem.get('type', '')
             metric_key = _APPLE_TYPE_MAP.get(record_type)
 
-            if metric_key is not None:
+            if record_type == _APPLE_GENERAL_HR_TYPE:
+                # Collect general HR for resting-HR derivation
+                value_str = elem.get('value')
+                start_str = elem.get('startDate', '')
+                if value_str and start_str:
+                    try:
+                        val = float(value_str)
+                        d = _parse_apple_date(start_str)
+                        if d is not None and 20 < val < 250:
+                            general_hr[d].append(val)
+                    except (TypeError, ValueError):
+                        pass
+                elem.clear()
+                if root is not None:
+                    root.clear()
+                continue
+
+            elif metric_key is not None:
                 # Quantity record
                 value_str = elem.get('value')
                 start_str = elem.get('startDate', '')
@@ -309,11 +470,24 @@ def parse_apple_health_export(zip_bytes: bytes) -> list[WearableSample]:
             if root is not None:
                 root.clear()
 
+    # Derive resting HR from general HeartRate if no explicit RestingHeartRate data
+    if general_hr and not daily.get('resting_hr'):
+        for d, hr_values in general_hr.items():
+            if len(hr_values) >= 5:
+                # 10th percentile of daily readings approximates resting HR
+                sorted_hr = sorted(hr_values)
+                idx = max(0, int(len(sorted_hr) * 0.10))
+                resting_estimate = sorted_hr[idx]
+                daily['resting_hr'][d].append(resting_estimate)
+        if daily.get('resting_hr'):
+            logger.info('apple_health_derived_resting_hr days=%d from general HeartRate', len(daily['resting_hr']))
+
     # Collapse daily lists to single values
     samples: list[WearableSample] = []
     for metric_key, date_map in daily.items():
         for d, values in date_map.items():
-            if metric_key in ('steps', 'active_minutes', 'sleep_duration'):
+            if metric_key in ('steps', 'active_minutes', 'sleep_duration',
+                              'distance', 'flights_climbed', 'active_energy', 'basal_energy'):
                 agg = sum(values)
             else:
                 agg = sum(values) / len(values)
@@ -335,7 +509,7 @@ def _parse_apple_date(s: str) -> date | None:
 def _parse_apple_datetime(s: str) -> datetime | None:
     """Parse Apple Health datetime string to datetime."""
     try:
-        # "2024-01-15 08:30:00 -0700" — strip timezone for simplicity
+        # "2024-01-15 08:30:00 -0700" -- strip timezone for simplicity
         return datetime.strptime(s[:19], '%Y-%m-%d %H:%M:%S')
     except (ValueError, IndexError):
         return None
