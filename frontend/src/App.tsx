@@ -65,7 +65,7 @@ function AppRoutes() {
     }
   }, [location.pathname, refresh]);
 
-  const publicPaths = ['/accept-invite', '/accept-patient-invite', '/reset-password', '/login', '/auth/callback'];
+  const publicPaths = ['/accept-invite', '/accept-patient-invite', '/reset-password', '/forgot-password', '/login', '/auth/callback'];
   const isPublicPath = (path: string) =>
     publicPaths.includes(path) || /^\/org\/[^/]+\/(login|signup|forgot-password|accept-invite)$/.test(path);
   if (authLoading && !isPublicPath(location.pathname)) {
@@ -81,7 +81,7 @@ function AppRoutes() {
   // backend independently refuses every other /api/ request meanwhile, so this
   // is a UX affordance over a server-enforced rule. Public auth pages (reset
   // link, invite acceptance) are exempt so those flows can still complete.
-  const forceChangeExemptPaths = ['/reset-password', '/accept-invite', '/accept-patient-invite'];
+  const forceChangeExemptPaths = ['/reset-password', '/forgot-password', '/accept-invite', '/accept-patient-invite'];
   const isForceChangeExempt = (path: string) =>
     forceChangeExemptPaths.includes(path) || /^\/org\/[^/]+\/(login|signup|forgot-password|accept-invite)$/.test(path);
   if (
@@ -111,6 +111,7 @@ function AppRoutes() {
       <Route path="/org/:slug/accept-invite" element={<AcceptInvite />} />
       <Route path="/accept-patient-invite" element={<AcceptPatientInvite />} />
       <Route path="/reset-password" element={<ResetPassword />} />
+      <Route path="/forgot-password" element={<ForgotPassword />} />
 
       <Route path="/org/:slug/login" element={<OrgLogin />} />
       <Route path="/org/:slug/signup" element={<OrgSignup />} />
