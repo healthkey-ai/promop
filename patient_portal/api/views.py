@@ -3922,8 +3922,8 @@ def login_view(request):
         user = authenticate(request, username=username, password=password)
 
         # Fallback: if username lookup failed, try matching by email
+        from patient_portal.models import Identity
         if user is None:
-            from patient_portal.models import Identity
             identity = Identity.objects.filter(email__iexact=username).first()
             if identity:
                 user = authenticate(request, username=identity.uid, password=password)
@@ -3935,10 +3935,20 @@ def login_view(request):
                 'message': 'Login successful',
                 'user': user_serializer.data
             }, status=status.HTTP_200_OK)
-        else:
+
+        # Check if the account is locked so we can show a specific message
+        identity = (
+            Identity.objects.filter(uid=username).first()
+            or Identity.objects.filter(email__iexact=username).first()
+        )
+        if identity and identity.is_locked:
             return Response({
-                'error': 'Invalid credentials'
-            }, status=status.HTTP_401_UNAUTHORIZED)
+                'error': 'Account temporarily locked due to too many failed attempts. Please try again later.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        return Response({
+            'error': 'Invalid credentials'
+        }, status=status.HTTP_401_UNAUTHORIZED)
     except Exception as e:
         import traceback
         logger.error('Login error: %s\n%s', str(e), traceback.format_exc())
