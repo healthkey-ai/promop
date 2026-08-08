@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import api from "@/api/axios";
 import { getActiveBranding } from "@/config/branding";
 
@@ -36,10 +37,10 @@ export function Login() {
       <div className="w-full max-w-md space-y-8 rounded-lg bg-background p-8 shadow-lg">
         <div>
           <h2 className="mt-6 text-center text-3xl font-extrabold text-foreground">
-            {branding.appName || "PROMOP"}
+            {branding.appName || "PRomop"}
           </h2>
           <p className="mt-2 text-center text-sm text-muted-foreground">
-            Sign in to your account
+            {branding.tagline || "An Open Source Personal Health Record from HealthKey.ai"}
           </p>
         </div>
 
@@ -84,6 +85,15 @@ export function Login() {
                 placeholder="Enter your password"
               />
             </div>
+          </div>
+
+          <div className="flex items-center justify-end">
+            <Link
+              to="/forgot-password"
+              className="text-sm font-medium text-primary hover:text-primary/80"
+            >
+              Forgot password?
+            </Link>
           </div>
 
           <button

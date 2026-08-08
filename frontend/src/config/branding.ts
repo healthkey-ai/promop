@@ -1,5 +1,6 @@
 export interface PortalBranding {
   appName: string;
+  tagline: string;
   brandHsl: string;
   brandHoverHsl: string;
   fontFamily: string;
@@ -9,7 +10,8 @@ export interface PortalBranding {
 // ── Presets ───────────────────────────────────────────────────────────────────
 
 export const defaultBranding: PortalBranding = {
-  appName: '',
+  appName: 'PRomop',
+  tagline: 'An Open Source Personal Health Record from HealthKey.ai',
   brandHsl: '212 87% 33%',
   brandHoverHsl: '212 95% 28%',
   fontFamily: 'Inter, system-ui, sans-serif',
@@ -17,6 +19,7 @@ export const defaultBranding: PortalBranding = {
 
 export const healthTreeBranding: PortalBranding = {
   appName: 'HealthTree',
+  tagline: 'Your Personal Health Record',
   brandHsl: '159 72% 30%',
   brandHoverHsl: '159 72% 25%',
   fontFamily: 'Inter, system-ui, sans-serif',
@@ -25,6 +28,7 @@ export const healthTreeBranding: PortalBranding = {
 
 export const cancerBotBranding: PortalBranding = {
   appName: 'CancerBot',
+  tagline: 'Your Personal Health Record',
   brandHsl: '212 87% 33%',
   brandHoverHsl: '212 95% 28%',
   fontFamily: 'Inter, system-ui, sans-serif',
