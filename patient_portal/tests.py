@@ -9778,14 +9778,18 @@ class WearablePatientRecordTest(TestCase):
         pi = self._refresh()
         self.assertAlmostEqual(float(pi.wearable_coverage_ratio_30d), 0.5, places=1)
 
-    def test_insufficient_coverage_leaves_metric_null(self):
-        # Only 3 days → below MIN_VALID_DAYS, steps median should be None
+    def test_low_coverage_still_computes_metrics(self):
+        # Only 3 days — below the old MIN_VALID_DAYS threshold but metrics
+        # are still computed (threshold relaxed so newly-uploaded data is
+        # visible immediately; MIN_VALID_DAYS now only gates activity trend).
         for d in range(1, 4):
             self._add_measurement('steps', d, 10000)
         pi = self._refresh()
-        self.assertIsNone(pi.median_daily_steps_30d)
-        # But coverage ratio is still computed
+        self.assertEqual(pi.median_daily_steps_30d, 10000)
         self.assertIsNotNone(pi.wearable_coverage_ratio_30d)
+        # Activity trend still requires enough data per half — should be
+        # insufficient_data with only 3 days.
+        self.assertEqual(pi.activity_trend_30d, 'insufficient_data')
 
     def test_cardiovascular_aggregation(self):
         for d in range(1, 20):
