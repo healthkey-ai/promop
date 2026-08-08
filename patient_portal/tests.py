@@ -13507,12 +13507,15 @@ class AuthControlsTest(TestCase):
     # --- lockout (TI.1.1#03) ---
 
     def test_lockout_after_threshold_failures(self):
-        for _ in range(3):
+        # First two failures return 401 (invalid credentials).
+        for _ in range(2):
             self.assertEqual(self._login('wrong-password').status_code, status.HTTP_401_UNAUTHORIZED)
+        # The third failure triggers lockout; the view returns 403 (account locked).
+        self.assertEqual(self._login('wrong-password').status_code, status.HTTP_403_FORBIDDEN)
         self.identity.refresh_from_db()
         self.assertTrue(self.identity.is_locked)
-        # Correct password is refused while locked.
-        self.assertEqual(self._login(self.password).status_code, status.HTTP_401_UNAUTHORIZED)
+        # Correct password is also refused while locked (403).
+        self.assertEqual(self._login(self.password).status_code, status.HTTP_403_FORBIDDEN)
 
     def test_successful_login_resets_failure_count(self):
         self._login('wrong-password')
