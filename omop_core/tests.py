@@ -2075,6 +2075,32 @@ class PatientInfoCompatViewTest(TestCase):
         unbacked = set(self._view_columns()) - table_cols - {'status'}
         self.assertEqual(sorted(unbacked), [])
 
+    def test_view_exposes_death_date(self):
+        """
+        Migration 0139 adds `death_date` to the view. The column has existed on
+        the table since 0110, but 0104 froze the view's column list before that,
+        so chain-built databases were missing it while staging had it.
+        """
+        self.assertIn('death_date', self._view_columns())
+
+    def test_death_date_readable_through_view(self):
+        person = Person.objects.create(person_id=880004, year_of_birth=1980)
+        PatientRecord.objects.create(person=person, death_date=date(2024, 3, 1))
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT death_date FROM patient_info WHERE person_id = %s",
+                           [person.person_id])
+            self.assertEqual(cursor.fetchone()[0], date(2024, 3, 1))
+
+    def test_death_date_ordered_after_race(self):
+        """
+        0139 inserts the column after `race` to reproduce staging's ordinal
+        position rather than appending, so `SELECT *` consumers see the same
+        column order in every environment.
+        """
+        cols = self._view_columns()
+        self.assertIn('race', cols)
+        self.assertEqual(cols[cols.index('race') + 1], 'death_date')
+
     def test_view_remains_read_only(self):
         """The INSTEAD OF trigger must survive the rebuild."""
         person = Person.objects.create(person_id=880003, year_of_birth=1980)
