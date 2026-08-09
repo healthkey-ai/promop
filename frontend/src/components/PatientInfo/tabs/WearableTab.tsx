@@ -21,6 +21,16 @@ const METRIC_LABELS: Record<string, string> = {
   spo2: 'SpO\u2082',
   respiratory_rate: 'Respiratory Rate',
   sleep_duration: 'Sleep Duration',
+  vo2_max: 'VO\u2082 Max',
+  distance: 'Distance',
+  walking_speed: 'Walking Speed',
+  walking_step_length: 'Step Length',
+  walking_double_support_pct: 'Double Support %',
+  walking_hr_avg: 'Walking HR',
+  flights_climbed: 'Flights Climbed',
+  active_energy: 'Active Energy',
+  basal_energy: 'Basal Energy',
+  body_mass: 'Body Mass',
 };
 
 interface UploadRecord {
@@ -58,6 +68,16 @@ function formatMetricValue(metric: string, value: number): string {
   if (metric === 'spo2') return `${value.toFixed(1)}%`;
   if (metric === 'respiratory_rate') return `${value.toFixed(1)} breaths/min`;
   if (metric === 'sleep_duration') return `${value.toFixed(1)} hrs`;
+  if (metric === 'vo2_max') return `${value.toFixed(1)} mL/kg/min`;
+  if (metric === 'distance') return `${value.toFixed(2)} km`;
+  if (metric === 'walking_speed') return `${value.toFixed(2)} km/hr`;
+  if (metric === 'walking_step_length') return `${value.toFixed(1)} cm`;
+  if (metric === 'walking_double_support_pct') return `${value.toFixed(1)}%`;
+  if (metric === 'walking_hr_avg') return `${value.toFixed(0)} bpm`;
+  if (metric === 'flights_climbed') return `${value.toFixed(0)}`;
+  if (metric === 'active_energy') return `${value.toFixed(0)} kcal`;
+  if (metric === 'basal_energy') return `${value.toFixed(0)} kcal`;
+  if (metric === 'body_mass') return `${value.toFixed(1)} kg`;
   return String(value);
 }
 
@@ -74,6 +94,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
   const [uploads, setUploads] = useState<UploadRecord[]>([]);
   const [uploadsLoading, setUploadsLoading] = useState(true);
   const [expandedUpload, setExpandedUpload] = useState<number | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   const fetchUploads = useCallback(async () => {
     try {
@@ -106,6 +127,21 @@ export default function WearableTab({ formData, onRefresh }: Props) {
       cancelled = true;
     };
   }, []);
+
+  const handleDelete = useCallback(async (uploadId: number) => {
+    if (!confirm('Delete this upload and its associated measurements?')) return;
+    setDeletingId(uploadId);
+    try {
+      await api.delete(`/v1/patient-records/wearable-uploads/${uploadId}/`);
+      setUploads(prev => prev.filter(u => u.id !== uploadId));
+      if (expandedUpload === uploadId) setExpandedUpload(null);
+      if (onRefresh) onRefresh();
+    } catch {
+      setUploadError('Failed to delete upload. Please try again.');
+    } finally {
+      setDeletingId(null);
+    }
+  }, [expandedUpload, onRefresh]);
 
   /** Upload a list of files with a given device type. Shared by file-picker and drag-and-drop. */
   const uploadFiles = useCallback(async (files: File[], deviceType: string) => {
@@ -341,6 +377,24 @@ export default function WearableTab({ formData, onRefresh }: Props) {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
                   </svg>
                 </button>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); handleDelete(upload.id); }}
+                  disabled={deletingId === upload.id}
+                  className="ml-1 rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-500 disabled:opacity-50"
+                  title="Delete upload"
+                >
+                  {deletingId === upload.id ? (
+                    <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                  ) : (
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  )}
+                </button>
 
                 {expandedUpload === upload.id && upload.sample_summary.length > 0 && (
                   <div className="mb-2 ml-2 rounded border border-gray-100 bg-gray-50">
@@ -463,6 +517,14 @@ export default function WearableTab({ formData, onRefresh }: Props) {
             disabled
           />
           <Field
+            label="Avg SpO&#8322; (%)"
+            name="oxygen_saturation_avg_30d"
+            type="number"
+            value={formData?.oxygen_saturation_avg_30d}
+            onChange={() => {}}
+            disabled
+          />
+          <Field
             label="Respiratory Rate (breaths/min)"
             name="respiratory_rate_avg_30d"
             type="number"
@@ -480,6 +542,101 @@ export default function WearableTab({ formData, onRefresh }: Props) {
             name="sleep_duration_hours_avg_30d"
             type="number"
             value={formData?.sleep_duration_hours_avg_30d}
+            onChange={() => {}}
+            disabled
+          />
+        </div>
+      </Section>
+
+      <Section title="Fitness (30-Day)">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <Field
+            label="VO&#8322; Max (mL/kg/min)"
+            name="vo2_max_avg_30d"
+            type="number"
+            value={formData?.vo2_max_avg_30d}
+            onChange={() => {}}
+            disabled
+          />
+          <Field
+            label="Distance (km/day)"
+            name="distance_km_per_day_30d"
+            type="number"
+            value={formData?.distance_km_per_day_30d}
+            onChange={() => {}}
+            disabled
+          />
+          <Field
+            label="Flights Climbed / Day"
+            name="flights_climbed_per_day_30d"
+            type="number"
+            value={formData?.flights_climbed_per_day_30d}
+            onChange={() => {}}
+            disabled
+          />
+        </div>
+      </Section>
+
+      <Section title="Gait & Mobility (30-Day)">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <Field
+            label="Walking Speed (km/hr)"
+            name="walking_speed_avg_30d"
+            type="number"
+            value={formData?.walking_speed_avg_30d}
+            onChange={() => {}}
+            disabled
+          />
+          <Field
+            label="Step Length (cm)"
+            name="walking_step_length_avg_30d"
+            type="number"
+            value={formData?.walking_step_length_avg_30d}
+            onChange={() => {}}
+            disabled
+          />
+          <Field
+            label="Double Support (%)"
+            name="walking_double_support_pct_avg_30d"
+            type="number"
+            value={formData?.walking_double_support_pct_avg_30d}
+            onChange={() => {}}
+            disabled
+          />
+          <Field
+            label="Walking Heart Rate (bpm)"
+            name="walking_hr_avg_30d"
+            type="number"
+            value={formData?.walking_hr_avg_30d}
+            onChange={() => {}}
+            disabled
+          />
+        </div>
+      </Section>
+
+      <Section title="Energy & Body (30-Day)">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <Field
+            label="Active Energy (kcal/day)"
+            name="active_energy_per_day_30d"
+            type="number"
+            value={formData?.active_energy_per_day_30d}
+            onChange={() => {}}
+            disabled
+          />
+          <Field
+            label="Basal Energy (kcal/day)"
+            name="basal_energy_per_day_30d"
+            type="number"
+            value={formData?.basal_energy_per_day_30d}
+            onChange={() => {}}
+            disabled
+          />
+          <Field
+            label="Body Mass (kg)"
+            name="body_mass_avg_30d"
+            type="number"
+            value={formData?.body_mass_avg_30d}
             onChange={() => {}}
             disabled
           />

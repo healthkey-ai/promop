@@ -53,7 +53,7 @@ from omop_core.services.regimen_resolution import (
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
 from omop_core.services.access import get_visible_orgs, build_trusting_map, get_admin_orgs
-from datetime import datetime, timedelta
+from datetime import date as _date, datetime, timedelta
 from django.utils.timezone import localdate
 import csv
 import hashlib
@@ -3697,6 +3697,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     'hrv_sdnn': 'ms',
                     'spo2': '%',
                     'respiratory_rate': '/min',
+                    'vo2_max': 'mL/kg/min',
+                    'distance': 'km',
+                    'walking_speed': 'km/hr',
+                    'walking_step_length': 'cm',
+                    'walking_double_support_pct': '%',
+                    'walking_hr_avg': '/min',
+                    'flights_climbed': '{flights}',
+                    'active_energy': 'kcal',
+                    'basal_energy': 'kcal',
+                    'body_mass': 'kg',
                 }
                 m = Measurement(
                     measurement_id=0,  # allocated below
@@ -3782,6 +3792,71 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             for u in uploads
         ]
         return Response(data)
+
+    @action(detail=False, methods=['delete'], url_path='wearable-uploads/(?P<upload_id>[0-9]+)',
+            permission_classes=[IsAuthenticated])
+    def delete_wearable_upload(self, request, upload_id=None):
+        """Delete a wearable upload and its associated Measurement/Observation rows."""
+        from omop_core.services.mappings import WEARABLE_LOINC
+        from omop_core.services.concept_cache import concept_by_loinc as _cc_by_loinc
+
+        patient_user = getattr(request.user, 'patient_user', None)
+        if not patient_user:
+            return Response({'error': 'Not a patient'}, status=status.HTTP_403_FORBIDDEN)
+        person = patient_user.person
+
+        try:
+            upload = WearableUpload.objects.get(id=upload_id, person=person)
+        except WearableUpload.DoesNotExist:
+            return Response({'error': 'Upload not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Delete associated Measurement/Observation rows using sample_summary
+        deleted_count = 0
+        for entry in upload.sample_summary or []:
+            metric_key = entry.get('metric')
+            date_str = entry.get('date')
+            value = entry.get('value')
+            if not metric_key or not date_str or value is None:
+                continue
+
+            loinc_code = WEARABLE_LOINC.get(metric_key)
+            if not loinc_code:
+                continue
+            concept = _cc_by_loinc(loinc_code)
+            if not concept:
+                continue
+
+            sample_date = _date.fromisoformat(date_str)
+
+            if metric_key == 'sleep_duration':
+                count, _ = Observation.objects.filter(
+                    person=person,
+                    observation_concept=concept,
+                    observation_date=sample_date,
+                    value_as_number=value,
+                ).delete()
+            else:
+                count, _ = Measurement.objects.filter(
+                    person=person,
+                    measurement_concept=concept,
+                    measurement_date=sample_date,
+                    value_as_number=value,
+                ).delete()
+            deleted_count += count
+
+        upload.delete()
+
+        # Refresh PatientRecord to recompute 30-day summaries
+        try:
+            refresh_patient_record(person)
+        except Exception:
+            logger.exception('wearable_refresh_after_delete_failed person_id=%s', person.person_id)
+
+        logger.info(
+            'wearable_upload_deleted upload_id=%s person_id=%s measurements_deleted=%d',
+            upload_id, person.person_id, deleted_count,
+        )
+        return Response({'deleted_measurements': deleted_count})
 
     @action(detail=False, methods=['delete'], permission_classes=[ScopedTokenPermission])
     def bulk_delete(self, request):

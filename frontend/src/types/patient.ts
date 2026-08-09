@@ -278,8 +278,19 @@ export interface PatientInfo {
   resting_heart_rate_avg_30d?: number;
   hrv_sdnn_avg_30d?: string | number;
   oxygen_saturation_min_30d?: string | number;
+  oxygen_saturation_avg_30d?: string | number;
   respiratory_rate_avg_30d?: string | number;
   sleep_duration_hours_avg_30d?: string | number;
+  vo2_max_avg_30d?: string | number;
+  distance_km_per_day_30d?: string | number;
+  walking_speed_avg_30d?: string | number;
+  walking_step_length_avg_30d?: string | number;
+  walking_double_support_pct_avg_30d?: string | number;
+  walking_hr_avg_30d?: number;
+  flights_climbed_per_day_30d?: string | number;
+  active_energy_per_day_30d?: string | number;
+  basal_energy_per_day_30d?: string | number;
+  body_mass_avg_30d?: string | number;
 
   // Myeloma diagnostic criteria (computed, read-only)
   meets_crab?: boolean | null;
