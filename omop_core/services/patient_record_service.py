@@ -453,23 +453,34 @@ def _get_disease_data(person: Person) -> dict:
     data = {}
 
     # Most-recent oncologic condition — match common OMOP oncology terms
+    # in either the mapped concept_name OR the original condition_source_value
+    # (concept_id=0 rows store the disease name only in source_value).
     from django.db.models import Q
+    _ONCO_KEYWORDS = [
+        'cancer', 'neoplasm', 'malignant', 'lymphoma', 'leukemia',
+        'myeloma', 'carcinoma', 'sarcoma', 'tumor',
+    ]
+    concept_q = Q()
+    source_q = Q()
+    for kw in _ONCO_KEYWORDS:
+        concept_q |= Q(condition_concept__concept_name__icontains=kw)
+        source_q |= Q(condition_source_value__icontains=kw)
+
     cancer_condition = ConditionOccurrence.objects.filter(
         person=person,
-    ).filter(
-        Q(condition_concept__concept_name__icontains='cancer')
-        | Q(condition_concept__concept_name__icontains='neoplasm')
-        | Q(condition_concept__concept_name__icontains='malignant')
-        | Q(condition_concept__concept_name__icontains='lymphoma')
-        | Q(condition_concept__concept_name__icontains='leukemia')
-        | Q(condition_concept__concept_name__icontains='myeloma')
-        | Q(condition_concept__concept_name__icontains='carcinoma')
-        | Q(condition_concept__concept_name__icontains='sarcoma')
-        | Q(condition_concept__concept_name__icontains='tumor')
-    ).order_by('-condition_start_date').first()
+    ).filter(concept_q | source_q).order_by('-condition_start_date').first()
 
     if cancer_condition:
-        data['disease'] = _canonicalize_disease(cancer_condition.condition_concept.concept_name)
+        # Prefer source_value when concept is unmapped (id=0 / "No matching concept")
+        concept_name = (
+            cancer_condition.condition_concept.concept_name
+            if cancer_condition.condition_concept_id
+            and cancer_condition.condition_concept.concept_name != 'No matching concept'
+            else None
+        )
+        raw_name = concept_name or cancer_condition.condition_source_value or ''
+        if raw_name:
+            data['disease'] = _canonicalize_disease(raw_name)
         if cancer_condition.condition_start_date:
             data['diagnosis_date'] = cancer_condition.condition_start_date
 
