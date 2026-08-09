@@ -219,11 +219,46 @@ arbitrary resolution described in #415.
 | The 11 codes that are already correct | Seed the real Athena concept_id |
 | `walking_speed`, `flights_climbed` | Correct the code first (41957-2, 100304-5), then seed the real id |
 | `basal_energy` | Resolve the correct code first — 41982-0 is body-fat-percentage |
-| `walking_step_length`, `walking_double_support_pct`, `walking_hr_avg` | No LOINC exists — mint in `HK-Wearable` with `source='HealthKey'` and an `HK-*` concept_code |
+| `walking_step_length`, `walking_double_support_pct`, `walking_hr_avg` | No LOINC exists — mint in `HK-Wearable`, `source='HealthKey'`, `HK-*` concept_code, **concept_id ≥ 2e9** |
 | Existing 9001019–9001024 | Retire; remap dependent `measurement`/`observation` FKs to the Athena ids |
 
 This also requires adding a `source` parameter to `_c()` (`seed_omop_concepts.py:94`), which
 currently cannot express `'HealthKey'` at all.
+
+#### Minted concept_ids must sit in the OHDSI custom range
+
+OHDSI reserves **`concept_id >= 2,000,000,000`** for locally-authored concepts; Athena never
+allocates there. This repo already follows the convention for `HK-Labs`, but not for the
+`900xxxx` seed mints.
+
+Staging allocation:
+
+| Range | Rows | Note |
+|---|---|---|
+| 2,006,492,703 – 2,022,763,720 | 6 | HemOnc, `source=NULL` — local rows in an external vocabulary |
+| 2,029,606,278 | 1 | LOINC, `source=NULL` — same anti-pattern |
+| 2,029,606,279 – 2,029,606,349 | 71 | `HK-Labs` — the contiguous local block |
+| — | — | global max `concept_id` = **2,029,606,349** |
+
+**New `HK-Wearable` concepts should be allocated from 2,029,606,350 upward**, continuing the
+`HK-Labs` block.
+
+The `900xxxx` range is unsafe: non-mint concept_ids in staging span `0 → 2,029,606,349`, so
+`900xxxx` falls inside the space Athena actually uses. Those ids risk a primary-key collision on
+a future vocabulary load, independently of the `(vocabulary_id, concept_code)` duplication.
+
+All **24** `900xxxx` mints are `vocabulary_id='LOINC'`. Six are the wearable concepts retired
+above; the remaining 18 (labs, GFR, electrolytes) carry the same defect and need the same
+treatment — seed the genuine Athena id where one exists, otherwise relocate above 2e9 under an
+`HK-*` vocabulary. Out of scope for the wearable work, but tracked in #415.
+
+Relocation is not an `UPDATE` of `concept_id`: it is the primary key, referenced by
+`measurement`, `observation`, and other FKs. Retiring a mint means inserting/resolving the
+replacement, remapping every referencing row, then deleting the old concept.
+
+**Guard to add:** a test asserting that every concept with `source='HealthKey'` has
+`concept_id >= 2e9` and lives in an `HK-*` vocabulary — and conversely that no row in an
+externally-loaded vocabulary carries `source='HealthKey'`.
 
 ### Gap 1c — unresolvable concepts are skipped silently
 
