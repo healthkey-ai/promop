@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import ProgrammingError, connection, transaction
 from django.test import TestCase
 
 from omop_core.models import (
@@ -1957,3 +1958,133 @@ class LoadLoincClassesArchiveTest(TestCase):
     def test_malformed_gcs_uri_is_reported(self):
         with self.assertRaisesMessage(CommandError, 'bucket and an object'):
             call_command('load_loinc_classes', archive='gs://bucket-only')
+
+
+# ---------------------------------------------------------------------------
+# Schema / model sync
+# ---------------------------------------------------------------------------
+
+class PatientRecordSchemaSyncTest(TestCase):
+    """
+    Guard against columns drifting away from the model definition.
+
+    Migration 0036 created a ``status`` column with raw SQL and migration 0040
+    removed the field from Django's state only, leaving an orphan column that
+    no model field mapped to. Migration 0138 drops it. This test fails if that
+    -- or any comparable drift -- is reintroduced by the migration chain.
+
+    Scope: the test database is always built fresh from the migrations, so this
+    catches chain-introduced drift only. It cannot see out-of-band schema
+    changes made directly against a deployed database -- that is what made the
+    ``patient_info`` view 297 columns in staging and production but 296 in CI.
+    Use the sync check in CLAUDE.md against those environments for that.
+    """
+
+    def _db_columns(self):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = %s",
+                [PatientRecord._meta.db_table],
+            )
+            return {row[0] for row in cursor.fetchall()}
+
+    def _model_columns(self):
+        return {
+            f.column
+            for f in PatientRecord._meta.get_fields()
+            if hasattr(f, 'column')
+        }
+
+    def test_no_orphan_status_column(self):
+        """The column dropped by migration 0138 stays dropped."""
+        self.assertNotIn('status', self._db_columns())
+
+    def test_db_and_model_columns_match(self):
+        """patient_record has no extra columns and no missing ones."""
+        db_cols = self._db_columns()
+        model_cols = self._model_columns()
+        self.assertEqual(
+            sorted(model_cols - db_cols), [],
+            "model fields with no matching database column",
+        )
+        self.assertEqual(
+            sorted(db_cols - model_cols), [],
+            "database columns with no matching model field",
+        )
+
+
+class PatientInfoCompatViewTest(TestCase):
+    """
+    The ``patient_info`` view is a read-only compatibility shim for external
+    consumers of the pre-rename table name. Migration 0138 had to rebuild it in
+    order to drop the orphan ``status`` column, so these tests pin the parts of
+    its contract that the rebuild had to preserve.
+    """
+
+    def _view_columns(self):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = 'patient_info' "
+                "ORDER BY ordinal_position"
+            )
+            return [row[0] for row in cursor.fetchall()]
+
+    def test_view_exists(self):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM information_schema.views "
+                "WHERE table_schema = 'public' AND table_name = 'patient_info'"
+            )
+            self.assertEqual(cursor.fetchone()[0], 1)
+
+    def test_view_still_exposes_status_as_null(self):
+        """
+        `status` survives as a NULL literal even though the physical column is
+        gone, so external `SELECT status FROM patient_info` keeps working.
+        """
+        self.assertIn('status', self._view_columns())
+        person = Person.objects.create(person_id=880001, year_of_birth=1980)
+        PatientRecord.objects.create(person=person)
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT status FROM patient_info WHERE person_id = %s",
+                           [person.person_id])
+            self.assertIsNone(cursor.fetchone()[0])
+
+    def test_view_mirrors_table_data(self):
+        person = Person.objects.create(person_id=880002, year_of_birth=1980)
+        PatientRecord.objects.create(person=person, disease='Multiple Myeloma')
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT disease FROM patient_info WHERE person_id = %s",
+                           [person.person_id])
+            self.assertEqual(cursor.fetchone()[0], 'Multiple Myeloma')
+
+    def test_view_columns_are_backed_by_the_table(self):
+        """
+        Every view column except the `status` placeholder maps to a real
+        `patient_record` column -- i.e. the rebuild did not invent columns.
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = %s",
+                [PatientRecord._meta.db_table],
+            )
+            table_cols = {row[0] for row in cursor.fetchall()}
+        unbacked = set(self._view_columns()) - table_cols - {'status'}
+        self.assertEqual(sorted(unbacked), [])
+
+    def test_view_remains_read_only(self):
+        """The INSTEAD OF trigger must survive the rebuild."""
+        person = Person.objects.create(person_id=880003, year_of_birth=1980)
+        PatientRecord.objects.create(person=person)
+        # The failed statement aborts the surrounding transaction, so run it
+        # inside a savepoint to keep the test's transaction usable.
+        with self.assertRaisesMessage(ProgrammingError, 'read-only compatibility view'):
+            with transaction.atomic():
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "UPDATE patient_info SET disease = 'x' WHERE person_id = %s",
+                        [person.person_id],
+                    )
