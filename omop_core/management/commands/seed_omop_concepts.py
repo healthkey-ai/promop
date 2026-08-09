@@ -11,7 +11,7 @@ Usage:
 """
 from datetime import date
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
@@ -41,6 +41,13 @@ _VOCABULARIES = [
          vocabulary_name='OMOP CDM',
          vocabulary_reference='OMOP generated',
          vocabulary_version='CDM v5',
+         vocabulary_concept_id=0),
+    # Locally-authored wearable concepts with no LOINC equivalent. Rows in this
+    # vocabulary always carry source='HealthKey' and concept_id >= 2e9.
+    dict(vocabulary_id='HK-Wearable',
+         vocabulary_name='HealthKey Wearable Metrics',
+         vocabulary_reference='HealthKey local mint',
+         vocabulary_version='v1',
          vocabulary_concept_id=0),
     dict(vocabulary_id='Episode',
          vocabulary_name='OMOP Episode',
@@ -93,7 +100,14 @@ _END   = date(2099, 12, 31)
 
 def _c(concept_id, concept_name, domain_id, vocabulary_id, concept_class_id,
         standard_concept, concept_code,
-        valid_start=None, valid_end=None):
+        valid_start=None, valid_end=None, source=None):
+    """Build a concept row.
+
+    ``source`` follows Concept.source semantics: None means the row mirrors an
+    externally-loaded vocabulary release (Athena), 'HealthKey' means it is
+    authored locally. Locally-authored rows MUST use an HK-* vocabulary and a
+    concept_id in the OHDSI custom range (>= 2e9) — see _assert_local_mint.
+    """
     return dict(
         concept_id=concept_id,
         concept_name=concept_name,
@@ -105,6 +119,22 @@ def _c(concept_id, concept_name, domain_id, vocabulary_id, concept_class_id,
         valid_start_date=valid_start or _START,
         valid_end_date=valid_end or _END,
         invalid_reason=None,
+        source=source,
+    )
+
+
+# OHDSI reserves concept_id >= 2e9 for locally-authored concepts; Athena never
+# allocates there. HK-Labs occupies 2029606279-2029606349 on staging, so the
+# wearable block continues immediately above it.
+LOCAL_CONCEPT_ID_MIN = 2_000_000_000
+_HK_WEARABLE_ID_BASE = 2_029_606_350
+
+
+def _hk(offset, concept_name, domain_id, concept_class_id, concept_code):
+    """Build a locally-minted HK-Wearable concept, correctly quarantined."""
+    return _c(
+        _HK_WEARABLE_ID_BASE + offset, concept_name, domain_id, 'HK-Wearable',
+        concept_class_id, None, concept_code, source='HealthKey',
     )
 
 
@@ -262,17 +292,43 @@ _CONCEPTS = [
     _c(9001018, 'Glomerular filtration rate by CKD-EPI',          'Measurement', 'LOINC', 'Lab Test', 'S', '62238-1'),
 
     # ------------------------------------------------------------------
-    # Wearable / remote-monitoring LOINCs
-    # Required for wearable_last_sync_at and related PatientRecord fields.
-    # patient_record_service._get_wearable_data() queries by both
-    # measurement_concept__concept_code and measurement_source_value.
+    # Wearable / remote-monitoring concepts.
+    #
+    # These MIRROR genuine Athena rows: concept_id, name, domain and class are
+    # copied verbatim from the LOINC vocabulary. Because seeding is keyed on
+    # concept_id, a row seeded here is created on a database with no Athena load
+    # and matches the existing row where Athena IS loaded — so no duplicate
+    # (vocabulary_id, concept_code) pair can arise. Never mint a fresh id for a
+    # code Athena already owns; that is what produced the duplicates in #415.
+    #
+    # Note the domains: steps, active_minutes, sleep_duration and flights_climbed
+    # are Observation-domain concepts. upload_wearable routes on concept.domain_id.
     # ------------------------------------------------------------------
-    _c(9001019, 'Number of steps in 24 hours',                    'Measurement', 'LOINC', 'Clinical Observation', 'S', '55423-8'),
-    _c(9001020, 'Moderate-vigorous physical activity duration',   'Measurement', 'LOINC', 'Clinical Observation', 'S', '77592-4'),
-    _c(9001021, 'Heart rate -- resting',                          'Measurement', 'LOINC', 'Clinical Observation', 'S', '40443-4'),
-    _c(9001022, 'Heart rate variability SDNN',                    'Measurement', 'LOINC', 'Clinical Observation', 'S', '80404-7'),
-    _c(9001023, 'Respiratory rate',                               'Measurement', 'LOINC', 'Clinical Observation', 'S', '9279-1'),
-    _c(9001024, 'Sleep duration',                                 'Measurement', 'LOINC', 'Clinical Observation', 'S', '93832-4'),
+    _c(40758552, 'Number of steps in unspecified time Pedometer',              'Observation', 'LOINC', 'Clinical Observation', 'S', '55423-8',  date(2009, 4, 23)),
+    _c(40758540, 'Exercise duration',                                          'Observation', 'LOINC', 'Clinical Observation', 'S', '55411-3',  date(2009, 4, 23)),
+    _c(3040891,  'Heart rate --resting',                                       'Measurement', 'LOINC', 'Clinical Observation', 'S', '40443-4'),
+    _c(21491502, 'R-R interval.standard deviation (Heart rate variability)',   'Measurement', 'LOINC', 'Clinical Observation', 'S', '80404-7',  date(2016, 6, 24)),
+    # spo2 (59408-5 / 40762499) and body_mass (29463-7 / 3025315) are already
+    # seeded in the vitals block above and must not be repeated here — a second
+    # row for the same (vocabulary_id, concept_code) is exactly the duplication
+    # this block exists to avoid.
+    _c(3024171,  'Respiratory rate',                                           'Measurement', 'LOINC', 'Clinical Observation', 'S', '9279-1',   date(1996, 9, 6)),
+    _c(1002368,  'Sleep duration',                                             'Observation', 'LOINC', 'Clinical Observation', 'S', '93832-4',  date(2019, 12, 13)),
+    _c(1002246,  'Oxygen consumption (VO2)/Body weight [Volume Rate Content]', 'Measurement', 'LOINC', 'Clinical Observation', 'S', '94122-9',  date(2019, 12, 13)),
+    _c(3031111,  'Walking distance 24 hour Calculated',                        'Measurement', 'LOINC', 'Clinical Observation', 'S', '41953-1',  date(2005, 7, 27)),
+    _c(3032289,  'Walking speed 24 hour mean Calculated',                      'Measurement', 'LOINC', 'Clinical Observation', 'S', '41957-2',  date(2005, 7, 27)),
+    _c(1761351,  'Flights climbed [#] Reporting Period',                       'Observation', 'LOINC', 'Clinical Observation', 'S', '100304-5', date(2022, 8, 8)),
+    _c(1001786,  'Calories burned in unspecified time --during activity',      'Measurement', 'LOINC', 'Clinical Observation', 'S', '93819-1',  date(2019, 12, 13)),
+
+    # Wearable metrics with NO LOINC equivalent — locally minted, quarantined
+    # under HK-Wearable with source='HealthKey' and ids in the OHDSI custom
+    # range. LOINC has no concept for step length, double-support percentage,
+    # walking heart rate, or basal energy expenditure in kcal/day (50042-1 is
+    # "Basal metabolic rate index", a normalized index, not an energy rate).
+    _hk(0, 'Walking step length',                    'Measurement', 'Clinical Observation', 'HK-WEAR-STEP-LENGTH'),
+    _hk(1, 'Walking double support time percentage', 'Measurement', 'Clinical Observation', 'HK-WEAR-DBL-SUPPORT'),
+    _hk(2, 'Heart rate during walking',              'Measurement', 'Clinical Observation', 'HK-WEAR-WALK-HR'),
+    _hk(3, 'Basal energy expenditure',               'Measurement', 'Clinical Observation', 'HK-WEAR-BASAL-ENERGY'),
 
     # ------------------------------------------------------------------
     # HemOnc therapy regimen concepts — required for first_line_therapy_id
@@ -309,6 +365,45 @@ _CONCEPTS = [
 ]
 
 
+def _assert_local_mint_convention():
+    """Fail fast if any seeded row breaks the local-mint quarantine rules.
+
+    Guards the three invariants that, when violated, produced #413 and #415:
+      - a locally-authored row must live in an HK-* vocabulary,
+      - it must carry source='HealthKey',
+      - and its concept_id must be in the OHDSI custom range (>= 2e9), which
+        Athena never allocates, so it cannot collide on the primary key.
+    """
+    problems = []
+    for row in _CONCEPTS:
+        is_hk_vocab = row['vocabulary_id'].startswith('HK-')
+        is_tagged = row.get('source') == 'HealthKey'
+        in_local_range = row['concept_id'] >= LOCAL_CONCEPT_ID_MIN
+
+        if is_hk_vocab or is_tagged:
+            if not is_hk_vocab:
+                problems.append(
+                    f"{row['concept_id']} {row['concept_code']}: source='HealthKey' "
+                    f"but vocabulary is {row['vocabulary_id']!r}, not HK-*")
+            if not is_tagged:
+                problems.append(
+                    f"{row['concept_id']} {row['concept_code']}: HK-* vocabulary "
+                    f"but source is {row.get('source')!r}, not 'HealthKey'")
+            if not in_local_range:
+                problems.append(
+                    f"{row['concept_id']} {row['concept_code']}: local mint must have "
+                    f"concept_id >= {LOCAL_CONCEPT_ID_MIN}")
+        elif in_local_range:
+            problems.append(
+                f"{row['concept_id']} {row['concept_code']}: concept_id is in the local "
+                f"range but the row is not marked as a HealthKey mint")
+
+    if problems:
+        raise CommandError(
+            'Seed rows violate the local-mint convention:\n  '
+            + '\n  '.join(problems))
+
+
 class Command(BaseCommand):
     help = (
         'Seed the minimal OMOP concept rows required for mCODE FHIR import. '
@@ -323,6 +418,8 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         dry_run = options['dry_run']
+
+        _assert_local_mint_convention()
 
         if dry_run:
             self.stdout.write(self.style.WARNING('Dry-run mode — no changes will be written.\n'))

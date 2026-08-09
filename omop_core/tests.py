@@ -2114,3 +2114,143 @@ class PatientInfoCompatViewTest(TestCase):
                         "UPDATE patient_info SET disease = 'x' WHERE person_id = %s",
                         [person.person_id],
                     )
+
+
+class WearableConceptMappingTest(TestCase):
+    """Guards the concept-mapping invariants that #413 and #415 were caused by.
+
+    These assert on the seed definitions rather than a loaded database, so they
+    run everywhere and fail at the point a bad mapping is written rather than
+    when an upload silently drops data.
+    """
+
+    def _seed_rows(self):
+        from omop_core.management.commands.seed_omop_concepts import _CONCEPTS
+        return _CONCEPTS
+
+    def test_every_wearable_metric_is_seeded(self):
+        """Each metric's (vocabulary, code) must exist in the seed set.
+
+        Without this, upload_wearable resolves None and silently discards every
+        sample for the metric while still reporting HTTP 200.
+        """
+        from omop_core.services.mappings import (
+            WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB,
+        )
+        seeded = {(r['vocabulary_id'], r['concept_code']) for r in self._seed_rows()}
+        missing = [
+            (metric, WEARABLE_CONCEPT_VOCAB[metric], code)
+            for metric, code in WEARABLE_CONCEPT_CODE.items()
+            if (WEARABLE_CONCEPT_VOCAB[metric], code) not in seeded
+        ]
+        self.assertEqual(missing, [], f'wearable metrics absent from seed set: {missing}')
+
+    def test_seeded_wearable_concept_names_match_their_metric(self):
+        """A code that resolves is not necessarily the RIGHT code.
+
+        The original mapping pointed walking_speed and walking_hr_avg at BMI
+        concepts and basal_energy at body-fat percentage — all of which resolved
+        fine. This asserts the concept_name is semantically consistent, which is
+        what a mere code-exists check would have missed.
+        """
+        from omop_core.services.mappings import (
+            WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB,
+        )
+        # Substrings that must appear (lowercased) in the seeded concept_name.
+        expected_terms = {
+            'steps': ['step'],
+            'active_minutes': ['exercise', 'activity'],
+            'resting_hr': ['heart rate'],
+            'hrv_sdnn': ['r-r interval', 'heart rate variability'],
+            'spo2': ['oxygen saturation'],
+            'respiratory_rate': ['respiratory rate'],
+            'sleep_duration': ['sleep'],
+            'vo2_max': ['oxygen consumption'],
+            'distance': ['distance'],
+            'walking_speed': ['walking speed'],
+            'walking_step_length': ['step length'],
+            'walking_double_support_pct': ['double support'],
+            'walking_hr_avg': ['heart rate'],
+            'flights_climbed': ['flights'],
+            'active_energy': ['calories', 'energy'],
+            'basal_energy': ['basal energy'],
+            'body_mass': ['body weight', 'body mass'],
+        }
+        by_key = {
+            (r['vocabulary_id'], r['concept_code']): r['concept_name']
+            for r in self._seed_rows()
+        }
+        for metric, code in WEARABLE_CONCEPT_CODE.items():
+            name = by_key.get((WEARABLE_CONCEPT_VOCAB[metric], code))
+            self.assertIsNotNone(name, f'{metric} ({code}) not seeded')
+            lowered = name.lower()
+            self.assertTrue(
+                any(term in lowered for term in expected_terms[metric]),
+                f'{metric} maps to {code} = "{name}", which does not look like '
+                f'{expected_terms[metric]}',
+            )
+
+    def test_no_duplicate_vocabulary_code_pairs_in_seed(self):
+        """Two seed rows must never claim the same (vocabulary_id, concept_code).
+
+        A duplicate pair makes concept resolution nondeterministic, since
+        concept_by_vocab does .first() with no ordering.
+        """
+        seen, dupes = set(), []
+        for row in self._seed_rows():
+            key = (row['vocabulary_id'], row['concept_code'])
+            if key in seen:
+                dupes.append(key)
+            seen.add(key)
+        self.assertEqual(dupes, [], f'duplicate (vocabulary_id, concept_code): {dupes}')
+
+    def test_local_mints_are_quarantined(self):
+        """source='HealthKey' <-> HK-* vocabulary <-> concept_id >= 2e9."""
+        from omop_core.management.commands.seed_omop_concepts import (
+            _assert_local_mint_convention, LOCAL_CONCEPT_ID_MIN,
+        )
+        _assert_local_mint_convention()  # raises CommandError on violation
+
+        for row in self._seed_rows():
+            if row['vocabulary_id'].startswith('HK-'):
+                self.assertEqual(
+                    row.get('source'), 'HealthKey',
+                    f"{row['concept_code']} is HK-* but not tagged as a HealthKey mint")
+                self.assertGreaterEqual(
+                    row['concept_id'], LOCAL_CONCEPT_ID_MIN,
+                    f"{row['concept_code']} is a local mint below the OHDSI custom range")
+            else:
+                self.assertIsNone(
+                    row.get('source'),
+                    f"{row['concept_code']} is in an external vocabulary but tagged local")
+
+    def test_no_local_mint_shadows_an_external_code(self):
+        """A local mint must not reuse a real LOINC/SNOMED/RxNorm code string.
+
+        Reusing one asserts an externally-defined meaning for a locally-authored
+        concept and makes code-only lookups ambiguous.
+        """
+        from omop_core.services.mappings import (
+            WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB,
+        )
+        for metric, code in WEARABLE_CONCEPT_CODE.items():
+            if WEARABLE_CONCEPT_VOCAB[metric] == 'HK-Wearable':
+                self.assertTrue(
+                    code.startswith('HK-'),
+                    f'{metric} is locally minted but uses external-looking code {code}')
+
+    def test_observation_metric_set_matches_seeded_domains(self):
+        """WEARABLE_OBSERVATION_METRICS must agree with the seeded domain_ids."""
+        from omop_core.services.mappings import (
+            WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB, WEARABLE_OBSERVATION_METRICS,
+        )
+        by_key = {
+            (r['vocabulary_id'], r['concept_code']): r['domain_id']
+            for r in self._seed_rows()
+        }
+        for metric, code in WEARABLE_CONCEPT_CODE.items():
+            domain = by_key.get((WEARABLE_CONCEPT_VOCAB[metric], code))
+            expected = 'Observation' if metric in WEARABLE_OBSERVATION_METRICS else 'Measurement'
+            self.assertEqual(
+                domain, expected,
+                f'{metric} ({code}) is seeded domain {domain} but the metric set says {expected}')

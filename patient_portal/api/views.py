@@ -3556,8 +3556,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         """
         from omop_core.services.wearable_parsers import parse_garmin_fit, parse_apple_health_export
         from omop_core.services.pk import next_pk_batch as _next_pk_batch
-        from omop_core.services.mappings import WEARABLE_LOINC, WEARABLE_ARTIFACT_BOUNDS
-        from omop_core.services.concept_cache import concept_by_loinc as _cc_by_loinc
+        from omop_core.services.mappings import (
+            WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB, WEARABLE_ARTIFACT_BOUNDS,
+        )
+        from omop_core.services.concept_cache import concept_by_vocab as _cc_by_vocab
 
         if 'file' not in request.FILES:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
@@ -3614,10 +3616,21 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if not samples:
             return Response({'samples_created': 0, 'duplicates_skipped': 0})
 
-        # Look up LOINC concepts for each metric
-        loinc_concepts: dict[str, Concept | None] = {}
-        for metric_key, loinc_code in WEARABLE_LOINC.items():
-            loinc_concepts[metric_key] = _cc_by_loinc(loinc_code)
+        # Resolve each metric's concept, scoped by (vocabulary_id, concept_code).
+        # A bare concept_code is ambiguous — 852 codes are reused across
+        # vocabularies — and four wearable metrics live in HK-Wearable, not LOINC.
+        metric_concepts: dict[str, Concept | None] = {}
+        for metric_key, concept_code in WEARABLE_CONCEPT_CODE.items():
+            metric_concepts[metric_key] = _cc_by_vocab(
+                WEARABLE_CONCEPT_VOCAB[metric_key], concept_code)
+
+        unresolved = sorted(k for k, c in metric_concepts.items() if c is None)
+        if unresolved:
+            logger.warning(
+                'wearable_concepts_unresolved person_id=%s metrics=%s — samples for these '
+                'metrics will be discarded. Run seed_omop_concepts or load_athena_vocabularies.',
+                person.person_id, unresolved,
+            )
 
         # Measurement type concept (wearable device = 32883 / Patient self-report)
         type_concept = None
@@ -3632,14 +3645,41 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # Filter out artifact values and deduplicate
         from django.db.models import Q
 
+        # UCUM unit for each metric, written to *_source_value.
+        unit_map = {
+            'steps': '/d',
+            'active_minutes': 'min',
+            'resting_hr': '/min',
+            'hrv_sdnn': 'ms',
+            'spo2': '%',
+            'respiratory_rate': '/min',
+            'sleep_duration': 'h',
+            'vo2_max': 'mL/kg/min',
+            'distance': 'km',
+            'walking_speed': 'km/hr',
+            'walking_step_length': 'cm',
+            'walking_double_support_pct': '%',
+            'walking_hr_avg': '/min',
+            'flights_climbed': '{flights}',
+            'active_energy': 'kcal',
+            'basal_energy': 'kcal',
+            'body_mass': 'kg',
+        }
+
+        # OMOP routes a row by its concept's domain, not by a hard-coded metric
+        # list: steps, active_minutes, sleep_duration and flights_climbed are
+        # Observation-domain concepts, the rest are Measurement.
+        def _is_observation(concept):
+            return concept.domain_id == 'Observation'
+
         existing_keys = set()
-        # Build set of (metric_key, date, value) that already exist.
-        # Most metrics live in Measurement; sleep_duration lives in Observation.
+        # Build set of (metric_key, date, value) that already exist, reading
+        # whichever table the concept's domain routes it to.
         for metric_key in set(s.metric_key for s in samples):
-            concept = loinc_concepts.get(metric_key)
+            concept = metric_concepts.get(metric_key)
             if concept is None:
                 continue
-            if metric_key == 'sleep_duration':
+            if _is_observation(concept):
                 existing_rows = Observation.objects.filter(
                     person=person,
                     observation_concept=concept,
@@ -3656,10 +3696,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         pending_measurements = []
         pending_observations = []
         duplicates_skipped = 0
+        unmapped_samples = 0
+        unmapped_metrics = set()
 
         for sample in samples:
-            concept = loinc_concepts.get(sample.metric_key)
+            concept = metric_concepts.get(sample.metric_key)
             if concept is None:
+                unmapped_samples += 1
+                unmapped_metrics.add(sample.metric_key)
                 continue
 
             # Artifact filter
@@ -3674,8 +3718,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 continue
             existing_keys.add(dedup_key)
 
-            if sample.metric_key == 'sleep_duration':
-                # Sleep goes into Observation table
+            unit = unit_map.get(sample.metric_key)
+            source_code = WEARABLE_CONCEPT_CODE[sample.metric_key]
+
+            if _is_observation(concept):
                 obs = Observation(
                     observation_id=0,  # allocated below
                     person=person,
@@ -3683,31 +3729,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     observation_date=sample.date,
                     observation_type_concept=type_concept,
                     value_as_number=sample.value,
-                    observation_source_value=WEARABLE_LOINC[sample.metric_key],
-                    unit_source_value='h',
+                    observation_source_value=source_code,
+                    unit_source_value=unit,
                 )
                 obs._skip_patient_record_refresh = True
                 pending_observations.append(obs)
             else:
-                # All other metrics go into Measurement table
-                unit_map = {
-                    'steps': '/d',
-                    'active_minutes': 'min',
-                    'resting_hr': '/min',
-                    'hrv_sdnn': 'ms',
-                    'spo2': '%',
-                    'respiratory_rate': '/min',
-                    'vo2_max': 'mL/kg/min',
-                    'distance': 'km',
-                    'walking_speed': 'km/hr',
-                    'walking_step_length': 'cm',
-                    'walking_double_support_pct': '%',
-                    'walking_hr_avg': '/min',
-                    'flights_climbed': '{flights}',
-                    'active_energy': 'kcal',
-                    'basal_energy': 'kcal',
-                    'body_mass': 'kg',
-                }
                 m = Measurement(
                     measurement_id=0,  # allocated below
                     person=person,
@@ -3715,8 +3742,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     measurement_date=sample.date,
                     measurement_type_concept=type_concept,
                     value_as_number=sample.value,
-                    measurement_source_value=WEARABLE_LOINC[sample.metric_key],
-                    unit_source_value=unit_map.get(sample.metric_key),
+                    measurement_source_value=source_code,
+                    unit_source_value=unit,
                 )
                 m._skip_patient_record_refresh = True
                 pending_measurements.append(m)
@@ -3761,13 +3788,23 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception:
             logger.exception('wearable_upload_history_save_failed person_id=%s', person.person_id)
 
+        if unmapped_samples:
+            logger.warning(
+                'wearable_upload_unmapped device=%s person_id=%s samples=%d metrics=%s',
+                device_type, person.person_id, unmapped_samples, sorted(unmapped_metrics),
+            )
+
         logger.info(
-            'wearable_upload_complete device=%s person_id=%s created=%d duplicates=%d',
-            device_type, person.person_id, created_count, duplicates_skipped,
+            'wearable_upload_complete device=%s person_id=%s created=%d duplicates=%d unmapped=%d',
+            device_type, person.person_id, created_count, duplicates_skipped, unmapped_samples,
         )
+        # unmapped_* is reported so a missing concept is distinguishable from
+        # "the device exported no data for this metric" — previously identical.
         return Response({
             'samples_created': created_count,
             'duplicates_skipped': duplicates_skipped,
+            'unmapped_samples': unmapped_samples,
+            'unmapped_metrics': sorted(unmapped_metrics),
         })
 
     @action(detail=False, methods=['get'], url_path='wearable-uploads',
@@ -3797,8 +3834,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             permission_classes=[IsAuthenticated])
     def delete_wearable_upload(self, request, upload_id=None):
         """Delete a wearable upload and its associated Measurement/Observation rows."""
-        from omop_core.services.mappings import WEARABLE_LOINC
-        from omop_core.services.concept_cache import concept_by_loinc as _cc_by_loinc
+        from omop_core.services.mappings import WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB
+        from omop_core.services.concept_cache import concept_by_vocab as _cc_by_vocab
 
         patient_user = getattr(request.user, 'patient_user', None)
         if not patient_user:
@@ -3819,16 +3856,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if not metric_key or not date_str or value is None:
                 continue
 
-            loinc_code = WEARABLE_LOINC.get(metric_key)
-            if not loinc_code:
+            concept_code = WEARABLE_CONCEPT_CODE.get(metric_key)
+            if not concept_code:
                 continue
-            concept = _cc_by_loinc(loinc_code)
+            concept = _cc_by_vocab(WEARABLE_CONCEPT_VOCAB[metric_key], concept_code)
             if not concept:
                 continue
 
             sample_date = _date.fromisoformat(date_str)
 
-            if metric_key == 'sleep_duration':
+            # Route by the concept's domain, matching how upload_wearable wrote it.
+            if concept.domain_id == 'Observation':
                 count, _ = Observation.objects.filter(
                     person=person,
                     observation_concept=concept,

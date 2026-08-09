@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 class WearableSample(NamedTuple):
     """A single daily metric extracted from a wearable data file."""
-    metric_key: str   # one of WEARABLE_LOINC keys
+    metric_key: str   # one of WEARABLE_CONCEPT_CODE keys
     date: date
     value: float
 
