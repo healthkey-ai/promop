@@ -87,26 +87,50 @@ CONCEPT_TREATMENT_REGIMEN = 32531     # Treatment Regimen (episode concept)
 CONCEPT_DRUG_EXPOSURE_FIELD = 1147094  # drug_exposure_id field concept (EpisodeEvent)
 
 
-# Wearable metric LOINC codes → PatientRecord field (for 30-day aggregation)
-WEARABLE_LOINC = {
-    'steps':              '55423-8',   # Number of steps in 24 hours
-    'active_minutes':     '77592-4',   # Moderate-vigorous physical activity duration
-    'resting_hr':         '40443-4',   # Heart rate -- resting
-    'hrv_sdnn':           '80404-7',   # Heart rate variability SDNN
-    'spo2':               '59408-5',   # Oxygen saturation by pulse oximetry
+# Wearable metric → controlled-vocabulary concept_code.
+#
+# Most entries are LOINC. Four metrics have no LOINC equivalent and are minted
+# locally under the HK-Wearable vocabulary (see WEARABLE_CONCEPT_VOCAB), so this
+# map is NOT LOINC-only despite most of its contents.
+#
+# Every code here is verified to resolve to a concept whose meaning matches the
+# metric. Do not add an entry without checking the concept_name in Athena — four
+# codes in the original version resolved to BMI and body-fat-percentage concepts.
+WEARABLE_CONCEPT_CODE = {
+    'steps':              '55423-8',   # Number of steps in unspecified time Pedometer
+    'active_minutes':     '55411-3',   # Exercise duration
+    'resting_hr':         '40443-4',   # Heart rate --resting
+    'hrv_sdnn':           '80404-7',   # R-R interval.standard deviation (HRV SDNN)
+    'spo2':               '59408-5',   # Oxygen saturation in Arterial blood by Pulse oximetry
     'respiratory_rate':   '9279-1',    # Respiratory rate
     'sleep_duration':     '93832-4',   # Sleep duration
-    'vo2_max':            '94122-9',   # VO2 max (mL/kg/min)
-    'distance':           '41953-1',   # Walking distance
-    'walking_speed':      '41909-3',   # Gait speed
-    'walking_step_length': '96341-8',  # Step length
-    'walking_double_support_pct': '96343-4',  # Double support time percent
-    'walking_hr_avg':     '89270-3',   # Heart rate during walking
-    'flights_climbed':    '96340-0',   # Floors ascended
-    'active_energy':      '55424-6',   # Calories burned in exercise
-    'basal_energy':       '41982-0',   # Basal energy expenditure
+    'vo2_max':            '94122-9',   # Oxygen consumption (VO2)/Body weight
+    'distance':           '41953-1',   # Walking distance 24 hour Calculated
+    'walking_speed':      '41957-2',   # Walking speed 24 hour mean Calculated
+    'walking_step_length': 'HK-WEAR-STEP-LENGTH',        # no LOINC equivalent
+    'walking_double_support_pct': 'HK-WEAR-DBL-SUPPORT',  # no LOINC equivalent
+    'walking_hr_avg':     'HK-WEAR-WALK-HR',             # no LOINC equivalent
+    'flights_climbed':    '100304-5',  # Flights climbed [#] Reporting Period
+    'active_energy':      '93819-1',   # Calories burned in unspecified time --during activity
+    'basal_energy':       'HK-WEAR-BASAL-ENERGY',        # no LOINC equivalent
     'body_mass':          '29463-7',   # Body weight
 }
+
+# Vocabulary each code above belongs to. Concept resolution must be scoped by
+# (vocabulary_id, concept_code) — a bare concept_code is ambiguous, since 852
+# codes are reused across vocabularies.
+WEARABLE_CONCEPT_VOCAB = {
+    metric: ('HK-Wearable' if code.startswith('HK-') else 'LOINC')
+    for metric, code in WEARABLE_CONCEPT_CODE.items()
+}
+
+# Metrics whose concept is Observation-domain and therefore belong in the
+# `observation` table rather than `measurement`. This mirrors the domain_id of
+# the concepts above and exists for tests and fixtures; the runtime write path
+# reads concept.domain_id directly so it stays correct if a code changes.
+WEARABLE_OBSERVATION_METRICS = frozenset({
+    'steps', 'active_minutes', 'sleep_duration', 'flights_climbed',
+})
 
 # Artifact-filter bounds: readings outside [lo, hi] are discarded before aggregation
 WEARABLE_ARTIFACT_BOUNDS = {

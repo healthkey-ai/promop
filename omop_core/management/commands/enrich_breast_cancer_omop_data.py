@@ -48,7 +48,7 @@ from omop_core.models import (
     Domain, ConceptClass, DrugExposure,
 )
 from omop_core.services.mappings import (
-    WEARABLE_LOINC, WEARABLE_MIN_VALID_DAYS, CONCEPT_EHR_TYPE, CONCEPT_GENERIC_LAB,
+    WEARABLE_CONCEPT_CODE, WEARABLE_MIN_VALID_DAYS, CONCEPT_EHR_TYPE, CONCEPT_GENERIC_LAB,
 )
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.services.patient_record_service import refresh_patient_record
@@ -426,7 +426,7 @@ class Command(BaseCommand):
         # and provides an early abort if any required concept is missing.
         self._write_progress('Pre-fetching wearable LOINC concepts...')
         wearable_concepts = {}
-        for metric_key, loinc_code in WEARABLE_LOINC.items():
+        for metric_key, loinc_code in WEARABLE_CONCEPT_CODE.items():
             concept = Concept.objects.filter(concept_code=loinc_code).first()
             if concept is None:
                 raise CommandError(
@@ -851,7 +851,7 @@ class Command(BaseCommand):
         measurements_to_create = []
         observations_to_create = []
 
-        for metric_key, loinc_code in WEARABLE_LOINC.items():
+        for metric_key, loinc_code in WEARABLE_CONCEPT_CODE.items():
             if metric_key == 'sleep_duration':
                 continue
 

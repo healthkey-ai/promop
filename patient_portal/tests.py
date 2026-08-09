@@ -9639,7 +9639,7 @@ class WearablePatientRecordTest(TestCase):
     def setUp(self):
         import datetime
         from omop_core.models import Concept, Vocabulary, Domain, ConceptClass
-        from omop_core.services.mappings import WEARABLE_LOINC
+        from omop_core.services.mappings import WEARABLE_CONCEPT_CODE
 
         self.today = datetime.date.today()
 
@@ -9664,7 +9664,7 @@ class WearablePatientRecordTest(TestCase):
 
         base_id = 9_900_000
         self.concepts = {}
-        for i, (key, loinc_code) in enumerate(WEARABLE_LOINC.items()):
+        for i, (key, loinc_code) in enumerate(WEARABLE_CONCEPT_CODE.items()):
             c, _ = Concept.objects.get_or_create(
                 concept_id=base_id + i,
                 defaults={
@@ -15604,33 +15604,49 @@ class WearableUploadEndpointTest(TestCase):
 
         _make_vocab_fixtures()
 
-        # Create LOINC concepts for wearable metrics — must use vocabulary_id='LOINC'
-        # so concept_by_loinc() can find them.
-        from omop_core.services.mappings import WEARABLE_LOINC
+        # Create concepts for wearable metrics in the vocabulary and domain each
+        # metric actually uses — most are LOINC, four are locally-minted
+        # HK-Wearable, and four are Observation-domain. upload_wearable resolves
+        # by (vocabulary_id, concept_code) and routes on concept.domain_id, so a
+        # fixture that flattens either would not exercise the real behaviour.
+        from omop_core.services.mappings import (
+            WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB, WEARABLE_OBSERVATION_METRICS,
+        )
         from omop_core.services.concept_cache import concept_cache_clear
         concept_cache_clear()
 
-        loinc_vocab, _ = Vocabulary.objects.get_or_create(
-            vocabulary_id='LOINC',
-            defaults={'vocabulary_name': 'LOINC', 'vocabulary_concept_id': 0},
-        )
+        vocabs = {}
+        for vocabulary_id in set(WEARABLE_CONCEPT_VOCAB.values()):
+            vocabs[vocabulary_id], _ = Vocabulary.objects.get_or_create(
+                vocabulary_id=vocabulary_id,
+                defaults={'vocabulary_name': vocabulary_id, 'vocabulary_concept_id': 0},
+            )
         cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
-        domain_m = Domain.objects.get(domain_id='Measurement')
+        domains = {}
+        for domain_id in ('Measurement', 'Observation'):
+            domains[domain_id], _ = Domain.objects.get_or_create(
+                domain_id=domain_id,
+                defaults={'domain_name': domain_id, 'domain_concept_id': 0},
+            )
         today = date.today()
         far_future = date(2099, 12, 31)
 
         cls.wearable_concepts = {}
         concept_id_base = 990000
-        for metric_key, loinc_code in WEARABLE_LOINC.items():
+        for metric_key, concept_code in WEARABLE_CONCEPT_CODE.items():
             concept_id_base += 1
+            domain_id = (
+                'Observation' if metric_key in WEARABLE_OBSERVATION_METRICS
+                else 'Measurement'
+            )
             c, _ = Concept.objects.get_or_create(
                 concept_id=concept_id_base,
                 defaults={
                     'concept_name': f'Wearable {metric_key}',
-                    'domain': domain_m,
-                    'vocabulary': loinc_vocab,
+                    'domain': domains[domain_id],
+                    'vocabulary': vocabs[WEARABLE_CONCEPT_VOCAB[metric_key]],
                     'concept_class': cc,
-                    'concept_code': loinc_code,
+                    'concept_code': concept_code,
                     'valid_start_date': today,
                     'valid_end_date': far_future,
                 },
@@ -15674,6 +15690,112 @@ class WearableUploadEndpointTest(TestCase):
         buf.seek(0)
         return buf
 
+    def _upload_apple(self, xml):
+        """Upload an Apple Health export and return the parsed JSON response."""
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        buf = self._make_apple_zip(xml)
+        uploaded = SimpleUploadedFile('export.zip', buf.read(), content_type='application/zip')
+        resp = self._client_as(self.identity).post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': uploaded, 'device_type': 'apple'},
+            format='multipart',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.data
+
+    def test_observation_domain_metrics_are_written_to_observation(self):
+        """Routing follows concept.domain_id, not a hard-coded metric list.
+
+        steps and flights_climbed are Observation-domain concepts; writing them
+        to `measurement` would contradict the concept's own domain and fail DQD
+        domain checks.
+        """
+        from omop_core.models import Measurement, Observation
+
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierStepCount"
+          startDate="2024-07-02 08:00:00 -0700"
+          endDate="2024-07-02 08:30:00 -0700" value="7200"/>
+  <Record type="HKQuantityTypeIdentifierFlightsClimbed"
+          startDate="2024-07-02 09:00:00 -0700"
+          endDate="2024-07-02 09:10:00 -0700" value="9"/>
+  <Record type="HKQuantityTypeIdentifierRestingHeartRate"
+          startDate="2024-07-02 06:00:00 -0700"
+          endDate="2024-07-02 06:00:00 -0700" value="61"/>
+</HealthData>
+"""
+        self._upload_apple(xml)
+
+        steps_concept = self.wearable_concepts['steps']
+        flights_concept = self.wearable_concepts['flights_climbed']
+        rhr_concept = self.wearable_concepts['resting_hr']
+
+        self.assertTrue(
+            Observation.objects.filter(
+                person=self.person, observation_concept=steps_concept).exists(),
+            'steps is an Observation-domain concept and must land in observation')
+        self.assertFalse(
+            Measurement.objects.filter(
+                person=self.person, measurement_concept=steps_concept).exists(),
+            'steps must not be written to measurement')
+        self.assertTrue(
+            Observation.objects.filter(
+                person=self.person, observation_concept=flights_concept).exists())
+
+        # resting_hr is Measurement-domain and must still go to measurement.
+        self.assertTrue(
+            Measurement.objects.filter(
+                person=self.person, measurement_concept=rhr_concept).exists())
+        self.assertFalse(
+            Observation.objects.filter(
+                person=self.person, observation_concept=rhr_concept).exists())
+
+    def test_locally_minted_metric_resolves_in_hk_vocabulary(self):
+        """HK-Wearable metrics resolve by (vocabulary_id, concept_code).
+
+        walking_step_length has no LOINC equivalent, so it is minted under
+        HK-Wearable. A LOINC-scoped lookup would miss it and drop the sample.
+        """
+        from omop_core.models import Measurement
+
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierWalkingStepLength"
+          startDate="2024-07-03 08:00:00 -0700"
+          endDate="2024-07-03 08:00:00 -0700" value="72"/>
+</HealthData>
+"""
+        data = self._upload_apple(xml)
+        self.assertEqual(data['unmapped_samples'], 0, data)
+        self.assertTrue(
+            Measurement.objects.filter(
+                person=self.person,
+                measurement_concept=self.wearable_concepts['walking_step_length'],
+            ).exists())
+
+    def test_unresolvable_metric_is_reported_not_silently_dropped(self):
+        """A missing concept must be distinguishable from "no data exported"."""
+        from omop_core.models import Concept
+        from omop_core.services.concept_cache import concept_cache_clear
+
+        Concept.objects.filter(
+            concept_id=self.wearable_concepts['vo2_max'].concept_id).delete()
+        concept_cache_clear()
+        self.addCleanup(concept_cache_clear)
+
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierVO2Max"
+          startDate="2024-07-04 08:00:00 -0700"
+          endDate="2024-07-04 08:00:00 -0700" value="34.5"/>
+</HealthData>
+"""
+        data = self._upload_apple(xml)
+        self.assertEqual(data['samples_created'], 0)
+        self.assertEqual(data['unmapped_samples'], 1, data)
+        self.assertIn('vo2_max', data['unmapped_metrics'])
+
     def test_upload_apple_health_creates_measurements(self):
         """Uploading an Apple Health zip creates Measurement rows."""
         xml = """<?xml version="1.0" encoding="UTF-8"?>
@@ -15710,10 +15832,21 @@ class WearableUploadEndpointTest(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertGreaterEqual(resp.data['samples_created'], 2)
 
-        # Verify Measurement rows created
-        steps_concept = self.wearable_concepts['steps']
-        steps_rows = Measurement.objects.filter(person=self.person, measurement_concept=steps_concept)
-        self.assertTrue(steps_rows.exists())
+        # steps is an Observation-domain concept, so it lands in `observation`;
+        # resting_hr is Measurement-domain and lands in `measurement`. Rows are
+        # routed by concept.domain_id — see
+        # test_observation_domain_metrics_are_written_to_observation.
+        from omop_core.models import Observation
+        self.assertTrue(
+            Observation.objects.filter(
+                person=self.person,
+                observation_concept=self.wearable_concepts['steps'],
+            ).exists())
+        self.assertTrue(
+            Measurement.objects.filter(
+                person=self.person,
+                measurement_concept=self.wearable_concepts['resting_hr'],
+            ).exists())
 
     def test_upload_deduplication(self):
         """Uploading the same file twice does not create duplicate rows."""

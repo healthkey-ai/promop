@@ -908,7 +908,7 @@ class Command(BaseCommand):
     def _wearable_obs(self, p, today):
         """7 days of synthetic daily wearable readings, correlated to ECOG.
 
-        Uses the exact LOINC codes that patient_record_service WEARABLE_LOINC
+        Uses the exact LOINC codes that patient_record_service WEARABLE_CONCEPT_CODE
         expects so _get_wearable_data() can aggregate them automatically.
         """
         pid = p['id']

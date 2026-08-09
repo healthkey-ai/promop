@@ -23,7 +23,7 @@ from omop_core.models import (
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
 from omop_core.services.mappings import (
-    WEARABLE_LOINC, WEARABLE_ARTIFACT_BOUNDS, WEARABLE_MIN_VALID_DAYS,
+    WEARABLE_CONCEPT_CODE, WEARABLE_ARTIFACT_BOUNDS, WEARABLE_MIN_VALID_DAYS,
     WEARABLE_TREND_IMPROVING_PCT, WEARABLE_TREND_DECLINING_PCT,
 )
 from omop_core.services.lot_regimens import (
@@ -2488,8 +2488,8 @@ def _get_wearable_data(person: Person) -> dict:
             qs = qs.filter(measurement_date__gte=date_filter)
         return list(
             qs.filter(
-                models.Q(measurement_concept__concept_code__in=WEARABLE_LOINC.values())
-                | models.Q(measurement_source_value__in=WEARABLE_LOINC.values())
+                models.Q(measurement_concept__concept_code__in=WEARABLE_CONCEPT_CODE.values())
+                | models.Q(measurement_source_value__in=WEARABLE_CONCEPT_CODE.values())
             )
             .values_list(
                 'measurement_concept__concept_code',
@@ -2500,6 +2500,10 @@ def _get_wearable_data(person: Person) -> dict:
         )
 
     def _wearable_observations(date_filter=None):
+        # Several wearable concepts are Observation-domain (steps, active_minutes,
+        # sleep_duration, flights_climbed), so this must match every wearable code
+        # — not just sleep — and return the code alongside the value so rows are
+        # keyed identically to the Measurement rows below.
         qs = Observation.objects.filter(
             person=person,
             value_as_number__isnull=False,
@@ -2508,10 +2512,15 @@ def _get_wearable_data(person: Person) -> dict:
             qs = qs.filter(observation_date__gte=date_filter)
         return list(
             qs.filter(
-                models.Q(observation_concept__concept_code=WEARABLE_LOINC['sleep_duration'])
-                | models.Q(observation_source_value=WEARABLE_LOINC['sleep_duration'])
+                models.Q(observation_concept__concept_code__in=WEARABLE_CONCEPT_CODE.values())
+                | models.Q(observation_source_value__in=WEARABLE_CONCEPT_CODE.values())
             )
-            .values_list('observation_date', 'value_as_number')
+            .values_list(
+                'observation_concept__concept_code',
+                'observation_source_value',
+                'observation_date',
+                'value_as_number',
+            )
         )
 
     # Try recent data first; fall back to all data if nothing within 90 days
@@ -2528,16 +2537,19 @@ def _get_wearable_data(person: Person) -> dict:
     # unrelated concept_code (e.g. an unmapped source concept) yet a wearable
     # measurement_source_value — prefer whichever is a known wearable code so
     # the source_value fallback isn't shadowed by a present-but-unrelated concept.
-    _wearable_codes = set(WEARABLE_LOINC.values())
+    _wearable_codes = set(WEARABLE_CONCEPT_CODE.values())
     rows_by_code: dict[str, list[tuple[date, float]]] = {}
-    for concept_code, source_value, mdate, val in measurement_rows:
+    # Measurement and Observation rows are merged into one index keyed by code,
+    # so a metric is read the same way regardless of which table its concept's
+    # domain routed it to.
+    for concept_code, source_value, mdate, val in measurement_rows + observation_rows:
         code = concept_code if concept_code in _wearable_codes else source_value
         if code not in _wearable_codes:
             continue
         rows_by_code.setdefault(code, []).append((mdate, float(val)))
 
     def _metric_daily(metric_key):
-        loinc_code = WEARABLE_LOINC[metric_key]
+        loinc_code = WEARABLE_CONCEPT_CODE[metric_key]
         lo, hi = WEARABLE_ARTIFACT_BOUNDS[metric_key]
         daily: dict[date, list[float]] = {}
         for mdate, val in rows_by_code.get(loinc_code, []):
@@ -2562,15 +2574,8 @@ def _get_wearable_data(person: Person) -> dict:
     basal_energy_daily = _metric_daily('basal_energy')
     body_mass_daily = _metric_daily('body_mass')
 
-    sleep_daily: dict[date, list[float]] = {}
-    lo_s, hi_s = WEARABLE_ARTIFACT_BOUNDS['sleep_duration']
-    for odate, val in observation_rows:
-        fval = float(val)
-        if lo_s <= fval <= hi_s:
-            sleep_daily.setdefault(odate, []).append(fval)
-    for mdate, val in rows_by_code.get(WEARABLE_LOINC['sleep_duration'], []):
-        if lo_s <= val <= hi_s:
-            sleep_daily.setdefault(mdate, []).append(val)
+    # Sleep needs no special-casing now that observation rows are merged above.
+    sleep_daily = _metric_daily('sleep_duration')
 
     all_valid_days = sorted(
         steps_daily.keys() | active_daily.keys()
