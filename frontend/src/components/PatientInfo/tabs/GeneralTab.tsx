@@ -14,6 +14,7 @@ interface Props {
   editedName: string;
   onNameChange: (name: string) => void;
   onZipcodeChange: (zip: string) => void;
+  diseaseType?: 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'other';
 }
 
 function calculateAge(dateOfBirth: string): number | null {
@@ -26,7 +27,7 @@ function calculateAge(dateOfBirth: string): number | null {
   return age;
 }
 
-export default function GeneralTab({ formData, onChange, editedName, onNameChange, onZipcodeChange }: Props) {
+export default function GeneralTab({ formData, onChange, editedName, onNameChange, onZipcodeChange, diseaseType }: Props) {
   const { source: ecogSource }        = useVocabulary('ecog-status', 'code');
   const { source: karnofskySource }   = useVocabulary('karnofsky-score', 'code');
   const { source: diseaseSource }     = useVocabulary('disease', 'title');
@@ -114,11 +115,13 @@ export default function GeneralTab({ formData, onChange, editedName, onNameChang
             value={formData?.stage} options={STAGE_OPTIONS}
             onChange={onChange} vocabSource={cancerStageSource} />
 
-          <div className="sm:col-span-2">
-            <Field label="Histologic Type" name="histologic_type" type="select"
-              value={formData?.histologic_type} options={histOptions}
-              onChange={onChange} vocabSource={histologicSource} />
-          </div>
+          {(!diseaseType || diseaseType === 'breast' || diseaseType === 'other') && (
+            <div className="sm:col-span-2">
+              <Field label="Histologic Type" name="histologic_type" type="select"
+                value={formData?.histologic_type} options={histOptions}
+                onChange={onChange} vocabSource={histologicSource} />
+            </div>
+          )}
 
           <Field label="ECOG Performance Status" name="ecog_performance_status" type="select"
             value={formData?.ecog_performance_status} options={ECOG_OPTIONS}

@@ -594,7 +594,7 @@ export default function PatientDetail({
                     #{personId}
                   </span>
                   {typeof editedInfo?.disease === "string" && editedInfo.disease && (
-                    <span className="hidden shrink-0 items-center rounded-full border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 sm:inline-flex">
+                    <span className="inline-flex shrink-0 items-center rounded-full border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
                       {editedInfo.disease}
                     </span>
                   )}
@@ -676,6 +676,7 @@ export default function PatientDetail({
                     editedName={editedName}
                     onNameChange={handleNameChange}
                     onZipcodeChange={handleZipcodeChange}
+                    diseaseType={getDiseaseType()}
                   />
                 )}
                 {activeTab === 1 && (
