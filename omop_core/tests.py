@@ -2370,6 +2370,56 @@ class RemapWearableConceptsCommandTest(TestCase):
 
         self.assertTrue(Concept.objects.filter(concept_id=9001019).exists())
 
+    def test_apply_does_not_trigger_patient_record_refresh(self):
+        """The remap must not fire per-row PatientRecord re-derivations.
+
+        QuerySet.delete() sends post_delete per row, and omop_core/signals.py
+        turns every Measurement deletion into a full refresh_patient_record.
+        Unsuppressed, moving 78k rows on staging meant 78k complete patient
+        re-derivations inside the write transaction -- the run was still going
+        after 18 minutes and had to be killed. Derivation belongs to
+        `backfill_patient_records --all`, run once afterwards.
+
+        Asserting on call count rather than wall-clock: a slow test is a flaky
+        test, but a spurious refresh is unambiguous.
+        """
+        from omop_core.models import Concept
+
+        mint = self._mint(9001019, '55423-8')
+        for day in range(1, 11):
+            self._measurement(mint, 7000 + day, day=day)
+
+        with patch(
+            'omop_core.services.patient_record_service.refresh_patient_record'
+        ) as mock_refresh:
+            call_command('remap_wearable_concepts', '--apply', verbosity=0)
+
+        self.assertEqual(
+            mock_refresh.call_count, 0,
+            f'remap triggered {mock_refresh.call_count} PatientRecord refresh(es); '
+            f'derivation must be deferred to backfill_patient_records')
+
+    def test_apply_moves_rows_larger_than_one_chunk(self):
+        """Exercise the chunking boundary rather than a two-row happy path."""
+        from omop_core.management.commands import remap_wearable_concepts as cmd
+        from omop_core.models import Measurement, Observation
+
+        mint = self._mint(9001019, '55423-8')
+        for day in range(1, 16):
+            self._measurement(mint, 7000 + day, day=day)
+
+        with patch.object(cmd, 'CHUNK_SIZE', 4):
+            call_command('remap_wearable_concepts', '--apply', verbosity=0)
+
+        self.assertFalse(
+            Measurement.objects.filter(measurement_source_value='55423-8').exists())
+        moved = Observation.objects.filter(observation_source_value='55423-8')
+        self.assertEqual(moved.count(), 15, 'every row must survive chunked moves')
+        self.assertEqual(
+            sorted(float(o.value_as_number) for o in moved),
+            [float(7000 + d) for d in range(1, 16)],
+            'values must be preserved exactly across chunk boundaries')
+
     def test_metric_scope_does_not_touch_other_metrics(self):
         from omop_core.models import Measurement
 

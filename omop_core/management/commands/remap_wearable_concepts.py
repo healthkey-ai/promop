@@ -30,6 +30,7 @@ from omop_core.models import Concept, Measurement, Observation
 from omop_core.services.mappings import (
     WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB,
 )
+from omop_core.signals import suppress_patient_record_refresh
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,10 @@ RETIRED_MINT_BY_METRIC = {
     'sleep_duration':   9001024,
 }
 RETIRED_MINT_IDS = frozenset(RETIRED_MINT_BY_METRIC.values())
+
+# Rows moved per round-trip. Bounds both peak memory and the size of the
+# `id IN (...)` delete clause — a single 36k-element IN list is its own problem.
+CHUNK_SIZE = 2000
 
 # Pre-#413 concept_code for each metric, where it differed from the corrected
 # one. Only codes that are UNIQUELY wearable appear here.
@@ -108,11 +113,31 @@ class Command(BaseCommand):
                 'a partial remap can leave rows still pointing at them.\n'))
 
         if apply_changes:
-            with transaction.atomic():
+            # Two things matter here, both learned the hard way on staging.
+            #
+            # suppress_patient_record_refresh: QuerySet.delete() fires post_delete
+            # per row, and omop_core/signals.py:117 turns every Measurement
+            # deletion into a full refresh_patient_record for that person. Without
+            # this, moving ~78k rows triggers ~78k complete patient re-derivations
+            # inside the write transaction — hours of redundant work computing
+            # summaries from half-migrated data. Derivation is the job of
+            # `backfill_patient_records --all`, run once afterwards.
+            #
+            # Per-metric transactions: a single transaction over the whole remap
+            # means any interruption discards everything. Committing per metric
+            # keeps finished metrics and lets a re-run resume, at the cost of the
+            # run being non-atomic overall — acceptable because each metric is
+            # independent and the command is idempotent.
+            with suppress_patient_record_refresh():
                 for metric in metrics:
-                    self._remap_metric(metric, totals, apply_changes=True)
+                    with transaction.atomic():
+                        self._remap_metric(metric, totals, apply_changes=True)
                 if delete_mints:
-                    self._delete_retired_mints(totals, apply_changes=True)
+                    with transaction.atomic():
+                        self._delete_retired_mints(totals, apply_changes=True)
+            self.stdout.write(self.style.WARNING(
+                '\nPatientRecord summaries were NOT refreshed. Run '
+                '`manage.py backfill_patient_records --all` to re-derive them.'))
         else:
             # A dry run only counts. Doing the work inside a transaction and
             # rolling back would be correct but unusably slow — ~78k rows move
@@ -259,62 +284,62 @@ class Command(BaseCommand):
     def _move_measurements_to_observation(self, qs, target, new_code):
         from omop_core.services.pk import next_pk_batch as _next_pk_batch
 
-        rows = list(qs.values(
-            'measurement_id', 'person_id', 'measurement_date',
-            'measurement_type_concept_id', 'value_as_number', 'unit_source_value'))
-        if not rows:
-            return 0
+        moved = 0
+        for rows in _chunked(qs.values(
+                'measurement_id', 'person_id', 'measurement_date',
+                'measurement_type_concept_id', 'value_as_number',
+                'unit_source_value').iterator(chunk_size=CHUNK_SIZE), CHUNK_SIZE):
+            new_ids = _next_pk_batch(Observation, 'observation_id', len(rows))
+            pending = []
+            for row, oid in zip(rows, new_ids):
+                obs = Observation(
+                    observation_id=oid,
+                    person_id=row['person_id'],
+                    observation_concept=target,
+                    observation_date=row['measurement_date'],
+                    observation_type_concept_id=row['measurement_type_concept_id'],
+                    value_as_number=row['value_as_number'],
+                    observation_source_value=new_code,
+                    unit_source_value=row['unit_source_value'],
+                )
+                obs._skip_patient_record_refresh = True
+                pending.append(obs)
 
-        new_ids = _next_pk_batch(Observation, 'observation_id', len(rows))
-        pending = []
-        for row, oid in zip(rows, new_ids):
-            obs = Observation(
-                observation_id=oid,
-                person_id=row['person_id'],
-                observation_concept=target,
-                observation_date=row['measurement_date'],
-                observation_type_concept_id=row['measurement_type_concept_id'],
-                value_as_number=row['value_as_number'],
-                observation_source_value=new_code,
-                unit_source_value=row['unit_source_value'],
-            )
-            obs._skip_patient_record_refresh = True
-            pending.append(obs)
-
-        Observation.objects.bulk_create(pending)
-        Measurement.objects.filter(
-            measurement_id__in=[r['measurement_id'] for r in rows]).delete()
-        return len(pending)
+            Observation.objects.bulk_create(pending)
+            Measurement.objects.filter(
+                measurement_id__in=[r['measurement_id'] for r in rows]).delete()
+            moved += len(pending)
+        return moved
 
     def _move_observations_to_measurement(self, qs, target, new_code):
         from omop_core.services.pk import next_pk_batch as _next_pk_batch
 
-        rows = list(qs.values(
-            'observation_id', 'person_id', 'observation_date',
-            'observation_type_concept_id', 'value_as_number', 'unit_source_value'))
-        if not rows:
-            return 0
+        moved = 0
+        for rows in _chunked(qs.values(
+                'observation_id', 'person_id', 'observation_date',
+                'observation_type_concept_id', 'value_as_number',
+                'unit_source_value').iterator(chunk_size=CHUNK_SIZE), CHUNK_SIZE):
+            new_ids = _next_pk_batch(Measurement, 'measurement_id', len(rows))
+            pending = []
+            for row, mid in zip(rows, new_ids):
+                m = Measurement(
+                    measurement_id=mid,
+                    person_id=row['person_id'],
+                    measurement_concept=target,
+                    measurement_date=row['observation_date'],
+                    measurement_type_concept_id=row['observation_type_concept_id'],
+                    value_as_number=row['value_as_number'],
+                    measurement_source_value=new_code,
+                    unit_source_value=row['unit_source_value'],
+                )
+                m._skip_patient_record_refresh = True
+                pending.append(m)
 
-        new_ids = _next_pk_batch(Measurement, 'measurement_id', len(rows))
-        pending = []
-        for row, mid in zip(rows, new_ids):
-            m = Measurement(
-                measurement_id=mid,
-                person_id=row['person_id'],
-                measurement_concept=target,
-                measurement_date=row['observation_date'],
-                measurement_type_concept_id=row['observation_type_concept_id'],
-                value_as_number=row['value_as_number'],
-                measurement_source_value=new_code,
-                unit_source_value=row['unit_source_value'],
-            )
-            m._skip_patient_record_refresh = True
-            pending.append(m)
-
-        Measurement.objects.bulk_create(pending)
-        Observation.objects.filter(
-            observation_id__in=[r['observation_id'] for r in rows]).delete()
-        return len(pending)
+            Measurement.objects.bulk_create(pending)
+            Observation.objects.filter(
+                observation_id__in=[r['observation_id'] for r in rows]).delete()
+            moved += len(pending)
+        return moved
 
 
 def _wearable_row_filter(table, mint_id, old_codes):
@@ -336,3 +361,15 @@ def _wearable_row_filter(table, mint_id, old_codes):
     if old_codes:
         q |= Q(**{f'{source_field}__in': old_codes})
     return q
+
+
+def _chunked(iterable, size):
+    """Yield lists of at most `size` items from `iterable`."""
+    batch = []
+    for item in iterable:
+        batch.append(item)
+        if len(batch) >= size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
