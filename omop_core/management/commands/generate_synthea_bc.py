@@ -375,7 +375,7 @@ _BC_WEARABLE_RANGES = {
 
 _BC_WEARABLE_CODES = {
     'steps': '55423-8',
-    'active_minutes': '77592-4',
+    'active_minutes': '55411-3',
     'resting_hr': '40443-4',
     'hrv_sdnn': '80404-7',
     'spo2': '59408-5',

@@ -908,8 +908,11 @@ class Command(BaseCommand):
     def _wearable_obs(self, p, today):
         """7 days of synthetic daily wearable readings, correlated to ECOG.
 
-        Uses the exact LOINC codes that patient_record_service WEARABLE_CONCEPT_CODE
-        expects so _get_wearable_data() can aggregate them automatically.
+        Uses the exact concept codes in WEARABLE_CONCEPT_CODE so
+        _get_wearable_data() can aggregate them automatically. Codes must be kept
+        in step with that map: active_minutes moved from 77592-4 (which is the
+        IPAQ survey item, not a measured duration) to 55411-3 in #413, and data
+        emitted under a stale code is silently discarded by the read path.
         """
         pid = p['id']
         ecog = min(p['ecog'], 4)
@@ -924,7 +927,7 @@ class Command(BaseCommand):
              [7000, 5500, 3000, 1500, 600],
              [10000, 8000, 5000, 2500, 1200],
              '{steps}', 'activity'),
-            ('77592-4', 'Moderate-vigorous physical activity',
+            ('55411-3', 'Exercise duration',
              [20, 10, 5, 0, 0],
              [60, 40, 20, 10, 5],
              'min', 'activity'),

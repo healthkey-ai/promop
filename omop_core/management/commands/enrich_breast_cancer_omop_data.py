@@ -48,7 +48,8 @@ from omop_core.models import (
     Domain, ConceptClass, DrugExposure,
 )
 from omop_core.services.mappings import (
-    WEARABLE_CONCEPT_CODE, WEARABLE_MIN_VALID_DAYS, CONCEPT_EHR_TYPE, CONCEPT_GENERIC_LAB,
+    WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB, WEARABLE_MIN_VALID_DAYS,
+    CONCEPT_EHR_TYPE, CONCEPT_GENERIC_LAB,
 )
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.services.patient_record_service import refresh_patient_record
@@ -426,11 +427,17 @@ class Command(BaseCommand):
         # and provides an early abort if any required concept is missing.
         self._write_progress('Pre-fetching wearable LOINC concepts...')
         wearable_concepts = {}
-        for metric_key, loinc_code in WEARABLE_CONCEPT_CODE.items():
-            concept = Concept.objects.filter(concept_code=loinc_code).first()
+        # Scope by (vocabulary_id, concept_code): a bare concept_code is
+        # ambiguous — 852 codes are reused across vocabularies — and four
+        # wearable metrics live in HK-Wearable rather than LOINC.
+        for metric_key, concept_code in WEARABLE_CONCEPT_CODE.items():
+            concept = Concept.objects.filter(
+                vocabulary_id=WEARABLE_CONCEPT_VOCAB[metric_key],
+                concept_code=concept_code,
+            ).first()
             if concept is None:
                 raise CommandError(
-                    f'Required wearable LOINC concept {loinc_code!r} ({metric_key}) '
+                    f'Required wearable concept {concept_code!r} ({metric_key}) '
                     f'not found in Concept table. Run seed_omop_concepts first.'
                 )
             wearable_concepts[metric_key] = concept
@@ -851,11 +858,23 @@ class Command(BaseCommand):
         measurements_to_create = []
         observations_to_create = []
 
-        for metric_key, loinc_code in WEARABLE_CONCEPT_CODE.items():
-            if metric_key == 'sleep_duration':
+        # Route by the concept's domain, not by a hard-coded "everything except
+        # sleep is a Measurement" rule. steps, active_minutes, sleep_duration and
+        # flights_climbed are Observation-domain; writing them to measurement
+        # both violates the CDM's domain routing and, because the read path now
+        # merges both tables, double-counts against genuine rows already in
+        # observation.
+        for metric_key, concept_code in WEARABLE_CONCEPT_CODE.items():
+            concept = wearable_concepts[metric_key]  # pre-fetched — no DB query here
+            if concept.domain_id == 'Observation':
+                continue
+            # Only metrics with a defined synthetic range are generated.
+            # WEARABLE_CONCEPT_CODE grew from 7 to 17 metrics in #413 without
+            # _WEARABLE_RANGES following, so indexing it unguarded raises
+            # KeyError on the first ungenerated metric.
+            if metric_key not in _WEARABLE_RANGES:
                 continue
 
-            concept = wearable_concepts[metric_key]  # pre-fetched — no DB query here
             existing_days = set(
                 Measurement.objects.filter(
                     person=person, measurement_concept=concept,
@@ -882,27 +901,38 @@ class Command(BaseCommand):
                     value_as_number=value,
                 ))
 
-        sleep_concept = wearable_concepts['sleep_duration']  # pre-fetched — no DB query here
-        existing_sleep_days = set(
-            Observation.objects.filter(
-                person=person, observation_concept=sleep_concept,
-            ).values_list('observation_date', flat=True)
-        )
-        if len(existing_sleep_days) < WEARABLE_MIN_VALID_DAYS:
-            lo, hi = _WEARABLE_RANGES['sleep_duration']
+        for metric_key, concept_code in WEARABLE_CONCEPT_CODE.items():
+            concept = wearable_concepts[metric_key]  # pre-fetched — no DB query here
+            if concept.domain_id != 'Observation':
+                continue
+            if metric_key not in _WEARABLE_RANGES:
+                continue
+
+            existing_days = set(
+                Observation.objects.filter(
+                    person=person, observation_concept=concept,
+                ).values_list('observation_date', flat=True)
+            )
+            if len(existing_days) >= WEARABLE_MIN_VALID_DAYS:
+                continue
+
+            lo, hi = _WEARABLE_RANGES[metric_key]
+            is_float = metric_key in ('hrv_sdnn', 'spo2', 'sleep_duration')
             for day_offset in range(_WEARABLE_DAYS):
                 d = today - timedelta(days=day_offset)
-                if d in existing_sleep_days:
+                if d in existing_days:
                     continue
                 created += 1
                 if dry_run:
                     continue
+                value = (round(random.uniform(lo, hi), 1) if is_float
+                         else random.randint(lo, hi))
                 observations_to_create.append(Observation(
                     person=person,
-                    observation_concept=sleep_concept,
+                    observation_concept=concept,
                     observation_date=d,
                     observation_type_concept_id=ehr_type_concept_id,
-                    value_as_number=round(random.uniform(lo, hi), 1),
+                    value_as_number=value,
                 ))
 
         if measurements_to_create:
