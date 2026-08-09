@@ -152,10 +152,13 @@ The read path (`patient_record_service._get_wearable_data`, `:2473`) matches on 
 > **Environments audited.** All findings below were verified against **staging**
 > (`ctomop_dev`, `promop-staging.onrender.com`, full Athena load: 1,979,424 concepts /
 > 277,790 LOINC rows) and against local `promop_dev` (partial `seed_omop_concepts` set only).
-> **Production was not reachable and has not been audited** — `.env` carries only the staging
-> `DATABASE_URL`, and CLAUDE.md's Database Selection table is stale (it references an undefined
-> `STAGING_DATABASE_URL` and a production host that does not match). Prod may not yet have the
-> `concept.source` column. Re-verify before acting on anything here.
+> Staging is the reference environment for this work. Production trails the `dev` branch by a
+> long way and is reconciled by a separate `dev` → `main` merge; it is out of scope here and is
+> not a prerequisite for any fix below.
+>
+> Note that CLAUDE.md's Database Selection table is stale: it references a `STAGING_DATABASE_URL`
+> that is not defined in `.env`, and a production host that does not match the one `DATABASE_URL`
+> actually points at — which is staging (`ctomop_dev`).
 
 ### Gap 1 — four LOINC codes resolve to unrelated concepts (blocking)
 
