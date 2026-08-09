@@ -61,6 +61,11 @@ metric key; the LOINC code is the join point between the two device adapters.
 | `basal_energy` | 41982-0 | measurement | `kcal` | sum | `HKQuantityTypeIdentifierBasalEnergyBurned` | `monitoring_info.resting_metabolic_rate` |
 | `body_mass` | 29463-7 | measurement | `kg` | mean | `HKQuantityTypeIdentifierBodyMass` | *(no source)* |
 
+> ⚠️ **The codes above document what the code does today, not what is correct.** Four resolve to
+> unrelated concepts and three are not valid LOINC at all — see Gap 1 and Gap 1b. Do not copy
+> `walking_speed`, `walking_hr_avg`, `basal_energy`, `flights_climbed`, `walking_step_length`, or
+> `walking_double_support_pct` from this table into new work.
+
 ### Why one metric lands in `observation` and the rest in `measurement`
 
 `sleep_duration` is written to `observation`; everything else to `measurement`
@@ -144,19 +149,82 @@ The read path (`patient_record_service._get_wearable_data`, `:2473`) matches on 
 
 ## Gaps and proposed work
 
-### Gap 1 — 9 of 17 LOINC concepts are never seeded (blocking)
+> **Environments audited.** All findings below were verified against **staging**
+> (`ctomop_dev`, `promop-staging.onrender.com`, full Athena load: 1,979,424 concepts /
+> 277,790 LOINC rows) and against local `promop_dev` (partial `seed_omop_concepts` set only).
+> **Production was not reachable and has not been audited** — `.env` carries only the staging
+> `DATABASE_URL`, and CLAUDE.md's Database Selection table is stale (it references an undefined
+> `STAGING_DATABASE_URL` and a production host that does not match). Prod may not yet have the
+> `concept.source` column. Re-verify before acting on anything here.
 
-`seed_omop_concepts.py:270` seeds only six wearable concepts (9001019–9001024) plus `spo2` and
-`body_mass`, which resolve against Athena. The nine metrics added in commit `401956d` have no
-concept row. Verified against `promop_dev`:
+### Gap 1 — four LOINC codes resolve to unrelated concepts (blocking)
 
-```
-vo2_max 94122-9, distance 41953-1, walking_speed 41909-3, walking_step_length 96341-8,
-walking_double_support_pct 96343-4, walking_hr_avg 89270-3, flights_climbed 96340-0,
-active_energy 55424-6, basal_energy 41982-0          → *** MISSING ***
-```
+Where a full Athena vocabulary is loaded, 14 of 17 codes resolve — but four resolve to the
+**wrong concept**, so wearable data is filed under unrelated clinical meanings:
 
-This is not cosmetic. `views.py:3662` reads:
+| Metric | Code in `WEARABLE_LOINC` | What it actually is |
+|---|---|---|
+| `walking_speed` | 41909-3 | **Deprecated Body mass index (BMI)** — also `standard_concept=None` |
+| `walking_hr_avg` | 89270-3 | **Body mass index (BMI) [Ratio] Estimated** |
+| `basal_energy` | 41982-0 | **Percentage of body fat Measured** |
+| `active_energy` | 55424-6 | Calories burned in unspecified time **Pedometer** — approximate |
+
+This is worse than dropping the data: the rows look valid, and any query trusting
+`measurement_concept_id` reads walking speed and basal energy as BMI and body fat.
+
+Verified replacements: `walking_speed` → **41957-2** (Walking speed 24 hour mean Calculated,
+std=S) — same 419xx family as `distance` 41953-1, which is correct, suggesting a mis-picked
+neighbour; `flights_climbed` → **100304-5** (Flights climbed [#] Reporting Period, std=S).
+For `basal_energy` the only candidate is 50042-1 "Basal metabolic rate **index**", which may not
+be kcal/day — review before adopting.
+
+### Gap 1b — three codes are not valid LOINC, and minting must be quarantined
+
+`96340-0`, `96341-8`, `96343-4` do not exist in the loaded release. This is not a vocabulary
+vintage problem — 111 concepts in the `963xx` range are present, and searching LOINC for
+`step length` or `double support` returns nothing at all.
+
+Where a metric has no LOINC, the local mint **must** follow the project's quarantine convention
+(`omop_core/models.py:566`): `source='HealthKey'`, in an `HK-*` vocabulary, with an `HK-*`-shaped
+`concept_code`. A new `HK-Wearable` vocabulary is the right home for `walking_step_length`,
+`walking_double_support_pct`, and `walking_hr_avg`.
+
+**Never mint a real LOINC code under `vocabulary_id='LOINC'`.** Doing so creates a duplicate
+`(vocabulary_id, concept_code)` pair, and `concept_by_loinc` resolves duplicates arbitrarily
+(`concept_cache.py:39`, `.first()` with no ordering). All six existing wearable mints
+(9001019–9001024) already collide with genuine Athena concepts this way, and all 24 `900xxxx`
+mints are written `source=NULL` because `seed_omop_concepts._c()` has no `source` parameter.
+Tracked separately in **#415** — 115 duplicate pairs table-wide.
+
+### How to seed wearable concepts correctly
+
+Local dev and test databases have no Athena load, so the concepts must be seeded for ingestion to
+work there at all. The rule that keeps that safe:
+
+> **Seed the genuine Athena `concept_id`. Never invent a new one for a code Athena already owns.**
+
+`seed_omop_concepts` applies rows with `get_or_create(concept_id=..., defaults=row)` — keyed on
+`concept_id`. So a row seeded with the real id is *created* on a bare database and *matches the
+existing row* on an Athena-loaded one. No duplicate can arise, on any environment, by
+construction. These rows are genuine external concepts, so `source` correctly stays NULL.
+
+Minting a fresh `900xxxx` id for the same code is what produces the duplicate pair and the
+arbitrary resolution described in #415.
+
+| Metrics | Action |
+|---|---|
+| The 11 codes that are already correct | Seed the real Athena concept_id |
+| `walking_speed`, `flights_climbed` | Correct the code first (41957-2, 100304-5), then seed the real id |
+| `basal_energy` | Resolve the correct code first — 41982-0 is body-fat-percentage |
+| `walking_step_length`, `walking_double_support_pct`, `walking_hr_avg` | No LOINC exists — mint in `HK-Wearable` with `source='HealthKey'` and an `HK-*` concept_code |
+| Existing 9001019–9001024 | Retire; remap dependent `measurement`/`observation` FKs to the Athena ids |
+
+This also requires adding a `source` parameter to `_c()` (`seed_omop_concepts.py:94`), which
+currently cannot express `'HealthKey'` at all.
+
+### Gap 1c — unresolvable concepts are skipped silently
+
+`views.py:3661`:
 
 ```python
 concept = loinc_concepts.get(sample.metric_key)
@@ -164,19 +232,10 @@ if concept is None:
     continue
 ```
 
-Parsed samples for all nine are **silently discarded** — no row, no warning, no counter. The
-upload reports success and the `PatientRecord` columns stay null. On any database seeded only by
-`seed_omop_concepts`, the nine new metrics cannot be ingested at all.
-
-**Proposed:** extend the wearable block with concept_ids 9001025–9001033 (next free; the local
-block currently ends at 9001024), domain `Measurement`, vocabulary `LOINC`, concept_class
-`Clinical Observation`, standard_concept `S`. Prefer real Athena concept_ids where they exist —
-`spo2` and `body_mass` already resolve to genuine ones (40762499, 3025315) and should not be
-shadowed by local mints.
-
-Independently, the silent `continue` should log at WARNING and surface an
-`unmapped_metrics` count in the upload response, so a missing concept is visible rather than
-indistinguishable from "device exported no data".
+No log, no counter. On a database seeded only by `seed_omop_concepts` — which is every local dev
+and test database — nine metrics have no concept at all and are discarded while the upload still
+returns HTTP 200 with a success count. The failure is indistinguishable from "the device
+exported no data". This should log at WARNING and return an `unmapped_metrics` count.
 
 ### Gap 2 — `sleep_duration` domain contradicts its write target
 
@@ -184,9 +243,10 @@ Seeded as `domain_id='Measurement'` (`seed_omop_concepts.py:275`) but written to
 (`views.py:3677`). OMOP convention is that a concept's `domain_id` determines its table, so this
 row violates the CDM's own routing rule and will fail Achilles/DQD domain checks.
 
-**Proposed:** change the seeded `domain_id` to `Observation` and keep the write target. Requires
-a data migration for any existing rows only if the concept row itself is rewritten — the
-`observation` rows already sit in the right table.
+Genuine Athena 93832-4 (concept_id 1002368) carries `domain_id='Observation'`, which **confirms
+the write target is correct and the local seed is the wrong side**. Seeding the real concept_id
+per the recipe above fixes this automatically — the hand-written `Measurement` domain disappears
+along with the mint.
 
 ### Gap 3 — `unit_concept_id` is never populated
 
@@ -207,15 +267,20 @@ into `mappings.py`.
 ### Gap 4 — type concept 32883 is unverified
 
 `views.py:3625` uses concept 32883 with a comment reading "wearable device = 32883 / Patient
-self-report", falling back to 32856. Verified against `promop_dev`: **32883 does not exist in the
-concept table**, so every wearable row written there is currently typed 32856 — whose
-`concept_name` is literally `Lab` (vocabulary `Type Concept`). Wearable readings are being
-provenance-labelled as laboratory results.
+self-report", falling back to 32856. Both are wrong:
 
-The pairing of 32883 with "patient self-report" should be confirmed against Athena; a wearable
-reading is neither a lab result nor, strictly, self-reported. If a device-derived type concept
-exists it is the correct choice, it should be seeded so the lookup resolves, and the silent
-fallback to `Lab` should be dropped in favour of an explicit failure.
+| Concept | Actual `concept_name` (staging) |
+|---|---|
+| 32883 | **Survey** |
+| 32856 | **Lab** |
+
+A wearable reading is neither a survey response nor a laboratory result. Worse, 32883 is absent
+from any database seeded only by `seed_omop_concepts` (verified on `promop_dev`), so the fallback
+fires there and wearable rows are typed `Lab` outright.
+
+**Proposed:** identify the correct device/EHR-derived type concept in Athena, seed it by its real
+concept_id, and drop the silent fallback in favour of an explicit failure — mislabelling
+provenance is worse than refusing to write.
 
 ### Gap 5 — Garmin has no adapter for six metrics
 
