@@ -2254,3 +2254,132 @@ class WearableConceptMappingTest(TestCase):
             self.assertEqual(
                 domain, expected,
                 f'{metric} ({code}) is seeded domain {domain} but the metric set says {expected}')
+
+
+class RemapWearableConceptsCommandTest(TestCase):
+    """Exercises remap_wearable_concepts against real rows.
+
+    The first version of this command failed with ImportError the moment it had
+    a row to move, because nothing in the suite ever gave it one — every test
+    database was empty of wearable rows. These tests create rows on the retired
+    mints so the move path actually executes.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Person
+        call_command('seed_omop_concepts', verbosity=0)
+        cls.person = Person.objects.create(person_id=770001, year_of_birth=1970)
+
+    def _mint(self, concept_id, concept_code, domain_id='Measurement'):
+        """Recreate a retired 900xxxx mint, as a pre-#413 database would have."""
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+        return Concept.objects.create(
+            concept_id=concept_id,
+            concept_name=f'Retired mint {concept_code}',
+            domain=Domain.objects.get(domain_id=domain_id),
+            vocabulary=Vocabulary.objects.get(vocabulary_id='LOINC'),
+            concept_class=ConceptClass.objects.get(concept_class_id='Clinical Observation'),
+            standard_concept='S',
+            concept_code=concept_code,
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+
+    def _measurement(self, concept, value, day=1):
+        from omop_core.models import Concept, Measurement
+        m = Measurement.objects.create(
+            measurement_id=Measurement.objects.count() + 900001,
+            person=self.person,
+            measurement_concept=concept,
+            measurement_date=date(2024, 7, day),
+            measurement_type_concept=Concept.objects.get(concept_id=32856),
+            value_as_number=value,
+            measurement_source_value=concept.concept_code,
+        )
+        return m
+
+    def test_dry_run_writes_nothing(self):
+        from omop_core.models import Measurement, Observation
+
+        mint = self._mint(9001019, '55423-8')
+        self._measurement(mint, 7000)
+
+        call_command('remap_wearable_concepts', '--dry-run', verbosity=0)
+
+        self.assertTrue(
+            Measurement.objects.filter(measurement_concept=mint).exists(),
+            'dry run must not move rows')
+        self.assertEqual(Observation.objects.count(), 0)
+
+    def test_apply_moves_observation_domain_rows_out_of_measurement(self):
+        """steps is Observation-domain, so its rows must move tables.
+
+        This is the path that previously raised ImportError.
+        """
+        from omop_core.models import Measurement, Observation
+
+        mint = self._mint(9001019, '55423-8')
+        self._measurement(mint, 7000, day=1)
+        self._measurement(mint, 8000, day=2)
+
+        call_command('remap_wearable_concepts', '--apply', verbosity=0)
+
+        self.assertFalse(
+            Measurement.objects.filter(measurement_source_value='55423-8').exists(),
+            'steps rows must not remain in measurement')
+        moved = Observation.objects.filter(observation_source_value='55423-8')
+        self.assertEqual(moved.count(), 2)
+        self.assertEqual(
+            sorted(float(o.value_as_number) for o in moved), [7000.0, 8000.0],
+            'values must survive the move')
+        self.assertEqual(moved.first().observation_concept.concept_id, 40758552)
+
+    def test_apply_recodes_measurement_domain_rows_in_place(self):
+        from omop_core.models import Measurement
+
+        mint = self._mint(9001021, '40443-4')
+        self._measurement(mint, 58)
+
+        call_command('remap_wearable_concepts', '--apply', verbosity=0)
+
+        row = Measurement.objects.get(measurement_source_value='40443-4')
+        self.assertEqual(row.measurement_concept.concept_id, 3040891)
+        self.assertEqual(float(row.value_as_number), 58.0)
+
+    def test_apply_deletes_retired_mints_once_unreferenced(self):
+        """The mint row itself must go, or a later upload can resolve back onto it."""
+        from omop_core.models import Concept
+
+        self._mint(9001019, '55423-8')
+        self._measurement(Concept.objects.get(concept_id=9001019), 7000)
+
+        call_command('remap_wearable_concepts', '--apply', verbosity=0)
+
+        self.assertFalse(
+            Concept.objects.filter(concept_id=9001019).exists(),
+            'retired mint must be deleted once nothing references it')
+
+    def test_keep_mints_leaves_the_mint_in_place(self):
+        from omop_core.models import Concept
+
+        self._mint(9001019, '55423-8')
+        self._measurement(Concept.objects.get(concept_id=9001019), 7000)
+
+        call_command('remap_wearable_concepts', '--apply', '--keep-mints', verbosity=0)
+
+        self.assertTrue(Concept.objects.filter(concept_id=9001019).exists())
+
+    def test_metric_scope_does_not_touch_other_metrics(self):
+        from omop_core.models import Measurement
+
+        steps_mint = self._mint(9001019, '55423-8')
+        rhr_mint = self._mint(9001021, '40443-4')
+        self._measurement(steps_mint, 7000, day=1)
+        self._measurement(rhr_mint, 58, day=2)
+
+        call_command('remap_wearable_concepts', '--apply', '--metric', 'steps', verbosity=0)
+
+        self.assertTrue(
+            Measurement.objects.filter(measurement_concept=rhr_mint).exists(),
+            'a scoped run must leave other metrics alone')
