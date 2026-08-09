@@ -1971,14 +1971,20 @@ class PatientRecordSchemaSyncTest(TestCase):
     Migration 0036 created a ``status`` column with raw SQL and migration 0040
     removed the field from Django's state only, leaving an orphan column that
     no model field mapped to. Migration 0138 drops it. This test fails if that
-    -- or any comparable drift -- reappears on ``patient_record``.
+    -- or any comparable drift -- is reintroduced by the migration chain.
+
+    Scope: the test database is always built fresh from the migrations, so this
+    catches chain-introduced drift only. It cannot see out-of-band schema
+    changes made directly against a deployed database -- that is what made the
+    ``patient_info`` view 297 columns in staging and production but 296 in CI.
+    Use the sync check in CLAUDE.md against those environments for that.
     """
 
     def _db_columns(self):
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = %s",
+                "WHERE table_schema = 'public' AND table_name = %s",
                 [PatientRecord._meta.db_table],
             )
             return {row[0] for row in cursor.fetchall()}
