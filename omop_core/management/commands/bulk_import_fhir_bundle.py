@@ -386,7 +386,7 @@ class Command(BaseCommand):
             '76513-1',  # insurance type
             '77243-3',  # annual household income
             # Wearable metrics
-            '55423-8', '77592-4', '40443-4', '80404-7', '59408-5', '9279-1', '93832-4',
+            '55423-8', '55411-3', '40443-4', '80404-7', '59408-5', '9279-1', '93832-4',
         }
 
         # ── Accumulate model instances ──────────────────────────────────

@@ -1714,7 +1714,7 @@ class Command(BaseCommand):
         metrics = [
             ('55423-8', 'Steps count', 'steps', '/d',  '/d',
              lambda: round(random.gauss(7500, 2500))),
-            ('77592-4', 'Active minutes', 'min',  'min', 'min',
+            ('55411-3', 'Exercise duration', 'min',  'min', 'min',
              lambda: round(random.gauss(35, 12))),
             ('40443-4', 'Resting heart rate', 'bpm', '/min', '/min',
              lambda: round(random.gauss(68, 8))),

@@ -2255,14 +2255,13 @@ class WearableConceptMappingTest(TestCase):
                 domain, expected,
                 f'{metric} ({code}) is seeded domain {domain} but the metric set says {expected}')
 
+class PurgeBrokenWearableRowsCommandTest(TestCase):
+    """Covers purge_broken_wearable_rows against real rows.
 
-class RemapWearableConceptsCommandTest(TestCase):
-    """Exercises remap_wearable_concepts against real rows.
-
-    The first version of this command failed with ImportError the moment it had
-    a row to move, because nothing in the suite ever gave it one — every test
-    database was empty of wearable rows. These tests create rows on the retired
-    mints so the move path actually executes.
+    The command this replaced accrued three defects that only surfaced when it
+    was run against staging, all because its fixtures moved two rows against an
+    otherwise empty database. These tests use enough rows to cross the chunk
+    boundary and assert on signal behaviour, not just end state.
     """
 
     @classmethod
@@ -2270,6 +2269,9 @@ class RemapWearableConceptsCommandTest(TestCase):
         from omop_core.models import Person
         call_command('seed_omop_concepts', verbosity=0)
         cls.person = Person.objects.create(person_id=770001, year_of_birth=1970)
+
+    def setUp(self):
+        self._next_pk = 900001
 
     def _mint(self, concept_id, concept_code, domain_id='Measurement'):
         """Recreate a retired 900xxxx mint, as a pre-#413 database would have."""
@@ -2286,100 +2288,148 @@ class RemapWearableConceptsCommandTest(TestCase):
             valid_end_date=date(2099, 12, 31),
         )
 
-    def _measurement(self, concept, value, day=1):
+    def _measurement(self, concept, value, day=1, source_value=None):
+        """Create a Measurement with an explicitly allocated pk.
+
+        Deriving the pk from a live row count collides once the command starts
+        deleting rows, producing duplicate-key failures in unrelated tests.
+        """
         from omop_core.models import Concept, Measurement
-        m = Measurement.objects.create(
-            measurement_id=Measurement.objects.count() + 900001,
+        self._next_pk += 1
+        return Measurement.objects.create(
+            measurement_id=self._next_pk,
             person=self.person,
             measurement_concept=concept,
-            measurement_date=date(2024, 7, day),
+            measurement_date=date(2024, 7, (day % 28) + 1),
             measurement_type_concept=Concept.objects.get(concept_id=32856),
             value_as_number=value,
-            measurement_source_value=concept.concept_code,
+            measurement_source_value=source_value or concept.concept_code,
         )
-        return m
 
-    def test_dry_run_writes_nothing(self):
-        from omop_core.models import Measurement, Observation
+    def test_dry_run_deletes_nothing(self):
+        from omop_core.models import Measurement
 
         mint = self._mint(9001019, '55423-8')
         self._measurement(mint, 7000)
 
-        call_command('remap_wearable_concepts', '--dry-run', verbosity=0)
+        call_command('purge_broken_wearable_rows', '--dry-run', verbosity=0)
 
-        self.assertTrue(
-            Measurement.objects.filter(measurement_concept=mint).exists(),
-            'dry run must not move rows')
-        self.assertEqual(Observation.objects.count(), 0)
+        self.assertEqual(Measurement.objects.count(), 1)
+        self.assertTrue(Concept.objects.filter(concept_id=9001019).exists())
 
-    def test_apply_moves_observation_domain_rows_out_of_measurement(self):
-        """steps is Observation-domain, so its rows must move tables.
-
-        This is the path that previously raised ImportError.
-        """
-        from omop_core.models import Measurement, Observation
-
-        mint = self._mint(9001019, '55423-8')
-        self._measurement(mint, 7000, day=1)
-        self._measurement(mint, 8000, day=2)
-
-        call_command('remap_wearable_concepts', '--apply', verbosity=0)
-
-        self.assertFalse(
-            Measurement.objects.filter(measurement_source_value='55423-8').exists(),
-            'steps rows must not remain in measurement')
-        moved = Observation.objects.filter(observation_source_value='55423-8')
-        self.assertEqual(moved.count(), 2)
-        self.assertEqual(
-            sorted(float(o.value_as_number) for o in moved), [7000.0, 8000.0],
-            'values must survive the move')
-        self.assertEqual(moved.first().observation_concept.concept_id, 40758552)
-
-    def test_apply_recodes_measurement_domain_rows_in_place(self):
+    def test_apply_deletes_rows_on_retired_mints(self):
         from omop_core.models import Measurement
 
-        mint = self._mint(9001021, '40443-4')
-        self._measurement(mint, 58)
+        mint = self._mint(9001019, '55423-8')
+        for day in range(1, 6):
+            self._measurement(mint, 7000 + day, day=day)
 
-        call_command('remap_wearable_concepts', '--apply', verbosity=0)
+        call_command('purge_broken_wearable_rows', '--apply', verbosity=0)
 
-        row = Measurement.objects.get(measurement_source_value='40443-4')
-        self.assertEqual(row.measurement_concept.concept_id, 3040891)
-        self.assertEqual(float(row.value_as_number), 58.0)
+        self.assertEqual(
+            Measurement.objects.filter(measurement_concept_id=9001019).count(), 0)
 
-    def test_apply_deletes_retired_mints_once_unreferenced(self):
-        """The mint row itself must go, or a later upload can resolve back onto it."""
-        from omop_core.models import Concept
+    def test_apply_deletes_rows_carrying_broken_codes(self):
+        """Rows on the correct concept but a superseded code must also go."""
+        from omop_core.models import Concept, Measurement
 
-        self._mint(9001019, '55423-8')
-        self._measurement(Concept.objects.get(concept_id=9001019), 7000)
+        good = Concept.objects.get(concept_id=3040891)  # resting HR, a valid concept
+        self._measurement(good, 58, source_value='41909-3')  # walking_speed -> BMI
 
-        call_command('remap_wearable_concepts', '--apply', verbosity=0)
+        call_command('purge_broken_wearable_rows', '--apply', verbosity=0)
 
-        self.assertFalse(
-            Concept.objects.filter(concept_id=9001019).exists(),
-            'retired mint must be deleted once nothing references it')
+        self.assertEqual(
+            Measurement.objects.filter(measurement_source_value='41909-3').count(), 0)
 
-    def test_keep_mints_leaves_the_mint_in_place(self):
-        from omop_core.models import Concept
+    def test_shared_vitals_codes_are_never_touched(self):
+        """body_mass and spo2 codes are written by the vitals path too.
 
-        self._mint(9001019, '55423-8')
-        self._measurement(Concept.objects.get(concept_id=9001019), 7000)
+        Matching them by source_value would delete non-wearable clinical data,
+        so they are only removed when sitting on a retired mint.
+        """
+        from omop_core.models import Concept, Measurement
 
-        call_command('remap_wearable_concepts', '--apply', '--keep-mints', verbosity=0)
+        weight = Concept.objects.get(concept_id=3025315)   # 29463-7 Body weight
+        spo2 = Concept.objects.get(concept_id=40762499)    # 59408-5 SpO2
+        self._measurement(weight, 68.4)
+        self._measurement(spo2, 97.0)
+
+        call_command('purge_broken_wearable_rows', '--apply', verbosity=0)
+
+        self.assertEqual(Measurement.objects.filter(
+            measurement_source_value='29463-7').count(), 1)
+        self.assertEqual(Measurement.objects.filter(
+            measurement_source_value='59408-5').count(), 1)
+
+    def test_apply_does_not_trigger_patient_record_refresh(self):
+        """Deletion must not fire per-row PatientRecord re-derivations.
+
+        QuerySet.delete() sends post_delete per row and omop_core/signals.py
+        turns each Measurement deletion into a full refresh_patient_record.
+        Unsuppressed, purging ~127k staging rows means ~127k re-derivations.
+        """
+        mint = self._mint(9001019, '55423-8')
+        for day in range(1, 11):
+            self._measurement(mint, 7000 + day, day=day)
+
+        with patch(
+            'omop_core.services.patient_record_service.refresh_patient_record'
+        ) as mock_refresh:
+            call_command('purge_broken_wearable_rows', '--apply', verbosity=0)
+
+        self.assertEqual(
+            mock_refresh.call_count, 0,
+            f'purge triggered {mock_refresh.call_count} PatientRecord refresh(es)')
+        # Guard against the assertion passing simply because nothing happened.
+        from omop_core.models import Measurement
+        self.assertEqual(Measurement.objects.count(), 0, 'rows should have been deleted')
+
+    def test_apply_deletes_more_rows_than_one_chunk(self):
+        from omop_core.management.commands import purge_broken_wearable_rows as cmd
+        from omop_core.models import Measurement
+
+        mint = self._mint(9001019, '55423-8')
+        for day in range(1, 16):
+            self._measurement(mint, 7000 + day, day=day)
+
+        with patch.object(cmd, 'CHUNK_SIZE', 4):
+            call_command('purge_broken_wearable_rows', '--apply', verbosity=0)
+
+        self.assertEqual(Measurement.objects.count(), 0,
+                         'chunked deletion must drain every row')
+
+    def test_apply_deletes_retired_mint_concepts(self):
+        mint = self._mint(9001019, '55423-8')
+        self._measurement(mint, 7000)
+
+        call_command('purge_broken_wearable_rows', '--apply', verbosity=0)
+
+        self.assertFalse(Concept.objects.filter(concept_id=9001019).exists())
+
+    def test_keep_mints_leaves_the_concept_in_place(self):
+        mint = self._mint(9001019, '55423-8')
+        self._measurement(mint, 7000)
+
+        call_command('purge_broken_wearable_rows', '--apply', '--keep-mints',
+                     verbosity=0)
 
         self.assertTrue(Concept.objects.filter(concept_id=9001019).exists())
 
-    def test_metric_scope_does_not_touch_other_metrics(self):
-        from omop_core.models import Measurement
+    def test_affected_patient_records_are_marked_stale(self):
+        """Otherwise `backfill_patient_records` reports a false all-clear.
 
-        steps_mint = self._mint(9001019, '55423-8')
-        rhr_mint = self._mint(9001021, '40443-4')
-        self._measurement(steps_mint, 7000, day=1)
-        self._measurement(rhr_mint, 58, day=2)
+        The plain backfill selects on derivation_version, which a purge does not
+        otherwise touch — so summaries derived from now-deleted rows would be
+        served indefinitely unless the operator remembered --all.
+        """
+        from omop_core.models import PatientRecord
 
-        call_command('remap_wearable_concepts', '--apply', '--metric', 'steps', verbosity=0)
+        PatientRecord.objects.filter(person=self.person).update(derivation_version=99)
+        mint = self._mint(9001019, '55423-8')
+        self._measurement(mint, 7000)
 
-        self.assertTrue(
-            Measurement.objects.filter(measurement_concept=rhr_mint).exists(),
-            'a scoped run must leave other metrics alone')
+        call_command('purge_broken_wearable_rows', '--apply', verbosity=0)
+
+        self.assertEqual(
+            PatientRecord.objects.get(person=self.person).derivation_version, 0,
+            'affected PatientRecords must be re-derivable by the ordinary backfill')
