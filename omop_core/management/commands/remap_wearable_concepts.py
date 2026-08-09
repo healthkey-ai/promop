@@ -78,6 +78,9 @@ class Command(BaseCommand):
         parser.add_argument(
             '--metric', action='append', default=None,
             help='Limit to one metric key. Repeatable.')
+        parser.add_argument(
+            '--keep-mints', action='store_true',
+            help='Do not delete the retired 900xxxx mint concepts after remapping.')
 
     def handle(self, *args, **options):
         apply_changes = options['apply']
@@ -93,26 +96,51 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(
                 'DRY RUN — no changes will be written. Re-run with --apply.\n'))
 
-        totals = {'repointed': 0, 'recoded': 0, 'moved': 0, 'skipped_no_concept': 0}
+        totals = {
+            'repointed': 0, 'recoded': 0, 'moved': 0,
+            'skipped_no_concept': 0, 'mints_deleted': 0, 'mints_still_referenced': 0,
+            'skipped_metrics': set(),
+        }
+        delete_mints = not options['keep_mints'] and not options['metric']
+        if options['metric'] and not options['keep_mints']:
+            self.stdout.write(self.style.WARNING(
+                'Retired mints are only deleted on a full run (no --metric), since '
+                'a partial remap can leave rows still pointing at them.\n'))
 
-        with transaction.atomic():
+        if apply_changes:
+            with transaction.atomic():
+                for metric in metrics:
+                    self._remap_metric(metric, totals, apply_changes=True)
+                if delete_mints:
+                    self._delete_retired_mints(totals, apply_changes=True)
+        else:
+            # A dry run only counts. Doing the work inside a transaction and
+            # rolling back would be correct but unusably slow — ~78k rows move
+            # between tables, which takes over ten minutes against a remote
+            # database before discarding every byte of it.
             for metric in metrics:
-                self._remap_metric(metric, totals)
-
-            if not apply_changes:
-                transaction.set_rollback(True)
+                self._remap_metric(metric, totals, apply_changes=False)
+            if delete_mints:
+                self._delete_retired_mints(totals, apply_changes=False)
 
         self.stdout.write('')
+        label = 'Would remap' if not apply_changes else 'Remapped'
         self.stdout.write(self.style.SUCCESS(
-            'Repointed: {repointed}  |  Recoded: {recoded}  |  '
-            'Moved between tables: {moved}  |  Skipped (no target concept): '
-            '{skipped_no_concept}'.format(**totals)))
+            f'{label} — recoded in place: {{recoded}}  |  '
+            'moved between tables: {moved}  |  skipped (no target concept): '
+            '{skipped_no_concept}  |  retired mints removed: {mints_deleted}'
+            .format(**totals)))
+        if totals['mints_still_referenced']:
+            self.stdout.write(self.style.WARNING(
+                f"{totals['mints_still_referenced']} retired mint(s) still referenced "
+                f'and were left in place.'))
         if not apply_changes:
-            self.stdout.write(self.style.WARNING('Rolled back (dry run).'))
+            self.stdout.write(self.style.WARNING(
+                'Nothing was written. Re-run with --apply to perform the remap.'))
 
     # ------------------------------------------------------------------
 
-    def _remap_metric(self, metric, totals):
+    def _remap_metric(self, metric, totals, apply_changes):
         new_code = WEARABLE_CONCEPT_CODE[metric]
         vocabulary_id = WEARABLE_CONCEPT_VOCAB[metric]
 
@@ -128,6 +156,7 @@ class Command(BaseCommand):
                 f'  {metric:28s} SKIPPED — no concept for '
                 f'({vocabulary_id}, {new_code}). Run seed_omop_concepts first.'))
             totals['skipped_no_concept'] += 1
+            totals['skipped_metrics'].add(metric)
             return
 
         old_codes = OLD_CODES.get(metric, [])
@@ -145,27 +174,90 @@ class Command(BaseCommand):
         if not (m_count or o_count):
             return
 
+        # Rows already in the destination table are recoded in place; rows in
+        # the other table have to move, because the concept's domain changed.
+        if wants_observation:
+            target_table, to_move, to_recode = 'Observation', m_count, o_count
+        else:
+            target_table, to_move, to_recode = 'Measurement', o_count, m_count
+
+        if not apply_changes:
+            totals['moved'] += to_move
+            totals['recoded'] += to_recode
+            self.stdout.write(
+                f'  {metric:28s} -> {target_table} {target.concept_id} '
+                f'({new_code}): would move {to_move}, recode {to_recode}')
+            return
+
         if wants_observation:
             moved = self._move_measurements_to_observation(m_qs, target, new_code)
             recoded = o_qs.update(
                 observation_concept=target, observation_source_value=new_code)
-            totals['moved'] += moved
-            totals['recoded'] += recoded
-            self.stdout.write(
-                f'  {metric:28s} -> Observation {target.concept_id} '
-                f'({new_code}): moved {moved}, recoded {recoded}')
         else:
             moved = self._move_observations_to_measurement(o_qs, target, new_code)
             recoded = m_qs.update(
                 measurement_concept=target, measurement_source_value=new_code)
-            totals['moved'] += moved
-            totals['recoded'] += recoded
-            self.stdout.write(
-                f'  {metric:28s} -> Measurement {target.concept_id} '
-                f'({new_code}): moved {moved}, recoded {recoded}')
+
+        totals['moved'] += moved
+        totals['recoded'] += recoded
+        self.stdout.write(
+            f'  {metric:28s} -> {target_table} {target.concept_id} '
+            f'({new_code}): moved {moved}, recoded {recoded}')
+
+    def _delete_retired_mints(self, totals, apply_changes):
+        """Remove the retired 900xxxx mint concepts once nothing references them.
+
+        Remapping rows off a mint is not enough on its own: the mint row still
+        shares (vocabulary_id, concept_code) with the genuine Athena concept, and
+        concept_by_vocab resolves duplicates with .first() and no ordering — so a
+        later upload could resolve straight back onto the orphan and recreate the
+        problem. Deleting the mints is what actually closes it.
+
+        Every Concept FK is on_delete=PROTECT, so a still-referenced mint raises
+        ProtectedError rather than cascading. That is the safety net: we report it
+        and move on instead of enumerating every referencing column by hand.
+        """
+        from django.db.models import ProtectedError
+
+        self.stdout.write('')
+        for metric, mint_id in sorted(RETIRED_MINT_BY_METRIC.items()):
+            mint = Concept.objects.filter(concept_id=mint_id).first()
+            if mint is None:
+                continue
+
+            if not apply_changes:
+                # Reason about the state AFTER the remap, not before it. The
+                # remap claims every row carrying this mint, so the mint ends up
+                # unreferenced — unless its metric was skipped for want of a
+                # target concept, in which case its rows stay put.
+                if metric in totals['skipped_metrics']:
+                    refs = (
+                        Measurement.objects.filter(measurement_concept_id=mint_id).count()
+                        + Observation.objects.filter(observation_concept_id=mint_id).count()
+                    )
+                    self.stdout.write(
+                        f'  mint {mint_id} ({metric}): metric skipped, {refs} row(s) '
+                        f'would remain — not removable')
+                    totals['mints_still_referenced'] += 1
+                else:
+                    self.stdout.write(f'  mint {mint_id} ({metric}): would be removed')
+                    totals['mints_deleted'] += 1
+                continue
+
+            try:
+                with transaction.atomic():
+                    mint.delete()
+            except ProtectedError as exc:
+                self.stdout.write(self.style.WARNING(
+                    f'  mint {mint_id} ({metric}): still referenced, left in place '
+                    f'({exc.__class__.__name__})'))
+                totals['mints_still_referenced'] += 1
+            else:
+                self.stdout.write(f'  mint {mint_id} ({metric}): removed')
+                totals['mints_deleted'] += 1
 
     def _move_measurements_to_observation(self, qs, target, new_code):
-        from patient_portal.api.views import _next_pk_batch
+        from omop_core.services.pk import next_pk_batch as _next_pk_batch
 
         rows = list(qs.values(
             'measurement_id', 'person_id', 'measurement_date',
@@ -195,7 +287,7 @@ class Command(BaseCommand):
         return len(pending)
 
     def _move_observations_to_measurement(self, qs, target, new_code):
-        from patient_portal.api.views import _next_pk_batch
+        from omop_core.services.pk import next_pk_batch as _next_pk_batch
 
         rows = list(qs.values(
             'observation_id', 'person_id', 'observation_date',
