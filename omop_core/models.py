@@ -1980,7 +1980,7 @@ class WearableUpload(models.Model):
     sample_summary = models.JSONField(default=list, blank=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
     uploaded_by = models.ForeignKey(
-        'patient_portal.Identity', on_delete=models.SET_NULL,
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='wearable_uploads',
     )
 

@@ -1,0 +1,44 @@
+# PROMOP OMOP apps, packaged as an installable Django plugin so CancerBot (CB)
+# can embed the OMOP-CDM models + patient-derivation in-process (CB ADR 0001),
+# the same way CB already embeds EXACT's `exact_matching`. PROMOP itself stays a
+# standalone product that also uses these apps in place (this pyproject packages
+# them from the repo root WITHOUT moving them — omop_core structure is unchanged).
+#
+# Scope: this packages the MODELS + migration graph + derivation services. It does
+# NOT package the patient_portal-coupled runtime utilities (authorization.py,
+# organization_cleanup, signed fhir_export, some management commands) — those stay
+# PROMOP-service-only and must not be called from a host lacking patient_portal.
+# The three apps are versioned + released together (one wheel).
+#
+# Host requirements (validated: all 142 omop_core migrations apply into a fresh
+# CancerBot-like DB with NO patient_portal):
+#   INSTALLED_APPS must include, before the omop apps:
+#     "django.contrib.contenttypes" (required — omop_core GenericForeignKey +
+#                                 migrations 0062/0091 depend on contenttypes/0002)
+#     "django.contrib.postgres"  (required — trigram GIN opclass in omop_core/0119)
+#     "oauth2_provider"          (required — omop_core.Organization/0061 FKs
+#                                 oauth2_provider.Application; pulled in as a dep)
+#     "omop_core", "omop_oncology", "omop_genomics"
+#   AUTH_USER_MODEL = the host's own user model (created in its app's initial
+#     migration, per Django's swappable-user requirement). omop_core's user FKs are
+#     already settings.AUTH_USER_MODEL-swappable.
+#   Do NOT install patient_portal — the omop_core/0071 cross-app ordering edge is
+#     conditional on apps.is_installed("patient_portal"), so the graph loads without it.
+#   Postgres: pg_trgm (enabled by omop_core/0094) + btree_gin extensions.
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "promop-omop"
+version = "0.0.1"
+description = "PROMOP OMOP-CDM apps (omop_core + omop_oncology + omop_genomics): models + patient-derivation, embeddable in-process by a host (CancerBot) via CB ADR 0001. AUTH_USER_MODEL-swappable; patient_portal-free migration graph."
+requires-python = ">=3.12"
+# django-oauth-toolkit: omop_core.Organization (migration 0061) has a hard FK to
+# oauth2_provider.Application, so the host MUST also add 'oauth2_provider' to
+# INSTALLED_APPS. (patient_portal is NOT required — its 0071 edge is conditional.)
+dependencies = ["Django>=5.0", "django-oauth-toolkit>=3.0"]
+
+[tool.setuptools.packages.find]
+include = ["omop_core*", "omop_oncology*", "omop_genomics*"]
