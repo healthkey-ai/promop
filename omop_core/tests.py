@@ -2603,3 +2603,142 @@ class BackfillConceptSourceCommandTest(TestCase):
         call_command('backfill_concept_source', '--apply', verbosity=0)
         self.assertEqual(
             Concept.objects.filter(concept_id=9001099, source='HealthKey').count(), 1)
+
+
+class RemapLocalDrugConceptsCommandTest(TestCase):
+    """Covers remap_local_drug_concepts (see #427).
+
+    Six drug concepts were minted locally with the drug's name as concept_code
+    instead of being resolved against Athena. The clinical content is right, but
+    the mint has no vocabulary edges at all — the genuine HemOnc olaparib
+    concept participates in 63 relationships, the mint in zero — so the
+    exposures are invisible to any standard drug-class or indication query.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Person
+        call_command('seed_omop_concepts', verbosity=0)
+        cls.person = Person.objects.create(person_id=780001, year_of_birth=1970)
+
+    def _concept(self, concept_id, code, name, vocabulary_id, standard=None):
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id=vocabulary_id,
+            defaults={'vocabulary_name': vocabulary_id, 'vocabulary_concept_id': 0})
+        domain, _ = Domain.objects.get_or_create(
+            domain_id='Drug', defaults={'domain_name': 'Drug', 'domain_concept_id': 0})
+        return Concept.objects.create(
+            concept_id=concept_id, concept_name=name, domain=domain, vocabulary=vocab,
+            concept_class=ConceptClass.objects.get(concept_class_id='Clinical Observation'),
+            standard_concept=standard, concept_code=code,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+
+    def _setup_olaparib(self, n_exposures=3):
+        """Mint, HemOnc source concept and Standard target, as on staging."""
+        from omop_core.models import Concept, DrugExposure
+
+        mint = self._concept(2012334076, 'Olaparib', 'Olaparib', 'HemOnc')
+        self._concept(35803216, '366', 'Olaparib', 'HemOnc')
+        self._concept(45892579, '1597582', 'olaparib', 'RxNorm', standard='S')
+        for i in range(n_exposures):
+            DrugExposure.objects.create(
+                drug_exposure_id=880001 + i,
+                person=self.person,
+                drug_concept=mint,
+                drug_exposure_start_date=date(2024, 7, i + 1),
+                drug_type_concept=Concept.objects.get(concept_id=32869),
+            )
+        return mint
+
+    def test_dry_run_writes_nothing(self):
+        from omop_core.models import Concept, DrugExposure
+
+        self._setup_olaparib()
+        call_command('remap_local_drug_concepts', '--dry-run', verbosity=0)
+        self.assertEqual(
+            DrugExposure.objects.filter(drug_concept_id=2012334076).count(), 3)
+        self.assertTrue(Concept.objects.filter(concept_id=2012334076).exists())
+
+    def test_apply_points_drug_concept_at_the_standard_concept(self):
+        """drug_concept_id must hold a Standard concept.
+
+        RxNorm is standard for the Drug domain, so the HemOnc drug concept is
+        non-standard by design — pointing at it would swap one non-standard
+        concept for another.
+        """
+        from omop_core.models import DrugExposure
+
+        self._setup_olaparib()
+        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
+
+        rows = DrugExposure.objects.filter(person=self.person)
+        self.assertEqual(rows.count(), 3)
+        for row in rows:
+            self.assertEqual(row.drug_concept_id, 45892579)
+            self.assertEqual(row.drug_concept.standard_concept, 'S')
+
+    def test_apply_preserves_provenance_in_drug_source_concept(self):
+        from omop_core.models import DrugExposure
+
+        self._setup_olaparib()
+        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
+        self.assertEqual(
+            DrugExposure.objects.filter(person=self.person).first().drug_source_concept_id,
+            35803216, 'the HemOnc concept records what was actually stated')
+
+    def test_apply_deletes_the_mint(self):
+        from omop_core.models import Concept
+
+        self._setup_olaparib()
+        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
+        self.assertFalse(Concept.objects.filter(concept_id=2012334076).exists())
+
+    def test_keep_mints_leaves_the_concept(self):
+        from omop_core.models import Concept
+
+        self._setup_olaparib()
+        call_command('remap_local_drug_concepts', '--apply', '--keep-mints', verbosity=0)
+        self.assertTrue(Concept.objects.filter(concept_id=2012334076).exists())
+
+    def test_affected_patient_records_are_marked_stale(self):
+        """Therapy fields derive from drug_exposure, and queryset .update()
+        sends no signals, so nothing would otherwise notice the change."""
+        from omop_core.models import PatientRecord
+
+        self._setup_olaparib()
+        PatientRecord.objects.filter(person=self.person).update(derivation_version=99)
+        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
+        self.assertEqual(
+            PatientRecord.objects.get(person=self.person).derivation_version, 0)
+
+    def test_skips_when_the_target_concept_is_absent(self):
+        """On a database with no Athena load the targets do not exist. The
+        command must leave the data alone rather than repoint it at nothing."""
+        from omop_core.models import Concept, DrugExposure
+
+        mint = self._concept(2012334076, 'Olaparib', 'Olaparib', 'HemOnc')
+        DrugExposure.objects.create(
+            drug_exposure_id=880900, person=self.person, drug_concept=mint,
+            drug_exposure_start_date=date(2024, 7, 1),
+            drug_type_concept=Concept.objects.get(concept_id=32869))
+
+        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
+
+        self.assertEqual(
+            DrugExposure.objects.get(drug_exposure_id=880900).drug_concept_id, 2012334076)
+        self.assertTrue(Concept.objects.filter(concept_id=2012334076).exists())
+
+    def test_refuses_a_non_standard_target(self):
+        """Guards the mapping constant itself: if a listed target stops being
+        Standard in a later vocabulary release, do not silently use it."""
+        from omop_core.models import Concept, DrugExposure
+
+        self._setup_olaparib()
+        Concept.objects.filter(concept_id=45892579).update(standard_concept=None)
+
+        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
+
+        self.assertEqual(
+            DrugExposure.objects.filter(drug_concept_id=2012334076).count(), 3,
+            'rows must be left alone when the target is not Standard')
