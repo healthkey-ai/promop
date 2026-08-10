@@ -2433,3 +2433,76 @@ class PurgeBrokenWearableRowsCommandTest(TestCase):
         self.assertEqual(
             PatientRecord.objects.get(person=self.person).derivation_version, 0,
             'affected PatientRecords must be re-derivable by the ordinary backfill')
+
+
+class ConceptZeroTest(TestCase):
+    """concept 0 is OMOP's universal 'No matching concept' sentinel (see #427).
+
+    It is written to any *_concept_id when source data cannot be mapped, so it
+    is domain-agnostic by design. One database had it stored as
+    (HK-Labs, Measurement, Lab Test), which made ~20,800 unmapped rows across
+    every domain look like HealthKey lab tests to any query grouping by
+    vocabulary or domain.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_omop_concepts', verbosity=0)
+
+    def test_seeded_with_omop_specified_metadata(self):
+        from omop_core.models import Concept
+
+        c = Concept.objects.get(concept_id=0)
+        self.assertEqual(c.concept_name, 'No matching concept')
+        self.assertEqual(c.domain_id, 'Metadata',
+                         'concept 0 is domain-agnostic; a real domain misattributes '
+                         'every unmapped row of every other domain')
+        self.assertEqual(c.vocabulary_id, 'None')
+        self.assertEqual(c.concept_class_id, 'Undefined')
+        self.assertIsNone(c.standard_concept)
+
+    def test_not_marked_as_a_local_mint(self):
+        """concept 0 is standard OMOP content, not HealthKey-authored.
+
+        Tagging it 'HealthKey' pollutes the ?source=external vocabulary-mirror
+        filter in the opposite direction from the rest of #415.
+        """
+        from omop_core.models import Concept
+
+        self.assertIsNone(Concept.objects.get(concept_id=0).source)
+
+    def test_placeholder_vocabulary_and_class_are_seeded(self):
+        """seed_omop_concepts referenced vocabulary 'None' for the generic-lab
+        fallback but never seeded it, so seeding an empty database raised
+        IntegrityError — conftest.py documents working around exactly this."""
+        from omop_core.models import ConceptClass, Vocabulary
+
+        self.assertTrue(Vocabulary.objects.filter(vocabulary_id='None').exists())
+        self.assertTrue(ConceptClass.objects.filter(concept_class_id='Undefined').exists())
+
+    def test_migration_corrects_a_misfiled_concept_zero(self):
+        """Reproduces the staging state and asserts the migration logic fixes it."""
+        import importlib
+        # Module name starts with a digit, so it cannot be imported normally.
+        _0140 = importlib.import_module(
+            'omop_core.migrations.0140_fix_concept_zero_metadata')
+        from django.apps import apps as global_apps
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+
+        hk, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HK-Labs',
+            defaults={'vocabulary_name': 'HK-Labs', 'vocabulary_concept_id': 0})
+        c = Concept.objects.get(concept_id=0)
+        c.vocabulary = hk
+        c.domain = Domain.objects.get(domain_id='Measurement')
+        c.concept_class = ConceptClass.objects.get(concept_class_id='Lab Test')
+        c.source = 'HealthKey'
+        c.save()
+
+        _0140.fix_concept_zero(global_apps, None)
+
+        c.refresh_from_db()
+        self.assertEqual(c.domain_id, 'Metadata')
+        self.assertEqual(c.vocabulary_id, 'None')
+        self.assertEqual(c.concept_class_id, 'Undefined')
+        self.assertIsNone(c.source)
