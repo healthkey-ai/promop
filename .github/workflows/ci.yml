@@ -48,8 +48,17 @@ jobs:
       - name: Run migrations
         run: python manage.py migrate --noinput
 
-      - name: Run tests
+      - name: Run tests (Django runner)
         run: python manage.py test omop_core patient_portal --verbosity=2 --noinput
+
+      # The tests/ package is pytest-based (pytest.ini sets testpaths = tests,
+      # conftest.py does session-level DB setup that --no-migrations skips).
+      # Django's runner does not discover it, so these 166 tests ran in CI for
+      # the first time here — they had been green-by-omission, and were in fact
+      # 14-of-15 red in tests/test_enrich_breast_cancer_omop_data.py after #413
+      # expanded WEARABLE_CONCEPT_CODE without anyone noticing.
+      - name: Run tests (pytest)
+        run: pytest -q
 
   frontend:
     name: Frontend lint & build
