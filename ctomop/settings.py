@@ -356,6 +356,16 @@ if DEBUG:
         'rest_framework.authentication.BasicAuthentication',
     ]
 
+# Pinned rather than inherited so the value is visible, but note the scope:
+# this bounds form/multipart bodies and anything read via HttpRequest.body. It
+# does NOT bound DRF JSON bodies — Request._load_stream hands JSONParser the raw
+# WSGI stream, bypassing HttpRequest.body entirely, which is the only place
+# Django enforces this. The bulk OMOP write endpoint therefore does its own
+# pre-parse CONTENT_LENGTH check (OMOP_BULK_MAX_BYTES in patient_portal/api/views.py).
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(
+    os.environ.get('DATA_UPLOAD_MAX_MEMORY_SIZE', 2621440)
+)
+
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_AUTHENTICATION_CLASSES': _auth_classes,
@@ -377,6 +387,14 @@ REST_FRAMEWORK = {
         # a more generous bucket than the shared service-token /sync/ endpoint.
         'patient_sync': os.environ.get('PATIENT_SYNC_THROTTLE_RATE', '120/minute'),
         'patient_signup': '10/hour',
+        # OMOP clinical-row CRUD (conditions / drug-exposures / measurements /
+        # observations / procedures). These viewsets set throttle_scope='omop_write'
+        # and override throttle_classes, so this bucket REPLACES 'user' for them
+        # rather than stacking with it. The default matches the old 'user' rate, so
+        # behaviour is unchanged out of the box; raise it for bulk backfills, where
+        # 300/minute would otherwise become the new ceiling once per-row request
+        # overhead is gone.
+        'omop_write': os.environ.get('OMOP_WRITE_THROTTLE_RATE', '300/minute'),
     },
 }
 

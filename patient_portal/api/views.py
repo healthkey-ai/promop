@@ -4,6 +4,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.throttling import ScopedRateThrottle
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
@@ -14,6 +15,7 @@ from django.utils.decorators import method_decorator
 from django.utils import timezone
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError as DjangoValidationError
 from omop_core.models import (
     Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
@@ -41,7 +43,7 @@ from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.omop_write_service import sync_to_omop
 from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
-from omop_core.services.pk import next_pk
+from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.services.regimen_resolution import (
     get_or_create_quarantine_drug,
@@ -59,6 +61,7 @@ import csv
 import hashlib
 import json
 import logging
+import os
 import re
 from io import StringIO
 from .permissions import ScopedTokenPermission, PatientCrudPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
@@ -142,16 +145,22 @@ class CurrentUserViewSet(viewsets.ViewSet):
         })
 
 def _extract_provenance(request):
-    """Return (source, source_user_id, modification_reason) from headers or POST body."""
+    """Return (source, source_user_id, modification_reason) from headers or POST body.
+
+    A bulk POST body is a JSON *list*, which has no top-level provenance fields and
+    no ``.get()``. For those requests the headers are the only channel — per-row
+    provenance keys are deliberately out of scope, so a list body reads headers only.
+    """
+    body = request.data if isinstance(request.data, dict) else {}
     source = (
-        request.data.get('source')
+        body.get('source')
         or request.META.get('HTTP_X_PROVENANCE_SOURCE')
     )
     source_user_id = (
-        request.data.get('source_user_id')
+        body.get('source_user_id')
         or request.META.get('HTTP_X_PROVENANCE_USER_ID', '')
     )
-    modification_reason = request.data.get('modification_reason')
+    modification_reason = body.get('modification_reason')
     return source, source_user_id, modification_reason
 
 
@@ -4417,6 +4426,256 @@ class _OmopFilterMixin:
         return qs
 
 
+#: Maximum rows accepted in a single bulk POST body. Exceeding it is a 413 naming
+#: the limit rather than a timeout — callers chunk to this number.
+OMOP_BULK_MAX_ROWS = int(os.environ.get('OMOP_BULK_MAX_ROWS', 1000))
+
+#: Byte ceiling for a bulk body, checked against CONTENT_LENGTH *before* parsing.
+#: The row cap cannot serve as a memory guard: DRF's JSONParser reads the WSGI
+#: stream directly (Request._load_stream sets _stream to the raw HttpRequest),
+#: so it never touches HttpRequest.body — the only place Django enforces
+#: DATA_UPLOAD_MAX_MEMORY_SIZE. A 500 MB array would therefore be fully parsed
+#: into memory before the row count could reject it. 1,000 measurement rows is
+#: ~250 KB, so this leaves ample headroom.
+OMOP_BULK_MAX_BYTES = int(os.environ.get('OMOP_BULK_MAX_BYTES', 8 * 1024 * 1024))
+
+
+def _cached_pk_lookup(field, cache):
+    """Wrap a PrimaryKeyRelatedField's to_internal_value with a prefetched cache.
+
+    ``PrimaryKeyRelatedField.to_internal_value`` runs ``queryset.get(pk=...)`` per
+    row, so a 1,000-row batch with five FK columns costs 5,000 queries — the same
+    N+1 at the ORM layer that the endpoint exists to remove at the HTTP layer.
+    A cache miss falls through to the original implementation so that unknown or
+    malformed ids still raise DRF's own per-index validation error.
+    """
+    original = field.to_internal_value
+
+    def to_internal_value(data):
+        # bool subclasses int, so {1: obj}.get(True) is a HIT and would silently
+        # link the row to pk 1. DRF's own to_internal_value raises TypeError for
+        # bool before it reaches the queryset, yielding "Incorrect type. Expected
+        # pk value, received bool." — so deferring to it here is what produces the
+        # 400. Removing this guard turns a rejected row into a mis-linked one.
+        # Locked in by test_boolean_fk_is_rejected_not_silently_mislinked.
+        if isinstance(data, bool):
+            return original(data)
+        try:
+            hit = cache.get(data)
+        except TypeError:      # unhashable (dict/list) — let DRF report it
+            hit = None
+        return hit if hit is not None else original(data)
+
+    return to_internal_value
+
+
+def _prefetch_bulk_related(serializer, rows):
+    """Resolve every FK referenced anywhere in the batch in one query per model."""
+    from rest_framework.relations import PrimaryKeyRelatedField
+
+    for name, field in serializer.child.fields.items():
+        if not isinstance(field, PrimaryKeyRelatedField) or field.read_only:
+            continue
+        # Collect one value at a time rather than in a set comprehension: an
+        # unhashable id ({"person": {"id": 5}}) would raise TypeError out of the
+        # comprehension, escape as a 500, and lose the per-index 400 the
+        # single-row path gives for the same input. Skipping the value here
+        # leaves it out of the cache, so _cached_pk_lookup falls through to DRF
+        # and the offending row gets its normal validation error.
+        raw = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            value = row.get(name)
+            if value is None:
+                continue
+            try:
+                raw.add(value)
+            except TypeError:
+                continue
+        if not raw:
+            continue
+        try:
+            objs = {obj.pk: obj for obj in field.get_queryset().filter(pk__in=raw)}
+        except (ValueError, TypeError, DjangoValidationError):
+            # Non-integer ids in the batch — skip the optimisation and let DRF
+            # produce the per-index error for the offending rows.
+            continue
+        if objs:
+            field.to_internal_value = _cached_pk_lookup(field, objs)
+
+
+class _OmopBulkCreateMixin:
+    """Accept a JSON *list* on POST and insert the rows in one batched transaction.
+
+    Motivation: consumers that have already parsed FHIR into OMOP-shaped rows were
+    writing one row per HTTP request (~1,900 requests for a single patient). This is
+    the batch entrance to the same fast internals ``fhir/sync.py::_bulk_insert``
+    uses — batched PK allocation plus ``bulk_create`` — without going through FHIR.
+
+    Semantics (summarised in CLAUDE.md, "Bulk OMOP Row Writes"):
+
+    * A single dict body is untouched and still goes through the normal DRF path.
+    * All-or-nothing: the whole batch shares one ``transaction.atomic()``.
+    * One batch is one person. Mixed-person batches are rejected with 400.
+    * Query count is bounded by a constant, not by the number of rows.
+    * ``bulk_create`` does not fire ``post_save``, so the ``omop_core.signals``
+      receivers that rebuild ``PatientRecord`` never run. The refresh is therefore
+      explicit here — once for the batch instead of once per row. ``?skip_refresh=true``
+      defers it for backfills that will run ``populate_patient_record`` afterwards.
+    """
+
+    def create(self, request, *args, **kwargs):
+        # Checked before request.data, which is what triggers parsing. Chunked
+        # uploads send no CONTENT_LENGTH; there is nothing to check pre-parse in
+        # that case, and the row cap still bounds what gets written.
+        try:
+            declared = int(request.META.get('CONTENT_LENGTH') or 0)
+        except (TypeError, ValueError):
+            declared = 0
+        if declared > OMOP_BULK_MAX_BYTES:
+            return Response(
+                {'detail': (
+                    f'Request body too large: {declared} bytes exceeds the maximum '
+                    f'of {OMOP_BULK_MAX_BYTES} bytes. Split the batch and retry.'
+                ), 'max_bytes': OMOP_BULK_MAX_BYTES},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        if not isinstance(request.data, list):
+            return super().create(request, *args, **kwargs)
+        return self._bulk_create(request)
+
+    def _bulk_create(self, request):
+        from rest_framework.exceptions import PermissionDenied
+
+        rows = request.data
+        if len(rows) > OMOP_BULK_MAX_ROWS:
+            return Response(
+                {'detail': (
+                    f'Batch too large: {len(rows)} rows exceeds the maximum of '
+                    f'{OMOP_BULK_MAX_ROWS} rows per request. Split the batch and retry.'
+                ), 'max_rows': OMOP_BULK_MAX_ROWS},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        model_name = self.serializer_class.Meta.model.__name__
+        pk_field, model_cls = _MODEL_PK_MAP[model_name]
+
+        # Client-supplied PKs would desynchronise the next_pk_batch accounting
+        # (some rows allocated, some not) — reject rather than half-honour them.
+        pk_errors = [
+            ({pk_field: ['Client-supplied primary keys are not allowed in a bulk '
+                         'request; ids are assigned by the server.']}
+             if isinstance(row, dict) and row.get(pk_field) is not None else {})
+            for row in rows
+        ]
+        if any(pk_errors):
+            return Response(pk_errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # many=True yields positionally-aligned per-index error dicts, so the
+        # operator can tell which of N rows to fix.
+        serializer = self.get_serializer(data=rows, many=True)
+        _prefetch_bulk_related(serializer, rows)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+
+        if not validated:
+            return Response({'created': 0, 'ids': []}, status=status.HTTP_201_CREATED)
+
+        # One batch is one person, by construction on the producer side.
+        people = {attrs.get('person') for attrs in validated}
+        if len(people) > 1:
+            return Response(
+                {'detail': (
+                    'A bulk request must contain rows for exactly one person; '
+                    f'found {len(people)} distinct person values. '
+                    'Split the batch by person and retry.'
+                )},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        person = people.pop()
+        if person is None:
+            return Response(
+                {'detail': 'person is required on every row of a bulk request.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Same authorization the single-row path applies in perform_create, run
+        # once for the batch's single person.
+        org = get_request_org(request)
+        if not is_service_token(request):
+            if org is not None:
+                existing_pi = PatientRecord.objects.filter(person=person).first()
+                if (existing_pi is not None
+                        and existing_pi.organization is not None
+                        and existing_pi.organization != org):
+                    raise PermissionDenied('Person does not belong to your organization.')
+            elif not getattr(request.user, 'is_staff', False):
+                from omop_core.authorization import can_write_patient
+                if not can_write_patient(request.user, person.person_id):
+                    raise PermissionDenied('Access denied.')
+
+        source, source_user_id, reason = _extract_provenance(request)
+        skip_refresh = str(
+            request.query_params.get('skip_refresh', 'false')
+        ).strip().lower() in ('1', 'true', 'yes')
+
+        from omop_core.signals import suppress_patient_record_refresh
+
+        with transaction.atomic():
+            # bulk_create does not fire post_save today, so the per-row refresh
+            # receivers would not run anyway. Suppressing explicitly is the
+            # documented house idiom for bulk writes (omop_core/signals.py) and
+            # keeps "one refresh per batch, never per row" true even if a future
+            # change introduces a per-row save() in here.
+            with suppress_patient_record_refresh():
+                ids = next_pk_batch(model_cls, pk_field, len(validated))
+                instances = []
+                for attrs, pk in zip(validated, ids):
+                    attrs = dict(attrs)
+                    attrs[pk_field] = pk
+                    instances.append(model_cls(**attrs))
+                model_cls.objects.bulk_create(instances)
+
+            # No source supplied means no ProvenanceRecord, matching the single-row
+            # path — inventing a source would make provenance unfalsifiable.
+            if source:
+                ct = ContentType.objects.get_for_model(model_cls)
+                ProvenanceRecord.objects.bulk_create([
+                    ProvenanceRecord(
+                        source=source,
+                        source_user_id=source_user_id or '',
+                        target_patient_id=str(person.person_id),
+                        modification_reason=reason,
+                        organization=org,
+                        content_type=ct,
+                        object_id=pk,
+                    )
+                    for pk in ids
+                ])
+
+            # Deliberately inside the transaction, and deliberately unguarded:
+            # a failing derivation rolls the rows back and 500s rather than
+            # leaving a landed batch with a stale read model, which is the
+            # silent-corruption case this endpoint exists to avoid.
+            #
+            # This is a considered divergence from the single-row path, where
+            # _refresh_for_instance swallows the same exception and logs a
+            # warning (omop_core/signals.py). There, one stale row is a small
+            # blast radius and failing the write would be disproportionate; here
+            # the caller is a pipeline that retries whole batches, so a loud
+            # rollback is both recoverable and the safer default. Callers who
+            # want the rows regardless can pass ?skip_refresh=true and derive
+            # separately.
+            if not skip_refresh:
+                refresh_patient_record(person)
+
+        return Response(
+            {'created': len(ids), 'ids': list(ids)},
+            status=status.HTTP_201_CREATED,
+        )
+
+
 class _ProvenanceMixin:
     """Record provenance on create/update when source headers/body fields are present."""
     def _prov(self, obj):
@@ -4496,26 +4755,32 @@ class _ProvenanceMixin:
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ConditionOccurrenceViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class ConditionOccurrenceViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ConditionOccurrenceSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = ConditionOccurrence.objects.all()
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'omop_write'
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class DrugExposureViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class DrugExposureViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = DrugExposureSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = DrugExposure.objects.all()
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'omop_write'
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class MeasurementViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class MeasurementViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Measurement.objects.all()
     ordering_fields = ['measurement_date', 'measurement_id']
     ordering = ['-measurement_date']
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'omop_write'
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -4546,17 +4811,21 @@ class MeasurementViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewS
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ObservationViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class ObservationViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ObservationSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Observation.objects.all()
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'omop_write'
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ProcedureOccurrenceViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class ProcedureOccurrenceViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ProcedureOccurrenceSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = ProcedureOccurrence.objects.all()
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'omop_write'
 
 
 @method_decorator(csrf_exempt, name='dispatch')

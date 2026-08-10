@@ -711,6 +711,32 @@ The FHIR upload endpoint in `patient_portal/api/views.py` (`upload_fhir_bundle`)
 
 ---
 
+## Bulk OMOP Row Writes
+
+The five OMOP clinical CRUD endpoints (`conditions`, `drug-exposures`, `measurements`,
+`observations`, `procedures`) accept a **JSON array** on POST for callers that have
+already parsed FHIR into OMOP rows. Single-dict POSTs are unchanged.
+
+Contract: `201` with `{"created": N, "ids": [...]}`, ids in request order. One
+transaction, all-or-nothing. One batch is one person (mixed-person → 400). Server
+assigns PKs via `next_pk_batch` (client-supplied PKs → 400). Per-index validation
+errors. Max 1,000 rows (`OMOP_BULK_MAX_ROWS`) → 413. Provenance comes from the
+`X-Provenance-Source` / `X-Provenance-User-Id` headers and applies to the whole
+batch; no source means no `ProvenanceRecord`, matching the single-row path.
+
+Two things to know before touching this code:
+
+- **`bulk_create` does not fire `post_save`**, so the `omop_core/signals.py` receivers
+  that rebuild `PatientRecord` do not run. The bulk path calls `refresh_patient_record`
+  explicitly, once per batch. Any new bulk write path must do the same, or it will land
+  rows that the read model never reflects.
+- **Query count must stay flat in batch size.** DRF resolves FKs with a per-row
+  `queryset.get(pk=...)`; `_prefetch_bulk_related` collapses that to one query per FK
+  column. `BulkOmopWriteTest` asserts this with `CaptureQueriesContext` at two batch
+  sizes — treat a failure there as a real regression, not a flaky threshold.
+
+---
+
 ## FHIR Bundle Generator Architecture
 
 `omop_core/management/commands/generate_fhir_bundle.py`:
