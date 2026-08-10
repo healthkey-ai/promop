@@ -15,11 +15,18 @@ from pathlib import Path
 import dj_database_url
 from dotenv import load_dotenv
 
+from ctomop.frontend_paths import resolve_frontend_root
+
 # Load environment variables from .env file (for local development)
 load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Directory holding the built frontend. Feeds BOTH the Django template loader
+# (for the SPA catch-all in ctomop.urls) and WhiteNoise (for index.html and the
+# hashed assets) — see ctomop/frontend_paths.py for why they must agree.
+FRONTEND_ROOT = resolve_frontend_root(BASE_DIR, os.environ.get('WHITENOISE_ROOT', ''))
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-your-default-key-change-this')
@@ -166,7 +173,7 @@ ROOT_URLCONF = 'ctomop.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'frontend' / 'build'],
+        'DIRS': [FRONTEND_ROOT] if FRONTEND_ROOT else [],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -287,14 +294,8 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
-_whitenoise_root = os.environ.get('WHITENOISE_ROOT', '')
-if _whitenoise_root:
-    WHITENOISE_ROOT = Path(_whitenoise_root)
-else:
-    for _candidate in (BASE_DIR / 'frontend' / 'dist' / 'remote', BASE_DIR / 'frontend' / 'build'):
-        if _candidate.exists():
-            WHITENOISE_ROOT = _candidate
-            break
+if FRONTEND_ROOT:
+    WHITENOISE_ROOT = FRONTEND_ROOT
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
