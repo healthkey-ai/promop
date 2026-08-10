@@ -40,5 +40,11 @@ requires-python = ">=3.12"
 # INSTALLED_APPS. (patient_portal is NOT required — its 0071 edge is conditional.)
 dependencies = ["Django>=5.0", "django-oauth-toolkit>=3.0"]
 
+[project.optional-dependencies]
+# The patient-matching contract test (tests/test_patient_matching.py) exercises the
+# adapter against the REAL matcher. Install this extra to run it (it is otherwise
+# importorskip-guarded so it does not gate the PROMOP suite). Pin the SHA CancerBot pins.
+test = ["exact-matching @ git+https://github.com/healthkey-ai/exact@8501802902f0597390cc7cbb0c7c2526e59a3cf7#subdirectory=matcher_app"]
+
 [tool.setuptools.packages.find]
 include = ["omop_core*", "omop_oncology*", "omop_genomics*"]
