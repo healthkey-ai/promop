@@ -45,6 +45,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # pytest runs with --no-migrations, so the test DB is built by reflecting
+      # model state. That recreates concept's GIN trigram index during CREATE
+      # TABLE, inside pytest-django's base django_db_setup fixture — before any
+      # fixture override could enable the extension. Enabling it on template1
+      # instead means every database cloned from it already has pg_trgm, which
+      # is what conftest.py prescribes as the required environment setup.
+      - name: Enable pg_trgm on template1 (required by the pytest suite)
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+
       - name: Run migrations
         run: python manage.py migrate --noinput
 
