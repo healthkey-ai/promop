@@ -59,6 +59,15 @@ _VOCABULARIES = [
          vocabulary_reference='OMOP generated',
          vocabulary_version='v5',
          vocabulary_concept_id=0),
+    # OMOP's placeholder vocabulary. Required by concept 0 ('No matching
+    # concept') and by the generic-lab fallback 3000963. It was referenced by
+    # _CONCEPTS but never seeded, so seeding against an empty database raised
+    # IntegrityError — see conftest.py, which documents working around this.
+    dict(vocabulary_id='None',
+         vocabulary_name='OMOP Standardized Vocabularies',
+         vocabulary_reference='OMOP generated',
+         vocabulary_version='v5',
+         vocabulary_concept_id=0),
     dict(vocabulary_id='HemOnc',
          vocabulary_name='HemOnc',
          vocabulary_reference='https://hemonc.org',
@@ -87,6 +96,7 @@ _CONCEPT_CLASSES = [
     dict(concept_class_id='Treatment',           concept_class_name='Treatment',            concept_class_concept_id=0),
     dict(concept_class_id='Gender',              concept_class_name='Gender',               concept_class_concept_id=0),
     dict(concept_class_id='Regimen',             concept_class_name='Regimen',              concept_class_concept_id=0),
+    dict(concept_class_id='Undefined',           concept_class_name='Undefined',            concept_class_concept_id=0),
 ]
 
 
@@ -139,6 +149,19 @@ def _hk(offset, concept_name, domain_id, concept_class_id, concept_code):
 
 
 _CONCEPTS = [
+    # ------------------------------------------------------------------
+    # concept 0 — OMOP's universal "No matching concept" sentinel, written to
+    # any *_concept_id when source data cannot be mapped. It is domain-agnostic
+    # by design: on staging it is referenced by 12,352 observations, 8,131 drug
+    # exposures, 290 conditions and 14 measurements.
+    #
+    # It must NOT carry a real vocabulary or domain. Storing it as
+    # (HK-Labs, Measurement, Lab Test) — as one database had — makes every
+    # unmapped row of every domain look like a HealthKey lab test to any query
+    # that groups by vocabulary or domain. See #427.
+    # ------------------------------------------------------------------
+    _c(0, 'No matching concept', 'Metadata', 'None', 'Undefined', None, 'No matching concept'),
+
     # ------------------------------------------------------------------
     # Gender concepts — needed for Person.gender_concept FK.
     # ------------------------------------------------------------------
