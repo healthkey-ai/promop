@@ -45,11 +45,31 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # pytest runs with --no-migrations, so the test DB is built by reflecting
+      # model state. That recreates concept's GIN trigram index during CREATE
+      # TABLE, inside pytest-django's base django_db_setup fixture — before any
+      # fixture override could enable the extension. Enabling it on template1
+      # instead means every database cloned from it already has pg_trgm, which
+      # is what conftest.py prescribes as the required environment setup.
+      - name: Enable pg_trgm on template1 (required by the pytest suite)
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+
       - name: Run migrations
         run: python manage.py migrate --noinput
 
-      - name: Run tests
+      - name: Run tests (Django runner)
         run: python manage.py test omop_core patient_portal --verbosity=2 --noinput
+
+      # The tests/ package is pytest-based (pytest.ini sets testpaths = tests,
+      # conftest.py does session-level DB setup that --no-migrations skips).
+      # Django's runner does not discover it, so these 166 tests ran in CI for
+      # the first time here — they had been green-by-omission, and were in fact
+      # 14-of-15 red in tests/test_enrich_breast_cancer_omop_data.py after #413
+      # expanded WEARABLE_CONCEPT_CODE without anyone noticing.
+      - name: Run tests (pytest)
+        run: pytest -q
 
   frontend:
     name: Frontend lint & build

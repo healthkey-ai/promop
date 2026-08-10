@@ -372,13 +372,23 @@ describe('LabsTab - new_field', () => {
 ### Running Tests
 
 ```bash
-# Backend tests — run against local PostgreSQL (matches CI)
+# Backend tests, Django runner — omop_core + patient_portal
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
+
+# Backend tests, pytest — the tests/ package (18 files, 166 tests)
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
+  .venv/bin/python -m pytest -q
 
 # Frontend tests (install deps first if needed: cd frontend && npm ci)
 cd frontend && npm test -- --run
 ```
+
+**Both backend suites must be run.** Django's test runner discovers only
+`omop_core.tests` and `patient_portal.tests`; the `tests/` package is
+pytest-based and is invisible to it. CI runs both as of PR #426 — before that
+those 166 tests had never run in CI and sat at 14 failures for some time
+without anyone noticing.
 
 ### Rule: Feature Branch + PR for Every Code Change
 
@@ -430,6 +440,15 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d postgres \
 # Apply migrations
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py migrate --noinput
+
+# Enable pg_trgm on template1 — REQUIRED by the pytest suite.
+# pytest runs with --no-migrations, so the test DB is built by reflecting model
+# state, which recreates concept's GIN trigram index during CREATE TABLE before
+# any fixture can enable the extension. Putting it on template1 means every
+# database cloned from it already has pg_trgm. Without this, all 166 pytest
+# tests error with: operator class "gin_trgm_ops" does not exist
+PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d template1 \
+  -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
 
 # Connect (use @14 bin directly — system psql binary has OpenSSL crash on this machine)
 PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -d promop_test
