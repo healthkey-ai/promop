@@ -2506,3 +2506,100 @@ class ConceptZeroTest(TestCase):
         self.assertEqual(c.vocabulary_id, 'None')
         self.assertEqual(c.concept_class_id, 'Undefined')
         self.assertIsNone(c.source)
+
+
+
+class BackfillConceptSourceCommandTest(TestCase):
+    """Covers backfill_concept_source (see #415).
+
+    Concept.source separates locally-authored rows from vocabulary-release rows.
+    It was added after most rows existed and never populated, so the column
+    claims a guarantee it does not provide — on staging 19 of 1,979,422 rows
+    were tagged while 224 were demonstrably local.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_omop_concepts', verbosity=0)
+
+    def _concept(self, concept_id, code, vocabulary_id='LOINC', source=None):
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id=vocabulary_id,
+            defaults={'vocabulary_name': vocabulary_id, 'vocabulary_concept_id': 0})
+        return Concept.objects.create(
+            concept_id=concept_id,
+            concept_name=f'Test {code}',
+            domain=Domain.objects.get(domain_id='Measurement'),
+            vocabulary=vocab,
+            concept_class=ConceptClass.objects.get(concept_class_id='Clinical Observation'),
+            standard_concept='S',
+            concept_code=code,
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+            source=source,
+        )
+
+    def test_dry_run_writes_nothing(self):
+        from omop_core.models import Concept
+
+        self._concept(9001099, 'X-1')
+        call_command('backfill_concept_source', '--dry-run', verbosity=0)
+        self.assertIsNone(Concept.objects.get(concept_id=9001099).source)
+
+    def test_tags_each_category_of_local_row(self):
+        from omop_core.models import Concept
+
+        self._concept(9001099, 'X-1')                                  # seed mint range
+        self._concept(392021999, 'X-2', vocabulary_id='SNOMED')        # FHIR ingest block
+        self._concept(2_100_000_001, 'X-3', vocabulary_id='HemOnc')    # OHDSI custom range
+        self._concept(500001, 'X-4', vocabulary_id='LOCAL')            # local vocabulary
+        self._concept(500002, 'X-5', vocabulary_id='HK-Labs')          # HK-* vocabulary
+
+        call_command('backfill_concept_source', '--apply', verbosity=0)
+
+        for cid in (9001099, 392021999, 2_100_000_001, 500001, 500002):
+            self.assertEqual(
+                Concept.objects.get(concept_id=cid).source, 'HealthKey',
+                f'concept {cid} should have been tagged as locally minted')
+
+    def test_genuine_vocabulary_rows_are_left_alone(self):
+        """The overwhelming majority of rows are Athena content and must not be
+        touched — a predicate that swept them up would relabel 1.98M rows as
+        locally authored and destroy the column's meaning."""
+        from omop_core.models import Concept
+
+        genuine = self._concept(3025999, 'X-6', vocabulary_id='LOINC')
+        call_command('backfill_concept_source', '--apply', verbosity=0)
+        genuine.refresh_from_db()
+        self.assertIsNone(genuine.source)
+
+    def test_existing_source_values_are_not_overwritten(self):
+        from omop_core.models import Concept
+
+        self._concept(500003, 'X-7', vocabulary_id='HK-Labs', source='SomethingElse')
+        call_command('backfill_concept_source', '--apply', verbosity=0)
+        self.assertEqual(
+            Concept.objects.get(concept_id=500003).source, 'SomethingElse',
+            'the command must only fill NULLs, never relabel an existing value')
+
+    def test_rule_flag_limits_scope(self):
+        from omop_core.models import Concept
+
+        self._concept(9001099, 'X-1')                            # seed mint
+        self._concept(500001, 'X-4', vocabulary_id='LOCAL')      # local vocabulary
+
+        call_command('backfill_concept_source', '--apply', '--rule', 'seed_mint',
+                     verbosity=0)
+
+        self.assertEqual(Concept.objects.get(concept_id=9001099).source, 'HealthKey')
+        self.assertIsNone(Concept.objects.get(concept_id=500001).source)
+
+    def test_is_idempotent(self):
+        from omop_core.models import Concept
+
+        self._concept(9001099, 'X-1')
+        call_command('backfill_concept_source', '--apply', verbosity=0)
+        call_command('backfill_concept_source', '--apply', verbosity=0)
+        self.assertEqual(
+            Concept.objects.filter(concept_id=9001099, source='HealthKey').count(), 1)
