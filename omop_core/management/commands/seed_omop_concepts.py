@@ -175,6 +175,12 @@ _CONCEPTS = [
     # ------------------------------------------------------------------
     _c(32817, 'EHR',               'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976890'),
     _c(32856, 'Lab',               'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976929'),
+    # Provenance for patient-generated data (wearable uploads). OMOP's Type
+    # Concept vocabulary has no device/wearable type — all 81 rows were
+    # reviewed — so 'Patient self-report' is the closest faithful fit for data
+    # the patient's own device produced. Previously wearable rows were typed
+    # 32883, which is 'Survey' (#441).
+    _c(32865, 'Patient self-report', 'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976938'),
     _c(32869, 'Pharmacy claim',    'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976942'),
     _c(32531, 'Treatment Regimen', 'Episode',       'Episode',       'Treatment',    'S', 'OMOP4822256'),
 
@@ -352,6 +358,16 @@ _CONCEPTS = [
     _hk(1, 'Walking double support time percentage', 'Measurement', 'Clinical Observation', 'HK-WEAR-DBL-SUPPORT'),
     _hk(2, 'Heart rate during walking',              'Measurement', 'Clinical Observation', 'HK-WEAR-WALK-HR'),
     _hk(3, 'Basal energy expenditure',               'Measurement', 'Clinical Observation', 'HK-WEAR-BASAL-ENERGY'),
+    # RMSSD has no LOINC concept. Verified against a full Athena load
+    # (1,979,416 concepts): searching LOINC for 'RMSSD' and for
+    # 'successive difference' returns nothing, and the complete 'R-R interval'
+    # family carries only mean, min, max, standard deviation (80404-7 /
+    # 76643-6) and coefficient of variation. SDNN is present; RMSSD is not.
+    #
+    # It must not be aliased onto 80404-7: that code is specifically the
+    # standard-deviation form, and filing RMSSD under it is the same defect
+    # class as the pre-#413 walking_speed → BMI mapping. See #438.
+    _hk(4, 'R-R interval RMSSD (heart rate variability)', 'Measurement', 'Clinical Observation', 'HK-WEAR-HRV-RMSSD'),
 
     # ------------------------------------------------------------------
     # HemOnc therapy regimen concepts — required for first_line_therapy_id

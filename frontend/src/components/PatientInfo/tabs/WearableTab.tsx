@@ -495,11 +495,22 @@ export default function WearableTab({ formData, onRefresh }: Props) {
             onChange={() => {}}
             disabled
           />
+          {/* SDNN and RMSSD are distinct statistics and are shown as
+              distinct fields. A patient normally has one or the other
+              depending on their device, not both. */}
           <Field
             label="HRV SDNN (ms)"
             name="hrv_sdnn_avg_30d"
             type="number"
             value={formData?.hrv_sdnn_avg_30d}
+            onChange={() => {}}
+            disabled
+          />
+          <Field
+            label="HRV RMSSD (ms)"
+            name="hrv_rmssd_avg_30d"
+            type="number"
+            value={formData?.hrv_rmssd_avg_30d}
             onChange={() => {}}
             disabled
           />

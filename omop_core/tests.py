@@ -2161,7 +2161,12 @@ class WearableConceptMappingTest(TestCase):
             'steps': ['step'],
             'active_minutes': ['exercise', 'activity'],
             'resting_hr': ['heart rate'],
-            'hrv_sdnn': ['r-r interval', 'heart rate variability'],
+            # HRV terms must be the DISTINGUISHING part of each name, not the
+            # shared 'r-r interval' / 'heart rate variability' wording. Both
+            # concepts contain that wording, so matching on it would let RMSSD
+            # be aliased onto the SDNN code — the #438 defect — and still pass.
+            'hrv_sdnn': ['standard deviation'],
+            'hrv_rmssd': ['rmssd'],
             'spo2': ['oxygen saturation'],
             'respiratory_rate': ['respiratory rate'],
             'sleep_duration': ['sleep'],

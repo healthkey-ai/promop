@@ -3558,6 +3558,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         from omop_core.services.pk import next_pk_batch as _next_pk_batch
         from omop_core.services.mappings import (
             WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB, WEARABLE_ARTIFACT_BOUNDS,
+            WEARABLE_TYPE_CONCEPT_ID,
         )
         from omop_core.services.concept_cache import concept_by_vocab as _cc_by_vocab
 
@@ -3632,15 +3633,34 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 person.person_id, unresolved,
             )
 
-        # Measurement type concept (wearable device = 32883 / Patient self-report)
-        type_concept = None
+        # Provenance type for every row written below. 32865 is
+        # 'Patient self-report' — OMOP's Type Concept vocabulary has no
+        # device or wearable type, so this is the closest faithful fit for
+        # data the patient's own device produced.
+        #
+        # This previously used 32883 with a comment claiming it was
+        # "Patient self-report"; 32883 is 'Survey'. It fell back to 32856,
+        # which is 'Lab'. Both mislabelled the provenance of every wearable
+        # row, and the fallback fired silently on any database without the
+        # full vocabulary loaded (#441).
+        #
+        # There is deliberately no fallback now: refusing to write is better
+        # than writing a row that misstates where the data came from. The
+        # concept is seeded by seed_omop_concepts, so an unseeded database is
+        # a setup error the operator needs to see.
         try:
-            type_concept = Concept.objects.get(concept_id=32883)
+            type_concept = Concept.objects.get(concept_id=WEARABLE_TYPE_CONCEPT_ID)
         except Concept.DoesNotExist:
-            try:
-                type_concept = Concept.objects.get(concept_id=32856)  # Lab fallback
-            except Concept.DoesNotExist:
-                pass
+            logger.error(
+                'wearable_type_concept_missing concept_id=%s person_id=%s — refusing to write '
+                'rows with unknown provenance. Run seed_omop_concepts.',
+                WEARABLE_TYPE_CONCEPT_ID, person.person_id,
+            )
+            return Response(
+                {'error': 'Wearable ingestion is not configured on this server '
+                          '(missing measurement type concept). Contact an administrator.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         # Filter out artifact values and deduplicate
         from django.db.models import Q
@@ -3651,6 +3671,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             'active_minutes': 'min',
             'resting_hr': '/min',
             'hrv_sdnn': 'ms',
+            'hrv_rmssd': 'ms',
             'spo2': '%',
             'respiratory_rate': '/min',
             'sleep_duration': 'h',
