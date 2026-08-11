@@ -12,7 +12,6 @@ from omop_core.services.mappings import (
     LAB_FIELD_TO_LOINC,
     CONDITION_FIELDS,
     DEMOGRAPHIC_FIELDS,
-    DEMOGRAPHIC_FIELDS_PERSISTED,
     THERAPY_LINE_FIELDS,
     THERAPY_LINE_PREFIXES,
     CONCEPT_GENERIC_LAB,
@@ -64,48 +63,56 @@ def sync_to_omop(patient_info, changed_fields: set, today: date = None, changed_
     _mark_user_edited(patient_info, changed_fields)
 
 
-def unsynced_derived_fields(changed_fields) -> set:
-    """Derived fields this service cannot write back to OMOP.
+def candidate_user_edited_fields(changed_fields) -> set:
+    """Edited fields that a re-derivation would blank.
 
-    A field in `_OMOP_DERIVED_FIELDS` is blanked by every re-derivation. That is
-    only safe if OMOP can reconstruct it, and the write-through covers just 77 of
-    the 183 derived fields — the other 109 (staging, biomarker statuses, the
-    behaviour/lifestyle block, the MM/CLL/lymphoma blocks, ...) are editable via
-    PATCH with nowhere in OMOP to land. Those are the ones the read model has to
-    remember on the patient's behalf.
+    Every field in `_OMOP_DERIVED_FIELDS` is cleared before each refresh, so any
+    edit to one needs a fallback until we know derivation can reproduce it.
+
+    Deliberately *not* filtered against a table of "fields the write-through
+    covers". Such a table was wrong in both directions: `stage` and the therapy
+    line dates sit inside CONDITION_FIELDS/THERAPY_LINE_FIELDS but never reach a
+    column derivation reads, and ECOG reaches `measurement` yet was invisible to
+    an Observation-only reader. Claiming coverage the round-trip does not deliver
+    is exactly the bug this module is fixing.
+
+    Flagging too much is cheap instead: `_restore_user_edited` only fills a field
+    derivation left empty, and the flag is dropped the moment derivation produces
+    a value. So a field OMOP really does own unflags itself on the next refresh,
+    and no list has to be kept accurate by hand.
     """
     # Imported here rather than at module scope: patient_record_service is the
     # read side and pulling it in eagerly would couple the two directions.
     from omop_core.services.patient_record_service import _OMOP_DERIVED_FIELDS
 
-    synced = (
-        set(LAB_FIELD_TO_LOINC)
-        | CONDITION_FIELDS
-        | DEMOGRAPHIC_FIELDS_PERSISTED
-        | THERAPY_LINE_FIELDS
-    )
-    return (set(changed_fields) & set(_OMOP_DERIVED_FIELDS)) - synced
+    return set(changed_fields) & set(_OMOP_DERIVED_FIELDS)
 
 
 def _mark_user_edited(patient_info, changed_fields) -> None:
-    """Remember hand-entered values that OMOP has no home for.
+    """Remember edits to fields a refresh would otherwise blank.
 
-    Recorded even when the incoming value is empty: clearing a field is an edit
-    too, and the record has to survive re-derivation the same way a set value
-    does.
+    `changed_fields` must be fields whose value actually changed, not every key
+    in the request body — the React client PATCHes the whole record on autosave,
+    so flagging the body wholesale would pin every derived field on the row and
+    stop OMOP deletions propagating.
+
+    A cleared field is recorded too, so the flag set tracks what the user has
+    touched. Restoring an empty value is a no-op (see `_restore_user_edited`):
+    when derivation also comes up empty the field ends up blank either way, and
+    when OMOP has a value it wins.
     """
-    unsynced = unsynced_derived_fields(changed_fields)
-    if not unsynced:
+    candidates = candidate_user_edited_fields(changed_fields)
+    if not candidates:
         return
     existing = list(patient_info.user_edited_fields or [])
-    merged = existing + sorted(unsynced - set(existing))
+    merged = existing + sorted(candidates - set(existing))
     if merged == existing:
         return
     patient_info.user_edited_fields = merged
     patient_info.save(update_fields=['user_edited_fields'])
     logger.info(
         '{"event": "patient_record_user_edited_fields", "person_id": "%s", "fields": "%s"}',
-        patient_info.person_id, ','.join(sorted(unsynced)),
+        patient_info.person_id, ','.join(sorted(candidates)),
     )
 
 

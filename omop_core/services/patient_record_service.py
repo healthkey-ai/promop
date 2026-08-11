@@ -331,16 +331,29 @@ def _snapshot_user_edited(patient_info: PatientRecord) -> dict:
 def _restore_user_edited(patient_info: PatientRecord, preserved: dict) -> None:
     """Put hand-entered values back where derivation produced nothing.
 
-    Runs after every section extractor, so a field OMOP can now answer for keeps
-    the derived value — the user's copy is a fallback, not an override. That
-    ordering is what lets a later FHIR upload or OMOP correction take over a
-    field the patient once filled in by hand.
+    Runs after every section extractor, so a field OMOP can now answer keeps the
+    derived value — the user's copy is a fallback, not an override. That ordering
+    is what lets a later FHIR upload or OMOP correction take over a field the
+    patient once filled in by hand.
+
+    Once derivation does answer for a field, its flag is dropped. That hand-off
+    is what keeps the fallback honest, and it is why the write-through can afford
+    to flag generously instead of maintaining a table of which fields round-trip:
+
+      - it stops OMOP's value being mistaken for the user's on a later refresh
+        and resurrected after the source row is deleted, which would leave a
+        value no table backs and no user typed;
+      - and it lets a field OMOP owns resume propagating deletions normally.
     """
+    still_edited = set(patient_info.user_edited_fields or [])
     for field, value in preserved.items():
-        if _is_empty(value):
-            continue
         if _is_empty(getattr(patient_info, field, None)):
-            setattr(patient_info, field, value)
+            if not _is_empty(value):
+                setattr(patient_info, field, value)
+        else:
+            # Derivation answered for this field — OMOP owns it from here.
+            still_edited.discard(field)
+    patient_info.user_edited_fields = sorted(still_edited)
 
 
 def refresh_patient_record(person: Person) -> PatientRecord:
@@ -2105,10 +2118,14 @@ def _performance_rows(person: Person, name_fragment: str, loinc_code: str) -> li
         .order_by('-measurement_date', '-measurement_id')
         .values_list('measurement_date', 'value_as_number')
     )
-    rows = list(obs) + list(meas)
-    # date.min for undated rows so a dated score always outranks one with no
-    # date. The sort is stable, so same-date rows keep observation-before-
-    # measurement order rather than resolving arbitrarily.
+    # Measurements first, and the sort below is stable (reverse=True preserves
+    # the order of equal keys), so a same-date tie resolves in favour of
+    # `measurement`. That is the PATCH write-through's table and
+    # _sync_measurement always stamps today, so the tie case is "clinician
+    # corrected a score a bundle loaded the same day" — the correction has to
+    # win, or the refresh silently reverts it.
+    rows = list(meas) + list(obs)
+    # date.min for undated rows so a dated score always outranks one with no date.
     rows.sort(key=lambda r: (r[0] or date.min), reverse=True)
     return rows
 

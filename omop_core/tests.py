@@ -2748,42 +2748,43 @@ class RemapLocalDrugConceptsCommandTest(TestCase):
 # Issue #434: re-derivation must not erase hand-entered values
 # ===========================================================================
 
-class UnsyncedDerivedFieldsTest(TestCase):
-    """Which derived fields the OMOP write-through cannot persist."""
+class CandidateUserEditedFieldsTest(TestCase):
+    """Which edited fields need a fallback until derivation proves otherwise."""
 
-    def test_fields_the_write_through_covers_are_not_flagged(self):
-        from omop_core.services.omop_write_service import unsynced_derived_fields
-
-        # hemoglobin_g_dl -> Measurement, disease -> ConditionOccurrence,
-        # first_line_therapy -> Episode. All recoverable from OMOP.
-        self.assertEqual(
-            unsynced_derived_fields({'hemoglobin_g_dl', 'disease', 'first_line_therapy'}),
-            set(),
-        )
-
-    def test_derived_fields_with_nowhere_to_land_are_flagged(self):
-        from omop_core.services.omop_write_service import unsynced_derived_fields
+    def test_derived_fields_are_flagged(self):
+        from omop_core.services.omop_write_service import candidate_user_edited_fields
 
         self.assertEqual(
-            unsynced_derived_fields({'tumor_stage', 'her2_status', 'smoking_status'}),
+            candidate_user_edited_fields({'tumor_stage', 'her2_status', 'smoking_status'}),
             {'tumor_stage', 'her2_status', 'smoking_status'},
         )
 
     def test_non_derived_fields_are_never_flagged(self):
         """email and date_of_birth live on PatientRecord and are never cleared,
         so they need no preservation."""
-        from omop_core.services.omop_write_service import unsynced_derived_fields
+        from omop_core.services.omop_write_service import candidate_user_edited_fields
 
-        self.assertEqual(unsynced_derived_fields({'email', 'date_of_birth'}), set())
+        self.assertEqual(candidate_user_edited_fields({'email', 'date_of_birth'}), set())
+
+    def test_fields_inside_a_trigger_set_are_still_flagged(self):
+        """`stage` is in CONDITION_FIELDS and the therapy dates are in
+        THERAPY_LINE_FIELDS, but _sync_condition writes only `disease` and
+        _sync_therapy_line bails without a therapy name. Treating those trigger
+        sets as proof of a round-trip is what let #434's stage='I' disappear."""
+        from omop_core.services.omop_write_service import candidate_user_edited_fields
+
+        self.assertEqual(candidate_user_edited_fields({'stage'}), {'stage'})
+        self.assertEqual(
+            candidate_user_edited_fields({'first_line_start_date'}),
+            {'first_line_start_date'},
+        )
 
     def test_patient_age_is_flagged_despite_triggering_the_demographic_sync(self):
-        """patient_age is in DEMOGRAPHIC_FIELDS, but _sync_demographics writes
-        only gender and the birth date — counting the trigger set as coverage
-        would drop a typed age on the next refresh."""
-        from omop_core.services.omop_write_service import unsynced_derived_fields
+        """_sync_demographics writes only gender and the birth date; a typed age
+        has nowhere to land."""
+        from omop_core.services.omop_write_service import candidate_user_edited_fields
 
-        self.assertEqual(unsynced_derived_fields({'patient_age'}), {'patient_age'})
-        self.assertEqual(unsynced_derived_fields({'gender'}), set())
+        self.assertEqual(candidate_user_edited_fields({'patient_age'}), {'patient_age'})
 
 
 class PreserveUserEditedFieldsTest(_OmopBase):
@@ -2857,6 +2858,56 @@ class PreserveUserEditedFieldsTest(_OmopBase):
 
         self.assertIs(pi.transformed_to_dlbcl, False)
 
+    def test_derivation_taking_over_drops_the_flag(self):
+        """Once OMOP answers for a flagged field, the field stops being tracked
+        as hand-entered — otherwise the next snapshot would capture OMOP's own
+        value and treat it as the user's."""
+        PatientRecord.objects.create(
+            person=self.person, stage='I', user_edited_fields=['stage', 'her2_status'],
+        )
+        stage_concept = _concept(90612, 'Stage group.clinical', self.dom_meas,
+                                 self.vocab, self.cc, code='21908-9')
+        Measurement.objects.create(
+            measurement_id=90613,
+            person=self.person,
+            measurement_concept=stage_concept,
+            measurement_date=date(2026, 1, 15),
+            measurement_type_concept=self.type_concept,
+            value_as_string='III',
+            measurement_source_value='21908-9',
+        )
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(pi.stage, 'III')
+        # her2_status is still unanswered by OMOP, so it stays tracked.
+        self.assertEqual(pi.user_edited_fields, ['her2_status'])
+
+    def test_derived_value_is_not_resurrected_after_its_source_is_deleted(self):
+        """The failure the hand-off prevents: user types a value, OMOP overrides
+        it, the OMOP row is then deleted. Without dropping the flag the refresh
+        would restore OMOP's old value — one nobody typed and no table backs."""
+        PatientRecord.objects.create(
+            person=self.person, stage='I', user_edited_fields=['stage'],
+        )
+        stage_concept = _concept(90614, 'Stage group.clinical', self.dom_meas,
+                                 self.vocab, self.cc, code='21908-9')
+        m = Measurement.objects.create(
+            measurement_id=90615,
+            person=self.person,
+            measurement_concept=stage_concept,
+            measurement_date=date(2026, 1, 15),
+            measurement_type_concept=self.type_concept,
+            value_as_string='III',
+            measurement_source_value='21908-9',
+        )
+        self.assertEqual(refresh_patient_record(self.person).stage, 'III')
+
+        m.delete()
+        pi = refresh_patient_record(self.person)
+
+        self.assertIsNone(pi.stage)
+
     def test_flagging_an_unknown_field_is_harmless(self):
         """user_edited_fields is written by the service, but a stale entry left
         by a renamed field must not break the refresh for the whole patient."""
@@ -2885,15 +2936,31 @@ class SyncToOmopMarksUserEditedTest(_OmopBase):
         pi.refresh_from_db()
         self.assertEqual(pi.user_edited_fields, ['her2_status'])
 
-    def test_synced_edit_is_not_recorded(self):
-        """hemoglobin round-trips through Measurement, so it needs no fallback."""
+    def test_non_derived_edit_is_not_recorded(self):
+        """email is never cleared by a refresh, so it needs no fallback."""
+        from omop_core.services.omop_write_service import sync_to_omop
+
+        pi = PatientRecord.objects.create(person=self.person, email='p@example.com')
+        sync_to_omop(pi, {'email'})
+
+        pi.refresh_from_db()
+        self.assertEqual(pi.user_edited_fields, [])
+
+    def test_a_field_omop_owns_unflags_itself_on_the_next_refresh(self):
+        """Flagging is generous on the write side; the read side hands the field
+        back to OMOP as soon as derivation can answer for it. Without that,
+        nothing would ever remove a flag and deletions would stop propagating."""
         from omop_core.services.omop_write_service import sync_to_omop
 
         _concept(3000963, 'Laboratory test result', self.dom_meas, self.vocab, self.cc)
         pi = PatientRecord.objects.create(person=self.person, hemoglobin_g_dl=11.2)
         sync_to_omop(pi, {'hemoglobin_g_dl'})
-
         pi.refresh_from_db()
+        self.assertEqual(pi.user_edited_fields, ['hemoglobin_g_dl'])
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertAlmostEqual(float(pi.hemoglobin_g_dl), 11.2, places=1)
         self.assertEqual(pi.user_edited_fields, [])
 
     def test_repeated_edits_accumulate_without_duplicating(self):
@@ -3005,6 +3072,33 @@ class PerformanceStatusFromEitherTableTest(_OmopBase):
 
         self.assertEqual(pi.ecog_performance_status, 0)
         self.assertEqual(pi.ecog_assessment_date, date(2026, 8, 1))
+
+    def test_a_same_day_correction_beats_the_bundle_it_corrects(self):
+        """_sync_measurement stamps today, so a clinician's PATCH lands on the
+        same date as a bundle uploaded that morning. The correction must win the
+        tie or the next refresh silently reverts it."""
+        same_day = date(2026, 8, 5)
+        Observation.objects.create(
+            observation_id=90649,
+            person=self.person,
+            observation_concept=self._ecog_concept(),
+            observation_date=same_day,
+            observation_type_concept=self.type_concept,
+            value_as_number=3,
+        )
+        Measurement.objects.create(
+            measurement_id=90650,
+            person=self.person,
+            measurement_concept=self._ecog_concept(),
+            measurement_date=same_day,
+            measurement_type_concept=self.type_concept,
+            value_as_number=1,
+            measurement_source_value='89247-1',
+        )
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(pi.ecog_performance_status, 1)
 
     def test_matched_by_loinc_when_the_concept_name_does_not_say_karnofsky(self):
         """Vocabulary-poor environments keep the LOINC in the source value only."""

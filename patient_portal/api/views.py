@@ -169,6 +169,25 @@ def _record_provenance(record, source, source_user_id, target_patient_id=None, m
     )
 
 
+def _changed_fields(patient_record, previous_values, prev_val):
+    """Fields whose stored value actually moved during this PATCH.
+
+    ``previous_values`` was captured before ``serializer.save()`` and already
+    excludes read-only fields and anything not on the model, so comparing it to
+    the saved instance yields exactly the fields the user changed.
+
+    The distinction matters because the React client autosaves by PATCHing the
+    entire record back (``{...editedInfo, [field]: value}``), so the request body
+    is not a statement of intent — every key is present whether or not it moved.
+    Callers that treat the body as the change set attribute the whole record to
+    the user on every keystroke.
+    """
+    return {
+        field for field, old in previous_values.items()
+        if prev_val(patient_record, field) != old
+    }
+
+
 def _write_record_revisions(patient_record, previous_values, request):
     """Persist field-level revision-history rows for a PatientRecord update.
 
@@ -524,10 +543,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = PatientRecordSerializer(patient_info, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
 
-        changed_fields = {f for f in request.data if f not in _prov_meta}
         try:
             with transaction.atomic():
                 serializer.save()
+                # Fields whose value actually moved, not every key in the body:
+                # the React client PATCHes the whole record on autosave, so
+                # keying off the request would mark all ~180 derived fields as
+                # hand-edited on a single keystroke and freeze the read model
+                # against OMOP. Compared after save so both sides are model-
+                # native types rather than raw request strings.
+                changed_fields = _changed_fields(patient_info, previous_values, _prev_val)
                 if prov_source:
                     _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
                 sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
@@ -746,7 +771,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
         serializer.is_valid(raise_exception=True)
 
-        changed_fields = set(patch_data.keys())
         # Capture previous values before save so revision history can record
         # old/new (PHR-S FM TI.1.2#04). FK fields compared via {field}_id.
         _read_only = set(PatientRecordSerializer.Meta.read_only_fields)
@@ -764,6 +788,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         try:
             with transaction.atomic():
                 serializer.save()
+                # See the /patient-info/{pk}/ PATCH above: only fields whose
+                # value actually moved, or a whole-record autosave would mark
+                # every derived field hand-edited.
+                changed_fields = _changed_fields(patient_info, previous_values, _prev_val)
                 sync_to_omop(patient_info, changed_fields, changed_data=dict(patch_data))
                 # PHR-S FM TI.1.2#04 — record field-level revision history.
                 _write_record_revisions(patient_info, previous_values, request)
