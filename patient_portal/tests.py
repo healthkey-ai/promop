@@ -4453,6 +4453,74 @@ class PatientRecordOmopSyncTest(_SmartBase):
             '_LAB_FIELD_TO_LOINC should have been removed from views.py',
         )
 
+    # --- user_edited_fields bookkeeping (#434) ---------------------------------
+
+    def test_patch_records_only_the_field_that_moved(self):
+        """The React client autosaves by PATCHing the whole record back. Only
+        the field the user actually changed may be marked hand-edited — flagging
+        the body wholesale would pin every derived field on the row and stop
+        OMOP deletions ever propagating again."""
+        person = Person.objects.create(person_id=91101)
+        pi = PatientRecord.objects.create(
+            person=person, organization=self.organization,
+            her2_status='Positive', smoking_status='never', tumor_stage='T1',
+        )
+
+        # Whole record echoed back with a single field altered, as the UI does.
+        self._patch(pi, {
+            'her2_status': 'Positive',
+            'smoking_status': 'never',
+            'tumor_stage': 'T2',
+        })
+
+        pi.refresh_from_db()
+        self.assertEqual(pi.user_edited_fields, ['tumor_stage'])
+
+    def test_patch_that_changes_nothing_records_nothing(self):
+        person = Person.objects.create(person_id=91102)
+        pi = PatientRecord.objects.create(
+            person=person, organization=self.organization, her2_status='Positive',
+        )
+
+        self._patch(pi, {'her2_status': 'Positive'})
+
+        pi.refresh_from_db()
+        self.assertEqual(pi.user_edited_fields, [])
+
+    def test_read_only_fields_are_never_recorded(self):
+        """DRF discards read-only fields from the input, so attributing them to
+        the user would pin values the client never actually set."""
+        person = Person.objects.create(person_id=91103)
+        pi = PatientRecord.objects.create(
+            person=person, organization=self.organization, tumor_stage='T1',
+        )
+
+        self._patch(pi, {'tumor_stage': 'T2', 'therapy_component_ids': [1, 2, 3]})
+
+        pi.refresh_from_db()
+        self.assertEqual(pi.user_edited_fields, ['tumor_stage'])
+
+    def test_user_edited_fields_is_not_client_writable(self):
+        person = Person.objects.create(person_id=91104)
+        pi = PatientRecord.objects.create(person=person, organization=self.organization)
+
+        self._patch(pi, {'user_edited_fields': ['disease', 'stage']})
+
+        pi.refresh_from_db()
+        self.assertEqual(pi.user_edited_fields, [])
+
+    def test_patched_stage_survives_a_later_refresh(self):
+        """End-to-end for #434: the exact sequence that lost the staging
+        patient's stage — PATCH it, then re-derive."""
+        from omop_core.services.patient_record_service import refresh_patient_record
+        person = Person.objects.create(person_id=91105)
+        pi = PatientRecord.objects.create(person=person, organization=self.organization)
+
+        self._patch(pi, {'stage': 'I'})
+        refreshed = refresh_patient_record(person)
+
+        self.assertEqual(refreshed.stage, 'I')
+
 
 class VocabularyRelationshipModelTest(TestCase):
     """Verify Relationship, ConceptRelationship, ConceptAncestor models exist and are queryable."""

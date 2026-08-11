@@ -281,6 +281,10 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             'sleep_duration_hours_avg_30d',
             # Derivation versioning — set only by refresh_patient_record, never by client.
             'derivation_version', 'derived_at',
+            # Bookkeeping for which derived fields were hand-entered; maintained by
+            # the OMOP write-through from what a PATCH actually changed. A client
+            # setting it directly could pin any derived field against OMOP truth.
+            'user_edited_fields',
         )
 
     def get_patient_name(self, obj):

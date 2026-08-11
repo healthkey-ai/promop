@@ -64,6 +64,10 @@ LAB_FIELD_TO_LOINC = {
 
 CONDITION_FIELDS = frozenset({'disease', 'stage', 'condition_code_icd_10', 'condition_code_snomed_ct'})
 
+# Fields that trigger _sync_demographics. Note that it only writes gender and
+# the birth date to Person — `patient_age` is a function of the birth date and
+# `ethnicity` is unhandled — so membership here does NOT mean a field survives
+# a re-derivation. See candidate_user_edited_fields in omop_write_service.
 DEMOGRAPHIC_FIELDS = frozenset({'gender', 'date_of_birth', 'patient_age', 'ethnicity'})
 
 # Maps line number (1/2/3) → PatientRecord field prefix
