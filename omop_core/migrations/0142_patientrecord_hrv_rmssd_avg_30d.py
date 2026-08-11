@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('omop_core', '0140_fix_concept_zero_metadata'),
+        ('omop_core', '0141_patientrecord_user_edited_fields'),
     ]
 
     operations = [

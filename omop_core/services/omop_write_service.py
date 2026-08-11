@@ -60,6 +60,61 @@ def sync_to_omop(patient_info, changed_fields: set, today: date = None, changed_
         if changed_fields & line_fields:
             _sync_therapy_line(person, patient_info, line_number, prefix, today)
 
+    _mark_user_edited(patient_info, changed_fields)
+
+
+def candidate_user_edited_fields(changed_fields) -> set:
+    """Edited fields that a re-derivation would blank.
+
+    Every field in `_OMOP_DERIVED_FIELDS` is cleared before each refresh, so any
+    edit to one needs a fallback until we know derivation can reproduce it.
+
+    Deliberately *not* filtered against a table of "fields the write-through
+    covers". Such a table was wrong in both directions: `stage` and the therapy
+    line dates sit inside CONDITION_FIELDS/THERAPY_LINE_FIELDS but never reach a
+    column derivation reads, and ECOG reaches `measurement` yet was invisible to
+    an Observation-only reader. Claiming coverage the round-trip does not deliver
+    is exactly the bug this module is fixing.
+
+    Flagging too much is cheap instead: `_restore_user_edited` only fills a field
+    derivation left empty, and the flag is dropped the moment derivation produces
+    a value. So a field OMOP really does own unflags itself on the next refresh,
+    and no list has to be kept accurate by hand.
+    """
+    # Imported here rather than at module scope: patient_record_service is the
+    # read side and pulling it in eagerly would couple the two directions.
+    from omop_core.services.patient_record_service import _OMOP_DERIVED_FIELDS
+
+    return set(changed_fields) & set(_OMOP_DERIVED_FIELDS)
+
+
+def _mark_user_edited(patient_info, changed_fields) -> None:
+    """Remember edits to fields a refresh would otherwise blank.
+
+    `changed_fields` must be fields whose value actually changed, not every key
+    in the request body — the React client PATCHes the whole record on autosave,
+    so flagging the body wholesale would pin every derived field on the row and
+    stop OMOP deletions propagating.
+
+    A cleared field is recorded too, so the flag set tracks what the user has
+    touched. Restoring an empty value is a no-op (see `_restore_user_edited`):
+    when derivation also comes up empty the field ends up blank either way, and
+    when OMOP has a value it wins.
+    """
+    candidates = candidate_user_edited_fields(changed_fields)
+    if not candidates:
+        return
+    existing = list(patient_info.user_edited_fields or [])
+    merged = existing + sorted(candidates - set(existing))
+    if merged == existing:
+        return
+    patient_info.user_edited_fields = merged
+    patient_info.save(update_fields=['user_edited_fields'])
+    logger.info(
+        '{"event": "patient_record_user_edited_fields", "person_id": "%s", "fields": "%s"}',
+        patient_info.person_id, ','.join(sorted(candidates)),
+    )
+
 
 def _sync_measurement(person, field_name: str, value, today: date) -> None:
     loinc_code, unit, display = LAB_FIELD_TO_LOINC[field_name]

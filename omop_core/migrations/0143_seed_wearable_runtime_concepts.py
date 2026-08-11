@@ -152,7 +152,7 @@ def reverse_noop(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('omop_core', '0141_patientrecord_hrv_rmssd_avg_30d_and_more'),
+        ('omop_core', '0142_patientrecord_hrv_rmssd_avg_30d'),
     ]
 
     operations = [

@@ -305,6 +305,10 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             'later_therapies',
             # Derivation versioning — set only by refresh_patient_record, never by client.
             'derivation_version', 'derived_at',
+            # Bookkeeping for which derived fields were hand-entered; maintained by
+            # the OMOP write-through from what a PATCH actually changed. A client
+            # setting it directly could pin any derived field against OMOP truth.
+            'user_edited_fields',
             # Wearable summaries are written by the device-sync service, never
             # by the client API. Enumerated from the model — see
             # _derived_wearable_fields for why this one is not hand-listed.
