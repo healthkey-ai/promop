@@ -2742,3 +2742,312 @@ class RemapLocalDrugConceptsCommandTest(TestCase):
         self.assertEqual(
             DrugExposure.objects.filter(drug_concept_id=2012334076).count(), 3,
             'rows must be left alone when the target is not Standard')
+
+
+# ===========================================================================
+# Issue #434: re-derivation must not erase hand-entered values
+# ===========================================================================
+
+class UnsyncedDerivedFieldsTest(TestCase):
+    """Which derived fields the OMOP write-through cannot persist."""
+
+    def test_fields_the_write_through_covers_are_not_flagged(self):
+        from omop_core.services.omop_write_service import unsynced_derived_fields
+
+        # hemoglobin_g_dl -> Measurement, disease -> ConditionOccurrence,
+        # first_line_therapy -> Episode. All recoverable from OMOP.
+        self.assertEqual(
+            unsynced_derived_fields({'hemoglobin_g_dl', 'disease', 'first_line_therapy'}),
+            set(),
+        )
+
+    def test_derived_fields_with_nowhere_to_land_are_flagged(self):
+        from omop_core.services.omop_write_service import unsynced_derived_fields
+
+        self.assertEqual(
+            unsynced_derived_fields({'tumor_stage', 'her2_status', 'smoking_status'}),
+            {'tumor_stage', 'her2_status', 'smoking_status'},
+        )
+
+    def test_non_derived_fields_are_never_flagged(self):
+        """email and date_of_birth live on PatientRecord and are never cleared,
+        so they need no preservation."""
+        from omop_core.services.omop_write_service import unsynced_derived_fields
+
+        self.assertEqual(unsynced_derived_fields({'email', 'date_of_birth'}), set())
+
+
+class PreserveUserEditedFieldsTest(_OmopBase):
+    """refresh_patient_record must not blank values OMOP cannot reproduce."""
+
+    PERSON_ID = 90600
+
+    def test_hand_entered_value_survives_re_derivation(self):
+        """The staging symptom in #434: set in the UI, gone after the next refresh."""
+        PatientRecord.objects.create(
+            person=self.person,
+            tumor_stage='T2',
+            user_edited_fields=['tumor_stage'],
+        )
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(pi.tumor_stage, 'T2')
+
+    def test_unflagged_value_is_still_cleared(self):
+        """Preservation is opt-in per field. A derived field nobody edited must
+        still be blanked, or deletions in OMOP would stop propagating."""
+        PatientRecord.objects.create(person=self.person, tumor_stage='T2')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertIsNone(pi.tumor_stage)
+
+    def test_omop_wins_when_it_has_a_value(self):
+        """A hand-entered value is a fallback, not a pin: once OMOP can answer
+        for the field, the derived value takes over."""
+        PatientRecord.objects.create(
+            person=self.person, stage='I', user_edited_fields=['stage'],
+        )
+        stage_concept = _concept(90610, 'Stage group.clinical', self.dom_meas,
+                                 self.vocab, self.cc, code='21908-9')
+        # Creating this fires the post_save refresh, so the assertion below covers
+        # the real path as well as the explicit call.
+        Measurement.objects.create(
+            measurement_id=90611,
+            person=self.person,
+            measurement_concept=stage_concept,
+            measurement_date=date(2026, 1, 15),
+            measurement_type_concept=self.type_concept,
+            value_as_string='III',
+            measurement_source_value='21908-9',
+        )
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(pi.stage, 'III')
+
+    def test_zero_is_preserved_as_a_real_answer(self):
+        """Zero drinks a week is an answer, not an absence — a falsy check drops it."""
+        PatientRecord.objects.create(
+            person=self.person, drinks_per_week=0, user_edited_fields=['drinks_per_week'],
+        )
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(pi.drinks_per_week, 0)
+
+    def test_false_is_preserved_as_a_real_answer(self):
+        PatientRecord.objects.create(
+            person=self.person,
+            transformed_to_dlbcl=False,
+            user_edited_fields=['transformed_to_dlbcl'],
+        )
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertIs(pi.transformed_to_dlbcl, False)
+
+    def test_flagging_an_unknown_field_is_harmless(self):
+        """user_edited_fields is written by the service, but a stale entry left
+        by a renamed field must not break the refresh for the whole patient."""
+        PatientRecord.objects.create(
+            person=self.person,
+            email='patient@example.com',
+            user_edited_fields=['email', 'not_a_field_at_all'],
+        )
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(pi.email, 'patient@example.com')
+
+
+class SyncToOmopMarksUserEditedTest(_OmopBase):
+    """The write-through records what it could not persist."""
+
+    PERSON_ID = 90620
+
+    def test_unsynced_edit_is_recorded(self):
+        from omop_core.services.omop_write_service import sync_to_omop
+
+        pi = PatientRecord.objects.create(person=self.person, her2_status='positive')
+        sync_to_omop(pi, {'her2_status'})
+
+        pi.refresh_from_db()
+        self.assertEqual(pi.user_edited_fields, ['her2_status'])
+
+    def test_synced_edit_is_not_recorded(self):
+        """hemoglobin round-trips through Measurement, so it needs no fallback."""
+        from omop_core.services.omop_write_service import sync_to_omop
+
+        _concept(3000963, 'Laboratory test result', self.dom_meas, self.vocab, self.cc)
+        pi = PatientRecord.objects.create(person=self.person, hemoglobin_g_dl=11.2)
+        sync_to_omop(pi, {'hemoglobin_g_dl'})
+
+        pi.refresh_from_db()
+        self.assertEqual(pi.user_edited_fields, [])
+
+    def test_repeated_edits_accumulate_without_duplicating(self):
+        from omop_core.services.omop_write_service import sync_to_omop
+
+        pi = PatientRecord.objects.create(person=self.person, her2_status='positive')
+        sync_to_omop(pi, {'her2_status'})
+        pi.smoking_status = 'never'
+        sync_to_omop(pi, {'her2_status', 'smoking_status'})
+
+        pi.refresh_from_db()
+        self.assertEqual(pi.user_edited_fields, ['her2_status', 'smoking_status'])
+
+    def test_clearing_a_field_is_recorded_too(self):
+        """Blanking a field is an edit. Recording it only when a value is present
+        would leave the flag unset exactly when the user meant 'none'."""
+        from omop_core.services.omop_write_service import sync_to_omop
+
+        pi = PatientRecord.objects.create(person=self.person, her2_status=None)
+        sync_to_omop(pi, {'her2_status'})
+
+        pi.refresh_from_db()
+        self.assertEqual(pi.user_edited_fields, ['her2_status'])
+
+
+class PerformanceStatusFromEitherTableTest(_OmopBase):
+    """ECOG/Karnofsky reach OMOP as `observation` via FHIR upload and as
+    `measurement` via the PatientRecord write-through. Both must be read."""
+
+    PERSON_ID = 90640
+
+    def _kps_concept(self):
+        return _concept(90641, 'Karnofsky Performance Status score', self.dom_meas,
+                        self.vocab, self.cc, code='89243-0')
+
+    def _ecog_concept(self):
+        return _concept(90642, 'ECOG Performance Status score', self.dom_obs,
+                        self.vocab, self.cc, code='89247-1')
+
+    def test_karnofsky_read_from_measurement(self):
+        """The staging case: the write-through wrote a Measurement that the
+        Observation-only reader could not see."""
+        Measurement.objects.create(
+            measurement_id=90643,
+            person=self.person,
+            measurement_concept=self._kps_concept(),
+            measurement_date=date(2026, 8, 5),
+            measurement_type_concept=self.type_concept,
+            value_as_number=100,
+            measurement_source_value='89243-0',
+        )
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(pi.karnofsky_performance_score, 100)
+
+    def test_ecog_read_from_measurement(self):
+        Measurement.objects.create(
+            measurement_id=90644,
+            person=self.person,
+            measurement_concept=self._ecog_concept(),
+            measurement_date=date(2026, 8, 5),
+            measurement_type_concept=self.type_concept,
+            value_as_number=1,
+            measurement_source_value='89247-1',
+        )
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(pi.ecog_performance_status, 1)
+        self.assertEqual(pi.ecog_assessment_date, date(2026, 8, 5))
+
+    def test_ecog_still_read_from_observation(self):
+        Observation.objects.create(
+            observation_id=90645,
+            person=self.person,
+            observation_concept=self._ecog_concept(),
+            observation_date=date(2026, 8, 5),
+            observation_type_concept=self.type_concept,
+            value_as_number=2,
+        )
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(pi.ecog_performance_status, 2)
+
+    def test_most_recent_wins_across_both_tables(self):
+        """A newer Measurement must beat an older Observation: the two sources
+        are one timeline, not a preferred table plus a fallback."""
+        Observation.objects.create(
+            observation_id=90646,
+            person=self.person,
+            observation_concept=self._ecog_concept(),
+            observation_date=date(2026, 1, 1),
+            observation_type_concept=self.type_concept,
+            value_as_number=3,
+        )
+        Measurement.objects.create(
+            measurement_id=90647,
+            person=self.person,
+            measurement_concept=self._ecog_concept(),
+            measurement_date=date(2026, 8, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_number=0,
+            measurement_source_value='89247-1',
+        )
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(pi.ecog_performance_status, 0)
+        self.assertEqual(pi.ecog_assessment_date, date(2026, 8, 1))
+
+    def test_matched_by_loinc_when_the_concept_name_does_not_say_karnofsky(self):
+        """Vocabulary-poor environments keep the LOINC in the source value only."""
+        generic = _concept(3000963, 'Laboratory test result', self.dom_meas,
+                           self.vocab, self.cc)
+        Measurement.objects.create(
+            measurement_id=90648,
+            person=self.person,
+            measurement_concept=generic,
+            measurement_date=date(2026, 8, 5),
+            measurement_type_concept=self.type_concept,
+            value_as_number=90,
+            measurement_source_value='89243-0',
+        )
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(pi.karnofsky_performance_score, 90)
+
+
+class PlaceholderBirthYearTest(_OmopBase):
+    """Registration seeds year_of_birth=1900; it is not a birth year."""
+
+    PERSON_ID = 90660
+
+    def test_placeholder_year_yields_no_age(self):
+        self.person.year_of_birth = 1900
+        self.person.save(update_fields=['year_of_birth'])
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertIsNone(pi.patient_age)
+
+    def test_real_year_still_yields_an_age(self):
+        self.person.year_of_birth = 1980
+        self.person.save(update_fields=['year_of_birth'])
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(pi.patient_age, date.today().year - 1980)
+
+    def test_date_of_birth_overrides_the_placeholder(self):
+        """A patient who supplied a DOB gets a real age even while Person still
+        carries the placeholder year."""
+        self.person.year_of_birth = 1900
+        self.person.save(update_fields=['year_of_birth'])
+        PatientRecord.objects.create(person=self.person, date_of_birth=date(1975, 6, 1))
+
+        pi = refresh_patient_record(self.person)
+
+        today = date.today()
+        self.assertEqual(
+            pi.patient_age,
+            today.year - 1975 - ((today.month, today.day) < (6, 1)),
+        )

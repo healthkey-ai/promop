@@ -12,14 +12,14 @@ import statistics
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from django.db import models
-from django.db.models import DateTimeField
+from django.db.models import DateTimeField, Q
 from django.db.models.functions import Cast, Coalesce
 from django.db import transaction
 from django.utils import timezone
 from omop_core.models import (
     Person, PatientRecord, ConditionOccurrence, Concept,
     Measurement, Observation, DrugExposure, Location, ProcedureOccurrence,
-    Death, ConceptRelationship,
+    Death, ConceptRelationship, PERSON_YEAR_PLACEHOLDERS,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
 from omop_core.services.mappings import (
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 2
+DERIVATION_VERSION = 3
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
@@ -298,6 +298,43 @@ def _clear_derived_fields(patient_info: PatientRecord) -> None:
             setattr(patient_info, field, default)
 
 
+def _is_empty(value) -> bool:
+    """True for the values derivation leaves behind when it finds no source data.
+
+    Deliberately not falsy-testing: 0 (ECOG 0, zero relapses) and False (a
+    recorded negative) are real derived answers, not absences.
+    """
+    return value is None or value == '' or value == [] or value == {}
+
+
+def _snapshot_user_edited(patient_info: PatientRecord) -> dict:
+    """Capture hand-entered values for fields OMOP cannot round-trip.
+
+    Only fields recorded by the write-through in `user_edited_fields` are taken,
+    so this restores what a user typed and never resurrects a stale derived value.
+    """
+    snapshot = {}
+    for field in (patient_info.user_edited_fields or []):
+        if field in _OMOP_DERIVED_FIELDS and hasattr(patient_info, field):
+            snapshot[field] = getattr(patient_info, field)
+    return snapshot
+
+
+def _restore_user_edited(patient_info: PatientRecord, preserved: dict) -> None:
+    """Put hand-entered values back where derivation produced nothing.
+
+    Runs after every section extractor, so a field OMOP can now answer for keeps
+    the derived value — the user's copy is a fallback, not an override. That
+    ordering is what lets a later FHIR upload or OMOP correction take over a
+    field the patient once filled in by hand.
+    """
+    for field, value in preserved.items():
+        if _is_empty(value):
+            continue
+        if _is_empty(getattr(patient_info, field, None)):
+            setattr(patient_info, field, value)
+
+
 def refresh_patient_record(person: Person) -> PatientRecord:
     """Derive and upsert PatientRecord from OMOP tables for a given person.
 
@@ -312,6 +349,12 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             patient_info = PatientRecord.objects.select_for_update().get(person=person)
         except PatientRecord.DoesNotExist:
             patient_info = PatientRecord(person=person)
+
+        # Hand-entered values for fields the write-through cannot push into OMOP
+        # would be destroyed by the clear below and have nothing to restore them.
+        # Snapshot them first; they are put back after derivation, but only where
+        # derivation came up empty, so OMOP still wins whenever it has a value.
+        preserved = _snapshot_user_edited(patient_info)
 
         # Clear all OMOP-derived fields before re-deriving so deletions are reflected.
         _clear_derived_fields(patient_info)
@@ -343,6 +386,8 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             for field, value in section_fn(person).items():
                 setattr(patient_info, field, value)
 
+        _restore_user_edited(patient_info, preserved)
+
         _compute_derived_fields(patient_info)
 
         patient_info.derivation_version = DERIVATION_VERSION
@@ -363,7 +408,7 @@ def _get_demographics(person: Person) -> dict:
     if death:
         data['death_date'] = death.death_date
 
-    if person.year_of_birth:
+    if person.year_of_birth not in PERSON_YEAR_PLACEHOLDERS:
         today = date.today()
         data['patient_age'] = today.year - person.year_of_birth
 
@@ -2015,34 +2060,64 @@ def _get_laboratory_data(person: Person) -> dict:
     return data
 
 
+# Performance status lands in either OMOP table depending on how it arrived:
+# the FHIR upload routes these LOINCs to `observation` (_ASSESSMENT_LOINC in
+# patient_portal/api/views.py), while the PatientRecord PATCH write-through
+# sends them to `measurement`, because both fields appear in LAB_FIELD_TO_LOINC.
+# Reading only one table loses whatever came in by the other route.
+_ECOG_LOINC = '89247-1'
+_KARNOFSKY_LOINC = '89243-0'
+
+
+def _performance_rows(person: Person, name_fragment: str, loinc_code: str) -> list:
+    """Latest-first performance scores from both `observation` and `measurement`.
+
+    Matches on concept name or LOINC code so a row still resolves when the
+    vocabulary is not loaded and the code survives only in the source value.
+    """
+    obs = (
+        Observation.objects.filter(person=person)
+        .filter(
+            Q(observation_concept__concept_name__icontains=name_fragment)
+            | Q(observation_concept__concept_code=loinc_code)
+            | Q(observation_source_value=loinc_code)
+        )
+        .exclude(value_as_number__isnull=True)
+        .order_by('-observation_date', '-observation_id')
+        .values_list('observation_date', 'value_as_number')
+    )
+    meas = (
+        Measurement.objects.filter(person=person)
+        .filter(
+            Q(measurement_concept__concept_name__icontains=name_fragment)
+            | Q(measurement_concept__concept_code=loinc_code)
+            | Q(measurement_source_value=loinc_code)
+        )
+        .exclude(value_as_number__isnull=True)
+        .order_by('-measurement_date', '-measurement_id')
+        .values_list('measurement_date', 'value_as_number')
+    )
+    rows = list(obs) + list(meas)
+    # date.min for undated rows so a dated score always outranks one with no
+    # date. The sort is stable, so same-date rows keep observation-before-
+    # measurement order rather than resolving arbitrarily.
+    rows.sort(key=lambda r: (r[0] or date.min), reverse=True)
+    return rows
+
+
 def _get_performance_data(person: Person) -> dict:
     data = {}
 
-    observations = (
-        Observation.objects.filter(person=person)
-        .select_related('observation_concept')
-        .order_by('-observation_date', '-observation_id')
-    )
-
-    ecog = (
-        observations
-        .filter(observation_concept__concept_name__icontains='ecog')
-        .exclude(value_as_number__isnull=True)
-        .first()
-    )
+    ecog = _performance_rows(person, 'ecog', _ECOG_LOINC)
     if ecog:
-        data['ecog_performance_status'] = int(ecog.value_as_number)
-        if ecog.observation_date:
-            data['ecog_assessment_date'] = ecog.observation_date
+        ecog_date, ecog_value = ecog[0]
+        data['ecog_performance_status'] = int(ecog_value)
+        if ecog_date:
+            data['ecog_assessment_date'] = ecog_date
 
-    karnofsky = (
-        observations
-        .filter(observation_concept__concept_name__icontains='karnofsky')
-        .exclude(value_as_number__isnull=True)
-        .first()
-    )
+    karnofsky = _performance_rows(person, 'karnofsky', _KARNOFSKY_LOINC)
     if karnofsky:
-        data['karnofsky_performance_score'] = int(karnofsky.value_as_number)
+        data['karnofsky_performance_score'] = int(karnofsky[0][1])
 
     return data
 

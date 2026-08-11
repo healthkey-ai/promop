@@ -60,6 +60,53 @@ def sync_to_omop(patient_info, changed_fields: set, today: date = None, changed_
         if changed_fields & line_fields:
             _sync_therapy_line(person, patient_info, line_number, prefix, today)
 
+    _mark_user_edited(patient_info, changed_fields)
+
+
+def unsynced_derived_fields(changed_fields) -> set:
+    """Derived fields this service cannot write back to OMOP.
+
+    A field in `_OMOP_DERIVED_FIELDS` is blanked by every re-derivation. That is
+    only safe if OMOP can reconstruct it, and the write-through covers just 77 of
+    the 183 derived fields — the other 109 (staging, biomarker statuses, the
+    behaviour/lifestyle block, the MM/CLL/lymphoma blocks, ...) are editable via
+    PATCH with nowhere in OMOP to land. Those are the ones the read model has to
+    remember on the patient's behalf.
+    """
+    # Imported here rather than at module scope: patient_record_service is the
+    # read side and pulling it in eagerly would couple the two directions.
+    from omop_core.services.patient_record_service import _OMOP_DERIVED_FIELDS
+
+    synced = (
+        set(LAB_FIELD_TO_LOINC)
+        | CONDITION_FIELDS
+        | DEMOGRAPHIC_FIELDS
+        | THERAPY_LINE_FIELDS
+    )
+    return (set(changed_fields) & set(_OMOP_DERIVED_FIELDS)) - synced
+
+
+def _mark_user_edited(patient_info, changed_fields) -> None:
+    """Remember hand-entered values that OMOP has no home for.
+
+    Recorded even when the incoming value is empty: clearing a field is an edit
+    too, and the record has to survive re-derivation the same way a set value
+    does.
+    """
+    unsynced = unsynced_derived_fields(changed_fields)
+    if not unsynced:
+        return
+    existing = list(patient_info.user_edited_fields or [])
+    merged = existing + sorted(unsynced - set(existing))
+    if merged == existing:
+        return
+    patient_info.user_edited_fields = merged
+    patient_info.save(update_fields=['user_edited_fields'])
+    logger.info(
+        '{"event": "patient_record_user_edited_fields", "person_id": "%s", "fields": "%s"}',
+        patient_info.person_id, ','.join(sorted(unsynced)),
+    )
+
 
 def _sync_measurement(person, field_name: str, value, today: date) -> None:
     loinc_code, unit, display = LAB_FIELD_TO_LOINC[field_name]

@@ -33,6 +33,7 @@ from omop_core.models import (
     FlipIScore, FollicularLymphomaGrade, PostTransformationOutcome,
     BreastCancerFirstLineTherapy, BreastCancerSecondLineTherapy, BreastCancerLaterLineTherapy,
     MyelomaType, WearableUpload,
+    PERSON_YEAR_PLACEHOLDERS,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.patient_record_service import refresh_patient_record
@@ -4251,7 +4252,7 @@ def auth_test(request):
 
 # Fields considered "placeholder" values that a fill-if-empty PATCH may overwrite.
 _PERSON_STR_PLACEHOLDERS = {'', 'unknown', 'Unknown'}
-_PERSON_YEAR_PLACEHOLDER = {None, 0, 1900}
+_PERSON_YEAR_PLACEHOLDER = PERSON_YEAR_PLACEHOLDERS
 _PERSON_INT_PLACEHOLDER  = {None, 0}
 
 _PERSON_PATCHABLE_FIELDS = {
