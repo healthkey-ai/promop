@@ -4509,6 +4509,42 @@ class PatientRecordOmopSyncTest(_SmartBase):
         pi.refresh_from_db()
         self.assertEqual(pi.user_edited_fields, [])
 
+    # --- patient_name write-through -------------------------------------------
+
+    def test_patch_patient_name_renames_the_person(self):
+        person = Person.objects.create(
+            person_id=91110, given_name='Alishia', family_name='Tawny Howell')
+        pi = PatientRecord.objects.create(person=person, organization=self.organization)
+
+        self._patch(pi, {'patient_name': 'Adam Blum'})
+
+        person.refresh_from_db()
+        self.assertEqual((person.given_name, person.family_name), ('Adam', 'Blum'))
+
+    def test_echoing_the_synthesised_name_back_does_not_corrupt_the_person(self):
+        """A client PATCHing the whole record echoes patient_name unchanged. For
+        a person with no name the serializer synthesises 'Patient {id}', and
+        writing that back would set given_name='Patient', family_name='91111'."""
+        person = Person.objects.create(person_id=91111, given_name='', family_name='')
+        pi = PatientRecord.objects.create(person=person, organization=self.organization)
+
+        self._patch(pi, {'patient_name': f'Patient {person.person_id}'})
+
+        person.refresh_from_db()
+        self.assertEqual(person.given_name, '')
+        self.assertEqual(person.family_name, '')
+
+    def test_echoing_an_unchanged_name_is_a_no_op(self):
+        person = Person.objects.create(
+            person_id=91112, given_name='Alishia', family_name='Tawny Howell')
+        pi = PatientRecord.objects.create(person=person, organization=self.organization)
+
+        self._patch(pi, {'patient_name': 'Alishia Tawny Howell', 'stage': 'II'})
+
+        person.refresh_from_db()
+        self.assertEqual(
+            (person.given_name, person.family_name), ('Alishia', 'Tawny Howell'))
+
     def test_patched_stage_survives_a_later_refresh(self):
         """End-to-end for #434: the exact sequence that lost the staging
         patient's stage — PATCH it, then re-derive."""

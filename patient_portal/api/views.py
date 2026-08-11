@@ -169,6 +169,53 @@ def _record_provenance(record, source, source_user_id, target_patient_id=None, m
     )
 
 
+def _pop_patient_name(data):
+    """Take patient_name out of a PATCH body, returning (name_or_None, rest).
+
+    `patient_name` is a SerializerMethodField over Person.given_name/family_name,
+    not a PatientRecord column, so it can only be applied by hand. Leaving it in
+    the body means DRF silently drops it as read-only and logs it as an ignored
+    field — which is exactly how renaming a patient came to be a no-op on
+    /api/patient-info/{id}/ while working on /api/patient-info/me/.
+    """
+    if hasattr(data, 'pop'):
+        name = data.pop('patient_name', None)
+        # QueryDict.pop returns a list; DRF's parsed JSON dict returns a scalar.
+        if isinstance(name, list):
+            name = name[0] if name else None
+        return name, data
+    return data.get('patient_name'), {
+        k: v for k, v in data.items() if k != 'patient_name'
+    }
+
+
+def _apply_patient_name(person, patient_name):
+    """Rename a Person from a free-text 'Given Family' string. Returns True if written.
+
+    Only writes a real change. Clients that PATCH the whole record echo
+    patient_name back unchanged on every autosave, and for a person with no name
+    the serializer synthesises "Patient {id}" — writing that back would set
+    given_name='Patient', family_name='<id>'. Guarding on difference makes the
+    echo harmless while keeping a genuine rename working.
+    """
+    if patient_name is None:
+        return False
+    incoming = str(patient_name).strip()
+    # Compare against what the serializer would have rendered, not against the
+    # split name. That catches both echoes with one test: the real name, and the
+    # "Patient {id}" placeholder get_patient_name synthesises for an unnamed
+    # person — which a naive comparison would happily write back as
+    # given_name='Patient', family_name='<id>'.
+    current = f'{person.given_name or ""} {person.family_name or ""}'.strip()
+    if incoming == (current or f'Patient {person.person_id}'):
+        return False
+    parts = incoming.split(None, 1)
+    person.given_name = parts[0] if parts else ''
+    person.family_name = parts[1] if len(parts) > 1 else ''
+    person.save(update_fields=['given_name', 'family_name'])
+    return True
+
+
 def _changed_fields(patient_record, previous_values, prev_val):
     """Fields whose stored value actually moved during this PATCH.
 
@@ -516,11 +563,19 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # patient_name maps onto Person, not PatientRecord, so it has to be
+        # applied by hand — the same treatment /patient-info/me/ gives it. Left
+        # in the body it is dropped as read-only, which is why renaming a
+        # patient from the UI silently did nothing: this is the route the client
+        # PATCHes.
+        _patient_name, _patch_data = _pop_patient_name(request.data)
+        _apply_patient_name(person, _patient_name)
+
         # Capture previous values for fields being changed (exclude provenance meta-fields).
         # Use {field}_id for FK fields so we get a serializable PK, not a model object.
         _prov_meta = {'source', 'source_user_id', 'modification_reason'}
         _read_only = set(PatientRecordSerializer.Meta.read_only_fields)
-        _ignored_ro = sorted((set(request.data) & _read_only) - _prov_meta)
+        _ignored_ro = sorted((set(_patch_data) & _read_only) - _prov_meta)
         if _ignored_ro:
             # DRF silently drops read-only fields from the input — surface the
             # attempt so API consumers learn the derived therapy-id fields are
@@ -536,11 +591,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             return getattr(obj, field, None)
         previous_values = {
             field: _prev_val(patient_info, field)
-            for field in request.data
+            for field in _patch_data
             if field not in _prov_meta and field not in _read_only and hasattr(patient_info, field)
         }
 
-        serializer = PatientRecordSerializer(patient_info, data=request.data, partial=True)
+        serializer = PatientRecordSerializer(patient_info, data=_patch_data, partial=True)
         serializer.is_valid(raise_exception=True)
 
         try:
@@ -555,7 +610,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 changed_fields = _changed_fields(patient_info, previous_values, _prev_val)
                 if prov_source:
                     _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
+                sync_to_omop(patient_info, changed_fields, changed_data=dict(_patch_data))
                 # PHR-S FM TI.1.2#04 — record field-level revision history.
                 _write_record_revisions(patient_info, previous_values, request)
                 if prov_source:
@@ -759,14 +814,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             })
 
         # PATCH
-        patient_name = request.data.pop('patient_name', None) if hasattr(request.data, 'pop') else request.data.get('patient_name')
-        patch_data = {k: v for k, v in request.data.items() if k != 'patient_name'}
-
-        if patient_name is not None:
-            parts = str(patient_name).strip().split(None, 1)
-            person.given_name = parts[0] if parts else ''
-            person.family_name = parts[1] if len(parts) > 1 else ''
-            person.save(update_fields=['given_name', 'family_name'])
+        patient_name, patch_data = _pop_patient_name(request.data)
+        _apply_patient_name(person, patient_name)
 
         serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
         serializer.is_valid(raise_exception=True)

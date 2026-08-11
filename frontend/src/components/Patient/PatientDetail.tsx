@@ -319,8 +319,25 @@ export default function PatientDetail({
     const seq = ++saveSeqRef.current;
     setSaveStatus("saving");
     try {
-      await api.patch(`/patient-info/${personId}/`, data.info);
+      // Renaming a patient silently did nothing. scheduleAutoSave carries the
+      // edited name alongside the field data, but only data.info was sent — and
+      // data.info is the whole GET response, which already carries the ORIGINAL
+      // patient_name. So every autosave wrote the old name straight back over
+      // Person.given_name/family_name, and the header kept rendering it through
+      // reloads included.
+      //
+      // Strip it unconditionally and re-add it only on a real rename. Sending
+      // the server's own value back is never useful and is actively harmful for
+      // a patient with no name: get_patient_name synthesises "Patient 3542",
+      // which the view would split into given_name="Patient", family_name="3542".
+      const { patient_name: _stale, ...info } = data.info as Record<string, unknown>;
+      const renamed = !!data.name && data.name !== patientNameRef.current;
+      const payload = renamed ? { ...info, patient_name: data.name } : info;
+      await api.patch(`/patient-info/${personId}/`, payload);
       if (seq === saveSeqRef.current) {
+        // Header state is set once on load, so without this the new name only
+        // appears after a refetch.
+        if (renamed) setPatientName(data.name);
         setSaveStatus("saved");
         setTimeout(() => setSaveStatus((s) => (s === "saved" ? "idle" : s)), 1200);
       }
