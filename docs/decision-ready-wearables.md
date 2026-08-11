@@ -54,8 +54,8 @@ flowchart TB
     AP --> WS["<b>WearableSample</b><br/>(metric_key, date, value)"]
     GP --> WS
     FP -.-> WS
-    WS --> C["Concept resolution<br/><i>(vocabulary_id, concept_code)</i><br/>13 LOINC + 4 HK-Wearable"]
-    C --> M["OMOP <b>measurement</b><br/>13 metrics"]
+    WS --> C["Concept resolution<br/><i>(vocabulary_id, concept_code)</i><br/>13 LOINC + 5 HK-Wearable"]
+    C --> M["OMOP <b>measurement</b><br/>14 metrics"]
     C --> O["OMOP <b>observation</b><br/>4 metrics"]
     M --> PR["<b>PatientRecord</b><br/>21 flat 30-day columns"]
     O --> PR
@@ -71,7 +71,7 @@ flowchart TB
 `WearableSample` is a three-field tuple: `(metric_key, date, value)`. That is the entire contract
 between the device world and everything else. Vendor vocabulary does not cross this boundary.
 
-The seventeen canonical metric keys are the vocabulary the rest of the system speaks: `steps`,
+The eighteen canonical metric keys are the vocabulary the rest of the system speaks: `steps`,
 `resting_hr`, `hrv_sdnn`, `spo2`, `respiratory_rate`, `sleep_duration`, `vo2_max`, and so on.
 When Apple emits `HKQuantityTypeIdentifierRestingHeartRate` and Garmin emits
 `monitoring_hr_data.resting_heart_rate`, both become `resting_hr` — and from that point they are
@@ -100,7 +100,7 @@ columns derived from the OMOP rows. This is the surface that decisions actually 
 
 ## Layer 2: the mapping that carries the meaning
 
-Seventeen metrics, thirteen of which have a genuine LOINC code:
+Eighteen metrics, thirteen of which have a genuine LOINC code:
 
 | Metric | LOINC | Concept | OMOP table | Unit | Daily aggregation |
 |---|---|---|---|---|---|
@@ -122,11 +122,11 @@ The full table — including every Apple HealthKit type identifier and every Gar
 message/field that feeds each row — is in
 [wearable-omop-mapping.md](wearable-omop-mapping.md).
 
-### The four metrics LOINC doesn't have
+### The five metrics LOINC doesn't have
 
 Consumer wearables measure some things clinical terminology has never needed a code for. LOINC
 has no concept for walking step length, walking double-support percentage, heart rate during
-walking, or basal energy expenditure in kcal/day.
+walking, basal energy expenditure in kcal/day, or — as the HRV section below covers — RMSSD.
 
 The wrong answer is to find the nearest-looking code and use it. The right answer is to mint
 locally — under strict quarantine, so a local concept can never be mistaken for a standard one:
@@ -138,7 +138,7 @@ locally — under strict quarantine, so a local concept can never be mistaken fo
 - `concept_id >= 2,000,000,000` — the range OHDSI reserves for locally-authored concepts, where
   Athena never allocates
 
-The four mints are allocated contiguously from 2,029,606,350, continuing the project's existing
+The five mints are allocated contiguously from 2,029,606,350, continuing the project's existing
 `HK-Labs` block. They are visibly, structurally local. Nothing about them can pass for a
 vocabulary release row.
 
@@ -180,7 +180,7 @@ a code that means the wrong thing is not interoperability.
 ### Routing follows the vocabulary, not our opinion
 
 Four metrics — steps, active minutes, sleep duration, flights climbed — resolve to
-**Observation-domain** concepts and are written to `observation`. The other thirteen are
+**Observation-domain** concepts and are written to `observation`. The other fourteen are
 Measurement-domain and go to `measurement`.
 
 The write path does not hard-code that list. It reads `concept.domain_id` at runtime, so routing
@@ -247,7 +247,8 @@ and Garmin happen to call things, so the overlap with the other three vendors is
 | `steps` | ✓ | limited — not a historical Whoop capability | ✓ |
 | `active_minutes` | ✓ (active-zone minutes) | ✓ (strain/activity durations) | ✓ |
 | `resting_hr` | ✓ | ✓ | ✓ (nightly lowest HR) |
-| `hrv_sdnn` | ✓ **but RMSSD** — see below | ✓ **but RMSSD** | ✓ **but RMSSD** |
+| `hrv_rmssd` | ✓ | ✓ | ✓ |
+| `hrv_sdnn` | — | — | — |
 | `spo2` | ✓ | ✓ | ✓ |
 | `respiratory_rate` | ✓ | ✓ | ✓ |
 | `sleep_duration` | ✓ | ✓ | ✓ |
@@ -280,23 +281,36 @@ different statistics over the same signal, they respond to different physiology,
 different numbers from identical data. LOINC 80404-7 — the code this system uses for `hrv_sdnn` —
 is specifically the standard-deviation form.
 
-Apple's identifier is unambiguous: `HKQuantityTypeIdentifierHeartRateVariabilitySDNN`. Fitbit,
-Whoop, and Oura all report RMSSD-derived values. Filing an RMSSD number under the SDNN code
-because both are "HRV in ms" would be precisely the failure this system already made once, when
-walking speed went into a BMI concept: a row that looks entirely valid, that any correct OMOP
-query will read confidently, and that means something other than what it says.
+Apple's identifier is unambiguous: `HKQuantityTypeIdentifierHeartRateVariabilitySDNN`. Garmin's
+HRV Status is RMSSD — the root mean square of successive differences over overnight readings,
+displayed as a 7-day rolling mean. Fitbit, Whoop, and Oura all report RMSSD-derived values too.
+Filing an RMSSD number under the SDNN code because both are "HRV in ms" is precisely the failure
+this system already made once, when walking speed went into a BMI concept: a row that looks
+entirely valid, that any correct OMOP query will read confidently, and that means something other
+than what it says.
 
-The correct handling is a second canonical metric with its own concept — resolved against Athena
-at implementation time, not aliased onto 80404-7 — and a `PatientRecord` column that does not
-average the two together. That is more work than one adapter line. It is also the difference
-between an interoperability layer and a pile of numbers that share a unit.
+**This one was not hypothetical.** The Garmin adapter was doing exactly that — writing HRV Status
+values into `hrv_sdnn`, and naming the local variable `sdnn` for good measure. It shipped, and it
+was found by re-reading the mapping against the vocabulary rather than by anything going visibly
+wrong, which is the point: nothing about a mis-concepted row looks wrong.
 
-> **This applies to code already shipped.** Garmin's HRV Status is documented by Garmin as
-> RMSSD-based, and the existing adapter files `hrv_status_summary.weekly_average` under
-> `hrv_sdnn`. That mapping needs verification before any further HRV work — it may already be the
-> same conflation. Tracked as
-> [#438](https://github.com/healthkey-ai/promop/issues/438), and as Gap G in
-> [wearable-omop-mapping.md](wearable-omop-mapping.md).
+The fix ([#438](https://github.com/healthkey-ai/promop/issues/438)) was a second canonical metric.
+LOINC turned out to have no RMSSD concept at all — verified across 1,979,416 loaded concepts, with
+the full `R-R interval` family carrying mean, min, max, standard deviation and coefficient of
+variation, but not RMSSD — so `hrv_rmssd` is a quarantined `HK-Wearable` mint, and
+`hrv_rmssd_avg_30d` is its own `PatientRecord` column. The two are never averaged together; a
+merged value would be neither statistic.
+
+One detail worth keeping: the legacy Garmin `hrv` message can carry *either* statistic, so it now
+routes per field rather than taking whichever is checked first — `weekly_average` to RMSSD, a
+field named `sdnn` to SDNN.
+
+> **What could not be fixed.** Garmin rows already written under 80404-7 stay mis-filed. The
+> normal repair is to delete and let the patient re-upload, but Apple rows under that same code
+> are correct SDNN, and a wearable OMOP row records nothing about which device produced it — so
+> the two cannot be told apart. That gap is now its own issue
+> ([#442](https://github.com/healthkey-ai/promop/issues/442)). A defect you can detect but cannot
+> scope is a different and worse problem than one you can.
 
 ### What a new adapter actually changes
 
@@ -308,7 +322,7 @@ Concretely, adding Fitbit touches:
   it — for a cloud vendor, a sync entry point alongside the upload one
 - **the frontend's `detectDeviceType`** and its upload-history label, which today is a two-way
   ternary that would render any third device as "Apple"
-- **new canonical metrics**, only if the vendor measures something the seventeen don't cover
+- **new canonical metrics**, only if the vendor measures something the eighteen don't cover
   (readiness scores, skin temperature) — each needing a verified concept or a quarantined
   `HK-Wearable` mint
 
@@ -321,7 +335,7 @@ return on drawing the boundary at three fields.
 
 ## Layer 3: from OMOP rows to a decision surface
 
-A trial screening query against raw OMOP has to touch, per patient: seventeen metrics × up to
+A trial screening query against raw OMOP has to touch, per patient: eighteen metrics × up to
 thirty days × two tables, joined to `concept`, filtered by code, aggregated, and windowed. Per
 patient. For every criterion, in every screen.
 
@@ -334,7 +348,8 @@ So PROMOP materializes the answer. `_get_wearable_data` derives twenty-one flat 
 | `active_minutes_per_day_30d` | mean of daily active-minute totals |
 | `activity_trend_30d` | first vs. second half of window: `improving` / `stable` / `declining` / `insufficient_data` |
 | `resting_heart_rate_avg_30d` | mean of daily means |
-| `hrv_sdnn_avg_30d` | mean of daily means |
+| `hrv_sdnn_avg_30d` | mean of daily means — Apple only |
+| `hrv_rmssd_avg_30d` | mean of daily means — Garmin (and Fitbit/Whoop/Oura when they land) |
 | `oxygen_saturation_min_30d` | **minimum** valid reading in window |
 | `oxygen_saturation_avg_30d` | mean of daily means |
 | `respiratory_rate_avg_30d` | mean of daily means |
@@ -397,7 +412,8 @@ day the patient wears the device. `activity_trend_30d = 'declining'` on a patien
 treatment is a supportive-care conversation that would otherwise have waited for the next visit.
 
 The other summaries map to specific surveillance questions: rising `resting_heart_rate_avg_30d`
-with falling `hrv_sdnn_avg_30d` is a recognized deconditioning and cardiotoxicity pattern relevant
+with falling HRV (`hrv_sdnn_avg_30d` or `hrv_rmssd_avg_30d`, depending on device) is a recognized
+deconditioning and cardiotoxicity pattern relevant
 to anthracycline and HER2-directed therapy. `oxygen_saturation_min_30d < 90` is a pulmonary flag.
 `respiratory_rate_avg_30d` supports infection and pneumonitis escalation.
 
@@ -450,15 +466,24 @@ An honest data layer is measured by what it refuses to assert. This one:
 - **reports unmapped metrics** in the upload response instead of returning a success count
 
 The known limitations are documented rather than papered over. `unit_concept_id` is not yet
-populated (only `unit_source_value`), which standard OMOP consumers read. The measurement type
-concept currently in use resolves to "Survey," which a wearable reading is not. Six metrics are
+populated (only `unit_source_value`), which standard OMOP consumers read. Six metrics are
 Apple-only because the Garmin adapter has no source for them yet — a Garmin patient has permanent
 nulls in six columns. Storage is at daily grain with no `measurement_datetime`, so nocturnal SpO2
-desaturation and circadian HR analyses are out of reach today.
+desaturation and circadian HR analyses are out of reach today. And a wearable row still records
+nothing about which device produced it, which is what made the HRV cleanup impossible to scope.
 
-All six are tracked as numbered gaps with proposed fixes in
-[wearable-omop-mapping.md](wearable-omop-mapping.md). A gap you've written down is a roadmap item.
-A gap you haven't is a bug someone else will find in your data.
+Each is tracked as a numbered gap with a proposed fix in
+[wearable-omop-mapping.md](wearable-omop-mapping.md), and as an issue. A gap you've written down
+is a roadmap item. A gap you haven't is a bug someone else will find in your data.
+
+That list is shorter than it was when this article was first written. The measurement type concept
+used to resolve to "Survey" — a wearable reading is not a survey response — and it fell back to
+"Lab" on any database without the full vocabulary loaded, which is every developer's. It is now
+`Patient self-report`, with no fallback: an unconfigured server refuses the upload rather than
+writing rows that misstate where the data came from. Eleven derived summary columns used to be
+writable over the API despite being computed from OMOP; they are now enumerated from the model and
+locked, so the next column added is protected on the day it is added. Neither was found by
+anything breaking.
 
 ---
 

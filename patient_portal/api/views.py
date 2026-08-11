@@ -3596,6 +3596,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         from omop_core.services.pk import next_pk_batch as _next_pk_batch
         from omop_core.services.mappings import (
             WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB, WEARABLE_ARTIFACT_BOUNDS,
+            WEARABLE_TYPE_CONCEPT_ID,
         )
         from omop_core.services.concept_cache import concept_by_vocab as _cc_by_vocab
 
@@ -3670,15 +3671,45 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 person.person_id, unresolved,
             )
 
-        # Measurement type concept (wearable device = 32883 / Patient self-report)
-        type_concept = None
-        try:
-            type_concept = Concept.objects.get(concept_id=32883)
-        except Concept.DoesNotExist:
-            try:
-                type_concept = Concept.objects.get(concept_id=32856)  # Lab fallback
-            except Concept.DoesNotExist:
-                pass
+        # Provenance type for every row written below. 32865 is
+        # 'Patient self-report' — OMOP's Type Concept vocabulary has no
+        # device or wearable type, so this is the closest faithful fit for
+        # data the patient's own device produced.
+        #
+        # This previously used 32883 with a comment claiming it was
+        # "Patient self-report"; 32883 is 'Survey'. It fell back to 32856,
+        # which is 'Lab'. Both mislabelled the provenance of every wearable
+        # row, and the fallback fired silently on any database without the
+        # full vocabulary loaded (#441).
+        #
+        # There is deliberately no fallback now: refusing to write is better
+        # than writing a row that misstates where the data came from. The
+        # concept is seeded by seed_omop_concepts, so an unseeded database is
+        # a setup error the operator needs to see.
+        # Migration 0143 installs this concept, so the deploy path guarantees it
+        # rather than depending on someone remembering to run seed_omop_concepts.
+        #
+        # The vocabulary check is not redundant. lab_results.sync._ensure_concept
+        # mints concept_id 32865 into HK-Labs as a fallback when Athena is absent
+        # — a locally-authored row occupying a genuine Athena id. Accepting it
+        # here would type every wearable row with a shadow concept, which is the
+        # defect class #415 exists to eliminate, and would do so silently.
+        type_concept = Concept.objects.filter(
+            concept_id=WEARABLE_TYPE_CONCEPT_ID).first()
+        if type_concept is None or type_concept.vocabulary_id != 'Type Concept':
+            logger.error(
+                'wearable_type_concept_unusable concept_id=%s person_id=%s found=%r '
+                'vocabulary_id=%r — refusing to write rows with unknown provenance.',
+                WEARABLE_TYPE_CONCEPT_ID, person.person_id,
+                type_concept is not None,
+                getattr(type_concept, 'vocabulary_id', None),
+            )
+            return Response(
+                {'error': 'Wearable ingestion is not configured on this server '
+                          '(measurement type concept missing or invalid). '
+                          'Contact an administrator.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         # Filter out artifact values and deduplicate
         from django.db.models import Q
@@ -3689,6 +3720,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             'active_minutes': 'min',
             'resting_hr': '/min',
             'hrv_sdnn': 'ms',
+            'hrv_rmssd': 'ms',
             'spo2': '%',
             'respiratory_rate': '/min',
             'sleep_duration': 'h',

@@ -104,7 +104,15 @@ WEARABLE_CONCEPT_CODE = {
     'steps':              '55423-8',   # Number of steps in unspecified time Pedometer
     'active_minutes':     '55411-3',   # Exercise duration
     'resting_hr':         '40443-4',   # Heart rate --resting
+    # HRV is two distinct metrics, not one. SDNN (standard deviation of the
+    # R-R series) and RMSSD (root mean square of successive differences) are
+    # different statistics over the same signal and are NOT interchangeable.
+    # 80404-7 is specifically the standard-deviation form, so only a source
+    # that genuinely reports SDNN may be mapped to it — Apple's
+    # HKQuantityTypeIdentifierHeartRateVariabilitySDNN does; Garmin's HRV
+    # Status does not (it is RMSSD). See #438.
     'hrv_sdnn':           '80404-7',   # R-R interval.standard deviation (HRV SDNN)
+    'hrv_rmssd':          'HK-WEAR-HRV-RMSSD',  # no LOINC equivalent — see below
     'spo2':               '59408-5',   # Oxygen saturation in Arterial blood by Pulse oximetry
     'respiratory_rate':   '9279-1',    # Respiratory rate
     'sleep_duration':     '93832-4',   # Sleep duration
@@ -141,6 +149,7 @@ WEARABLE_ARTIFACT_BOUNDS = {
     'spo2':             (70.0, 100.0),
     'resting_hr':       (20.0, 300.0),
     'hrv_sdnn':         (1.0,  300.0),
+    'hrv_rmssd':        (1.0,  300.0),
     'respiratory_rate': (4.0,  60.0),
     'steps':            (0.0,  100_000.0),
     'active_minutes':   (0.0,  1440.0),
@@ -156,6 +165,18 @@ WEARABLE_ARTIFACT_BOUNDS = {
     'basal_energy':     (500.0, 5000.0),   # kcal/day
     'body_mass':        (20.0, 300.0),     # kg
 }
+
+# Provenance type concept for wearable rows: 32865 'Patient self-report'.
+#
+# OMOP's Type Concept vocabulary contains no device or wearable type — all 81
+# rows were reviewed against a full Athena load — so this is the closest
+# faithful fit for data produced by the patient's own device. It is seeded by
+# seed_omop_concepts with its genuine Athena concept_id.
+#
+# Do not reintroduce a fallback here. The previous code used 32883 ('Survey')
+# and fell back to 32856 ('Lab'), mislabelling every wearable row's provenance
+# (#441).
+WEARABLE_TYPE_CONCEPT_ID = 32865
 
 # Minimum valid days required to emit a metric (else field stays None)
 WEARABLE_MIN_VALID_DAYS = 7

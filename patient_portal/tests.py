@@ -9990,6 +9990,132 @@ class WearablePatientRecordTest(TestCase):
         self.assertIsNone(pi.median_daily_steps_30d)
         self.assertIsNone(pi.activity_trend_30d)
 
+    def test_sdnn_and_rmssd_aggregate_into_separate_columns(self):
+        """Two HRV statistics, two columns — never averaged together (#438).
+
+        Values are chosen so a naive merge is detectable: means of 40 and 80
+        would collapse to 60 in either column.
+        """
+        for days_ago in range(10):
+            self._add_measurement('hrv_sdnn', days_ago, 40)
+            self._add_measurement('hrv_rmssd', days_ago, 80)
+
+        pi = self._refresh()
+        self.assertAlmostEqual(float(pi.hrv_sdnn_avg_30d), 40.0)
+        self.assertAlmostEqual(float(pi.hrv_rmssd_avg_30d), 80.0)
+
+    def test_rmssd_absent_leaves_sdnn_alone(self):
+        """A patient on an SDNN-only device gets no RMSSD column, and vice versa."""
+        for days_ago in range(10):
+            self._add_measurement('hrv_sdnn', days_ago, 45)
+
+        pi = self._refresh()
+        self.assertAlmostEqual(float(pi.hrv_sdnn_avg_30d), 45.0)
+        self.assertIsNone(pi.hrv_rmssd_avg_30d)
+
+    def test_wearable_columns_can_never_be_flagged_user_edited(self):
+        """#440 and #434 must not cancel each other out.
+
+        candidate_user_edited_fields flags anything in _OMOP_DERIVED_FIELDS
+        that a PATCH changed, and every wearable column is in that list. Being
+        flagged would pin a client-supplied value against re-derivation
+        permanently — the exact failure #440 closed, reopened by a different
+        door. The only thing preventing it is that read-only fields never
+        reach validated_data and so can never appear in changed_fields.
+        """
+        from patient_portal.api.serializers import PatientRecordSerializer
+        from omop_core.services.omop_write_service import candidate_user_edited_fields
+
+        names = set(self._derived_wearable_field_names())
+        serializer = PatientRecordSerializer()
+
+        writable = {n for n in names
+                    if n in serializer.fields and not serializer.fields[n].read_only}
+        self.assertEqual(writable, set())
+
+        # If one ever did become writable, it would be flagged — assert the
+        # consequence directly so the reason this matters stays visible.
+        self.assertEqual(
+            candidate_user_edited_fields(names), names,
+            'wearable columns are in _OMOP_DERIVED_FIELDS, so read-only '
+            'enforcement is the only thing keeping them out of user_edited_fields')
+
+    def _derived_wearable_field_names(self):
+        """Every derived wearable column, read off the model rather than listed.
+
+        A hard-coded list here would drift exactly the way the one in
+        PatientRecordSerializer.Meta.read_only_fields did — ten columns
+        protected, eleven added later and left writable (#440). Enumerating the
+        model is what makes this test fail when the next column is added
+        without protection.
+        """
+        return [
+            field.name
+            for field in PatientRecord._meta.get_fields()
+            if getattr(field, 'concrete', False)
+            and (field.name.endswith('_30d') or field.name.startswith('wearable_'))
+        ]
+
+    def test_every_derived_wearable_column_is_read_only(self):
+        """No derived wearable column may be writable through the serializer."""
+        from patient_portal.api.serializers import PatientRecordSerializer
+
+        names = self._derived_wearable_field_names()
+        # Guard the guard: if the discovery predicate stops matching, this test
+        # would vacuously pass while protecting nothing.
+        self.assertGreaterEqual(len(names), 21, f'Expected the full wearable column set, got {names}')
+
+        serializer = PatientRecordSerializer()
+        writable = [
+            name for name in names
+            if name in serializer.fields and not serializer.fields[name].read_only
+        ]
+        self.assertEqual(
+            writable, [],
+            f'Derived wearable columns are client-writable: {writable}. '
+            f'They are computed by refresh_patient_record from OMOP rows; a client '
+            f'PATCH would leave the summary disagreeing with its source data.'
+        )
+
+        missing = [name for name in names if name not in serializer.fields]
+        self.assertEqual(missing, [], f'Wearable columns absent from the serializer: {missing}')
+
+    def test_patch_cannot_write_any_derived_wearable_column(self):
+        """A PATCH naming every wearable column must change none of them."""
+        from decimal import Decimal
+        from django.db import models as dj_models
+        from patient_portal.api.serializers import PatientRecordSerializer
+
+        pi = PatientRecord.objects.get(person=self.person)
+
+        # Build a type-appropriate payload so the request is rejected on
+        # read-only grounds rather than silently failing validation.
+        payload = {}
+        for name in self._derived_wearable_field_names():
+            field = PatientRecord._meta.get_field(name)
+            if isinstance(field, dj_models.IntegerField):
+                payload[name] = 12345
+            elif isinstance(field, dj_models.DecimalField):
+                payload[name] = Decimal('9.99')
+            elif isinstance(field, dj_models.DateTimeField):
+                payload[name] = '2020-01-01T00:00:00Z'
+            else:
+                payload[name] = 'improving'
+
+        before = {name: getattr(pi, name) for name in payload}
+
+        serializer = PatientRecordSerializer(pi, data=payload, partial=True)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
+        pi.refresh_from_db()
+        changed = {
+            name: (before[name], getattr(pi, name))
+            for name in payload
+            if getattr(pi, name) != before[name]
+        }
+        self.assertEqual(changed, {}, f'PATCH wrote derived wearable columns: {changed}')
+
     def test_wearable_endpoint_requires_authentication(self):
         """Unauthenticated requests to patient-info must be rejected."""
         from rest_framework.test import APIClient as AnonClient
@@ -15592,6 +15718,129 @@ class MeetsCrabSlimFieldTest(_SmartBase):
 # Wearable Upload Tests
 # =============================================================================
 
+class WearableHrvStatisticTest(TestCase):
+    """SDNN and RMSSD are distinct statistics and must stay distinct (#438).
+
+    LOINC 80404-7 is specifically the standard-deviation form. Garmin's HRV
+    Status is RMSSD-based, so filing it under that code stated something the
+    data does not support — the same defect class as the pre-#413
+    walking_speed -> BMI mapping.
+    """
+
+    def test_sdnn_and_rmssd_have_different_concepts(self):
+        from omop_core.services.mappings import (
+            WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB,
+        )
+        self.assertNotEqual(WEARABLE_CONCEPT_CODE['hrv_sdnn'],
+                            WEARABLE_CONCEPT_CODE['hrv_rmssd'])
+        # SDNN keeps the genuine LOINC; RMSSD has none and is locally minted.
+        self.assertEqual(WEARABLE_CONCEPT_CODE['hrv_sdnn'], '80404-7')
+        self.assertEqual(WEARABLE_CONCEPT_VOCAB['hrv_sdnn'], 'LOINC')
+        self.assertEqual(WEARABLE_CONCEPT_VOCAB['hrv_rmssd'], 'HK-Wearable')
+
+    def test_rmssd_is_not_mapped_to_a_loinc_code(self):
+        """Guards the specific regression: aliasing RMSSD onto an SDNN code."""
+        from omop_core.services.mappings import (
+            WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB,
+        )
+        self.assertNotEqual(
+            WEARABLE_CONCEPT_VOCAB['hrv_rmssd'], 'LOINC',
+            'RMSSD has no LOINC concept — verified against a full Athena load. '
+            'Mapping it to any LOINC code misstates the statistic.')
+        self.assertTrue(WEARABLE_CONCEPT_CODE['hrv_rmssd'].startswith('HK-'))
+
+    def _parse_fit_with_messages(self, messages):
+        """Run parse_garmin_fit against synthetic FIT messages.
+
+        fitparse is an optional dependency and is not installed in CI, so the
+        module is stubbed. This is what lets the Garmin HRV routing — the code
+        #438 actually changed — be tested at all.
+        """
+        import sys
+        import types
+        from unittest import mock
+
+        class _FakeField:
+            def __init__(self, name, value):
+                self.name = name
+                self.value = value
+
+        class _FakeMessage:
+            """Mirrors the fitparse record shape: .name plus .fields of name/value."""
+
+            def __init__(self, name, values):
+                self.name = name
+                self.fields = [_FakeField(k, v) for k, v in values.items()]
+
+        class _FakeFitFile:
+            def __init__(self, _stream):
+                pass
+
+            def parse(self):
+                return None
+
+            def get_messages(self):
+                return [_FakeMessage(name, values) for name, values in messages]
+
+        fake_module = types.ModuleType('fitparse')
+        fake_module.FitFile = _FakeFitFile
+        with mock.patch.dict(sys.modules, {'fitparse': fake_module}):
+            from omop_core.services.wearable_parsers import parse_garmin_fit
+            return parse_garmin_fit(b'not-a-real-fit-file')
+
+    def test_garmin_hrv_status_is_stored_as_rmssd(self):
+        import datetime
+
+        samples = self._parse_fit_with_messages([
+            ('hrv_status_summary', {
+                'timestamp': datetime.datetime(2024, 7, 1, 6, 0, 0),
+                'weekly_average': 42.0,
+            }),
+        ])
+        by_key = {s.metric_key: s for s in samples}
+        self.assertIn('hrv_rmssd', by_key)
+        self.assertNotIn('hrv_sdnn', by_key,
+                         'Garmin HRV Status is RMSSD and must not populate the SDNN metric')
+        self.assertAlmostEqual(by_key['hrv_rmssd'].value, 42.0)
+
+    def test_legacy_hrv_message_routes_each_field_to_its_own_statistic(self):
+        """The legacy message can carry either statistic; each must land correctly."""
+        import datetime
+
+        samples = self._parse_fit_with_messages([
+            ('hrv', {
+                'timestamp': datetime.datetime(2024, 7, 2, 6, 0, 0),
+                'weekly_average': 55.0,
+                'sdnn': 71.0,
+            }),
+        ])
+        by_key = {s.metric_key: s for s in samples}
+        self.assertAlmostEqual(by_key['hrv_rmssd'].value, 55.0)
+        self.assertAlmostEqual(by_key['hrv_sdnn'].value, 71.0)
+
+    def test_apple_sdnn_still_maps_to_sdnn(self):
+        """Apple's identifier names SDNN explicitly — it must be unaffected."""
+        import io as _io
+        import zipfile
+        from omop_core.services.wearable_parsers import parse_apple_health_export
+
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierHeartRateVariabilitySDNN"
+          startDate="2024-07-01 06:00:00 -0700"
+          endDate="2024-07-01 06:00:00 -0700" value="48"/>
+</HealthData>
+"""
+        buf = _io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as zf:
+            zf.writestr('apple_health_export/export.xml', xml)
+
+        by_key = {s.metric_key: s for s in parse_apple_health_export(buf.getvalue())}
+        self.assertIn('hrv_sdnn', by_key)
+        self.assertNotIn('hrv_rmssd', by_key)
+        self.assertAlmostEqual(by_key['hrv_sdnn'].value, 48.0)
+
+
 class WearableParserUnitTest(TestCase):
     """Unit tests for the Garmin FIT and Apple Health parsers."""
 
@@ -15679,6 +15928,7 @@ class WearableUploadEndpointTest(TestCase):
         # fixture that flattens either would not exercise the real behaviour.
         from omop_core.services.mappings import (
             WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB, WEARABLE_OBSERVATION_METRICS,
+            WEARABLE_TYPE_CONCEPT_ID,
         )
         from omop_core.services.concept_cache import concept_cache_clear
         concept_cache_clear()
@@ -15721,17 +15971,27 @@ class WearableUploadEndpointTest(TestCase):
             )
             cls.wearable_concepts[metric_key] = c
 
-        # Type concept for wearable measurements
+        # Provenance type concept for wearable rows. This fixture previously
+        # created 32883 under the name 'Patient self-report', mirroring the
+        # same mistake the production code made — 32883 is 'Survey'; 32865 is
+        # 'Patient self-report' (#441). Use the real id and code so the
+        # fixture cannot vouch for a mapping Athena would reject.
+        # The vocabulary must be the genuine 'Type Concept', not a TEST stub:
+        # upload_wearable rejects a 32865 row from any other vocabulary, because
+        # lab_results.sync can mint a shadow row at that id under HK-Labs.
         type_domain = Domain.objects.get(domain_id='Type Concept')
-        test_vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        type_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='Type Concept',
+            defaults={'vocabulary_name': 'OMOP Type Concept', 'vocabulary_concept_id': 0},
+        )
         Concept.objects.get_or_create(
-            concept_id=32883,
+            concept_id=WEARABLE_TYPE_CONCEPT_ID,
             defaults={
                 'concept_name': 'Patient self-report',
                 'domain': type_domain,
-                'vocabulary': test_vocab,
+                'vocabulary': type_vocab,
                 'concept_class': cc,
-                'concept_code': '32883',
+                'concept_code': 'OMOP4976938',
                 'valid_start_date': today,
                 'valid_end_date': far_future,
             },
@@ -15863,6 +16123,107 @@ class WearableUploadEndpointTest(TestCase):
         self.assertEqual(data['samples_created'], 0)
         self.assertEqual(data['unmapped_samples'], 1, data)
         self.assertIn('vo2_max', data['unmapped_metrics'])
+
+    def test_rows_are_typed_patient_self_report(self):
+        """Provenance must be 32865, not 'Survey' (32883) or 'Lab' (32856). (#441)"""
+        from omop_core.models import Measurement, Observation
+        from omop_core.services.mappings import WEARABLE_TYPE_CONCEPT_ID
+
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierRestingHeartRate"
+          startDate="2024-07-05 06:00:00 -0700"
+          endDate="2024-07-05 06:00:00 -0700" value="58"/>
+  <Record type="HKQuantityTypeIdentifierStepCount"
+          startDate="2024-07-05 09:00:00 -0700"
+          endDate="2024-07-05 09:30:00 -0700" value="3200"/>
+</HealthData>
+"""
+        data = self._upload_apple(xml)
+        self.assertGreater(data['samples_created'], 0, data)
+
+        # Cover both tables — steps is Observation-domain, resting HR is not.
+        m_types = set(Measurement.objects.filter(person=self.person)
+                      .values_list('measurement_type_concept_id', flat=True))
+        o_types = set(Observation.objects.filter(person=self.person)
+                      .values_list('observation_type_concept_id', flat=True))
+        self.assertEqual(m_types, {WEARABLE_TYPE_CONCEPT_ID})
+        self.assertEqual(o_types, {WEARABLE_TYPE_CONCEPT_ID})
+
+    def test_missing_type_concept_refuses_to_write(self):
+        """Unknown provenance must fail loudly, not fall back to 'Lab'. (#441)"""
+        from omop_core.models import Concept, Measurement
+        from omop_core.services.concept_cache import concept_cache_clear
+        from omop_core.services.mappings import WEARABLE_TYPE_CONCEPT_ID
+
+        before = Measurement.objects.filter(person=self.person).count()
+        Concept.objects.filter(concept_id=WEARABLE_TYPE_CONCEPT_ID).delete()
+        concept_cache_clear()
+        self.addCleanup(concept_cache_clear)
+
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierRestingHeartRate"
+          startDate="2024-07-06 06:00:00 -0700"
+          endDate="2024-07-06 06:00:00 -0700" value="60"/>
+</HealthData>
+"""
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        # Not _upload_apple: that helper asserts HTTP 200, and refusing the
+        # write is the behaviour under test.
+        upload = SimpleUploadedFile('export.zip', self._make_apple_zip(xml).read(),
+                                    content_type='application/zip')
+        resp = self._client_as(self.identity).post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': upload, 'device_type': 'apple'}, format='multipart')
+
+        self.assertEqual(resp.status_code, 503, getattr(resp, 'data', resp))
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(), before,
+            'Rows were written despite unknown provenance')
+
+    def test_shadow_type_concept_is_rejected(self):
+        """A locally-minted row at 32865 must not be used as provenance.
+
+        lab_results.sync._ensure_concept mints concept_id 32865 into HK-Labs
+        when Athena is absent. Accepting it would type every wearable row with
+        a HealthKey concept squatting a genuine Athena id (#415).
+        """
+        from omop_core.models import Concept, Measurement, Vocabulary
+        from omop_core.services.concept_cache import concept_cache_clear
+        from omop_core.services.mappings import WEARABLE_TYPE_CONCEPT_ID
+
+        before = Measurement.objects.filter(person=self.person).count()
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='HK-Labs',
+            defaults={'vocabulary_name': 'HK-Labs', 'vocabulary_concept_id': 0},
+        )
+        Concept.objects.filter(concept_id=WEARABLE_TYPE_CONCEPT_ID).update(
+            vocabulary_id='HK-Labs',
+            concept_code='hkl:fallback-32865',
+            source='HealthKey',
+        )
+        concept_cache_clear()
+        self.addCleanup(concept_cache_clear)
+
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierRestingHeartRate"
+          startDate="2024-07-07 06:00:00 -0700"
+          endDate="2024-07-07 06:00:00 -0700" value="61"/>
+</HealthData>
+"""
+        upload = SimpleUploadedFile('export.zip', self._make_apple_zip(xml).read(),
+                                    content_type='application/zip')
+        resp = self._client_as(self.identity).post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': upload, 'device_type': 'apple'}, format='multipart')
+
+        self.assertEqual(resp.status_code, 503, getattr(resp, 'data', resp))
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(), before,
+            'Rows were typed with a shadow concept')
 
     def test_upload_apple_health_creates_measurements(self):
         """Uploading an Apple Health zip creates Measurement rows."""

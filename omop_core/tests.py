@@ -2161,7 +2161,12 @@ class WearableConceptMappingTest(TestCase):
             'steps': ['step'],
             'active_minutes': ['exercise', 'activity'],
             'resting_hr': ['heart rate'],
-            'hrv_sdnn': ['r-r interval', 'heart rate variability'],
+            # HRV terms must be the DISTINGUISHING part of each name, not the
+            # shared 'r-r interval' / 'heart rate variability' wording. Both
+            # concepts contain that wording, so matching on it would let RMSSD
+            # be aliased onto the SDNN code — the #438 defect — and still pass.
+            'hrv_sdnn': ['standard deviation'],
+            'hrv_rmssd': ['rmssd'],
             'spo2': ['oxygen saturation'],
             'respiratory_rate': ['respiratory rate'],
             'sleep_duration': ['sleep'],
@@ -2189,6 +2194,62 @@ class WearableConceptMappingTest(TestCase):
                 f'{metric} maps to {code} = "{name}", which does not look like '
                 f'{expected_terms[metric]}',
             )
+
+    def test_runtime_migration_matches_seed_definitions(self):
+        """Migration 0143 duplicates concept rows; the copies must not drift.
+
+        The migration deliberately hard-codes these rather than importing
+        seed_omop_concepts, because a migration must stay frozen against the
+        code as it was written. That trade buys correctness on replay and costs
+        a consistency check, which is this test.
+        """
+        from importlib import import_module
+
+        mig = import_module(
+            'omop_core.migrations.0143_seed_wearable_runtime_concepts')
+        seed_by_key = {
+            (r['vocabulary_id'], r['concept_code']): r for r in self._seed_rows()
+        }
+
+        mig_rows = [mig._TYPE_CONCEPT] + [
+            dict(r, vocabulary_id='HK-Wearable', domain_id='Measurement',
+                 concept_class_id='Clinical Observation', source='HealthKey')
+            for r in mig._HK_WEARABLE_CONCEPTS
+        ]
+
+        for row in mig_rows:
+            key = (row['vocabulary_id'], row['concept_code'])
+            seeded = seed_by_key.get(key)
+            self.assertIsNotNone(
+                seeded, f'migration 0143 seeds {key}, which seed_omop_concepts does not')
+            for field in ('concept_id', 'concept_name', 'domain_id', 'concept_class_id'):
+                self.assertEqual(
+                    row[field], seeded[field],
+                    f'{key} {field} differs between migration 0143 and seed_omop_concepts')
+            self.assertEqual(row.get('source'), seeded.get('source'), f'{key} source differs')
+
+    def test_locally_minted_wearable_concepts_are_installed_by_migration(self):
+        """Athena can never supply a local mint, so a migration must.
+
+        start.sh runs only `migrate`; seed_omop_concepts is manual. A metric
+        whose concept is locally minted is silently discarded on any deployment
+        that never ran the seed command.
+        """
+        from importlib import import_module
+        from omop_core.services.mappings import (
+            WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB,
+        )
+
+        mig = import_module(
+            'omop_core.migrations.0143_seed_wearable_runtime_concepts')
+        installed = {r['concept_code'] for r in mig._HK_WEARABLE_CONCEPTS}
+        local_metrics = {
+            code for metric, code in WEARABLE_CONCEPT_CODE.items()
+            if WEARABLE_CONCEPT_VOCAB[metric] != 'LOINC'
+        }
+        self.assertEqual(
+            local_metrics - installed, set(),
+            'locally-minted wearable concepts not installed by any migration')
 
     def test_no_duplicate_vocabulary_code_pairs_in_seed(self):
         """Two seed rows must never claim the same (vocabulary_id, concept_code).

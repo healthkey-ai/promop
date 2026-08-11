@@ -23,6 +23,14 @@ codes were always correct, and both are written by the vitals and FHIR ingestion
 paths too — matching them would delete non-wearable clinical data. Rows for those
 metrics are only removed when they sit on a retired mint, which is unambiguous.
 
+Also NOT matched: hrv_sdnn (80404-7), despite #438 establishing that Garmin
+values under that code are RMSSD and belong on HK-WEAR-HRV-RMSSD. Apple values
+under the same code are correct SDNN, and a wearable OMOP row records nothing
+about which device produced it (#442), so the two cannot be separated here.
+Deleting by code would destroy correct Apple data. Garmin patients get correct
+HRV only by re-uploading their export after #438; the historical rows stay
+mis-filed until #442 makes them addressable.
+
 Usage:
     python manage.py purge_broken_wearable_rows              # dry run (default)
     python manage.py purge_broken_wearable_rows --apply

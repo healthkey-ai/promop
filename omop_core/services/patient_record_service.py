@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 3
+DERIVATION_VERSION = 4
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
@@ -140,7 +140,7 @@ _OMOP_DERIVED_FIELDS = [
     # Wearable summaries
     'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
     'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
-    'resting_heart_rate_avg_30d', 'hrv_sdnn_avg_30d',
+    'resting_heart_rate_avg_30d', 'hrv_sdnn_avg_30d', 'hrv_rmssd_avg_30d',
     'oxygen_saturation_min_30d', 'oxygen_saturation_avg_30d', 'respiratory_rate_avg_30d',
     'sleep_duration_hours_avg_30d', 'vo2_max_avg_30d',
     'distance_km_per_day_30d', 'walking_speed_avg_30d', 'walking_step_length_avg_30d',
@@ -2682,7 +2682,10 @@ def _get_wearable_data(person: Person) -> dict:
     steps_daily = _metric_daily('steps')
     active_daily = _metric_daily('active_minutes')
     rhr_daily = _metric_daily('resting_hr')
-    hrv_daily = _metric_daily('hrv_sdnn')
+    # SDNN and RMSSD are separate metrics with separate concepts — they must
+    # never be merged into one summary. See #438.
+    hrv_sdnn_daily = _metric_daily('hrv_sdnn')
+    hrv_rmssd_daily = _metric_daily('hrv_rmssd')
     spo2_daily = _metric_daily('spo2')
     rr_daily = _metric_daily('respiratory_rate')
     vo2_daily = _metric_daily('vo2_max')
@@ -2701,7 +2704,7 @@ def _get_wearable_data(person: Person) -> dict:
 
     all_valid_days = sorted(
         steps_daily.keys() | active_daily.keys()
-        | rhr_daily.keys() | hrv_daily.keys()
+        | rhr_daily.keys() | hrv_sdnn_daily.keys() | hrv_rmssd_daily.keys()
         | spo2_daily.keys() | rr_daily.keys()
         | sleep_daily.keys() | vo2_daily.keys()
         | distance_daily.keys() | walk_speed_daily.keys()
@@ -2741,7 +2744,8 @@ def _get_wearable_data(person: Person) -> dict:
     steps_daily = _within_window(steps_daily)
     active_daily = _within_window(active_daily)
     rhr_daily = _within_window(rhr_daily)
-    hrv_daily = _within_window(hrv_daily)
+    hrv_sdnn_daily = _within_window(hrv_sdnn_daily)
+    hrv_rmssd_daily = _within_window(hrv_rmssd_daily)
     spo2_daily = _within_window(spo2_daily)
     rr_daily = _within_window(rr_daily)
     sleep_daily = _within_window(sleep_daily)
@@ -2763,7 +2767,7 @@ def _get_wearable_data(person: Person) -> dict:
     # ---- Coverage ratio (union of all wearable metric days) ----------
     all_valid_days = (
         steps_totals.keys() | active_totals.keys()
-        | rhr_daily.keys() | hrv_daily.keys()
+        | rhr_daily.keys() | hrv_sdnn_daily.keys() | hrv_rmssd_daily.keys()
         | spo2_daily.keys() | rr_daily.keys()
         | sleep_nightly.keys() | vo2_daily.keys()
         | distance_daily.keys() | walk_speed_daily.keys()
@@ -2812,9 +2816,16 @@ def _get_wearable_data(person: Person) -> dict:
         data['resting_heart_rate_avg_30d'] = int(round(statistics.mean(rhr_means.values())))
 
     # ---- HRV SDNN ----------------------------------------------------
-    hrv_means = {d: statistics.mean(vs) for d, vs in hrv_daily.items()}
-    if hrv_means:
-        data['hrv_sdnn_avg_30d'] = round(statistics.mean(hrv_means.values()), 1)
+    hrv_sdnn_means = {d: statistics.mean(vs) for d, vs in hrv_sdnn_daily.items()}
+    if hrv_sdnn_means:
+        data['hrv_sdnn_avg_30d'] = round(statistics.mean(hrv_sdnn_means.values()), 1)
+
+    # ---- HRV RMSSD ---------------------------------------------------
+    # Kept separate from SDNN deliberately: they are different statistics and
+    # averaging them together would produce a number that is neither (#438).
+    hrv_rmssd_means = {d: statistics.mean(vs) for d, vs in hrv_rmssd_daily.items()}
+    if hrv_rmssd_means:
+        data['hrv_rmssd_avg_30d'] = round(statistics.mean(hrv_rmssd_means.values()), 1)
 
     # ---- SpO2 minimum (single low reading is clinically significant) -
     all_spo2 = [v for vs in spo2_daily.values() for v in vs]
