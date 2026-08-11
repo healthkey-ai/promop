@@ -66,6 +66,12 @@ CONDITION_FIELDS = frozenset({'disease', 'stage', 'condition_code_icd_10', 'cond
 
 DEMOGRAPHIC_FIELDS = frozenset({'gender', 'date_of_birth', 'patient_age', 'ethnicity'})
 
+# The subset _sync_demographics actually writes to Person. The other two trigger
+# the sync but have no column to land in: `patient_age` is a function of the
+# birth date rather than a stored value, and `ethnicity` is simply unhandled.
+# Anything outside this set has not round-tripped, whatever triggered the sync.
+DEMOGRAPHIC_FIELDS_PERSISTED = frozenset({'gender', 'date_of_birth'})
+
 # Maps line number (1/2/3) → PatientRecord field prefix
 THERAPY_LINE_PREFIXES = {
     1: 'first_line',

@@ -2776,6 +2776,15 @@ class UnsyncedDerivedFieldsTest(TestCase):
 
         self.assertEqual(unsynced_derived_fields({'email', 'date_of_birth'}), set())
 
+    def test_patient_age_is_flagged_despite_triggering_the_demographic_sync(self):
+        """patient_age is in DEMOGRAPHIC_FIELDS, but _sync_demographics writes
+        only gender and the birth date — counting the trigger set as coverage
+        would drop a typed age on the next refresh."""
+        from omop_core.services.omop_write_service import unsynced_derived_fields
+
+        self.assertEqual(unsynced_derived_fields({'patient_age'}), {'patient_age'})
+        self.assertEqual(unsynced_derived_fields({'gender'}), set())
+
 
 class PreserveUserEditedFieldsTest(_OmopBase):
     """refresh_patient_record must not blank values OMOP cannot reproduce."""
@@ -3028,6 +3037,30 @@ class PlaceholderBirthYearTest(_OmopBase):
         pi = refresh_patient_record(self.person)
 
         self.assertIsNone(pi.patient_age)
+
+    def test_stale_age_is_cleared_rather_than_left_behind(self):
+        """patient_age was absent from the clear-list, so once the extractor
+        stopped emitting it the old 126 simply stayed on the row."""
+        self.person.year_of_birth = 1900
+        self.person.save(update_fields=['year_of_birth'])
+        PatientRecord.objects.create(person=self.person, patient_age=126)
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertIsNone(pi.patient_age)
+
+    def test_hand_entered_age_survives(self):
+        """A typed age has nowhere to land in OMOP, so it must be preserved
+        rather than cleared along with the stale ones."""
+        self.person.year_of_birth = 1900
+        self.person.save(update_fields=['year_of_birth'])
+        PatientRecord.objects.create(
+            person=self.person, patient_age=54, user_edited_fields=['patient_age'],
+        )
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(pi.patient_age, 54)
 
     def test_real_year_still_yields_an_age(self):
         self.person.year_of_birth = 1980

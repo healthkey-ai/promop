@@ -47,6 +47,14 @@ DERIVATION_VERSION = 3
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
 _OMOP_DERIVED_FIELDS = [
+    # Demographics. Only patient_age is listed: it is a pure function of the
+    # birth date, so a value left over from an earlier derivation is stale by
+    # construction and has to be cleared. This is what stranded age=126 on
+    # records whose Person still carried the year_of_birth=1900 placeholder —
+    # nothing ever cleared the number once _get_demographics stopped emitting
+    # it. (gender/race/ethnicity are written by the same extractor and are NOT
+    # cleared, so they can still go stale; out of scope for #434.)
+    'patient_age',
     # Disease / condition
     'disease', 'diagnosis_date', 'death_date', 'condition_clinical_status', 'disease_slug',
     # Therapy lines

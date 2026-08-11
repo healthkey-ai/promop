@@ -12,6 +12,7 @@ from omop_core.services.mappings import (
     LAB_FIELD_TO_LOINC,
     CONDITION_FIELDS,
     DEMOGRAPHIC_FIELDS,
+    DEMOGRAPHIC_FIELDS_PERSISTED,
     THERAPY_LINE_FIELDS,
     THERAPY_LINE_PREFIXES,
     CONCEPT_GENERIC_LAB,
@@ -80,7 +81,7 @@ def unsynced_derived_fields(changed_fields) -> set:
     synced = (
         set(LAB_FIELD_TO_LOINC)
         | CONDITION_FIELDS
-        | DEMOGRAPHIC_FIELDS
+        | DEMOGRAPHIC_FIELDS_PERSISTED
         | THERAPY_LINE_FIELDS
     )
     return (set(changed_fields) & set(_OMOP_DERIVED_FIELDS)) - synced
