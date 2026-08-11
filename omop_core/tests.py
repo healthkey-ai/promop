@@ -3119,6 +3119,171 @@ class PerformanceStatusFromEitherTableTest(_OmopBase):
         self.assertEqual(pi.karnofsky_performance_score, 90)
 
 
+class EnrichDemoOmopDataTest(_OmopBase):
+    """enrich_demo_omop_data inserts only the OMOP rows a cohort is missing."""
+
+    PERSON_ID = 90700
+
+    def setUp(self):
+        _concept(3000963, 'Laboratory test result', self.dom_meas, self.vocab, self.cc)
+        _concept(32856, 'Lab', self.dom_meas, self.vocab, self.cc)
+
+    def _record(self, person_id, disease):
+        person = Person.objects.create(
+            person_id=person_id, year_of_birth=1970,
+            gender_source_value='female', race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        # Backed by a real condition row: `disease` is OMOP-derived, so a
+        # PatientRecord that only carries it as a column loses it on the first
+        # refresh and drops out of the command's cohort selection.
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=person_id,
+            person=person,
+            condition_concept=_concept(
+                900000 + (person_id % 1000), disease, self.dom_cond,
+                self.vocab, self.cc),
+            condition_start_date=date(2025, 1, 10),
+            condition_type_concept=self.type_concept,
+            condition_source_value=disease,
+        )
+        return PatientRecord.objects.get(person=person)
+
+    def _codes(self, person_id):
+        return set(
+            Measurement.objects.filter(person_id=person_id)
+            .values_list('measurement_source_value', flat=True)
+        )
+
+    def test_dry_run_writes_nothing(self):
+        self._record(90701, 'Malignant tumor of breast')
+
+        call_command('enrich_demo_omop_data', verbosity=0)
+
+        self.assertEqual(Measurement.objects.filter(person_id=90701).count(), 0)
+
+    def test_breast_cohort_gets_vitals_performance_and_grade(self):
+        self._record(90702, 'Malignant tumor of breast')
+
+        call_command('enrich_demo_omop_data', '--apply', verbosity=0)
+
+        codes = self._codes(90702)
+        for loinc in ('8302-2', '29463-7', '8867-4', '20570-8',
+                      '8480-6', '8462-4', '89247-1', '89243-0', '2532-0', '44648-4'):
+            self.assertIn(loinc, codes, f'breast cohort missing {loinc}')
+        # ANC/eGFR already exist for the breast cohort upstream — not its gap.
+        self.assertNotIn('751-8', codes)
+        self.assertNotIn('62238-1', codes)
+
+    def test_myeloma_cohort_gets_anc_and_egfr_but_not_breast_only_rows(self):
+        self._record(90703, 'Multiple myeloma')
+
+        call_command('enrich_demo_omop_data', '--apply', verbosity=0)
+
+        codes = self._codes(90703)
+        self.assertIn('751-8', codes)
+        self.assertIn('62238-1', codes)
+        self.assertIn('8302-2', codes)
+        # Nottingham grade is meaningless outside a breast specimen.
+        self.assertNotIn('44648-4', codes)
+        self.assertNotIn('89247-1', codes)
+
+    def test_existing_rows_are_never_duplicated(self):
+        self._record(90704, 'Malignant tumor of breast')
+        call_command('enrich_demo_omop_data', '--apply', verbosity=0)
+        before = Measurement.objects.filter(person_id=90704).count()
+
+        call_command('enrich_demo_omop_data', '--apply', verbosity=0)
+
+        self.assertEqual(Measurement.objects.filter(person_id=90704).count(), before)
+
+    def test_a_row_found_by_source_value_counts_as_covered(self):
+        """Derivation matches concept_code OR source_value, so a row carrying
+        only the source value must suppress the insert too."""
+        self._record(90705, 'Malignant tumor of breast')
+        Measurement.objects.create(
+            measurement_id=90790,
+            person_id=90705,
+            measurement_concept=Concept.objects.get(concept_id=3000963),
+            measurement_date=date(2026, 1, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_number=70.0,
+            measurement_source_value='29463-7',
+        )
+
+        call_command('enrich_demo_omop_data', '--apply', verbosity=0)
+
+        self.assertEqual(
+            Measurement.objects.filter(
+                person_id=90705, measurement_source_value='29463-7').count(), 1)
+
+    def test_values_are_stable_across_runs(self):
+        """Demos are re-run; a patient's numbers must not drift each time."""
+        self._record(90706, 'Multiple myeloma')
+        call_command('enrich_demo_omop_data', '--apply', verbosity=0)
+        first = dict(
+            Measurement.objects.filter(person_id=90706)
+            .values_list('measurement_source_value', 'value_as_number'))
+
+        Measurement.objects.filter(person_id=90706).delete()
+        call_command('enrich_demo_omop_data', '--apply', verbosity=0)
+        second = dict(
+            Measurement.objects.filter(person_id=90706)
+            .values_list('measurement_source_value', 'value_as_number'))
+
+        self.assertEqual(first, second)
+
+    def test_height_and_weight_yield_a_plausible_bmi(self):
+        self._record(90707, 'Malignant tumor of breast')
+
+        call_command('enrich_demo_omop_data', '--apply', verbosity=0)
+
+        vals = dict(
+            Measurement.objects.filter(person_id=90707)
+            .values_list('measurement_source_value', 'value_as_number'))
+        height_m = float(vals['8302-2']) / 100
+        bmi = float(vals['29463-7']) / (height_m ** 2)
+        self.assertGreater(bmi, 18.0)
+        self.assertLess(bmi, 33.0)
+
+    def test_touched_records_are_marked_stale_for_the_backfill(self):
+        pr = self._record(90708, 'Multiple myeloma')
+        PatientRecord.objects.filter(pk=pr.pk).update(derivation_version=3)
+
+        call_command('enrich_demo_omop_data', '--apply', verbosity=0)
+
+        pr.refresh_from_db()
+        self.assertEqual(pr.derivation_version, 0)
+
+    def test_cohort_filter_limits_scope(self):
+        self._record(90709, 'Malignant tumor of breast')
+        self._record(90710, 'Multiple myeloma')
+
+        call_command('enrich_demo_omop_data', '--apply', '--cohort', 'breast', verbosity=0)
+
+        self.assertGreater(Measurement.objects.filter(person_id=90709).count(), 0)
+        self.assertEqual(Measurement.objects.filter(person_id=90710).count(), 0)
+
+    def test_inserted_rows_actually_populate_the_read_model(self):
+        """The point of the command: the fields the audit found blank must be
+        non-empty after a re-derivation."""
+        pr = self._record(90711, 'Malignant tumor of breast')
+
+        call_command('enrich_demo_omop_data', '--apply', verbosity=0)
+        refreshed = refresh_patient_record(pr.person)
+
+        self.assertIsNotNone(refreshed.weight)
+        self.assertIsNotNone(refreshed.height)
+        self.assertIsNotNone(refreshed.bmi)
+        self.assertIsNotNone(refreshed.heartrate)
+        self.assertIsNotNone(refreshed.systolic_blood_pressure)
+        self.assertIsNotNone(refreshed.ecog_performance_status)
+        self.assertIsNotNone(refreshed.karnofsky_performance_score)
+        self.assertIsNotNone(refreshed.ldh_u_l)
+        self.assertIsNotNone(refreshed.hematocrit_percent)
+        self.assertIsNotNone(refreshed.biopsy_grade)
+
+
 class PlaceholderBirthYearTest(_OmopBase):
     """Registration seeds year_of_birth=1900; it is not a birth year."""
 

@@ -1243,19 +1243,30 @@ def _get_vitals_data(person: Person) -> dict:
         'temperature': '8310-5',
     }
 
+    codes = set(vital_sign_concepts.values())
+    # Matched on source_value as well as concept_code, like the lab, staging and
+    # performance extractors already are. A row whose concept never resolved
+    # keeps its LOINC only in measurement_source_value, and vitals was the one
+    # extractor that could not see those — so an unresolved weight or height
+    # left the field blank and BMI uncomputed.
     measurements = (
         Measurement.objects
-        .filter(
-            person=person,
-            measurement_concept__concept_code__in=vital_sign_concepts.values(),
-            value_as_number__isnull=False,
-        )
+        .filter(person=person, value_as_number__isnull=False)
+        .filter(Q(measurement_concept__concept_code__in=codes)
+                | Q(measurement_source_value__in=codes))
         .select_related('measurement_concept')
         .order_by('-measurement_date')
     )
     first_by_code = {}
     for measurement in measurements:
-        first_by_code.setdefault(measurement.measurement_concept.concept_code, measurement)
+        code = _measurement_code(measurement)
+        if code not in codes:
+            # _measurement_code prefers whichever field looks like a LOINC; if
+            # that is a code we did not ask for, fall back to the one that
+            # actually matched so the row is not dropped.
+            concept_code = getattr(measurement.measurement_concept, 'concept_code', None)
+            code = concept_code if concept_code in codes else measurement.measurement_source_value
+        first_by_code.setdefault(code, measurement)
 
     for vital_type, loinc_code in vital_sign_concepts.items():
         measurement = first_by_code.get(loinc_code)
