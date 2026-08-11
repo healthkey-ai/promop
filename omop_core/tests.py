@@ -8,7 +8,7 @@ TEST-04: FLBundleGenerator unit tests
 """
 
 import tempfile
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -210,6 +210,53 @@ class RefreshPatientRecordDemographicsTest(_OmopBase):
         pi = refresh_patient_record(self.person)
         expected_age = date.today().year - self.person.year_of_birth
         self.assertEqual(pi.patient_age, expected_age)
+
+    # --- issue #456: derivation must populate date_of_birth ---
+
+    def _person_with_dob(self, person_id, year, month, day):
+        return Person.objects.create(
+            person_id=person_id,
+            year_of_birth=year,
+            month_of_birth=month,
+            day_of_birth=day,
+            gender_source_value='female',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+
+    def test_date_of_birth_populated_when_person_has_full_precision(self):
+        person = self._person_with_dob(90211, 1975, 6, 15)
+        pi = refresh_patient_record(person)
+        self.assertEqual(pi.date_of_birth, date(1975, 6, 15))
+
+    def test_date_of_birth_not_fabricated_when_only_year_known(self):
+        """A Jan-1 placeholder would show patients a birthday that is not theirs."""
+        pi = refresh_patient_record(self.person)
+        self.assertIsNone(pi.date_of_birth)
+        self.assertIsNotNone(pi.patient_age)
+
+    def test_patient_age_when_birthday_not_yet_passed_this_year(self):
+        today = date.today()
+        # A birthday one day in the future — age must not be rounded up.
+        ref = today + timedelta(days=1)
+        # Anchor the year to `ref`, not `today`, so the test holds on Dec 31.
+        person = self._person_with_dob(90212, ref.year - 40, ref.month, ref.day)
+        pi = refresh_patient_record(person)
+        self.assertEqual(pi.patient_age, 39)
+
+    def test_patient_age_when_birthday_already_passed_this_year(self):
+        today = date.today()
+        ref = today - timedelta(days=1)
+        # Anchor the year to `ref`, not `today`, so the test holds on Jan 1.
+        person = self._person_with_dob(90213, ref.year - 40, ref.month, ref.day)
+        pi = refresh_patient_record(person)
+        self.assertEqual(pi.patient_age, 40)
+
+    def test_impossible_month_day_does_not_break_derivation(self):
+        person = self._person_with_dob(90214, 1975, 2, 30)
+        pi = refresh_patient_record(person)
+        self.assertIsNone(pi.date_of_birth)
+        self.assertEqual(pi.patient_age, date.today().year - 1975)
 
 
 class RefreshPatientRecordDiseaseTest(_OmopBase):

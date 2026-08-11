@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 2
+DERIVATION_VERSION = 3
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
@@ -365,7 +365,26 @@ def _get_demographics(person: Person) -> dict:
 
     if person.year_of_birth:
         today = date.today()
-        data['patient_age'] = today.year - person.year_of_birth
+        # Only materialize a full date when the Person carries real month/day
+        # precision. Defaulting the missing parts to Jan 1 would store a
+        # fabricated birthday, which the portal renders in its editable
+        # "Date of Birth" field as though it were fact.
+        dob = None
+        if person.month_of_birth and person.day_of_birth:
+            try:
+                dob = date(
+                    person.year_of_birth, person.month_of_birth, person.day_of_birth
+                )
+            except ValueError:
+                dob = None
+        if dob:
+            data['date_of_birth'] = dob
+            data['patient_age'] = today.year - dob.year - (
+                (today.month, today.day) < (dob.month, dob.day)
+            )
+        else:
+            # Year-only precision: the best available estimate.
+            data['patient_age'] = today.year - person.year_of_birth
 
     gender_src = None
     if person.gender_concept:

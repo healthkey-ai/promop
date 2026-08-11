@@ -218,7 +218,11 @@ class PatientListSerializer(serializers.ModelSerializer):
             today = date.today()
             age = today.year - obj.date_of_birth.year - ((today.month, today.day) < (obj.date_of_birth.month, obj.date_of_birth.day))
             return age
-        return None
+        # OMOP-derived records only carry date_of_birth when the Person has
+        # full month/day precision; for the rest, patient_age is the derived
+        # value (see _get_demographics). Falling back here keeps `age`
+        # populated without requiring a re-derivation pass.
+        return obj.patient_age
 
 
 class GenderField(serializers.CharField):
@@ -354,7 +358,11 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             today = date.today()
             age = today.year - obj.date_of_birth.year - ((today.month, today.day) < (obj.date_of_birth.month, obj.date_of_birth.day))
             return age
-        return None
+        # OMOP-derived records only carry date_of_birth when the Person has
+        # full month/day precision; for the rest, patient_age is the derived
+        # value (see _get_demographics). Falling back here keeps `age`
+        # populated without requiring a re-derivation pass.
+        return obj.patient_age
 
     def get_first_line_therapy_display(self, obj):
         if obj.first_line_therapy_id:

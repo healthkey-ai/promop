@@ -35,7 +35,13 @@ export default function GeneralTab({ formData, onChange, editedName, onNameChang
   const { source: ethnicitySource }   = useVocabulary('ethnicity', 'title');
   const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
 
-  const age = formData?.date_of_birth ? calculateAge(formData.date_of_birth as string) : null;
+  // OMOP-derived records only carry date_of_birth when the source Person has
+  // full month/day precision; otherwise fall back to the age the API derived
+  // from Person.year_of_birth (issue #456).
+  const derivedAge = (formData?.age ?? formData?.patient_age) as number | null | undefined;
+  const age = formData?.date_of_birth
+    ? calculateAge(formData.date_of_birth as string)
+    : derivedAge ?? null;
   const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
 
   return (

@@ -2647,6 +2647,45 @@ class SmartServiceClientReadTest(_SmartBase):
         resp = self.read_client.get('/api/patient-info/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
+    # --- issue #456: `age` must not be null for OMOP-derived patients ---
+
+    @staticmethod
+    def _rows(resp):
+        data = resp.data
+        return data['results'] if isinstance(data, dict) and 'results' in data else data
+
+    def test_list_age_populated_for_record_without_date_of_birth(self):
+        """ETL-loaded rows carry patient_age but no date_of_birth (issue #456)."""
+        self.patient_info.refresh_from_db()
+        self.assertIsNone(self.patient_info.date_of_birth)
+        self.assertIsNotNone(self.patient_info.patient_age)
+
+        resp = self.read_client.get('/api/patient-info/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        row = next(r for r in self._rows(resp)
+                   if r.get('person_id') == self.person.person_id)
+        self.assertEqual(row['age'], self.patient_info.patient_age)
+
+    def test_detail_age_populated_for_record_without_date_of_birth(self):
+        resp = self.read_client.get(f'/api/patient-info/{self.person.person_id}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.patient_info.refresh_from_db()
+        # Legacy wire format nests the record under `patient_info`.
+        self.assertEqual(resp.data['patient_info']['age'], self.patient_info.patient_age)
+
+    def test_age_prefers_date_of_birth_over_patient_age(self):
+        """date_of_birth stays authoritative; patient_age is only a fallback."""
+        from datetime import date as _date
+        self.patient_info.date_of_birth = _date(1990, 1, 1)
+        self.patient_info.patient_age = 999   # overwritten by save()
+        self.patient_info.save()
+
+        resp = self.read_client.get(f'/api/patient-info/{self.person.person_id}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        today = _date.today()
+        expected = today.year - 1990 - ((today.month, today.day) < (1, 1))
+        self.assertEqual(resp.data['patient_info']['age'], expected)
+
     def test_expired_token_returns_401_on_conditions(self):
         client = self._bearer(self.expired_token.token)
         resp = client.get('/api/conditions/')
