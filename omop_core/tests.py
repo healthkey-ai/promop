@@ -3404,3 +3404,484 @@ class PlaceholderBirthYearTest(_OmopBase):
             pi.patient_age,
             today.year - 1975 - ((today.month, today.day) < (6, 1)),
         )
+
+
+
+class RemapLocalDrugConceptsCommandTest(TestCase):
+    """Covers remap_local_drug_concepts (see #427).
+
+    Six drug concepts were minted locally with the drug's name as concept_code
+    instead of being resolved against Athena. The clinical content is right, but
+    the mint has no vocabulary edges at all — the genuine HemOnc olaparib
+    concept participates in 63 relationships, the mint in zero — so the
+    exposures are invisible to any standard drug-class or indication query.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Person
+        call_command('seed_omop_concepts', verbosity=0)
+        cls.person = Person.objects.create(person_id=780001, year_of_birth=1970)
+
+    def _concept(self, concept_id, code, name, vocabulary_id, standard=None):
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id=vocabulary_id,
+            defaults={'vocabulary_name': vocabulary_id, 'vocabulary_concept_id': 0})
+        domain, _ = Domain.objects.get_or_create(
+            domain_id='Drug', defaults={'domain_name': 'Drug', 'domain_concept_id': 0})
+        return Concept.objects.create(
+            concept_id=concept_id, concept_name=name, domain=domain, vocabulary=vocab,
+            concept_class=ConceptClass.objects.get(concept_class_id='Clinical Observation'),
+            standard_concept=standard, concept_code=code,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+
+    def _setup_olaparib(self, n_exposures=3):
+        """Mint, HemOnc source concept and Standard target, as on staging."""
+        from omop_core.models import Concept, DrugExposure
+
+        mint = self._concept(2012334076, 'Olaparib', 'Olaparib', 'HemOnc')
+        self._concept(35803216, '366', 'Olaparib', 'HemOnc')
+        self._concept(45892579, '1597582', 'olaparib', 'RxNorm', standard='S')
+        for i in range(n_exposures):
+            DrugExposure.objects.create(
+                drug_exposure_id=880001 + i,
+                person=self.person,
+                drug_concept=mint,
+                drug_exposure_start_date=date(2024, 7, i + 1),
+                drug_type_concept=Concept.objects.get(concept_id=32869),
+            )
+        return mint
+
+    def test_dry_run_writes_nothing(self):
+        from omop_core.models import Concept, DrugExposure
+
+        self._setup_olaparib()
+        call_command('remap_local_drug_concepts', '--dry-run', verbosity=0)
+        self.assertEqual(
+            DrugExposure.objects.filter(drug_concept_id=2012334076).count(), 3)
+        self.assertTrue(Concept.objects.filter(concept_id=2012334076).exists())
+
+    def test_apply_points_drug_concept_at_the_standard_concept(self):
+        """drug_concept_id must hold a Standard concept.
+
+        RxNorm is standard for the Drug domain, so the HemOnc drug concept is
+        non-standard by design — pointing at it would swap one non-standard
+        concept for another.
+        """
+        from omop_core.models import DrugExposure
+
+        self._setup_olaparib()
+        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
+
+        rows = DrugExposure.objects.filter(person=self.person)
+        self.assertEqual(rows.count(), 3)
+        for row in rows:
+            self.assertEqual(row.drug_concept_id, 45892579)
+            self.assertEqual(row.drug_concept.standard_concept, 'S')
+
+    def test_apply_preserves_provenance_in_drug_source_concept(self):
+        from omop_core.models import DrugExposure
+
+        self._setup_olaparib()
+        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
+        self.assertEqual(
+            DrugExposure.objects.filter(person=self.person).first().drug_source_concept_id,
+            35803216, 'the HemOnc concept records what was actually stated')
+
+    def test_apply_deletes_the_mint(self):
+        from omop_core.models import Concept
+
+        self._setup_olaparib()
+        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
+        self.assertFalse(Concept.objects.filter(concept_id=2012334076).exists())
+
+    def test_keep_mints_leaves_the_concept(self):
+        from omop_core.models import Concept
+
+        self._setup_olaparib()
+        call_command('remap_local_drug_concepts', '--apply', '--keep-mints', verbosity=0)
+        self.assertTrue(Concept.objects.filter(concept_id=2012334076).exists())
+
+    def test_affected_patient_records_are_marked_stale(self):
+        """Therapy fields derive from drug_exposure, and queryset .update()
+        sends no signals, so nothing would otherwise notice the change."""
+        from omop_core.models import PatientRecord
+
+        self._setup_olaparib()
+        PatientRecord.objects.filter(person=self.person).update(derivation_version=99)
+        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
+        self.assertEqual(
+            PatientRecord.objects.get(person=self.person).derivation_version, 0)
+
+    def test_skips_when_the_target_concept_is_absent(self):
+        """On a database with no Athena load the targets do not exist. The
+        command must leave the data alone rather than repoint it at nothing."""
+        from omop_core.models import Concept, DrugExposure
+
+        mint = self._concept(2012334076, 'Olaparib', 'Olaparib', 'HemOnc')
+        DrugExposure.objects.create(
+            drug_exposure_id=880900, person=self.person, drug_concept=mint,
+            drug_exposure_start_date=date(2024, 7, 1),
+            drug_type_concept=Concept.objects.get(concept_id=32869))
+
+        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
+
+        self.assertEqual(
+            DrugExposure.objects.get(drug_exposure_id=880900).drug_concept_id, 2012334076)
+        self.assertTrue(Concept.objects.filter(concept_id=2012334076).exists())
+
+    def test_refuses_a_non_standard_target(self):
+        """Guards the mapping constant itself: if a listed target stops being
+        Standard in a later vocabulary release, do not silently use it."""
+        from omop_core.models import Concept, DrugExposure
+
+        self._setup_olaparib()
+        Concept.objects.filter(concept_id=45892579).update(standard_concept=None)
+
+        call_command('remap_local_drug_concepts', '--apply', verbosity=0)
+
+        self.assertEqual(
+            DrugExposure.objects.filter(drug_concept_id=2012334076).count(), 3,
+            'rows must be left alone when the target is not Standard')
+
+class RemapShadowConceptsCommandTest(TestCase):
+    """Covers remap_shadow_concepts (see #415).
+
+    A block at concept_id 392021009-392021287 duplicates genuine Athena content.
+    It exists because one writer used a SNOMED code as a concept_id, which
+    poisoned MAX(concept_id); next_pk's self-heal adopted it and allocated 141
+    more mints behind it.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Person
+        call_command('seed_omop_concepts', verbosity=0)
+        cls.person = Person.objects.create(person_id=790001, year_of_birth=1970)
+
+    def _concept(self, concept_id, code, name, vocabulary_id, domain='Procedure',
+                 standard='S'):
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id=vocabulary_id,
+            defaults={'vocabulary_name': vocabulary_id, 'vocabulary_concept_id': 0})
+        dom, _ = Domain.objects.get_or_create(
+            domain_id=domain, defaults={'domain_name': domain, 'domain_concept_id': 0})
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Procedure',
+            defaults={'concept_class_name': 'Procedure', 'concept_class_concept_id': 0})
+        return Concept.objects.create(
+            concept_id=concept_id, concept_name=name, domain=dom, vocabulary=vocab,
+            concept_class=cc, standard_concept=standard, concept_code=code,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+
+    def _procedure(self, concept, pid=890001):
+        from omop_core.models import Concept, ProcedureOccurrence
+        return ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=pid, person=self.person, procedure_concept=concept,
+            procedure_date=date(2024, 7, 1),
+            procedure_type_concept=Concept.objects.get(concept_id=32817))
+
+    def _shadow_pair(self):
+        """A shadow mint and the genuine concept it duplicates."""
+        genuine = self._concept(4213045, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        mint = self._concept(392021009, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        return mint, genuine
+
+    def test_dry_run_writes_nothing(self):
+        from omop_core.models import Concept, ProcedureOccurrence
+
+        mint, _ = self._shadow_pair()
+        self._procedure(mint)
+        call_command('remap_shadow_concepts', '--dry-run', verbosity=0)
+        self.assertEqual(
+            ProcedureOccurrence.objects.get(procedure_occurrence_id=890001)
+            .procedure_concept_id, 392021009)
+        self.assertTrue(Concept.objects.filter(concept_id=392021009).exists())
+
+    def test_apply_repoints_rows_and_deletes_the_shadow(self):
+        from omop_core.models import Concept, ProcedureOccurrence
+
+        mint, genuine = self._shadow_pair()
+        self._procedure(mint)
+
+        call_command('remap_shadow_concepts', '--apply', verbosity=0)
+
+        row = ProcedureOccurrence.objects.get(procedure_occurrence_id=890001)
+        self.assertEqual(row.procedure_concept_id, genuine.concept_id)
+        self.assertEqual(row.procedure_source_concept_id, genuine.concept_id)
+        self.assertFalse(Concept.objects.filter(concept_id=392021009).exists())
+
+    def test_sct_resolves_against_the_snomed_vocabulary(self):
+        """'sct' is the FHIR system-URI form of SNOMED, not a vocabulary."""
+        from omop_core.models import ProcedureOccurrence
+
+        genuine = self._concept(4077697, '24623002', 'Screening mammography', 'SNOMED')
+        mint = self._concept(392021219, '24623002', 'Screening mammography', 'sct')
+        self._procedure(mint)
+
+        call_command('remap_shadow_concepts', '--apply', verbosity=0)
+
+        self.assertEqual(
+            ProcedureOccurrence.objects.get(procedure_occurrence_id=890001)
+            .procedure_concept_id, genuine.concept_id)
+
+    def test_non_standard_target_follows_maps_to(self):
+        """*_concept_id must hold a Standard concept, per OMOP."""
+        from omop_core.models import ConceptRelationship, ProcedureOccurrence, Relationship
+
+        genuine = self._concept(4210177, '109989006', 'Multiple myeloma', 'SNOMED',
+                                standard=None)
+        standard = self._concept(437233, '109989006-std', 'Multiple myeloma', 'SNOMED')
+        rel, _ = Relationship.objects.get_or_create(
+            relationship_id='Maps to',
+            defaults={'relationship_name': 'Maps to', 'is_hierarchical': '0',
+                      'defines_ancestry': '0', 'reverse_relationship_id': 'Maps to',
+                      'relationship_concept_id': 0})
+        ConceptRelationship.objects.create(
+            concept_1=genuine, concept_2=standard, relationship=rel,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+        mint = self._concept(392021177, '109989006', 'Multiple myeloma', 'sct')
+        self._procedure(mint)
+
+        call_command('remap_shadow_concepts', '--apply', verbosity=0)
+
+        row = ProcedureOccurrence.objects.get(procedure_occurrence_id=890001)
+        self.assertEqual(row.procedure_concept_id, standard.concept_id,
+                         'should point at the Standard concept')
+        self.assertEqual(row.procedure_source_concept_id, genuine.concept_id,
+                         'provenance records what was actually stated')
+
+    def test_legitimately_local_vocabularies_are_untouched(self):
+        """LOCAL, FHIR and HK-Regimen concepts in the block are real local
+        content, not shadows, and must survive."""
+        from omop_core.models import Concept
+
+        self._concept(392021010, 'hkr:t-dm1', 'T-DM1', 'HK-Regimen', domain='Drug')
+        self._concept(392021165, 'FHIR-VISIT-TYPE', 'FHIR visit type', 'FHIR')
+        self._concept(392021021, 'SYNTH-MM-BMBX', 'Bone marrow biopsy', 'LOCAL')
+
+        call_command('remap_shadow_concepts', '--apply', verbosity=0)
+
+        for cid in (392021010, 392021165, 392021021):
+            self.assertTrue(Concept.objects.filter(concept_id=cid).exists(),
+                            f'{cid} is legitimately local and must not be deleted')
+
+    def test_ambiguous_resolution_is_skipped(self):
+        """Two genuine candidates for one code means identity is not certain."""
+        from omop_core.models import Concept, ProcedureOccurrence
+
+        self._concept(4213045, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        self._concept(4213046, '392021009', 'Lumpectomy of breast (dup)', 'SNOMED')
+        mint = self._concept(392021009, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        self._procedure(mint)
+
+        call_command('remap_shadow_concepts', '--apply', verbosity=0)
+
+        self.assertEqual(
+            ProcedureOccurrence.objects.get(procedure_occurrence_id=890001)
+            .procedure_concept_id, 392021009, 'ambiguous shadows must be left alone')
+        self.assertTrue(Concept.objects.filter(concept_id=392021009).exists())
+
+    def test_affected_patient_records_are_marked_stale(self):
+        from omop_core.models import PatientRecord
+
+        mint, _ = self._shadow_pair()
+        self._procedure(mint)
+        PatientRecord.objects.filter(person=self.person).update(derivation_version=99)
+
+        call_command('remap_shadow_concepts', '--apply', verbosity=0)
+
+        self.assertEqual(
+            PatientRecord.objects.get(person=self.person).derivation_version, 0)
+
+
+class RemapShadowConceptsEdgeCaseTest(TestCase):
+    """The paths the review found untested: mints reachable only through a
+    type/source column, --keep-mints, and the non-standard fallback."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Person
+        call_command('seed_omop_concepts', verbosity=0)
+        cls.person = Person.objects.create(person_id=791001, year_of_birth=1970)
+
+    def _concept(self, concept_id, code, name, vocabulary_id, standard='S'):
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id=vocabulary_id,
+            defaults={'vocabulary_name': vocabulary_id, 'vocabulary_concept_id': 0})
+        dom, _ = Domain.objects.get_or_create(
+            domain_id='Procedure',
+            defaults={'domain_name': 'Procedure', 'domain_concept_id': 0})
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Procedure',
+            defaults={'concept_class_name': 'Procedure', 'concept_class_concept_id': 0})
+        return Concept.objects.create(
+            concept_id=concept_id, concept_name=name, domain=dom, vocabulary=vocab,
+            concept_class=cc, standard_concept=standard, concept_code=code,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+
+    def test_mint_held_only_in_a_type_column_blocks_deletion_and_is_reported(self):
+        """views.py writes procedure_type_concept=<ehr> or <procedure concept>,
+        so on a database missing concept 32817 the type column holds the mint.
+        Such a row is not remapped, so the mint must not be promised as
+        removable and must survive with a warning rather than a traceback."""
+        from omop_core.models import Concept, ProcedureOccurrence
+
+        self._concept(4213045, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        mint = self._concept(392021009, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        genuine_other = self._concept(4000001, '999999', 'Other procedure', 'SNOMED')
+        # The mint sits in the TYPE column, not the concept column.
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=891001, person=self.person,
+            procedure_concept=genuine_other, procedure_date=date(2024, 7, 1),
+            procedure_type_concept=mint)
+
+        call_command('remap_shadow_concepts', '--apply', verbosity=0)
+
+        self.assertTrue(
+            Concept.objects.filter(concept_id=392021009).exists(),
+            'a mint still referenced by a type column must not be deleted')
+
+    def test_keep_mints_leaves_concepts_in_place(self):
+        from omop_core.models import Concept, ProcedureOccurrence
+
+        self._concept(4213045, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        mint = self._concept(392021009, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=891002, person=self.person,
+            procedure_concept=mint, procedure_date=date(2024, 7, 1),
+            procedure_type_concept=Concept.objects.get(concept_id=32817))
+
+        call_command('remap_shadow_concepts', '--apply', '--keep-mints', verbosity=0)
+
+        self.assertTrue(Concept.objects.filter(concept_id=392021009).exists())
+        self.assertEqual(
+            ProcedureOccurrence.objects.get(procedure_occurrence_id=891002)
+            .procedure_concept_id, 4213045, 'rows are still remapped')
+
+    def test_non_standard_target_without_maps_to_still_remaps_and_warns(self):
+        """No usable 'Maps to' edge. The row still improves — it points at a
+        genuine concept instead of a mint — but *_concept_id is left
+        non-standard, which the operator must be told about."""
+        from io import StringIO
+        from omop_core.models import Concept, ProcedureOccurrence
+
+        self._concept(4273242, '23875004', 'Gingivectomy', 'SNOMED', standard=None)
+        mint = self._concept(392021030, '23875004', 'Gingivectomy', 'SNOMED')
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=891003, person=self.person,
+            procedure_concept=mint, procedure_date=date(2024, 7, 1),
+            procedure_type_concept=Concept.objects.get(concept_id=32817))
+
+        out = StringIO()
+        call_command('remap_shadow_concepts', '--apply', stdout=out)
+
+        row = ProcedureOccurrence.objects.get(procedure_occurrence_id=891003)
+        self.assertEqual(row.procedure_concept_id, 4273242)
+        self.assertIn('NON-STANDARD', out.getvalue(),
+                      'a non-standard result must be reported, not buried')
+
+    def test_dry_run_does_not_promise_an_unremovable_mint(self):
+        from io import StringIO
+        from omop_core.models import Concept, ProcedureOccurrence
+
+        self._concept(4213045, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        mint = self._concept(392021009, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        genuine_other = self._concept(4000002, '999998', 'Other procedure', 'SNOMED')
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=891004, person=self.person,
+            procedure_concept=genuine_other, procedure_date=date(2024, 7, 1),
+            procedure_type_concept=mint)
+
+        out = StringIO()
+        call_command('remap_shadow_concepts', '--dry-run', stdout=out)
+
+        self.assertIn('not removable', out.getvalue(),
+                      'the dry run must project post-remap references')
+
+    def test_residual_check_covers_tables_beyond_the_clinical_five(self):
+        """Concept has 97 PROTECT referrers; checking only the five clinical
+        tables under-projects. A ConditionEra pointing at a mint blocks its
+        deletion, and the dry run must say so rather than promise removal."""
+        from io import StringIO
+        from omop_core.models import ConditionEra, Concept, ProcedureOccurrence
+
+        self._concept(4213045, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        mint = self._concept(392021009, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=891005, person=self.person,
+            procedure_concept=mint, procedure_date=date(2024, 7, 1),
+            procedure_type_concept=Concept.objects.get(concept_id=32817))
+        ConditionEra.objects.create(
+            condition_era_id=892001, person=self.person, condition_concept=mint,
+            condition_era_start_date=date(2024, 7, 1),
+            condition_era_end_date=date(2024, 7, 2),
+            condition_occurrence_count=1)
+
+        out = StringIO()
+        call_command('remap_shadow_concepts', '--dry-run', stdout=out)
+        self.assertIn('ConditionEra', out.getvalue(),
+                      'the dry run must see referrers outside the clinical five')
+        self.assertIn('not removable', out.getvalue())
+
+    def test_source_only_reference_is_repointed(self):
+        """A mint held ONLY in *_source_concept_id must still be repointed.
+
+        This regressed twice: an `if not n: continue` guarding the concept_col
+        count short-circuited before the source-only block that exists for
+        exactly this case, so the mint stayed in the source column and its
+        deletion then failed with ProtectedError after the dry run had promised
+        it would be removed.
+        """
+        from omop_core.models import Concept, ProcedureOccurrence
+
+        genuine_a = self._concept(4213045, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        genuine_b = self._concept(4077697, '24623002', 'Screening mammography', 'SNOMED')
+        mint_a = self._concept(392021009, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        mint_b = self._concept(392021219, '24623002', 'Screening mammography', 'sct')
+
+        # concept_col holds mint_a; source_col holds a DIFFERENT mint.
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=891006, person=self.person,
+            procedure_concept=mint_a, procedure_source_concept=mint_b,
+            procedure_date=date(2024, 7, 1),
+            procedure_type_concept=Concept.objects.get(concept_id=32817))
+
+        call_command('remap_shadow_concepts', '--apply', verbosity=0)
+
+        row = ProcedureOccurrence.objects.get(procedure_occurrence_id=891006)
+        self.assertEqual(row.procedure_concept_id, genuine_a.concept_id)
+        self.assertEqual(
+            row.procedure_source_concept_id, genuine_b.concept_id,
+            'a mint held only in the source column must be repointed too')
+        self.assertFalse(Concept.objects.filter(concept_id=392021219).exists(),
+                         'and the mint must then be deletable')
+
+    def test_set_null_referrer_is_reported_as_nulled_not_blocking(self):
+        """RegimenMappingGap.quarantine_concept is SET_NULL, so it does not
+        block deletion — Django nulls it. Reporting it as blocking made the dry
+        run say 'not removable' where --apply deletes and silently mutates that
+        table."""
+        from io import StringIO
+        from omop_core.models import Concept, ProcedureOccurrence, RegimenMappingGap
+
+        self._concept(4213045, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        mint = self._concept(392021009, '392021009', 'Lumpectomy of breast', 'SNOMED')
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=891007, person=self.person,
+            procedure_concept=mint, procedure_date=date(2024, 7, 1),
+            procedure_type_concept=Concept.objects.get(concept_id=32817))
+        RegimenMappingGap.objects.create(
+            source_system='test', source_value='test regimen',
+            normalized_name='test regimen', quarantine_concept=mint)
+
+        out = StringIO()
+        call_command('remap_shadow_concepts', '--dry-run', stdout=out)
+
+        self.assertIn('SET_NULL', out.getvalue(),
+                      'the dry run must disclose that another table will be mutated')
+        self.assertNotIn('not removable', out.getvalue(),
+                         'a SET_NULL referrer does not block deletion')
