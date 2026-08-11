@@ -52,6 +52,27 @@ def _seed_loinc_concepts_the_command_assumes_exist():
     }.items():
         _loinc_concept(code, name)
 
+    # Behaviour and response concepts, derived from the command's own tables.
+    # The command resolves these by (vocabulary_id, concept_code) and raises if
+    # one is missing — it no longer mints them, because minting at
+    # concept_id=int(code) produced duplicates shadowing the genuine SNOMED
+    # concepts (#415). Deriving the fixture keeps it in step when a code changes,
+    # which a literal list would not.
+    #
+    # The four response codes remain the SNOMED 1828xxxx values even though they
+    # mean "Drug treatment stopped - medical advice / ineffective / side effect
+    # / inconvenient" rather than treatment response. That mismatch is a known
+    # defect left in place deliberately: six consumers read them, and the fix is
+    # per-disease outcome value sets, since only breast cancer uses RECIST
+    # (lymphoma uses Lugano, myeloma IMWG, CLL iwCLL).
+    from omop_core.management.commands.enrich_breast_cancer_omop_data import (
+        _RESPONSE_CODES, _TOBACCO_CODES,
+    )
+    for (vocab, code), (name, _weight) in _TOBACCO_CODES.items():
+        _loinc_concept(code, name, vocabulary_id=vocab, domain_id='Observation')
+    for (vocab, code), name in _RESPONSE_CODES.items():
+        _loinc_concept(code, name, vocabulary_id=vocab, domain_id='Observation')
+
     observation_domain = {
         'steps', 'active_minutes', 'sleep_duration', 'flights_climbed',
     }

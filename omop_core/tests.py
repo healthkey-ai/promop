@@ -3404,3 +3404,100 @@ class PlaceholderBirthYearTest(_OmopBase):
             pi.patient_age,
             today.year - 1975 - ((today.month, today.day) < (6, 1)),
         )
+
+
+
+class ConceptIdIsNotAConceptCodeTest(TestCase):
+    """No concept may use its own concept_code as its concept_id (see #415).
+
+    That single pattern caused the largest vocabulary defect in this database.
+    enrich_breast_cancer_omop_data minted concepts at concept_id=int(code) on
+    the reasoning that no SNOMED vocabulary was loaded and the numeric codes sat
+    outside the id range. Loading Athena invalidated both halves: the genuine
+    concepts existed, so the mints shadowed them, and MAX(concept_id) jumped to
+    392021009, which next_pk's self-heal adopted — allocating 141 further mints
+    behind it.
+    """
+
+    def test_no_seeded_concept_uses_its_code_as_its_id(self):
+        from omop_core.management.commands.seed_omop_concepts import _CONCEPTS
+
+        offenders = [
+            (r['concept_id'], r['concept_code']) for r in _CONCEPTS
+            if str(r['concept_id']) == str(r['concept_code'])
+        ]
+        self.assertEqual(
+            offenders, [],
+            f'concept_id must never equal concept_code: {offenders}')
+
+    def test_enrichment_resolves_concepts_instead_of_minting(self):
+        """The command must refuse to invent vocabulary content.
+
+        Raising is the desired behaviour: a missing concept means the vocabulary
+        is not loaded, which the operator needs to know. Minting silently
+        produced a shadow of the genuine concept.
+        """
+        from omop_core.management.commands.enrich_breast_cancer_omop_data import (
+            _resolve_concept,
+        )
+        from omop_core.models import Concept
+
+        with self.assertRaises(CommandError) as ctx:
+            _resolve_concept('SNOMED', '999999999', 'Not a real concept')
+        self.assertIn('no longer mints OBSERVATION concepts', str(ctx.exception))
+        self.assertFalse(
+            Concept.objects.filter(concept_id=999999999).exists(),
+            'no concept may be created at concept_id=int(code)')
+
+    def test_response_code_defect_is_recorded_not_silently_swapped(self):
+        """The four response codes are semantically wrong — SNOMED
+        182840001-182843004 mean "drug treatment stopped", not treatment
+        response — but they are deliberately left in place.
+
+        Swapping in RECIST codes would entrench a solid-tumour vocabulary across
+        five diseases, only one of which uses RECIST: lymphoma uses Lugano,
+        myeloma IMWG, CLL iwCLL, and IMWG's VGPR/sCR and iwCLL's CRi/PR-L have
+        no RECIST equivalent. The correct fix is per-disease value sets. This
+        test pins the current state so the defect cannot be quietly "fixed" by a
+        like-for-like swap.
+        """
+        import inspect
+        from omop_core.management.commands import enrich_breast_cancer_omop_data as mod
+
+        self.assertEqual(
+            {code for _, code in mod._RESPONSE_CODES},
+            {'182840001', '182841002', '182842009', '182843004'})
+        source = inspect.getsource(mod)
+        self.assertIn('KNOWN DEFECT', source,
+                      'the mismatch must stay documented at the code table')
+
+    def test_duplicate_concept_is_resolved_deterministically_not_by_error(self):
+        """The duplicate branch had a NameError: it called logger.warning() in a
+        module with no logger. Nothing exercised it, so the fix for the
+        unrunnable-on-staging blocker was itself broken — staging would have
+        raised NameError instead of the CommandError it replaced.
+
+        Lowest concept_id is chosen because genuine Athena rows have lower ids
+        than the code-as-id mints that shadow them (4144272 vs 266919005).
+        """
+        from omop_core.management.commands.enrich_breast_cancer_omop_data import (
+            _resolve_concept,
+        )
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+
+        call_command('seed_omop_concepts', verbosity=0)
+        vocab = Vocabulary.objects.get(vocabulary_id='SNOMED')
+        domain = Domain.objects.get(domain_id='Observation')
+        cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
+        # The code-as-id shadow, alongside the genuine row seeded at 4144272.
+        Concept.objects.create(
+            concept_id=266919005, concept_name='Never smoked tobacco',
+            domain=domain, vocabulary=vocab, concept_class=cc,
+            standard_concept='S', concept_code='266919005',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+
+        resolved = _resolve_concept('SNOMED', '266919005', 'Never smoked tobacco')
+
+        self.assertEqual(
+            resolved.concept_id, 4144272,
+            'must pick the genuine Athena row, not the code-as-id shadow')
