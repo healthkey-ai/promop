@@ -214,6 +214,22 @@ class PatientListSerializer(serializers.ModelSerializer):
         return "Unknown Patient"
 
     def get_age(self, obj):
+        # PHR-S FM PH.1.2#05 — suppress age for non-owner readers when the
+        # patient has opted in to demographic redaction.
+        if getattr(obj, 'suppress_demographics_for_others', False):
+            request = self.context.get('request')
+            if request is not None:
+                from patient_portal.models import PatientUser
+                user = getattr(request, 'user', None)
+                is_owner = (
+                    user is not None
+                    and getattr(user, 'is_authenticated', False)
+                    and PatientUser.objects.filter(
+                        identity=user, person_id=obj.person_id,
+                    ).exists()
+                )
+                if not is_owner:
+                    return None
         if obj.date_of_birth:
             today = date.today()
             age = today.year - obj.date_of_birth.year - ((today.month, today.day) < (obj.date_of_birth.month, obj.date_of_birth.day))
