@@ -8,6 +8,13 @@ from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db.models.functions import Upper
 
 
+# Person.year_of_birth values that mean "not known" rather than a birth year.
+# Registration seeds 1900 (patient_portal/services.py, api/patient_signup.py,
+# api/org_views.py) because the column is NOT NULL; treating that as real makes
+# every patient without a date of birth 126 years old.
+PERSON_YEAR_PLACEHOLDERS = frozenset({None, 0, 1900})
+
+
 class ProvenanceRecord(models.Model):
     """Audit trail for every clinical write — who created/modified a record and why."""
     SOURCE_CHOICES = [
@@ -2423,7 +2430,8 @@ class PatientRecord(models.Model):
     active_minutes_per_day_30d = models.DecimalField(max_digits=5, decimal_places=1, blank=True, null=True, help_text="Mean daily active/exercise minutes over last 30 days")
     activity_trend_30d = models.CharField(max_length=20, blank=True, null=True, help_text="Activity trend: improving, stable, declining, or insufficient_data")
     resting_heart_rate_avg_30d = models.IntegerField(blank=True, null=True, help_text="Mean resting heart rate over last 30 days")
-    hrv_sdnn_avg_30d = models.DecimalField(max_digits=6, decimal_places=1, blank=True, null=True, help_text="Mean HRV SDNN over last 30 days (ms)")
+    hrv_sdnn_avg_30d = models.DecimalField(max_digits=6, decimal_places=1, blank=True, null=True, help_text="Mean HRV SDNN over last 30 days (ms). Apple Health only — SDNN and RMSSD are different statistics and must not be combined")
+    hrv_rmssd_avg_30d = models.DecimalField(max_digits=6, decimal_places=1, blank=True, null=True, help_text="Mean HRV RMSSD over last 30 days (ms). Garmin HRV Status is RMSSD-based; kept separate from SDNN")
     oxygen_saturation_min_30d = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True, help_text="Minimum valid SpO2 reading over last 30 days (%)")
     oxygen_saturation_avg_30d = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True, help_text="Mean SpO2 over last 30 days (%)")
     respiratory_rate_avg_30d = models.DecimalField(max_digits=5, decimal_places=1, blank=True, null=True, help_text="Mean respiratory rate over last 30 days (breaths/min)")
@@ -2581,6 +2589,16 @@ class PatientRecord(models.Model):
         null=True, blank=True,
         help_text="Timestamp when this row was last derived from OMOP tables",
     )
+    user_edited_fields = models.JSONField(
+        default=list, blank=True,
+        help_text=(
+            "Names of OMOP-derived fields a user set directly through the API that "
+            "the write-through cannot persist to OMOP. refresh_patient_record "
+            "restores these when re-derivation yields nothing for them, so a "
+            "hand-entered value is not erased. OMOP still wins whenever it has a "
+            "value for the field."
+        ),
+    )
 
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
@@ -2632,7 +2650,7 @@ class PatientRecord(models.Model):
                 dob = None
         if dob is None and self.person_id:
             p = self.person
-            if p.year_of_birth:
+            if p.year_of_birth not in PERSON_YEAR_PLACEHOLDERS:
                 month = p.month_of_birth or 1
                 day = p.day_of_birth or 1
                 try:

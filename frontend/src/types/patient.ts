@@ -277,6 +277,7 @@ export interface PatientInfo {
   activity_trend_30d?: 'improving' | 'stable' | 'declining' | 'insufficient_data';
   resting_heart_rate_avg_30d?: number;
   hrv_sdnn_avg_30d?: string | number;
+  hrv_rmssd_avg_30d?: string | number;
   oxygen_saturation_min_30d?: string | number;
   oxygen_saturation_avg_30d?: string | number;
   respiratory_rate_avg_30d?: string | number;

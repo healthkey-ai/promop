@@ -12,14 +12,14 @@ import statistics
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from django.db import models
-from django.db.models import DateTimeField
+from django.db.models import DateTimeField, Q
 from django.db.models.functions import Cast, Coalesce
 from django.db import transaction
 from django.utils import timezone
 from omop_core.models import (
     Person, PatientRecord, ConditionOccurrence, Concept,
     Measurement, Observation, DrugExposure, Location, ProcedureOccurrence,
-    Death, ConceptRelationship,
+    Death, ConceptRelationship, PERSON_YEAR_PLACEHOLDERS,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
 from omop_core.services.mappings import (
@@ -42,11 +42,19 @@ logger = logging.getLogger(__name__)
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 3
+DERIVATION_VERSION = 5
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
 _OMOP_DERIVED_FIELDS = [
+    # Demographics. Only patient_age is listed: it is a pure function of the
+    # birth date, so a value left over from an earlier derivation is stale by
+    # construction and has to be cleared. This is what stranded age=126 on
+    # records whose Person still carried the year_of_birth=1900 placeholder —
+    # nothing ever cleared the number once _get_demographics stopped emitting
+    # it. (gender/race/ethnicity are written by the same extractor and are NOT
+    # cleared, so they can still go stale; out of scope for #434.)
+    'patient_age',
     # Disease / condition
     'disease', 'diagnosis_date', 'death_date', 'condition_clinical_status', 'disease_slug',
     # Therapy lines
@@ -132,7 +140,7 @@ _OMOP_DERIVED_FIELDS = [
     # Wearable summaries
     'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
     'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
-    'resting_heart_rate_avg_30d', 'hrv_sdnn_avg_30d',
+    'resting_heart_rate_avg_30d', 'hrv_sdnn_avg_30d', 'hrv_rmssd_avg_30d',
     'oxygen_saturation_min_30d', 'oxygen_saturation_avg_30d', 'respiratory_rate_avg_30d',
     'sleep_duration_hours_avg_30d', 'vo2_max_avg_30d',
     'distance_km_per_day_30d', 'walking_speed_avg_30d', 'walking_step_length_avg_30d',
@@ -298,6 +306,56 @@ def _clear_derived_fields(patient_info: PatientRecord) -> None:
             setattr(patient_info, field, default)
 
 
+def _is_empty(value) -> bool:
+    """True for the values derivation leaves behind when it finds no source data.
+
+    Deliberately not falsy-testing: 0 (ECOG 0, zero relapses) and False (a
+    recorded negative) are real derived answers, not absences.
+    """
+    return value is None or value == '' or value == [] or value == {}
+
+
+def _snapshot_user_edited(patient_info: PatientRecord) -> dict:
+    """Capture hand-entered values for fields OMOP cannot round-trip.
+
+    Only fields recorded by the write-through in `user_edited_fields` are taken,
+    so this restores what a user typed and never resurrects a stale derived value.
+    """
+    snapshot = {}
+    for field in (patient_info.user_edited_fields or []):
+        if field in _OMOP_DERIVED_FIELDS and hasattr(patient_info, field):
+            snapshot[field] = getattr(patient_info, field)
+    return snapshot
+
+
+def _restore_user_edited(patient_info: PatientRecord, preserved: dict) -> None:
+    """Put hand-entered values back where derivation produced nothing.
+
+    Runs after every section extractor, so a field OMOP can now answer keeps the
+    derived value — the user's copy is a fallback, not an override. That ordering
+    is what lets a later FHIR upload or OMOP correction take over a field the
+    patient once filled in by hand.
+
+    Once derivation does answer for a field, its flag is dropped. That hand-off
+    is what keeps the fallback honest, and it is why the write-through can afford
+    to flag generously instead of maintaining a table of which fields round-trip:
+
+      - it stops OMOP's value being mistaken for the user's on a later refresh
+        and resurrected after the source row is deleted, which would leave a
+        value no table backs and no user typed;
+      - and it lets a field OMOP owns resume propagating deletions normally.
+    """
+    still_edited = set(patient_info.user_edited_fields or [])
+    for field, value in preserved.items():
+        if _is_empty(getattr(patient_info, field, None)):
+            if not _is_empty(value):
+                setattr(patient_info, field, value)
+        else:
+            # Derivation answered for this field — OMOP owns it from here.
+            still_edited.discard(field)
+    patient_info.user_edited_fields = sorted(still_edited)
+
+
 def refresh_patient_record(person: Person) -> PatientRecord:
     """Derive and upsert PatientRecord from OMOP tables for a given person.
 
@@ -312,6 +370,12 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             patient_info = PatientRecord.objects.select_for_update().get(person=person)
         except PatientRecord.DoesNotExist:
             patient_info = PatientRecord(person=person)
+
+        # Hand-entered values for fields the write-through cannot push into OMOP
+        # would be destroyed by the clear below and have nothing to restore them.
+        # Snapshot them first; they are put back after derivation, but only where
+        # derivation came up empty, so OMOP still wins whenever it has a value.
+        preserved = _snapshot_user_edited(patient_info)
 
         # Clear all OMOP-derived fields before re-deriving so deletions are reflected.
         _clear_derived_fields(patient_info)
@@ -343,6 +407,8 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             for field, value in section_fn(person).items():
                 setattr(patient_info, field, value)
 
+        _restore_user_edited(patient_info, preserved)
+
         _compute_derived_fields(patient_info)
 
         patient_info.derivation_version = DERIVATION_VERSION
@@ -363,7 +429,7 @@ def _get_demographics(person: Person) -> dict:
     if death:
         data['death_date'] = death.death_date
 
-    if person.year_of_birth:
+    if person.year_of_birth not in PERSON_YEAR_PLACEHOLDERS:
         today = date.today()
         # Only materialize a full date when the Person carries real month/day
         # precision. Defaulting the missing parts to Jan 1 would store a
@@ -1196,19 +1262,30 @@ def _get_vitals_data(person: Person) -> dict:
         'temperature': '8310-5',
     }
 
+    codes = set(vital_sign_concepts.values())
+    # Matched on source_value as well as concept_code, like the lab, staging and
+    # performance extractors already are. A row whose concept never resolved
+    # keeps its LOINC only in measurement_source_value, and vitals was the one
+    # extractor that could not see those — so an unresolved weight or height
+    # left the field blank and BMI uncomputed.
     measurements = (
         Measurement.objects
-        .filter(
-            person=person,
-            measurement_concept__concept_code__in=vital_sign_concepts.values(),
-            value_as_number__isnull=False,
-        )
+        .filter(person=person, value_as_number__isnull=False)
+        .filter(Q(measurement_concept__concept_code__in=codes)
+                | Q(measurement_source_value__in=codes))
         .select_related('measurement_concept')
         .order_by('-measurement_date')
     )
     first_by_code = {}
     for measurement in measurements:
-        first_by_code.setdefault(measurement.measurement_concept.concept_code, measurement)
+        code = _measurement_code(measurement)
+        if code not in codes:
+            # _measurement_code prefers whichever field looks like a LOINC; if
+            # that is a code we did not ask for, fall back to the one that
+            # actually matched so the row is not dropped.
+            concept_code = getattr(measurement.measurement_concept, 'concept_code', None)
+            code = concept_code if concept_code in codes else measurement.measurement_source_value
+        first_by_code.setdefault(code, measurement)
 
     for vital_type, loinc_code in vital_sign_concepts.items():
         measurement = first_by_code.get(loinc_code)
@@ -2034,34 +2111,68 @@ def _get_laboratory_data(person: Person) -> dict:
     return data
 
 
+# Performance status lands in either OMOP table depending on how it arrived:
+# the FHIR upload routes these LOINCs to `observation` (_ASSESSMENT_LOINC in
+# patient_portal/api/views.py), while the PatientRecord PATCH write-through
+# sends them to `measurement`, because both fields appear in LAB_FIELD_TO_LOINC.
+# Reading only one table loses whatever came in by the other route.
+_ECOG_LOINC = '89247-1'
+_KARNOFSKY_LOINC = '89243-0'
+
+
+def _performance_rows(person: Person, name_fragment: str, loinc_code: str) -> list:
+    """Latest-first performance scores from both `observation` and `measurement`.
+
+    Matches on concept name or LOINC code so a row still resolves when the
+    vocabulary is not loaded and the code survives only in the source value.
+    """
+    obs = (
+        Observation.objects.filter(person=person)
+        .filter(
+            Q(observation_concept__concept_name__icontains=name_fragment)
+            | Q(observation_concept__concept_code=loinc_code)
+            | Q(observation_source_value=loinc_code)
+        )
+        .exclude(value_as_number__isnull=True)
+        .order_by('-observation_date', '-observation_id')
+        .values_list('observation_date', 'value_as_number')
+    )
+    meas = (
+        Measurement.objects.filter(person=person)
+        .filter(
+            Q(measurement_concept__concept_name__icontains=name_fragment)
+            | Q(measurement_concept__concept_code=loinc_code)
+            | Q(measurement_source_value=loinc_code)
+        )
+        .exclude(value_as_number__isnull=True)
+        .order_by('-measurement_date', '-measurement_id')
+        .values_list('measurement_date', 'value_as_number')
+    )
+    # Measurements first, and the sort below is stable (reverse=True preserves
+    # the order of equal keys), so a same-date tie resolves in favour of
+    # `measurement`. That is the PATCH write-through's table and
+    # _sync_measurement always stamps today, so the tie case is "clinician
+    # corrected a score a bundle loaded the same day" — the correction has to
+    # win, or the refresh silently reverts it.
+    rows = list(meas) + list(obs)
+    # date.min for undated rows so a dated score always outranks one with no date.
+    rows.sort(key=lambda r: (r[0] or date.min), reverse=True)
+    return rows
+
+
 def _get_performance_data(person: Person) -> dict:
     data = {}
 
-    observations = (
-        Observation.objects.filter(person=person)
-        .select_related('observation_concept')
-        .order_by('-observation_date', '-observation_id')
-    )
-
-    ecog = (
-        observations
-        .filter(observation_concept__concept_name__icontains='ecog')
-        .exclude(value_as_number__isnull=True)
-        .first()
-    )
+    ecog = _performance_rows(person, 'ecog', _ECOG_LOINC)
     if ecog:
-        data['ecog_performance_status'] = int(ecog.value_as_number)
-        if ecog.observation_date:
-            data['ecog_assessment_date'] = ecog.observation_date
+        ecog_date, ecog_value = ecog[0]
+        data['ecog_performance_status'] = int(ecog_value)
+        if ecog_date:
+            data['ecog_assessment_date'] = ecog_date
 
-    karnofsky = (
-        observations
-        .filter(observation_concept__concept_name__icontains='karnofsky')
-        .exclude(value_as_number__isnull=True)
-        .first()
-    )
+    karnofsky = _performance_rows(person, 'karnofsky', _KARNOFSKY_LOINC)
     if karnofsky:
-        data['karnofsky_performance_score'] = int(karnofsky.value_as_number)
+        data['karnofsky_performance_score'] = int(karnofsky[0][1])
 
     return data
 
@@ -2590,7 +2701,10 @@ def _get_wearable_data(person: Person) -> dict:
     steps_daily = _metric_daily('steps')
     active_daily = _metric_daily('active_minutes')
     rhr_daily = _metric_daily('resting_hr')
-    hrv_daily = _metric_daily('hrv_sdnn')
+    # SDNN and RMSSD are separate metrics with separate concepts — they must
+    # never be merged into one summary. See #438.
+    hrv_sdnn_daily = _metric_daily('hrv_sdnn')
+    hrv_rmssd_daily = _metric_daily('hrv_rmssd')
     spo2_daily = _metric_daily('spo2')
     rr_daily = _metric_daily('respiratory_rate')
     vo2_daily = _metric_daily('vo2_max')
@@ -2609,7 +2723,7 @@ def _get_wearable_data(person: Person) -> dict:
 
     all_valid_days = sorted(
         steps_daily.keys() | active_daily.keys()
-        | rhr_daily.keys() | hrv_daily.keys()
+        | rhr_daily.keys() | hrv_sdnn_daily.keys() | hrv_rmssd_daily.keys()
         | spo2_daily.keys() | rr_daily.keys()
         | sleep_daily.keys() | vo2_daily.keys()
         | distance_daily.keys() | walk_speed_daily.keys()
@@ -2649,7 +2763,8 @@ def _get_wearable_data(person: Person) -> dict:
     steps_daily = _within_window(steps_daily)
     active_daily = _within_window(active_daily)
     rhr_daily = _within_window(rhr_daily)
-    hrv_daily = _within_window(hrv_daily)
+    hrv_sdnn_daily = _within_window(hrv_sdnn_daily)
+    hrv_rmssd_daily = _within_window(hrv_rmssd_daily)
     spo2_daily = _within_window(spo2_daily)
     rr_daily = _within_window(rr_daily)
     sleep_daily = _within_window(sleep_daily)
@@ -2671,7 +2786,7 @@ def _get_wearable_data(person: Person) -> dict:
     # ---- Coverage ratio (union of all wearable metric days) ----------
     all_valid_days = (
         steps_totals.keys() | active_totals.keys()
-        | rhr_daily.keys() | hrv_daily.keys()
+        | rhr_daily.keys() | hrv_sdnn_daily.keys() | hrv_rmssd_daily.keys()
         | spo2_daily.keys() | rr_daily.keys()
         | sleep_nightly.keys() | vo2_daily.keys()
         | distance_daily.keys() | walk_speed_daily.keys()
@@ -2720,9 +2835,16 @@ def _get_wearable_data(person: Person) -> dict:
         data['resting_heart_rate_avg_30d'] = int(round(statistics.mean(rhr_means.values())))
 
     # ---- HRV SDNN ----------------------------------------------------
-    hrv_means = {d: statistics.mean(vs) for d, vs in hrv_daily.items()}
-    if hrv_means:
-        data['hrv_sdnn_avg_30d'] = round(statistics.mean(hrv_means.values()), 1)
+    hrv_sdnn_means = {d: statistics.mean(vs) for d, vs in hrv_sdnn_daily.items()}
+    if hrv_sdnn_means:
+        data['hrv_sdnn_avg_30d'] = round(statistics.mean(hrv_sdnn_means.values()), 1)
+
+    # ---- HRV RMSSD ---------------------------------------------------
+    # Kept separate from SDNN deliberately: they are different statistics and
+    # averaging them together would produce a number that is neither (#438).
+    hrv_rmssd_means = {d: statistics.mean(vs) for d, vs in hrv_rmssd_daily.items()}
+    if hrv_rmssd_means:
+        data['hrv_rmssd_avg_30d'] = round(statistics.mean(hrv_rmssd_means.values()), 1)
 
     # ---- SpO2 minimum (single low reading is clinically significant) -
     all_spo2 = [v for vs in spo2_daily.values() for v in vs]

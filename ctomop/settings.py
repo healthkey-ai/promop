@@ -15,11 +15,18 @@ from pathlib import Path
 import dj_database_url
 from dotenv import load_dotenv
 
+from ctomop.frontend_paths import resolve_frontend_root
+
 # Load environment variables from .env file (for local development)
 load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Directory holding the built frontend. Feeds BOTH the Django template loader
+# (for the SPA catch-all in ctomop.urls) and WhiteNoise (for index.html and the
+# hashed assets) — see ctomop/frontend_paths.py for why they must agree.
+FRONTEND_ROOT = resolve_frontend_root(BASE_DIR, os.environ.get('WHITENOISE_ROOT', ''))
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-your-default-key-change-this')
@@ -166,7 +173,7 @@ ROOT_URLCONF = 'ctomop.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'frontend' / 'build'],
+        'DIRS': [FRONTEND_ROOT] if FRONTEND_ROOT else [],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -287,14 +294,8 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
-_whitenoise_root = os.environ.get('WHITENOISE_ROOT', '')
-if _whitenoise_root:
-    WHITENOISE_ROOT = Path(_whitenoise_root)
-else:
-    for _candidate in (BASE_DIR / 'frontend' / 'dist' / 'remote', BASE_DIR / 'frontend' / 'build'):
-        if _candidate.exists():
-            WHITENOISE_ROOT = _candidate
-            break
+if FRONTEND_ROOT:
+    WHITENOISE_ROOT = FRONTEND_ROOT
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
@@ -356,6 +357,16 @@ if DEBUG:
         'rest_framework.authentication.BasicAuthentication',
     ]
 
+# Pinned rather than inherited so the value is visible, but note the scope:
+# this bounds form/multipart bodies and anything read via HttpRequest.body. It
+# does NOT bound DRF JSON bodies — Request._load_stream hands JSONParser the raw
+# WSGI stream, bypassing HttpRequest.body entirely, which is the only place
+# Django enforces this. The bulk OMOP write endpoint therefore does its own
+# pre-parse CONTENT_LENGTH check (OMOP_BULK_MAX_BYTES in patient_portal/api/views.py).
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(
+    os.environ.get('DATA_UPLOAD_MAX_MEMORY_SIZE', 2621440)
+)
+
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_AUTHENTICATION_CLASSES': _auth_classes,
@@ -377,6 +388,14 @@ REST_FRAMEWORK = {
         # a more generous bucket than the shared service-token /sync/ endpoint.
         'patient_sync': os.environ.get('PATIENT_SYNC_THROTTLE_RATE', '120/minute'),
         'patient_signup': '10/hour',
+        # OMOP clinical-row CRUD (conditions / drug-exposures / measurements /
+        # observations / procedures). These viewsets set throttle_scope='omop_write'
+        # and override throttle_classes, so this bucket REPLACES 'user' for them
+        # rather than stacking with it. The default matches the old 'user' rate, so
+        # behaviour is unchanged out of the box; raise it for bulk backfills, where
+        # 300/minute would otherwise become the new ceiling once per-row request
+        # overhead is gone.
+        'omop_write': os.environ.get('OMOP_WRITE_THROTTLE_RATE', '300/minute'),
     },
 }
 

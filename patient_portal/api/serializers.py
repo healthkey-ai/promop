@@ -238,6 +238,36 @@ class GenderField(serializers.CharField):
         return self.DISPLAY_TO_CODE.get(title, data)
 
 
+def _derived_wearable_fields():
+    """Every wearable summary column on PatientRecord, read off the model.
+
+    These are written only by refresh_patient_record, deriving them from OMOP
+    measurement/observation rows. A client PATCH must never set one: the value
+    would survive until the next refresh recomputed it, and during that window
+    the column disagrees with the OMOP rows it claims to summarize, with no
+    indication that it does. The window is unbounded in practice — refresh
+    fires on OMOP writes for that person, so a patient who stops syncing their
+    device never triggers one.
+
+    This is computed rather than hand-listed because the hand-listed version
+    drifted: ten columns were protected, and the eleven added afterwards were
+    not (#440). Enumerating the model means a new column is protected the day
+    it is added, rather than the day someone notices.
+
+    Matching on the naming convention deliberately errs toward
+    over-protection. A future settings field that happened to match would be
+    wrongly read-only — which surfaces immediately as a rejected write. The
+    opposite failure, a derived column silently accepting client values, is
+    invisible and is exactly what this function exists to prevent.
+    """
+    return tuple(
+        field.name
+        for field in PatientRecord._meta.get_fields()
+        if getattr(field, 'concrete', False)
+        and (field.name.endswith('_30d') or field.name.startswith('wearable_'))
+    )
+
+
 class PatientRecordSerializer(serializers.ModelSerializer):
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)
     patient_name = serializers.SerializerMethodField()
@@ -277,15 +307,16 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             # dates) is derived from OMOP; lines_of_therapy surfaces its
             # concept_ids as authoritative, so a client must never PATCH it.
             'later_therapies',
-            # Wearable summaries are written by the device-sync service, never by the client API.
-            'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
-            'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
-            'resting_heart_rate_avg_30d', 'hrv_sdnn_avg_30d',
-            'oxygen_saturation_min_30d', 'respiratory_rate_avg_30d',
-            'sleep_duration_hours_avg_30d',
             # Derivation versioning — set only by refresh_patient_record, never by client.
             'derivation_version', 'derived_at',
-        )
+            # Bookkeeping for which derived fields were hand-entered; maintained by
+            # the OMOP write-through from what a PATCH actually changed. A client
+            # setting it directly could pin any derived field against OMOP truth.
+            'user_edited_fields',
+            # Wearable summaries are written by the device-sync service, never
+            # by the client API. Enumerated from the model — see
+            # _derived_wearable_fields for why this one is not hand-listed.
+        ) + _derived_wearable_fields()
 
     def get_patient_name(self, obj):
         if obj.person:
