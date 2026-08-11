@@ -16013,3 +16013,570 @@ class WearableUploadEndpointTest(TestCase):
             format='multipart',
         )
         self.assertIn(resp.status_code, [401, 403])
+
+
+# ---------------------------------------------------------------------------
+# Bulk OMOP row write endpoint
+# (contract summarised in CLAUDE.md, "Bulk OMOP Row Writes")
+# ---------------------------------------------------------------------------
+
+class BulkOmopWriteTest(TestCase):
+    """POST a JSON list to the five OMOP clinical CRUD endpoints.
+
+    Consumers that have already parsed FHIR into OMOP rows were writing one row
+    per HTTP request (~1,900 requests for a single patient). These cover the
+    batch entrance: one transaction, batched PK allocation, ordered ids back,
+    and — the part a naive bulk_create silently gets wrong — an explicit
+    PatientRecord refresh, since bulk_create does not fire post_save.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(person_id=31001)
+        cls.other_person = Person.objects.create(person_id=31002)
+        PatientRecord.objects.create(person=cls.person)
+        PatientRecord.objects.create(person=cls.other_person)
+
+        cls.m_concept = Concept.objects.get(concept_id=3000963)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.drug_concept = Concept.objects.get(concept_id=19136160)
+
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='bulk-write-test',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        from django.core.cache import cache
+        # DRF throttle state lives in the cache and leaks between tests.
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token"
+        )
+
+    def _rows(self, n, person=None, start_day=0):
+        person = person or self.person
+        base = date(2024, 1, 1)
+        return [
+            {
+                'person': person.person_id,
+                'measurement_concept': self.m_concept.concept_id,
+                'measurement_date': (
+                    base + timedelta(days=start_day + i)).isoformat(),
+                'measurement_type_concept': self.type_concept.concept_id,
+                'value_as_number': 5.0 + i,
+                'measurement_source_value': f'LOCAL-{i}',
+            }
+            for i in range(n)
+        ]
+
+    # --- happy path -------------------------------------------------------
+
+    def test_bulk_post_creates_all_rows_and_returns_ordered_ids(self):
+        """A JSON array creates every row and returns ids in request order."""
+        resp = self.client.post('/api/v1/measurements/', self._rows(3), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['created'], 3)
+        ids = resp.data['ids']
+        self.assertEqual(len(ids), 3)
+        self.assertEqual(len(set(ids)), 3)
+
+        # Ids are positionally aligned with the request rows.
+        for i, mid in enumerate(ids):
+            m = Measurement.objects.get(measurement_id=mid)
+            self.assertEqual(m.measurement_source_value, f'LOCAL-{i}')
+            self.assertEqual(m.person_id, self.person.person_id)
+
+    def test_single_dict_post_still_works(self):
+        """The existing single-row form is unchanged by the list support."""
+        resp = self.client.post('/api/v1/measurements/', {
+            'person': self.person.person_id,
+            'measurement_concept': self.m_concept.concept_id,
+            'measurement_date': '2024-03-01',
+            'measurement_type_concept': self.type_concept.concept_id,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        # Single-row responses still serialize the full row, not {created, ids}.
+        self.assertIn('measurement_id', resp.data)
+        self.assertNotIn('created', resp.data)
+
+    def test_bulk_post_works_on_legacy_prefix_too(self):
+        """Extending create() exposes the array form on /api/ as well as /api/v1/."""
+        resp = self.client.post('/api/measurements/', self._rows(2), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['created'], 2)
+
+    def test_all_five_resource_types_accept_a_batch(self):
+        """conditions, drug-exposures, measurements, observations, procedures."""
+        cases = [
+            ('conditions', 'condition_occurrence_id', ConditionOccurrence, {
+                'condition_concept': self.m_concept.concept_id,
+                'condition_start_date': '2024-01-01',
+                'condition_type_concept': self.type_concept.concept_id,
+            }),
+            ('drug-exposures', 'drug_exposure_id', DrugExposure, {
+                'drug_concept': self.drug_concept.concept_id,
+                'drug_exposure_start_date': '2024-01-01',
+                'drug_type_concept': self.type_concept.concept_id,
+            }),
+            ('measurements', 'measurement_id', Measurement, {
+                'measurement_concept': self.m_concept.concept_id,
+                'measurement_date': '2024-01-01',
+                'measurement_type_concept': self.type_concept.concept_id,
+            }),
+            ('observations', 'observation_id', Observation, {
+                'observation_concept': self.m_concept.concept_id,
+                'observation_date': '2024-01-01',
+                'observation_type_concept': self.type_concept.concept_id,
+            }),
+            ('procedures', 'procedure_occurrence_id', ProcedureOccurrence, {
+                'procedure_concept': self.m_concept.concept_id,
+                'procedure_date': '2024-01-01',
+                'procedure_type_concept': self.type_concept.concept_id,
+            }),
+        ]
+        for route, pk_field, model, fields in cases:
+            with self.subTest(route=route):
+                rows = [dict(fields, person=self.person.person_id) for _ in range(2)]
+                resp = self.client.post(
+                    f'/api/v1/{route}/', rows, format='json')
+                self.assertEqual(
+                    resp.status_code, status.HTTP_201_CREATED,
+                    f'{route}: {resp.data}')
+                self.assertEqual(resp.data['created'], 2)
+                self.assertEqual(
+                    model.objects.filter(
+                        **{f'{pk_field}__in': resp.data['ids']}).count(), 2)
+
+    def test_empty_list_is_a_noop(self):
+        resp = self.client.post('/api/v1/measurements/', [], format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data, {'created': 0, 'ids': []})
+
+    # --- query count ------------------------------------------------------
+
+    def _post_query_count(self, n, start_day, query=''):
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self.client.post(
+                f'/api/v1/measurements/{query}',
+                self._rows(n, start_day=start_day), format='json')
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+            self.assertEqual(resp.data['created'], n)
+        return len(ctx)
+
+    def test_bulk_write_query_count_does_not_scale_with_batch_size(self):
+        """Mirrors test_batched_ingest_does_not_scale_queries_with_bundle_size.
+
+        Measures the write path (skip_refresh=true) so the assertion is about
+        insert behaviour alone: batched PK allocation, one bulk_create, and FK
+        resolution prefetched per column instead of per row. Warmup first so
+        ContentType and other process-level caches are not counted.
+
+        The refresh is excluded deliberately — refresh_patient_record is O(the
+        person's accumulated data) by nature, so it cannot be constant, and
+        covering it here would measure the derivation pipeline rather than this
+        endpoint. test_bulk_write_is_far_cheaper_than_per_row_posts covers the
+        end-to-end cost with the refresh on.
+        """
+        self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            self._rows(1), format='json')
+
+        q_small = self._post_query_count(5, 100, '?skip_refresh=true')
+        q_large = self._post_query_count(40, 200, '?skip_refresh=true')
+        self.assertLess(
+            q_large - q_small, 10,
+            f'query count scaled with batch size: {q_small} queries for 5 rows, '
+            f'{q_large} for 40. Bulk path is falling back to per-row work.')
+
+    def test_bulk_write_is_far_cheaper_than_per_row_posts(self):
+        """End-to-end, refresh included: one batch beats N single-row POSTs.
+
+        This is the claim the endpoint is justified by, so assert it rather than
+        assuming it follows from the write-path test above.
+        """
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+
+        n = 20
+        self.client.post('/api/v1/measurements/', self._rows(1), format='json')
+
+        with CaptureQueriesContext(connection) as bulk_ctx:
+            resp = self.client.post(
+                '/api/v1/measurements/', self._rows(n, start_day=100),
+                format='json')
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+        with CaptureQueriesContext(connection) as row_ctx:
+            for row in self._rows(n, person=self.other_person, start_day=200):
+                r = self.client.post('/api/v1/measurements/', row, format='json')
+                self.assertEqual(r.status_code, status.HTTP_201_CREATED, r.data)
+
+        self.assertLess(
+            len(bulk_ctx), len(row_ctx),
+            f'bulk write ({len(bulk_ctx)} queries) was not cheaper than '
+            f'{n} single-row POSTs ({len(row_ctx)} queries)')
+
+    # --- transaction / validation ----------------------------------------
+
+    def test_invalid_row_rolls_back_whole_batch_with_per_index_errors(self):
+        """One bad row fails the batch; errors are positionally aligned."""
+        before = Measurement.objects.filter(person=self.person).count()
+        rows = self._rows(3)
+        del rows[1]['measurement_date']
+
+        resp = self.client.post('/api/v1/measurements/', rows, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(len(resp.data), 3)
+        self.assertEqual(resp.data[0], {})
+        self.assertIn('measurement_date', resp.data[1])
+        self.assertEqual(resp.data[2], {})
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(), before,
+            'a partial batch landed — the whole batch must roll back')
+
+    def test_client_supplied_pk_is_rejected(self):
+        rows = self._rows(2)
+        rows[1]['measurement_id'] = 999999
+        resp = self.client.post('/api/v1/measurements/', rows, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data[0], {})
+        self.assertIn('measurement_id', resp.data[1])
+        self.assertFalse(Measurement.objects.filter(measurement_id=999999).exists())
+
+    def test_mixed_person_batch_is_rejected(self):
+        """One batch is one person; a mixed batch is a client bug, not a merge."""
+        rows = self._rows(2) + self._rows(1, person=self.other_person, start_day=5)
+        before = Measurement.objects.count()
+        resp = self.client.post('/api/v1/measurements/', rows, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('one person', resp.data['detail'])
+        self.assertEqual(Measurement.objects.count(), before)
+
+    # --- limits -----------------------------------------------------------
+
+    def test_over_limit_batch_returns_413_naming_the_maximum(self):
+        from patient_portal.api.views import OMOP_BULK_MAX_ROWS
+        rows = [self._rows(1)[0]] * (OMOP_BULK_MAX_ROWS + 1)
+        before = Measurement.objects.count()
+        resp = self.client.post('/api/v1/measurements/', rows, format='json')
+        self.assertEqual(
+            resp.status_code, status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+        self.assertEqual(resp.data['max_rows'], OMOP_BULK_MAX_ROWS)
+        self.assertIn(str(OMOP_BULK_MAX_ROWS), resp.data['detail'])
+        self.assertEqual(Measurement.objects.count(), before)
+
+    def test_batch_at_exactly_the_limit_is_accepted(self):
+        from patient_portal.api.views import OMOP_BULK_MAX_ROWS
+        rows = self._rows(1) * OMOP_BULK_MAX_ROWS
+        resp = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true', rows, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['created'], OMOP_BULK_MAX_ROWS)
+
+    # --- provenance -------------------------------------------------------
+
+    def test_provenance_row_per_created_row_when_source_supplied(self):
+        from omop_core.models import ProvenanceRecord
+        from django.contrib.contenttypes.models import ContentType
+
+        resp = self.client.post(
+            '/api/v1/measurements/', self._rows(4), format='json',
+            HTTP_X_PROVENANCE_SOURCE='EHR_SYNC',
+            HTTP_X_PROVENANCE_USER_ID='etl-run-7',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        ct = ContentType.objects.get_for_model(Measurement)
+        prov = ProvenanceRecord.objects.filter(
+            content_type=ct, object_id__in=resp.data['ids'])
+        self.assertEqual(prov.count(), 4)
+        self.assertEqual({p.source for p in prov}, {'EHR_SYNC'})
+        self.assertEqual({p.source_user_id for p in prov}, {'etl-run-7'})
+        self.assertEqual(
+            {p.target_patient_id for p in prov}, {str(self.person.person_id)})
+
+    def test_no_source_means_no_provenance_rows(self):
+        """Matches single-row behavior — an invented source is unfalsifiable."""
+        from omop_core.models import ProvenanceRecord
+        from django.contrib.contenttypes.models import ContentType
+
+        resp = self.client.post('/api/v1/measurements/', self._rows(3), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        ct = ContentType.objects.get_for_model(Measurement)
+        self.assertEqual(
+            ProvenanceRecord.objects.filter(
+                content_type=ct, object_id__in=resp.data['ids']).count(),
+            0)
+
+    # --- PatientRecord refresh -------------------------------------------
+
+    def test_bulk_write_refreshes_patient_record_by_default(self):
+        """bulk_create skips post_save, so the refresh must be explicit.
+
+        Without it the rows land but the read model stays stale — invisible to
+        the frontend and to /api/patient-records/.
+        """
+        derived_before = PatientRecord.objects.get(
+            person=self.person).derived_at
+
+        resp = self.client.post('/api/v1/measurements/', self._rows(3), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+        pr = PatientRecord.objects.get(person=self.person)
+        self.assertIsNotNone(
+            pr.derived_at,
+            'PatientRecord was never refreshed after the bulk write')
+        self.assertNotEqual(
+            pr.derived_at, derived_before,
+            'PatientRecord.derived_at did not advance — the read model is stale')
+
+    def _count_refreshes(self, n, query='', start_day=0):
+        """Return how many times refresh_patient_record runs for one bulk POST.
+
+        views.py binds the symbol at module load; omop_core/signals.py imports it
+        lazily inside _refresh_for_instance. Patch both so signal-triggered
+        refreshes are counted too, not just the explicit end-of-batch one.
+        """
+        from unittest import mock
+        from omop_core.services import patient_record_service as prs
+
+        real = prs.refresh_patient_record
+        calls = []
+
+        def counting(person, *a, **kw):
+            calls.append(getattr(person, 'person_id', person))
+            return real(person, *a, **kw)
+
+        with mock.patch('patient_portal.api.views.refresh_patient_record', counting), \
+             mock.patch.object(prs, 'refresh_patient_record', counting):
+            resp = self.client.post(
+                f'/api/v1/measurements/{query}',
+                self._rows(n, start_day=start_day), format='json')
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        return calls
+
+    def test_refresh_runs_once_per_batch_never_per_row(self):
+        """The derivation pipeline must fire once for the batch, not per row.
+
+        refresh_patient_record rebuilds the whole PatientRecord from the person's
+        OMOP data, so a per-row call is what made the single-row path take ~65
+        minutes for one patient. Assert the count is exactly 1 and independent of
+        batch size — measured for real, since the guarantee currently rests on
+        bulk_create not emitting post_save.
+        """
+        for n in (1, 5, 40):
+            with self.subTest(rows=n):
+                calls = self._count_refreshes(n, start_day=n * 3)
+                self.assertEqual(
+                    len(calls), 1,
+                    f'{n}-row batch triggered {len(calls)} refreshes; expected '
+                    f'exactly 1. A per-row refresh has crept back in.')
+                self.assertEqual(calls, [self.person.person_id])
+
+    def test_skip_refresh_true_runs_no_refresh_at_all(self):
+        self.assertEqual(
+            self._count_refreshes(20, '?skip_refresh=true', start_day=500), [])
+
+    def test_skip_refresh_true_defers_the_refresh(self):
+        derived_before = PatientRecord.objects.get(person=self.person).derived_at
+        resp = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            self._rows(3), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(Measurement.objects.filter(person=self.person).count(), 3)
+        self.assertEqual(
+            PatientRecord.objects.get(person=self.person).derived_at,
+            derived_before,
+            'skip_refresh=true still refreshed the PatientRecord')
+
+    # --- auth -------------------------------------------------------------
+
+    def test_bulk_write_requires_authentication(self):
+        anon = APIClient()
+        resp = anon.post('/api/v1/measurements/', self._rows(2), format='json')
+        self.assertIn(resp.status_code, [401, 403])
+        self.assertEqual(Measurement.objects.filter(person=self.person).count(), 0)
+
+    def test_boolean_fk_is_rejected_not_silently_mislinked(self):
+        """A JSON boolean FK must 400, never resolve to pk=1.
+
+        bool subclasses int, so the prefetch cache built in _prefetch_bulk_related
+        would return the pk-1 object for `True` — {1: obj}.get(True) is a hit.
+        DRF's own to_internal_value guards against this (it raises TypeError for
+        bool before hitting the queryset), so _cached_pk_lookup must route bools
+        to the original implementation rather than answering from the cache.
+
+        Verified counterfactually: with the bool guard removed this POST returns
+        201 and silently attaches the measurement to person 1.
+        """
+        p1 = Person.objects.create(person_id=1)
+        PatientRecord.objects.create(person=p1)
+
+        row = self._rows(1)[0]
+        row['person'] = True
+        resp = self.client.post('/api/v1/measurements/', [row], format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('person', resp.data[0])
+        self.assertEqual(
+            Measurement.objects.filter(person_id=1).count(), 0,
+            'a boolean FK silently resolved to person_id=1')
+
+    def test_boolean_fk_bulk_matches_single_row_behavior(self):
+        """The bulk path must not be more permissive than the single-row path."""
+        p1 = Person.objects.create(person_id=1)
+        PatientRecord.objects.create(person=p1)
+
+        row = self._rows(1)[0]
+        row['person'] = True
+        single = self.client.post('/api/v1/measurements/', dict(row), format='json')
+        bulk = self.client.post('/api/v1/measurements/', [dict(row)], format='json')
+
+        self.assertEqual(single.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(bulk.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            str(single.data['person'][0]), str(bulk.data[0]['person'][0]),
+            'bulk and single-row disagree on how a boolean FK is reported')
+
+    def test_unhashable_fk_value_errors_per_index_not_500(self):
+        """A dict/list FK id must 400 like the single-row path, not blow up.
+
+        _prefetch_bulk_related builds a set of candidate ids; adding an
+        unhashable value raised TypeError straight out of the comprehension,
+        which DRF does not catch — so the batch 500'd where a single-row POST of
+        the same body returns a clean 400.
+        """
+        for bad in ({'id': 5}, [5], {'nested': {'deep': 1}}):
+            with self.subTest(value=bad):
+                row = self._rows(1)[0]
+                row['person'] = bad
+                resp = self.client.post(
+                    '/api/v1/measurements/', [row], format='json')
+                self.assertEqual(
+                    resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+                self.assertIn('person', resp.data[0])
+
+    def test_unhashable_fk_matches_single_row_status(self):
+        """Bulk must not be worse than single-row for the same malformed body."""
+        row = self._rows(1)[0]
+        row['person'] = {'id': 5}
+        single = self.client.post('/api/v1/measurements/', dict(row), format='json')
+        bulk = self.client.post('/api/v1/measurements/', [dict(row)], format='json')
+        self.assertEqual(single.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(bulk.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_one_bad_fk_does_not_stop_the_others_prefetching(self):
+        """An unhashable id is skipped for caching, not fatal to the batch.
+
+        The valid rows must still validate normally; only the bad row errors.
+        """
+        rows = self._rows(3)
+        rows[1]['person'] = {'id': 5}
+        resp = self.client.post('/api/v1/measurements/', rows, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data[0], {})
+        self.assertIn('person', resp.data[1])
+        self.assertEqual(resp.data[2], {})
+
+    def test_oversized_body_rejected_before_parsing(self):
+        """CONTENT_LENGTH over the byte ceiling returns 413 pre-parse.
+
+        The row cap alone is not a memory guard: DRF's JSONParser reads the WSGI
+        stream directly and never touches HttpRequest.body, so
+        DATA_UPLOAD_MAX_MEMORY_SIZE does not bound a JSON array. Without this
+        check a huge body is fully parsed before the row count can reject it.
+        """
+        from patient_portal.api.views import OMOP_BULK_MAX_BYTES
+
+        resp = self.client.post(
+            '/api/v1/measurements/', self._rows(1), format='json',
+            CONTENT_LENGTH=str(OMOP_BULK_MAX_BYTES + 1))
+        self.assertEqual(
+            resp.status_code, status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, resp.data)
+        self.assertEqual(resp.data['max_bytes'], OMOP_BULK_MAX_BYTES)
+
+    def test_normal_sized_body_is_unaffected_by_the_byte_ceiling(self):
+        resp = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            self._rows(50), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['created'], 50)
+
+    def test_unknown_fk_id_still_errors_per_index(self):
+        """A cache miss must fall through to DRF's own per-index error."""
+        rows = self._rows(2)
+        rows[1]['measurement_concept'] = 987654321   # no such concept
+        resp = self.client.post('/api/v1/measurements/', rows, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data[0], {})
+        self.assertIn('measurement_concept', resp.data[1])
+
+    def _org_client(self, org, label):
+        """An OAuth2 write-token client scoped to `org`."""
+        from oauth2_provider.models import AccessToken, Application
+        from omop_core.models import ApplicationOrganization
+        from django.utils import timezone as tz
+        import datetime
+
+        user = Identity.objects.create_user(email=f'svc_{label}@test.com', password='x')
+        app = Application.objects.create(
+            name=f'{label} App',
+            client_id=f'{label}-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=user,
+        )
+        ApplicationOrganization.objects.create(application=app, organization=org)
+        token = AccessToken.objects.create(
+            user=user, application=app, token=f'{label}-write-token',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='patient/*.write',
+        )
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+        return client
+
+    def test_bulk_write_rejects_cross_org_person(self):
+        """The bulk path re-implements perform_create's org check — prove it runs.
+
+        A batch is authorized once for its single person rather than per row, so
+        this is genuinely separate code from the single-row path and needs its
+        own coverage: an org token must not write to another org's patient.
+        """
+        from omop_core.models import Organization
+
+        org_a = Organization.objects.create(name='Bulk Org A', slug='bulk-org-a')
+        org_b = Organization.objects.create(name='Bulk Org B', slug='bulk-org-b')
+        pr = PatientRecord.objects.get(person=self.person)
+        pr.organization = org_b
+        pr.save()
+
+        before = Measurement.objects.filter(person=self.person).count()
+        resp = self._org_client(org_a, 'bulk-a').post(
+            '/api/v1/measurements/', self._rows(3), format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN, resp.data)
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(), before,
+            'cross-org bulk write landed rows')
+
+    def test_bulk_write_allows_same_org_person(self):
+        """The counterpart — the org check must not reject a legitimate write."""
+        from omop_core.models import Organization
+
+        org = Organization.objects.create(name='Bulk Org C', slug='bulk-org-c')
+        pr = PatientRecord.objects.get(person=self.person)
+        pr.organization = org
+        pr.save()
+
+        resp = self._org_client(org, 'bulk-c').post(
+            '/api/v1/measurements/', self._rows(3), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['created'], 3)
