@@ -15881,14 +15881,20 @@ class WearableUploadEndpointTest(TestCase):
         # same mistake the production code made — 32883 is 'Survey'; 32865 is
         # 'Patient self-report' (#441). Use the real id and code so the
         # fixture cannot vouch for a mapping Athena would reject.
+        # The vocabulary must be the genuine 'Type Concept', not a TEST stub:
+        # upload_wearable rejects a 32865 row from any other vocabulary, because
+        # lab_results.sync can mint a shadow row at that id under HK-Labs.
         type_domain = Domain.objects.get(domain_id='Type Concept')
-        test_vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        type_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='Type Concept',
+            defaults={'vocabulary_name': 'OMOP Type Concept', 'vocabulary_concept_id': 0},
+        )
         Concept.objects.get_or_create(
             concept_id=WEARABLE_TYPE_CONCEPT_ID,
             defaults={
                 'concept_name': 'Patient self-report',
                 'domain': type_domain,
-                'vocabulary': test_vocab,
+                'vocabulary': type_vocab,
                 'concept_class': cc,
                 'concept_code': 'OMOP4976938',
                 'valid_start_date': today,
@@ -16080,6 +16086,49 @@ class WearableUploadEndpointTest(TestCase):
         self.assertEqual(
             Measurement.objects.filter(person=self.person).count(), before,
             'Rows were written despite unknown provenance')
+
+    def test_shadow_type_concept_is_rejected(self):
+        """A locally-minted row at 32865 must not be used as provenance.
+
+        lab_results.sync._ensure_concept mints concept_id 32865 into HK-Labs
+        when Athena is absent. Accepting it would type every wearable row with
+        a HealthKey concept squatting a genuine Athena id (#415).
+        """
+        from omop_core.models import Concept, Measurement, Vocabulary
+        from omop_core.services.concept_cache import concept_cache_clear
+        from omop_core.services.mappings import WEARABLE_TYPE_CONCEPT_ID
+
+        before = Measurement.objects.filter(person=self.person).count()
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='HK-Labs',
+            defaults={'vocabulary_name': 'HK-Labs', 'vocabulary_concept_id': 0},
+        )
+        Concept.objects.filter(concept_id=WEARABLE_TYPE_CONCEPT_ID).update(
+            vocabulary_id='HK-Labs',
+            concept_code='hkl:fallback-32865',
+            source='HealthKey',
+        )
+        concept_cache_clear()
+        self.addCleanup(concept_cache_clear)
+
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierRestingHeartRate"
+          startDate="2024-07-07 06:00:00 -0700"
+          endDate="2024-07-07 06:00:00 -0700" value="61"/>
+</HealthData>
+"""
+        upload = SimpleUploadedFile('export.zip', self._make_apple_zip(xml).read(),
+                                    content_type='application/zip')
+        resp = self._client_as(self.identity).post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': upload, 'device_type': 'apple'}, format='multipart')
+
+        self.assertEqual(resp.status_code, 503, getattr(resp, 'data', resp))
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(), before,
+            'Rows were typed with a shadow concept')
 
     def test_upload_apple_health_creates_measurements(self):
         """Uploading an Apple Health zip creates Measurement rows."""

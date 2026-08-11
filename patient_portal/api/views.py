@@ -3648,17 +3648,28 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # than writing a row that misstates where the data came from. The
         # concept is seeded by seed_omop_concepts, so an unseeded database is
         # a setup error the operator needs to see.
-        try:
-            type_concept = Concept.objects.get(concept_id=WEARABLE_TYPE_CONCEPT_ID)
-        except Concept.DoesNotExist:
+        # Migration 0142 installs this concept, so the deploy path guarantees it
+        # rather than depending on someone remembering to run seed_omop_concepts.
+        #
+        # The vocabulary check is not redundant. lab_results.sync._ensure_concept
+        # mints concept_id 32865 into HK-Labs as a fallback when Athena is absent
+        # — a locally-authored row occupying a genuine Athena id. Accepting it
+        # here would type every wearable row with a shadow concept, which is the
+        # defect class #415 exists to eliminate, and would do so silently.
+        type_concept = Concept.objects.filter(
+            concept_id=WEARABLE_TYPE_CONCEPT_ID).first()
+        if type_concept is None or type_concept.vocabulary_id != 'Type Concept':
             logger.error(
-                'wearable_type_concept_missing concept_id=%s person_id=%s — refusing to write '
-                'rows with unknown provenance. Run seed_omop_concepts.',
+                'wearable_type_concept_unusable concept_id=%s person_id=%s found=%r '
+                'vocabulary_id=%r — refusing to write rows with unknown provenance.',
                 WEARABLE_TYPE_CONCEPT_ID, person.person_id,
+                type_concept is not None,
+                getattr(type_concept, 'vocabulary_id', None),
             )
             return Response(
                 {'error': 'Wearable ingestion is not configured on this server '
-                          '(missing measurement type concept). Contact an administrator.'},
+                          '(measurement type concept missing or invalid). '
+                          'Contact an administrator.'},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
