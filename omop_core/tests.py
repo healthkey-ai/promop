@@ -258,6 +258,35 @@ class RefreshPatientRecordDemographicsTest(_OmopBase):
         self.assertIsNone(pi.date_of_birth)
         self.assertEqual(pi.patient_age, date.today().year - 1975)
 
+    def test_corrected_person_birth_fields_propagate(self):
+        person = self._person_with_dob(90215, 1975, 6, 15)
+        self.assertEqual(refresh_patient_record(person).date_of_birth, date(1975, 6, 15))
+
+        person.month_of_birth, person.day_of_birth = 7, 20
+        person.year_of_birth = 1976
+        person.save()
+        self.assertEqual(refresh_patient_record(person).date_of_birth, date(1976, 7, 20))
+
+    def test_externally_written_date_of_birth_survives_rederivation(self):
+        """date_of_birth is not an OMOP-only field — do not clear it (PR #460).
+
+        The CSV import writes PatientRecord.date_of_birth while creating the
+        Person with year_of_birth only. Since refresh runs on every OMOP write,
+        clearing date_of_birth whenever the Person lacks month/day precision
+        would silently destroy those recorded birthdays.
+        """
+        person = Person.objects.create(
+            person_id=90216,
+            year_of_birth=1975,          # CSV import sets no month/day
+            gender_source_value='female',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        PatientRecord.objects.create(person=person, date_of_birth=date(1975, 6, 15))
+
+        pi = refresh_patient_record(person)
+        self.assertEqual(pi.date_of_birth, date(1975, 6, 15))
+
 
 class RefreshPatientRecordDiseaseTest(_OmopBase):
     """Disease / condition section."""

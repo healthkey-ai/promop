@@ -450,6 +450,19 @@ def _get_demographics(person: Person) -> dict:
             )
         else:
             # Year-only precision: the best available estimate.
+            #
+            # Deliberately leave date_of_birth untouched rather than setting it
+            # to None. Unlike the fields in _OMOP_DERIVED_FIELDS, date_of_birth
+            # has writers outside the OMOP derivation path: the CSV import
+            # (views.py) writes it while creating the Person with year_of_birth
+            # only, so unconditionally clearing it here would wipe a real
+            # recorded birthday on the next refresh — and refresh runs on every
+            # OMOP write via the post_save signals. A genuine correction to the
+            # Person birth fields still propagates, because the branch above
+            # always overwrites when a valid date can be built. The only value
+            # retained is one whose precision was removed or corrupted
+            # upstream, where keeping the last known good date beats discarding
+            # a clinical fact.
             data['patient_age'] = today.year - person.year_of_birth
 
     gender_src = None
