@@ -4006,3 +4006,67 @@ class RemapShadowConceptsEdgeCaseTest(TestCase):
                       'the dry run must disclose that another table will be mutated')
         self.assertNotIn('not removable', out.getvalue(),
                          'a SET_NULL referrer does not block deletion')
+
+
+class NoFalselyStandardMintsTest(TestCase):
+    """Locally-minted concepts must not claim standard_concept='S' (#453).
+
+    standard_concept is an OHDSI curation designation, not a quality flag: one
+    vocabulary is chosen as canonical per domain and its concepts marked 'S',
+    everything else being non-standard and mapped onward via 'Maps to'. A mint
+    claiming 'S' breaks three things — it is unreachable from concept_ancestor
+    while appearing standard to tooling, DQD assumes 'S' implies membership of
+    the standard vocabulary set, and where it shadows a genuine non-standard
+    concept every standard_concept='S' filter prefers the fabrication.
+
+    That last one was not hypothetical. Before #446 the only "Standard" tobacco
+    concepts in the database were this codebase's own mints:
+
+        4144272    SNOMED  266919005  std=None   <- genuine
+        266919005  SNOMED  266919005  std=S      <- the mint
+    """
+
+    def test_no_concept_is_both_locally_sourced_and_standard(self):
+        from omop_core.models import Concept
+
+        offenders = list(
+            Concept.objects
+            .filter(source='HealthKey', standard_concept='S')
+            .values_list('concept_id', 'vocabulary_id', 'concept_code')[:10]
+        )
+        self.assertEqual(
+            offenders, [],
+            f'locally-minted concepts must not claim Standard: {offenders}')
+
+    def test_mint_helpers_do_not_default_to_standard(self):
+        """The two helpers took standard_concept='S' as a DEFAULT, so every
+        caller inherited a falsely-Standard concept without ever writing 'S'
+        — invisible in a diff and in review."""
+        import inspect
+        from omop_core.management.commands import (
+            enrich_synthea_mm_omop_data, fill_org_analytics_gaps,
+        )
+
+        for module in (fill_org_analytics_gaps, enrich_synthea_mm_omop_data):
+            sig = inspect.signature(module._get_or_create_concept)
+            default = sig.parameters['standard_concept'].default
+            self.assertIsNone(
+                default,
+                f'{module.__name__}._get_or_create_concept defaults '
+                f'standard_concept to {default!r}; minting must be non-standard '
+                f'unless a caller deliberately mirrors a genuine concept')
+
+    def test_minted_rows_are_tagged_as_locally_authored(self):
+        """A mint with no source is indistinguishable from vocabulary content,
+        which is why backfill_concept_source had to find them by id range."""
+        import inspect
+        from omop_core.management.commands import (
+            enrich_synthea_mm_omop_data, fill_org_analytics_gaps,
+        )
+
+        for module in (fill_org_analytics_gaps, enrich_synthea_mm_omop_data):
+            source = inspect.getsource(module._get_or_create_concept)
+            self.assertIn(
+                'HealthKey', source,
+                f'{module.__name__}._get_or_create_concept must tag rows it '
+                f'invents with source=HealthKey')

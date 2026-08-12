@@ -118,7 +118,8 @@ def _get_or_create_concept_class(concept_class_id):
     return concept_class
 
 
-def _get_or_create_concept(*, concept_code, concept_name, vocabulary_id, domain_id, concept_class_id, standard_concept='S', concept_id=None):
+def _get_or_create_concept(*, concept_code, concept_name, vocabulary_id, domain_id,
+                           concept_class_id, standard_concept=None, concept_id=None):
     if concept_id is not None:
         concept = Concept.objects.filter(concept_id=concept_id).first()
         if concept:
@@ -128,6 +129,10 @@ def _get_or_create_concept(*, concept_code, concept_name, vocabulary_id, domain_
         return concept
     return Concept.objects.create(
         concept_id=concept_id or next_pk(Concept, 'concept_id'),
+        # source is set only on rows this code invents. A caller passing a real
+        # concept_id is mirroring genuine vocabulary content, and tagging that
+        # 'HealthKey' would claim authorship of something we did not write.
+        source=None if concept_id is not None else 'HealthKey',
         concept_name=concept_name,
         domain=_get_or_create_domain(domain_id),
         vocabulary=_get_or_create_vocab(vocabulary_id, vocabulary_name=vocabulary_id),

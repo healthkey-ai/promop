@@ -132,7 +132,7 @@ def _get_or_create_concept_class(concept_class_id):
 
 
 def _get_or_create_concept(*, concept_code, concept_name, vocabulary_id, domain_id, concept_class_id,
-                           standard_concept='S', concept_id=None, create=True):
+                           standard_concept=None, concept_id=None, create=True):
     if concept_id is not None:
         concept = Concept.objects.filter(concept_id=concept_id).select_related(
             'vocabulary', 'domain', 'concept_class'
@@ -150,6 +150,11 @@ def _get_or_create_concept(*, concept_code, concept_name, vocabulary_id, domain_
     if not create:
         return None
 
+    # Captured before concept_id is reassigned: a caller supplying a real
+    # concept_id is mirroring genuine vocabulary content, and tagging that
+    # 'HealthKey' would claim authorship of something we did not write. Only a
+    # row whose id we allocate ourselves is a local mint.
+    is_local_mint = concept_id is None
     if concept_id is None:
         concept_id = next_pk(Concept, 'concept_id')
 
@@ -160,6 +165,7 @@ def _get_or_create_concept(*, concept_code, concept_name, vocabulary_id, domain_
         vocabulary=_get_or_create_vocab(vocabulary_id, vocabulary_name=vocabulary_id),
         concept_class=_get_or_create_concept_class(concept_class_id),
         standard_concept=standard_concept,
+        source='HealthKey' if is_local_mint else None,
         concept_code=concept_code,
         valid_start_date='1970-01-01',
         valid_end_date='2099-12-31',
