@@ -13,7 +13,7 @@ from io import StringIO
 import pytest
 from django.core.management import call_command, CommandError
 
-from omop_core.models import DrugExposure, Measurement, Observation, PatientRecord
+from omop_core.models import Concept, DrugExposure, Measurement, Observation, PatientRecord
 from omop_core.services.mappings import (
     WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB,
 )
@@ -51,6 +51,27 @@ def _seed_loinc_concepts_the_command_assumes_exist():
         '21901-4': 'Distant metastases.pathology [Class] Cancer',
     }.items():
         _loinc_concept(code, name)
+
+    # Behaviour and response concepts, derived from the command's own tables.
+    # The command resolves these by (vocabulary_id, concept_code) and raises if
+    # one is missing — it no longer mints them, because minting at
+    # concept_id=int(code) produced duplicates shadowing the genuine SNOMED
+    # concepts (#415). Deriving the fixture keeps it in step when a code changes,
+    # which a literal list would not.
+    #
+    # The four response codes remain the SNOMED 1828xxxx values even though they
+    # mean "Drug treatment stopped - medical advice / ineffective / side effect
+    # / inconvenient" rather than treatment response. That mismatch is a known
+    # defect left in place deliberately: six consumers read them, and the fix is
+    # per-disease outcome value sets, since only breast cancer uses RECIST
+    # (lymphoma uses Lugano, myeloma IMWG, CLL iwCLL).
+    from omop_core.management.commands.enrich_breast_cancer_omop_data import (
+        _RESPONSE_CODES, _TOBACCO_CODES,
+    )
+    for (vocab, code), (name, _weight) in _TOBACCO_CODES.items():
+        _loinc_concept(code, name, vocabulary_id=vocab, domain_id='Observation')
+    for (vocab, code), name in _RESPONSE_CODES.items():
+        _loinc_concept(code, name, vocabulary_id=vocab, domain_id='Observation')
 
     observation_domain = {
         'steps', 'active_minutes', 'sleep_duration', 'flights_climbed',
@@ -283,6 +304,30 @@ class TestRefreshesPatientRecord:
         org = PatientRecordFactory(person=breast_person, disease='Breast Cancer').organization
         PatientRecordFactory(person=other_person, organization=org, disease='Multiple Myeloma')
         refreshed = []
+
+        monkeypatch.setattr(
+            'omop_core.management.commands.enrich_breast_cancer_omop_data.refresh_patient_record',
+            lambda person: refreshed.append(person.person_id),
+        )
+
+        call_command(
+            'enrich_breast_cancer_omop_data',
+            org_slugs=org.slug,
+            refresh_only=True,
+        )
+
+        assert refreshed == [breast_person.person_id]
+
+    def test_refresh_only_does_not_require_wearable_concepts(self, monkeypatch):
+        breast_person = PersonFactory()
+        org = PatientRecordFactory(person=breast_person, disease='Breast Cancer').organization
+        refreshed = []
+        wearable_filters = [
+            {'vocabulary_id': WEARABLE_CONCEPT_VOCAB[metric_key], 'concept_code': code}
+            for metric_key, code in WEARABLE_CONCEPT_CODE.items()
+        ]
+        for lookup in wearable_filters:
+            Concept.objects.filter(**lookup).delete()
 
         monkeypatch.setattr(
             'omop_core.management.commands.enrich_breast_cancer_omop_data.refresh_patient_record',

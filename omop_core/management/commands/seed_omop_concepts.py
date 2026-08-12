@@ -97,6 +97,8 @@ _CONCEPT_CLASSES = [
     dict(concept_class_id='Gender',              concept_class_name='Gender',               concept_class_concept_id=0),
     dict(concept_class_id='Regimen',             concept_class_name='Regimen',              concept_class_concept_id=0),
     dict(concept_class_id='Undefined',           concept_class_name='Undefined',            concept_class_concept_id=0),
+    dict(concept_class_id='Clinical Finding',    concept_class_name='Clinical Finding',     concept_class_concept_id=0),
+    dict(concept_class_id='Context-dependent',   concept_class_name='Context-dependent',    concept_class_concept_id=0),
 ]
 
 
@@ -349,6 +351,29 @@ _CONCEPTS = [
     _c(1761351,  'Flights climbed [#] Reporting Period',                       'Observation', 'LOINC', 'Clinical Observation', 'S', '100304-5', date(2022, 8, 8)),
     _c(1001786,  'Calories burned in unspecified time --during activity',      'Measurement', 'LOINC', 'Clinical Observation', 'S', '93819-1',  date(2019, 12, 13)),
 
+    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Concepts read by enrich_breast_cancer_omop_data, seeded with their genuine
+    # Athena concept_ids so a database without a full vocabulary load can still
+    # run enrichment. The command previously minted these itself at
+    # concept_id=int(code), which produced the duplicate rows in #415.
+    #
+    # concept_name is the vocabulary's own, NOT the meaning the command assigns.
+    # The four 1828xxxx codes really do mean "drug treatment stopped"; the
+    # command uses them for treatment response, which is a known defect left in
+    # place because six consumers read them and the correct fix is per-disease
+    # outcome value sets (RECIST for breast cancer, Lugano for lymphoma, IMWG
+    # for myeloma, iwCLL for CLL). Seeding them under their real names keeps the
+    # vocabulary honest and makes the mismatch visible.
+    # ------------------------------------------------------------------
+    _c(4144272, 'Never smoked tobacco',                    'Observation', 'SNOMED', 'Clinical Finding',    None, '266919005'),
+    _c(4310250, 'Ex-smoker',                               'Observation', 'SNOMED', 'Clinical Finding',    None, '8517006'),
+    _c(4298794, 'Smoker',                                  'Observation', 'SNOMED', 'Clinical Finding',    None, '77176002'),
+    _c(4057412, 'Drug treatment stopped - medical advice', 'Observation', 'SNOMED', 'Context-dependent',   'S',  '182840001'),
+    _c(4082386, 'Doctor stopped drugs - ineffective',      'Observation', 'SNOMED', 'Context-dependent',   'S',  '182841002'),
+    _c(4056953, 'Doctor stopped drugs - side effect',      'Observation', 'SNOMED', 'Context-dependent',   'S',  '182842009'),
+    _c(4056954, 'Doctor stopped drugs - inconvenient',     'Observation', 'SNOMED', 'Context-dependent',   'S',  '182843004'),
+
     # Wearable metrics with NO LOINC equivalent — locally minted, quarantined
     # under HK-Wearable with source='HealthKey' and ids in the OHDSI custom
     # range. LOINC has no concept for step length, double-support percentage,
@@ -504,9 +529,25 @@ class Command(BaseCommand):
                         cc_created += 1
 
             # Concepts
-            c_created = c_existing = 0
+            c_created = c_existing = c_skipped = 0
             for row in _CONCEPTS:
+                clash_ids = list(
+                    Concept.objects
+                    .filter(vocabulary_id=row['vocabulary_id'],
+                            concept_code=row['concept_code'])
+                    .exclude(concept_id=row['concept_id'])
+                    .values_list('concept_id', flat=True)[:5]
+                )
                 if dry_run:
+                    if clash_ids:
+                        # Reported in the preview too: without this the dry run
+                        # promised rows the real run skips.
+                        self.stdout.write(self.style.WARNING(
+                            f"  [would skip] {row['concept_id']:>8}  "
+                            f"{row['concept_code']:<12}  already present under "
+                            f"concept_id {clash_ids} — would duplicate"))
+                        c_skipped += 1
+                        continue
                     exists = Concept.objects.filter(concept_id=row['concept_id']).exists()
                     status = 'exists' if exists else 'would create'
                     self.stdout.write(
@@ -516,6 +557,20 @@ class Command(BaseCommand):
                     else:
                         c_existing += 1
                 else:
+                    # get_or_create keys on concept_id alone, so on a database
+                    # that already holds a different row for this
+                    # (vocabulary_id, concept_code) — e.g. a legacy mint at
+                    # concept_id=int(code) — it would insert a second one and
+                    # manufacture the very shadow this seeding exists to avoid.
+                    # There is no unique constraint to stop it (see #415).
+                    if clash_ids:
+                        self.stdout.write(self.style.WARNING(
+                            f"  skipped {row['concept_id']} "
+                            f"({row['vocabulary_id']}, {row['concept_code']}): already "
+                            f"present under concept_id {clash_ids} — seeding would "
+                            f"create a duplicate. Clean up first (#415)."))
+                        c_skipped += 1
+                        continue
                     _, created = Concept.objects.get_or_create(
                         concept_id=row['concept_id'], defaults=row)
                     if created:
@@ -531,6 +586,7 @@ class Command(BaseCommand):
             f'Domains: {d_created} new  |  '
             f'ConceptClasses: {cc_created} new  |  '
             f'Concepts: {c_created} new, {c_existing} already present'
+            + (f', {c_skipped} skipped (would duplicate)' if c_skipped else '')
         )
         if dry_run:
             self.stdout.write(self.style.WARNING(f'\nDry-run summary: {summary}'))
