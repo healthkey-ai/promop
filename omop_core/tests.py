@@ -4006,3 +4006,107 @@ class RemapShadowConceptsEdgeCaseTest(TestCase):
                       'the dry run must disclose that another table will be mutated')
         self.assertNotIn('not removable', out.getvalue(),
                          'a SET_NULL referrer does not block deletion')
+
+
+class NoFalselyStandardMintsTest(TestCase):
+    """Locally-minted concepts must not claim standard_concept='S' (#453).
+
+    standard_concept is an OHDSI curation designation, not a quality flag: one
+    vocabulary is chosen as canonical per domain and its concepts marked 'S',
+    everything else being non-standard and mapped onward via 'Maps to'. A mint
+    claiming 'S' breaks three things — it is unreachable from concept_ancestor
+    while appearing standard to tooling, DQD assumes 'S' implies membership of
+    the standard vocabulary set, and where it shadows a genuine non-standard
+    concept every standard_concept='S' filter prefers the fabrication.
+
+    That last one was not hypothetical. Before #446 the only "Standard" tobacco
+    concepts in the database were this codebase's own mints:
+
+        4144272    SNOMED  266919005  std=None   <- genuine
+        266919005  SNOMED  266919005  std=S      <- the mint
+    """
+
+    def test_rxnav_runtime_mint_is_local_but_not_standard(self):
+        from omop_core.models import Concept
+        from omop_core.services.rxnav_service import _create_rxnorm_concept
+
+        concept = _create_rxnorm_concept('9990001', 'Review Drug')
+
+        concept.refresh_from_db()
+        self.assertEqual(concept.vocabulary_id, 'RxNorm')
+        self.assertEqual(concept.source, 'HealthKey')
+        self.assertIsNone(concept.standard_concept)
+        self.assertFalse(
+            Concept.objects.filter(source='HealthKey', standard_concept='S').exists())
+
+    def test_mint_helpers_do_not_default_to_standard(self):
+        """The two helpers took standard_concept='S' as a DEFAULT, so every
+        caller inherited a falsely-Standard concept without ever writing 'S'
+        — invisible in a diff and in review."""
+        import inspect
+        from omop_core.management.commands import (
+            enrich_synthea_mm_omop_data, fill_org_analytics_gaps,
+        )
+
+        for module in (fill_org_analytics_gaps, enrich_synthea_mm_omop_data):
+            sig = inspect.signature(module._get_or_create_concept)
+            default = sig.parameters['standard_concept'].default
+            self.assertIsNone(
+                default,
+                f'{module.__name__}._get_or_create_concept defaults '
+                f'standard_concept to {default!r}; minting must be non-standard '
+                f'unless a caller deliberately mirrors a genuine concept')
+
+    def test_helper_mints_are_tagged_local_and_not_standard(self):
+        """A mint with no source is indistinguishable from vocabulary content,
+        which is why backfill_concept_source had to find them by id range."""
+        from omop_core.management.commands import (
+            enrich_synthea_mm_omop_data, fill_org_analytics_gaps,
+        )
+
+        for idx, module in enumerate(
+            (fill_org_analytics_gaps, enrich_synthea_mm_omop_data),
+            start=1,
+        ):
+            concept = module._get_or_create_concept(
+                concept_code=f'REVIEW-MINT-{idx}',
+                concept_name=f'Review mint {idx}',
+                vocabulary_id='LOCAL',
+                domain_id='Observation',
+                concept_class_id='Clinical Observation',
+            )
+
+            concept.refresh_from_db()
+            self.assertEqual(concept.source, 'HealthKey')
+            self.assertIsNone(concept.standard_concept)
+
+    def test_type_concept_32817_is_mirrored_not_fabricated(self):
+        from omop_core.models import Concept
+        from omop_core.management.commands import (
+            enrich_synthea_mm_omop_data, fill_org_analytics_gaps,
+        )
+
+        Concept.objects.filter(concept_id=32817).delete()
+
+        first = fill_org_analytics_gaps._analytics_type_concept()
+        self.assertEqual(first.concept_id, 32817)
+        self.assertEqual(first.vocabulary_id, 'Type Concept')
+        self.assertEqual(first.concept_code, 'OMOP4976890')
+        self.assertEqual(first.standard_concept, 'S')
+        self.assertIsNone(first.source)
+
+        Concept.objects.filter(concept_id=32817).delete()
+        second = enrich_synthea_mm_omop_data._get_or_create_concept(
+            concept_code='OMOP4976890',
+            concept_name='EHR',
+            vocabulary_id='Type Concept',
+            domain_id='Type Concept',
+            concept_class_id='Type Concept',
+            standard_concept='S',
+            concept_id=32817,
+        )
+        self.assertEqual(second.concept_id, 32817)
+        self.assertEqual(second.vocabulary_id, 'Type Concept')
+        self.assertEqual(second.concept_code, 'OMOP4976890')
+        self.assertEqual(second.standard_concept, 'S')
+        self.assertIsNone(second.source)

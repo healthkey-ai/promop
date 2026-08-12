@@ -1274,7 +1274,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     domain=domain,
                     vocabulary=vocabulary,
                     concept_class=concept_class,
-                    standard_concept='S',
+                    # Locally minted, so not Standard: only OHDSI assigns that,
+                    # and a mint claiming 'S' is unreachable from
+                    # concept_ancestor while appearing standard to tooling. The
+                    # source tag below is already correct. See #453.
+                    standard_concept=None,
                     source='HealthKey',
                     concept_code=concept_code,
                     valid_start_date=datetime(1970, 1, 1).date(),

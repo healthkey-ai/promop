@@ -132,7 +132,7 @@ def _get_or_create_concept_class(concept_class_id):
 
 
 def _get_or_create_concept(*, concept_code, concept_name, vocabulary_id, domain_id, concept_class_id,
-                           standard_concept='S', concept_id=None, create=True):
+                           standard_concept=None, concept_id=None, create=True):
     if concept_id is not None:
         concept = Concept.objects.filter(concept_id=concept_id).select_related(
             'vocabulary', 'domain', 'concept_class'
@@ -150,6 +150,14 @@ def _get_or_create_concept(*, concept_code, concept_name, vocabulary_id, domain_
     if not create:
         return None
 
+    # Supplying a concept_id is not enough to prove we are mirroring Athena.
+    # The common failure is a fabricated row whose code equals its id. Genuine
+    # type concepts use the Type Concept vocabulary and OMOP... codes.
+    is_external_mirror = (
+        concept_id is not None
+        and vocabulary_id != 'LOCAL'
+        and not str(concept_code).isdigit()
+    )
     if concept_id is None:
         concept_id = next_pk(Concept, 'concept_id')
 
@@ -160,6 +168,7 @@ def _get_or_create_concept(*, concept_code, concept_name, vocabulary_id, domain_
         vocabulary=_get_or_create_vocab(vocabulary_id, vocabulary_name=vocabulary_id),
         concept_class=_get_or_create_concept_class(concept_class_id),
         standard_concept=standard_concept,
+        source=None if is_external_mirror else 'HealthKey',
         concept_code=concept_code,
         valid_start_date='1970-01-01',
         valid_end_date='2099-12-31',
@@ -538,11 +547,12 @@ class Command(BaseCommand):
         touched_person_ids = []
 
         ehr_type = _get_or_create_concept(
-            concept_code='32817',
+            concept_code='OMOP4976890',
             concept_name='EHR',
-            vocabulary_id='OMOP',
+            vocabulary_id='Type Concept',
             domain_id='Type Concept',
             concept_class_id='Type Concept',
+            standard_concept='S',
             concept_id=32817,
             create=not dry_run,
         )
