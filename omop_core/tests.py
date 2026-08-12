@@ -3501,3 +3501,30 @@ class ConceptIdIsNotAConceptCodeTest(TestCase):
         self.assertEqual(
             resolved.concept_id, 4144272,
             'must pick the genuine Athena row, not the code-as-id shadow')
+
+    def test_resolve_concept_ignores_retired_duplicates(self):
+        """Athena loads retain invalid concepts for history.
+
+        Resolution must not let the "lowest concept_id wins" duplicate heuristic
+        pick a retired row over the active concept.
+        """
+        from omop_core.management.commands.enrich_breast_cancer_omop_data import (
+            _resolve_concept,
+        )
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+
+        call_command('seed_omop_concepts', verbosity=0)
+        vocab = Vocabulary.objects.get(vocabulary_id='SNOMED')
+        domain = Domain.objects.get(domain_id='Observation')
+        cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
+        Concept.objects.create(
+            concept_id=4000000, concept_name='Retired never smoked tobacco',
+            domain=domain, vocabulary=vocab, concept_class=cc,
+            standard_concept='S', concept_code='266919005', invalid_reason='U',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+
+        resolved = _resolve_concept('SNOMED', '266919005', 'Never smoked tobacco')
+
+        self.assertEqual(
+            resolved.concept_id, 4144272,
+            'retired candidates must not be selected even when they sort lower')

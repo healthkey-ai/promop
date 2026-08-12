@@ -13,7 +13,7 @@ from io import StringIO
 import pytest
 from django.core.management import call_command, CommandError
 
-from omop_core.models import DrugExposure, Measurement, Observation, PatientRecord
+from omop_core.models import Concept, DrugExposure, Measurement, Observation, PatientRecord
 from omop_core.services.mappings import (
     WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB,
 )
@@ -304,6 +304,30 @@ class TestRefreshesPatientRecord:
         org = PatientRecordFactory(person=breast_person, disease='Breast Cancer').organization
         PatientRecordFactory(person=other_person, organization=org, disease='Multiple Myeloma')
         refreshed = []
+
+        monkeypatch.setattr(
+            'omop_core.management.commands.enrich_breast_cancer_omop_data.refresh_patient_record',
+            lambda person: refreshed.append(person.person_id),
+        )
+
+        call_command(
+            'enrich_breast_cancer_omop_data',
+            org_slugs=org.slug,
+            refresh_only=True,
+        )
+
+        assert refreshed == [breast_person.person_id]
+
+    def test_refresh_only_does_not_require_wearable_concepts(self, monkeypatch):
+        breast_person = PersonFactory()
+        org = PatientRecordFactory(person=breast_person, disease='Breast Cancer').organization
+        refreshed = []
+        wearable_filters = [
+            {'vocabulary_id': WEARABLE_CONCEPT_VOCAB[metric_key], 'concept_code': code}
+            for metric_key, code in WEARABLE_CONCEPT_CODE.items()
+        ]
+        for lookup in wearable_filters:
+            Concept.objects.filter(**lookup).delete()
 
         monkeypatch.setattr(
             'omop_core.management.commands.enrich_breast_cancer_omop_data.refresh_patient_record',

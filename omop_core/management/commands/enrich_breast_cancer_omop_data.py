@@ -280,7 +280,8 @@ def _resolve_concept(vocabulary_id, concept_code, concept_name):
     """
     candidates = list(
         Concept.objects
-        .filter(vocabulary_id=vocabulary_id, concept_code=concept_code)
+        .filter(vocabulary_id=vocabulary_id, concept_code=concept_code,
+                invalid_reason__isnull=True)
         .order_by('concept_id')[:5]
     )
     if not candidates:
@@ -509,22 +510,23 @@ class Command(BaseCommand):
         # Pre-fetch all wearable LOINC concepts in one query. This avoids N+1
         # Concept.objects.get() calls inside _create_missing_wearable_measurements
         # and provides an early abort if any required concept is missing.
-        self._write_progress('Pre-fetching wearable LOINC concepts...')
         wearable_concepts = {}
-        # Scope by (vocabulary_id, concept_code): a bare concept_code is
-        # ambiguous — 852 codes are reused across vocabularies — and four
-        # wearable metrics live in HK-Wearable rather than LOINC.
-        for metric_key, concept_code in WEARABLE_CONCEPT_CODE.items():
-            concept = Concept.objects.filter(
-                vocabulary_id=WEARABLE_CONCEPT_VOCAB[metric_key],
-                concept_code=concept_code,
-            ).first()
-            if concept is None:
-                raise CommandError(
-                    f'Required wearable concept {concept_code!r} ({metric_key}) '
-                    f'not found in Concept table. Run seed_omop_concepts first.'
+        if person_ids:
+            self._write_progress('Pre-fetching wearable LOINC concepts...')
+            # Scope by (vocabulary_id, concept_code): a bare concept_code is
+            # ambiguous — 852 codes are reused across vocabularies — and four
+            # wearable metrics live in HK-Wearable rather than LOINC.
+            for metric_key, concept_code in WEARABLE_CONCEPT_CODE.items():
+                concept = Concept.objects.filter(
+                    vocabulary_id=WEARABLE_CONCEPT_VOCAB[metric_key],
+                    concept_code=concept_code,
+                ).first()
+                if concept is None:
+                    raise CommandError(
+                        f'Required wearable concept {concept_code!r} ({metric_key}) '
+                        f'not found in Concept table. Run seed_omop_concepts first.'
                 )
-            wearable_concepts[metric_key] = concept
+                wearable_concepts[metric_key] = concept
 
         ehr_type_concept_id = CONCEPT_EHR_TYPE
         counts = {
