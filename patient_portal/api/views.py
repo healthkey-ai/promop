@@ -4606,9 +4606,14 @@ def _upsert_key(instance, sv_field, date_field, extra_fields):
 
     A row with no source_value or no date cannot be matched against anything, so
     it is always inserted rather than silently merged with every other keyless
-    row in the batch. Numeric parts need no normalisation: Python compares and
-    hashes Decimal against int/float by value, so Decimal('5.00000') off the row
-    and Decimal('5.0') off the request body land in the same bucket.
+    row in the batch. The numeric part needs no normalisation *because both sides
+    are Decimal*: value_as_number is a DecimalField, so DRF hands back a Decimal
+    and the DB column returns one, and Decimal compares and hashes across
+    exponents — Decimal('5.00000') off the row and Decimal('5.0') off the request
+    body land in the same bucket. That does not generalise to float: most
+    non-integer floats compare unequal to the Decimal of the same literal
+    (Decimal('0.1') != 0.1), so a FloatField joining a key here would need
+    explicit normalisation to one type.
     """
     sv = getattr(instance, sv_field, None)
     event_date = getattr(instance, date_field, None)
