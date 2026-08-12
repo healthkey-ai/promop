@@ -4046,11 +4046,18 @@ class RemapCodeAsIdConceptsCommandTest(TestCase):
             observation_date=date(2024, 7, 1),
             observation_type_concept=Concept.objects.get(concept_id=32817))
 
+    def _mark_participating(self, concept):
+        from omop_core.models import ConceptSynonym
+        ConceptSynonym.objects.create(
+            concept=concept, concept_synonym_name=f'{concept.concept_name} synonym',
+            language_concept_id=32817)
+
     def _mint_pair(self):
         """A code-as-id mint and the genuine concept it duplicates."""
         # Deliberately not a code seed_omop_concepts seeds: those ids now exist
         # in the test database and the fixture would collide on the PK.
         genuine = self._concept(4900001, '9517006', 'Test finding', standard=None)
+        self._mark_participating(genuine)
         mint = self._concept(9517006, '9517006', 'Test finding')
         return mint, genuine
 
@@ -4134,6 +4141,23 @@ class RemapCodeAsIdConceptsCommandTest(TestCase):
         self.assertEqual(row.observation_concept_id, standard.concept_id)
         self.assertEqual(row.observation_source_concept_id, genuine.concept_id)
 
+    def test_counterpart_must_participate_in_vocabulary_graph(self):
+        from io import StringIO
+        from omop_core.models import Concept, Observation
+
+        isolated_counterpart = self._concept(4900004, '5550005', 'Isolated duplicate')
+        mint = self._concept(5550005, '5550005', 'Isolated duplicate')
+        self._observation(mint, obs_id=900003)
+
+        out = StringIO()
+        call_command('remap_code_as_id_concepts', '--apply', stdout=out)
+
+        row = Observation.objects.get(observation_id=900003)
+        self.assertEqual(row.observation_concept_id, mint.concept_id)
+        self.assertTrue(Concept.objects.filter(concept_id=mint.concept_id).exists())
+        self.assertTrue(Concept.objects.filter(concept_id=isolated_counterpart.concept_id).exists())
+        self.assertIn('no genuine counterpart', out.getvalue())
+
     def test_affected_patient_records_are_marked_stale(self):
         from omop_core.models import PatientRecord
 
@@ -4145,3 +4169,43 @@ class RemapCodeAsIdConceptsCommandTest(TestCase):
 
         self.assertEqual(
             PatientRecord.objects.get(person=self.person).derivation_version, 0)
+
+    def test_dry_run_reports_residual_blocking_references(self):
+        from io import StringIO
+        from omop_core.models import Concept, ProcedureOccurrence
+
+        mint, _ = self._mint_pair()
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=891107, person=self.person,
+            procedure_concept=Concept.objects.get(concept_id=0),
+            procedure_date=date(2024, 7, 1),
+            procedure_type_concept=mint)
+
+        out = StringIO()
+        call_command('remap_code_as_id_concepts', '--dry-run', stdout=out)
+
+        self.assertIn('would remain referenced by', out.getvalue())
+        self.assertIn('ProcedureOccurrence.procedure_type_concept_id=1', out.getvalue())
+        self.assertIn('not removable', out.getvalue())
+
+    def test_set_null_referrer_is_disclosed_on_dry_run_and_apply(self):
+        from io import StringIO
+        from omop_core.models import Concept, RegimenMappingGap
+
+        mint, _ = self._mint_pair()
+        self._observation(mint, obs_id=900004)
+        RegimenMappingGap.objects.create(
+            source_system='test', source_value='test regimen',
+            normalized_name='test regimen', quarantine_concept=mint)
+
+        dry_out = StringIO()
+        call_command('remap_code_as_id_concepts', '--dry-run', stdout=dry_out)
+        self.assertIn('SET_NULL', dry_out.getvalue())
+        self.assertNotIn('not removable', dry_out.getvalue())
+
+        apply_out = StringIO()
+        call_command('remap_code_as_id_concepts', '--apply', stdout=apply_out)
+        self.assertIn('NULLed', apply_out.getvalue())
+        self.assertIsNone(
+            RegimenMappingGap.objects.get(normalized_name='test regimen').quarantine_concept)
+        self.assertFalse(Concept.objects.filter(concept_id=mint.concept_id).exists())
