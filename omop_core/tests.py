@@ -4008,6 +4008,207 @@ class RemapShadowConceptsEdgeCaseTest(TestCase):
                          'a SET_NULL referrer does not block deletion')
 
 
+class RemapCodeAsIdConceptsCommandTest(TestCase):
+    """Covers remap_code_as_id_concepts (see #452).
+
+    A concept whose concept_id equals its concept_code was minted locally by
+    code doing `concept_id = int(concept_code)` — the root pattern of #415.
+    These sit below the 392021xxx block that #436 cleaned up.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Person
+        call_command('seed_omop_concepts', verbosity=0)
+        cls.person = Person.objects.create(person_id=800001, year_of_birth=1970)
+
+    def _concept(self, concept_id, code, name, vocabulary_id='SNOMED',
+                 domain='Observation', standard='S'):
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id=vocabulary_id,
+            defaults={'vocabulary_name': vocabulary_id, 'vocabulary_concept_id': 0})
+        dom, _ = Domain.objects.get_or_create(
+            domain_id=domain, defaults={'domain_name': domain, 'domain_concept_id': 0})
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Clinical Observation',
+            defaults={'concept_class_name': 'Clinical Observation',
+                      'concept_class_concept_id': 0})
+        return Concept.objects.create(
+            concept_id=concept_id, concept_name=name, domain=dom, vocabulary=vocab,
+            concept_class=cc, standard_concept=standard, concept_code=code,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+
+    def _observation(self, concept, obs_id=900001):
+        from omop_core.models import Concept, Observation
+        return Observation.objects.create(
+            observation_id=obs_id, person=self.person, observation_concept=concept,
+            observation_date=date(2024, 7, 1),
+            observation_type_concept=Concept.objects.get(concept_id=32817))
+
+    def _mark_participating(self, concept):
+        from omop_core.models import ConceptSynonym
+        ConceptSynonym.objects.create(
+            concept=concept, concept_synonym_name=f'{concept.concept_name} synonym',
+            language_concept_id=32817)
+
+    def _mint_pair(self):
+        """A code-as-id mint and the genuine concept it duplicates."""
+        # Deliberately not a code seed_omop_concepts seeds: those ids now exist
+        # in the test database and the fixture would collide on the PK.
+        genuine = self._concept(4900001, '9517006', 'Test finding', standard=None)
+        self._mark_participating(genuine)
+        mint = self._concept(9517006, '9517006', 'Test finding')
+        return mint, genuine
+
+    def test_dry_run_writes_nothing(self):
+        from omop_core.models import Concept, Observation
+
+        mint, _ = self._mint_pair()
+        self._observation(mint)
+        call_command('remap_code_as_id_concepts', '--dry-run', verbosity=0)
+        self.assertEqual(
+            Observation.objects.get(observation_id=900001).observation_concept_id, 9517006)
+        self.assertTrue(Concept.objects.filter(concept_id=9517006).exists())
+
+    def test_apply_repoints_and_deletes(self):
+        from omop_core.models import Concept, Observation
+
+        mint, genuine = self._mint_pair()
+        self._observation(mint)
+
+        call_command('remap_code_as_id_concepts', '--apply', verbosity=0)
+
+        row = Observation.objects.get(observation_id=900001)
+        self.assertEqual(row.observation_concept_id, genuine.concept_id)
+        self.assertEqual(row.observation_source_concept_id, genuine.concept_id)
+        self.assertFalse(Concept.objects.filter(concept_id=9517006).exists())
+
+    def test_a_concept_participating_in_the_vocabulary_is_never_touched(self):
+        """`concept_id == concept_code` alone is not conclusive — OMOP authors
+        placeholder concepts too. A genuine Athena concept always participates
+        in the vocabulary graph, so participation is the second required test.
+        Without it this command would delete real vocabulary content."""
+        from omop_core.models import Concept, ConceptSynonym
+
+        genuine_lookalike = self._concept(42894200, '42894200', 'Improved')
+        # language_concept_id is a FK; reuse a concept the seed guarantees.
+        ConceptSynonym.objects.create(
+            concept=genuine_lookalike, concept_synonym_name='Improved',
+            language_concept_id=32817)
+
+        call_command('remap_code_as_id_concepts', '--apply', verbosity=0)
+
+        self.assertTrue(
+            Concept.objects.filter(concept_id=42894200).exists(),
+            'a concept with vocabulary participation must never be deleted')
+
+    def test_mint_with_no_counterpart_is_reported_not_deleted(self):
+        """Several codes exist only as the mint — it filled a genuine gap in the
+        loaded vocabulary rather than duplicating anything. Deleting would lose
+        the meaning outright."""
+        from io import StringIO
+        from omop_core.models import Concept
+
+        orphan = self._concept(726437004, '726437004', 'Mastectomy')
+        self._observation(orphan)
+
+        out = StringIO()
+        call_command('remap_code_as_id_concepts', '--apply', stdout=out)
+
+        self.assertTrue(Concept.objects.filter(concept_id=726437004).exists())
+        self.assertIn('no genuine counterpart', out.getvalue())
+
+    def test_non_standard_genuine_follows_maps_to(self):
+        from omop_core.models import ConceptRelationship, Observation, Relationship
+
+        genuine = self._concept(4900002, '9266919', 'Test status', standard=None)
+        standard = self._concept(4900003, '9266919-std', 'Test status')
+        rel, _ = Relationship.objects.get_or_create(
+            relationship_id='Maps to',
+            defaults={'relationship_name': 'Maps to', 'is_hierarchical': '0',
+                      'defines_ancestry': '0', 'reverse_relationship_id': 'Maps to',
+                      'relationship_concept_id': 0})
+        ConceptRelationship.objects.create(
+            concept_1=genuine, concept_2=standard, relationship=rel,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+        mint = self._concept(9266919, '9266919', 'Test status')
+        self._observation(mint, obs_id=900002)
+
+        call_command('remap_code_as_id_concepts', '--apply', verbosity=0)
+
+        row = Observation.objects.get(observation_id=900002)
+        self.assertEqual(row.observation_concept_id, standard.concept_id)
+        self.assertEqual(row.observation_source_concept_id, genuine.concept_id)
+
+    def test_counterpart_must_participate_in_vocabulary_graph(self):
+        from io import StringIO
+        from omop_core.models import Concept, Observation
+
+        isolated_counterpart = self._concept(4900004, '5550005', 'Isolated duplicate')
+        mint = self._concept(5550005, '5550005', 'Isolated duplicate')
+        self._observation(mint, obs_id=900003)
+
+        out = StringIO()
+        call_command('remap_code_as_id_concepts', '--apply', stdout=out)
+
+        row = Observation.objects.get(observation_id=900003)
+        self.assertEqual(row.observation_concept_id, mint.concept_id)
+        self.assertTrue(Concept.objects.filter(concept_id=mint.concept_id).exists())
+        self.assertTrue(Concept.objects.filter(concept_id=isolated_counterpart.concept_id).exists())
+        self.assertIn('no genuine counterpart', out.getvalue())
+
+    def test_affected_patient_records_are_marked_stale(self):
+        from omop_core.models import PatientRecord
+
+        mint, _ = self._mint_pair()
+        self._observation(mint)
+        PatientRecord.objects.filter(person=self.person).update(derivation_version=99)
+
+        call_command('remap_code_as_id_concepts', '--apply', verbosity=0)
+
+        self.assertEqual(
+            PatientRecord.objects.get(person=self.person).derivation_version, 0)
+
+    def test_dry_run_reports_residual_blocking_references(self):
+        from io import StringIO
+        from omop_core.models import Concept, ProcedureOccurrence
+
+        mint, _ = self._mint_pair()
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=891107, person=self.person,
+            procedure_concept=Concept.objects.get(concept_id=0),
+            procedure_date=date(2024, 7, 1),
+            procedure_type_concept=mint)
+
+        out = StringIO()
+        call_command('remap_code_as_id_concepts', '--dry-run', stdout=out)
+
+        self.assertIn('would remain referenced by', out.getvalue())
+        self.assertIn('ProcedureOccurrence.procedure_type_concept_id=1', out.getvalue())
+        self.assertIn('not removable', out.getvalue())
+
+    def test_set_null_referrer_is_disclosed_on_dry_run_and_apply(self):
+        from io import StringIO
+        from omop_core.models import Concept, RegimenMappingGap
+
+        mint, _ = self._mint_pair()
+        self._observation(mint, obs_id=900004)
+        RegimenMappingGap.objects.create(
+            source_system='test', source_value='test regimen',
+            normalized_name='test regimen', quarantine_concept=mint)
+
+        dry_out = StringIO()
+        call_command('remap_code_as_id_concepts', '--dry-run', stdout=dry_out)
+        self.assertIn('SET_NULL', dry_out.getvalue())
+        self.assertNotIn('not removable', dry_out.getvalue())
+
+        apply_out = StringIO()
+        call_command('remap_code_as_id_concepts', '--apply', stdout=apply_out)
+        self.assertIn('NULLed', apply_out.getvalue())
+        self.assertIsNone(
+            RegimenMappingGap.objects.get(normalized_name='test regimen').quarantine_concept)
+        self.assertFalse(Concept.objects.filter(concept_id=mint.concept_id).exists())
 class NoFalselyStandardMintsTest(TestCase):
     """Locally-minted concepts must not claim standard_concept='S' (#453).
 
