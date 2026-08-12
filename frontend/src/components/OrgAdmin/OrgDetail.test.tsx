@@ -26,12 +26,65 @@ const ORG_DATA = {
   created_at: "2024-01-01T00:00:00Z",
 };
 
+const VOCABULARY_DATA = {
+  org_slug: "acme",
+  org_name: "Acme Clinic",
+  concept_count: 2,
+  concepts: [
+    {
+      concept_id: 9800001,
+      vocabulary_id: "SNOMED",
+      concept_code: "254837009",
+      concept_name: "Breast cancer",
+      domain_id: "Condition",
+      standard_concept: "S",
+      source: null,
+      group: "athena",
+      group_label: "Athena / external",
+      group_order: 0,
+      patient_count: 2,
+      instance_count: 3,
+      usage: [
+        {
+          table: "condition_occurrence",
+          column: "condition_concept_id",
+          role: "concept",
+          instance_count: 3,
+        },
+      ],
+    },
+    {
+      concept_id: 2000000101,
+      vocabulary_id: "HK-Wearable",
+      concept_code: "HK-WEAR-STRIDE",
+      concept_name: "HealthKey wearable stride",
+      domain_id: "Measurement",
+      standard_concept: "S",
+      source: "HealthKey",
+      group: "healthkey",
+      group_label: "HealthKey: HK-Wearable",
+      group_order: 1,
+      patient_count: 1,
+      instance_count: 1,
+      usage: [
+        {
+          table: "measurement",
+          column: "measurement_source_concept_id",
+          role: "source_concept",
+          instance_count: 1,
+        },
+      ],
+    },
+  ],
+};
+
 function setupMocks(overrides: Partial<typeof ORG_DATA> = {}) {
   const orgData = { ...ORG_DATA, ...overrides };
   mockGet.mockImplementation((url: string) => {
     if (url.includes("/orgs/acme/trusts/")) return Promise.resolve({ data: [] });
     if (url.includes("/orgs/acme/invitations/")) return Promise.resolve({ data: [] });
     if (url.includes("/orgs/acme/access/")) return Promise.resolve({ data: [] });
+    if (url.includes("/orgs/acme/vocabulary/")) return Promise.resolve({ data: VOCABULARY_DATA });
     if (url.includes("/orgs/acme/")) return Promise.resolve({ data: orgData });
     if (url.includes("/stats/org-disease/")) return Promise.resolve({ data: [] });
     if (url.includes("/orgs/")) return Promise.resolve({ data: [] });
@@ -187,6 +240,47 @@ describe("OrgDetail — Invite form", () => {
 
     fireEvent.change(roleSelect, { target: { value: "doctor" } });
     expect(screen.queryByPlaceholderText("Search by name or ID...")).not.toBeInTheDocument();
+  });
+});
+
+describe("OrgDetail — Vocabulary", () => {
+  it("loads and renders organization vocabulary usage", async () => {
+    setupMocks();
+    renderOrgDetail();
+    await waitFor(() => {
+      expect(screen.getByText("Acme Clinic")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("Vocabulary"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Breast cancer")).toBeInTheDocument();
+    });
+    expect(mockGet).toHaveBeenCalledWith("/orgs/acme/vocabulary/");
+    expect(screen.getByText("SNOMED")).toBeInTheDocument();
+    expect(screen.getByText("HK-Wearable")).toBeInTheDocument();
+    expect(screen.getByText(/condition_occurrence/)).toBeInTheDocument();
+    expect(screen.getByText(/measurement/)).toBeInTheDocument();
+  });
+
+  it("filters vocabulary rows by search text", async () => {
+    setupMocks();
+    renderOrgDetail();
+    await waitFor(() => {
+      expect(screen.getByText("Acme Clinic")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("Vocabulary"));
+    await waitFor(() => {
+      expect(screen.getByText("Breast cancer")).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByPlaceholderText("Search vocabulary, code, name..."), {
+      target: { value: "wearable" },
+    });
+
+    expect(screen.queryByText("Breast cancer")).not.toBeInTheDocument();
+    expect(screen.getByText("HealthKey wearable stride")).toBeInTheDocument();
   });
 });
 

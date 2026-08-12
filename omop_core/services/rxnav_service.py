@@ -73,10 +73,9 @@ def _rxnav_lookup(name: str):
 def _create_rxnorm_concept(rxcui: str, canonical_name: str):
     """Create and return a minimal Concept row for an RxNav-resolved drug.
 
-    The RXCUI is a genuine RxNorm identifier, so the row stays under the
-    RxNorm vocabulary with standard_concept='S' — but it is locally authored
-    (not part of a governed Athena load), so it is stamped
-    source='HealthKey' to distinguish it from loader-owned rows.
+    The RXCUI is a genuine RxNorm identifier, but this row did not arrive
+    through a governed Athena vocabulary load. Keep it queryable by code while
+    marking it as a local non-standard placeholder.
     """
     vocab, _ = Vocabulary.objects.get_or_create(
         vocabulary_id='RxNorm',
@@ -98,7 +97,7 @@ def _create_rxnorm_concept(rxcui: str, canonical_name: str):
             'concept_name': canonical_name[:255],
             'domain': domain,
             'concept_class': cc,
-            'standard_concept': 'S',
+            'standard_concept': None,
             'source': 'HealthKey',
             'valid_start_date': date(1970, 1, 1),
             'valid_end_date': date(2099, 12, 31),

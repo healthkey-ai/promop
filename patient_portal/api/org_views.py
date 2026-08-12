@@ -19,7 +19,7 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.core.validators import URLValidator
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, F, Q
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.utils.decorators import method_decorator
@@ -88,7 +88,10 @@ def _send_invitation_email(invitation) -> None:
         )
         raise InvitationEmailError
 
-from omop_core.models import Organization, OrgTrust, OrgInvitation, GroupAccess
+from omop_core.models import (
+    ConditionOccurrence, DrugExposure, Measurement, Observation,
+    Organization, OrgTrust, OrgInvitation, GroupAccess, ProcedureOccurrence,
+)
 from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
 from omop_core.services.access import get_admin_orgs
 from omop_core.services.pk import next_pk
@@ -132,6 +135,122 @@ def _get_or_create_invitee_identity(email):
 
 
 ROLE_RANK = {'org_admin': 3, 'doctor': 2, 'analyst': 1, 'patient': 0}
+
+NONCONFORMING_VOCABULARIES = frozenset({'LOCAL', 'FHIR', 'sct'})
+
+VOCABULARY_USAGE_SOURCES = (
+    (ConditionOccurrence, 'condition_occurrence', (
+        ('condition_concept', 'concept'),
+        ('condition_source_concept', 'source_concept'),
+    )),
+    (ProcedureOccurrence, 'procedure_occurrence', (
+        ('procedure_concept', 'concept'),
+        ('procedure_source_concept', 'source_concept'),
+    )),
+    (DrugExposure, 'drug_exposure', (
+        ('drug_concept', 'concept'),
+        ('drug_source_concept', 'source_concept'),
+    )),
+    (Measurement, 'measurement', (
+        ('measurement_concept', 'concept'),
+        ('measurement_source_concept', 'source_concept'),
+    )),
+    (Observation, 'observation', (
+        ('observation_concept', 'concept'),
+        ('observation_source_concept', 'source_concept'),
+    )),
+)
+
+
+def _vocabulary_group(vocabulary_id, source):
+    if vocabulary_id in NONCONFORMING_VOCABULARIES:
+        return 'nonconforming', 2, 'Non-conforming'
+    if (vocabulary_id or '').startswith('HK-') or source == 'HealthKey':
+        return 'healthkey', 1, f'HealthKey: {vocabulary_id}'
+    return 'athena', 0, 'Athena / external'
+
+
+def _org_vocabulary_usage(org):
+    concepts = {}
+
+    def ensure_concept(row):
+        concept_id = row['concept_id']
+        if concept_id not in concepts:
+            group, group_order, group_label = _vocabulary_group(
+                row['vocabulary_id'], row['source'],
+            )
+            concepts[concept_id] = {
+                'concept_id': concept_id,
+                'vocabulary_id': row['vocabulary_id'],
+                'concept_code': row['concept_code'],
+                'concept_name': row['concept_name'],
+                'domain_id': row['domain_id'],
+                'standard_concept': row['standard_concept'],
+                'source': row['source'],
+                'group': group,
+                'group_label': group_label,
+                'group_order': group_order,
+                'patient_ids': set(),
+                'instance_count': 0,
+                'usage': [],
+            }
+        return concepts[concept_id]
+
+    for model, table_name, fields in VOCABULARY_USAGE_SOURCES:
+        base_qs = model.objects.filter(person__patient_record__organization=org)
+        pk_name = model._meta.pk.name
+        for field_name, role in fields:
+            field_filter = {f'{field_name}__isnull': False}
+            value_exprs = {
+                'concept_id': F(f'{field_name}_id'),
+                'vocabulary_id': F(f'{field_name}__vocabulary_id'),
+                'concept_code': F(f'{field_name}__concept_code'),
+                'concept_name': F(f'{field_name}__concept_name'),
+                'domain_id': F(f'{field_name}__domain_id'),
+                'standard_concept': F(f'{field_name}__standard_concept'),
+                'source': F(f'{field_name}__source'),
+            }
+            usage_rows = (
+                base_qs
+                .filter(**field_filter)
+                .values(**value_exprs)
+                .annotate(instance_count=Count(pk_name))
+            )
+            for row in usage_rows:
+                concept = ensure_concept(row)
+                count = row['instance_count']
+                concept['instance_count'] += count
+                concept['usage'].append({
+                    'table': table_name,
+                    'column': f'{field_name}_id',
+                    'role': role,
+                    'instance_count': count,
+                })
+
+            patient_rows = (
+                base_qs
+                .filter(**field_filter)
+                .values('person_id', concept_id=F(f'{field_name}_id'))
+                .distinct()
+            )
+            for row in patient_rows:
+                if row['concept_id'] in concepts:
+                    concepts[row['concept_id']]['patient_ids'].add(row['person_id'])
+
+    result = []
+    for concept in concepts.values():
+        concept['patient_count'] = len(concept.pop('patient_ids'))
+        concept['usage'].sort(key=lambda item: (-item['instance_count'], item['table'], item['column']))
+        result.append(concept)
+
+    result.sort(key=lambda row: (
+        row['group_order'],
+        row['vocabulary_id'] or '',
+        -row['patient_count'],
+        -row['instance_count'],
+        row['concept_name'] or '',
+    ))
+    return result
 
 
 def _normalize_redirect_url(role, redirect_url):
@@ -589,6 +708,20 @@ class OrgAccessDetailView(APIView):
         grant = get_object_or_404(GroupAccess, id=access_id, org=org)
         grant.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class OrgVocabularyUsageView(APIView):
+    permission_classes = [IsStaffOrOrgAdmin]
+
+    def get(self, request, slug):
+        org = _get_org(slug)
+        concepts = _org_vocabulary_usage(org)
+        return Response({
+            'org_slug': org.slug,
+            'org_name': org.name,
+            'concept_count': len(concepts),
+            'concepts': concepts,
+        })
 
 
 # ---------------------------------------------------------------------------
