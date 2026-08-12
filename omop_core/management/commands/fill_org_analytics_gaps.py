@@ -127,12 +127,14 @@ def _get_or_create_concept(*, concept_code, concept_name, vocabulary_id, domain_
     concept = Concept.objects.filter(concept_code=concept_code, vocabulary_id=vocabulary_id).first()
     if concept:
         return concept
+    is_external_mirror = (
+        concept_id is not None
+        and vocabulary_id != 'LOCAL'
+        and not str(concept_code).isdigit()
+    )
     return Concept.objects.create(
         concept_id=concept_id or next_pk(Concept, 'concept_id'),
-        # source is set only on rows this code invents. A caller passing a real
-        # concept_id is mirroring genuine vocabulary content, and tagging that
-        # 'HealthKey' would claim authorship of something we did not write.
-        source=None if concept_id is not None else 'HealthKey',
+        source=None if is_external_mirror else 'HealthKey',
         concept_name=concept_name,
         domain=_get_or_create_domain(domain_id),
         vocabulary=_get_or_create_vocab(vocabulary_id, vocabulary_name=vocabulary_id),
@@ -146,11 +148,12 @@ def _get_or_create_concept(*, concept_code, concept_name, vocabulary_id, domain_
 
 def _analytics_type_concept():
     return _get_or_create_concept(
-        concept_code='32817',
+        concept_code='OMOP4976890',
         concept_name='EHR',
-        vocabulary_id='OMOP',
+        vocabulary_id='Type Concept',
         domain_id='Type Concept',
         concept_class_id='Type Concept',
+        standard_concept='S',
         concept_id=32817,
     )
 

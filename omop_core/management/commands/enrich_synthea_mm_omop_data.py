@@ -150,11 +150,14 @@ def _get_or_create_concept(*, concept_code, concept_name, vocabulary_id, domain_
     if not create:
         return None
 
-    # Captured before concept_id is reassigned: a caller supplying a real
-    # concept_id is mirroring genuine vocabulary content, and tagging that
-    # 'HealthKey' would claim authorship of something we did not write. Only a
-    # row whose id we allocate ourselves is a local mint.
-    is_local_mint = concept_id is None
+    # Supplying a concept_id is not enough to prove we are mirroring Athena.
+    # The common failure is a fabricated row whose code equals its id. Genuine
+    # type concepts use the Type Concept vocabulary and OMOP... codes.
+    is_external_mirror = (
+        concept_id is not None
+        and vocabulary_id != 'LOCAL'
+        and not str(concept_code).isdigit()
+    )
     if concept_id is None:
         concept_id = next_pk(Concept, 'concept_id')
 
@@ -165,7 +168,7 @@ def _get_or_create_concept(*, concept_code, concept_name, vocabulary_id, domain_
         vocabulary=_get_or_create_vocab(vocabulary_id, vocabulary_name=vocabulary_id),
         concept_class=_get_or_create_concept_class(concept_class_id),
         standard_concept=standard_concept,
-        source='HealthKey' if is_local_mint else None,
+        source=None if is_external_mirror else 'HealthKey',
         concept_code=concept_code,
         valid_start_date='1970-01-01',
         valid_end_date='2099-12-31',
@@ -544,11 +547,12 @@ class Command(BaseCommand):
         touched_person_ids = []
 
         ehr_type = _get_or_create_concept(
-            concept_code='32817',
+            concept_code='OMOP4976890',
             concept_name='EHR',
-            vocabulary_id='OMOP',
+            vocabulary_id='Type Concept',
             domain_id='Type Concept',
             concept_class_id='Type Concept',
+            standard_concept='S',
             concept_id=32817,
             create=not dry_run,
         )
