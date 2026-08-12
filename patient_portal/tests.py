@@ -16676,7 +16676,7 @@ class BulkOmopWriteTest(TestCase):
     def test_empty_list_is_a_noop(self):
         resp = self.client.post('/api/v1/measurements/', [], format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(resp.data, {'created': 0, 'ids': []})
+        self.assertEqual(resp.data, {'created': 0, 'updated': 0, 'ids': []})
 
     # --- query count ------------------------------------------------------
 
@@ -16795,8 +16795,11 @@ class BulkOmopWriteTest(TestCase):
         self.assertEqual(Measurement.objects.count(), before)
 
     def test_batch_at_exactly_the_limit_is_accepted(self):
+        # Distinct rows: the batch has to actually write OMOP_BULK_MAX_ROWS rows
+        # for the limit to mean anything, and since the write is idempotent
+        # (issue #454) a batch of identical rows would collapse to one.
         from patient_portal.api.views import OMOP_BULK_MAX_ROWS
-        rows = self._rows(1) * OMOP_BULK_MAX_ROWS
+        rows = self._rows(OMOP_BULK_MAX_ROWS)
         resp = self.client.post(
             '/api/v1/measurements/?skip_refresh=true', rows, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
@@ -17102,3 +17105,417 @@ class BulkOmopWriteTest(TestCase):
             '/api/v1/measurements/', self._rows(3), format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
         self.assertEqual(resp.data['created'], 3)
+
+
+class BulkOmopUpsertTest(TestCase):
+    """The bulk OMOP write endpoints are idempotent (issue #454).
+
+    The endpoint carries no idempotency key, so before this every ETL re-run,
+    every retry after a read timeout, and every re-parse duplicated rows the
+    server already held — one observed patient ended up with 8,879 measurements
+    from retries of writes that had in fact succeeded. Source bundles also repeat
+    events internally (41 conditions parsing to 30 distinct events), so even the
+    first load was not convergent.
+
+    These cover the four semantics ported from fhir/sync.py::_upsert_clinical —
+    re-post is a no-op, a changed concept updates in place, within-batch repeats
+    collapse, pre-existing stacked duplicates collapse — plus the properties that
+    had to survive: one refresh per batch, and a query count flat in batch size.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(person_id=32001)
+        cls.other_person = Person.objects.create(person_id=32002)
+        PatientRecord.objects.create(person=cls.person)
+        PatientRecord.objects.create(person=cls.other_person)
+
+        cls.m_concept = Concept.objects.get(concept_id=3000963)
+        # Stands in for the concept a later vocabulary load resolves the same
+        # source code to; any Concept row works, the FK is not domain-checked.
+        cls.upgraded_concept = Concept.objects.get(concept_id=4112853)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='bulk-upsert-test',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token")
+
+    # --- helpers ----------------------------------------------------------
+
+    def _rows(self, n, person=None, start_day=0, concept=None):
+        person = person or self.person
+        concept = concept or self.m_concept
+        base = date(2024, 1, 1)
+        return [
+            {
+                'person': person.person_id,
+                'measurement_concept': concept.concept_id,
+                'measurement_date': (base + timedelta(days=start_day + i)).isoformat(),
+                'measurement_type_concept': self.type_concept.concept_id,
+                'value_as_number': 5.0 + i,
+                'measurement_source_value': f'LOCAL-{i}',
+            }
+            for i in range(n)
+        ]
+
+    def _conditions(self, source_values, day='2024-01-01', concept=None):
+        concept = concept or self.m_concept
+        return [
+            {
+                'person': self.person.person_id,
+                'condition_concept': concept.concept_id,
+                'condition_start_date': day,
+                'condition_type_concept': self.type_concept.concept_id,
+                'condition_source_value': sv,
+            }
+            for sv in source_values
+        ]
+
+    def _post(self, rows, route='measurements', query='?skip_refresh=true'):
+        resp = self.client.post(f'/api/v1/{route}/{query}', rows, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        return resp.data
+
+    # --- acceptance criteria ---------------------------------------------
+
+    def test_reposting_the_same_batch_writes_no_new_rows(self):
+        """The headline case: an ETL re-run converges instead of doubling."""
+        rows = self._rows(4)
+        first = self._post(rows)
+        self.assertEqual(first['created'], 4)
+        self.assertEqual(first['updated'], 0)
+
+        second = self._post(rows)
+        self.assertEqual(second['created'], 0)
+        self.assertEqual(second['updated'], 0)
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(), 4,
+            're-posting an unchanged batch duplicated the rows')
+        # The second response still names a row per request row — the caller can
+        # keep using ids positionally without knowing whether it inserted.
+        self.assertEqual(second['ids'], first['ids'])
+
+    def test_changed_concept_updates_in_place_instead_of_duplicating(self):
+        """A vocabulary load upgrading 'No matching concept' must not strand a
+        duplicate — the stored row's concept is corrected in place."""
+        rows = self._conditions(['C50.9'])
+        created = self._post(rows, route='conditions')
+        self.assertEqual(created['created'], 1)
+
+        upgraded = self._conditions(['C50.9'], concept=self.upgraded_concept)
+        resp = self._post(upgraded, route='conditions')
+        self.assertEqual(resp['created'], 0)
+        self.assertEqual(resp['updated'], 1)
+
+        rows_now = ConditionOccurrence.objects.filter(person=self.person)
+        self.assertEqual(rows_now.count(), 1, 'the concept change duplicated the row')
+        self.assertEqual(
+            rows_now.first().condition_concept_id, self.upgraded_concept.concept_id)
+        self.assertEqual(resp['ids'], created['ids'], 'the row identity changed')
+
+    def test_repeats_within_one_batch_collapse_to_one_row(self):
+        """Source bundles repeat events; the first load must still converge."""
+        rows = self._conditions(['C50.9', 'C50.9', 'I10', 'C50.9'])
+        resp = self._post(rows, route='conditions')
+
+        self.assertEqual(resp['created'], 2)
+        self.assertEqual(
+            ConditionOccurrence.objects.filter(person=self.person).count(), 2)
+        # Every request row still maps to the row it resolved to, so a caller
+        # that stored ids positionally is not silently misaligned.
+        self.assertEqual(len(resp['ids']), 4)
+        self.assertEqual(resp['ids'][0], resp['ids'][1])
+        self.assertEqual(resp['ids'][0], resp['ids'][3])
+        self.assertNotEqual(resp['ids'][0], resp['ids'][2])
+
+    def test_last_occurrence_of_a_repeated_key_wins(self):
+        """Matches _upsert_clinical's last-wins `desired` dict, so the batch
+        converges on what the producer emitted most recently."""
+        rows = self._conditions(['C50.9']) + self._conditions(
+            ['C50.9'], concept=self.upgraded_concept)
+        resp = self._post(rows, route='conditions')
+
+        self.assertEqual(resp['created'], 1)
+        stored = ConditionOccurrence.objects.get(person=self.person)
+        self.assertEqual(
+            stored.condition_concept_id, self.upgraded_concept.concept_id)
+
+    def test_preexisting_stacked_duplicates_are_collapsed(self):
+        """Rows a previous non-idempotent load already doubled are cleaned up on
+        the next write, onto the earliest row."""
+        appended = self._post(
+            self._conditions(['C50.9']), route='conditions',
+            query='?skip_refresh=true&upsert=false')
+        again = self._post(
+            self._conditions(['C50.9']), route='conditions',
+            query='?skip_refresh=true&upsert=false')
+        self.assertEqual(
+            ConditionOccurrence.objects.filter(person=self.person).count(), 2)
+
+        resp = self._post(self._conditions(['C50.9']), route='conditions')
+        self.assertEqual(resp['created'], 0)
+        self.assertEqual(resp['updated'], 1)
+        remaining = list(ConditionOccurrence.objects.filter(person=self.person))
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(
+            remaining[0].condition_occurrence_id, appended['ids'][0],
+            'duplicates collapsed onto the wrong row — the earliest must survive')
+        self.assertFalse(
+            ConditionOccurrence.objects.filter(
+                condition_occurrence_id=again['ids'][0]).exists())
+
+    def test_collapsing_a_duplicate_removes_its_provenance(self):
+        """ProvenanceRecord points at rows via a GenericForeignKey, so nothing
+        cascades — a collapsed duplicate would leave a dangling record behind."""
+        from omop_core.models import ProvenanceRecord
+        from django.contrib.contenttypes.models import ContentType
+
+        headers = {'HTTP_X_PROVENANCE_SOURCE': 'EHR_SYNC',
+                   'HTTP_X_PROVENANCE_USER_ID': 'etl-run-9'}
+        first = self.client.post(
+            '/api/v1/conditions/?skip_refresh=true&upsert=false',
+            self._conditions(['C50.9']), format='json', **headers).data
+        dupe = self.client.post(
+            '/api/v1/conditions/?skip_refresh=true&upsert=false',
+            self._conditions(['C50.9']), format='json', **headers).data
+
+        ct = ContentType.objects.get_for_model(ConditionOccurrence)
+        self.assertEqual(ProvenanceRecord.objects.filter(content_type=ct).count(), 2)
+
+        self._post(self._conditions(['C50.9']), route='conditions')
+
+        self.assertEqual(
+            list(ProvenanceRecord.objects.filter(content_type=ct)
+                 .values_list('object_id', flat=True)),
+            [first['ids'][0]],
+            'provenance for the collapsed duplicate outlived the row')
+
+    def test_repost_writes_no_extra_provenance(self):
+        """An upsert that touched nothing wrote nothing to attribute."""
+        from omop_core.models import ProvenanceRecord
+        from django.contrib.contenttypes.models import ContentType
+
+        headers = {'HTTP_X_PROVENANCE_SOURCE': 'EHR_SYNC'}
+        rows = self._rows(3)
+        self.client.post('/api/v1/measurements/?skip_refresh=true', rows,
+                         format='json', **headers)
+        self.client.post('/api/v1/measurements/?skip_refresh=true', rows,
+                         format='json', **headers)
+
+        ct = ContentType.objects.get_for_model(Measurement)
+        self.assertEqual(ProvenanceRecord.objects.filter(content_type=ct).count(), 3)
+
+    # --- key shape --------------------------------------------------------
+
+    def test_same_day_measurements_with_different_values_both_survive(self):
+        """Measurement diverges from _upsert_clinical's (source_value, date) key.
+
+        A repeat draw of one analyte on one day is a real second result. Keying
+        measurements on (source_value, date) alone would make this batch write
+        one row and — worse — delete the other on the next load.
+        """
+        rows = [dict(self._rows(1)[0], value_as_number=v) for v in (5.0, 9.5)]
+        resp = self._post(rows)
+
+        self.assertEqual(resp['created'], 2)
+        self.assertEqual(
+            sorted(float(m.value_as_number) for m in
+                   Measurement.objects.filter(person=self.person)),
+            [5.0, 9.5])
+
+        # …and re-posting both still converges.
+        again = self._post(rows)
+        self.assertEqual(again['created'], 0)
+        self.assertEqual(Measurement.objects.filter(person=self.person).count(), 2)
+
+    def test_measurement_concept_still_upgrades_in_place(self):
+        """The concept stays outside the measurement key, so a vocabulary load
+        updates the row rather than stranding a duplicate next to it."""
+        rows = self._rows(1)
+        self._post(rows)
+        upgraded = [dict(rows[0],
+                         measurement_concept=self.upgraded_concept.concept_id)]
+        resp = self._post(upgraded)
+
+        self.assertEqual(resp['created'], 0)
+        self.assertEqual(resp['updated'], 1)
+        stored = Measurement.objects.get(person=self.person)
+        self.assertEqual(
+            stored.measurement_concept_id, self.upgraded_concept.concept_id)
+
+    def test_rows_without_an_identity_are_always_inserted(self):
+        """No source_value means no event identity. Such rows must not all
+        collapse into one another — insert, as the endpoint always did."""
+        rows = [
+            {
+                'person': self.person.person_id,
+                'measurement_concept': self.m_concept.concept_id,
+                'measurement_date': '2024-02-01',
+                'measurement_type_concept': self.type_concept.concept_id,
+                'value_as_number': 7.0,
+            }
+            for _ in range(3)
+        ]
+        resp = self._post(rows)
+        self.assertEqual(resp['created'], 3)
+        self.assertEqual(len(set(resp['ids'])), 3)
+
+    def test_upsert_is_scoped_to_the_batch_person(self):
+        """Another person's identical event must not be matched or collapsed."""
+        other = self._rows(2, person=self.other_person)
+        self.client.post('/api/v1/measurements/?skip_refresh=true', other,
+                         format='json')
+        resp = self._post(self._rows(2))
+
+        self.assertEqual(resp['created'], 2)
+        self.assertEqual(Measurement.objects.filter(person=self.person).count(), 2)
+        self.assertEqual(
+            Measurement.objects.filter(person=self.other_person).count(), 2)
+
+    def test_upsert_false_restores_append_only_writes(self):
+        """The escape hatch for callers that really do want every row appended."""
+        rows = self._rows(2)
+        self._post(rows, query='?skip_refresh=true&upsert=false')
+        resp = self._post(rows, query='?skip_refresh=true&upsert=false')
+
+        self.assertEqual(resp['created'], 2)
+        self.assertEqual(resp['updated'], 0)
+        self.assertEqual(Measurement.objects.filter(person=self.person).count(), 4)
+
+    def test_all_five_resource_types_are_idempotent(self):
+        cases = [
+            ('conditions', ConditionOccurrence, {
+                'condition_concept': self.m_concept.concept_id,
+                'condition_start_date': '2024-01-01',
+                'condition_type_concept': self.type_concept.concept_id,
+                'condition_source_value': 'SRC-1',
+            }),
+            ('drug-exposures', DrugExposure, {
+                'drug_concept': self.m_concept.concept_id,
+                'drug_exposure_start_date': '2024-01-01',
+                'drug_type_concept': self.type_concept.concept_id,
+                'drug_source_value': 'SRC-1',
+            }),
+            ('measurements', Measurement, {
+                'measurement_concept': self.m_concept.concept_id,
+                'measurement_date': '2024-01-01',
+                'measurement_type_concept': self.type_concept.concept_id,
+                'measurement_source_value': 'SRC-1',
+            }),
+            ('observations', Observation, {
+                'observation_concept': self.m_concept.concept_id,
+                'observation_date': '2024-01-01',
+                'observation_type_concept': self.type_concept.concept_id,
+                'observation_source_value': 'SRC-1',
+            }),
+            ('procedures', ProcedureOccurrence, {
+                'procedure_concept': self.m_concept.concept_id,
+                'procedure_date': '2024-01-01',
+                'procedure_type_concept': self.type_concept.concept_id,
+                'procedure_source_value': 'SRC-1',
+            }),
+        ]
+        for route, model, fields in cases:
+            with self.subTest(route=route):
+                rows = [dict(fields, person=self.person.person_id)] * 2
+                first = self._post(rows, route=route)
+                second = self._post(rows, route=route)
+                self.assertEqual(first['created'], 1, f'{route}: within-batch repeat')
+                self.assertEqual(second['created'], 0, f'{route}: re-post')
+                self.assertEqual(
+                    model.objects.filter(person=self.person).count(), 1,
+                    f'{route}: not idempotent')
+
+    # --- properties that had to survive ----------------------------------
+
+    def test_upsert_query_count_does_not_scale_with_batch_size(self):
+        """The matching SELECT must stay one query, not one per row.
+
+        _upsert_clinical queries per key, which a small FHIR compartment can
+        afford and a 1,000-row ETL chunk cannot — so the bulk path resolves the
+        whole batch with a single superset SELECT. Measured on the re-post, the
+        expensive case: every row matches something.
+        """
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+
+        def repost_cost(n, start_day):
+            rows = self._rows(n, start_day=start_day)
+            self._post(rows)
+            with CaptureQueriesContext(connection) as ctx:
+                self._post(rows)
+            return len(ctx)
+
+        self._post(self._rows(1, start_day=900))    # warm process-level caches
+        q_small = repost_cost(5, 100)
+        q_large = repost_cost(40, 200)
+        self.assertLess(
+            q_large - q_small, 10,
+            f'query count scaled with batch size: {q_small} queries to re-post 5 '
+            f'rows, {q_large} for 40. The upsert is doing per-row work.')
+
+    def test_refresh_still_runs_once_per_batch(self):
+        """The read model must not go stale, and must not be rebuilt per row —
+        including on the re-post path, where bulk_update and the collapse delete
+        would otherwise each fire their own signal-driven refresh."""
+        from unittest import mock
+        from omop_core.services import patient_record_service as prs
+
+        rows = self._conditions(['C50.9', 'I10'])
+        self.client.post('/api/v1/conditions/?skip_refresh=true&upsert=false',
+                         rows, format='json')
+        self.client.post('/api/v1/conditions/?skip_refresh=true&upsert=false',
+                         rows, format='json')
+
+        real = prs.refresh_patient_record
+        calls = []
+
+        def counting(person, *a, **kw):
+            calls.append(getattr(person, 'person_id', person))
+            return real(person, *a, **kw)
+
+        upgraded = self._conditions(['C50.9', 'I10'], concept=self.upgraded_concept)
+        with mock.patch('patient_portal.api.views.refresh_patient_record', counting), \
+             mock.patch.object(prs, 'refresh_patient_record', counting):
+            resp = self.client.post('/api/v1/conditions/', upgraded, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['updated'], 2)
+        self.assertEqual(
+            calls, [self.person.person_id],
+            f'an upsert batch triggered {len(calls)} refreshes; expected exactly 1')
+
+    def test_skip_refresh_still_defers_the_refresh_on_the_upsert_path(self):
+        rows = self._rows(2)
+        self._post(rows)
+        derived_before = PatientRecord.objects.get(person=self.person).derived_at
+        self._post(rows)
+        self.assertEqual(
+            PatientRecord.objects.get(person=self.person).derived_at,
+            derived_before)
+
+    def test_refresh_reflects_a_collapsed_duplicate(self):
+        """The read model is rebuilt after the collapse, not before it."""
+        rows = self._conditions(['C50.9'])
+        self.client.post('/api/v1/conditions/?upsert=false', rows, format='json')
+        self.client.post('/api/v1/conditions/?upsert=false', rows, format='json')
+        derived_before = PatientRecord.objects.get(person=self.person).derived_at
+
+        resp = self.client.post('/api/v1/conditions/', rows, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(
+            ConditionOccurrence.objects.filter(person=self.person).count(), 1)
+        self.assertNotEqual(
+            PatientRecord.objects.get(person=self.person).derived_at,
+            derived_before,
+            'the collapse landed without refreshing the read model')

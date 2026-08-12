@@ -717,14 +717,41 @@ The five OMOP clinical CRUD endpoints (`conditions`, `drug-exposures`, `measurem
 `observations`, `procedures`) accept a **JSON array** on POST for callers that have
 already parsed FHIR into OMOP rows. Single-dict POSTs are unchanged.
 
-Contract: `201` with `{"created": N, "ids": [...]}`, ids in request order. One
-transaction, all-or-nothing. One batch is one person (mixed-person → 400). Server
-assigns PKs via `next_pk_batch` (client-supplied PKs → 400). Per-index validation
-errors. Max 1,000 rows (`OMOP_BULK_MAX_ROWS`) → 413. Provenance comes from the
-`X-Provenance-Source` / `X-Provenance-User-Id` headers and applies to the whole
-batch; no source means no `ProvenanceRecord`, matching the single-row path.
+Contract: `201` with `{"created": N, "updated": M, "ids": [...]}`, one id per
+request row in request order. One transaction, all-or-nothing. One batch is one
+person (mixed-person → 400). Server assigns PKs via `next_pk_batch`
+(client-supplied PKs → 400). Per-index validation errors. Max 1,000 rows
+(`OMOP_BULK_MAX_ROWS`) → 413. Provenance comes from the `X-Provenance-Source` /
+`X-Provenance-User-Id` headers and applies to the whole batch; no source means no
+`ProvenanceRecord`, matching the single-row path.
 
-Two things to know before touching this code:
+**The write is idempotent by default** (issue #454). Rows are upserted on the
+event identity in `_UPSERT_KEYS`, the same identity
+`fhir/sync.py::_upsert_clinical` uses — so an ETL re-run, a retry after a read
+timeout, or a re-parse converges instead of duplicating. Semantics per key:
+event already present → left in place, its concept updated when it changed and
+any stacked historical duplicates collapsed onto the earliest row; otherwise
+inserted. Repeats within one batch collapse to a single row (last occurrence
+wins). Only the concept column is rewritten on a matched row — every other
+column is left as stored, so a re-run cannot quietly overwrite a corrected
+value. Only inserted rows get a `ProvenanceRecord`. `?upsert=false` restores
+append-only writes.
+
+| Model | Event identity |
+|---|---|
+| ConditionOccurrence, DrugExposure, Observation, ProcedureOccurrence | `(source_value, date)` |
+| Measurement | `(source_value, date, datetime, value_as_number)` |
+
+Measurement is the deliberate divergence: a patient legitimately has several
+distinct results for one analyte on one day, so `(source_value, date)` alone
+would not dedup a re-run — it would delete real results. The wider key matches
+what `fhir/sync.py::_insert_discrete_observations` already dedups on. The concept
+column stays *outside* every key, which is what lets a vocabulary load upgrade a
+stored row in place instead of stranding a duplicate beside it.
+
+A row with no `source_value` or no date has no identity and is always inserted.
+
+Three things to know before touching this code:
 
 - **`bulk_create` does not fire `post_save`**, so the `omop_core/signals.py` receivers
   that rebuild `PatientRecord` do not run. The bulk path calls `refresh_patient_record`
@@ -732,8 +759,14 @@ Two things to know before touching this code:
   rows that the read model never reflects.
 - **Query count must stay flat in batch size.** DRF resolves FKs with a per-row
   `queryset.get(pk=...)`; `_prefetch_bulk_related` collapses that to one query per FK
-  column. `BulkOmopWriteTest` asserts this with `CaptureQueriesContext` at two batch
-  sizes — treat a failure there as a real regression, not a flaky threshold.
+  column. The upsert match is one superset `SELECT` for the whole batch, not the
+  per-key query `_upsert_clinical` can afford on a small FHIR compartment.
+  `BulkOmopWriteTest` and `BulkOmopUpsertTest` assert this with
+  `CaptureQueriesContext` at two batch sizes — treat a failure there as a real
+  regression, not a flaky threshold.
+- **The collapse path deletes rows, and `post_delete` receivers are live.** The
+  whole write block runs inside `suppress_patient_record_refresh()`; without it a
+  batch that collapses duplicates fires one refresh per deleted row.
 
 ---
 

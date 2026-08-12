@@ -4570,6 +4570,194 @@ def _prefetch_bulk_related(serializer, rows):
             field.to_internal_value = _cached_pk_lookup(field, objs)
 
 
+#: Identity of a clinical event for the idempotent bulk write, mirroring
+#: ``fhir/sync.py::_upsert_clinical``: ``(source_value, date)`` is "the stable
+#: identity of a clinical event, independent of how its code resolves", so the
+#: concept column stays *outside* the key and is upgraded in place when a
+#: vocabulary load resolves a code that previously fell back to 'No matching
+#: concept'.
+#:
+#: Measurement is the one deliberate divergence. A patient legitimately has
+#: several distinct results for one analyte on one day (repeat draws, sub-daily
+#: vitals), so keying it on (source_value, date) alone would not dedup a re-run
+#: — it would delete real results and keep one. Its timestamp and value
+#: therefore join the key, which is exactly what
+#: ``fhir/sync.py::_insert_discrete_observations`` already dedups discrete
+#: readings on.
+#:
+#: Format: model name -> (source_value field, date field, concept field, extra key fields)
+_UPSERT_KEYS = {
+    'ConditionOccurrence': ('condition_source_value', 'condition_start_date',
+                            'condition_concept', ()),
+    'DrugExposure':        ('drug_source_value', 'drug_exposure_start_date',
+                            'drug_concept', ()),
+    'Measurement':         ('measurement_source_value', 'measurement_date',
+                            'measurement_concept',
+                            ('measurement_datetime', 'value_as_number')),
+    'Observation':         ('observation_source_value', 'observation_date',
+                            'observation_concept', ()),
+    'ProcedureOccurrence': ('procedure_source_value', 'procedure_date',
+                            'procedure_concept', ()),
+}
+
+
+def _upsert_key(instance, sv_field, date_field, extra_fields):
+    """Event identity of one unsaved row, or None when it has none.
+
+    A row with no source_value or no date cannot be matched against anything, so
+    it is always inserted rather than silently merged with every other keyless
+    row in the batch. The numeric part needs no normalisation *because both sides
+    are Decimal*: value_as_number is a DecimalField, so DRF hands back a Decimal
+    and the DB column returns one, and Decimal compares and hashes across
+    exponents — Decimal('5.00000') off the row and Decimal('5.0') off the request
+    body land in the same bucket. That does not generalise to float: most
+    non-integer floats compare unequal to the Decimal of the same literal
+    (Decimal('0.1') != 0.1), so a FloatField joining a key here would need
+    explicit normalisation to one type.
+    """
+    sv = getattr(instance, sv_field, None)
+    event_date = getattr(instance, date_field, None)
+    if not sv or event_date is None:
+        return None
+    return (sv, event_date) + tuple(getattr(instance, f, None) for f in extra_fields)
+
+
+class _UpsertPlan:
+    """What one bulk batch resolves to once matched against the person's rows.
+
+    Built with a single SELECT and executed with a constant number of statements
+    regardless of batch size — the property ``BulkOmopUpsertTest`` pins with
+    ``CaptureQueriesContext``. Per-row ``.get()``/``.save()`` here is what the
+    endpoint exists to avoid; ``fhir/sync.py::_upsert_clinical`` can afford its
+    per-key query because a FHIR compartment is small, a 1,000-row ETL chunk is
+    not.
+    """
+
+    def __init__(self, to_insert, row_slots, collapse_ids, to_update, touched_ids):
+        self.to_insert = to_insert        # unsaved rows needing a pk, in order
+        self.row_slots = row_slots        # per input row: ('new', slot) | ('old', pk)
+        self.collapse_ids = collapse_ids  # stacked duplicates to delete
+        self.to_update = to_update        # [(pk, concept_id)] — concept changed
+        self.touched_ids = touched_ids    # existing rows updated or de-stacked
+
+
+def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances):
+    """Match a batch of unsaved rows against what `person` already has.
+
+    Same three outcomes as ``_upsert_clinical``: an event already on file is left
+    in place (its concept updated when it changed, its stacked historical
+    duplicates collapsed onto the earliest row), and anything else is inserted.
+    Only the concept is rewritten on a matched row — every other column is left
+    as stored, so a re-run cannot quietly overwrite a value someone corrected.
+    Repeats of one event *within* the batch collapse to a single row, last
+    occurrence winning, so a source bundle that reports an event twice does not
+    write it twice.
+    """
+    sv_field, date_field, concept_field, extra_fields = _UPSERT_KEYS[model_name]
+    cid_attr = f'{concept_field}_id'
+
+    keys = [_upsert_key(inst, sv_field, date_field, extra_fields)
+            for inst in instances]
+    keyed = [k for k in keys if k is not None]
+
+    # One SELECT for every row of this person that could match the batch. The
+    # (source_value IN …, date IN …) pair is a superset of the real key set —
+    # narrowing it to exact tuples would need a per-key OR term, i.e. the query
+    # growth this endpoint exists to avoid. The superset is bounded by the
+    # person's own rows for those source values.
+    existing = {}   # key -> [pk, …] ascending
+    existing_cid = {}
+    if keyed:
+        columns = (pk_field, cid_attr, sv_field, date_field) + tuple(extra_fields)
+        rows = model_cls.objects.filter(**{
+            'person': person,
+            f'{sv_field}__in': {k[0] for k in keyed},
+            f'{date_field}__in': {k[1] for k in keyed},
+        }).order_by(pk_field).values_list(*columns)
+        for row in rows:
+            key = (row[2], row[3]) + tuple(row[4:])
+            if key in existing:
+                existing[key].append(row[0])
+            else:
+                existing[key] = [row[0]]
+                existing_cid[key] = row[1]
+
+    # Last occurrence of a repeated key wins, matching _upsert_clinical's
+    # "desired" dict — so the batch converges on the row the producer emitted
+    # most recently rather than the first one it happened to serialise.
+    last_index = {}
+    for i, key in enumerate(keys):
+        if key is not None:
+            last_index[key] = i
+
+    to_insert, row_slots = [], [None] * len(instances)
+    insert_slot, collapse_ids, to_update, touched_ids = {}, [], [], []
+
+    for i, (inst, key) in enumerate(zip(instances, keys)):
+        if key is None:                       # no identity — always insert
+            row_slots[i] = ('new', len(to_insert))
+            to_insert.append(inst)
+            continue
+
+        if key in existing:
+            keep = existing[key][0]
+            row_slots[i] = ('old', keep)
+            if last_index[key] != i:
+                continue                      # decide the key once, on its last row
+            extras = existing[key][1:]
+            collapse_ids.extend(extras)
+            new_cid = getattr(inst, cid_attr, None)
+            if existing_cid[key] != new_cid:
+                to_update.append((keep, new_cid))
+                touched_ids.append(keep)
+            elif extras:
+                touched_ids.append(keep)
+            continue
+
+        if key in insert_slot:                # repeated within this batch
+            slot = insert_slot[key]
+            if last_index[key] == i:
+                to_insert[slot] = inst
+        else:
+            slot = insert_slot[key] = len(to_insert)
+            to_insert.append(inst)
+        row_slots[i] = ('new', slot)
+
+    return _UpsertPlan(to_insert, row_slots, collapse_ids, to_update, touched_ids)
+
+
+def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
+    """Execute a plan: collapse duplicates, update changed concepts, insert the
+    rest. Returns (ids aligned with the input rows, newly inserted ids)."""
+    concept_field = _UPSERT_KEYS[model_name][2]
+    cid_attr = f'{concept_field}_id'
+
+    if plan.collapse_ids:
+        # Provenance first: it points at rows that are about to disappear, and a
+        # GenericForeignKey has no FK cascade to clean it up.
+        ProvenanceRecord.objects.filter(
+            content_type=ContentType.objects.get_for_model(model_cls),
+            object_id__in=plan.collapse_ids,
+        ).delete()
+        model_cls.objects.filter(**{f'{pk_field}__in': plan.collapse_ids}).delete()
+
+    if plan.to_update:
+        model_cls.objects.bulk_update(
+            [model_cls(**{pk_field: pk, cid_attr: cid}) for pk, cid in plan.to_update],
+            [concept_field],
+        )
+
+    new_ids = []
+    if plan.to_insert:
+        new_ids = list(next_pk_batch(model_cls, pk_field, len(plan.to_insert)))
+        for row, pk in zip(plan.to_insert, new_ids):
+            setattr(row, pk_field, pk)
+        model_cls.objects.bulk_create(plan.to_insert)
+
+    ids = [new_ids[ref] if kind == 'new' else ref for kind, ref in plan.row_slots]
+    return ids, new_ids
+
+
 class _OmopBulkCreateMixin:
     """Accept a JSON *list* on POST and insert the rows in one batched transaction.
 
@@ -4583,6 +4771,12 @@ class _OmopBulkCreateMixin:
     * A single dict body is untouched and still goes through the normal DRF path.
     * All-or-nothing: the whole batch shares one ``transaction.atomic()``.
     * One batch is one person. Mixed-person batches are rejected with 400.
+    * Idempotent by default (issue #454): rows are upserted on the event identity
+      ``_UPSERT_KEYS`` defines, the same identity ``fhir/sync.py::_upsert_clinical``
+      uses, so re-posting a batch converges instead of duplicating. The response
+      reports ``created`` vs ``updated``; ``ids`` stays positionally aligned with
+      the request rows and names the row each one resolved to. ``?upsert=false``
+      restores the append-only behaviour.
     * Query count is bounded by a constant, not by the number of rows.
     * ``bulk_create`` does not fire ``post_save``, so the ``omop_core.signals``
       receivers that rebuild ``PatientRecord`` never run. The refresh is therefore
@@ -4645,7 +4839,8 @@ class _OmopBulkCreateMixin:
         validated = serializer.validated_data
 
         if not validated:
-            return Response({'created': 0, 'ids': []}, status=status.HTTP_201_CREATED)
+            return Response({'created': 0, 'updated': 0, 'ids': []},
+                            status=status.HTTP_201_CREATED)
 
         # One batch is one person, by construction on the producer side.
         people = {attrs.get('person') for attrs in validated}
@@ -4684,6 +4879,14 @@ class _OmopBulkCreateMixin:
         skip_refresh = str(
             request.query_params.get('skip_refresh', 'false')
         ).strip().lower() in ('1', 'true', 'yes')
+        # Idempotent by default: the endpoint carries no idempotency key of any
+        # kind, so an ETL re-run, a retry after a read timeout, or a re-parse
+        # would otherwise duplicate every row it had already written. Callers
+        # that genuinely want append-only writes (an audit-style feed of rows
+        # with no stable identity) pass ?upsert=false.
+        upsert = str(
+            request.query_params.get('upsert', 'true')
+        ).strip().lower() not in ('0', 'false', 'no')
 
         from omop_core.signals import suppress_patient_record_refresh
 
@@ -4692,19 +4895,29 @@ class _OmopBulkCreateMixin:
             # receivers would not run anyway. Suppressing explicitly is the
             # documented house idiom for bulk writes (omop_core/signals.py) and
             # keeps "one refresh per batch, never per row" true even if a future
-            # change introduces a per-row save() in here.
+            # change introduces a per-row save() in here. The upsert path *does*
+            # delete collapsed duplicates, and post_delete receivers are live —
+            # so here the suppression is load-bearing, not just defensive.
             with suppress_patient_record_refresh():
-                ids = next_pk_batch(model_cls, pk_field, len(validated))
-                instances = []
-                for attrs, pk in zip(validated, ids):
-                    attrs = dict(attrs)
-                    attrs[pk_field] = pk
-                    instances.append(model_cls(**attrs))
-                model_cls.objects.bulk_create(instances)
+                instances = [model_cls(**dict(attrs)) for attrs in validated]
+                if upsert:
+                    plan = _plan_bulk_upsert(
+                        model_cls, pk_field, model_name, person, instances)
+                    ids, new_ids = _apply_upsert_plan(
+                        plan, model_cls, pk_field, model_name)
+                    updated = len(plan.touched_ids)
+                else:
+                    new_ids = list(next_pk_batch(model_cls, pk_field, len(instances)))
+                    for inst, pk in zip(instances, new_ids):
+                        setattr(inst, pk_field, pk)
+                    model_cls.objects.bulk_create(instances)
+                    ids, updated = list(new_ids), 0
 
             # No source supplied means no ProvenanceRecord, matching the single-row
             # path — inventing a source would make provenance unfalsifiable.
-            if source:
+            # Only inserted rows get one: an upsert that left a row untouched
+            # wrote nothing to attribute, matching _upsert_clinical.
+            if source and new_ids:
                 ct = ContentType.objects.get_for_model(model_cls)
                 ProvenanceRecord.objects.bulk_create([
                     ProvenanceRecord(
@@ -4716,7 +4929,7 @@ class _OmopBulkCreateMixin:
                         content_type=ct,
                         object_id=pk,
                     )
-                    for pk in ids
+                    for pk in new_ids
                 ])
 
             # Deliberately inside the transaction, and deliberately unguarded:
@@ -4736,7 +4949,7 @@ class _OmopBulkCreateMixin:
                 refresh_patient_record(person)
 
         return Response(
-            {'created': len(ids), 'ids': list(ids)},
+            {'created': len(new_ids), 'updated': updated, 'ids': list(ids)},
             status=status.HTTP_201_CREATED,
         )
 
