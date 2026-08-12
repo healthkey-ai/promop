@@ -22,7 +22,7 @@ from .org_views import (
     OrgListCreateView, OrgDetailView,
     OrgInviteView, OrgInvitationListView, OrgInvitationDetailView,
     OrgTrustListCreateView, OrgTrustDetailView,
-    OrgAccessListView, OrgAccessDetailView,
+    OrgAccessListView, OrgAccessDetailView, OrgVocabularyUsageView,
     confirm_invitation,
 )
 
@@ -77,4 +77,5 @@ urlpatterns = [
     path('orgs/<slug:slug>/trusts/<int:trust_id>/', OrgTrustDetailView.as_view(), name='org-trust-detail'),
     path('orgs/<slug:slug>/access/', OrgAccessListView.as_view(), name='org-access-list'),
     path('orgs/<slug:slug>/access/<int:access_id>/', OrgAccessDetailView.as_view(), name='org-access-detail'),
+    path('orgs/<slug:slug>/vocabulary/', OrgVocabularyUsageView.as_view(), name='org-vocabulary-usage'),
 ]

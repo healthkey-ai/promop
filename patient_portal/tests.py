@@ -8936,6 +8936,167 @@ class OrgViewSetStaffTest(TestCase):
         self.assertTrue(Person.objects.filter(pk=other_person.pk).exists())
 
 
+class OrgVocabularyUsageAPITest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user('vocab-staff@example.com', is_staff=True)
+        self.admin = _make_user('vocab-admin@example.com')
+        self.user = _make_user('vocab-user@example.com')
+        self.org = _make_org('Vocabulary Org', 'vocab-org')
+        self.other_org = _make_org('Other Vocabulary Org', 'other-vocab-org')
+        GroupAccess.objects.create(identity=self.admin, org=self.org, role='org_admin')
+
+        self.type_concept = self._concept(
+            9800000, 'EHR', 'OMOP4976890', 'Type Concept', 'Type Concept',
+        )
+        self.snomed = self._concept(
+            9800001, 'Breast cancer', '254837009', 'SNOMED', 'Condition',
+        )
+        self.hk = self._concept(
+            2000000101, 'HealthKey wearable stride', 'HK-WEAR-STRIDE',
+            'HK-Wearable', 'Measurement', source='HealthKey',
+        )
+        self.fhir = self._concept(
+            9800003, 'FHIR-coded legacy row', 'FHIR-LEGACY', 'FHIR', 'Observation',
+        )
+        self.generic_lab = self._concept(
+            9800004, 'Generic lab', '0', 'None', 'Measurement',
+        )
+
+        self.person_a = Person.objects.create(person_id=9801)
+        self.person_b = Person.objects.create(person_id=9802)
+        self.other_person = Person.objects.create(person_id=9803)
+        PatientRecord.objects.create(person=self.person_a, organization=self.org)
+        PatientRecord.objects.create(person=self.person_b, organization=self.org)
+        PatientRecord.objects.create(person=self.other_person, organization=self.other_org)
+
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=98001,
+            person=self.person_a,
+            condition_concept=self.snomed,
+            condition_start_date=date.today(),
+            condition_type_concept=self.type_concept,
+        )
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=98002,
+            person=self.person_b,
+            condition_concept=self.snomed,
+            condition_start_date=date.today(),
+            condition_type_concept=self.type_concept,
+        )
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=98003,
+            person=self.other_person,
+            condition_concept=self.snomed,
+            condition_start_date=date.today(),
+            condition_type_concept=self.type_concept,
+        )
+        Measurement.objects.create(
+            measurement_id=98004,
+            person=self.person_a,
+            measurement_concept=self.hk,
+            measurement_date=date.today(),
+            measurement_type_concept=self.type_concept,
+        )
+        Measurement.objects.create(
+            measurement_id=98005,
+            person=self.person_b,
+            measurement_concept=self.generic_lab,
+            measurement_source_concept=self.hk,
+            measurement_date=date.today(),
+            measurement_type_concept=self.type_concept,
+        )
+        Observation.objects.create(
+            observation_id=98006,
+            person=self.person_a,
+            observation_concept=self.fhir,
+            observation_date=date.today(),
+            observation_type_concept=self.type_concept,
+        )
+        Observation.objects.create(
+            observation_id=98007,
+            person=self.person_a,
+            observation_concept=self.fhir,
+            observation_date=date.today(),
+            observation_type_concept=self.type_concept,
+        )
+
+    def _concept(self, concept_id, name, code, vocabulary_id, domain_id,
+                 concept_class_id='Clinical Finding', standard='S', source=None):
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id=vocabulary_id,
+            defaults={'vocabulary_name': vocabulary_id, 'vocabulary_concept_id': 0},
+        )
+        domain, _ = Domain.objects.get_or_create(
+            domain_id=domain_id,
+            defaults={'domain_name': domain_id, 'domain_concept_id': 0},
+        )
+        concept_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id=concept_class_id,
+            defaults={
+                'concept_class_name': concept_class_id,
+                'concept_class_concept_id': 0,
+            },
+        )
+        return Concept.objects.create(
+            concept_id=concept_id,
+            concept_name=name,
+            concept_code=code,
+            vocabulary=vocab,
+            domain=domain,
+            concept_class=concept_class,
+            standard_concept=standard,
+            source=source,
+            valid_start_date=date.today(),
+            valid_end_date=date(2099, 12, 31),
+        )
+
+    def test_returns_org_scoped_vocabulary_usage_counts(self):
+        self.client.force_authenticate(user=self.staff)
+
+        resp = self.client.get('/api/orgs/vocab-org/vocabulary/')
+
+        self.assertEqual(resp.status_code, 200)
+        by_id = {row['concept_id']: row for row in resp.data['concepts']}
+        self.assertEqual(by_id[self.snomed.concept_id]['patient_count'], 2)
+        self.assertEqual(by_id[self.snomed.concept_id]['instance_count'], 2)
+        self.assertEqual(by_id[self.hk.concept_id]['patient_count'], 2)
+        self.assertEqual(by_id[self.hk.concept_id]['instance_count'], 2)
+        self.assertEqual(by_id[self.hk.concept_id]['group'], 'healthkey')
+        self.assertEqual(by_id[self.fhir.concept_id]['patient_count'], 1)
+        self.assertEqual(by_id[self.fhir.concept_id]['instance_count'], 2)
+        self.assertEqual(by_id[self.fhir.concept_id]['group'], 'nonconforming')
+        self.assertNotIn(self.type_concept.concept_id, by_id)
+        self.assertTrue(any(
+            usage['column'] == 'measurement_source_concept_id'
+            for usage in by_id[self.hk.concept_id]['usage']
+        ))
+
+    def test_orders_external_then_healthkey_then_nonconforming(self):
+        self.client.force_authenticate(user=self.staff)
+
+        resp = self.client.get('/api/orgs/vocab-org/vocabulary/')
+
+        self.assertEqual(resp.status_code, 200)
+        groups = [row['group'] for row in resp.data['concepts']]
+        self.assertLess(groups.index('athena'), groups.index('healthkey'))
+        self.assertLess(groups.index('healthkey'), groups.index('nonconforming'))
+
+    def test_org_admin_can_read_own_org_vocabulary(self):
+        self.client.force_authenticate(user=self.admin)
+
+        resp = self.client.get('/api/orgs/vocab-org/vocabulary/')
+
+        self.assertEqual(resp.status_code, 200)
+
+    def test_non_admin_cannot_read_org_vocabulary(self):
+        self.client.force_authenticate(user=self.user)
+
+        resp = self.client.get('/api/orgs/vocab-org/vocabulary/')
+
+        self.assertEqual(resp.status_code, 403)
+
+
 class OrganizationCleanupServiceTest(TestCase):
     """Shared org deletion helper must cascade patient data."""
 
