@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import ProgrammingError, connection, transaction
+from django.db import IntegrityError, ProgrammingError, connection, transaction
 from django.test import TestCase
 
 from omop_core.models import (
@@ -54,6 +54,29 @@ def _make_vocab():
         defaults={'concept_class_name': 'Clinical Finding', 'concept_class_concept_id': 0},
     )
     return vocab, dom_cond, dom_meas, dom_drug, dom_type, dom_obs, cc
+
+
+def _allow_duplicate_concept_codes():
+    """Let legacy cleanup tests build pre-#415 corrupt fixtures."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'ALTER TABLE concept DROP CONSTRAINT IF EXISTS uq_concept_vocabulary_code'
+        )
+
+
+class _AllowsDuplicateConceptCodes(TestCase):
+    """Base for commands that clean historical rows now blocked by #415."""
+
+    PERSON_ID = None
+
+    @classmethod
+    def setUpTestData(cls):
+        if cls.PERSON_ID is None:
+            raise NotImplementedError('PERSON_ID is required')
+        _allow_duplicate_concept_codes()
+        from omop_core.models import Person
+        call_command('seed_omop_concepts', verbosity=0)
+        cls.person = Person.objects.create(person_id=cls.PERSON_ID, year_of_birth=1970)
 
 
 def _concept(cid, name, domain, vocab, cc, code=None):
@@ -2344,7 +2367,7 @@ class PurgeBrokenWearableRowsCommandTest(TestCase):
             vocabulary=Vocabulary.objects.get(vocabulary_id='LOINC'),
             concept_class=ConceptClass.objects.get(concept_class_id='Clinical Observation'),
             standard_concept='S',
-            concept_code=concept_code,
+            concept_code=f'HK-RETIRED-{concept_id}',
             valid_start_date=date(1970, 1, 1),
             valid_end_date=date(2099, 12, 31),
         )
@@ -3470,63 +3493,69 @@ class ConceptIdIsNotAConceptCodeTest(TestCase):
         self.assertIn('KNOWN DEFECT', source,
                       'the mismatch must stay documented at the code table')
 
-    def test_duplicate_concept_is_resolved_deterministically_not_by_error(self):
-        """The duplicate branch had a NameError: it called logger.warning() in a
-        module with no logger. Nothing exercised it, so the fix for the
-        unrunnable-on-staging blocker was itself broken — staging would have
-        raised NameError instead of the CommandError it replaced.
-
-        Lowest concept_id is chosen because genuine Athena rows have lower ids
-        than the code-as-id mints that shadow them (4144272 vs 266919005).
-        """
-        from omop_core.management.commands.enrich_breast_cancer_omop_data import (
-            _resolve_concept,
-        )
+    def test_duplicate_concept_shadow_is_rejected_by_constraint(self):
+        """The database constraint now blocks the shadow rows #415 cleaned up."""
         from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
 
         call_command('seed_omop_concepts', verbosity=0)
         vocab = Vocabulary.objects.get(vocabulary_id='SNOMED')
         domain = Domain.objects.get(domain_id='Observation')
         cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
-        # The code-as-id shadow, alongside the genuine row seeded at 4144272.
-        Concept.objects.create(
-            concept_id=266919005, concept_name='Never smoked tobacco',
-            domain=domain, vocabulary=vocab, concept_class=cc,
-            standard_concept='S', concept_code='266919005',
-            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Concept.objects.create(
+                    concept_id=266919005, concept_name='Never smoked tobacco',
+                    domain=domain, vocabulary=vocab, concept_class=cc,
+                    standard_concept='S', concept_code='266919005',
+                    valid_start_date=date(1970, 1, 1),
+                    valid_end_date=date(2099, 12, 31))
 
-        resolved = _resolve_concept('SNOMED', '266919005', 'Never smoked tobacco')
-
-        self.assertEqual(
-            resolved.concept_id, 4144272,
-            'must pick the genuine Athena row, not the code-as-id shadow')
-
-    def test_resolve_concept_ignores_retired_duplicates(self):
-        """Athena loads retain invalid concepts for history.
-
-        Resolution must not let the "lowest concept_id wins" duplicate heuristic
-        pick a retired row over the active concept.
-        """
-        from omop_core.management.commands.enrich_breast_cancer_omop_data import (
-            _resolve_concept,
-        )
+    def test_retired_duplicate_is_rejected_by_constraint(self):
+        """Invalid/retired duplicates cannot share the same vocabulary code."""
         from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
 
         call_command('seed_omop_concepts', verbosity=0)
         vocab = Vocabulary.objects.get(vocabulary_id='SNOMED')
         domain = Domain.objects.get(domain_id='Observation')
         cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Concept.objects.create(
+                    concept_id=4000000, concept_name='Retired never smoked tobacco',
+                    domain=domain, vocabulary=vocab, concept_class=cc,
+                    standard_concept='S', concept_code='266919005',
+                    invalid_reason='U',
+                    valid_start_date=date(1970, 1, 1),
+                    valid_end_date=date(2099, 12, 31))
+
+
+class ConceptVocabularyCodeUniquenessTest(TestCase):
+    """The concept natural key is (vocabulary_id, concept_code), not concept_id."""
+
+    def test_database_rejects_duplicate_vocabulary_code_pair(self):
+        vocab, _dom_cond, dom_meas, _dom_drug, _dom_type, _dom_obs, cc = _make_vocab()
+        common = {
+            'vocabulary': vocab,
+            'domain': dom_meas,
+            'concept_class': cc,
+            'concept_code': 'DUPLICATE-CODE',
+            'valid_start_date': date(1970, 1, 1),
+            'valid_end_date': date(2099, 12, 31),
+        }
         Concept.objects.create(
-            concept_id=4000000, concept_name='Retired never smoked tobacco',
-            domain=domain, vocabulary=vocab, concept_class=cc,
-            standard_concept='S', concept_code='266919005', invalid_reason='U',
-            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+            concept_id=990001,
+            concept_name='First concept',
+            **common,
+        )
 
-        resolved = _resolve_concept('SNOMED', '266919005', 'Never smoked tobacco')
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Concept.objects.create(
+                    concept_id=990002,
+                    concept_name='Second concept',
+                    **common,
+                )
 
-        self.assertEqual(
-            resolved.concept_id, 4144272,
-            'retired candidates must not be selected even when they sort lower')
 
 class RemapLocalDrugConceptsCommandTest(TestCase):
     """Covers remap_local_drug_concepts (see #427).
@@ -3666,7 +3695,7 @@ class RemapLocalDrugConceptsCommandTest(TestCase):
             DrugExposure.objects.filter(drug_concept_id=2012334076).count(), 3,
             'rows must be left alone when the target is not Standard')
 
-class RemapShadowConceptsCommandTest(TestCase):
+class RemapShadowConceptsCommandTest(_AllowsDuplicateConceptCodes):
     """Covers remap_shadow_concepts (see #415).
 
     A block at concept_id 392021009-392021287 duplicates genuine Athena content.
@@ -3675,11 +3704,7 @@ class RemapShadowConceptsCommandTest(TestCase):
     more mints behind it.
     """
 
-    @classmethod
-    def setUpTestData(cls):
-        from omop_core.models import Person
-        call_command('seed_omop_concepts', verbosity=0)
-        cls.person = Person.objects.create(person_id=790001, year_of_birth=1970)
+    PERSON_ID = 790001
 
     def _concept(self, concept_id, code, name, vocabulary_id, domain='Procedure',
                  standard='S'):
@@ -3818,15 +3843,11 @@ class RemapShadowConceptsCommandTest(TestCase):
             PatientRecord.objects.get(person=self.person).derivation_version, 0)
 
 
-class RemapShadowConceptsEdgeCaseTest(TestCase):
+class RemapShadowConceptsEdgeCaseTest(_AllowsDuplicateConceptCodes):
     """The paths the review found untested: mints reachable only through a
     type/source column, --keep-mints, and the non-standard fallback."""
 
-    @classmethod
-    def setUpTestData(cls):
-        from omop_core.models import Person
-        call_command('seed_omop_concepts', verbosity=0)
-        cls.person = Person.objects.create(person_id=791001, year_of_birth=1970)
+    PERSON_ID = 791001
 
     def _concept(self, concept_id, code, name, vocabulary_id, standard='S'):
         from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
@@ -4008,7 +4029,7 @@ class RemapShadowConceptsEdgeCaseTest(TestCase):
                          'a SET_NULL referrer does not block deletion')
 
 
-class RemapCodeAsIdConceptsCommandTest(TestCase):
+class RemapCodeAsIdConceptsCommandTest(_AllowsDuplicateConceptCodes):
     """Covers remap_code_as_id_concepts (see #452).
 
     A concept whose concept_id equals its concept_code was minted locally by
@@ -4016,11 +4037,7 @@ class RemapCodeAsIdConceptsCommandTest(TestCase):
     These sit below the 392021xxx block that #436 cleaned up.
     """
 
-    @classmethod
-    def setUpTestData(cls):
-        from omop_core.models import Person
-        call_command('seed_omop_concepts', verbosity=0)
-        cls.person = Person.objects.create(person_id=800001, year_of_birth=1970)
+    PERSON_ID = 800001
 
     def _concept(self, concept_id, code, name, vocabulary_id='SNOMED',
                  domain='Observation', standard='S'):

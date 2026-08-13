@@ -50,7 +50,7 @@ class ConceptClassFactory(factory.django.DjangoModelFactory):
 class ConceptFactory(factory.django.DjangoModelFactory):
     class Meta:
         model = Concept
-        django_get_or_create = ('concept_id',)
+        django_get_or_create = ('vocabulary', 'concept_code')
 
     concept_id = factory.Sequence(lambda n: 9_000_000 + n)
     concept_name = factory.Sequence(lambda n: f'Concept {n}')
@@ -62,6 +62,15 @@ class ConceptFactory(factory.django.DjangoModelFactory):
     valid_start_date = '1970-01-01'
     valid_end_date = '2099-12-31'
     invalid_reason = None
+
+    @classmethod
+    def _create(cls, model_class, *args, **kwargs):
+        concept_id = kwargs.get('concept_id')
+        if concept_id is not None:
+            existing = model_class.objects.filter(concept_id=concept_id).first()
+            if existing is not None:
+                return existing
+        return super()._create(model_class, *args, **kwargs)
 
 
 class PersonFactory(factory.django.DjangoModelFactory):

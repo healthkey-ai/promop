@@ -16118,18 +16118,21 @@ class WearableUploadEndpointTest(TestCase):
                 'Observation' if metric_key in WEARABLE_OBSERVATION_METRICS
                 else 'Measurement'
             )
-            c, _ = Concept.objects.get_or_create(
-                concept_id=concept_id_base,
-                defaults={
-                    'concept_name': f'Wearable {metric_key}',
-                    'domain': domains[domain_id],
-                    'vocabulary': vocabs[WEARABLE_CONCEPT_VOCAB[metric_key]],
-                    'concept_class': cc,
-                    'concept_code': concept_code,
-                    'valid_start_date': today,
-                    'valid_end_date': far_future,
-                },
-            )
+            c = Concept.objects.filter(
+                vocabulary_id=WEARABLE_CONCEPT_VOCAB[metric_key],
+                concept_code=concept_code,
+            ).first()
+            if c is None:
+                c = Concept.objects.create(
+                    concept_id=concept_id_base,
+                    concept_name=f'Wearable {metric_key}',
+                    domain=domains[domain_id],
+                    vocabulary=vocabs[WEARABLE_CONCEPT_VOCAB[metric_key]],
+                    concept_class=cc,
+                    concept_code=concept_code,
+                    valid_start_date=today,
+                    valid_end_date=far_future,
+                )
             cls.wearable_concepts[metric_key] = c
 
         # Provenance type concept for wearable rows. This fixture previously
