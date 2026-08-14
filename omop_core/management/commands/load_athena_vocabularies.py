@@ -8,6 +8,7 @@ csv.field_size_limit(sys.maxsize)
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection
+from django.db.models import Count
 
 import logging
 
@@ -29,6 +30,11 @@ VOCAB_SCOPE = frozenset({
     # export, so it loads once a CVX-inclusive bundle is fetched.
     'SNOMED', 'ICD10CM', 'CVX',
 })
+# These vocabularies underpin the clinical concepts PROMOP presents and maps.
+# Do not include CVX here: it is deliberately absent from the current Athena
+# bundle, even though the importer supports it when a CVX-inclusive bundle is
+# used.
+REQUIRED_CLINICAL_VOCABULARIES = frozenset({'LOINC', 'RxNorm', 'SNOMED', 'ICD10CM'})
 RXNORM_CLASS_SCOPE = frozenset({'Ingredient', 'Clinical Drug', 'Branded Drug', 'Clinical Drug Comp'})
 # A --replace reload deletes the entire vocabulary before applying this filter.
 # Keep every LOINC domain already required by our deployed vocabulary; the
@@ -138,12 +144,15 @@ class Command(BaseCommand):
                             help='Clear vocabulary rows before loading')
         parser.add_argument('--dry-run', action='store_true', dest='dry_run',
                             help='Count rows without writing to DB')
+        parser.add_argument('--skip-clinical-vocabulary-verification', action='store_true',
+                            help='Do not verify that required clinical vocabularies loaded')
 
     def handle(self, *args, **options):
         base = options['path']
         bucket_name = options['bucket']
         replace = options['replace']
         dry_run = options['dry_run']
+        skip_clinical_vocabulary_verification = options['skip_clinical_vocabulary_verification']
 
         if not base and not bucket_name:
             raise CommandError('Provide either --path or --bucket')
@@ -188,6 +197,8 @@ class Command(BaseCommand):
         if not dry_run:
             self._seed_concept_zero()
             self._sync_cdm_source_metadata()
+            if not skip_clinical_vocabulary_verification:
+                self._verify_required_clinical_vocabularies()
             self._record_version_history(replace)
             self._publish_release(counts)
         elapsed = time.monotonic() - t0
@@ -212,6 +223,28 @@ class Command(BaseCommand):
     def _log(self, msg):
         self.stdout.write(msg)
         self.stdout.flush()
+
+    def _verify_required_clinical_vocabularies(self):
+        """Fail the load when a partial Athena bundle omits core clinical vocabularies."""
+        counts = dict(
+            Concept.objects.filter(vocabulary_id__in=REQUIRED_CLINICAL_VOCABULARIES)
+            .values('vocabulary_id')
+            .annotate(total=Count('concept_id'))
+            .values_list('vocabulary_id', 'total')
+        )
+        missing = sorted(REQUIRED_CLINICAL_VOCABULARIES - counts.keys())
+        if missing:
+            raise CommandError(
+                'Required clinical vocabularies are missing after the load: '
+                f"{', '.join(missing)}. This database cannot reliably map clinical "
+                'conditions, diagnoses, medications, and labs. Fetch an Athena bundle '
+                'that includes the missing vocabularies and rerun this command without '
+                '--replace; --replace truncates clinical data.'
+            )
+        self._log(
+            '  verified required clinical vocabularies: ' +
+            ', '.join(f'{vid} ({counts[vid]:,})' for vid in sorted(counts))
+        )
 
     def _open(self, filename):
         if self._gcs_bucket:

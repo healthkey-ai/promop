@@ -4617,6 +4617,14 @@ class VocabularyRelationshipModelTest(TestCase):
 class AthenaVocabularyLoadTest(TestCase):
     """Test load_athena_vocabularies management command with minimal fixture TSV files."""
 
+    def _load_minimal_athena(self, directory, **options):
+        """Load the deliberately partial fixture without deployment verification."""
+        from django.core.management import call_command
+        call_command(
+            'load_athena_vocabularies', path=directory,
+            skip_clinical_vocabulary_verification=True, **options,
+        )
+
     def _write_tsv(self, directory, filename, headers, rows):
         path = os.path.join(directory, filename)
         with open(path, 'w', newline='') as f:
@@ -4683,19 +4691,17 @@ class AthenaVocabularyLoadTest(TestCase):
 
     def test_load_creates_relationship_rows(self):
         from omop_core.models import Relationship
-        from django.core.management import call_command
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_minimal_athena(tmpdir)
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
         self.assertTrue(Relationship.objects.filter(relationship_id='Maps to').exists())
         self.assertTrue(Relationship.objects.filter(relationship_id='Is a').exists())
 
     def test_load_filters_concepts_to_scope(self):
         from omop_core.models import Concept
-        from django.core.management import call_command
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_minimal_athena(tmpdir)
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
         self.assertTrue(Concept.objects.filter(concept_id=5000001).exists())  # HemOnc
         self.assertTrue(Concept.objects.filter(concept_id=5000003).exists())  # RxNorm Ingredient
         self.assertTrue(Concept.objects.filter(concept_id=5000004).exists())  # RxNorm Branded
@@ -4703,10 +4709,9 @@ class AthenaVocabularyLoadTest(TestCase):
 
     def test_load_filters_concept_relationships(self):
         from omop_core.models import ConceptRelationship
-        from django.core.management import call_command
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_minimal_athena(tmpdir)
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
         # Edge between two in-scope concepts should be loaded
         self.assertTrue(ConceptRelationship.objects.filter(
             concept_1_id=5000003, concept_2_id=5000002
@@ -4718,10 +4723,9 @@ class AthenaVocabularyLoadTest(TestCase):
 
     def test_load_concept_ancestors_hemonc_only(self):
         from omop_core.models import ConceptAncestor
-        from django.core.management import call_command
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_minimal_athena(tmpdir)
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
         self.assertTrue(ConceptAncestor.objects.filter(
             ancestor_concept_id=5000001, descendant_concept_id=5000002
         ).exists())
@@ -4732,23 +4736,21 @@ class AthenaVocabularyLoadTest(TestCase):
 
     def test_idempotent_reload(self):
         from omop_core.models import Concept
-        from django.core.management import call_command
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_minimal_athena(tmpdir)
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
             count_after_first = Concept.objects.filter(vocabulary_id='HemOnc').count()
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
             count_after_second = Concept.objects.filter(vocabulary_id='HemOnc').count()
         self.assertEqual(count_after_first, count_after_second)
 
     def test_dry_run_writes_nothing(self):
         from omop_core.models import Concept, Relationship
-        from django.core.management import call_command
         before_concepts = Concept.objects.count()
         before_rels = Relationship.objects.count()
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_minimal_athena(tmpdir)
-            call_command('load_athena_vocabularies', path=tmpdir, dry_run=True)
+            self._load_minimal_athena(tmpdir, dry_run=True)
         self.assertEqual(Concept.objects.count(), before_concepts)
         self.assertEqual(Relationship.objects.count(), before_rels)
 
@@ -4760,14 +4762,13 @@ class AthenaVocabularyLoadTest(TestCase):
         loads accumulate rows rather than overwriting.)
         """
         from omop_core.models import VocabularyVersionHistory
-        from django.core.management import call_command
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_minimal_athena(tmpdir)
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
             after_first = VocabularyVersionHistory.objects.filter(
                 action=VocabularyVersionHistory.ACTION_LOADED).count()
             self.assertGreater(after_first, 0)
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
             after_second = VocabularyVersionHistory.objects.filter(
                 action=VocabularyVersionHistory.ACTION_LOADED).count()
         # Second load appends more history rows rather than replacing the trail.
