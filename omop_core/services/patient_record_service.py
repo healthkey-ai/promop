@@ -26,6 +26,7 @@ from omop_core.services.mappings import (
     WEARABLE_CONCEPT_CODE, WEARABLE_ARTIFACT_BOUNDS, WEARABLE_MIN_VALID_DAYS,
     WEARABLE_TREND_IMPROVING_PCT, WEARABLE_TREND_DECLINING_PCT,
 )
+from omop_core.services.clinical_units import canonical_wbc_unit, wbc_to_canonical
 from omop_core.services.lot_regimens import (
     get_regimen_concept_id,
     get_regimen_name,
@@ -70,6 +71,7 @@ _OMOP_DERIVED_FIELDS = [
     'concomitant_medications',
     # Legacy labs (derived via name-based Measurement lookup)
     'hemoglobin_level', 'hemoglobin_level_units',
+    'white_blood_cell_count', 'white_blood_cell_count_units',
     'serum_creatinine_level', 'serum_creatinine_level_units',
     'platelet_count', 'platelet_count_units',
     'serum_calcium_level', 'serum_calcium_level_units',
@@ -2076,13 +2078,37 @@ def _get_laboratory_data(person: Person) -> dict:
     loinc_ms = measurements.filter(
         value_as_number__isnull=False,
     ).select_related('measurement_concept')
+    wbc_projection_blocked = False
     for m in loinc_ms:
         code = _measurement_code(m)
         if code not in _LOINC_LAB_FIELDS:
             continue
         field, cast = _LOINC_LAB_FIELDS[code]
+        canonical_value = None
+        if code == '6690-2':
+            if wbc_projection_blocked:
+                continue
+            canonical_value = wbc_to_canonical(m.value_as_number, m.unit_source_value)
+            if canonical_value is None:
+                # This is the latest WBC row due to the query ordering. Do not
+                # silently substitute an older result with a known unit.
+                wbc_projection_blocked = True
+                logger.warning(
+                    'WBC projections skipped for person_id=%s: unsupported or absent '
+                    'unit_source_value=%r', person.person_id, m.unit_source_value,
+                )
+                continue
         if field not in data:
-            data[field] = cast(m.value_as_number)
+            if code != '6690-2' or canonical_value is not None:
+                data[field] = cast(canonical_value if code == '6690-2' else m.value_as_number)
+        if code == '6690-2' and canonical_value is not None and 'white_blood_cell_count' not in data:
+            unit_system = (
+                PatientRecord.objects.filter(person=person)
+                .values_list('organization__clinical_unit_system', flat=True)
+                .first()
+            )
+            data['white_blood_cell_count'] = canonical_value
+            data['white_blood_cell_count_units'] = canonical_wbc_unit(unit_system)
 
     # --- New UI fields via display-name source_value (legacy/generator path) ---
     unfound = {f for (f, _) in _LOINC_LAB_FIELDS.values() if f not in data}
@@ -2093,6 +2119,8 @@ def _get_laboratory_data(person: Person) -> dict:
         )
         for m in sv_ms:
             field = _SOURCE_VALUE_LAB_FIELDS.get(m.measurement_source_value)
+            if field == 'wbc_count_thousand_per_ul' and wbc_projection_blocked:
+                continue
             if field and field not in data:
                 data[field] = float(m.value_as_number)
 

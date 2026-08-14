@@ -15043,6 +15043,31 @@ class OrganizationSerializerTest(TestCase):
         self.org.refresh_from_db()
         self.assertTrue(self.org.allows_patient_signup)
 
+    def test_clinical_unit_system_defaults_and_is_patchable(self):
+        response = self.client.get('/api/orgs/ser-org/')
+        self.assertEqual(response.data['clinical_unit_system'], 'US_ONCOLOGY')
+
+        response = self.client.patch(
+            '/api/orgs/ser-org/', {'clinical_unit_system': 'SI'}, format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.org.refresh_from_db()
+        self.assertEqual(self.org.clinical_unit_system, 'SI')
+
+    def test_changing_unit_system_marks_only_that_org_records_stale(self):
+        person = Person.objects.create(person_id=150231)
+        record = PatientRecord.objects.create(person=person, organization=self.org, derivation_version=4)
+        other_org = _make_org('Other Unit Org', 'other-unit-org')
+        other_person = Person.objects.create(person_id=150232)
+        other = PatientRecord.objects.create(person=other_person, organization=other_org, derivation_version=4)
+
+        self.client.patch('/api/orgs/ser-org/', {'clinical_unit_system': 'SI'}, format='json')
+
+        record.refresh_from_db()
+        other.refresh_from_db()
+        self.assertEqual(record.derivation_version, 0)
+        self.assertEqual(other.derivation_version, 4)
+
 
 # ---------------------------------------------------------------------------
 # Vocabulary Release API tests

@@ -51,6 +51,11 @@ class ProvenanceRecord(models.Model):
         return f"{self.source} → {self.content_type} #{self.object_id}"
 
 
+class ClinicalUnitSystem(models.TextChoices):
+    US_ONCOLOGY = 'US_ONCOLOGY', 'US oncology (mCODE/USCDI)'
+    SI = 'SI', 'SI'
+
+
 class Organization(models.Model):
     """A tenant organization (hospital, foundation, analytics service) that owns patient records."""
     name = models.CharField(max_length=200)
@@ -66,6 +71,12 @@ class Organization(models.Model):
     allows_patient_signup = models.BooleanField(
         default=False,
         help_text="When true, patients may self-register via the org's public page.",
+    )
+    clinical_unit_system = models.CharField(
+        max_length=20,
+        choices=ClinicalUnitSystem.choices,
+        default=ClinicalUnitSystem.US_ONCOLOGY,
+        help_text='Default canonical units for derived clinical compatibility fields.',
     )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
@@ -1679,6 +1690,14 @@ class PlateletCountUnits(models.TextChoices):
     CELLS_L = 'CELLS/L', '10^9/L'
 
 
+class WhiteBloodCellCountUnits(models.TextChoices):
+    """WBC units; US oncology is the default for new records."""
+    K_PER_UL = '10*3/uL', '10^3/μL (US oncology)'
+    G_PER_L = '10*9/L', '10^9/L (SI)'
+    LEGACY_CELLS_UL = 'CELLS/UL', 'Legacy CELLS/UL'
+    LEGACY_CELLS_L = 'CELLS/L', 'Legacy CELLS/L'
+
+
 class SerumCalciumUnits(models.TextChoices):
     """Serum calcium unit choices"""
     MG_DL = 'MG/DL', 'mg/dL'
@@ -2211,10 +2230,10 @@ class PatientRecord(models.Model):
     white_blood_cell_count = models.DecimalField(decimal_places=2, max_digits=10, blank=True, null=True)
     white_blood_cell_count_units = models.CharField(
         max_length=10,
-        choices=PlateletCountUnits.choices,
+        choices=WhiteBloodCellCountUnits.choices,
         blank=True,
         null=True,
-        default='CELLS/L'
+        default='10*3/uL'
     )
     red_blood_cell_count = models.DecimalField(decimal_places=2, max_digits=10, blank=True, null=True)
     red_blood_cell_count_units = models.CharField(

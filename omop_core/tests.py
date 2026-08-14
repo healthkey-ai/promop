@@ -19,7 +19,7 @@ from django.test import TestCase
 
 from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
-    Person, PatientRecord, ConditionOccurrence, DrugExposure, Measurement, Observation,
+    Organization, Person, PatientRecord, ConditionOccurrence, DrugExposure, Measurement, Observation,
 )
 from omop_core.services.patient_record_service import refresh_patient_record
 
@@ -469,6 +469,69 @@ class LegacyLaboratoryProjectionTest(_OmopBase):
         pi = refresh_patient_record(self.person)
 
         self.assertAlmostEqual(float(pi.albumin_level), 3.8, places=1)
+
+
+class WhiteBloodCellUnitPolicyTest(_OmopBase):
+    """WBC compatibility output follows the org unit policy and fails closed (#473)."""
+
+    PERSON_ID = 90232
+
+    def _wbc(self, value, unit, *, measurement_id=92350, day=1, source_value='6690-2'):
+        concept = _concept(92350, 'Leukocytes [#/volume] in Blood', self.dom_meas,
+                           self.vocab, self.cc, code='6690-2')
+        Measurement.objects.create(
+            measurement_id=measurement_id, person=self.person, measurement_concept=concept,
+            measurement_date=date(2023, 5, day), measurement_type_concept=self.type_concept,
+            value_as_number=value, unit_source_value=unit, measurement_source_value=source_value,
+        )
+
+    def test_us_oncology_converts_cells_per_ul(self):
+        org = Organization.objects.create(name='US Oncology', slug='us-oncology')
+        PatientRecord.objects.create(person=self.person, organization=org)
+        self._wbc(4500, 'cells/uL')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(float(pi.white_blood_cell_count), 4.5)
+        self.assertEqual(pi.white_blood_cell_count_units, '10*3/uL')
+
+    def test_si_uses_si_label_after_cells_per_l_conversion(self):
+        org = Organization.objects.create(name='SI Oncology', slug='si-oncology', clinical_unit_system='SI')
+        PatientRecord.objects.create(person=self.person, organization=org)
+        self._wbc(4_500_000_000, 'cells/L')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(float(pi.white_blood_cell_count), 4.5)
+        self.assertEqual(pi.white_blood_cell_count_units, '10*9/L')
+
+    def test_unknown_unit_is_not_relabelled_as_canonical(self):
+        PatientRecord.objects.create(person=self.person)
+        self._wbc(4.5, 'bananas/L')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertIsNone(pi.wbc_count_thousand_per_ul)
+        self.assertIsNone(pi.white_blood_cell_count)
+
+    def test_newest_unknown_unit_does_not_fall_back_to_older_value(self):
+        PatientRecord.objects.create(person=self.person)
+        self._wbc(4.5, '10*3/uL', measurement_id=92351, day=1)
+        self._wbc(5.0, 'unknown', measurement_id=92352, day=2)
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertIsNone(pi.wbc_count_thousand_per_ul)
+        self.assertIsNone(pi.white_blood_cell_count)
+
+    def test_unknown_unit_cannot_bypass_via_source_value_fallback(self):
+        PatientRecord.objects.create(person=self.person)
+        self._wbc(4500, 'unknown', source_value='White blood cell count')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertIsNone(pi.wbc_count_thousand_per_ul)
+        self.assertIsNone(pi.white_blood_cell_count)
 
 
 class RefreshPatientRecordReceptorStatusTest(_OmopBase):

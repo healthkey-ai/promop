@@ -332,7 +332,16 @@ class OrgDetailView(APIView):
         # Non-staff org_admins cannot toggle is_active
         if not getattr(request.user, 'is_staff', False):
             ser.validated_data.pop('is_active', None)
+        unit_policy_changed = (
+            'clinical_unit_system' in ser.validated_data
+            and ser.validated_data['clinical_unit_system'] != org.clinical_unit_system
+        )
         ser.save()
+        if unit_policy_changed:
+            # The setting changes a derived compatibility field. Mark exactly
+            # this tenant's rows stale; operators can rederive them without
+            # putting a potentially large refresh on the admin PATCH request.
+            PatientRecord.objects.filter(organization=org).update(derivation_version=0)
         return Response(ser.data)
 
     def delete(self, request, slug):
