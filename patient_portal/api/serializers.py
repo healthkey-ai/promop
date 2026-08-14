@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from patient_portal.models import Identity, PatientConsent, PatientMessage
 from omop_core.models import (
-    PatientRecord, Concept,
+    PatientRecord, Concept, Death,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
     Survey, PatientSurveyResponse,
@@ -758,6 +758,22 @@ class ObservationSerializer(serializers.ModelSerializer):
             'is_erroneous', 'erroneous_reason',
         ]
         extra_kwargs = {'observation_id': {'required': False}}
+
+
+class DeathSerializer(serializers.ModelSerializer):
+    """OMOP Death.
+
+    ``person`` is the primary key — one row per person, by construction — so
+    there is no separate id field and a re-post of the same person is an
+    update rather than a duplicate.
+    """
+
+    class Meta:
+        model = Death
+        fields = [
+            'person', 'death_date', 'death_datetime', 'death_type_concept',
+            'cause_concept', 'cause_source_value', 'cause_source_concept',
+        ]
 
 
 class ProcedureOccurrenceSerializer(serializers.ModelSerializer):

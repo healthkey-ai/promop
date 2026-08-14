@@ -6,7 +6,8 @@ from .views import (
     PersonViewSet,
     # OMOP clinical event ViewSets
     ConditionOccurrenceViewSet, DrugExposureViewSet, MeasurementViewSet,
-    ObservationViewSet, ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
+    ObservationViewSet, ProcedureOccurrenceViewSet, DeathViewSet,
+    EpisodeViewSet, EpisodeEventViewSet,
     # Document storage
     PatientDocumentViewSet,
     # Clinical trial enrollment tracker (metadata from EXACT)
@@ -44,6 +45,7 @@ router.register(r'drug-exposures', DrugExposureViewSet, basename='drug-exposures
 router.register(r'measurements', MeasurementViewSet, basename='measurements')
 router.register(r'observations', ObservationViewSet, basename='observations')
 router.register(r'procedures', ProcedureOccurrenceViewSet, basename='procedures')
+router.register(r'deaths', DeathViewSet, basename='deaths')
 router.register(r'episodes', EpisodeViewSet, basename='episodes')
 router.register(r'episode-events', EpisodeEventViewSet, basename='episode-events')
 

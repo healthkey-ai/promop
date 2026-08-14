@@ -1586,13 +1586,15 @@ class OmopObservationsEndpointTest(FhirUploadBase):
             'value_as_string': 'Former',
             'observation_source_value': 'Smoking status',
         }
-        resp = self.client.post('/api/observations/', payload, format='json')
+        resp = self.client.post('/api/observations/', payload, format='json',
+                                HTTP_X_PROVENANCE_SOURCE='EHR_SYNC')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         self.assertTrue(OmopObservation.objects.filter(observation_id=88802).exists())
 
     def test_update_observation(self):
         from omop_core.models import Observation as OmopObservation
-        resp = self.client.patch('/api/observations/88801/', {'value_as_string': 'Current'}, format='json')
+        resp = self.client.patch('/api/observations/88801/', {'value_as_string': 'Current'}, format='json',
+                                 HTTP_X_PROVENANCE_SOURCE='ADMIN_CORRECTION')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(OmopObservation.objects.get(observation_id=88801).value_as_string, 'Current')
 
@@ -1675,13 +1677,15 @@ class OmopProceduresEndpointTest(FhirUploadBase):
             'procedure_type_concept': self._proc_concept.concept_id,
             'procedure_source_value': 'Lumpectomy',
         }
-        resp = self.client.post('/api/procedures/', payload, format='json')
+        resp = self.client.post('/api/procedures/', payload, format='json',
+                                HTTP_X_PROVENANCE_SOURCE='EHR_SYNC')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         self.assertTrue(ProcedureOccurrence.objects.filter(procedure_occurrence_id=88802).exists())
 
     def test_update_procedure(self):
         resp = self.client.patch('/api/procedures/88801/',
-                                 {'procedure_source_value': 'Excisional biopsy'}, format='json')
+                                 {'procedure_source_value': 'Excisional biopsy'}, format='json',
+                                 HTTP_X_PROVENANCE_SOURCE='ADMIN_CORRECTION')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(
             ProcedureOccurrence.objects.get(procedure_occurrence_id=88801).procedure_source_value,
@@ -17621,11 +17625,12 @@ class PatientSelfCreateTest(TestCase):
             'value_as_string': 'ECOG 1',
         }
 
-    def _post(self, identity, person):
+    def _post(self, identity, person, source='PATIENT_SELF'):
         client = APIClient()
         if identity is not None:
             client.force_authenticate(user=identity)
-        return client.post('/api/observations/', self._payload(person), format='json')
+        headers = {'HTTP_X_PROVENANCE_SOURCE': source} if source else {}
+        return client.post('/api/observations/', self._payload(person), format='json', **headers)
 
     def test_patient_creates_own_observation(self):
         resp = self._post(self.patient_a, self.person_a)
@@ -17673,6 +17678,123 @@ class PatientSelfCreateTest(TestCase):
         rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
         returned = [row['person'] for row in rows]
         self.assertNotIn(self.person_b.person_id, returned)
+
+
+class ClinicalWriteProvenanceTest(TestCase):
+    """A person writing a clinical row must say where the row came from.
+
+    Provenance was opt-in: with no source header the write landed and no
+    ProvenanceRecord was made, leaving a clinical row with no origin and — for
+    a write made on someone's behalf — no record of who acted.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        _make_vocab_fixtures()
+        cls.concept = Concept.objects.get(concept_id=4112853)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+
+        cls.person = Person.objects.create(person_id=96001, family_name='Prov')
+        PatientRecord.objects.create(person=cls.person)
+        cls.patient = Identity.objects.create_user(email='prov-a@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.patient, person=cls.person)
+
+    def _payload(self):
+        return {
+            'person': self.person.person_id,
+            'observation_concept': self.concept.concept_id,
+            'observation_date': str(date.today()),
+            'observation_type_concept': self.type_concept.concept_id,
+            'value_as_string': 'ECOG 1',
+        }
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.patient)
+        return client
+
+    def test_create_without_a_source_is_refused(self):
+        resp = self._client().post('/api/observations/', self._payload(), format='json')
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn('source', resp.data)
+        self.assertFalse(Observation.objects.filter(person=self.person).exists())
+
+    def test_create_with_a_source_is_accepted_and_recorded(self):
+        from django.contrib.contenttypes.models import ContentType
+        from omop_core.models import ProvenanceRecord
+
+        resp = self._client().post(
+            '/api/observations/', self._payload(), format='json',
+            HTTP_X_PROVENANCE_SOURCE='PATIENT_SELF',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+        row = Observation.objects.get(person=self.person)
+        prov = ProvenanceRecord.objects.get(
+            content_type=ContentType.objects.get_for_model(Observation),
+            object_id=row.pk,
+        )
+        self.assertEqual(prov.source, 'PATIENT_SELF')
+
+    def test_the_subject_of_the_write_is_recorded(self):
+        """P3: without target_patient_id a reader learns who acted, not for whom."""
+        from django.contrib.contenttypes.models import ContentType
+        from omop_core.models import ProvenanceRecord
+
+        self._client().post(
+            '/api/observations/', self._payload(), format='json',
+            HTTP_X_PROVENANCE_SOURCE='PATIENT_SELF',
+            HTTP_X_PROVENANCE_USER_ID='acting-user',
+        )
+
+        row = Observation.objects.get(person=self.person)
+        prov = ProvenanceRecord.objects.get(
+            content_type=ContentType.objects.get_for_model(Observation),
+            object_id=row.pk,
+        )
+        self.assertEqual(prov.source_user_id, 'acting-user')
+        self.assertEqual(prov.target_patient_id, str(self.person.person_id))
+
+    def test_an_unrecognised_source_is_refused(self):
+        """The column has choices, which Django does not enforce on create()."""
+        resp = self._client().post(
+            '/api/observations/', self._payload(), format='json',
+            HTTP_X_PROVENANCE_SOURCE='FROM_A_HAT',
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn('source', resp.data)
+
+    def test_update_without_a_source_is_refused(self):
+        row = Observation.objects.create(
+            observation_id=96901,
+            person=self.person,
+            observation_concept=self.concept,
+            observation_date=date.today(),
+            observation_type_concept=self.type_concept,
+            value_as_string='before',
+        )
+        resp = self._client().patch(
+            f'/api/observations/{row.pk}/', {'value_as_string': 'after'}, format='json',
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        row.refresh_from_db()
+        self.assertEqual(row.value_as_string, 'before')
+
+    def test_a_batch_without_a_source_is_refused(self):
+        """A list body must not be a way around the rule."""
+        resp = self._client().post('/api/observations/', [self._payload()], format='json')
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertFalse(Observation.objects.filter(person=self.person).exists())
+
+    def test_a_machine_caller_is_unaffected(self):
+        """Service tokens keep today's contract; tightening them is a migration."""
+        client = APIClient()
+        with self.settings(SERVICE_AUTH_TOKEN='test-service-secret'):
+            client.credentials(HTTP_AUTHORIZATION='Bearer test-service-secret')
+            resp = client.post('/api/observations/', self._payload(), format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
 
 
 class FindOrCreatePersonTest(TestCase):
@@ -17759,3 +17881,168 @@ class FindOrCreatePersonTest(TestCase):
         self.assertTrue(resp.data['created'])
         self.assertEqual(Person.objects.count(), before + 1)
         self.assertNotEqual(resp.data['person_id'], self.person.person_id)
+
+
+class DeathEndpointTest(TestCase):
+    """`/api/deaths/`. The model existed with no route, so mortality was unwritable."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import GroupAccess, Organization
+        from patient_portal.models import PatientUser
+
+        _make_vocab_fixtures()
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+
+        cls.org = Organization.objects.create(name='Death Org', slug='death-org-98')
+        cls.person = Person.objects.create(person_id=98001, family_name='Late')
+        PatientRecord.objects.create(person=cls.person, organization=cls.org)
+
+        cls.other = Person.objects.create(person_id=98002, family_name='Living')
+        PatientRecord.objects.create(person=cls.other)
+
+        cls.clinician = Identity.objects.create_user(email='death-doc@test.com', password='pw')
+        GroupAccess.objects.create(identity=cls.clinician, org=cls.org, role='doctor')
+
+        cls.patient_other = Identity.objects.create_user(email='death-b@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.patient_other, person=cls.other)
+
+    def _payload(self, person, death_date='2026-02-01'):
+        return {
+            'person': person.person_id,
+            'death_date': death_date,
+            'death_type_concept': self.type_concept.concept_id,
+        }
+
+    def _post(self, identity, payload, source='EHR_SYNC'):
+        client = APIClient()
+        client.force_authenticate(user=identity)
+        headers = {'HTTP_X_PROVENANCE_SOURCE': source} if source else {}
+        return client.post('/api/deaths/', payload, format='json', **headers)
+
+    def test_clinician_records_a_death_for_their_patient(self):
+        from omop_core.models import Death
+
+        resp = self._post(self.clinician, self._payload(self.person))
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertTrue(Death.objects.filter(person=self.person).exists())
+
+    def test_a_second_report_corrects_the_first_rather_than_failing(self):
+        from omop_core.models import Death
+
+        self._post(self.clinician, self._payload(self.person))
+        resp = self._post(self.clinician, self._payload(self.person, '2026-02-03'))
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(Death.objects.filter(person=self.person).count(), 1)
+        self.assertEqual(
+            str(Death.objects.get(person=self.person).death_date), '2026-02-03',
+        )
+
+    def test_clinician_cannot_record_a_death_outside_their_org(self):
+        from omop_core.models import Death
+
+        resp = self._post(self.clinician, self._payload(self.other))
+        self.assertEqual(resp.status_code, 403, resp.data)
+        self.assertFalse(Death.objects.filter(person=self.other).exists())
+
+    def test_a_write_with_no_provenance_is_refused(self):
+        resp = self._post(self.clinician, self._payload(self.person), source=None)
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_reads_are_scoped_to_the_caller(self):
+        from omop_core.models import Death
+
+        Death.objects.create(
+            person=self.person, death_date=date(2026, 2, 1),
+            death_type_concept=self.type_concept,
+        )
+        client = APIClient()
+        client.force_authenticate(user=self.patient_other)
+        resp = client.get('/api/deaths/')
+
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
+        self.assertNotIn(self.person.person_id, [r['person'] for r in rows])
+
+    def test_unauthenticated_is_rejected(self):
+        resp = APIClient().post('/api/deaths/', self._payload(self.person), format='json')
+        self.assertIn(resp.status_code, (401, 403))
+
+
+class FindOrCreatePersonClinicianTest(TestCase):
+    """A clinician may resolve a patient they hold access to, and no one else.
+
+    Before this, ``find_or_create`` was staff-only, which left a clinician with
+    a ``GroupAccess`` grant able to write a patient's labs but unable to find
+    the ``person_id`` to write them against.
+    """
+
+    ISSUER = 'https://securetoken.google.com/hk-test'
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import (
+            GroupAccess, Organization, PatientGroup, PatientGroupMembership,
+        )
+        from patient_portal.models import PatientUser
+
+        cls.org = Organization.objects.create(name='Resolve Org', slug='resolve-org-97')
+        cls.group = PatientGroup.objects.create(
+            organization=cls.org, name='Resolve Cohort', slug='resolve-cohort-97',
+        )
+
+        # In the clinician's group.
+        cls.person_in = Person.objects.create(person_id=97001)
+        cls.identity_in = Identity.objects.create(issuer=cls.ISSUER, sub='in-group')
+        PatientUser.objects.create(identity=cls.identity_in, person=cls.person_in)
+        PatientGroupMembership.objects.create(group=cls.group, person_id=cls.person_in.person_id)
+
+        # Outside it.
+        cls.person_out = Person.objects.create(person_id=97002)
+        cls.identity_out = Identity.objects.create(issuer=cls.ISSUER, sub='out-of-group')
+        PatientUser.objects.create(identity=cls.identity_out, person=cls.person_out)
+
+        cls.clinician = Identity.objects.create_user(email='res-doc@test.com', password='pw')
+        GroupAccess.objects.create(identity=cls.clinician, group=cls.group, role='doctor')
+
+    def _post(self, identity, sub):
+        client = APIClient()
+        client.force_authenticate(user=identity)
+        return client.post(
+            '/api/persons/find_or_create/',
+            {'actor_iss': self.ISSUER, 'actor_sub': sub},
+            format='json',
+        )
+
+    def test_clinician_resolves_a_patient_in_their_group(self):
+        resp = self._post(self.clinician, 'in-group')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['person_id'], self.person_in.person_id)
+        self.assertFalse(resp.data['created'])
+
+    def test_clinician_cannot_resolve_a_patient_outside_their_group(self):
+        resp = self._post(self.clinician, 'out-of-group')
+        self.assertEqual(resp.status_code, 403, resp.data)
+
+    def test_clinician_cannot_mint_a_person(self):
+        """Provisioning stays privileged, and the 'created' flag stays unprobeable."""
+        before = Person.objects.count()
+        resp = self._post(self.clinician, 'nobody-has-this-sub')
+        self.assertEqual(resp.status_code, 403, resp.data)
+        self.assertEqual(Person.objects.count(), before)
+
+    def test_an_unknown_subject_is_refused_the_same_way_as_an_unreachable_one(self):
+        """Both 403, so the response cannot be used to tell which subjects exist."""
+        unknown = self._post(self.clinician, 'nobody-has-this-sub')
+        unreachable = self._post(self.clinician, 'out-of-group')
+        self.assertEqual(unknown.status_code, unreachable.status_code)
+
+    def test_a_patient_cannot_resolve_another_patient(self):
+        resp = self._post(self.identity_in, 'out-of-group')
+        self.assertEqual(resp.status_code, 403, resp.data)
+
+    def test_a_patient_can_resolve_themselves(self):
+        resp = self._post(self.identity_in, 'in-group')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['person_id'], self.person_in.person_id)

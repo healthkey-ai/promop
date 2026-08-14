@@ -70,7 +70,7 @@ from .providers.base import TokenClaims
 from .serializers import (
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
     ConditionOccurrenceSerializer, DrugExposureSerializer, MeasurementSerializer,
-    ObservationSerializer, ProcedureOccurrenceSerializer,
+    ObservationSerializer, ProcedureOccurrenceSerializer, DeathSerializer,
     EpisodeSerializer, EpisodeEventSerializer,
     PatientDocumentSerializer, PatientTrialEnrollmentSerializer,
     SurveySerializer, PatientSurveyResponseSerializer,
@@ -163,6 +163,64 @@ def _extract_provenance(request):
     )
     modification_reason = body.get('modification_reason')
     return source, source_user_id, modification_reason
+
+
+_PROVENANCE_SOURCES = frozenset(dict(ProvenanceRecord.SOURCE_CHOICES))
+
+
+def _is_person_actor(request) -> bool:
+    """True when a person made this request, rather than a machine.
+
+    Partner tokens (Firebase, SAML) and session cookies belong to people.
+    A service token, or an OAuth2 access token bound to a registered
+    application, is a backend whose identity is fixed and known from the
+    credential itself.
+    """
+    if is_service_token(request):
+        return False
+    auth = getattr(request, 'auth', None)
+    # django-oauth-toolkit AccessToken carries the application it was issued to.
+    return auth is None or getattr(auth, 'application', None) is None
+
+
+def _require_provenance(request):
+    """Reject a write that does not say where it came from.
+
+    Recording provenance is opt-in: no source header means no ProvenanceRecord,
+    and the row lands anyway. A clinical row with no origin cannot be audited,
+    corrected with confidence, or attributed — and for a write made on a
+    patient's behalf there is nothing at all to say who acted. Silently
+    accepting those is worse than refusing them, because the gap only becomes
+    visible long after the data is in.
+
+    Applied to the clinical viewsets that accept browser-direct writes, and
+    only to callers who are people (``requires_provenance`` plus
+    ``_is_person_actor``). Two populations are deliberately left alone, because
+    tightening either is a migration rather than a fix: machine callers, whose
+    identity the credential already fixes and who have integrations written
+    against today's contract, and the survey endpoint, which this service's own
+    frontend posts to.
+
+    The source is also checked against the vocabulary. It is stored on a
+    ``choices`` field, which Django does not enforce on ``create()``, so an
+    unrecognised value would sit in the column and quietly fail every filter
+    written against the real ones.
+    """
+    from rest_framework.exceptions import ValidationError
+
+    source, _, _ = _extract_provenance(request)
+    if not source:
+        raise ValidationError({'source': [
+            'Provenance is required: send an X-Provenance-Source header (or a '
+            'source field) naming where this write came from. One of: '
+            f'{", ".join(sorted(_PROVENANCE_SOURCES))}.'
+        ]})
+    if source not in _PROVENANCE_SOURCES:
+        raise ValidationError({'source': [
+            f'Unknown provenance source {source!r}. One of: '
+            f'{", ".join(sorted(_PROVENANCE_SOURCES))}.'
+        ]})
+    return source
 
 
 def _record_provenance(record, source, source_user_id, target_patient_id=None, modification_reason=None, organization=None):
@@ -4355,8 +4413,15 @@ class PersonViewSet(viewsets.GenericViewSet):
     Endpoints:
       POST /api/persons/find_or_create/  — resolve OIDC identity to a Person row
       PATCH /api/persons/{person_id}/    — fill-if-empty demographic patch
+
+    ``PatientCrudPermission`` rather than the base class so a clinician holding
+    ``GroupAccess`` can resolve a patient they may already write for. Under the
+    base class only staff and service tokens could POST here, which left a
+    clinician able to record a patient's labs but unable to find the
+    ``person_id`` to record them against. What that clinician may then see is
+    decided per-person inside the action, not by the method.
     """
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = Person.objects.all()
     lookup_field = 'person_id'
 
@@ -4381,7 +4446,9 @@ class PersonViewSet(viewsets.GenericViewSet):
         # link and mint a second Person for a patient who already has one,
         # scattering their record across two person_ids. Consult the identity
         # link first, and backfill the columns so both paths agree from then on.
+        from omop_core.authorization import can_access_patient
         from patient_portal.models import PatientUser
+        from rest_framework.exceptions import PermissionDenied
 
         person = None
         created = False
@@ -4405,6 +4472,13 @@ class PersonViewSet(viewsets.GenericViewSet):
                         person.refresh_from_db()
 
         if person is None:
+            # Minting a Person is privileged. A clinician calling this for an
+            # identity nobody has seen would be creating records, and — since
+            # the response distinguishes "found" from "created" — could use it
+            # to learn which subjects exist. Resolution is what a clinician
+            # needs, so they get resolution only.
+            if not self._may_create_person(request):
+                raise PermissionDenied('Access denied.')
             try:
                 _new_person_id = next_pk(Person, 'person_id')
                 person, created = Person.objects.get_or_create(
@@ -4416,8 +4490,25 @@ class PersonViewSet(viewsets.GenericViewSet):
                 # Concurrent first-call race: another request won the INSERT
                 person = Person.objects.get(actor_iss=actor_iss, actor_sub=actor_sub)
                 created = False
+        elif not self._may_create_person(request):
+            # An existing person is only disclosed to a caller who already
+            # holds access to them, so the endpoint cannot be used to probe.
+            if not can_access_patient(request.user, person.person_id):
+                raise PermissionDenied('Access denied.')
+
         http_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return Response({'person_id': person.person_id, 'created': created}, status=http_status)
+
+    @staticmethod
+    def _may_create_person(request) -> bool:
+        """Staff and trusted backends provision patients; clinicians resolve them.
+
+        The same machine/person split ``_require_provenance`` uses. A service
+        token or a registered OAuth client is a backend whose job includes
+        bringing patients into the system; a patient or clinician arriving on a
+        partner token or a session is not.
+        """
+        return not _is_person_actor(request) or getattr(request.user, 'is_staff', False)
 
     def partial_update(self, request, person_id=None):
         """
@@ -4856,6 +4947,12 @@ class _OmopBulkCreateMixin:
                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             )
 
+        # Same rule as the single-row path: a list body would otherwise be a way
+        # to write clinical rows with no origin at all. Deliberately after the
+        # size guards, so an oversized batch still reports 413 rather than
+        # having its real problem masked by a missing header.
+        self._check_provenance(request)
+
         model_name = self.serializer_class.Meta.model.__name__
         pk_field, model_cls = _MODEL_PK_MAP[model_name]
 
@@ -4995,12 +5092,35 @@ class _OmopBulkCreateMixin:
 
 class _ProvenanceMixin:
     """Record provenance on create/update when source headers/body fields are present."""
+
+    #: Refuse a write from a person that carries no provenance source. Set on
+    #: the clinical viewsets that accept browser-direct writes; see
+    #: ``_require_provenance`` for why it is not simply on by default.
+    requires_provenance = False
+
+    def _check_provenance(self, request):
+        if self.requires_provenance and _is_person_actor(request):
+            _require_provenance(request)
+
     def _prov(self, obj):
         source, user_id, reason = _extract_provenance(self.request)
         if source:
-            _record_provenance(obj, source, user_id, modification_reason=reason, organization=get_request_org(self.request))
+            # target_patient_id is what makes an on-behalf-of write legible: the
+            # actor is in source_user_id, but without the subject a reader can
+            # only tell that someone wrote something, not for whom. Every model
+            # this mixin serves carries `person`; the getattr keeps a future one
+            # that does not from breaking the write.
+            person_id = getattr(obj, 'person_id', None)
+            _record_provenance(
+                obj, source, user_id,
+                target_patient_id=str(person_id) if person_id is not None else None,
+                modification_reason=reason,
+                organization=get_request_org(self.request),
+            )
 
     def perform_create(self, serializer):
+        self._check_provenance(self.request)
+
         # Auto-generate PK if not supplied
         model_name = serializer.Meta.model.__name__
         if model_name in _MODEL_PK_MAP:
@@ -5041,6 +5161,10 @@ class _ProvenanceMixin:
         self._prov(obj)
 
     def perform_update(self, serializer):
+        # An edit needs an origin as much as an insert does — more so, since it
+        # is replacing something a different actor may have written.
+        self._check_provenance(self.request)
+
         # Trusted backend (service-token): skip ACL — already validated at
         # the permission layer (ScopedTokenPermission).
         if is_service_token(self.request):
@@ -5076,6 +5200,7 @@ class ConditionOccurrenceViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFi
     serializer_class = ConditionOccurrenceSerializer
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = ConditionOccurrence.objects.all()
+    requires_provenance = True
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'omop_write'
 
@@ -5085,6 +5210,7 @@ class DrugExposureViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMix
     serializer_class = DrugExposureSerializer
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = DrugExposure.objects.all()
+    requires_provenance = True
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'omop_write'
 
@@ -5094,6 +5220,7 @@ class MeasurementViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixi
     serializer_class = MeasurementSerializer
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = Measurement.objects.all()
+    requires_provenance = True
     ordering_fields = ['measurement_date', 'measurement_id']
     ordering = ['-measurement_date']
     throttle_classes = [ScopedRateThrottle]
@@ -5132,6 +5259,7 @@ class ObservationViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixi
     serializer_class = ObservationSerializer
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = Observation.objects.all()
+    requires_provenance = True
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'omop_write'
 
@@ -5141,8 +5269,46 @@ class ProcedureOccurrenceViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFi
     serializer_class = ProcedureOccurrenceSerializer
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = ProcedureOccurrence.objects.all()
+    requires_provenance = True
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'omop_write'
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class DeathViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+    """OMOP Death. The model existed with no route, so mortality was unwritable.
+
+    One row per person — ``person`` is the primary key — so a second report for
+    the same person is a correction of the first, not a new event. POST
+    converges on that row rather than failing on the key, which keeps a
+    retried or re-sent report from turning into an error the caller has to
+    special-case.
+    """
+    serializer_class = DeathSerializer
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
+    queryset = Death.objects.all()
+    requires_provenance = True
+    lookup_field = 'person_id'
+
+    def create(self, request, *args, **kwargs):
+        person_id = request.data.get('person') if isinstance(request.data, dict) else None
+        existing = (
+            Death.objects.filter(person_id=person_id).first()
+            if person_id is not None else None
+        )
+        if existing is None:
+            return super().create(request, *args, **kwargs)
+
+        # Deliberately not get_object(): that re-applies the read queryset, and
+        # read and write access are not the same set here — an org-level
+        # GroupAccess grant permits a write but not a read, so resolving the row
+        # that way would 404 a caller who is entitled to correct it. Going
+        # through perform_update applies the write rule, which is the one that
+        # governs this request.
+        serializer = self.get_serializer(existing, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -5150,6 +5316,7 @@ class EpisodeViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = EpisodeSerializer
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = Episode.objects.all()
+    requires_provenance = True
 
 
 @method_decorator(csrf_exempt, name='dispatch')
