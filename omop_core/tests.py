@@ -234,6 +234,28 @@ class RefreshPatientRecordDemographicsTest(_OmopBase):
         expected_age = date.today().year - self.person.year_of_birth
         self.assertEqual(pi.patient_age, expected_age)
 
+    def test_date_of_birth_derived_from_person_birth_fields(self):
+        self.person.month_of_birth = 12
+        self.person.day_of_birth = 31
+        self.person.save(update_fields=['month_of_birth', 'day_of_birth'])
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(pi.date_of_birth, date(1980, 12, 31))
+        expected_age = date.today().year - 1980 - (
+            (date.today().month, date.today().day) < (12, 31)
+        )
+        self.assertEqual(pi.patient_age, expected_age)
+
+    def test_invalid_person_birth_day_falls_back_to_known_year(self):
+        self.person.month_of_birth = 2
+        self.person.day_of_birth = 31
+        self.person.save(update_fields=['month_of_birth', 'day_of_birth'])
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(pi.date_of_birth, date(1980, 1, 1))
+
 
 class RefreshPatientRecordDiseaseTest(_OmopBase):
     """Disease / condition section."""

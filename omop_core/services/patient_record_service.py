@@ -42,18 +42,15 @@ logger = logging.getLogger(__name__)
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 4
+DERIVATION_VERSION = 5
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
 _OMOP_DERIVED_FIELDS = [
-    # Demographics. Only patient_age is listed: it is a pure function of the
-    # birth date, so a value left over from an earlier derivation is stale by
-    # construction and has to be cleared. This is what stranded age=126 on
-    # records whose Person still carried the year_of_birth=1900 placeholder —
-    # nothing ever cleared the number once _get_demographics stopped emitting
-    # it. (gender/race/ethnicity are written by the same extractor and are NOT
-    # cleared, so they can still go stale; out of scope for #434.)
+    # Demographics. patient_age is a pure function of the birth date, so a value
+    # left over from an earlier derivation is stale by construction and has to be
+    # cleared. date_of_birth is deliberately not cleared: a manually supplied
+    # DOB remains useful when Person has only the registration placeholder.
     'patient_age',
     # Disease / condition
     'disease', 'diagnosis_date', 'death_date', 'condition_clinical_status', 'disease_slug',
@@ -430,8 +427,17 @@ def _get_demographics(person: Person) -> dict:
         data['death_date'] = death.death_date
 
     if person.year_of_birth not in PERSON_YEAR_PLACEHOLDERS:
-        today = date.today()
-        data['patient_age'] = today.year - person.year_of_birth
+        try:
+            data['date_of_birth'] = date(
+                person.year_of_birth,
+                person.month_of_birth or 1,
+                person.day_of_birth or 1,
+            )
+        except ValueError:
+            # OMOP permits partial dates and some imported rows contain an
+            # invalid partial month/day. Keep the known year rather than
+            # discarding the patient's age and DOB entirely.
+            data['date_of_birth'] = date(person.year_of_birth, 1, 1)
 
     gender_src = None
     if person.gender_concept:
