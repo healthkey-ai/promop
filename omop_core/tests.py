@@ -4579,6 +4579,42 @@ class SentinelConceptNameFilterTest(_OmopBase):
         pi = refresh_patient_record(self.person)
         self.assertNotIn('No matching concept', pi.disease or '')
 
+    def test_episode_therapy_label_skips_sentinel(self):
+        """Episode whose source concept is the sentinel must not leak into
+        first_line_therapy_display.  The fallback chain should produce a label
+        from drug_source_value instead.  See #480."""
+        from omop_oncology.models import Episode, EpisodeEvent
+
+        # episode_concept 32531 = 'Treatment Regimen' — use type_concept as stand-in
+        ep = Episode.objects.create(
+            episode_id=94584,
+            person=self.person,
+            episode_concept=self.type_concept,
+            episode_object_concept=self.type_concept,
+            episode_type_concept=self.type_concept,
+            episode_start_date=date(2023, 1, 1),
+            episode_number=1,
+            episode_source_value='VRd',
+            episode_source_concept=self.sentinel_concept,
+        )
+        de = DrugExposure.objects.create(
+            drug_exposure_id=94584,
+            person=self.person,
+            drug_concept=self.drug_concept,
+            drug_source_value='Doxorubicin',
+            drug_exposure_start_date=date(2023, 1, 1),
+            drug_type_concept=self.type_concept,
+        )
+        # 1147094 = DrugExposure.drug_exposure_id field concept — use type_concept
+        EpisodeEvent.objects.create(
+            episode_id=ep.episode_id,
+            event_id=de.drug_exposure_id,
+            episode_event_field_concept=self.type_concept,
+        )
+        pi = refresh_patient_record(self.person)
+        label = pi.first_line_therapy or ''
+        self.assertNotIn('No matching concept', label)
+
     def test_usable_concept_name_helper(self):
         """Unit test for _usable_concept_name."""
         from omop_core.services.patient_record_service import _usable_concept_name
