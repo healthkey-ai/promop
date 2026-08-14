@@ -622,6 +622,46 @@ class LoadAthenaVocabExtraTablesTest(_OmopBase):
         self.assertEqual(row.cdm_version, '5.4')
 
 
+class AthenaVocabularyReplaceScopeTest(_OmopBase):
+    """`--replace` must not drop loaded LOINC domains (#424)."""
+
+    PERSON_ID = 90281
+
+    def _loinc_concept(self, concept_id, domain_id):
+        domain, _ = Domain.objects.get_or_create(
+            domain_id=domain_id,
+            defaults={'domain_name': domain_id, 'domain_concept_id': concept_id},
+        )
+        vocabulary, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_concept_id': 0},
+        )
+        return _concept(
+            concept_id, f'{domain_id} LOINC concept', domain, vocabulary, self.cc,
+            code=f'LOINC-{concept_id}',
+        )
+
+    def test_replace_scope_keeps_deployed_loinc_domains(self):
+        from io import StringIO
+        from omop_core.management.commands.load_athena_vocabularies import Command
+
+        for concept_id, domain_id in [
+            (902811, 'Meas Value'), (902812, 'Procedure'), (902813, 'Note'),
+        ]:
+            self._loinc_concept(concept_id, domain_id)
+
+        Command(stdout=StringIO())._validate_replace_loinc_scope()
+
+    def test_replace_aborts_before_truncate_for_new_loinc_domain(self):
+        from io import StringIO
+        from omop_core.management.commands.load_athena_vocabularies import Command
+
+        self._loinc_concept(902814, 'Specimen')
+
+        with self.assertRaisesRegex(CommandError, 'Specimen'):
+            Command(stdout=StringIO())._validate_replace_loinc_scope()
+
+
 class PopulateObservationPeriodTest(_OmopBase):
     """observation_period derivation from clinical-event spans."""
 

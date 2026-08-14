@@ -30,7 +30,12 @@ VOCAB_SCOPE = frozenset({
     'SNOMED', 'ICD10CM', 'CVX',
 })
 RXNORM_CLASS_SCOPE = frozenset({'Ingredient', 'Clinical Drug', 'Branded Drug', 'Clinical Drug Comp'})
-LOINC_DOMAIN_SCOPE = frozenset({'Measurement', 'Observation'})
+# A --replace reload deletes the entire vocabulary before applying this filter.
+# Keep every LOINC domain already required by our deployed vocabulary; the
+# preflight below turns any future scope drift into a safe, actionable failure.
+LOINC_DOMAIN_SCOPE = frozenset({
+    'Measurement', 'Observation', 'Meas Value', 'Procedure', 'Note',
+})
 BATCH = 100_000
 PROGRESS_EVERY = 500_000
 
@@ -163,6 +168,7 @@ class Command(BaseCommand):
                 'condition_occurrence, etc.). The default upsert path (no flag) '
                 'is safe for databases with clinical data.'
             )
+            self._validate_replace_loinc_scope()
 
         if self._direct:
             self._clear()
@@ -232,6 +238,30 @@ class Command(BaseCommand):
                   'including cdm_source, observation_period, and clinical event tables. '
                   'cdm_source is re-seeded after load; re-run populate_observation_period '
                   'to re-derive observation periods.')
+
+    def _validate_replace_loinc_scope(self):
+        """Abort before TRUNCATE if loaded LOINC data falls outside the filter.
+
+        `--replace` first clears ``concept`` and then reloads only the configured
+        LOINC domains. Without this check, adding a new LOINC domain to a live
+        database can make a later ordinary reload silently delete its concepts.
+        """
+        excluded = Concept.objects.filter(vocabulary_id='LOINC').exclude(
+            domain_id__in=LOINC_DOMAIN_SCOPE,
+        )
+        count = excluded.count()
+        if not count:
+            return
+
+        domains = list(
+            excluded.order_by('domain_id').values_list('domain_id', flat=True).distinct()
+        )
+        raise CommandError(
+            '--replace aborted before TRUNCATE: '
+            f'{count:,} loaded LOINC concept(s) use domain(s) outside '
+            f'LOINC_DOMAIN_SCOPE: {", ".join(domains)}. '
+            'Add the required domain(s) to LOINC_DOMAIN_SCOPE, then rerun.'
+        )
 
     def _seed_concept_zero(self):
         Vocabulary.objects.get_or_create(

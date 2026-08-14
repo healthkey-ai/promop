@@ -27,6 +27,11 @@ Client writes â†’ OMOP tables (Measurement, ConditionOccurrence, DrugExposure, â
 **denormalized read model**. Callers must not write to it directly. It is regenerated
 automatically whenever any OMOP record for that patient is saved or deleted.
 
+> **Legacy SQL compatibility only:** `public.patient_info` is a read-only database view
+> retained solely for existing consumers. New integrations must not query it or depend on
+> its column set; use `public.patient_record` for SQL access or `/api/v1/patient-records/`
+> for supported application access.
+
 The two sanctioned write paths are:
 
 | Path | Use case |
