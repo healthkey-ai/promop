@@ -132,7 +132,7 @@ function AppRoutes() {
           )
         }
       />
-      <Route path="/patient/:personId" element={providerRoute(<PatientDetail />)} />
+      <Route path="/patient/:personId" element={providerRoute(<PatientDetail user={currentUser} />)} />
       <Route path="/upload-fhir" element={providerRoute(<UploadFHIR />)} />
       <Route path="/upload-csv" element={providerRoute(<UploadCSV />)} />
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />

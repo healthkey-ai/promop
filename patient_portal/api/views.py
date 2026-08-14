@@ -64,6 +64,7 @@ import json
 import logging
 import os
 import re
+from decimal import Decimal
 from io import StringIO
 from .permissions import ScopedTokenPermission, PatientCrudPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
@@ -88,6 +89,16 @@ class PatientRecordPagination(PageNumberPagination):
     page_size = 25
     page_size_query_param = 'page_size'
     max_page_size = 100
+
+
+def _serialize_omop_row(obj):
+    row = {}
+    for field in obj._meta.fields:
+        value = getattr(obj, field.attname)
+        if isinstance(value, Decimal):
+            value = float(value)
+        row[field.name] = value
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -696,6 +707,59 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         results = get_fields_provenance(person, field_names)
         return Response(results)
 
+    @action(detail=True, methods=['get'], url_path='omop',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def omop(self, request, pk=None):
+        """GET /api/v1/patient-records/{person_id}/omop/ — admin-only OMOP rows."""
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+
+        actor = request.user
+        is_admin = (
+            is_service_token(request)
+            or bool(getattr(actor, 'is_staff', False))
+            or get_admin_orgs(actor).exists()
+        )
+        if not is_admin:
+            return Response(
+                {'detail': 'Only administrators can view raw OMOP rows.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        episode_ids = list(
+            Episode.objects.filter(person=person).values_list('episode_id', flat=True)
+        )
+        table_specs = [
+            ('person', 'Person', Person.objects.filter(person_id=person.person_id)),
+            ('death', 'Death', Death.objects.filter(person=person)),
+            ('condition_occurrences', 'Condition Occurrences', ConditionOccurrence.objects.filter(person=person)),
+            ('drug_exposures', 'Drug Exposures', DrugExposure.objects.filter(person=person)),
+            ('measurements', 'Measurements', Measurement.objects.filter(person=person)),
+            ('observations', 'Observations', Observation.objects.filter(person=person)),
+            ('procedure_occurrences', 'Procedure Occurrences', ProcedureOccurrence.objects.filter(person=person)),
+            ('episodes', 'Episodes', Episode.objects.filter(person=person)),
+            ('episode_events', 'Episode Events', EpisodeEvent.objects.filter(episode_id__in=episode_ids)),
+            ('visit_occurrences', 'Visit Occurrences', VisitOccurrence.objects.filter(person=person)),
+            ('visit_details', 'Visit Details', VisitDetail.objects.filter(person=person)),
+        ]
+
+        tables = []
+        for key, label, qs in table_specs:
+            rows = [_serialize_omop_row(obj) for obj in qs]
+            tables.append({
+                'key': key,
+                'label': label,
+                'count': len(rows),
+                'rows': rows,
+            })
+
+        return Response({
+            'person_id': person.person_id,
+            'patient_record_id': patient_info.pk,
+            'tables': tables,
+        })
+
     def _resolve_patient_with_auth(self, request, pk):
         """Shared lookup + auth logic for detail-level patient endpoints.
 
@@ -718,7 +782,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     return None, None, Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
             elif not getattr(request.user, 'is_staff', False):
                 from omop_core.authorization import can_access_patient
-                if not can_access_patient(request.user, person.person_id):
+                admin_org_ids = set(get_admin_orgs(request.user).values_list('id', flat=True))
+                is_admin_patient = (
+                    patient_info.organization_id is not None
+                    and patient_info.organization_id in admin_org_ids
+                )
+                if not is_admin_patient and not can_access_patient(request.user, person.person_id):
                     return None, None, Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
         return person, patient_info, None

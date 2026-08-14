@@ -18,6 +18,7 @@ import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
+import PatientOmopTab from "./PatientOmopTab";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -510,17 +511,20 @@ export default function PatientDetail({
 
   // Build tab list dynamically — patient mode adds Allergies (after Labs) and Surveys (last).
   // Immunizations are shown inside the Treatment tab, not as a separate tab.
+  const canViewOmop = !patientMode && !!(user?.is_staff || user?.is_org_admin);
   const coreTabs = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs"];
   const afterLabsTabs = patientMode ? ["Allergies"] : [];
   const trailingTabs = ["Behavior", "Wearables"];
   const surveyTabs = patientMode ? ["Surveys"] : [];
-  const tabLabels = [...coreTabs, ...afterLabsTabs, ...trailingTabs, ...surveyTabs];
+  const adminTabs = canViewOmop ? ["OMOP"] : [];
+  const tabLabels = [...coreTabs, ...afterLabsTabs, ...trailingTabs, ...surveyTabs, ...adminTabs];
 
   // Compute dynamic indices
   const allergiesIdx = patientMode ? coreTabs.length : -1;
   const behaviorIdx = coreTabs.length + afterLabsTabs.length;
   const wearablesIdx = behaviorIdx + 1;
   const surveysIdx = patientMode ? wearablesIdx + 1 : -1;
+  const omopIdx = canViewOmop ? tabLabels.length - 1 : -1;
 
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
@@ -532,6 +536,7 @@ export default function PatientDetail({
     [behaviorIdx]: "Lifestyle, socioeconomic, and behavioural health factors.",
     [wearablesIdx]: "30 day summaries derived from synced OMOP data.",
     ...(surveysIdx >= 0 ? { [surveysIdx]: "Surveys assigned to you by your care team." } : {}),
+    ...(omopIdx >= 0 ? { [omopIdx]: "Raw OMOP rows associated with this patient." } : {}),
   };
 
   const initials = getInitials(patientName);
@@ -705,6 +710,7 @@ export default function PatientDetail({
                 {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
                 {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={() => { if (personId) { api.get(`/patient-info/${personId}/`).then(res => { const d = res.data.patient_info; setPatientInfo(d); setEditedInfo(d); }).catch(() => {}); } }} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
+                {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} />}
               </div>
             </div>
           </>
