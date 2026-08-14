@@ -268,6 +268,22 @@ _SOURCE_VALUE_LAB_FIELDS = {
     'Clonal plasma cells in bone marrow (%)':     'clonal_plasma_cells',
 }
 
+# Historic, non-LOINC test names for the old paired lab fields. This fallback
+# must be an explicit allowlist: substring matching turns distinct analytes
+# (for example direct bilirubin, creatinine clearance, and HbA1c) into a
+# different clinical value. New fields use _LOINC_LAB_FIELDS instead.
+_LEGACY_LAB_CONCEPT_FIELDS = {
+    'hemoglobin': 'hemoglobin_level',
+    'hemoglobin measurement': 'hemoglobin_level',
+    'platelet count': 'platelet_count',
+    'creatinine': 'serum_creatinine_level',
+    'creatinine in serum': 'serum_creatinine_level',
+    'calcium': 'serum_calcium_level',
+    'bilirubin total': 'serum_bilirubin_level_total',
+    'bilirubin.total [mass/volume] in serum or plasma': 'serum_bilirubin_level_total',
+    'albumin': 'albumin_level',
+}
+
 _BEHAVIOR_MEASUREMENT_FIELDS = {
     '72166-2': ('smoking_status', str),
     '63640-7': ('pack_years', float),
@@ -2041,35 +2057,20 @@ def _get_laboratory_data(person: Person) -> dict:
     measurements = (
         Measurement.objects.filter(person=person)
         .select_related('measurement_concept')
-        .order_by('-measurement_date')
+        .order_by('-measurement_date', '-measurement_id')
     )
 
-    # --- Legacy fields via concept-name matching ---
-    legacy_lab_mappings = {
-        'hemoglobin': ('hemoglobin_level', 'G/DL'),
-        'platelet': ('platelet_count', 'CELLS/UL'),
-        'creatinine': ('serum_creatinine_level', 'MG/DL'),
-        'calcium': ('serum_calcium_level', 'MG/DL'),
-        'bilirubin': ('serum_bilirubin_level_total', 'MG/DL'),
-        'albumin': ('albumin_level', 'G/DL'),
-    }
+    # --- Legacy fields via exact historic concept-name matching ---
     for measurement in measurements:
-        if not measurement.measurement_concept:
+        if not measurement.measurement_concept or measurement.value_as_number is None:
             continue
-        if (
-            measurement.measurement_source_value
-            and measurement.measurement_concept.concept_code
-            and measurement.measurement_source_value != measurement.measurement_concept.concept_code
-        ):
+        concept_name = measurement.measurement_concept.concept_name.casefold().strip()
+        field_name = _LEGACY_LAB_CONCEPT_FIELDS.get(concept_name)
+        if not field_name or field_name in data:
             continue
-        concept_name = measurement.measurement_concept.concept_name.lower()
-        for lab_key, (field_name, unit_field) in legacy_lab_mappings.items():
-            if field_name in data:
-                continue
-            if lab_key in concept_name and measurement.value_as_number:
-                data[field_name] = measurement.value_as_number
-                data[f'{field_name}_units'] = unit_field
-                break
+        data[field_name] = measurement.value_as_number
+        if measurement.unit_source_value:
+            data[f'{field_name}_units'] = measurement.unit_source_value
 
     # --- New UI fields via LOINC concept code (primary path) ---
     loinc_ms = measurements.filter(

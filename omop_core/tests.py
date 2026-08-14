@@ -410,6 +410,67 @@ class RefreshPatientRecordLabsFromMeasurementTest(_OmopBase):
         self.assertIsNone(pi.hemoglobin_g_dl)
 
 
+class LegacyLaboratoryProjectionTest(_OmopBase):
+    """Historic lab columns must not infer an analyte from a name substring (#475)."""
+
+    PERSON_ID = 90231
+
+    def _measurement(self, measurement_id, name, value, *, code, unit=None):
+        concept = _concept(
+            measurement_id + 10_000, name, self.dom_meas, self.vocab, self.cc,
+            code=code,
+        )
+        return Measurement.objects.create(
+            measurement_id=measurement_id,
+            person=self.person,
+            measurement_concept=concept,
+            measurement_date=date(2023, 5, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_number=value,
+            unit_source_value=unit,
+            measurement_source_value=code,
+        )
+
+    def test_exact_legacy_name_keeps_recorded_unit(self):
+        self._measurement(92331, 'Hemoglobin measurement', 11.2, code='legacy-hgb', unit='mmol/L')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertAlmostEqual(float(pi.hemoglobin_level), 11.2, places=1)
+        self.assertEqual(pi.hemoglobin_level_units, 'mmol/L')
+
+    def test_direct_bilirubin_does_not_populate_total_bilirubin(self):
+        self._measurement(92332, 'Direct bilirubin', 0.3, code='1968-7', unit='mg/dL')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertIsNone(pi.serum_bilirubin_level_total)
+
+    def test_creatinine_clearance_does_not_populate_serum_creatinine(self):
+        self._measurement(92333, 'Creatinine clearance', 95, code='2164-2', unit='mL/min')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertEqual(float(pi.creatinine_clearance_ml_min), 95.0)
+        self.assertIsNone(pi.serum_creatinine_level)
+
+    def test_hba1c_does_not_populate_hemoglobin(self):
+        self._measurement(92334, 'Hemoglobin A1c', 6.1, code='4548-4', unit='%')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertAlmostEqual(float(pi.hba1c_percent), 6.1, places=1)
+        self.assertIsNone(pi.hemoglobin_level)
+
+    def test_same_day_legacy_measurements_use_highest_id(self):
+        self._measurement(92335, 'Albumin', 3.1, code='legacy-albumin-1', unit='g/dL')
+        self._measurement(92336, 'Albumin', 3.8, code='legacy-albumin-2', unit='g/dL')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertAlmostEqual(float(pi.albumin_level), 3.8, places=1)
+
+
 class RefreshPatientRecordReceptorStatusTest(_OmopBase):
     """HER2/ER/PR receptor status derivation from Measurement rows (issue #220)."""
 
