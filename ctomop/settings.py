@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 import os
 from pathlib import Path
 import dj_database_url
+from corsheaders.defaults import default_headers as default_cors_headers
 from dotenv import load_dotenv
 
 from ctomop.frontend_paths import resolve_frontend_root
@@ -311,6 +312,16 @@ else:
         if origin.strip()
     ]
 CORS_ALLOW_CREDENTIALS = True
+
+# Provenance travels in headers rather than the body so a payload cannot claim
+# an actor it did not authenticate as. They are not in the CORS default list, so
+# without naming them here a browser preflight refuses them and every
+# cross-origin clinical write fails before it reaches a view.
+CORS_ALLOW_HEADERS = (
+    *default_cors_headers,
+    'x-provenance-source',
+    'x-provenance-user-id',
+)
 
 # ── Pluggable partner auth providers ──────────────────────────────────────
 # PartnerAuthentication iterates these in order; the first provider that

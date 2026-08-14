@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   db:
     image: postgres:15
@@ -35,20 +33,31 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       PORT: 8000
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+      # Browsers calling this API from another origin — the patient and admin
+      # apps writing clinical rows directly — need that origin listed here.
+      # Settings require it whenever DEBUG is off.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}
+      # Patient and staff callers authenticate with a Firebase ID token.
+      # Setting FIREBASE_AUTH_EMULATOR_HOST switches the SDK to emulator
+      # credentials, which is how the end-to-end suite signs in without a real
+      # Firebase project. Leave it unset anywhere real tokens are expected.
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      FIREBASE_AUTH_EMULATOR_HOST: ${FIREBASE_AUTH_EMULATOR_HOST:-}
+      FIREBASE_SKIP_REVOCATION_CHECK: ${FIREBASE_SKIP_REVOCATION_CHECK:-}
     ports:
-      - "8000:8000"
+      # Host port is configurable: 8000 is commonly already taken by a sibling
+      # service in a full local stack.
+      - "${PROMOP_HOST_PORT:-8000}:8000"
+    # The gunicorn flags stay on one line: a folded scalar keeps the newline of
+    # any line indented deeper than the block's first, so wrapped flags arrive
+    # as separate shell commands and the server never starts.
     command: >
       sh -c "
         python manage.py migrate --noinput &&
         python manage.py setup_admin &&
-        gunicorn ctomop.wsgi:application
-          --bind 0.0.0.0:8000
-          --workers 4
-          --threads 2
-          --timeout 120
-          --access-logfile -
-          --error-logfile -
-          --log-level info
+        gunicorn ctomop.wsgi:application --bind 0.0.0.0:8000 --workers 4 --threads 2 --timeout 120 --access-logfile - --error-logfile - --log-level info
       "
 
 volumes:

@@ -4024,6 +4024,56 @@ class AuditLogMiddlewareTest(_SmartBase):
         return person, pi
 
     # ------------------------------------------------------------------
+    # Caller identification
+    # ------------------------------------------------------------------
+
+    def test_client_id_for_a_partner_token_is_the_issuer_and_subject(self):
+        """A partner token must not put its whole claim set in the audit row.
+
+        ``PartnerAuthentication`` leaves a ``TokenClaims`` on ``request.auth``,
+        and its ``str()`` is a repr of every claim the token carries — well past
+        the 255-character column. The audit row then failed to insert, so every
+        request authenticated this way went unrecorded, and the SIEM line
+        carried the token's contents.
+        """
+        from patient_portal.api.middleware import _get_client_id
+        from patient_portal.api.providers.base import TokenClaims
+
+        request = type('R', (), {})()
+        request.auth = TokenClaims(
+            issuer='https://securetoken.google.com/hk-test',
+            sub='some-subject',
+            email='p@test.com',
+            name=None,
+            raw={'padding': 'x' * 500},
+        )
+
+        client_id = _get_client_id(request)
+
+        self.assertEqual(client_id, 'https://securetoken.google.com/hk-test|some-subject')
+        self.assertLessEqual(len(client_id), 255)
+
+    def test_audit_row_persists_for_a_partner_token(self):
+        from patient_portal.api.middleware import AuditLogMiddleware
+        from patient_portal.models import AuditEvent
+
+        AuditLogMiddleware._persist({
+            'event': 'record_update',
+            'method': 'PATCH',
+            'path': '/api/observations/1/',
+            'status_code': 200,
+            'client_id': 'x' * 400,
+            'user_id': None,
+            'user_email': None,
+            'resource_id': '1',
+            'ip_address': '127.0.0.1',
+            'duration_ms': 1,
+        })
+
+        row = AuditEvent.objects.order_by('-id').first()
+        self.assertEqual(len(row.client_id), 255)
+
+    # ------------------------------------------------------------------
     # HTTP method coverage
     # ------------------------------------------------------------------
 
@@ -17623,3 +17673,89 @@ class PatientSelfCreateTest(TestCase):
         rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
         returned = [row['person'] for row in rows]
         self.assertNotIn(self.person_b.person_id, returned)
+
+
+class FindOrCreatePersonTest(TestCase):
+    """``find_or_create`` must return the Person a patient already has.
+
+    Two paths resolve a patient to a Person and they key on different columns.
+    The portal's own ``/api/patient-info/me/`` goes through ``PatientUser`` and
+    never populates ``Person.actor_iss/actor_sub``; ``find_or_create`` matched
+    only on those columns. For any patient who had signed in — the ordinary
+    case — a staff caller resolving them here got a brand-new Person, and
+    anything written against it landed on a record the patient could not see.
+    """
+
+    ISSUER = 'https://securetoken.google.com/hk-test'
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        cls.person = Person.objects.create(person_id=95001, family_name='Linked')
+        cls.identity = Identity.objects.create(issuer=cls.ISSUER, sub='linked-sub')
+        PatientUser.objects.create(identity=cls.identity, person=cls.person)
+
+        cls.staff = Identity.objects.create_user(
+            email='foc-staff@test.com', password='pw', is_staff=True,
+        )
+
+    def _post(self, sub):
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        return client.post(
+            '/api/persons/find_or_create/',
+            {'actor_iss': self.ISSUER, 'actor_sub': sub},
+            format='json',
+        )
+
+    def test_returns_the_person_the_identity_is_already_linked_to(self):
+        before = Person.objects.count()
+        resp = self._post('linked-sub')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['person_id'], self.person.person_id)
+        self.assertFalse(resp.data['created'])
+        self.assertEqual(Person.objects.count(), before)
+
+    def test_backfills_the_actor_columns_so_both_paths_agree(self):
+        self._post('linked-sub')
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.actor_iss, self.ISSUER)
+        self.assertEqual(self.person.actor_sub, 'linked-sub')
+
+    def test_is_idempotent_across_repeated_calls(self):
+        first = self._post('linked-sub')
+        second = self._post('linked-sub')
+        self.assertEqual(first.data['person_id'], second.data['person_id'])
+        self.assertFalse(second.data['created'])
+
+    def test_repeated_provenance_from_one_actor_refreshes_a_single_row(self):
+        """A patient correcting the same value twice must not hit the constraint.
+
+        ``uq_provenance_object_actor_source`` allows one row per
+        (record, actor, source). Recording provenance with an unconditional
+        create meant the second edit by the same actor raised IntegrityError
+        and the request 500ed.
+        """
+        from django.contrib.contenttypes.models import ContentType
+        from omop_core.models import ProvenanceRecord
+        from patient_portal.api.views import _record_provenance
+
+        _record_provenance(self.person, 'PATIENT_SELF', 'actor-1', modification_reason='first')
+        _record_provenance(self.person, 'PATIENT_SELF', 'actor-1', modification_reason='second')
+
+        rows = ProvenanceRecord.objects.filter(
+            content_type=ContentType.objects.get_for_model(Person),
+            object_id=self.person.pk,
+            source_user_id='actor-1',
+        )
+        self.assertEqual(rows.count(), 1)
+        self.assertEqual(rows.first().modification_reason, 'second')
+
+    def test_still_creates_for_an_identity_with_no_person(self):
+        before = Person.objects.count()
+        resp = self._post('brand-new-sub')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertTrue(resp.data['created'])
+        self.assertEqual(Person.objects.count(), before + 1)
+        self.assertNotEqual(resp.data['person_id'], self.person.person_id)

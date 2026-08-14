@@ -99,7 +99,15 @@ def _classify_event_type(request):
 
 
 def _get_client_id(request):
-    """Extract OAuth2 client_id from the token on the request, if present."""
+    """Extract an identifier for the credential the request arrived on.
+
+    Bounded and non-sensitive by construction. A partner token puts a
+    ``TokenClaims`` on ``request.auth``, whose ``str()`` is a repr of every
+    claim in the token: far past the 255-char column, so the audit row failed
+    to persist for every partner-authenticated request, and verbose enough in
+    the SIEM stream to be worth not emitting. The issuer and subject identify
+    the caller, which is what this field is read for.
+    """
     token = getattr(request, 'auth', None)
     if token is None:
         return None
@@ -107,7 +115,11 @@ def _get_client_id(request):
     app = getattr(token, 'application', None)
     if app:
         return app.client_id
-    return str(token)
+    issuer = getattr(token, 'issuer', None)
+    sub = getattr(token, 'sub', None)
+    if issuer or sub:
+        return f"{issuer or ''}|{sub or ''}"[:255]
+    return str(token)[:255]
 
 
 def _get_resource_id(request):
@@ -198,7 +210,7 @@ class AuditLogMiddleware:
             status_code=entry['status_code'],
             user_id=entry['user_id'],
             user_email=(entry['user_email'] or '')[:254] or None,
-            client_id=entry['client_id'],
+            client_id=(entry['client_id'] or '')[:255] or None,
             resource_id=entry['resource_id'],
             ip_address=(entry['ip_address'] or '')[:64] or None,
             duration_ms=entry['duration_ms'],

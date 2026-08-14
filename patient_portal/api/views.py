@@ -166,15 +166,24 @@ def _extract_provenance(request):
 
 
 def _record_provenance(record, source, source_user_id, target_patient_id=None, modification_reason=None, organization=None):
-    """Create a ProvenanceRecord pointing at any model instance."""
-    ProvenanceRecord.objects.create(
-        source=source,
-        source_user_id=source_user_id or '',
-        target_patient_id=target_patient_id,
-        modification_reason=modification_reason,
-        organization=organization,
+    """Record a ProvenanceRecord pointing at any model instance.
+
+    One row per (record, actor, source), which is what
+    ``uq_provenance_object_actor_source`` requires. The same actor editing the
+    same record again — a patient correcting a value they entered — refreshes
+    that row rather than inserting a second one; creating unconditionally made
+    the second edit fail on the constraint and return a 500.
+    """
+    ProvenanceRecord.objects.update_or_create(
         content_type=ContentType.objects.get_for_model(record),
         object_id=record.pk,
+        source=source,
+        source_user_id=source_user_id or '',
+        defaults={
+            'target_patient_id': target_patient_id,
+            'modification_reason': modification_reason,
+            'organization': organization,
+        },
     )
 
 
@@ -4366,17 +4375,47 @@ class PersonViewSet(viewsets.GenericViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        try:
-            _new_person_id = next_pk(Person, 'person_id')
-            person, created = Person.objects.get_or_create(
-                actor_iss=actor_iss,
-                actor_sub=actor_sub,
-                defaults={'person_id': _new_person_id},
-            )
-        except IntegrityError:
-            # Concurrent first-call race: another request won the INSERT
-            person = Person.objects.get(actor_iss=actor_iss, actor_sub=actor_sub)
-            created = False
+        # A patient who has signed in to the portal is already linked to a
+        # Person through PatientUser, and that path does not populate
+        # actor_iss/actor_sub. Matching on those columns alone would miss the
+        # link and mint a second Person for a patient who already has one,
+        # scattering their record across two person_ids. Consult the identity
+        # link first, and backfill the columns so both paths agree from then on.
+        from patient_portal.models import PatientUser
+
+        person = None
+        created = False
+        identity = Identity.objects.filter(issuer=actor_iss, sub=actor_sub).first()
+        if identity is not None:
+            link = PatientUser.objects.filter(
+                identity=identity,
+            ).select_related('person').first()
+            if link is not None:
+                person = link.person
+                if not person.actor_sub:
+                    person.actor_iss = actor_iss
+                    person.actor_sub = actor_sub
+                    try:
+                        person.save(update_fields=['actor_iss', 'actor_sub'])
+                    except IntegrityError:
+                        # Another Person already claims this pair — from a call
+                        # made before this resolution order existed. The linked
+                        # person is the authoritative one; leave it unlabelled
+                        # rather than fail the request.
+                        person.refresh_from_db()
+
+        if person is None:
+            try:
+                _new_person_id = next_pk(Person, 'person_id')
+                person, created = Person.objects.get_or_create(
+                    actor_iss=actor_iss,
+                    actor_sub=actor_sub,
+                    defaults={'person_id': _new_person_id},
+                )
+            except IntegrityError:
+                # Concurrent first-call race: another request won the INSERT
+                person = Person.objects.get(actor_iss=actor_iss, actor_sub=actor_sub)
+                created = False
         http_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return Response({'person_id': person.person_id, 'created': created}, status=http_status)
 
