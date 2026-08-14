@@ -378,47 +378,6 @@ def _is_empty(value) -> bool:
     return value is None or value == '' or value == [] or value == {}
 
 
-def _snapshot_user_edited(patient_info: PatientRecord) -> dict:
-    """Capture hand-entered values for fields OMOP cannot round-trip.
-
-    Only fields recorded by the write-through in `user_edited_fields` are taken,
-    so this restores what a user typed and never resurrects a stale derived value.
-    """
-    snapshot = {}
-    for field in (patient_info.user_edited_fields or []):
-        if field in _OMOP_DERIVED_FIELDS and hasattr(patient_info, field):
-            snapshot[field] = getattr(patient_info, field)
-    return snapshot
-
-
-def _restore_user_edited(patient_info: PatientRecord, preserved: dict) -> None:
-    """Put hand-entered values back where derivation produced nothing.
-
-    Runs after every section extractor, so a field OMOP can now answer keeps the
-    derived value — the user's copy is a fallback, not an override. That ordering
-    is what lets a later FHIR upload or OMOP correction take over a field the
-    patient once filled in by hand.
-
-    Once derivation does answer for a field, its flag is dropped. That hand-off
-    is what keeps the fallback honest, and it is why the write-through can afford
-    to flag generously instead of maintaining a table of which fields round-trip:
-
-      - it stops OMOP's value being mistaken for the user's on a later refresh
-        and resurrected after the source row is deleted, which would leave a
-        value no table backs and no user typed;
-      - and it lets a field OMOP owns resume propagating deletions normally.
-    """
-    still_edited = set(patient_info.user_edited_fields or [])
-    for field, value in preserved.items():
-        if _is_empty(getattr(patient_info, field, None)):
-            if not _is_empty(value):
-                setattr(patient_info, field, value)
-        else:
-            # Derivation answered for this field — OMOP owns it from here.
-            still_edited.discard(field)
-    patient_info.user_edited_fields = sorted(still_edited)
-
-
 def refresh_patient_record(person: Person) -> PatientRecord:
     """Derive and upsert PatientRecord from OMOP tables for a given person.
 
@@ -433,12 +392,6 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             patient_info = PatientRecord.objects.select_for_update().get(person=person)
         except PatientRecord.DoesNotExist:
             patient_info = PatientRecord(person=person)
-
-        # Hand-entered values for fields the write-through cannot push into OMOP
-        # would be destroyed by the clear below and have nothing to restore them.
-        # Snapshot them first; they are put back after derivation, but only where
-        # derivation came up empty, so OMOP still wins whenever it has a value.
-        preserved = _snapshot_user_edited(patient_info)
 
         # Clear all OMOP-derived fields before re-deriving so deletions are reflected.
         _clear_derived_fields(patient_info)
@@ -469,8 +422,6 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         ]:
             for field, value in section_fn(person).items():
                 setattr(patient_info, field, value)
-
-        _restore_user_edited(patient_info, preserved)
 
         _compute_derived_fields(patient_info)
 
@@ -2219,10 +2170,8 @@ def _get_laboratory_data(person: Person) -> dict:
 
 
 # Performance status lands in either OMOP table depending on how it arrived:
-# the FHIR upload routes these LOINCs to `observation` (_ASSESSMENT_LOINC in
-# patient_portal/api/views.py), while the PatientRecord PATCH write-through
-# sends them to `measurement`, because both fields appear in LAB_FIELD_TO_LOINC.
-# Reading only one table loses whatever came in by the other route.
+# the FHIR upload can route these LOINCs to `observation`, while other OMOP
+# imports may use `measurement`. Reading only one table loses valid OMOP facts.
 _ECOG_LOINC = '89247-1'
 _KARNOFSKY_LOINC = '89243-0'
 

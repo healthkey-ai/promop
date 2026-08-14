@@ -41,7 +41,6 @@ from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.lot_inference_service import infer_lot_for_person
-from omop_core.services.omop_write_service import sync_to_omop
 from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
 from omop_core.services.pk import next_pk, next_pk_batch
@@ -575,7 +574,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 changed_fields = _changed_fields(patient_info, previous_values, _prev_val)
                 if prov_source:
                     _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
                 # PHR-S FM TI.1.2#04 — record field-level revision history.
                 _write_record_revisions(patient_info, previous_values, request)
                 if prov_source:
@@ -870,7 +868,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 # value actually moved, or a whole-record autosave would mark
                 # every derived field hand-edited.
                 changed_fields = _changed_fields(patient_info, previous_values, _prev_val)
-                sync_to_omop(patient_info, changed_fields, changed_data=dict(patch_data))
                 # PHR-S FM TI.1.2#04 — record field-level revision history.
                 _write_record_revisions(patient_info, previous_values, request)
         except Exception as _sync_exc:
