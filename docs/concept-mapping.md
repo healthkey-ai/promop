@@ -303,8 +303,10 @@ name-based matching, which is functional but loses semantic precision.
 
 1. Go to [athena.ohdsi.org](https://athena.ohdsi.org) and create a free account.
 2. Select the vocabularies your deployment needs:
-   - **Always required**: LOINC, SNOMED CT, RxNorm, HemOnc, OMOP Extension
-   - **Recommended**: RxNorm Extension, NDF-RT, ATC
+   - **Required for deployed clinical environments**: LOINC, SNOMED CT,
+     RxNorm, ICD10CM
+   - **Required for PROMOP oncology features**: HemOnc
+   - **Included when available**: RxNorm Extension and ATC
 3. Download the ZIP — it contains one TSV file per vocabulary table.
 
 ### Step 2 — Load into PostgreSQL
@@ -316,8 +318,7 @@ unzip athena_download.zip -d /tmp/athena_vocab
 # Run the loader (uses PostgreSQL COPY for fast bulk insert)
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
   .venv/bin/python manage.py load_athena_vocabularies \
-    --path /tmp/athena_vocab \
-    --vocabularies LOINC SNOMED RxNorm HemOnc
+    --path /tmp/athena_vocab
 
 # Verify
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
@@ -325,7 +326,8 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 from omop_core.models import Concept
 print('LOINC:', Concept.objects.filter(vocabulary_id='LOINC').count())
 print('SNOMED:', Concept.objects.filter(vocabulary_id='SNOMED').count())
-print('HemOnc:', Concept.objects.filter(vocabulary_id='HemOnc').count())
+print('RxNorm:', Concept.objects.filter(vocabulary_id='RxNorm').count())
+print('ICD10CM:', Concept.objects.filter(vocabulary_id='ICD10CM').count())
 "
 ```
 
@@ -335,11 +337,13 @@ On Render (or any production platform), vocabulary loading is a one-time operati
 the first deploy. Upload the Athena TSV files to object storage (GCS or S3) and run:
 
 ```bash
-python manage.py load_athena_vocabularies --gcs-bucket your-bucket-name
+python manage.py load_athena_vocabularies --bucket your-bucket-name
 ```
 
-The `load_athena_vocabularies` command supports `--replace` to overwrite existing vocabulary
-data on a vocabulary update, and `--dry-run` to count records without writing.
+The command verifies LOINC, RxNorm, SNOMED, and ICD10CM after a non-dry-run
+load. `--dry-run` counts records without writing. Avoid `--replace` for a
+partial-load repair: it truncates vocabulary tables and cascades to clinical
+tables; the normal upsert is safe for an existing clinical environment.
 
 ---
 

@@ -148,6 +148,31 @@ The high unmapped counts in `drug_exposure` and `observation` are source data th
 | `seed_omop_concepts` | Seeds the minimal concept set for dev/test, using **genuine Athena `concept_id`s** so it cannot manufacture duplicates on a database that already has the vocabulary |
 | `backfill_concept_source` | Fills `source='HealthKey'` on locally-minted rows, dry-run by default |
 
+### Required clinical vocabulary verification
+
+PROMOP requires **LOINC**, **RxNorm**, **SNOMED**, and **ICD10CM** in every
+environment that ingests or serves clinical records. LOINC and RxNorm alone
+are insufficient: SNOMED backs standard condition/procedure concepts and
+ICD10CM backs EHR diagnosis codes before they map to SNOMED.
+
+`load_athena_vocabularies` now verifies those four vocabularies after every
+non-dry-run load and fails before publishing a vocabulary release if one is
+missing. This makes a partial Athena bundle or an incomplete load visible
+immediately rather than allowing clinical lookups to silently return `null`.
+
+To repair an environment with a partial vocabulary load, obtain an Athena
+bundle that contains the missing vocabularies and rerun the normal upsert load:
+
+```bash
+python manage.py load_athena_vocabularies --bucket <athena-bucket>
+```
+
+Do **not** use `--replace` for this repair. The default path upserts vocabulary
+rows and preserves clinical data; `--replace` truncates `concept` and cascades
+to clinical tables. `--skip-clinical-vocabulary-verification` is reserved for
+intentionally minimal local/test bundles and must not be used for deployed
+clinical environments.
+
 To check what a code means:
 
 ```sql
