@@ -1,5 +1,11 @@
 # PatientInfo ↔ OMOP Bidirectional Sync — Design Spec
 
+> **Superseded by #489 (2026-08):** This is retained as historical design context.
+> Mapped clinical `PatientRecord` fields are derive-only. New producers write complete
+> clinical facts to OMOP/FHIR; they must not reintroduce mapped-field-to-OMOP
+> write-through. Projection-owned fields with no OMOP representation remain explicit
+> writable exceptions.
+
 **Date:** 2026-05-16  
 **Status:** Approved  
 **Related issues:** #31 (OMOP write APIs), #67 (LOT inference)

@@ -1,5 +1,11 @@
 # PatientInfo ↔ OMOP Sync — Implementation Plan
 
+> **Superseded by #489 (2026-08):** This is retained as a historical implementation
+> record only. Mapped clinical `PatientRecord` fields are now derive-only; no new code
+> or consumer may use them for PatientRecord-to-OMOP write-through. Projection-owned
+> fields with no OMOP representation remain explicit writable exceptions. Write clinical
+> facts to OMOP/FHIR first.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Expand PatientInfo PATCH write-through from lab fields only to all OMOP-mapped fields (disease/staging → ConditionOccurrence, demographics → Person, therapy lines → Episode + EpisodeEvent), extracting shared mappings out of views.py into a dedicated sync service.

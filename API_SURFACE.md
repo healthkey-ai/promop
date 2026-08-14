@@ -9,7 +9,7 @@
 
 ---
 
-## Architecture: OMOP-first, PatientRecord is read-only
+## Architecture: OMOP-first, mapped PatientRecord clinical fields are read-only
 
 **The authoritative clinical record lives in OMOP tables.**
 
@@ -24,8 +24,11 @@ Client writes → OMOP tables (Measurement, ConditionOccurrence, DrugExposure, �
 ```
 
 `PatientRecord` (Django model: `PatientInfo`, API path: `/api/v1/patient-records/`) is a
-**denormalized read model**. Callers must not write to it directly. It is regenerated
-automatically whenever any OMOP record for that patient is saved or deleted.
+**denormalized read model for mapped clinical fields**. Those fields are regenerated
+automatically whenever their OMOP source records change and callers must not write them
+directly. A documented projection-owned field with no OMOP representation is an explicit
+exception: it may be written through the supported PatientRecord API and is not used to
+construct an OMOP clinical fact.
 
 > **Legacy SQL compatibility only:** `public.patient_info` is a read-only database view
 > retained solely for existing consumers. New integrations must not query it or depend on
@@ -39,16 +42,20 @@ The two sanctioned write paths are:
 | `POST /api/v1/patient-records/upload_fhir/` | Bulk ingest from an EHR / FHIR R4 Bundle |
 | `POST/PATCH/DELETE /api/v1/conditions/`, `/api/v1/measurements/`, etc. | Granular OMOP record writes |
 
-The convenience `PATCH /api/v1/patient-records/{person_id}/` endpoint exists for field-level UI
-updates. It does **not** write to PatientRecord directly — it translates each field into the
-appropriate OMOP table write, then the signal chain re-derives PatientRecord.
+Mapped clinical fields on `PatientRecord` are read-only. Clients that need to record a
+clinical fact must write the appropriate OMOP resource (or submit a FHIR bundle); the
+signal chain then re-derives the projection. A field-level PATCH is allowed only for an
+explicitly projection-owned field with no OMOP representation. It can never translate a
+clinical projection field into an OMOP write: one projection field can be derived from a
+clinically distinct LOINC, concept, time, or source-specific fact that a PATCH cannot
+safely infer.
 
 ---
 
 ## Table of contents
 
 1. [Authentication & authorization](#authentication--authorization)
-2. [PatientRecord endpoints](#patientrecord-endpoints) — list, detail, provenance, me, PATCH, upload_fhir, bulk_delete
+2. [PatientRecord endpoints](#patientrecord-endpoints) — list, detail, provenance, me, upload_fhir, bulk_delete
 3. [OMOP table CRUD](#omop-table-crud) — granular clinical event writes
 4. Supplementary API
    - [Person identity endpoints](#person-identity-endpoints)
@@ -88,7 +95,10 @@ Grant type: `client_credentials` via `POST /o/token/`
 
 ## PatientRecord endpoints
 
-`PatientRecord` is the 286-column denormalized projection that is the core of PRomop. It is read from directly but never written to directly — all clinical data enters through OMOP tables or FHIR ingest, and PatientRecord is re-derived automatically.
+`PatientRecord` is the 286-column denormalized projection that is the core of PRomop.
+Mapped clinical data enters through OMOP tables or FHIR ingest and is re-derived
+automatically. Explicit projection-owned fields that have no OMOP representation are the
+limited exception and may be updated without becoming clinical source data.
 
 Base path: `/api/v1/patient-records/`
 URL parameter `{person_id}` is `Person.person_id` (integer).
@@ -200,39 +210,19 @@ Returns the PatientRecord for the authenticated patient. Only available to patie
 
 ---
 
-### PATCH /api/v1/patient-records/{person_id}/ — field update
+### PatientRecord mutation policy
 
-A convenience endpoint that accepts PatientRecord field names and **translates them into OMOP table writes**. PatientRecord is **not** written to directly — the signal chain re-derives it after the OMOP write completes.
+Mapped clinical fields on `/api/v1/patient-records/` are read-only. A request that tries
+to create, replace, or patch one is rejected; it must not be translated into an OMOP
+write. `PATCH` remains available only for explicitly projection-owned fields with no
+OMOP representation. `POST`, `PUT`, and `DELETE` on individual projection resources are
+not supported.
 
-Returns **403** if patient's org ≠ caller's org.
-
-**Request body** (all fields optional)
-```json
-{
-  "hemoglobin_g_dl": 14.5,
-  "wbc_count_thousand_per_ul": 6.8,
-  "disease": "Diffuse Large B-Cell Lymphoma",
-  "source": "ADMIN_CORRECTION",
-  "source_user_id": "dr.jones",
-  "modification_reason": "Corrected after lab review"
-}
-```
-
-`source` choices: `PATIENT_SELF` · `ADMIN_CORRECTION` · `EHR_SYNC` · `DOCUMENT_EXTRACTION`
-
-`modification_reason` is **required** when `source == ADMIN_CORRECTION` — omitting it returns **400**.
-
-**What actually gets written**
-
-For every field in [`_LAB_FIELD_TO_LOINC`](#_lab_field_to_loinc-mapping) present in the request body:
-
-1. `_upsert_omop_measurement(person, field_name, value, today)` writes or updates a row in the `measurement` table.
-2. `refresh_patient_record(person)` then re-derives PatientRecord from the updated Measurement rows.
-3. If `source` is present, ProvenanceRecords are created for the Measurement row(s).
-
-Fields not yet modelled in OMOP (some behavioral/socioeconomic fields) are patched directly on PatientRecord as a temporary measure until they have a proper OMOP home. This is a transitional state; those fields will move to OMOP tables over time.
-
-**Response 200** — PatientRecord as re-derived from OMOP after the write.
+To correct or add clinical data, write a semantically complete OMOP fact to its own
+resource endpoint—for example a dated `Measurement` with its LOINC and unit—or use FHIR
+ingestion. Include source/provenance on that fact. Do not use a mapped `PatientRecord`
+field name as a clinical-write API: a field name alone cannot preserve the fact's concept,
+time, unit, and provenance.
 
 ---
 
@@ -875,30 +865,22 @@ means the stream was truncated (fail closed). Note the following:
 
 ---
 
-## OMOP write internals
+## OMOP write and derivation internals
 
-### _upsert_omop_measurement
-
-```python
-# patient_portal/api/views.py
-def _upsert_omop_measurement(person, field_name, value, today):
-```
-
-Writes a single lab or vital value into the OMOP `measurement` table. This is the primary write target for numeric clinical observations — PatientRecord is updated downstream by the signal chain.
-
-1. Looks up `(loinc_code, unit, display)` from `_LAB_FIELD_TO_LOINC[field_name]`.
-2. Resolves `Concept` by `concept_code = loinc_code, vocabulary_id = 'LOINC'`. Falls back to concept_id 3000963 (generic lab result) if the LOINC Concept is not loaded.
-3. **UPDATE** if a row already exists for `(person, concept, date)`.
-4. **CREATE** otherwise; `measurement_source_value` = display name (≤ 50 chars); `unit_source_value` = unit string.
-5. Saves with `_skip_patient_record_refresh = True` — the caller is responsible for triggering `refresh_patient_record` once, rather than once per measurement row.
-
-Called from `PatientInfoViewSet.partial_update()` for every field in the PATCH body that has a LOINC entry.
+Clinical write APIs operate on OMOP resources, not on projection fields. A numeric
+observation must carry its clinical concept, event time, value, and unit; terminology
+mapping and canonical-unit policy are documented in
+[`docs/concept-mapping.md`](docs/concept-mapping.md) and
+[`docs/canonical-units-policy.md`](docs/canonical-units-policy.md). This prevents a
+lossy projection update from being mistaken for a source clinical fact.
 
 ---
 
-### _LAB_FIELD_TO_LOINC mapping
+### PatientRecord output mapping reference
 
-Defines which PatientRecord field names map to OMOP `measurement` rows. Any field in this mapping is written to OMOP — not to PatientRecord directly.
+Shows how selected OMOP `measurement` concepts are projected into PatientRecord fields.
+It is an output/derivation reference, not an input API or permission to construct a
+Measurement from a PatientRecord field name.
 
 ```
 PatientInfo field                  LOINC      Unit            Display
@@ -991,8 +973,6 @@ FHIR Bundle
    └── refresh_patient_record(person)   ← explicit call after all OMOP writes complete
          PatientRecord re-derived entirely from the OMOP records written above.
          PatientRecord.organization stamped from the uploading token's org.
-         (A small set of fields not yet modelled in OMOP are patched here
-          as a transitional measure until they have a proper OMOP table.)
 ```
 
 ---
@@ -1071,7 +1051,8 @@ Row-level tenant isolation enforced across all read and write paths (HKI-SEC-04,
 |---|---|
 | `GET /api/v1/patient-records/` | Queryset filtered to `PatientRecord.organization = token.org` |
 | `GET /api/v1/patient-records/{person_id}/` | Returns **404** if patient's org ≠ caller's org |
-| `PATCH /api/v1/patient-records/{person_id}/` | Returns **403** if patient's org ≠ caller's org |
+| Mapped clinical fields on `/api/v1/patient-records/{person_id}/` | Read-only; clinical writes belong to org-scoped OMOP endpoints |
+| Projection-owned fields with no OMOP representation | May use the supported scoped PATCH path; they are not OMOP write-through |
 | All OMOP ViewSets (list) | `_OmopFilterMixin` restricts to persons whose PatientRecord belongs to caller's org |
 | `POST /api/v1/patient-records/upload_fhir/` | Stamps `PatientRecord.organization` from uploading token's org |
 
