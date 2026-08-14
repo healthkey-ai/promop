@@ -24,6 +24,7 @@ from omop_core.models import (
     Domain,
     GroupAccess,
     Organization,
+    PatientRecord,
     PatientGroup,
     PatientGroupMembership,
     Person,
@@ -41,6 +42,7 @@ ISSUER = 'https://securetoken.google.com/healthkey-e2e'
 PATIENT_SUB = 'e2e-patient-a'
 OTHER_SUB = 'e2e-patient-b'
 CLINICIAN_SUB = 'e2e-clinician'
+ORG_CLINICIAN_SUB = 'e2e-org-clinician'
 STAFF_SUB = 'e2e-staff'
 
 PATIENT_PERSON_ID = 9900001
@@ -77,6 +79,7 @@ class Command(BaseCommand):
         patient = self._identity(PATIENT_SUB, 'patient-a@e2e.invalid')
         other = self._identity(OTHER_SUB, 'patient-b@e2e.invalid')
         clinician = self._identity(CLINICIAN_SUB, 'clinician@e2e.invalid')
+        org_clinician = self._identity(ORG_CLINICIAN_SUB, 'org-clinician@e2e.invalid')
         staff = self._identity(STAFF_SUB, 'staff@e2e.invalid', is_staff=True)
 
         PatientUser.objects.get_or_create(identity=patient, defaults={'person': patient_person})
@@ -98,12 +101,24 @@ class Command(BaseCommand):
             identity=clinician, group=group, defaults={'role': 'doctor'},
         )
 
+        # A second clinician reaching the same patient through the organization
+        # rather than the group. The two paths are separate grants and were
+        # honoured inconsistently — an org grant permitted a write its holder
+        # could not read back — so the suite exercises both.
+        PatientRecord.objects.get_or_create(
+            person=patient_person, defaults={'organization': org},
+        )
+        GroupAccess.objects.get_or_create(
+            identity=org_clinician, org=org, defaults={'role': 'doctor'},
+        )
+
         self.stdout.write(json.dumps({
             'password': PASSWORD,
             'issuer': ISSUER,
             'patient': {'uid': patient.uid, 'sub': PATIENT_SUB, 'person_id': patient_person.person_id},
             'other': {'uid': other.uid, 'sub': OTHER_SUB, 'person_id': other_person.person_id},
             'clinician': {'uid': clinician.uid, 'sub': CLINICIAN_SUB},
+            'orgClinician': {'uid': org_clinician.uid, 'sub': ORG_CLINICIAN_SUB},
             'staff': {'uid': staff.uid, 'sub': STAFF_SUB},
         }, indent=2))
 

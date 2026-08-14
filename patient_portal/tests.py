@@ -15228,6 +15228,181 @@ class UserlessOAuthTokenDetailTest(TestCase):
         self.assertFalse(can_access_patient(None, pid))
         self.assertFalse(can_write_patient(None, pid))
         self.assertIsNone(get_actor_role(None, pid))
+
+
+class OrgLevelGrantTest(TestCase):
+    """A grant held at org level must mean the same thing to every check.
+
+    `can_write_patient` matched a grant through the patient's group *or* their
+    organization; `can_access_patient` and `get_actor_role` matched only the
+    group. An org-level grant therefore permitted a write its holder could not
+    read back — and any code that resolved a row through a read path before
+    updating it refused a caller who was entitled to make the change.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import (
+            GroupAccess, Organization, PatientGroup, PatientGroupMembership,
+        )
+
+        cls.org = Organization.objects.create(name='Grant Org', slug='grant-org-99')
+        cls.person = Person.objects.create(person_id=99001)
+        PatientRecord.objects.create(person=cls.person, organization=cls.org)
+
+        # A patient of no organization the grants below reach.
+        cls.outsider = Person.objects.create(person_id=99002)
+        PatientRecord.objects.create(person=cls.outsider)
+
+        cls.org_doctor = Identity.objects.create_user(email='org-doc@test.com', password='pw')
+        GroupAccess.objects.create(identity=cls.org_doctor, org=cls.org, role='doctor')
+
+        cls.org_analyst = Identity.objects.create_user(email='org-analyst@test.com', password='pw')
+        GroupAccess.objects.create(identity=cls.org_analyst, org=cls.org, role='analyst')
+
+        # The same reach, granted through a group instead — the path that always
+        # worked, kept alongside so the two stay comparable.
+        cls.group = PatientGroup.objects.create(
+            organization=cls.org, name='Grant Cohort', slug='grant-cohort-99',
+        )
+        PatientGroupMembership.objects.create(group=cls.group, person_id=cls.person.person_id)
+        cls.group_doctor = Identity.objects.create_user(email='grp-doc@test.com', password='pw')
+        GroupAccess.objects.create(identity=cls.group_doctor, group=cls.group, role='doctor')
+
+    def test_an_org_grant_permits_reading_what_it_permits_writing(self):
+        from omop_core.authorization import can_access_patient, can_write_patient
+
+        pid = self.person.person_id
+        self.assertTrue(can_write_patient(self.org_doctor, pid))
+        self.assertTrue(can_access_patient(self.org_doctor, pid))
+
+    def test_an_org_grant_reports_its_role(self):
+        from omop_core.authorization import get_actor_role
+
+        self.assertEqual(get_actor_role(self.org_doctor, self.person.person_id), 'doctor')
+
+    def test_a_group_grant_behaves_the_same_as_an_org_one(self):
+        from omop_core.authorization import (
+            can_access_patient, can_write_patient, get_actor_role,
+        )
+
+        pid = self.person.person_id
+        self.assertTrue(can_access_patient(self.group_doctor, pid))
+        self.assertTrue(can_write_patient(self.group_doctor, pid))
+        self.assertEqual(get_actor_role(self.group_doctor, pid), 'doctor')
+
+    def test_an_analyst_reads_but_does_not_write(self):
+        """Widening reads must not have widened writes."""
+        from omop_core.authorization import can_access_patient, can_write_patient
+
+        pid = self.person.person_id
+        self.assertTrue(can_access_patient(self.org_analyst, pid))
+        self.assertFalse(can_write_patient(self.org_analyst, pid))
+
+    def test_a_grant_reaches_no_further_than_its_org(self):
+        from omop_core.authorization import (
+            can_access_patient, can_write_patient, get_actor_role,
+        )
+
+        pid = self.outsider.person_id
+        self.assertFalse(can_access_patient(self.org_doctor, pid))
+        self.assertFalse(can_write_patient(self.org_doctor, pid))
+        self.assertIsNone(get_actor_role(self.org_doctor, pid))
+
+    def test_an_expired_grant_reaches_nothing(self):
+        from django.utils import timezone
+        from omop_core.models import GroupAccess
+        from omop_core.authorization import (
+            can_access_patient, can_write_patient, get_actor_role,
+        )
+
+        expired = Identity.objects.create_user(email='expired-doc@test.com', password='pw')
+        GroupAccess.objects.create(
+            identity=expired, org=self.org, role='doctor',
+            expires_at=timezone.now() - timezone.timedelta(days=1),
+        )
+
+        pid = self.person.person_id
+        self.assertFalse(can_access_patient(expired, pid))
+        self.assertFalse(can_write_patient(expired, pid))
+        self.assertIsNone(get_actor_role(expired, pid))
+
+    def test_an_org_grant_with_the_patient_role_confers_nothing(self):
+        """The trap in widening org grants.
+
+        A patient identity carries `GroupAccess(org=..., role='patient')` — it
+        marks which organization they belong to, not standing over its other
+        patients. Matching every role at org scope would let one patient read
+        every other patient in their org. Their own record reaches them by
+        self-access, not through this.
+        """
+        from omop_core.models import GroupAccess
+        from omop_core.authorization import (
+            can_access_patient, can_write_patient, get_actor_role,
+        )
+        from patient_portal.models import PatientUser
+
+        neighbour = Person.objects.create(person_id=99003)
+        PatientRecord.objects.create(person=neighbour, organization=self.org)
+        identity = Identity.objects.create_user(email='org-patient@test.com', password='pw')
+        PatientUser.objects.create(identity=identity, person=neighbour)
+        GroupAccess.objects.create(identity=identity, org=self.org, role='patient')
+
+        # Their own record, through self-access.
+        self.assertTrue(can_access_patient(identity, neighbour.person_id))
+        # A fellow patient of the same org: nothing.
+        pid = self.person.person_id
+        self.assertFalse(can_access_patient(identity, pid))
+        self.assertFalse(can_write_patient(identity, pid))
+        self.assertIsNone(get_actor_role(identity, pid))
+
+    def test_the_patient_list_does_not_expose_group_peers_to_a_patient(self):
+        """The same role trap, in the list query that builds its own set."""
+        from omop_core.models import GroupAccess, PatientGroupMembership
+        from patient_portal.models import PatientUser
+
+        peer = Person.objects.create(person_id=99004)
+        peer_record = PatientRecord.objects.create(person=peer, organization=self.org)
+        PatientGroupMembership.objects.create(group=self.group, person_id=peer.person_id)
+        identity = Identity.objects.create_user(email='grp-patient@test.com', password='pw')
+        PatientUser.objects.create(identity=identity, person=peer)
+        GroupAccess.objects.create(identity=identity, group=self.group, role='patient')
+
+        client = APIClient()
+        client.force_authenticate(user=identity)
+        resp = client.get('/api/patient-info/')
+
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.data.get('results', resp.data) if isinstance(resp.data, dict) else resp.data
+        ids = {row['id'] for row in rows}
+        self.assertIn(peer_record.id, ids, 'their own record')
+        self.assertNotIn(
+            PatientRecord.objects.get(person=self.person).id, ids,
+            'a fellow member of the group must not be visible',
+        )
+
+    def test_a_clinician_still_sees_their_group_panel_in_the_list(self):
+        client = APIClient()
+        client.force_authenticate(user=self.group_doctor)
+        resp = client.get('/api/patient-info/')
+
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.data.get('results', resp.data) if isinstance(resp.data, dict) else resp.data
+        ids = {row['id'] for row in rows}
+        self.assertIn(PatientRecord.objects.get(person=self.person).id, ids)
+
+    def test_the_strongest_role_wins_when_several_grants_apply(self):
+        """Two paths to the same patient must not make the answer arbitrary."""
+        from omop_core.models import GroupAccess
+        from omop_core.authorization import get_actor_role
+
+        both = Identity.objects.create_user(email='both-ways@test.com', password='pw')
+        GroupAccess.objects.create(identity=both, group=self.group, role='analyst')
+        GroupAccess.objects.create(identity=both, org=self.org, role='org_admin')
+
+        self.assertEqual(get_actor_role(both, self.person.person_id), 'org_admin')
+
+
 # ---------------------------------------------------------------------------
 # Vocabulary Snapshot (streaming NDJSON) tests
 # ---------------------------------------------------------------------------

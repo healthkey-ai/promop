@@ -4,16 +4,62 @@ Authorization helpers for patient data access.
 Three access paths checked in order:
 1. Self-access (Identity → PatientUser → person_id matches target)
 2. Personal representative (Identity → PersonalRepresentative → person_id, verified only)
-3. Professional group access (Identity → GroupAccess → group ∩ patient's groups, non-expired)
+3. Professional access (Identity → GroupAccess → the patient's group *or* org, non-expired)
+
+Every professional check goes through ``professional_grants``. It used to be
+written out at each call site, and the copies had drifted: reading and role
+lookup matched only group grants while writing matched group *and* org, so an
+org-level grant permitted a write its holder could not read back.
 """
 from django.db import models
 from django.utils import timezone
 
 from .models import (
     GroupAccess,
-    PatientGroupMembership,
     PersonalRepresentative,
 )
+
+#: Roles that make someone a professional with respect to a patient. Note what
+#: is absent: ``patient``. That role is how an identity is marked as belonging
+#: to an organization, not as having any standing over its other patients — a
+#: check that treated it as a grant would let one patient read every other
+#: patient in their org. Their own record reaches them through self-access.
+PROFESSIONAL_READ_ROLES = frozenset({'org_admin', 'doctor', 'analyst'})
+
+#: Analysts read; they do not write.
+PROFESSIONAL_WRITE_ROLES = frozenset({'org_admin', 'doctor'})
+
+# Most privileged first. A grant can be held through more than one path, and a
+# caller asking for "the" role wants the strongest one rather than whichever the
+# database returned first.
+_ROLE_PRECEDENCE = ['org_admin', 'doctor', 'analyst']
+
+
+def professional_grants(actor_identity, target_person_id: int, roles):
+    """Non-expired ``GroupAccess`` rows through which the actor reaches the patient.
+
+    A grant reaches a patient either through a group the patient belongs to or
+    through the organization that holds their record. Both are real grants; a
+    check that honours only one of them is a bug, which is why this is in one
+    place.
+
+    ``roles`` is required rather than defaulting to "any". The permissive
+    default is the one nobody should get by accident: at org scope it spans
+    every patient the organization holds.
+    """
+    now = timezone.now()
+    return GroupAccess.objects.filter(
+        identity=actor_identity,
+        role__in=roles,
+    ).filter(
+        models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=now),
+    ).filter(
+        models.Q(
+            group__memberships__person_id=target_person_id,
+        ) | models.Q(
+            org__patients__person_id=target_person_id,
+        )
+    )
 
 
 def can_access_patient(actor_identity, target_person_id: int) -> bool:
@@ -44,24 +90,11 @@ def can_access_patient(actor_identity, target_person_id: int) -> bool:
     ).exists():
         return True
 
-    # 3. Professional group access (non-expired)
-    now = timezone.now()
-    actor_groups = GroupAccess.objects.filter(
-        identity=actor_identity,
-    ).filter(
-        models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=now),
-    ).values_list('group_id', flat=True)
-
-    if not actor_groups:
-        return False
-
-    return PatientGroupMembership.objects.filter(
-        group_id__in=actor_groups,
-        person_id=target_person_id,
+    # 3. Professional access. Analysts read but do not write, which is the only
+    #    difference between this role set and can_write_patient's.
+    return professional_grants(
+        actor_identity, target_person_id, roles=PROFESSIONAL_READ_ROLES,
     ).exists()
-
-
-_WRITE_ROLES = frozenset({'org_admin', 'doctor'})
 
 
 def can_write_patient(actor_identity, target_person_id: int) -> bool:
@@ -95,18 +128,8 @@ def can_write_patient(actor_identity, target_person_id: int) -> bool:
         return True
 
     # Professional access: only doctor / org_admin roles may write
-    now = timezone.now()
-    return GroupAccess.objects.filter(
-        identity=actor_identity,
-        role__in=_WRITE_ROLES,
-    ).filter(
-        models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=now),
-    ).filter(
-        models.Q(
-            group__memberships__person_id=target_person_id,
-        ) | models.Q(
-            org__patients__person_id=target_person_id,
-        )
+    return professional_grants(
+        actor_identity, target_person_id, roles=PROFESSIONAL_WRITE_ROLES,
     ).exists()
 
 
@@ -135,14 +158,12 @@ def get_actor_role(actor_identity, target_person_id: int) -> str | None:
     ).exists():
         return 'representative'
 
-    now = timezone.now()
-    grant = GroupAccess.objects.filter(
-        identity=actor_identity,
-        group__memberships__person_id=target_person_id,
-    ).filter(
-        models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=now),
-    ).first()
-    if grant:
-        return grant.role
+    roles = set(
+        professional_grants(actor_identity, target_person_id, roles=PROFESSIONAL_READ_ROLES)
+        .values_list('role', flat=True)
+    )
+    for role in _ROLE_PRECEDENCE:
+        if role in roles:
+            return role
 
     return None

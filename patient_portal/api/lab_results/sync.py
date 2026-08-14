@@ -24,7 +24,7 @@ from rest_framework import serializers, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from omop_core.authorization import can_access_patient, get_actor_role
+from omop_core.authorization import can_access_patient
 from omop_core.models import (
     CareSite, Concept, Measurement, MeasurementOwnership,
     Person, ProvenanceRecord, VisitOccurrence,

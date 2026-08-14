@@ -347,6 +347,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # group access see their whole panel; is_staff bypasses this entirely.
             from patient_portal.models import PatientUser
             from omop_core.models import PatientGroupMembership, GroupAccess
+            from omop_core.authorization import PROFESSIONAL_READ_ROLES
             from django.utils import timezone
             from django.db.models import Q
 
@@ -370,9 +371,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # Org-admin access includes trust-derived admin orgs.
             admin_org_ids = list(get_admin_orgs(self.request.user).values_list('id', flat=True))
 
-            # Group grants: see patients in those groups
+            # Group grants: see patients in those groups. Filtered by role for
+            # the same reason can_access_patient is — a patient identity carries
+            # a `patient`-role grant to mark which group it belongs to, and
+            # counting that as professional access would show one patient every
+            # other patient in their group. Their own record is already in
+            # accessible_pids by self-access.
             actor_group_ids = list(
-                active_grants.filter(group__isnull=False).values_list('group_id', flat=True)
+                active_grants.filter(
+                    group__isnull=False, role__in=PROFESSIONAL_READ_ROLES,
+                ).values_list('group_id', flat=True)
             )
             if actor_group_ids:
                 group_pids = PatientGroupMembership.objects.filter(
