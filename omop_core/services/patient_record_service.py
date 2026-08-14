@@ -1093,16 +1093,22 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
 
     # ── Bulk-fetch Concept names in one query ──────────────────────────────
     # Concept rows already loaded via select_related are re-used directly.
+    # Filter the sentinel so concept 0 / 'No matching concept' never reaches
+    # therapy labels (#480, follow-up to #458).
     concept_name_map: dict = {
-        ep.episode_source_concept_id: ep.episode_source_concept.concept_name
+        ep.episode_source_concept_id: name
         for ep in episodes
         if ep.episode_source_concept_id and ep.episode_source_concept
+        for name in [_usable_concept_name(ep.episode_source_concept)]
+        if name
     }
     to_fetch = needed_concept_ids - set(concept_name_map)
     if to_fetch:
         concept_name_map.update(
-            (c.concept_id, c.concept_name)
+            (c.concept_id, name)
             for c in Concept.objects.filter(concept_id__in=to_fetch).only('concept_id', 'concept_name')
+            for name in [_usable_concept_name(c)]
+            if name
         )
 
     # ── Second pass: populate data dict ───────────────────────────────────
