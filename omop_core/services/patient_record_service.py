@@ -101,7 +101,7 @@ _OMOP_DERIVED_FIELDS = [
     'serum_calcium_mg_dl', 'serum_creatinine_mg_dl', 'creatinine_clearance_ml_min',
     'egfr_ml_min_173m2', 'bun_mg_dl', 'sodium_meq_l', 'potassium_meq_l', 'magnesium_mg_dl',
     # LFT / cardiac (LOINC-derived)
-    'bilirubin_total_mg_dl', 'alt_u_l', 'ast_u_l', 'alkaline_phosphatase_u_l',
+    'bilirubin_total_mg_dl', 'serum_bilirubin_level_direct', 'alt_u_l', 'ast_u_l', 'alkaline_phosphatase_u_l',
     'albumin_g_dl', 'total_protein', 'troponin_ng_ml', 'bnp_pg_ml',
     'glucose_mg_dl', 'hba1c_percent', 'ldh_u_l',
     # Other markers (LOINC-derived)
@@ -199,6 +199,7 @@ _LOINC_LAB_FIELDS = {
     '2339-0':  ('glucose_mg_dl',                  int),    # mCODE: Glucose in Blood
     # LFT / cardiac
     '1975-2':  ('bilirubin_total_mg_dl',          float),
+    '1968-7':  ('serum_bilirubin_level_direct',  float),
     '1742-6':  ('alt_u_l',                        int),
     '1920-8':  ('ast_u_l',                        int),
     '6768-6':  ('alkaline_phosphatase_u_l',       int),
@@ -251,6 +252,8 @@ _SOURCE_VALUE_LAB_FIELDS = {
     'Magnesium':                                  'magnesium_mg_dl',
     'Bilirubin.total [Mass/volume] in Serum or Plasma': 'bilirubin_total_mg_dl',
     'Total Bilirubin':                            'bilirubin_total_mg_dl',
+    'Bilirubin.direct [Mass/volume] in Serum or Plasma': 'serum_bilirubin_level_direct',
+    'Direct Bilirubin':                           'serum_bilirubin_level_direct',
     'Alanine aminotransferase [Enzymatic activity/volum': 'alt_u_l',
     'ALT':                                        'alt_u_l',
     'Aspartate aminotransferase [Enzymatic activity/vol': 'ast_u_l',
