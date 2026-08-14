@@ -10,7 +10,11 @@ vi.mock("@/hooks/useAuth", () => ({ useAuth: () => mockUseAuth() }));
 // Replace route targets with identifiable markers so we assert on routing only.
 vi.mock("@/components/Patient/PatientList", () => ({ default: () => <div>PROVIDER_LIST</div> }));
 vi.mock("@/components/Patient/PatientHome", () => ({ default: () => <div>PATIENT_HOME</div> }));
-vi.mock("@/components/Patient/PatientDetail", () => ({ default: () => <div>PATIENT_DETAIL</div> }));
+vi.mock("@/components/Patient/PatientDetail", () => ({
+  default: (props: { user?: { id?: number } | null }) => (
+    <div>{`PATIENT_DETAIL:${props.user?.id ?? "none"}`}</div>
+  ),
+}));
 vi.mock("@/components/Patient/UploadFHIR", () => ({ default: () => <div>UPLOAD_FHIR</div> }));
 vi.mock("@/components/Patient/UploadCSV", () => ({ default: () => <div>UPLOAD_CSV</div> }));
 vi.mock("@/components/OrgAdmin/OrgAdminPage", () => ({ default: () => <div>ORG_ADMIN</div> }));
@@ -70,7 +74,13 @@ describe("App role-gated routing", () => {
     mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 1, is_patient: true, person_id: 5 } });
     renderAt("/patient/999");
     expect(screen.getByText("PATIENT_HOME")).toBeInTheDocument();
-    expect(screen.queryByText("PATIENT_DETAIL")).not.toBeInTheDocument();
+    expect(screen.queryByText(/PATIENT_DETAIL/)).not.toBeInTheDocument();
+  });
+
+  it("passes currentUser to provider patient detail routes", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
+    renderAt("/patient/999");
+    expect(screen.getByText("PATIENT_DETAIL:2")).toBeInTheDocument();
   });
 
   it("allows a provider on a provider-only route (org-admin)", () => {

@@ -30,6 +30,7 @@ from omop_core.models import (
     SctEligibility,
     FhirConnection, FhirOauthState, Institution,
     ObservationPeriod, PatientSurveyResponse, PersonLanguageSkill, Survey,
+    Organization, GroupAccess,
 )
 from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
 from omop_oncology.models import CancerModifier, Episode, EpisodeEvent, Histology, StemTable
@@ -7694,6 +7695,64 @@ class OmopViewSetAccessTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         results = (resp.data if isinstance(resp.data, list) else resp.data.get('results', resp.data))
         self.assertGreater(len(results), 0)
+
+
+class PatientRecordOmopActionTest(TestCase):
+    """Admin-only consolidated OMOP rows for the patient record review tab."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.org = Organization.objects.create(name='OMOP Review Org', slug='omop-review-org')
+        cls.person = Person.objects.create(person_id=88921, family_name='Rows', given_name='Raw')
+        PatientRecord.objects.create(person=cls.person, organization=cls.org)
+        cls.measurement = Measurement.objects.create(
+            measurement_id=8892101,
+            person=cls.person,
+            measurement_concept_id=0,
+            measurement_type_concept_id=0,
+            measurement_date=date(2024, 2, 1),
+            value_as_number=12.5,
+            unit_source_value='g/dL',
+        )
+        cls.condition = ConditionOccurrence.objects.create(
+            condition_occurrence_id=8892102,
+            person=cls.person,
+            condition_concept_id=0,
+            condition_type_concept_id=0,
+            condition_start_date=date(2024, 1, 15),
+            condition_source_value='test condition',
+        )
+        cls.admin = Identity.objects.create_user(email='omop-admin@test.com', password='pw')
+        GroupAccess.objects.create(identity=cls.admin, org=cls.org, role='org_admin')
+        cls.patient = Identity.objects.create_user(email='omop-patient@test.com', password='pw')
+        from patient_portal.models import PatientUser
+        PatientUser.objects.create(identity=cls.patient, person=cls.person)
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def test_org_admin_can_view_consolidated_omop_rows(self):
+        resp = self._client_as(self.admin).get(
+            f'/api/v1/patient-records/{self.person.person_id}/omop/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        tables = {table['key']: table for table in resp.data['tables']}
+        self.assertEqual(resp.data['person_id'], self.person.person_id)
+        self.assertEqual(tables['measurements']['count'], 1)
+        self.assertEqual(tables['measurements']['rows'][0]['measurement_id'], self.measurement.measurement_id)
+        self.assertEqual(tables['condition_occurrences']['count'], 1)
+        self.assertEqual(
+            tables['condition_occurrences']['rows'][0]['condition_occurrence_id'],
+            self.condition.condition_occurrence_id,
+        )
+
+    def test_patient_cannot_view_consolidated_omop_rows(self):
+        resp = self._client_as(self.patient).get(
+            f'/api/v1/patient-records/{self.person.person_id}/omop/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
 
 # ---------------------------------------------------------------------------
