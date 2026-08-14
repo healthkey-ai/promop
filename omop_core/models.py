@@ -578,10 +578,6 @@ class Concept(models.Model):
     class Meta:
         db_table = 'concept'
         indexes = [
-            models.Index(
-                fields=['vocabulary_id', 'concept_code'],
-                name='ix_concept_vocab_code',
-            ),
             # Functional GIN trigram index on UPPER(concept_name): Django compiles
             # `concept_name__icontains` (concepts/search) to `UPPER(col::text) LIKE
             # UPPER(...)`, which a raw-column gin_trgm index cannot serve — the index
@@ -592,6 +588,12 @@ class Concept(models.Model):
             GinIndex(
                 OpClass(Upper('concept_name'), name='gin_trgm_ops'),
                 name='ix_concept_name_upper_trgm',
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['vocabulary_id', 'concept_code'],
+                name='uq_concept_vocabulary_code',
             ),
         ]
 
