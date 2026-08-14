@@ -41,6 +41,22 @@ from omop_core.services.lot_regimens import (
 
 logger = logging.getLogger(__name__)
 
+# Concept 0 is seeded with this name; it must never leak into user-visible
+# labels.  _get_disease_data already guards against it; the same guard must be
+# applied everywhere a concept_name is surfaced (therapy labels, concomitant
+# medications, etc.).  See #458.
+_SENTINEL_CONCEPT_NAME = 'No matching concept'
+
+
+def _usable_concept_name(concept) -> str | None:
+    """Return the concept's name unless it is the unmapped sentinel (concept 0)."""
+    if concept is None:
+        return None
+    name = concept.concept_name
+    if not name or name == _SENTINEL_CONCEPT_NAME:
+        return None
+    return name
+
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
 DERIVATION_VERSION = 5
@@ -561,13 +577,8 @@ def _get_disease_data(person: Person) -> dict:
     ).filter(concept_q | source_q).order_by('-condition_start_date').first()
 
     if cancer_condition:
-        # Prefer source_value when concept is unmapped (id=0 / "No matching concept")
-        concept_name = (
-            cancer_condition.condition_concept.concept_name
-            if cancer_condition.condition_concept_id
-            and cancer_condition.condition_concept.concept_name != 'No matching concept'
-            else None
-        )
+        # Prefer source_value when concept is unmapped (id=0 / sentinel)
+        concept_name = _usable_concept_name(cancer_condition.condition_concept) if cancer_condition.condition_concept_id else None
         raw_name = concept_name or cancer_condition.condition_source_value or ''
         if raw_name:
             data['disease'] = _canonicalize_disease(raw_name)
@@ -641,8 +652,9 @@ def _get_treatment_data(person: Person) -> dict:
 
     current_meds = []
     for drug in recent_drugs[:5]:
-        if drug.drug_concept:
-            current_meds.append(drug.drug_concept.concept_name)
+        name = _usable_concept_name(drug.drug_concept) or drug.drug_source_value
+        if name:
+            current_meds.append(name)
     if current_meds:
         data['concomitant_medications'] = ', '.join(current_meds)
 
@@ -898,11 +910,12 @@ def _apply_inferred_lots(data: dict, lots) -> None:
         for de in (DrugExposure.objects
                    .filter(drug_exposure_id__in=exp_ids)
                    .select_related('drug_concept')):
-            if de.drug_concept:
+            name = _usable_concept_name(de.drug_concept)
+            if name:
                 de_info_by_id[de.drug_exposure_id] = (
                     de.drug_concept.concept_id,
                     de.drug_concept.vocabulary_id,
-                    de.drug_concept.concept_name,
+                    name,
                 )
             else:
                 de_info_by_id[de.drug_exposure_id] = (None, None, de.drug_source_value or 'Unknown')
@@ -1023,9 +1036,10 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         drugs_in_episode = [de_by_id[eid] for eid in event_ids if eid in de_by_id]
 
         drug_name_set = {
-            normalize_drug_name(de.drug_concept.concept_name)
+            normalize_drug_name(n)
             for de in drugs_in_episode
-            if de.drug_concept
+            for n in [_usable_concept_name(de.drug_concept)]
+            if n
         }
         # Drug source values (regimen names set by import handler) as fallback
         source_value_set = {
@@ -1128,7 +1142,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         else:
             # Try regimen name resolution: drug concept names first, then source values
             from omop_core.services.lot_regimens import get_regimen_name
-            _drug_cnames = [normalize_drug_name(de.drug_concept.concept_name) for de in drugs_in_episode if de.drug_concept]
+            _drug_cnames = [normalize_drug_name(n) for de in drugs_in_episode for n in [_usable_concept_name(de.drug_concept)] if n]
             _regimen_name = get_regimen_name({n.lower().strip() for n in _drug_cnames}) if _drug_cnames else None
             if not _regimen_name:
                 for sv in source_value_set:

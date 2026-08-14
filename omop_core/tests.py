@@ -4514,3 +4514,74 @@ class NoFalselyStandardMintsTest(TestCase):
         self.assertEqual(second.concept_code, 'OMOP4976890')
         self.assertEqual(second.standard_concept, 'S')
         self.assertIsNone(second.source)
+
+
+# ===========================================================================
+# TEST-05: Sentinel concept name filtering (#458)
+# ===========================================================================
+
+class SentinelConceptNameFilterTest(_OmopBase):
+    """'No matching concept' (concept 0) must never leak into user-visible
+    labels — therapy regimens, concomitant medications, or disease names.
+    See #458."""
+
+    PERSON_ID = 90458
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Concept 0: the unmapped sentinel
+        cls.sentinel_concept = _concept(
+            0, 'No matching concept', cls.dom_drug, cls.vocab, cls.cc,
+            code='0',
+        )
+
+    def test_concomitant_medications_skips_sentinel(self):
+        """Drugs mapped to concept 0 should fall back to drug_source_value,
+        not emit 'No matching concept' in concomitant_medications."""
+        DrugExposure.objects.create(
+            drug_exposure_id=94581,
+            person=self.person,
+            drug_concept=self.sentinel_concept,
+            drug_source_value='Bortezomib',
+            drug_exposure_start_date=date.today(),
+            drug_type_concept=self.type_concept,
+        )
+        pi = refresh_patient_record(self.person)
+        meds = pi.concomitant_medications or ''
+        self.assertNotIn('No matching concept', meds)
+        self.assertIn('Bortezomib', meds)
+
+    def test_concomitant_medications_skips_drug_with_no_fallback(self):
+        """A drug with sentinel concept and no source_value is omitted entirely."""
+        DrugExposure.objects.create(
+            drug_exposure_id=94582,
+            person=self.person,
+            drug_concept=self.sentinel_concept,
+            drug_source_value=None,
+            drug_exposure_start_date=date.today(),
+            drug_type_concept=self.type_concept,
+        )
+        pi = refresh_patient_record(self.person)
+        meds = pi.concomitant_medications or ''
+        self.assertNotIn('No matching concept', meds)
+
+    def test_disease_skips_sentinel_concept_name(self):
+        """Condition with sentinel concept name falls back to source_value."""
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=94583,
+            person=self.person,
+            condition_concept=self.sentinel_concept,
+            condition_source_value='Breast cancer',
+            condition_start_date=date(2022, 1, 1),
+            condition_type_concept=self.type_concept,
+        )
+        pi = refresh_patient_record(self.person)
+        self.assertNotIn('No matching concept', pi.disease or '')
+
+    def test_usable_concept_name_helper(self):
+        """Unit test for _usable_concept_name."""
+        from omop_core.services.patient_record_service import _usable_concept_name
+        self.assertIsNone(_usable_concept_name(None))
+        self.assertIsNone(_usable_concept_name(self.sentinel_concept))
+        self.assertEqual(_usable_concept_name(self.drug_concept), 'Doxorubicin')
