@@ -22,22 +22,6 @@ from omop_core.models import (
     Death, ConceptRelationship, PERSON_YEAR_PLACEHOLDERS,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
-
-# Concept 0 is seeded with this name; it must never leak into user-visible
-# labels.  _get_disease_data already guards against it; the same guard must be
-# applied everywhere a concept_name is surfaced (therapy labels, concomitant
-# medications, etc.).  See #458.
-_SENTINEL_CONCEPT_NAME = 'No matching concept'
-
-
-def _usable_concept_name(concept) -> str | None:
-    """Return the concept's name unless it is the unmapped sentinel (concept 0)."""
-    if concept is None:
-        return None
-    name = concept.concept_name
-    if not name or name == _SENTINEL_CONCEPT_NAME:
-        return None
-    return name
 from omop_core.services.mappings import (
     WEARABLE_CONCEPT_CODE, WEARABLE_ARTIFACT_BOUNDS, WEARABLE_MIN_VALID_DAYS,
     WEARABLE_TREND_IMPROVING_PCT, WEARABLE_TREND_DECLINING_PCT,
@@ -55,6 +39,22 @@ from omop_core.services.lot_regimens import (
 # ---------------------------------------------------------------------------
 
 logger = logging.getLogger(__name__)
+
+# Concept 0 is seeded with this name; it must never leak into user-visible
+# labels.  _get_disease_data already guards against it; the same guard must be
+# applied everywhere a concept_name is surfaced (therapy labels, concomitant
+# medications, etc.).  See #458.
+_SENTINEL_CONCEPT_NAME = 'No matching concept'
+
+
+def _usable_concept_name(concept) -> str | None:
+    """Return the concept's name unless it is the unmapped sentinel (concept 0)."""
+    if concept is None:
+        return None
+    name = concept.concept_name
+    if not name or name == _SENTINEL_CONCEPT_NAME:
+        return None
+    return name
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.

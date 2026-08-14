@@ -4505,14 +4505,10 @@ class SentinelConceptNameFilterTest(_OmopBase):
 
     def test_disease_skips_sentinel_concept_name(self):
         """Condition with sentinel concept name falls back to source_value."""
-        sentinel_cond = _concept(
-            0, 'No matching concept', self.dom_cond, self.vocab, self.cc,
-            code='0',
-        )
         ConditionOccurrence.objects.create(
             condition_occurrence_id=94583,
             person=self.person,
-            condition_concept=sentinel_cond,
+            condition_concept=self.sentinel_concept,
             condition_source_value='Breast cancer',
             condition_start_date=date(2022, 1, 1),
             condition_type_concept=self.type_concept,
