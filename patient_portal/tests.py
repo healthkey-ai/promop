@@ -17519,3 +17519,107 @@ class BulkOmopUpsertTest(TestCase):
             PatientRecord.objects.get(person=self.person).derived_at,
             derived_before,
             'the collapse landed without refreshing the read model')
+
+
+class PatientSelfCreateTest(TestCase):
+    """POST to the clinical viewsets with the acting user's own credential.
+
+    The six viewsets carrying ``_ProvenanceMixin`` use ``PatientCrudPermission``
+    so that a patient can record their own data and a clinician can record data
+    for a patient they hold access to. Neither previously could: the base
+    ``ScopedTokenPermission`` denies POST to every authenticated caller without
+    ``is_staff``, which rejected the request before ``can_write_patient`` — the
+    rule that actually decides who may write for whom — ever ran.
+
+    These tests pin the pairing. The permission opens the method; the ownership
+    check in ``perform_create`` still decides the person.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+        from omop_core.models import GroupAccess, Organization
+
+        _make_vocab_fixtures()
+        cls.observation_concept = Concept.objects.get(concept_id=4112853)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+
+        # Patient A, in an organization a clinician will have access to.
+        cls.org = Organization.objects.create(name='Self Create Org', slug='self-create-org-94')
+        cls.person_a = Person.objects.create(person_id=94001, family_name='Able', given_name='Amy')
+        PatientRecord.objects.create(person=cls.person_a, organization=cls.org)
+        cls.patient_a = Identity.objects.create_user(email='sc-a@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.patient_a, person=cls.person_a)
+
+        # Patient B, in no organization — outside the clinician's reach.
+        cls.person_b = Person.objects.create(person_id=94002, family_name='Baker', given_name='Bob')
+        PatientRecord.objects.create(person=cls.person_b)
+        cls.patient_b = Identity.objects.create_user(email='sc-b@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.patient_b, person=cls.person_b)
+
+        cls.clinician = Identity.objects.create_user(email='sc-doc@test.com', password='pw')
+        GroupAccess.objects.create(identity=cls.clinician, org=cls.org, role='doctor')
+
+        cls.staff = Identity.objects.create_user(email='sc-staff@test.com', password='pw', is_staff=True)
+
+    def _payload(self, person):
+        return {
+            'person': person.person_id,
+            'observation_concept': self.observation_concept.concept_id,
+            'observation_date': str(date.today()),
+            'observation_type_concept': self.type_concept.concept_id,
+            'value_as_string': 'ECOG 1',
+        }
+
+    def _post(self, identity, person):
+        client = APIClient()
+        if identity is not None:
+            client.force_authenticate(user=identity)
+        return client.post('/api/observations/', self._payload(person), format='json')
+
+    def test_patient_creates_own_observation(self):
+        resp = self._post(self.patient_a, self.person_a)
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(
+            Observation.objects.filter(person=self.person_a).count(), 1
+        )
+
+    def test_patient_cannot_create_for_another_person(self):
+        resp = self._post(self.patient_a, self.person_b)
+        self.assertEqual(resp.status_code, 403, resp.data)
+        self.assertFalse(Observation.objects.filter(person=self.person_b).exists())
+
+    def test_clinician_creates_for_patient_in_their_org(self):
+        resp = self._post(self.clinician, self.person_a)
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_clinician_cannot_create_outside_their_org(self):
+        resp = self._post(self.clinician, self.person_b)
+        self.assertEqual(resp.status_code, 403, resp.data)
+        self.assertFalse(Observation.objects.filter(person=self.person_b).exists())
+
+    def test_staff_creates_for_any_person(self):
+        resp = self._post(self.staff, self.person_b)
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_unauthenticated_is_rejected(self):
+        resp = self._post(None, self.person_a)
+        self.assertIn(resp.status_code, (401, 403), resp.data)
+        self.assertFalse(Observation.objects.filter(person=self.person_a).exists())
+
+    def test_reads_are_unchanged_for_patients(self):
+        """The permission swap must not widen what a patient can read."""
+        Observation.objects.create(
+            observation_id=94901,
+            person=self.person_b,
+            observation_concept=self.observation_concept,
+            observation_date=date.today(),
+            observation_type_concept=self.type_concept,
+        )
+        client = APIClient()
+        client.force_authenticate(user=self.patient_a)
+        resp = client.get('/api/observations/')
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
+        returned = [row['person'] for row in rows]
+        self.assertNotIn(self.person_b.person_id, returned)
