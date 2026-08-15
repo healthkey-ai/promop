@@ -38,20 +38,21 @@ PRomop is currently organized around a simple pipeline:
 
 Key implementation points:
 - The platform is OMOP-first and mapped clinical `PatientRecord` fields are a
-  read model, not the system of record. Projection-owned fields with no OMOP
-  representation are explicit writable exceptions. See
+  read model, not the system of record. The compatibility API maps supported
+  tuples to OMOP and refreshes the projection; projection-owned fields with no
+  OMOP representation are explicit direct-persistence exceptions. See
   [API_SURFACE.md](/Users/adamblum/promop/API_SURFACE.md).
 - `PatientRecord` is a large denormalized projection that combines demographics,
   disease state, therapy lines, labs, biomarkers, behavior, geography, and
   wearable summaries. See [omop_core/models.py](/Users/adamblum/promop/omop_core/models.py#L1210).
 - The derivation logic lives in
   [omop_core/services/patient_record_service.py](/Users/adamblum/promop/omop_core/services/patient_record_service.py).
-- There is deliberately no mapped-clinical-`PatientRecord`-to-OMOP write-through
-  path. Producers write complete, provenance-bearing OMOP facts (or FHIR), and
-  the derivation pipeline rebuilds those PatientRecord fields. A mapped clinical
-  projection field is never a substitute for a fact with its own concept, time,
-  unit, and source. Projection-owned fields with no OMOP representation are
-  explicitly outside that rule and may remain writable.
+- The compatibility API deliberately maps supported mapped-clinical tuples to
+  complete, provenance-bearing OMOP facts before refreshing `PatientRecord`.
+  A mapped clinical projection field is never the source of truth or a substitute
+  for a fact with its own concept, time, unit, and source. Projection-owned
+  fields with no OMOP representation are explicitly outside that rule and may
+  remain directly writable.
 - `public.patient_info` is a legacy SQL compatibility view only. New consumers
   must use `public.patient_record` or the versioned PatientRecord API, and must
   not adopt `patient_info` as a new contract.
