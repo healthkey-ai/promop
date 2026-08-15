@@ -2912,15 +2912,29 @@ class SmartPatientRecordReadOnlyTest(_SmartBase):
         )
         self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
-    def test_patient_info_patch_succeeds_with_write_token(self):
-        """PATCH is now supported — write-through to OMOP was added in HKI-PDS-01."""
+    def test_patient_info_patch_returns_405_with_write_token(self):
+        """Clinical PatientRecord fields are never written through this API."""
         PatientRecord.objects.get_or_create(person=self.person, defaults={'organization': self.organization})
         resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
             {'disease': 'Updated disease'},
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_projection_owned_field_remains_writable(self):
+        """A field with no OMOP representation remains a projection-owned exception."""
+        record, _ = PatientRecord.objects.get_or_create(
+            person=self.person, defaults={'organization': self.organization},
+        )
+        resp = self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'email': 'projection-owned@example.test'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        record.refresh_from_db()
+        self.assertEqual(record.email, 'projection-owned@example.test')
 
     def test_patient_info_delete_returns_405(self):
         resp = self.write_client.delete(f'/api/patient-info/{self.person.person_id}/')
@@ -3532,90 +3546,6 @@ class MultiTenantIsolationTest(_SmartBase):
         # Org B's person must still exist
         from omop_core.models import Person as P
         self.assertTrue(P.objects.filter(person_id=self.person_b.person_id).exists())
-
-
-# ---------------------------------------------------------------------------
-# PatientRecord PATCH write-through tests (HKI-PDS-01 / issue #59)
-# ---------------------------------------------------------------------------
-
-class PatientRecordPatchWriteThroughTest(_SmartBase):
-    """PATCH /api/patient-info/{person_id}/ must update PatientRecord AND create a Measurement."""
-
-    @classmethod
-    def setUpTestData(cls):
-        super().setUpTestData()
-        # cls.patient_info already created by _SmartBase; just set disease.
-        PatientRecord.objects.filter(person=cls.person).update(disease='Breast Cancer')
-        cls.patient_info = PatientRecord.objects.get(person=cls.person)
-
-    def test_patch_updates_patient_info(self):
-        """PATCH updates the PatientRecord field value."""
-        resp = self.write_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'hemoglobin_g_dl': '12.5'},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, 200)
-        self.patient_info.refresh_from_db()
-        self.assertAlmostEqual(float(self.patient_info.hemoglobin_g_dl), 12.5, places=1)
-
-    def test_patch_creates_measurement_record(self):
-        """PATCH a lab field creates a Measurement row with the correct LOINC concept."""
-        resp = self.write_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'hemoglobin_g_dl': '11.0'},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, 200)
-        m = Measurement.objects.filter(
-            person=self.person,
-            measurement_source_value='718-7',
-        ).first()
-        self.assertIsNotNone(m, 'No Measurement record created for hemoglobin_g_dl patch')
-        self.assertAlmostEqual(float(m.value_as_number), 11.0, places=1)
-
-    def test_patch_upserts_existing_measurement(self):
-        """Patching the same field twice updates the existing Measurement rather than duplicating it."""
-        self.write_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'wbc_count_thousand_per_ul': '5.0'},
-            format='json',
-        )
-        self.write_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'wbc_count_thousand_per_ul': '6.2'},
-            format='json',
-        )
-        count = Measurement.objects.filter(
-            person=self.person,
-            measurement_source_value='6690-2',
-        ).count()
-        self.assertEqual(count, 1, 'Duplicate Measurement rows created on second patch')
-        m = Measurement.objects.get(
-            person=self.person,
-            measurement_source_value='6690-2',
-        )
-        self.assertAlmostEqual(float(m.value_as_number), 6.2, places=1)
-
-    def test_patch_non_lab_field_does_not_create_measurement(self):
-        """Patching a non-lab field (e.g. disease) must not create a Measurement row."""
-        before = Measurement.objects.filter(person=self.person).count()
-        self.write_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'disease': 'Lung Cancer'},
-            format='json',
-        )
-        after = Measurement.objects.filter(person=self.person).count()
-        self.assertEqual(before, after)
-
-    def test_patch_requires_write_scope(self):
-        """Read-only token must be rejected with 403."""
-        resp = self.read_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'hemoglobin_g_dl': '10.0'},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, 403)
 
 
 # ---------------------------------------------------------------------------
@@ -10658,11 +10588,22 @@ class MeEndpointGuardTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertIn('patient_info', resp.data)
 
-    def test_confirmed_patient_patch_returns_200(self):
+    def test_confirmed_patient_clinical_patch_returns_405(self):
         resp = self._client(self.patient_user).patch(
-            '/api/patient-info/me/', {}, format='json'
+            '/api/patient-info/me/', {'disease': 'not directly writable'}, format='json'
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_confirmed_patient_can_update_own_name_without_writing_patient_record(self):
+        before = PatientRecord.objects.get(person=self.patient_person).disease
+        resp = self._client(self.patient_user).patch(
+            '/api/patient-info/me/', {'patient_name': 'Ada Lovelace'}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.patient_person.refresh_from_db()
+        self.assertEqual(self.patient_person.given_name, 'Ada')
+        self.assertEqual(self.patient_person.family_name, 'Lovelace')
+        self.assertEqual(PatientRecord.objects.get(person=self.patient_person).disease, before)
 
     def test_staff_without_patient_record_returns_404(self):
         resp = self._client(self.staff_user).get('/api/patient-info/me/')
@@ -10841,11 +10782,11 @@ class V1MeEndpointTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertIn('patient_info', resp.data)
 
-    def test_v1_confirmed_patient_patch_returns_200(self):
+    def test_v1_confirmed_patient_clinical_patch_returns_405(self):
         resp = self._client(self.patient_user).patch(
-            '/api/v1/patient-records/me/', {}, format='json'
+            '/api/v1/patient-records/me/', {'disease': 'not directly writable'}, format='json'
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
     # --- guard: clinical users without a patient record are blocked -----------
 
@@ -10870,7 +10811,7 @@ class V1MeEndpointTest(TestCase):
 
     def test_v1_me_patch_has_no_deprecation_header(self):
         resp = self._client(self.patient_user).patch(
-            '/api/v1/patient-records/me/', {}, format='json'
+            '/api/v1/patient-records/me/', {'disease': 'not directly writable'}, format='json'
         )
         self.assertNotIn('Deprecation', resp)
 

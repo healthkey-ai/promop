@@ -38,11 +38,14 @@ from omop_core.models import (
     PERSON_YEAR_PLACEHOLDERS,
 )
 from omop_oncology.models import Episode, EpisodeEvent
-from omop_core.services.patient_record_service import refresh_patient_record
+from omop_core.services.patient_record_service import (
+    PATIENT_RECORD_OMOP_MAPPED_FIELDS,
+    refresh_patient_record,
+)
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.episode_service import upsert_therapy_line_episode
-from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
+from omop_core.services.mappings import get_gender_concept
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.services.regimen_resolution import (
@@ -447,39 +450,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = PatientListSerializer(queryset[:500], many=True)
         return Response(serializer.data)
 
-    def create(self, request):
-        """Create a new patient record, creating a Person if needed"""
-        data = request.data
-
-        # Resolve or create Person
-        person_id = data.get('person_id') or data.get('person')
-        if person_id:
-            try:
-                person = Person.objects.get(person_id=int(person_id))
-            except Person.DoesNotExist:
-                person = Person.objects.create(
-                    person_id=int(person_id),
-                    year_of_birth=datetime.now().year - 50,
-                    gender_source_value='unknown',
-                    race_source_value='unknown',
-                    ethnicity_source_value='unknown',
-                )
-        else:
-            last_person = Person.objects.order_by('-person_id').first()
-            new_person_id = last_person.person_id + 1 if last_person else 1000
-            person = Person.objects.create(
-                person_id=new_person_id,
-                year_of_birth=datetime.now().year - 50,
-                gender_source_value='unknown',
-                race_source_value='unknown',
-                ethnicity_source_value='unknown',
-            )
-
-        serializer = PatientRecordSerializer(data=data, context={'request': request})
-        serializer.is_valid(raise_exception=True)
-        serializer.save(person=person)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
-
     def retrieve(self, request, pk=None):
         """Get detailed patient info for a specific person"""
         person, patient_info, err = self._resolve_patient_with_auth(request, pk)
@@ -505,7 +475,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         })
 
     def partial_update(self, request, pk=None):
-        """PATCH /api/patient-info/{person_id}/ — update PatientRecord and write through to OMOP."""
+        """PATCH only projection-owned fields with no OMOP representation.
+
+        A mapped clinical PatientRecord field is output from an OMOP fact.  It
+        cannot safely supply the fact's concept, time, unit, or provenance, so
+        this endpoint rejects it rather than recreating the retired
+        PatientRecord-to-OMOP write-through path.
+        """
         try:
             person = Person.objects.get(person_id=pk)
             patient_info = PatientRecord.objects.get(person=person)
@@ -528,73 +504,47 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-        prov_source, prov_user_id, prov_reason = _extract_provenance(request)
-        if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
+        mapped_fields = sorted(set(request.data) & PATIENT_RECORD_OMOP_MAPPED_FIELDS)
+        if mapped_fields:
             return Response(
-                {'error': 'modification_reason is required when source is ADMIN_CORRECTION'},
-                status=status.HTTP_400_BAD_REQUEST,
+                {
+                    'detail': (
+                        'OMOP-mapped PatientRecord fields are read-only. Write a complete '
+                        'clinical fact to the appropriate OMOP resource, then rederive the record.'
+                    ),
+                    'fields': mapped_fields,
+                },
+                status=status.HTTP_405_METHOD_NOT_ALLOWED,
             )
-
-        # Capture previous values for fields being changed (exclude provenance meta-fields).
-        # Use {field}_id for FK fields so we get a serializable PK, not a model object.
-        _prov_meta = {'source', 'source_user_id', 'modification_reason'}
-        _read_only = set(PatientRecordSerializer.Meta.read_only_fields)
-        _ignored_ro = sorted((set(request.data) & _read_only) - _prov_meta)
-        if _ignored_ro:
-            # DRF silently drops read-only fields from the input — surface the
-            # attempt so API consumers learn the derived therapy-id fields are
-            # written only by the derivation pipeline (#236).
-            logger.warning(
-                '{"event": "read_only_patch_fields_ignored", "fields": "%s", "person_id": "%s"}',
-                ','.join(_ignored_ro), pk,
-            )
-        def _prev_val(obj, field):
-            fk_id = f'{field}_id'
-            if hasattr(obj, fk_id):
-                return getattr(obj, fk_id, None)
-            return getattr(obj, field, None)
-        previous_values = {
-            field: _prev_val(patient_info, field)
-            for field in request.data
-            if field not in _prov_meta and field not in _read_only and hasattr(patient_info, field)
-        }
 
         serializer = PatientRecordSerializer(patient_info, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
 
-        try:
-            with transaction.atomic():
-                serializer.save()
-                # Fields whose value actually moved, not every key in the body:
-                # the React client PATCHes the whole record on autosave, so
-                # keying off the request would mark all ~180 derived fields as
-                # hand-edited on a single keystroke and freeze the read model
-                # against OMOP. Compared after save so both sides are model-
-                # native types rather than raw request strings.
-                changed_fields = _changed_fields(patient_info, previous_values, _prev_val)
-                if prov_source:
-                    _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                # PHR-S FM TI.1.2#04 — record field-level revision history.
-                _write_record_revisions(patient_info, previous_values, request)
-                if prov_source:
-                    for field in changed_fields:
-                        if field in LAB_FIELD_TO_LOINC:
-                            loinc_code = LAB_FIELD_TO_LOINC[field][0]
-                            m = Measurement.objects.filter(
-                                person=patient_info.person,
-                                measurement_source_value=loinc_code,
-                            ).order_by('-measurement_id').first()
-                            if m:
-                                _record_provenance(m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-        except Exception as _sync_exc:
-            logger.error(
-                'omop_write_through_failed patient=%s error=%s',
-                patient_info.pk, type(_sync_exc).__name__,
-            )
+        # DRF intentionally discards serializer read-only fields. Surface those
+        # attempts instead of returning success for a no-op, so ownership
+        # boundaries are visible to API consumers.
+        writable_fields = {
+            name for name, field in serializer.fields.items() if not field.read_only
+        }
+        unsupported_fields = sorted(set(request.data) - writable_fields)
+        if unsupported_fields:
             return Response(
-                {'error': 'Failed to persist changes to OMOP. Please try again.'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                {'detail': 'Only projection-owned PatientRecord fields are writable.', 'fields': unsupported_fields},
+                status=status.HTTP_405_METHOD_NOT_ALLOWED,
             )
+
+        def previous_value(obj, field):
+            fk_id = f'{field}_id'
+            return getattr(obj, fk_id, None) if hasattr(obj, fk_id) else getattr(obj, field, None)
+
+        previous_values = {
+            field: previous_value(patient_info, field)
+            for field in request.data
+            if hasattr(patient_info, field)
+        }
+        with transaction.atomic():
+            serializer.save()
+            _write_record_revisions(patient_info, previous_values, request)
 
         return Response({**serializer.data, 'previous_values': previous_values})
 
@@ -792,7 +742,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['get', 'patch', 'delete'], permission_classes=[PatientDeletePermission, PatientSelfScopePermission])
     def me(self, request):
-        """GET/PATCH/DELETE /api/patient-info/me/ — current user's own PatientRecord."""
+        """GET/DELETE the current user's record; PATCH name or projection-owned fields.
+
+        ``PatientRecord`` is a derived OMOP read model. This legacy endpoint
+        remains available for its read wire format. Mapped clinical fields are
+        read-only; ``patient_name`` updates ``Person`` and unmapped
+        projection-owned fields remain writable.
+        """
         if request.method == 'DELETE':
             return self._delete_patient_account(request)
 
@@ -834,53 +790,60 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 'patient_name': full_name,
             })
 
-        # PATCH
-        patient_name = request.data.pop('patient_name', None) if hasattr(request.data, 'pop') else request.data.get('patient_name')
-        patch_data = {k: v for k, v in request.data.items() if k != 'patient_name'}
-
-        if patient_name is not None:
-            parts = str(patient_name).strip().split(None, 1)
-            person.given_name = parts[0] if parts else ''
-            person.family_name = parts[1] if len(parts) > 1 else ''
-            person.save(update_fields=['given_name', 'family_name'])
+        patch_data = {key: value for key, value in request.data.items() if key != 'patient_name'}
+        mapped_fields = sorted(set(patch_data) & PATIENT_RECORD_OMOP_MAPPED_FIELDS)
+        if mapped_fields:
+            return Response(
+                {
+                    'detail': (
+                        'OMOP-mapped PatientRecord fields are read-only. Write a complete '
+                        'clinical fact to the appropriate OMOP resource, then rederive the record.'
+                    ),
+                    'fields': mapped_fields,
+                },
+                status=status.HTTP_405_METHOD_NOT_ALLOWED,
+            )
 
         serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
         serializer.is_valid(raise_exception=True)
-
-        # Capture previous values before save so revision history can record
-        # old/new (PHR-S FM TI.1.2#04). FK fields compared via {field}_id.
-        _read_only = set(PatientRecordSerializer.Meta.read_only_fields)
-
-        def _prev_val(obj, field):
-            fk_id = f'{field}_id'
-            if hasattr(obj, fk_id):
-                return getattr(obj, fk_id, None)
-            return getattr(obj, field, None)
-        previous_values = {
-            field: _prev_val(patient_info, field)
-            for field in patch_data
-            if field not in _read_only and hasattr(patient_info, field)
+        writable_fields = {
+            name for name, field in serializer.fields.items() if not field.read_only
         }
-        try:
-            with transaction.atomic():
-                serializer.save()
-                # See the /patient-info/{pk}/ PATCH above: only fields whose
-                # value actually moved, or a whole-record autosave would mark
-                # every derived field hand-edited.
-                changed_fields = _changed_fields(patient_info, previous_values, _prev_val)
-                # PHR-S FM TI.1.2#04 — record field-level revision history.
-                _write_record_revisions(patient_info, previous_values, request)
-        except Exception as _sync_exc:
-            logger.error(
-                'omop_write_through_failed patient=%s error=%s',
-                patient_info.pk, type(_sync_exc).__name__,
-            )
+        unsupported_fields = sorted(set(patch_data) - writable_fields)
+        if unsupported_fields:
             return Response(
-                {'error': 'Failed to persist changes to OMOP. Please try again.'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                {'detail': 'Only projection-owned PatientRecord fields are writable.', 'fields': unsupported_fields},
+                status=status.HTTP_405_METHOD_NOT_ALLOWED,
             )
 
-        return Response(serializer.data)
+        if not patch_data and 'patient_name' not in request.data:
+            return Response(
+                {'detail': 'Supply patient_name or a projection-owned PatientRecord field.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        def previous_value(obj, field):
+            fk_id = f'{field}_id'
+            return getattr(obj, fk_id, None) if hasattr(obj, fk_id) else getattr(obj, field, None)
+
+        previous_values = {
+            field: previous_value(patient_info, field)
+            for field in patch_data
+            if hasattr(patient_info, field)
+        }
+        with transaction.atomic():
+            if 'patient_name' in request.data:
+                parts = str(request.data['patient_name']).strip().split(None, 1)
+                person.given_name = parts[0] if parts else ''
+                person.family_name = parts[1] if len(parts) > 1 else ''
+                person.save(update_fields=['given_name', 'family_name'])
+            serializer.save()
+            _write_record_revisions(patient_info, previous_values, request)
+
+        return Response({
+            'patient_info': PatientRecordSerializer(patient_info).data,
+            'patient_name': f"{person.given_name or ''} {person.family_name or ''}".strip(),
+        })
 
     def _delete_patient_account(self, request):
         """DELETE /api/patient-info/me/ — permanently delete the patient's account and all data."""

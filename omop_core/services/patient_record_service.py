@@ -171,6 +171,29 @@ _OMOP_DERIVED_FIELDS = [
     'body_mass_avg_30d',
 ]
 
+# Public ownership contract for API serializers and writers.  This is broader
+# than ``_OMOP_DERIVED_FIELDS`` because a few Person/Location fields are
+# populated by refresh but intentionally not cleared when their source is
+# incomplete.  They are still OMOP-backed facts, not projection-owned values.
+PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset({
+    'date_of_birth', 'gender', 'race', 'ethnicity', 'languages_skills',
+    'country', 'region', 'city', 'postal_code', 'latitude', 'longitude',
+    # These are populated by section extractors but are not cleared before a
+    # refresh (mostly because they carry structured / negative findings). They
+    # nevertheless originate from OMOP facts and must not become writable
+    # projection exceptions merely because they are absent from the reset list.
+    'autoimmune_cytopenias_refractory_to_steroids',
+    'clonal_b_lymphocyte_count', 'clonal_bone_marrow_b_lymphocytes',
+    'concomitant_medication_details',
+    'first_line_outcome', 'second_line_outcome', 'later_outcome',
+    'flipi_score_options', 'hepatitis_b_status', 'hepatitis_c_status',
+    'hiv_status', 'no_hepatitis_b_status', 'no_hepatitis_c_status',
+    'no_hiv_status', 'no_pre_existing_conditions', 'no_tobacco_use_status',
+    'measurable_disease_imwg', 'measurable_disease_iwcll',
+    'protein_expressions', 'richter_transformation', 'tobacco_use_details',
+    'tp53_disruption',
+})
+
 
 # LOINC code → (PatientRecord field name, coercion function)
 # Used to derive UI lab fields from the OMOP Measurement table.
