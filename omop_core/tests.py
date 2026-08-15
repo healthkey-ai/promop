@@ -4621,3 +4621,64 @@ class SentinelConceptNameFilterTest(_OmopBase):
         self.assertIsNone(_usable_concept_name(None))
         self.assertIsNone(_usable_concept_name(self.sentinel_concept))
         self.assertEqual(_usable_concept_name(self.drug_concept), 'Doxorubicin')
+
+
+class LatLonCheckConstraintTest(TestCase):
+    """TEST-05: CheckConstraints for PatientRecord latitude/longitude."""
+
+    def _make_person(self):
+        """Create a unique Person for each test."""
+        if not hasattr(self, '_person_seq'):
+            self._person_seq = 990000
+        self._person_seq += 1
+        return Person.objects.create(person_id=self._person_seq, year_of_birth=1980)
+
+    def test_both_set(self):
+        """lat and lon both provided — should succeed."""
+        person = self._make_person()
+        pr = PatientRecord.objects.create(
+            person=person, latitude=40.7128, longitude=-74.0060,
+        )
+        pr.refresh_from_db()
+        self.assertAlmostEqual(float(pr.latitude), 40.7128, places=4)
+        self.assertAlmostEqual(float(pr.longitude), -74.0060, places=4)
+
+    def test_both_null(self):
+        """lat and lon both null — should succeed."""
+        person = self._make_person()
+        pr = PatientRecord.objects.create(person=person)
+        pr.refresh_from_db()
+        self.assertIsNone(pr.latitude)
+        self.assertIsNone(pr.longitude)
+
+    def test_only_latitude_raises(self):
+        """lat set but lon null — should violate check constraint."""
+        person = self._make_person()
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                PatientRecord.objects.create(person=person, latitude=40.0)
+
+    def test_only_longitude_raises(self):
+        """lon set but lat null — should violate check constraint."""
+        person = self._make_person()
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                PatientRecord.objects.create(person=person, longitude=-74.0)
+
+    def test_latitude_out_of_range(self):
+        """lat=91 — should violate range constraint."""
+        person = self._make_person()
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                PatientRecord.objects.create(
+                    person=person, latitude=91, longitude=0,
+                )
+
+    def test_longitude_out_of_range(self):
+        """lon=181 — should violate range constraint."""
+        person = self._make_person()
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                PatientRecord.objects.create(
+                    person=person, latitude=0, longitude=181,
+                )
