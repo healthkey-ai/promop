@@ -2635,6 +2635,29 @@ class PatientRecord(models.Model):
             models.Index(fields=["-updated_at"], name="ix_pr_updated_at"),
             models.Index(fields=["organization", "-updated_at"], name="ix_pr_org_updated_at"),
         ]
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    Q(latitude__isnull=True, longitude__isnull=True)
+                    | Q(latitude__isnull=False, longitude__isnull=False)
+                ),
+                name="patientrecord_lat_lon_both_or_neither",
+            ),
+            models.CheckConstraint(
+                check=(
+                    Q(latitude__isnull=True)
+                    | Q(latitude__gte=-90, latitude__lte=90)
+                ),
+                name="patientrecord_latitude_range",
+            ),
+            models.CheckConstraint(
+                check=(
+                    Q(longitude__isnull=True)
+                    | Q(longitude__gte=-180, longitude__lte=180)
+                ),
+                name="patientrecord_longitude_range",
+            ),
+        ]
 
     def __str__(self):
         return f"PatientRecord for Person {self.person.person_id} (age={self.patient_age}, gender={self.gender})"
