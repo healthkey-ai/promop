@@ -1339,25 +1339,30 @@ def _get_vitals_data(person: Person) -> dict:
 
 
 _BIOMARKER_MEASUREMENT_LOINCS = frozenset({
-    '85337-4',  # PD-L1 tumor cells
+    '83052-1',  # PD-L1 by clone 22C3 [Presence] in Tissue by Immune stain
     '16112-5',  # Estrogen receptor
     '16113-3',  # Progesterone receptor
     '48676-1',  # HER2
     '85319-2',  # Ki-67
-    '85336-6',  # PD-L1 immune cells
-    '96893-3',  # PD-L1 combined positive score
+    '83055-4',  # PD-L1 by clone 28-8 [Presence] in Tissue by Immune stain
+    '83054-7',  # PD-L1 by clone 22C3 [Interpretation] in Tissue Narrative
     '44648-4',  # Biopsy/Nottingham grade
-    '76690-7',  # Menopausal status
+    # Menopausal status: no clean LOINC exists. 76690-7 is "Sexual orientation"
+    # (Observation domain), not menopausal status. Removed to prevent
+    # cross-contamination. Only 42802-9 "Age at menopause" is available, which
+    # does not map to a status enum. Menopausal status will only populate from
+    # the Observation table via _BIOMARKER_OBS_LOINCS (SNOMED/local codes).
 })
-_BIOMARKER_OBS_LOINCS = frozenset({'76690-7', '44667-4'})
+# Menopausal status has no reliable LOINC; read from Observation only.
+_BIOMARKER_OBS_LOINCS = frozenset({'44667-4'})
 _HISTOLOGIC_TYPE_LOINCS = frozenset({'59847-4'})
 _GENETIC_MUTATION_LOINCS = {
     '21636-6': 'BRCA1',
-    '21637-4': 'BRCA2',
-    '21667-1': 'TP53',
+    '21640-8': 'BRCA2',   # BRCA2 gene c.6174delT [Presence] in Blood or Tissue
+    '21739-8': 'TP53',    # TP53 gene mutations found [Identifier] in Blood or Tissue
     '48013-7': 'KRAS',
     '62862-8': 'EGFR',
-    '62318-1': 'PIK3CA',
+    '60033-8': 'PIK3CA',  # PIK3CA gene mutations found [Identifier] in Blood or Tissue
 }
 
 
@@ -1422,7 +1427,7 @@ def _get_biomarker_data(person: Person) -> dict:
         .order_by('-observation_date')
     )
 
-    pdl1_test = next((m for m in measurements if _measurement_code(m) == '85337-4'), None)
+    pdl1_test = next((m for m in measurements if _measurement_code(m) == '83052-1'), None)
     if pdl1_test:
         data['pd_l1_tumor_cells'] = int(pdl1_test.value_as_number) if pdl1_test.value_as_number else None
         data['pd_l1_assay'] = pdl1_test.value_source_value
@@ -1490,13 +1495,13 @@ def _get_biomarker_data(person: Person) -> dict:
     if ki67_m and ki67_m.value_as_number is not None:
         data['ki67_proliferation_index'] = int(ki67_m.value_as_number)
 
-    # PD-L1 immune cell percentage — LOINC 85336-6
-    pdl1_ic_m = _first_m('85336-6')
+    # PD-L1 immune cell percentage — LOINC 83055-4
+    pdl1_ic_m = _first_m('83055-4')
     if pdl1_ic_m and pdl1_ic_m.value_as_number is not None:
         data['pd_l1_ic_percentage'] = int(pdl1_ic_m.value_as_number)
 
-    # PD-L1 combined positive score — LOINC 96893-3
-    pdl1_cps_m = _first_m('96893-3')
+    # PD-L1 combined positive score — LOINC 83054-7
+    pdl1_cps_m = _first_m('83054-7')
     if pdl1_cps_m and pdl1_cps_m.value_as_number is not None:
         data['pd_l1_combined_positive_score'] = int(pdl1_cps_m.value_as_number)
 
@@ -1505,22 +1510,22 @@ def _get_biomarker_data(person: Person) -> dict:
     if biopsy_m and biopsy_m.value_as_number is not None:
         data['biopsy_grade'] = int(biopsy_m.value_as_number)
 
-    # Menopausal status — LOINC 76690-7 (Measurement first, then Observation)
-    menopause_m = _first_m('76690-7')
-    if menopause_m:
-        val = menopause_m.value_as_string
-        if not val and menopause_m.value_as_concept:
-            val = menopause_m.value_as_concept.concept_name
+    # Menopausal status — no reliable LOINC exists (76690-7 was "Sexual
+    # orientation", not menopausal status). Read from Observation only, matched
+    # by concept name containing 'menopaus'.
+    menopause_obs = next(
+        (obs for obs in observations
+         if obs.observation_concept
+         and obs.observation_concept.concept_name
+         and 'menopaus' in obs.observation_concept.concept_name.lower()),
+        None,
+    )
+    if menopause_obs:
+        val = menopause_obs.value_as_string
+        if not val and menopause_obs.value_as_concept:
+            val = menopause_obs.value_as_concept.concept_name
         if val:
             data['menopausal_status'] = val
-    else:
-        menopause_obs = next((obs for obs in observations if _observation_code(obs) == '76690-7'), None)
-        if menopause_obs:
-            val = menopause_obs.value_as_string
-            if not val and menopause_obs.value_as_concept:
-                val = menopause_obs.value_as_concept.concept_name
-            if val:
-                data['menopausal_status'] = val
 
     # HRD status — Observation concept name containing 'homologous recombination'
     hrd_obs = next(
