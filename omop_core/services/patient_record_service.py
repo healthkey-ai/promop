@@ -104,6 +104,13 @@ _OMOP_DERIVED_FIELDS = [
     'bilirubin_total_mg_dl', 'serum_bilirubin_level_direct', 'alt_u_l', 'ast_u_l', 'alkaline_phosphatase_u_l',
     'albumin_g_dl', 'total_protein', 'troponin_ng_ml', 'bnp_pg_ml',
     'glucose_mg_dl', 'hba1c_percent', 'ldh_u_l',
+    # Legacy aliases for deduplicated LOINC fields (issue #471).
+    # These model columns still exist for backward compatibility; they are
+    # populated with the same value as their canonical counterpart during
+    # derivation. See _LAB_FIELD_ALIASES below.
+    'calcium_mg_dl', 'creatinine_mg_dl', 'egfr', 'blood_urea_nitrogen',
+    'serum_sodium', 'serum_potassium', 'magnesium', 'alkaline_phosphatase',
+    'ldh_level', 'ldh',
     # Other markers (LOINC-derived)
     'beta2_microglobulin', 'c_reactive_protein', 'esr',
     # MM disease burden (LOINC-derived)
@@ -219,6 +226,28 @@ _LOINC_LAB_FIELDS = {
     '33944-8': ('kappa_flc',                      float),  # Kappa free light chains
     '33945-5': ('lambda_flc',                     float),  # Lambda free light chains
     '26098-4': ('clonal_plasma_cells',            float),  # Plasma cells % in bone marrow
+}
+
+# Legacy field aliases for deduplicated LOINC codes (issue #471).
+#
+# Before this fix, nine LOINC codes were each mapped by two or three
+# PatientRecord fields in LAB_FIELD_TO_LOINC, causing write collisions and
+# stale projections. The duplicates were removed; only the canonical
+# unit-suffixed field survives in LAB_FIELD_TO_LOINC. During derivation the
+# canonical value is copied to the legacy aliases so API consumers that read
+# the old field names continue to work.
+#
+# canonical field           → [legacy aliases]
+_LAB_FIELD_ALIASES = {
+    'serum_calcium_mg_dl':    ['calcium_mg_dl'],
+    'serum_creatinine_mg_dl': ['creatinine_mg_dl'],
+    'egfr_ml_min_173m2':      ['egfr'],
+    'bun_mg_dl':              ['blood_urea_nitrogen'],
+    'sodium_meq_l':           ['serum_sodium'],
+    'potassium_meq_l':        ['serum_potassium'],
+    'magnesium_mg_dl':        ['magnesium'],
+    'alkaline_phosphatase_u_l': ['alkaline_phosphatase'],
+    'ldh_u_l':                ['ldh_level', 'ldh'],
 }
 
 # Source-value fallback map for environments where LOINC Concepts aren't loaded.
@@ -2151,6 +2180,13 @@ def _get_laboratory_data(person: Person) -> dict:
                 continue
             if field and field not in data:
                 data[field] = float(m.value_as_number)
+
+    # --- Copy canonical values to legacy aliases (issue #471) ---
+    for canonical, aliases in _LAB_FIELD_ALIASES.items():
+        value = data.get(canonical)
+        if value is not None:
+            for alias in aliases:
+                data[alias] = value
 
     return data
 
