@@ -45,7 +45,7 @@ from django.db import close_old_connections, transaction
 from django.db.utils import InterfaceError, OperationalError
 
 from omop_core.models import (
-    Person, PatientRecord, Measurement, Observation, Concept, Vocabulary,
+    Person, PatientRecord, Measurement, Observation, Concept,
     Domain, ConceptClass, DrugExposure,
 )
 from omop_core.services.mappings import (
@@ -55,6 +55,10 @@ from omop_core.services.mappings import (
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.lot_regimens import REGIMEN_CONCEPT_IDS, get_regimen_name
+from omop_core.services.regimen_resolution import (
+    match_hemonc_regimen_by_name,
+    get_or_create_quarantine_regimen,
+)
 from omop_core.signals import suppress_patient_record_refresh
 
 logger = logging.getLogger(__name__)
@@ -203,48 +207,39 @@ def _get_or_create_concept_class(concept_class_id):
     return concept_class
 
 
-def _get_or_create_hemonc_vocabulary():
-    vocab, _ = Vocabulary.objects.get_or_create(
-        vocabulary_id='HemOnc',
-        defaults={
-            'vocabulary_name': 'HemOnc',
-            'vocabulary_reference': 'https://hemonc.org',
-            'vocabulary_version': 'HemOnc (synthetic, benchmark seed)',
-            'vocabulary_concept_id': 0,
-        },
-    )
-    return vocab
-
-
 def _get_or_create_regimen_concept(concept_id, regimen_key):
-    """Get or create the HemOnc regimen Concept for a known concept_id.
+    """Resolve (or quarantine-mint) the regimen Concept for a known concept_id.
 
-    KNOWN DEFECT, not fixed here: this mints with concept_code=str(concept_id),
-    so the code is fabricated rather than the genuine HemOnc code ('Elo-Rd').
-    That is the same shadow-producing class of defect as the
-    concept_id=int(code) minting this change removes, inverted. Fixing it means
-    resolving regimens against HemOnc, a larger piece of work; see #415.
-
-    Therapy backfill resolves a regimen's HemOnc concept_id from
-    REGIMEN_CONCEPT_IDS; on a DB where that Concept row was never loaded we
-    create it so the backfilled DrugExposure references a real regimen concept
-    (and derivation can surface it as first_line_therapy_id).
+    Resolution strategy (issue #450):
+      1. Look up the concept by concept_id — if the genuine HemOnc row is
+         already loaded, use it directly.
+      2. Look up by regimen name against HemOnc (case-insensitive, including
+         synonyms) via match_hemonc_regimen_by_name — catches the case where
+         the concept exists under a different concept_id than the one hardcoded
+         in REGIMEN_CONCEPT_IDS.
+      3. If neither lookup succeeds, mint under the HK-Regimen quarantine
+         vocabulary via get_or_create_quarantine_regimen — never fabricate a
+         HemOnc concept_code.
     """
+    # 1. Direct lookup by concept_id (fastest path when Athena is loaded).
     existing = Concept.objects.filter(concept_id=concept_id).first()
     if existing:
         return existing
+
     name = get_regimen_name(regimen_key) or ' + '.join(sorted(regimen_key)).title()
-    return Concept.objects.create(
-        concept_id=concept_id,
-        concept_name=name,
-        vocabulary=_get_or_create_hemonc_vocabulary(),
-        domain=_get_or_create_domain('Drug'),
-        concept_class=_get_or_create_concept_class('Regimen'),
-        standard_concept='S',
-        concept_code=str(concept_id),
-        valid_start_date='1970-01-01',
-        valid_end_date='2099-12-31',
+
+    # 2. Name-based lookup against genuine HemOnc regimens.
+    hemonc_match = match_hemonc_regimen_by_name(name)
+    if hemonc_match:
+        return hemonc_match
+
+    # 3. Quarantine-mint under HK-Regimen (never under HemOnc).
+    logger.info(
+        'enrich_breast_cancer_omop_data: regimen %r (concept_id=%s) not found '
+        'in HemOnc — minting under HK-Regimen quarantine vocabulary.',
+        name, concept_id,
     )
+    return get_or_create_quarantine_regimen(name, source_system='enrich-bc')
 
 
 def _concept_ids_for(code_table):
@@ -290,8 +285,8 @@ def _resolve_concept(vocabulary_id, concept_code, concept_name):
             f'Run seed_omop_concepts, or load the full vocabulary with '
             f'load_athena_vocabularies. This command no longer mints OBSERVATION '
             f'concepts: creating one at concept_id=int(code) produced duplicates '
-            f'shadowing the genuine concepts (#415). (Regimen concepts are still '
-            f'minted by _get_or_create_regimen_concept — tracked separately.)'
+            f'shadowing the genuine concepts (#415). (Regimen concepts are '
+            f'quarantine-minted under HK-Regimen — see #450.)'
         )
     if len(candidates) > 1:
         # Duplicates for one (vocabulary, code) are the #415 defect itself, and
