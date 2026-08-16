@@ -59,6 +59,44 @@ def test_apply_requires_explicit_attested_event_date():
         call_command("reconcile_patient_record_projection", "--apply")
 
 
+def test_apply_requires_one_explicit_person_and_field():
+    _lab_type, _hemoglobin = _measurement_concepts()
+    person = PersonFactory()
+    PatientRecordFactory(person=person, hemoglobin_g_dl=12.4)
+
+    with pytest.raises(CommandError, match="requires --person-id"):
+        call_command(
+            "reconcile_patient_record_projection",
+            "--apply", "--event-date", "2024-05-06", "--field", "hemoglobin_g_dl",
+        )
+    with pytest.raises(CommandError, match="requires --field"):
+        call_command(
+            "reconcile_patient_record_projection",
+            "--apply", "--event-date", "2024-05-06", "--person-id", str(person.person_id),
+        )
+
+
+def test_apply_requires_the_exact_projection_only_candidate():
+    _lab_type, hemoglobin = _measurement_concepts()
+    person = PersonFactory()
+    PatientRecordFactory(person=person, hemoglobin_g_dl=12.4)
+    Measurement.objects.create(
+        measurement_id=987_654,
+        person=person,
+        measurement_concept=hemoglobin,
+        measurement_date=date(2024, 5, 1),
+        measurement_type_concept=ConceptFactory(),
+        value_as_number=12.4,
+    )
+
+    with pytest.raises(CommandError, match="exactly one projection-only"):
+        call_command(
+            "reconcile_patient_record_projection",
+            "--apply", "--event-date", "2024-05-06", "--person-id", str(person.person_id),
+            "--field", "hemoglobin_g_dl",
+        )
+
+
 def test_apply_creates_mapped_measurement_with_explicit_event_date():
     _lab_type, hemoglobin = _measurement_concepts()
     person = PersonFactory()
@@ -66,7 +104,7 @@ def test_apply_creates_mapped_measurement_with_explicit_event_date():
 
     call_command(
         "reconcile_patient_record_projection",
-        "--person-id", str(person.person_id),
+        "--person-id", str(person.person_id), "--field", "hemoglobin_g_dl",
         "--apply", "--event-date", "2024-05-06",
     )
 

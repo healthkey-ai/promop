@@ -20,7 +20,7 @@ An operator who has recovered and verified the actual clinical event date may
 create only the `RECONCILABLE` facts:
 
 ```sh
-python manage.py reconcile_patient_record_projection --person-id 123 \
+python manage.py reconcile_patient_record_projection --person-id 123 --field hemoglobin_g_dl \
   --apply --event-date 2025-03-14
 ```
 
@@ -29,6 +29,10 @@ run date or any other synthetic date.  It also requires the exact mapped LOINC
 and the OMOP Lab measurement-type concepts to be loaded, and skips rather than
 falls back to a generic concept.  Re-running is idempotent with respect to an
 already-present Measurement for the person and LOINC.
+
+`--apply` also requires exactly one `--person-id` and one mapped `--field`.
+Bulk, whole-person, and whole-database repairs are deliberately prohibited;
+each migration must be an operator-reviewed clinical attestation.
 
 After a successful repair, re-derive the affected records using the existing
 `backfill_patient_records` command.  This process does not alter unmapped
