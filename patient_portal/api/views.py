@@ -1041,6 +1041,20 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     if person_id == 0:
                         last_person = Person.objects.all().order_by('-person_id').first()
                         person_id = last_person.person_id + 1 if last_person else 1000
+
+                    # CSV has no schema for a complete clinical fact (concept,
+                    # event time, units, provenance). Never create a Person or
+                    # PatientRecord from a row that tries to submit mapped
+                    # clinical projection columns.
+                    unsupported = [
+                        field for field in ('disease', 'date_of_birth')
+                        if row.get(field)
+                    ]
+                    if unsupported:
+                        errors.append(
+                            f"Row {row_num}: mapped clinical columns are not supported by CSV upload: {', '.join(unsupported)}"
+                        )
+                        continue
                     
                     # Get gender concept
                     gender_concept = get_gender_concept(row.get('gender', ''))
@@ -1060,24 +1074,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         }
                     )
                     
-                    date_of_birth = None
-                    if row.get('date_of_birth'):
-                        try:
-                            date_of_birth = datetime.strptime(row['date_of_birth'], '%Y-%m-%d').date()
-                        except ValueError:
-                            try:
-                                date_of_birth = datetime.strptime(row['date_of_birth'], '%m/%d/%Y').date()
-                            except ValueError:
-                                pass
-                    
-                    patient_info, pi_created = PatientRecord.objects.update_or_create(
-                        person=person,
-                        defaults={
-                            'date_of_birth': date_of_birth,
-                            'disease': row.get('disease', ''),
-                        }
-                    )
-                    
+                    patient_info, pi_created = PatientRecord.objects.get_or_create(person=person)
+                    refresh_patient_record(person)
                     if pi_created:
                         created_count += 1
                         

@@ -192,6 +192,17 @@ def update_health_records(request):
         patient_info, created = PatientRecord.objects.get_or_create(person=patient_user.person)
         
         tab = request.POST.get('tab', 'general')
+
+        # This server-rendered form predates the OMOP-first write boundary and
+        # submits scalar PatientRecord fields without concept, time, units, or
+        # provenance.  Reject it rather than persisting mapped clinical values
+        # to the projection.  New clinical writes belong to the OMOP/FHIR APIs.
+        if tab in {'general', 'treatment', 'blood', 'labs', 'behavior'}:
+            messages.error(
+                request,
+                'Clinical record updates must be submitted through OMOP or FHIR; PatientRecord is derived.',
+            )
+            return redirect('patient_portal:health_records')
         
         # Helper function to convert empty strings to None
         def get_value(field_name, convert_type=None):
