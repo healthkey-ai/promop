@@ -14910,19 +14910,56 @@ class OrgPatientSignupTest(TestCase):
         })
         self.assertEqual(resp.status_code, 409)
 
-    def test_signup_weak_password_returns_400(self):
+    def test_signup_weak_password_returns_400_with_field_errors(self):
         resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
             'email': 'weak@test.com',
             'password': '123',
         })
         self.assertEqual(resp.status_code, 400)
+        self.assertIn('errors', resp.data)
+        self.assertIn('password', resp.data['errors'])
+        # Django's validators produce specific messages for short/common/numeric passwords
+        pw_errors = resp.data['errors']['password']
+        self.assertTrue(len(pw_errors) > 0)
 
-    def test_signup_missing_email_returns_400(self):
+    def test_signup_missing_email_returns_400_with_field_errors(self):
         resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
             'email': '',
             'password': 'Str0ng!Pass99',
         })
         self.assertEqual(resp.status_code, 400)
+        self.assertIn('errors', resp.data)
+        self.assertIn('email', resp.data['errors'])
+
+    def test_signup_missing_password_returns_400_with_field_errors(self):
+        resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
+            'email': 'nopass@test.com',
+            'password': '',
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('errors', resp.data)
+        self.assertIn('password', resp.data['errors'])
+
+    def test_signup_invalid_email_returns_400_with_field_errors(self):
+        resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
+            'email': 'not-an-email',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('errors', resp.data)
+        self.assertIn('email', resp.data['errors'])
+        self.assertIn('Enter a valid email address.', resp.data['errors']['email'])
+
+    def test_signup_missing_both_fields_returns_all_errors(self):
+        """Both email and password errors are returned together."""
+        resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
+            'email': '',
+            'password': '',
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('errors', resp.data)
+        self.assertIn('email', resp.data['errors'])
+        self.assertIn('password', resp.data['errors'])
 
     def test_signup_cross_org_rejects_existing_account(self):
         """A patient who already signed up at Org A gets 409 when trying to
@@ -14945,6 +14982,9 @@ class OrgPatientSignupTest(TestCase):
         })
         self.assertEqual(resp.status_code, 409)
         self.assertIn('already exists', resp.data['error'])
+        # Also includes field-level errors for frontend display
+        self.assertIn('errors', resp.data)
+        self.assertIn('email', resp.data['errors'])
 
 
 @override_settings(

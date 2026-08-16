@@ -772,74 +772,102 @@ class OrgPatientSignupView(APIView):
         given_name = (request.data.get('given_name') or '').strip()
         family_name = (request.data.get('family_name') or '').strip()
 
-        if not email:
-            return Response({'error': 'email is required.'}, status=status.HTTP_400_BAD_REQUEST)
-        try:
-            from django.core.validators import validate_email as _validate_email
-            _validate_email(email)
-        except ValidationError:
-            return Response({'error': 'Invalid email address.'}, status=status.HTTP_400_BAD_REQUEST)
-        if not password:
-            return Response({'error': 'password is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        # Collect field-level validation errors so the frontend can display
+        # them next to the relevant input rather than as a single blob.
+        field_errors: dict[str, list[str]] = {}
 
-        from patient_portal.services import password_validation_errors, set_new_password
-        pw_errors = password_validation_errors(password, email=email)
-        if pw_errors:
-            return Response({'error': pw_errors}, status=status.HTTP_400_BAD_REQUEST)
+        if not email:
+            field_errors.setdefault('email', []).append('Email is required.')
+        else:
+            try:
+                from django.core.validators import validate_email as _validate_email
+                _validate_email(email)
+            except ValidationError:
+                field_errors.setdefault('email', []).append(
+                    'Enter a valid email address.'
+                )
+
+        if not password:
+            field_errors.setdefault('password', []).append('Password is required.')
+        else:
+            from patient_portal.services import password_validation_errors
+            pw_errors = password_validation_errors(password, email=email)
+            if pw_errors:
+                field_errors.setdefault('password', []).extend(pw_errors)
+
+        if field_errors:
+            return Response(
+                {'errors': field_errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from patient_portal.services import set_new_password
 
         # Check for existing account with this email
         existing = _find_identity_by_email(email)
         if existing and existing.has_usable_password():
             return Response(
-                {'error': 'An account with this email already exists. Please log in instead.'},
+                {
+                    'error': 'An account with this email already exists. Please log in instead.',
+                    'errors': {
+                        'email': ['An account with this email already exists. Please log in instead.'],
+                    },
+                },
                 status=status.HTTP_409_CONFLICT,
             )
 
-        with transaction.atomic():
-            if existing:
-                # Placeholder identity from a prior invitation — set its password
-                identity = existing
-                set_new_password(identity, password)
-                if given_name:
-                    identity.name = f"{given_name} {family_name}".strip()
-                    identity.save(update_fields=['name'])
-            else:
-                identity = Identity.objects.create_user(
-                    email=email,
-                    password=password,
-                    name=f"{given_name} {family_name}".strip(),
-                )
+        try:
+            with transaction.atomic():
+                if existing:
+                    # Placeholder identity from a prior invitation — set its password
+                    identity = existing
+                    set_new_password(identity, password)
+                    if given_name:
+                        identity.name = f"{given_name} {family_name}".strip()
+                        identity.save(update_fields=['name'])
+                else:
+                    identity = Identity.objects.create_user(
+                        email=email,
+                        password=password,
+                        name=f"{given_name} {family_name}".strip(),
+                    )
 
-            # Reuse existing PatientUser link if present (e.g. from a prior invitation
-            # or signup at another org)
-            existing_pu = PatientUser.objects.filter(identity=identity).first()
-            if existing_pu:
-                person = existing_pu.person
-                # Ensure a PatientRecord exists for this person in the new org
-                PatientRecord.objects.get_or_create(
-                    person=person,
-                    organization=org,
-                    defaults={'email': email},
-                )
-            else:
-                new_id = next_pk(Person, 'person_id')
-                person = Person.objects.create(
-                    person_id=new_id,
-                    given_name=given_name or None,
-                    family_name=family_name or None,
-                    year_of_birth=1900,
-                    gender_source_value='unknown',
-                    race_source_value='unknown',
-                    ethnicity_source_value='unknown',
-                )
-                PatientRecord.objects.create(person=person, email=email, organization=org)
-                PatientUser.objects.create(identity=identity, person=person)
+                # Reuse existing PatientUser link if present (e.g. from a prior invitation
+                # or signup at another org)
+                existing_pu = PatientUser.objects.filter(identity=identity).first()
+                if existing_pu:
+                    person = existing_pu.person
+                    # Ensure a PatientRecord exists for this person in the new org
+                    PatientRecord.objects.get_or_create(
+                        person=person,
+                        organization=org,
+                        defaults={'email': email},
+                    )
+                else:
+                    new_id = next_pk(Person, 'person_id')
+                    person = Person.objects.create(
+                        person_id=new_id,
+                        given_name=given_name or None,
+                        family_name=family_name or None,
+                        year_of_birth=1900,
+                        gender_source_value='unknown',
+                        race_source_value='unknown',
+                        ethnicity_source_value='unknown',
+                    )
+                    PatientRecord.objects.create(person=person, email=email, organization=org)
+                    PatientUser.objects.create(identity=identity, person=person)
 
-            # Grant patient access to this org
-            GroupAccess.objects.get_or_create(
-                identity=identity,
-                org=org,
-                defaults={'role': 'patient'},
+                # Grant patient access to this org
+                GroupAccess.objects.get_or_create(
+                    identity=identity,
+                    org=org,
+                    defaults={'role': 'patient'},
+                )
+        except Exception:
+            logger.exception('Unexpected error during patient signup for %s', email)
+            return Response(
+                {'error': 'Could not create your account. Please try again or contact support.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
         # Auto-login via session
