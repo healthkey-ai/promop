@@ -1,10 +1,10 @@
 # PatientInfo ↔ OMOP Sync — Implementation Plan
 
 > **Superseded by #489 (2026-08):** This is retained as a historical implementation
-> record only. The current compatibility API maps supported clinical tuples to OMOP and
-> refreshes PatientRecord; it does not persist a mapped clinical value as projection
-> truth. Projection-owned fields with no OMOP representation remain direct-persistence
-> exceptions. New consumers should write clinical facts to OMOP/FHIR first.
+> record only. Mapped clinical PatientRecord fields are now read-only at the
+> PatientRecord API; clinical facts are written to OMOP/FHIR then derived. Projection-owned
+> fields with no OMOP representation remain direct-persistence exceptions. New consumers
+> should write clinical facts to OMOP/FHIR first.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

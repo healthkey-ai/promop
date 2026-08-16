@@ -9,7 +9,7 @@
 
 ---
 
-## Architecture: OMOP-first, PatientRecord compatibility writes are tuple-mapped
+## Architecture: OMOP-first, mapped PatientRecord clinical fields are read-only
 
 **The authoritative clinical record lives in OMOP tables.**
 
@@ -25,11 +25,10 @@ Client writes → OMOP tables (Measurement, ConditionOccurrence, DrugExposure, �
 
 `PatientRecord` (Django model: `PatientInfo`, API path: `/api/v1/patient-records/`) is a
 **denormalized read model for mapped clinical fields**. Those fields are regenerated
-automatically whenever their OMOP source records change. The compatibility API accepts
-their supported input tuples, writes the corresponding OMOP facts, and then refreshes
-the projection; it must never treat the projection value as the source of truth. A
-projection-owned field with no OMOP representation remains a direct-persistence
-exception and is not used to construct an OMOP clinical fact.
+automatically whenever their OMOP source records change. The API must reject direct
+writes to those mapped clinical fields; OMOP APIs and imports own clinical writes, then
+the projection refreshes. A projection-owned field with no OMOP representation remains a
+direct-persistence exception and is not used to construct an OMOP clinical fact.
 
 > **Legacy SQL compatibility only:** `public.patient_info` is a read-only database view
 > retained solely for existing consumers. New integrations must not query it or depend on
@@ -42,13 +41,12 @@ The two sanctioned write paths are:
 |---|---|
 | `POST /api/v1/patient-records/upload_fhir/` | Bulk ingest from an EHR / FHIR R4 Bundle |
 | `POST/PATCH/DELETE /api/v1/conditions/`, `/api/v1/measurements/`, etc. | Granular OMOP record writes |
-| `PATCH /api/v1/patient-records/{person_id}/` | Compatibility write: map supported clinical tuples to OMOP, then refresh; persist projection-owned fields directly |
+| `PATCH /api/v1/patient-records/{person_id}/` | Persist explicitly projection-owned fields only; reject mapped clinical fields |
 
-The PatientRecord compatibility PATCH accepts supported mapped clinical tuples and routes
-them OMOP-first, then the signal chain re-derives the projection. It also persists
-projection-owned fields that have no OMOP representation directly. New integrations
-should prefer granular OMOP APIs or FHIR, which represent clinical concepts, time, unit,
-and provenance explicitly.
+Mapped clinical fields on PatientRecord are read-only. The PatientRecord PATCH persists
+only projection-owned fields with no OMOP representation. New integrations must use
+granular OMOP APIs or FHIR for clinical writes, where concept, time, unit, and provenance
+are explicit.
 
 ---
 
@@ -96,10 +94,9 @@ Grant type: `client_credentials` via `POST /o/token/`
 ## PatientRecord endpoints
 
 `PatientRecord` is the 286-column denormalized projection that is the core of PRomop.
-Mapped clinical data enters through OMOP tables, FHIR ingest, or the compatibility API's
-tuple-to-OMOP mapper, and is re-derived automatically. Explicit projection-owned fields
-that have no OMOP representation are the limited exception and may be updated directly
-without becoming clinical source data.
+Mapped clinical data enters through OMOP tables or FHIR ingest and is re-derived
+automatically. Explicit projection-owned fields that have no OMOP representation are the
+limited exception and may be updated directly without becoming clinical source data.
 
 Base path: `/api/v1/patient-records/`
 URL parameter `{person_id}` is `Person.person_id` (integer).
@@ -213,17 +210,15 @@ Returns the PatientRecord for the authenticated patient. Only available to patie
 
 ### PatientRecord mutation policy
 
-`PATCH /api/v1/patient-records/{person_id}/` is a compatibility endpoint, not a separate
-clinical source of truth. For each supported mapped clinical tuple, it validates the
-tuple, writes the corresponding OMOP fact, and refreshes `PatientRecord` from OMOP. It
-does not preserve a direct clinical projection edit across refresh. A projection-owned
-field with no OMOP representation is persisted directly.
+`PATCH /api/v1/patient-records/{person_id}/` may persist explicitly projection-owned
+fields with no OMOP representation. It rejects mapped clinical fields. A mapped clinical
+value must be written through its OMOP resource (or FHIR import), after which the signal
+chain refreshes `PatientRecord` from OMOP.
 
 New integrations should write semantically complete OMOP facts to their own resource
 endpoint—for example a dated `Measurement` with its LOINC and unit—or use FHIR ingest.
-Include source/provenance on that fact. The compatibility API is retained for existing
-callers, not as a reason for new consumers to use projection field names as their
-clinical-data model.
+Include source/provenance on that fact. The PatientRecord API is retained for existing
+projection-owned fields, not as a clinical-data model for new consumers.
 
 ---
 
@@ -879,10 +874,10 @@ lossy projection update from being mistaken for a source clinical fact.
 
 ### PatientRecord output mapping reference
 
-Shows selected PatientRecord-to-OMOP compatibility tuples. The mapper uses these tuples
-to construct the corresponding Measurement and then refreshes PatientRecord; they also
-define the OMOP-to-projection output mapping. New integrations should use the granular
-OMOP/FHIR representation rather than projection field names.
+Shows selected OMOP-to-PatientRecord mappings. This is a derivation/output reference, not
+an input API or permission to construct a Measurement from a PatientRecord field name.
+New integrations should use the granular OMOP/FHIR representation rather than projection
+field names.
 
 ```
 PatientInfo field                  LOINC      Unit            Display
@@ -1053,7 +1048,7 @@ Row-level tenant isolation enforced across all read and write paths (HKI-SEC-04,
 |---|---|
 | `GET /api/v1/patient-records/` | Queryset filtered to `PatientRecord.organization = token.org` |
 | `GET /api/v1/patient-records/{person_id}/` | Returns **404** if patient's org ≠ caller's org |
-| Mapped clinical fields on `/api/v1/patient-records/{person_id}/` | Scoped compatibility PATCH maps supported tuples to OMOP, then refreshes the projection |
+| Mapped clinical fields on `/api/v1/patient-records/{person_id}/` | Read-only; clinical writes belong to scoped OMOP endpoints/imports |
 | Projection-owned fields with no OMOP representation | Scoped PATCH persists them directly; they are not mapped to OMOP |
 | All OMOP ViewSets (list) | `_OmopFilterMixin` restricts to persons whose PatientRecord belongs to caller's org |
 | `POST /api/v1/patient-records/upload_fhir/` | Stamps `PatientRecord.organization` from uploading token's org |
