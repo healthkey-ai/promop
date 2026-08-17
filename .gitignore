@@ -105,3 +105,4 @@ synthea-with-dependencies.jar
 
 # Local agent/tool state
 .claude/
+.worktrees/
