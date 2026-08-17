@@ -3582,10 +3582,10 @@ class PlaceholderBirthYearTest(_OmopBase):
 
         self.assertIsNone(pi.patient_age)
 
-    def test_hand_entered_age_survives(self):
-        """A typed age has nowhere to land in OMOP, so it must be preserved
-        rather than cleared along with the stale ones."""
-        self.person.year_of_birth = 1900
+    def test_omop_birth_year_overwrites_legacy_user_edited_age(self):
+        """Age is always re-derived from Person birth data; the retired legacy
+        marker cannot preserve a conflicting projection value."""
+        self.person.year_of_birth = 1980
         self.person.save(update_fields=['year_of_birth'])
         PatientRecord.objects.create(
             person=self.person, patient_age=54, user_edited_fields=['patient_age'],
@@ -3593,7 +3593,8 @@ class PlaceholderBirthYearTest(_OmopBase):
 
         pi = refresh_patient_record(self.person)
 
-        self.assertEqual(pi.patient_age, 54)
+        expected_age = date.today().year - 1980
+        self.assertEqual(pi.patient_age, expected_age)
 
     def test_real_year_still_yields_an_age(self):
         self.person.year_of_birth = 1980
