@@ -39,6 +39,7 @@ from omop_core.models import (
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.patient_record_service import (
+    FHIR_CONDITION_STAGE_SOURCE_VALUE,
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
     refresh_patient_record,
 )
@@ -1683,6 +1684,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     dlbcl_onset = None          # onset from DLBCL (transformation) condition
                     _any_bc_condition = False   # True if any BC condition was seen in the bundle
                     _clinical_status_source = None  # FHIR Condition.clinicalStatus code for primary BC
+                    _breast_cancer_stage = None  # condition-stage assertion, persisted to OMOP below
+                    _breast_cancer_stage_datetime = None
 
                     def _disease_from_condition_code(codeable):
                         codeable = codeable or {}
@@ -1716,6 +1719,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')[:100]
 
                     for condition in data['conditions']:
+                        _condition_stage = None
                         # Get histologic type from code
                         code = condition.get('code', {})
                         coding_list = code.get('coding', [])
@@ -1792,6 +1796,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 else:
                                     stage = stage_display or _sc.get('code', '')
 
+                        if is_breast_cancer and stage:
+                            _condition_stage = stage
+
                         # Get condition onset date (handles both 'YYYY-MM-DD' and ISO datetime)
                         if condition.get('onsetDateTime'):
                             try:
@@ -1807,6 +1814,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 condition_date = _parsed_date  # fallback: last wins
                                 if is_breast_cancer and _parsed_date and (breast_cancer_onset is None or _parsed_date < breast_cancer_onset):
                                     breast_cancer_onset = _parsed_date
+                                if is_breast_cancer and _condition_stage:
+                                    # Keep the stage tied to the condition that
+                                    # asserted it, not to an earlier/later
+                                    # breast-cancer diagnosis in the bundle.
+                                    _breast_cancer_stage = _condition_stage
+                                    _breast_cancer_stage_datetime = _parsed_date
                                 if is_fl and _parsed_date and (fl_onset is None or _parsed_date < fl_onset):
                                     fl_onset = _parsed_date
                                 if is_dlbcl and _parsed_date and (dlbcl_onset is None or _parsed_date < dlbcl_onset):
@@ -1857,6 +1870,36 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
                     if _any_bc_condition and condition_date:
                         _upsert_condition(_concept_breast_cancer, condition_date, disease, _clinical_status_source)
+
+                    if _breast_cancer_stage and _breast_cancer_stage_datetime:
+                        _stage_date = _breast_cancer_stage_datetime.date()
+                        _stage_exists = Observation.objects.filter(
+                            person=person,
+                            observation_source_value=FHIR_CONDITION_STAGE_SOURCE_VALUE,
+                            observation_date=_stage_date,
+                            value_as_string=_breast_cancer_stage,
+                        ).exists()
+                        if not _stage_exists:
+                            _stage_observation = Observation(
+                                observation_id=next_pk(Observation, 'observation_id'),
+                                person=person,
+                                observation_concept=_concept_ehr_type or _concept_tx_regimen,
+                                observation_date=_stage_date,
+                                observation_datetime=_breast_cancer_stage_datetime,
+                                observation_type_concept=_concept_ehr_type or _concept_tx_regimen,
+                                value_as_string=_breast_cancer_stage,
+                                observation_source_value=FHIR_CONDITION_STAGE_SOURCE_VALUE,
+                            )
+                            _stage_observation._skip_patient_record_refresh = True
+                            _stage_observation.save()
+                            _record_provenance(
+                                _stage_observation,
+                                prov_source or 'EHR_SYNC',
+                                prov_user_id,
+                                target_patient_id=fhir_patient_id,
+                                modification_reason=prov_reason,
+                                organization=get_request_org(request),
+                            )
 
                     # FL diagnosis and DLBCL transformation conditions (FL → DLBCL
                     # transformation is derived from the DLBCL ConditionOccurrence).

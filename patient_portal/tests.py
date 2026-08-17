@@ -11132,6 +11132,16 @@ class BreastCancerSnomed254837009Test(FhirUploadBase):
     def test_stage_from_breast_cancer_condition(self):
         self.assertIsNotNone(self._pi)
         self.assertIn('IIIA', self._pi.stage or '')
+        stage_observation = Observation.objects.get(
+            person=self._pi.person,
+            observation_source_value='FHIR-condition-stage',
+        )
+        self.assertEqual(stage_observation.observation_date, date(2021, 7, 15))
+        self.assertEqual(stage_observation.value_as_string, 'IIIA')
+        self.assertTrue(ProvenanceRecord.objects.filter(
+            object_id=stage_observation.observation_id,
+            content_type__model='observation', source='EHR_SYNC',
+        ).exists())
 
 
 class MCODECreatinineLoincTest(FhirUploadBase):

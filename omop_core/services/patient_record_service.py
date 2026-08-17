@@ -273,6 +273,12 @@ _LAB_FIELD_ALIASES = {
     'ldh_u_l':                ['ldh_level', 'ldh'],
 }
 
+# A FHIR Condition.stage summary is an asserted clinical fact, but the FHIR
+# element does not require a LOINC coding. Keep its source identity explicit
+# in OMOP Observation rather than writing the derived PatientRecord.stage
+# field directly. A coded staging Observation remains preferred when present.
+FHIR_CONDITION_STAGE_SOURCE_VALUE = 'FHIR-condition-stage'
+
 # Source-value fallback map for environments where LOINC Concepts aren't loaded.
 # Key  = measurement_source_value (as stored by the FHIR upload pipeline or PATCH write-through)
 # Value = PatientRecord field name
@@ -1627,7 +1633,7 @@ def _get_staging_data(person: Person) -> dict:
         .filter(person=person)
         .filter(
             Q(observation_concept__concept_code__in=_STAGING_LOINCS)
-            | Q(observation_source_value__in=_STAGING_LOINCS)
+            | Q(observation_source_value__in=(*_STAGING_LOINCS, FHIR_CONDITION_STAGE_SOURCE_VALUE))
         )
         .select_related('observation_concept')
         .order_by('-observation_date')
@@ -1674,6 +1680,19 @@ def _get_staging_data(person: Person) -> dict:
     # Overall stage group. For MM both ISS (21908-9) and R-ISS (21908-9-riss)
     # are recorded; prefer R-ISS as it is the more current MM staging system.
     stage_val = _stage_value('21908-9-riss') or _stage_value('21908-9')
+    if not stage_val:
+        # Fallback for a dated FHIR Condition.stage assertion which had no
+        # standard staging code. This is still an OMOP fact; its distinct
+        # source value prevents it being confused with a coded LOINC result.
+        stage_val = next(
+            (
+                observation.value_as_string
+                for observation in observations
+                if observation.observation_source_value == FHIR_CONDITION_STAGE_SOURCE_VALUE
+                and observation.value_as_string
+            ),
+            None,
+        )
     if stage_val:
         data['stage'] = stage_val
 
