@@ -36,7 +36,6 @@ This file tells LLMs (Claude, Copilot, etc.) how to work on this codebase consis
 | FHIR bundle generator | `omop_core/management/commands/generate_fhir_bundle.py` — `--disease breast-cancer\|mm\|fl` |
 | FHIR bundle importer | `omop_core/management/commands/import_fhir_bundle.py` |
 | FHIR upload handler | `patient_portal/api/views.py` — `upload_fhir_bundle` function/view |
-| BQ loader (HealthTree) | `omop_core/management/commands/load_from_healthtree_bq.py` |
 | SCT sample data seeder | `omop_core/management/commands/populate_sct_sample_data.py` |
 | SCT migration audit | `omop_core/management/commands/audit_sct_history.py` |
 | Backend tests | `omop_core/tests.py`, `patient_portal/tests.py` |
@@ -505,16 +504,6 @@ The MM FHIR generator (`generate_fhir_bundle --disease mm`) emits three extensio
 | `mm-sct-eligibility` | `sct_eligibility` (comma-joined → split on ingest) |
 
 On ingest, both comma-split lists are filtered against the live vocabulary tables before storing — unrecognized tokens are discarded.
-
-### BigQuery loader
-
-`load_from_healthtree_bq.py` maps the `has_transplant` / `procedures` BQ columns to vocabulary strings via `_infer_sct_type(procedures)`:
-
-- contains `'allogeneic'` or `'allo'` → `'allogeneic SCT'`
-- contains `'tandem'` → `'tandem SCT'`
-- anything else / empty → `'autologous SCT'` (default for MM)
-
-Multiple transplant lines of the same type are deduplicated.
 
 ### Serializer validation
 
