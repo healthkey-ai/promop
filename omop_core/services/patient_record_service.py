@@ -171,6 +171,29 @@ _OMOP_DERIVED_FIELDS = [
     'body_mass_avg_30d',
 ]
 
+# Public ownership contract for API serializers and writers.  This is broader
+# than ``_OMOP_DERIVED_FIELDS`` because a few Person/Location fields are
+# populated by refresh but intentionally not cleared when their source is
+# incomplete.  They are still OMOP-backed facts, not projection-owned values.
+PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset({
+    'date_of_birth', 'gender', 'race', 'ethnicity', 'languages_skills',
+    'country', 'region', 'city', 'postal_code', 'latitude', 'longitude',
+    # These are populated by section extractors but are not cleared before a
+    # refresh (mostly because they carry structured / negative findings). They
+    # nevertheless originate from OMOP facts and must not become writable
+    # projection exceptions merely because they are absent from the reset list.
+    'autoimmune_cytopenias_refractory_to_steroids',
+    'clonal_b_lymphocyte_count', 'clonal_bone_marrow_b_lymphocytes',
+    'concomitant_medication_details',
+    'first_line_outcome', 'second_line_outcome', 'later_outcome',
+    'flipi_score_options', 'hepatitis_b_status', 'hepatitis_c_status',
+    'hiv_status', 'no_hepatitis_b_status', 'no_hepatitis_c_status',
+    'no_hiv_status', 'no_pre_existing_conditions', 'no_tobacco_use_status',
+    'measurable_disease_imwg', 'measurable_disease_iwcll',
+    'protein_expressions', 'richter_transformation', 'tobacco_use_details',
+    'tp53_disruption',
+})
+
 
 # LOINC code → (PatientRecord field name, coercion function)
 # Used to derive UI lab fields from the OMOP Measurement table.
@@ -249,6 +272,12 @@ _LAB_FIELD_ALIASES = {
     'alkaline_phosphatase_u_l': ['alkaline_phosphatase'],
     'ldh_u_l':                ['ldh_level', 'ldh'],
 }
+
+# A FHIR Condition.stage summary is an asserted clinical fact, but the FHIR
+# element does not require a LOINC coding. Keep its source identity explicit
+# in OMOP Observation rather than writing the derived PatientRecord.stage
+# field directly. A coded staging Observation remains preferred when present.
+FHIR_CONDITION_STAGE_SOURCE_VALUE = 'FHIR-condition-stage'
 
 # Source-value fallback map for environments where LOINC Concepts aren't loaded.
 # Key  = measurement_source_value (as stored by the FHIR upload pipeline or PATCH write-through)
@@ -378,47 +407,6 @@ def _is_empty(value) -> bool:
     return value is None or value == '' or value == [] or value == {}
 
 
-def _snapshot_user_edited(patient_info: PatientRecord) -> dict:
-    """Capture hand-entered values for fields OMOP cannot round-trip.
-
-    Only fields recorded by the write-through in `user_edited_fields` are taken,
-    so this restores what a user typed and never resurrects a stale derived value.
-    """
-    snapshot = {}
-    for field in (patient_info.user_edited_fields or []):
-        if field in _OMOP_DERIVED_FIELDS and hasattr(patient_info, field):
-            snapshot[field] = getattr(patient_info, field)
-    return snapshot
-
-
-def _restore_user_edited(patient_info: PatientRecord, preserved: dict) -> None:
-    """Put hand-entered values back where derivation produced nothing.
-
-    Runs after every section extractor, so a field OMOP can now answer keeps the
-    derived value — the user's copy is a fallback, not an override. That ordering
-    is what lets a later FHIR upload or OMOP correction take over a field the
-    patient once filled in by hand.
-
-    Once derivation does answer for a field, its flag is dropped. That hand-off
-    is what keeps the fallback honest, and it is why the write-through can afford
-    to flag generously instead of maintaining a table of which fields round-trip:
-
-      - it stops OMOP's value being mistaken for the user's on a later refresh
-        and resurrected after the source row is deleted, which would leave a
-        value no table backs and no user typed;
-      - and it lets a field OMOP owns resume propagating deletions normally.
-    """
-    still_edited = set(patient_info.user_edited_fields or [])
-    for field, value in preserved.items():
-        if _is_empty(getattr(patient_info, field, None)):
-            if not _is_empty(value):
-                setattr(patient_info, field, value)
-        else:
-            # Derivation answered for this field — OMOP owns it from here.
-            still_edited.discard(field)
-    patient_info.user_edited_fields = sorted(still_edited)
-
-
 def refresh_patient_record(person: Person) -> PatientRecord:
     """Derive and upsert PatientRecord from OMOP tables for a given person.
 
@@ -433,12 +421,6 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             patient_info = PatientRecord.objects.select_for_update().get(person=person)
         except PatientRecord.DoesNotExist:
             patient_info = PatientRecord(person=person)
-
-        # Hand-entered values for fields the write-through cannot push into OMOP
-        # would be destroyed by the clear below and have nothing to restore them.
-        # Snapshot them first; they are put back after derivation, but only where
-        # derivation came up empty, so OMOP still wins whenever it has a value.
-        preserved = _snapshot_user_edited(patient_info)
 
         # Clear all OMOP-derived fields before re-deriving so deletions are reflected.
         _clear_derived_fields(patient_info)
@@ -469,8 +451,6 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         ]:
             for field, value in section_fn(person).items():
                 setattr(patient_info, field, value)
-
-        _restore_user_edited(patient_info, preserved)
 
         _compute_derived_fields(patient_info)
 
@@ -1653,7 +1633,7 @@ def _get_staging_data(person: Person) -> dict:
         .filter(person=person)
         .filter(
             Q(observation_concept__concept_code__in=_STAGING_LOINCS)
-            | Q(observation_source_value__in=_STAGING_LOINCS)
+            | Q(observation_source_value__in=(*_STAGING_LOINCS, FHIR_CONDITION_STAGE_SOURCE_VALUE))
         )
         .select_related('observation_concept')
         .order_by('-observation_date')
@@ -1700,6 +1680,19 @@ def _get_staging_data(person: Person) -> dict:
     # Overall stage group. For MM both ISS (21908-9) and R-ISS (21908-9-riss)
     # are recorded; prefer R-ISS as it is the more current MM staging system.
     stage_val = _stage_value('21908-9-riss') or _stage_value('21908-9')
+    if not stage_val:
+        # Fallback for a dated FHIR Condition.stage assertion which had no
+        # standard staging code. This is still an OMOP fact; its distinct
+        # source value prevents it being confused with a coded LOINC result.
+        stage_val = next(
+            (
+                observation.value_as_string
+                for observation in observations
+                if observation.observation_source_value == FHIR_CONDITION_STAGE_SOURCE_VALUE
+                and observation.value_as_string
+            ),
+            None,
+        )
     if stage_val:
         data['stage'] = stage_val
 
@@ -2219,10 +2212,8 @@ def _get_laboratory_data(person: Person) -> dict:
 
 
 # Performance status lands in either OMOP table depending on how it arrived:
-# the FHIR upload routes these LOINCs to `observation` (_ASSESSMENT_LOINC in
-# patient_portal/api/views.py), while the PatientRecord PATCH write-through
-# sends them to `measurement`, because both fields appear in LAB_FIELD_TO_LOINC.
-# Reading only one table loses whatever came in by the other route.
+# the FHIR upload can route these LOINCs to `observation`, while other OMOP
+# imports may use `measurement`. Reading only one table loses valid OMOP facts.
 _ECOG_LOINC = '89247-1'
 _KARNOFSKY_LOINC = '89243-0'
 

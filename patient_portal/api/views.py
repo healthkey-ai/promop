@@ -38,12 +38,15 @@ from omop_core.models import (
     PERSON_YEAR_PLACEHOLDERS,
 )
 from omop_oncology.models import Episode, EpisodeEvent
-from omop_core.services.patient_record_service import refresh_patient_record
+from omop_core.services.patient_record_service import (
+    FHIR_CONDITION_STAGE_SOURCE_VALUE,
+    PATIENT_RECORD_OMOP_MAPPED_FIELDS,
+    refresh_patient_record,
+)
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.lot_inference_service import infer_lot_for_person
-from omop_core.services.omop_write_service import sync_to_omop
 from omop_core.services.episode_service import upsert_therapy_line_episode
-from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
+from omop_core.services.mappings import get_gender_concept
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.services.regimen_resolution import (
@@ -448,39 +451,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = PatientListSerializer(queryset[:500], many=True)
         return Response(serializer.data)
 
-    def create(self, request):
-        """Create a new patient record, creating a Person if needed"""
-        data = request.data
-
-        # Resolve or create Person
-        person_id = data.get('person_id') or data.get('person')
-        if person_id:
-            try:
-                person = Person.objects.get(person_id=int(person_id))
-            except Person.DoesNotExist:
-                person = Person.objects.create(
-                    person_id=int(person_id),
-                    year_of_birth=datetime.now().year - 50,
-                    gender_source_value='unknown',
-                    race_source_value='unknown',
-                    ethnicity_source_value='unknown',
-                )
-        else:
-            last_person = Person.objects.order_by('-person_id').first()
-            new_person_id = last_person.person_id + 1 if last_person else 1000
-            person = Person.objects.create(
-                person_id=new_person_id,
-                year_of_birth=datetime.now().year - 50,
-                gender_source_value='unknown',
-                race_source_value='unknown',
-                ethnicity_source_value='unknown',
-            )
-
-        serializer = PatientRecordSerializer(data=data, context={'request': request})
-        serializer.is_valid(raise_exception=True)
-        serializer.save(person=person)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
-
     def retrieve(self, request, pk=None):
         """Get detailed patient info for a specific person"""
         person, patient_info, err = self._resolve_patient_with_auth(request, pk)
@@ -506,7 +476,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         })
 
     def partial_update(self, request, pk=None):
-        """PATCH /api/patient-info/{person_id}/ — update PatientRecord and write through to OMOP."""
+        """PATCH only projection-owned fields with no OMOP representation.
+
+        A mapped clinical PatientRecord field is output from an OMOP fact.  It
+        cannot safely supply the fact's concept, time, unit, or provenance, so
+        this endpoint rejects it rather than recreating the retired
+        PatientRecord-to-OMOP write-through path.
+        """
         try:
             person = Person.objects.get(person_id=pk)
             patient_info = PatientRecord.objects.get(person=person)
@@ -529,74 +505,47 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-        prov_source, prov_user_id, prov_reason = _extract_provenance(request)
-        if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
+        mapped_fields = sorted(set(request.data) & PATIENT_RECORD_OMOP_MAPPED_FIELDS)
+        if mapped_fields:
             return Response(
-                {'error': 'modification_reason is required when source is ADMIN_CORRECTION'},
-                status=status.HTTP_400_BAD_REQUEST,
+                {
+                    'detail': (
+                        'OMOP-mapped PatientRecord fields are read-only. Write a complete '
+                        'clinical fact to the appropriate OMOP resource, then rederive the record.'
+                    ),
+                    'fields': mapped_fields,
+                },
+                status=status.HTTP_405_METHOD_NOT_ALLOWED,
             )
-
-        # Capture previous values for fields being changed (exclude provenance meta-fields).
-        # Use {field}_id for FK fields so we get a serializable PK, not a model object.
-        _prov_meta = {'source', 'source_user_id', 'modification_reason'}
-        _read_only = set(PatientRecordSerializer.Meta.read_only_fields)
-        _ignored_ro = sorted((set(request.data) & _read_only) - _prov_meta)
-        if _ignored_ro:
-            # DRF silently drops read-only fields from the input — surface the
-            # attempt so API consumers learn the derived therapy-id fields are
-            # written only by the derivation pipeline (#236).
-            logger.warning(
-                '{"event": "read_only_patch_fields_ignored", "fields": "%s", "person_id": "%s"}',
-                ','.join(_ignored_ro), pk,
-            )
-        def _prev_val(obj, field):
-            fk_id = f'{field}_id'
-            if hasattr(obj, fk_id):
-                return getattr(obj, fk_id, None)
-            return getattr(obj, field, None)
-        previous_values = {
-            field: _prev_val(patient_info, field)
-            for field in request.data
-            if field not in _prov_meta and field not in _read_only and hasattr(patient_info, field)
-        }
 
         serializer = PatientRecordSerializer(patient_info, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
 
-        try:
-            with transaction.atomic():
-                serializer.save()
-                # Fields whose value actually moved, not every key in the body:
-                # the React client PATCHes the whole record on autosave, so
-                # keying off the request would mark all ~180 derived fields as
-                # hand-edited on a single keystroke and freeze the read model
-                # against OMOP. Compared after save so both sides are model-
-                # native types rather than raw request strings.
-                changed_fields = _changed_fields(patient_info, previous_values, _prev_val)
-                if prov_source:
-                    _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
-                # PHR-S FM TI.1.2#04 — record field-level revision history.
-                _write_record_revisions(patient_info, previous_values, request)
-                if prov_source:
-                    for field in changed_fields:
-                        if field in LAB_FIELD_TO_LOINC:
-                            loinc_code = LAB_FIELD_TO_LOINC[field][0]
-                            m = Measurement.objects.filter(
-                                person=patient_info.person,
-                                measurement_source_value=loinc_code,
-                            ).order_by('-measurement_id').first()
-                            if m:
-                                _record_provenance(m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-        except Exception as _sync_exc:
-            logger.error(
-                'omop_write_through_failed patient=%s error=%s',
-                patient_info.pk, type(_sync_exc).__name__,
-            )
+        # DRF intentionally discards serializer read-only fields. Surface those
+        # attempts instead of returning success for a no-op, so ownership
+        # boundaries are visible to API consumers.
+        writable_fields = {
+            name for name, field in serializer.fields.items() if not field.read_only
+        }
+        unsupported_fields = sorted(set(request.data) - writable_fields)
+        if unsupported_fields:
             return Response(
-                {'error': 'Failed to persist changes to OMOP. Please try again.'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                {'detail': 'Only projection-owned PatientRecord fields are writable.', 'fields': unsupported_fields},
+                status=status.HTTP_405_METHOD_NOT_ALLOWED,
             )
+
+        def previous_value(obj, field):
+            fk_id = f'{field}_id'
+            return getattr(obj, fk_id, None) if hasattr(obj, fk_id) else getattr(obj, field, None)
+
+        previous_values = {
+            field: previous_value(patient_info, field)
+            for field in request.data
+            if hasattr(patient_info, field)
+        }
+        with transaction.atomic():
+            serializer.save()
+            _write_record_revisions(patient_info, previous_values, request)
 
         return Response({**serializer.data, 'previous_values': previous_values})
 
@@ -794,7 +743,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['get', 'patch', 'delete'], permission_classes=[PatientDeletePermission, PatientSelfScopePermission])
     def me(self, request):
-        """GET/PATCH/DELETE /api/patient-info/me/ — current user's own PatientRecord."""
+        """GET/DELETE the current user's record; PATCH name or projection-owned fields.
+
+        ``PatientRecord`` is a derived OMOP read model. This legacy endpoint
+        remains available for its read wire format. Mapped clinical fields are
+        read-only; ``patient_name`` updates ``Person`` and unmapped
+        projection-owned fields remain writable.
+        """
         if request.method == 'DELETE':
             return self._delete_patient_account(request)
 
@@ -836,54 +791,60 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 'patient_name': full_name,
             })
 
-        # PATCH
-        patient_name = request.data.pop('patient_name', None) if hasattr(request.data, 'pop') else request.data.get('patient_name')
-        patch_data = {k: v for k, v in request.data.items() if k != 'patient_name'}
-
-        if patient_name is not None:
-            parts = str(patient_name).strip().split(None, 1)
-            person.given_name = parts[0] if parts else ''
-            person.family_name = parts[1] if len(parts) > 1 else ''
-            person.save(update_fields=['given_name', 'family_name'])
+        patch_data = {key: value for key, value in request.data.items() if key != 'patient_name'}
+        mapped_fields = sorted(set(patch_data) & PATIENT_RECORD_OMOP_MAPPED_FIELDS)
+        if mapped_fields:
+            return Response(
+                {
+                    'detail': (
+                        'OMOP-mapped PatientRecord fields are read-only. Write a complete '
+                        'clinical fact to the appropriate OMOP resource, then rederive the record.'
+                    ),
+                    'fields': mapped_fields,
+                },
+                status=status.HTTP_405_METHOD_NOT_ALLOWED,
+            )
 
         serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
         serializer.is_valid(raise_exception=True)
-
-        # Capture previous values before save so revision history can record
-        # old/new (PHR-S FM TI.1.2#04). FK fields compared via {field}_id.
-        _read_only = set(PatientRecordSerializer.Meta.read_only_fields)
-
-        def _prev_val(obj, field):
-            fk_id = f'{field}_id'
-            if hasattr(obj, fk_id):
-                return getattr(obj, fk_id, None)
-            return getattr(obj, field, None)
-        previous_values = {
-            field: _prev_val(patient_info, field)
-            for field in patch_data
-            if field not in _read_only and hasattr(patient_info, field)
+        writable_fields = {
+            name for name, field in serializer.fields.items() if not field.read_only
         }
-        try:
-            with transaction.atomic():
-                serializer.save()
-                # See the /patient-info/{pk}/ PATCH above: only fields whose
-                # value actually moved, or a whole-record autosave would mark
-                # every derived field hand-edited.
-                changed_fields = _changed_fields(patient_info, previous_values, _prev_val)
-                sync_to_omop(patient_info, changed_fields, changed_data=dict(patch_data))
-                # PHR-S FM TI.1.2#04 — record field-level revision history.
-                _write_record_revisions(patient_info, previous_values, request)
-        except Exception as _sync_exc:
-            logger.error(
-                'omop_write_through_failed patient=%s error=%s',
-                patient_info.pk, type(_sync_exc).__name__,
-            )
+        unsupported_fields = sorted(set(patch_data) - writable_fields)
+        if unsupported_fields:
             return Response(
-                {'error': 'Failed to persist changes to OMOP. Please try again.'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                {'detail': 'Only projection-owned PatientRecord fields are writable.', 'fields': unsupported_fields},
+                status=status.HTTP_405_METHOD_NOT_ALLOWED,
             )
 
-        return Response(serializer.data)
+        if not patch_data and 'patient_name' not in request.data:
+            return Response(
+                {'detail': 'Supply patient_name or a projection-owned PatientRecord field.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        def previous_value(obj, field):
+            fk_id = f'{field}_id'
+            return getattr(obj, fk_id, None) if hasattr(obj, fk_id) else getattr(obj, field, None)
+
+        previous_values = {
+            field: previous_value(patient_info, field)
+            for field in patch_data
+            if hasattr(patient_info, field)
+        }
+        with transaction.atomic():
+            if 'patient_name' in request.data:
+                parts = str(request.data['patient_name']).strip().split(None, 1)
+                person.given_name = parts[0] if parts else ''
+                person.family_name = parts[1] if len(parts) > 1 else ''
+                person.save(update_fields=['given_name', 'family_name'])
+            serializer.save()
+            _write_record_revisions(patient_info, previous_values, request)
+
+        return Response({
+            'patient_info': PatientRecordSerializer(patient_info).data,
+            'patient_name': f"{person.given_name or ''} {person.family_name or ''}".strip(),
+        })
 
     def _delete_patient_account(self, request):
         """DELETE /api/patient-info/me/ — permanently delete the patient's account and all data."""
@@ -1081,6 +1042,20 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     if person_id == 0:
                         last_person = Person.objects.all().order_by('-person_id').first()
                         person_id = last_person.person_id + 1 if last_person else 1000
+
+                    # CSV has no schema for a complete clinical fact (concept,
+                    # event time, units, provenance). Never create a Person or
+                    # PatientRecord from a row that tries to submit mapped
+                    # clinical projection columns.
+                    unsupported = [
+                        field for field in ('disease', 'date_of_birth')
+                        if row.get(field)
+                    ]
+                    if unsupported:
+                        errors.append(
+                            f"Row {row_num}: mapped clinical columns are not supported by CSV upload: {', '.join(unsupported)}"
+                        )
+                        continue
                     
                     # Get gender concept
                     gender_concept = get_gender_concept(row.get('gender', ''))
@@ -1100,24 +1075,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         }
                     )
                     
-                    date_of_birth = None
-                    if row.get('date_of_birth'):
-                        try:
-                            date_of_birth = datetime.strptime(row['date_of_birth'], '%Y-%m-%d').date()
-                        except ValueError:
-                            try:
-                                date_of_birth = datetime.strptime(row['date_of_birth'], '%m/%d/%Y').date()
-                            except ValueError:
-                                pass
-                    
-                    patient_info, pi_created = PatientRecord.objects.update_or_create(
-                        person=person,
-                        defaults={
-                            'date_of_birth': date_of_birth,
-                            'disease': row.get('disease', ''),
-                        }
-                    )
-                    
+                    patient_info, pi_created = PatientRecord.objects.get_or_create(person=person)
+                    refresh_patient_record(person)
                     if pi_created:
                         created_count += 1
                         
@@ -1725,6 +1684,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     dlbcl_onset = None          # onset from DLBCL (transformation) condition
                     _any_bc_condition = False   # True if any BC condition was seen in the bundle
                     _clinical_status_source = None  # FHIR Condition.clinicalStatus code for primary BC
+                    _breast_cancer_stage = None  # condition-stage assertion, persisted to OMOP below
+                    _breast_cancer_stage_datetime = None
 
                     def _disease_from_condition_code(codeable):
                         codeable = codeable or {}
@@ -1758,6 +1719,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')[:100]
 
                     for condition in data['conditions']:
+                        _condition_stage = None
                         # Get histologic type from code
                         code = condition.get('code', {})
                         coding_list = code.get('coding', [])
@@ -1834,6 +1796,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 else:
                                     stage = stage_display or _sc.get('code', '')
 
+                        if is_breast_cancer and stage:
+                            _condition_stage = stage
+
                         # Get condition onset date (handles both 'YYYY-MM-DD' and ISO datetime)
                         if condition.get('onsetDateTime'):
                             try:
@@ -1849,6 +1814,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 condition_date = _parsed_date  # fallback: last wins
                                 if is_breast_cancer and _parsed_date and (breast_cancer_onset is None or _parsed_date < breast_cancer_onset):
                                     breast_cancer_onset = _parsed_date
+                                if is_breast_cancer and _condition_stage:
+                                    # Keep the stage tied to the condition that
+                                    # asserted it, not to an earlier/later
+                                    # breast-cancer diagnosis in the bundle.
+                                    _breast_cancer_stage = _condition_stage
+                                    _breast_cancer_stage_datetime = _parsed_date
                                 if is_fl and _parsed_date and (fl_onset is None or _parsed_date < fl_onset):
                                     fl_onset = _parsed_date
                                 if is_dlbcl and _parsed_date and (dlbcl_onset is None or _parsed_date < dlbcl_onset):
@@ -1899,6 +1870,36 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
                     if _any_bc_condition and condition_date:
                         _upsert_condition(_concept_breast_cancer, condition_date, disease, _clinical_status_source)
+
+                    if _breast_cancer_stage and _breast_cancer_stage_datetime:
+                        _stage_date = _breast_cancer_stage_datetime.date()
+                        _stage_exists = Observation.objects.filter(
+                            person=person,
+                            observation_source_value=FHIR_CONDITION_STAGE_SOURCE_VALUE,
+                            observation_date=_stage_date,
+                            value_as_string=_breast_cancer_stage,
+                        ).exists()
+                        if not _stage_exists:
+                            _stage_observation = Observation(
+                                observation_id=next_pk(Observation, 'observation_id'),
+                                person=person,
+                                observation_concept=_concept_ehr_type or _concept_tx_regimen,
+                                observation_date=_stage_date,
+                                observation_datetime=_breast_cancer_stage_datetime,
+                                observation_type_concept=_concept_ehr_type or _concept_tx_regimen,
+                                value_as_string=_breast_cancer_stage,
+                                observation_source_value=FHIR_CONDITION_STAGE_SOURCE_VALUE,
+                            )
+                            _stage_observation._skip_patient_record_refresh = True
+                            _stage_observation.save()
+                            _record_provenance(
+                                _stage_observation,
+                                prov_source or 'EHR_SYNC',
+                                prov_user_id,
+                                target_patient_id=fhir_patient_id,
+                                modification_reason=prov_reason,
+                                organization=get_request_org(request),
+                            )
 
                     # FL diagnosis and DLBCL transformation conditions (FL → DLBCL
                     # transformation is derived from the DLBCL ConditionOccurrence).
@@ -3378,6 +3379,81 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _timing_hash, _time.monotonic() - _pt_start, len(_pt_procedure_ids),
                     )
 
+                    # --- SCT Patient extensions -> dated OMOP Observation ---
+                    # A Patient extension is not itself an event.  The explicit
+                    # mm-sct-date is, however, a clinically asserted date for
+                    # the accompanying SCT facts, so it is safe to persist all
+                    # supplied SCT values as dated Observations and derive the
+                    # PatientRecord fields from them.  Without that date we do
+                    # not manufacture an import-time clinical event.
+                    _sct_event_date = None
+                    if sct_date_str:
+                        try:
+                            _candidate_sct_date = datetime.strptime(sct_date_str, '%Y-%m-%d').date()
+                            if _candidate_sct_date <= localdate():
+                                _sct_event_date = _candidate_sct_date
+                            else:
+                                logger.warning(
+                                    "Ignoring future mm-sct-date for patient (id_hash=%s)",
+                                    hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12],
+                                )
+                        except ValueError:
+                            logger.warning(
+                                "Ignoring invalid mm-sct-date for patient (id_hash=%s)",
+                                hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12],
+                            )
+
+                    if _sct_event_date is not None:
+                        _sct_values = [('mm-sct-date', _sct_event_date.isoformat())]
+                        if sct_history_str:
+                            _history = [
+                                token.strip() for token in sct_history_str.split(',')
+                                if token.strip() in _allowed_sct_titles
+                            ]
+                            if _history:
+                                _sct_values.append(('mm-sct-history', ','.join(_history)))
+                        if sct_eligibility_str:
+                            _eligibility = [
+                                token.strip() for token in sct_eligibility_str.split(',')
+                                if token.strip() in _allowed_elig_titles
+                            ]
+                            if _eligibility:
+                                _sct_values.append(('mm-sct-eligibility', ','.join(_eligibility)))
+
+                        for _sct_source, _sct_value in _sct_values:
+                            _sct_exists = Observation.objects.filter(
+                                person=person,
+                                observation_source_value=_sct_source,
+                                observation_date=_sct_event_date,
+                                value_as_string=_sct_value,
+                            ).exists()
+                            if _sct_exists:
+                                continue
+                            _sct_obs = Observation(
+                                observation_id=next_pk(Observation, 'observation_id'),
+                                person=person,
+                                observation_concept=_concept_ehr_type or _concept_tx_regimen,
+                                observation_date=_sct_event_date,
+                                observation_type_concept=_concept_ehr_type or _concept_tx_regimen,
+                                value_as_string=_sct_value,
+                                observation_source_value=_sct_source,
+                            )
+                            _sct_obs._skip_patient_record_refresh = True
+                            _sct_obs.save()
+                            _record_provenance(
+                                _sct_obs,
+                                prov_source or 'EHR_SYNC',
+                                prov_user_id,
+                                target_patient_id=fhir_patient_id,
+                                modification_reason=prov_reason,
+                                organization=get_request_org(request),
+                            )
+                    elif sct_history_str or sct_eligibility_str:
+                        logger.warning(
+                            "Skipping undated SCT Patient extension values (id_hash=%s)",
+                            hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12],
+                        )
+
                     # --- OMOP-first: refresh PatientRecord from OMOP tables ---
                     # Release suppression so the single intentional refresh can run.
                     # We stay inside the atomic block so that a refresh failure rolls
@@ -3436,27 +3512,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _patch['cytogenic_markers'] = cytogenetics_str
                     if measurable_disease_imwg is not None:
                         _patch['measurable_disease_imwg'] = measurable_disease_imwg
-                    if sct_date_str:
-                        try:
-                            parsed_sct_date = datetime.strptime(sct_date_str, '%Y-%m-%d').date()
-                            if parsed_sct_date <= localdate():
-                                _patch['sct_date'] = parsed_sct_date
-                        except ValueError:
-                            _id_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
-                            logger.warning(
-                                "Ignoring invalid mm-sct-date for patient (id_hash=%s)",
-                                _id_hash,
-                            )
-                    if sct_history_str:
-                        _patch['stem_cell_transplant_history'] = [
-                            t.strip() for t in sct_history_str.split(',')
-                            if t.strip() and t.strip() in _allowed_sct_titles
-                        ]
-                    if sct_eligibility_str:
-                        _patch['sct_eligibility'] = [
-                            t.strip() for t in sct_eligibility_str.split(',')
-                            if t.strip() and t.strip() in _allowed_elig_titles
-                        ]
                     if tumor_size:
                         _patch['tumor_size'] = tumor_size
                     if lymph_node_status:
@@ -3579,7 +3634,26 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     if upload_org is not None and patient_info.organization_id is None:
                         _patch['organization'] = upload_org
 
-                    # Apply patch to PatientRecord (suppress signal-triggering save)
+                    # PatientRecord accepts only projection-owned values here.
+                    # Every mapped clinical field above has to be represented by
+                    # an OMOP row (and is picked up by the preceding refresh),
+                    # never copied from this FHIR parser into the projection.
+                    _mapped_patch_fields = set(_patch) & PATIENT_RECORD_OMOP_MAPPED_FIELDS
+                    if _mapped_patch_fields:
+                        logger.info(
+                            "FHIR mapped PatientRecord fields omitted after OMOP derivation "
+                            "person_id=%s fields=%s",
+                            person.person_id,
+                            ",".join(sorted(_mapped_patch_fields)),
+                        )
+                        _patch = {
+                            field: value for field, value in _patch.items()
+                            if field not in PATIENT_RECORD_OMOP_MAPPED_FIELDS
+                        }
+
+                    # Apply projection-owned fields only (suppress
+                    # signal-triggering save).  In particular, this must not
+                    # become a PatientRecord-to-OMOP compatibility bridge.
                     for _field, _val in _patch.items():
                         setattr(patient_info, _field, _val)
                     patient_info.save()

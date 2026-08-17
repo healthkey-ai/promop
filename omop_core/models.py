@@ -2613,11 +2613,9 @@ class PatientRecord(models.Model):
     user_edited_fields = models.JSONField(
         default=list, blank=True,
         help_text=(
-            "Names of OMOP-derived fields a user set directly through the API that "
-            "the write-through cannot persist to OMOP. refresh_patient_record "
-            "restores these when re-derivation yields nothing for them, so a "
-            "hand-entered value is not erased. OMOP still wins whenever it has a "
-            "value for the field."
+            "Legacy compatibility metadata from the retired PatientRecord-to-OMOP "
+            "write-through. It is not written or consulted by derivation; mapped "
+            "clinical fields are rebuilt only from OMOP facts."
         ),
     )
 

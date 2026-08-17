@@ -1,7 +1,7 @@
 """PostgreSQL sequence-based PK generation for OMOP tables.
 
-Some legacy write paths (patient_portal/api/views.py, lot_inference_service,
-omop_write_service) assign PKs as ``MAX(id)+1`` with an explicit value, which
+Some legacy write paths (patient_portal/api/views.py, lot_inference_service)
+assign PKs as ``MAX(id)+1`` with an explicit value, which
 does NOT advance the table's sequence. That strands the sequence behind the
 table max, so a later ``nextval`` here would hand out an already-used id and
 hit a duplicate-key error. To stay robust against those writers, every

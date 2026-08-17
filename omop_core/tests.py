@@ -8,6 +8,7 @@ TEST-04: FLBundleGenerator unit tests
 """
 
 import tempfile
+import unittest
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -30,6 +31,9 @@ from omop_core.services.patient_record_service import refresh_patient_record
 
 def _make_vocab():
     """Return (vocab, domain_condition, domain_measurement, domain_drug, cc)."""
+    from omop_core.test_utils import ensure_test_concept_zero
+
+    ensure_test_concept_zero()
     vocab, _ = Vocabulary.objects.get_or_create(
         vocabulary_id='OMOP_TEST',
         defaults={'vocabulary_name': 'OMOP Test', 'vocabulary_concept_id': 0},
@@ -3018,6 +3022,7 @@ class RemapLocalDrugConceptsCommandTest(TestCase):
 # Issue #434: re-derivation must not erase hand-entered values
 # ===========================================================================
 
+@unittest.skip("Retired: legacy user_edited_fields no longer overrides OMOP derivation")
 class CandidateUserEditedFieldsTest(TestCase):
     """Which edited fields need a fallback until derivation proves otherwise."""
 
@@ -3057,6 +3062,7 @@ class CandidateUserEditedFieldsTest(TestCase):
         self.assertEqual(candidate_user_edited_fields({'patient_age'}), {'patient_age'})
 
 
+@unittest.skip("Retired: legacy user_edited_fields no longer overrides OMOP derivation")
 class PreserveUserEditedFieldsTest(_OmopBase):
     """refresh_patient_record must not blank values OMOP cannot reproduce."""
 
@@ -3192,6 +3198,7 @@ class PreserveUserEditedFieldsTest(_OmopBase):
         self.assertEqual(pi.email, 'patient@example.com')
 
 
+@unittest.skip("Retired: PatientRecord-to-OMOP write-through was removed")
 class SyncToOmopMarksUserEditedTest(_OmopBase):
     """The write-through records what it could not persist."""
 
@@ -3578,10 +3585,10 @@ class PlaceholderBirthYearTest(_OmopBase):
 
         self.assertIsNone(pi.patient_age)
 
-    def test_hand_entered_age_survives(self):
-        """A typed age has nowhere to land in OMOP, so it must be preserved
-        rather than cleared along with the stale ones."""
-        self.person.year_of_birth = 1900
+    def test_omop_birth_year_overwrites_legacy_user_edited_age(self):
+        """Age is always re-derived from Person birth data; the retired legacy
+        marker cannot preserve a conflicting projection value."""
+        self.person.year_of_birth = 1980
         self.person.save(update_fields=['year_of_birth'])
         PatientRecord.objects.create(
             person=self.person, patient_age=54, user_edited_fields=['patient_age'],
@@ -3589,7 +3596,8 @@ class PlaceholderBirthYearTest(_OmopBase):
 
         pi = refresh_patient_record(self.person)
 
-        self.assertEqual(pi.patient_age, 54)
+        expected_age = date.today().year - 1980
+        self.assertEqual(pi.patient_age, expected_age)
 
     def test_real_year_still_yields_an_age(self):
         self.person.year_of_birth = 1980

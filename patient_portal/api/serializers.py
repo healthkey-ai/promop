@@ -14,6 +14,7 @@ from datetime import date
 from django.utils.timezone import localdate
 from django.utils import timezone
 from omop_core.services.access import has_org_admin_access
+from omop_core.services.patient_record_service import PATIENT_RECORD_OMOP_MAPPED_FIELDS
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -289,30 +290,11 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             'first_line_therapy_display', 'second_line_therapy_display', 'later_therapy_display',
             'lines_of_therapy', 'therapy_release_id',
             'death_date',
-            # Derived therapy-id read model (issue #236): written only by the
-            # derivation pipeline (refresh_patient_record / FHIR upload) from
-            # OMOP truth.  A client PATCH must never set them directly —
-            # provenance would be lost and the values would diverge from OMOP.
-            'first_line_therapy_id', 'second_line_therapy_id', 'later_therapy_ids',
-            'first_line_component_ids', 'second_line_component_ids',
-            'later_component_ids', 'therapy_component_ids',
-            'first_line_therapy_type_ids', 'second_line_therapy_type_ids',
-            'later_therapy_type_ids', 'therapy_type_ids',
-            'therapy_ids_provenance',
-            # Per-line later-therapy structure (regimen/lineNumber/concept_id/
-            # dates) is derived from OMOP; lines_of_therapy surfaces its
-            # concept_ids as authoritative, so a client must never PATCH it.
-            'later_therapies',
             # Derivation versioning — set only by refresh_patient_record, never by client.
             'derivation_version', 'derived_at',
-            # Bookkeeping for which derived fields were hand-entered; maintained by
-            # the OMOP write-through from what a PATCH actually changed. A client
-            # setting it directly could pin any derived field against OMOP truth.
+            # Internal migration bookkeeping; clients must not set it.
             'user_edited_fields',
-            # Wearable summaries are written by the device-sync service, never
-            # by the client API. Enumerated from the model — see
-            # _derived_wearable_fields for why this one is not hand-listed.
-        ) + _derived_wearable_fields()
+        ) + tuple(sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS))
 
     def get_patient_name(self, obj):
         if obj.person:

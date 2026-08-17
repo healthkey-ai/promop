@@ -40,7 +40,7 @@ intentionally ○.
 |---|---|---|---|---|
 | **PH.1** | **PHR Account Holder Profile** | ✅ | First-class patient role | #264 |
 | PH.1.1 | Identify & maintain account-holder record | ✅ | `Identity` + `PatientUser`↔`Person`; provisioning via staff invite (`/api/v1/patients/{id}/invite/` + `/patient-invitations/accept/`) and app signup (`/api/v1/patients/signup/`); `patient_person_for()` | #264 |
-| PH.1.2 | Manage demographic information | ✅ | `PatientRecord` + `PatientHome` General tab (PATCH `/api/v1/patient-records/me/`) | #264 |
+| PH.1.2 | Manage demographic information | ✅ | `Person` demographic API + `PatientHome` General tab; mapped clinical facts are written to OMOP and re-derived, while projection-owned fields without an OMOP home persist directly | #264/#489 |
 | PH.1.3 | Manage account-holder & family preferences | ○ | No dedicated preferences store | — |
 | PH.1.4 | Manage advance directives | ✅ | `PatientDocument` `ADVANCE_DIRECTIVE` type + `doc_type` filter; `AdvanceDirectives.tsx` | #292 |
 | PH.1.5 | Manage consents & authorizations | ✅ | `PatientConsentViewSet` `/api/v1/consents/` (list + toggle), self-scoped; 3 consent types | #278/#283 |
