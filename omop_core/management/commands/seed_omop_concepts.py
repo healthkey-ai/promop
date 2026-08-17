@@ -99,6 +99,7 @@ _CONCEPT_CLASSES = [
     dict(concept_class_id='Undefined',           concept_class_name='Undefined',            concept_class_concept_id=0),
     dict(concept_class_id='Clinical Finding',    concept_class_name='Clinical Finding',     concept_class_concept_id=0),
     dict(concept_class_id='Context-dependent',   concept_class_name='Context-dependent',    concept_class_concept_id=0),
+    dict(concept_class_id='Answer',              concept_class_name='Answer',               concept_class_concept_id=0),
 ]
 
 
@@ -289,6 +290,12 @@ _CONCEPTS = [
     # ------------------------------------------------------------------
     _c(36305384, 'ECOG Performance Status score', 'Measurement',  'LOINC', 'Clinical Observation', 'S', '89247-1'),
     _c(43054909, 'Tobacco smoking status',         'Observation',  'LOINC', 'Clinical Observation', 'S', '72166-2'),
+
+    # Standard LOINC answer concepts for tobacco smoking status (question/answer pattern).
+    # observation_concept_id = 72166-2 (question), value_as_concept_id = answer below.
+    _c(45879404, 'Never smoker',              'Meas Value', 'LOINC', 'Answer', 'S', 'LA18978-9'),
+    _c(45883458, 'Former smoker',             'Meas Value', 'LOINC', 'Answer', 'S', 'LA15920-4'),
+    _c(45881517, 'Current every day smoker',  'Meas Value', 'LOINC', 'Answer', 'S', 'LA18976-3'),
 
     # ------------------------------------------------------------------
     # CBC — hemoglobin (missing from original seeder; required for CRAB)

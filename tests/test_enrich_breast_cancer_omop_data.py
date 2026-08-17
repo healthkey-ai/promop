@@ -66,10 +66,14 @@ def _seed_loinc_concepts_the_command_assumes_exist():
     # per-disease outcome value sets, since only breast cancer uses RECIST
     # (lymphoma uses Lugano, myeloma IMWG, CLL iwCLL).
     from omop_core.management.commands.enrich_breast_cancer_omop_data import (
-        _RESPONSE_CODES, _TOBACCO_CODES,
+        _RESPONSE_CODES, _TOBACCO_QUESTION_CODE, _TOBACCO_ANSWER_CODES,
     )
-    for (vocab, code), (name, _weight) in _TOBACCO_CODES.items():
-        _loinc_concept(code, name, vocabulary_id=vocab, domain_id='Observation')
+    # Tobacco question concept (LOINC 72166-2)
+    q_vocab, q_code = _TOBACCO_QUESTION_CODE
+    _loinc_concept(q_code, 'Tobacco smoking status', vocabulary_id=q_vocab, domain_id='Observation')
+    # Tobacco answer concepts
+    for (vocab, code), (name, _weight) in _TOBACCO_ANSWER_CODES.items():
+        _loinc_concept(code, name, vocabulary_id=vocab, domain_id='Meas Value')
     for (vocab, code), name in _RESPONSE_CODES.items():
         _loinc_concept(code, name, vocabulary_id=vocab, domain_id='Observation')
 
@@ -132,17 +136,24 @@ class TestPerformanceAndStageBackfill:
 
 class TestMissingObservations:
 
-    def test_creates_tobacco_status_observation(self):
+    def test_creates_tobacco_status_observation_question_answer(self):
+        """Tobacco status uses question/answer pattern (#451):
+        observation_concept = LOINC 72166-2, value_as_concept = answer."""
         person = PersonFactory()
         PatientRecordFactory(person=person, stage='II')
 
         call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id), confirm=True)
 
-        codes = set(
-            Observation.objects.filter(person=person)
-            .values_list('observation_concept__concept_code', flat=True)
+        tobacco_obs = Observation.objects.filter(
+            person=person,
+            observation_concept__concept_code='72166-2',
+            observation_concept__vocabulary_id='LOINC',
         )
-        assert codes & {'266919005', '8517006', '77176002'}
+        assert tobacco_obs.exists(), 'Expected a tobacco observation with LOINC 72166-2'
+        obs = tobacco_obs.first()
+        assert obs.value_as_concept_id is not None, 'Expected value_as_concept_id to be set'
+        answer_codes = {'LA18978-9', 'LA15920-4', 'LA18976-3'}
+        assert obs.value_as_concept.concept_code in answer_codes
 
     def test_creates_staging_observations_consistent_with_existing_stage(self):
         person = PersonFactory()

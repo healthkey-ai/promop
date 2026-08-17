@@ -1795,21 +1795,48 @@ def _get_behavior_data(person: Person) -> dict:
         .order_by('-measurement_date')
     )
 
-    tobacco_obs = observations.filter(
-        observation_concept__concept_code__in=['266919005', '8517006', '77176002']
+    # New format (question/answer, #451): observation_concept = LOINC 72166-2,
+    # answer in value_as_concept (LA18978-9 / LA15920-4 / LA18976-3).
+    tobacco_qa_obs = (
+        observations
+        .filter(observation_concept__concept_code='72166-2',
+                observation_concept__vocabulary_id='LOINC')
+        .select_related('value_as_concept')
     )
+    _ANSWER_MAP = {
+        'LA18978-9': (True,  'Never smoker'),
+        'LA15920-4': (False, None),           # date appended below
+        'LA18976-3': (False, 'Current smoker'),
+    }
+    for obs in tobacco_qa_obs:
+        if obs.value_as_concept_id is None:
+            continue
+        answer_code = obs.value_as_concept.concept_code
+        if answer_code in _ANSWER_MAP:
+            no_use, details = _ANSWER_MAP[answer_code]
+            data['no_tobacco_use_status'] = no_use
+            if answer_code == 'LA15920-4':
+                data['tobacco_use_details'] = f'Former smoker, quit {obs.observation_date}'
+            else:
+                data['tobacco_use_details'] = details
 
-    for obs in tobacco_obs:
-        code = obs.observation_concept.concept_code
-        if code == '266919005':
-            data['no_tobacco_use_status'] = True
-            data['tobacco_use_details'] = 'Never smoker'
-        elif code == '8517006':
-            data['no_tobacco_use_status'] = False
-            data['tobacco_use_details'] = f'Former smoker, quit {obs.observation_date}'
-        elif code == '77176002':
-            data['no_tobacco_use_status'] = False
-            data['tobacco_use_details'] = 'Current smoker'
+    # Backward compat: old format wrote SNOMED codes directly into
+    # observation_concept_id. Only apply if the new format didn't match.
+    if 'no_tobacco_use_status' not in data:
+        old_tobacco_obs = observations.filter(
+            observation_concept__concept_code__in=['266919005', '8517006', '77176002']
+        )
+        for obs in old_tobacco_obs:
+            code = obs.observation_concept.concept_code
+            if code == '266919005':
+                data['no_tobacco_use_status'] = True
+                data['tobacco_use_details'] = 'Never smoker'
+            elif code == '8517006':
+                data['no_tobacco_use_status'] = False
+                data['tobacco_use_details'] = f'Former smoker, quit {obs.observation_date}'
+            elif code == '77176002':
+                data['no_tobacco_use_status'] = False
+                data['tobacco_use_details'] = 'Current smoker'
 
     for measurement in measurements:
         code = _measurement_code(measurement)
