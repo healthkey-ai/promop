@@ -8,7 +8,7 @@ class Migration(migrations.Migration):
     dependencies = [
         (
             "omop_core",
-            "0146_patientrecord_patientrecord_lat_lon_both_or_neither_and_more",
+            "0147_convert_tobacco_to_question_answer",
         ),
     ]
 
