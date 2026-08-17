@@ -82,29 +82,25 @@ logger = logging.getLogger(__name__)
 # Lymphoma uses Lugano, myeloma IMWG, CLL iwCLL — and IMWG's VGPR/sCR and
 # iwCLL's CRi/PR-L have no RECIST equivalent, so one four-value set cannot
 # express them. Tracked separately; see the hemonc roadmap's P5.
-# TRADEOFF, deliberate: the three tobacco concepts are non-standard in Athena
-# (4144272 / 4310250 / 4298794 all have standard_concept=NULL) and have no
-# 'Maps to' edge to a Standard concept, so observation_concept_id will hold a
-# non-standard concept. That deviates from OMOP's convention and means these
-# rows are invisible to concept_ancestor rollups — a cohort query walking the
-# hierarchy from a Standard concept will not see them.
-#
-# It is still the right call here. The only "Standard" tobacco rows in the
-# database were this command's own mints, which hardcoded standard_concept='S'
-# and so fabricated a standardness the genuine concept does not have. Using the
-# real non-standard concept is honest; inventing a Standard one is what we are
-# stopping.
-#
-# The conformant alternative is a question/answer pair — observation_concept_id
-# = a tobacco-status question concept, value_as_concept_id = a Standard LOINC
-# answer (LA18978-9 "Never smoker", LA15920-4 "Former smoker",
-# LA18976-3 "Current every day smoker"). That restructures how the observation
-# is written and every reader keyed on these SNOMED codes, so it is tracked
-# separately rather than smuggled in here.
-_TOBACCO_CODES = {
-    ('SNOMED', '266919005'): ('Never smoked tobacco', 0.7),
-    ('SNOMED', '8517006'):   ('Ex-smoker', 0.2),
-    ('SNOMED', '77176002'):  ('Smoker', 0.1),
+# Tobacco smoking status — OMOP question/answer pattern (#451).
+# observation_concept_id = LOINC 72166-2 "Tobacco smoking status" (the question)
+# value_as_concept_id   = one of the three LOINC answer concepts below.
+# The old approach wrote non-standard SNOMED concepts (4144272/4310250/4298794)
+# directly into observation_concept_id; this replaces it with the conformant
+# pattern so rows are visible to concept_ancestor rollups.
+_TOBACCO_QUESTION_CODE = ('LOINC', '72166-2')
+_TOBACCO_ANSWER_CODES = {
+    # (vocabulary_id, concept_code): (display_name, weight)
+    ('LOINC', 'LA18978-9'): ('Never smoker',             0.7),
+    ('LOINC', 'LA15920-4'): ('Former smoker',             0.2),
+    ('LOINC', 'LA18976-3'): ('Current every day smoker',  0.1),
+}
+# Legacy SNOMED codes — kept only so the idempotency guard can detect
+# old-format rows that already exist and avoid duplicating them.
+_OLD_TOBACCO_SNOMED_CODES = {
+    ('SNOMED', '266919005'),
+    ('SNOMED', '8517006'),
+    ('SNOMED', '77176002'),
 }
 _RESPONSE_CODES = {
     ('SNOMED', '182840001'): 'Complete Response',
@@ -491,7 +487,9 @@ class Command(BaseCommand):
         # (--refresh-only), since these concepts are then never read.
         if person_ids:
             self._write_progress('Checking required concepts exist...')
-            for (vocab, code), (name, _weight) in _TOBACCO_CODES.items():
+            # Tobacco question concept
+            _resolve_concept(*_TOBACCO_QUESTION_CODE, 'Tobacco smoking status')
+            for (vocab, code), (name, _weight) in _TOBACCO_ANSWER_CODES.items():
                 _resolve_concept(vocab, code, name)
             for (vocab, code), name in _RESPONSE_CODES.items():
                 _resolve_concept(vocab, code, name)
@@ -504,7 +502,21 @@ class Command(BaseCommand):
         # Person-invariant, so resolved once here rather than per patient in
         # _create_missing_observations — the same reasoning as the wearable
         # prefetch below.
-        self._tobacco_concept_ids = _concept_ids_for(_TOBACCO_CODES)
+        # Include both old SNOMED codes and the new LOINC question code so
+        # the idempotency guard in _create_missing_observations detects either
+        # old-format or new-format tobacco rows.
+        self._tobacco_question_concept_id = None
+        q_vocab, q_code = _TOBACCO_QUESTION_CODE
+        q_concept = Concept.objects.filter(
+            vocabulary_id=q_vocab, concept_code=q_code
+        ).order_by('concept_id').first()
+        if q_concept:
+            self._tobacco_question_concept_id = q_concept.concept_id
+        self._tobacco_answer_concept_ids = _concept_ids_for(_TOBACCO_ANSWER_CODES)
+        # For idempotency: detect old-format SNOMED rows too
+        self._old_tobacco_concept_ids = _concept_ids_for(
+            _OLD_TOBACCO_SNOMED_CODES
+        )
         self._response_concept_ids = _concept_ids_for(_RESPONSE_CODES)
 
         # Pre-fetch all wearable LOINC concepts in one query. This avoids N+1
@@ -779,20 +791,37 @@ class Command(BaseCommand):
             )
             existing_concept_ids.add(concept.concept_id)
 
-        # Tobacco status — weighted random pick. Guard on the whole category,
-        # not just the randomly-chosen code: a rerun that happens to pick a
-        # *different* tobacco code than a prior run would otherwise pass the
-        # per-concept check in _make() and add a second, contradictory
-        # tobacco-status observation instead of being a no-op.
-        # Resolved once in handle() and passed down: these are person-invariant,
-        # and this method runs per patient. Resolving rather than assuming
-        # concept_id == int(code) is the point — that assumption is what minted
-        # duplicates shadowing the genuine SNOMED concepts (#415).
-        tobacco_concept_ids = self._tobacco_concept_ids
-        if not existing_concept_ids & tobacco_concept_ids:
-            keys, weights = zip(*[(k, w) for k, (_, w) in _TOBACCO_CODES.items()])
-            tobacco_key = random.choices(keys, weights=weights, k=1)[0]
-            _make(tobacco_key, None)
+        # Tobacco status — question/answer pattern (#451).
+        # observation_concept_id = LOINC 72166-2 (the question)
+        # value_as_concept_id   = one of the LOINC answer concepts
+        #
+        # Guard on both old-format (SNOMED codes in observation_concept_id) and
+        # new-format (72166-2 in observation_concept_id) to stay idempotent
+        # across the migration boundary.
+        tobacco_question_cid = self._tobacco_question_concept_id
+        has_tobacco = bool(
+            existing_concept_ids & self._old_tobacco_concept_ids
+            or (tobacco_question_cid and tobacco_question_cid in existing_concept_ids)
+        )
+        if not has_tobacco and tobacco_question_cid is not None:
+            keys, weights = zip(*[(k, w) for k, (_, w) in _TOBACCO_ANSWER_CODES.items()])
+            answer_key = random.choices(keys, weights=weights, k=1)[0]
+            answer_vocab, answer_code = answer_key
+            answer_concept = Concept.objects.filter(
+                vocabulary_id=answer_vocab, concept_code=answer_code
+            ).order_by('concept_id').first()
+            if answer_concept is not None:
+                created += 1
+                if not dry_run:
+                    Observation.objects.create(
+                        observation_id=observation_ids.take(),
+                        person=person,
+                        observation_concept_id=tobacco_question_cid,
+                        observation_date=obs_date,
+                        observation_type_concept_id=ehr_type_concept_id,
+                        value_as_concept=answer_concept,
+                    )
+                    existing_concept_ids.add(tobacco_question_cid)
 
         # Tumor/metastasis staging, consistent with the patient's existing
         # stage. Deterministic (not random), so the per-concept check in
