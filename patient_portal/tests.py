@@ -715,35 +715,35 @@ class TransformationFieldValidationTest(FhirUploadBase):
             f'/api/v1/patient-records/{self._pi.person_id}/', payload, format='json'
         )
 
-    def test_valid_transformation_fields_accepted(self):
+    def test_transformation_fields_are_read_only_via_patient_record_patch(self):
         response = self._patch({
             'transformed_to_dlbcl': True,
             'dlbcl_transformation_date': '2023-04-15',
             'post_transformation_outcome': 'Complete Response',
         })
-        self.assertEqual(response.status_code, status.HTTP_200_OK,
-                         msg=f'PATCH failed: {response.data}')
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED,
+                         msg=f'Mapped-field PATCH was not rejected: {response.data}')
         self._pi.refresh_from_db()
-        self.assertTrue(self._pi.transformed_to_dlbcl)
-        self.assertEqual(self._pi.post_transformation_outcome, 'Complete Response')
+        self.assertFalse(self._pi.transformed_to_dlbcl)
+        self.assertIsNone(self._pi.post_transformation_outcome)
 
     def test_future_transformation_date_rejected(self):
         response = self._patch({
             'transformed_to_dlbcl': True,
             'dlbcl_transformation_date': '2999-01-01',
         })
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
     def test_outcome_without_flag_rejected(self):
         response = self._patch({'post_transformation_outcome': 'Complete Response'})
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
     def test_unrecognized_outcome_rejected(self):
         response = self._patch({
             'transformed_to_dlbcl': True,
             'post_transformation_outcome': 'Cured Forever',
         })
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
     def test_vocabulary_endpoint_serves_outcomes(self):
         response = self.client.get('/api/vocabularies/post-transformation-outcome/')
@@ -951,7 +951,7 @@ class TherapyComponentIdsAPITest(FhirUploadBase):
             {'therapy_component_ids': [35806260, 19103793]},
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         record.refresh_from_db()
         self.assertEqual(
             record.therapy_component_ids, [111],
@@ -959,7 +959,7 @@ class TherapyComponentIdsAPITest(FhirUploadBase):
         )
 
     def test_all_derived_therapy_id_fields_read_only_via_patch(self):
-        """Every derived therapy-id field + provenance ignores client PATCHes."""
+        """Every derived therapy-id field + provenance rejects client PATCHes."""
         derived = {
             'first_line_therapy_id': 35806260,
             'second_line_therapy_id': 35806261,
@@ -980,7 +980,7 @@ class TherapyComponentIdsAPITest(FhirUploadBase):
             derived,
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         record.refresh_from_db()
         for field in derived:
             current = getattr(record, field)
@@ -1002,7 +1002,7 @@ class TherapyComponentIdsAPITest(FhirUploadBase):
             {'later_therapies': [{'lineNumber': 9, 'therapy': 'HACK', 'concept_id': 999}]},
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         record.refresh_from_db()
         self.assertEqual(
             record.later_therapies, [],
@@ -3660,42 +3660,37 @@ class AccountHolderDataTest(_SmartBase):
 
     # --- TI.1.2#04 : revision history ------------------------------------
 
-    def test_patient_record_update_writes_revision(self):
-        """PATCHing a PatientRecord field writes a RecordRevision with old/new values."""
+    def test_mapped_patient_record_patch_is_rejected_without_revision(self):
+        """Mapped clinical changes belong in OMOP, not projection revisions."""
         RecordRevision.objects.filter(patient_record=self.patient_info).delete()
         resp = self.write_client.patch(
             f'/api/v1/patient-records/{self.person.person_id}/',
             {'disease': 'Lung Cancer'},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200, resp.data)
-        rev = RecordRevision.objects.filter(
-            patient_record=self.patient_info, field='disease',
-        ).first()
-        self.assertIsNotNone(rev)
-        self.assertEqual(rev.old_value, 'Breast Cancer')
-        self.assertEqual(rev.new_value, 'Lung Cancer')
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED, resp.data)
+        self.assertFalse(RecordRevision.objects.filter(patient_record=self.patient_info).exists())
 
     def test_revision_not_written_when_value_unchanged(self):
         """No revision row is created when the submitted value equals the stored value."""
         RecordRevision.objects.filter(patient_record=self.patient_info).delete()
-        self.write_client.patch(
+        resp = self.write_client.patch(
             f'/api/v1/patient-records/{self.person.person_id}/',
             {'disease': self.patient_info.disease},
             format='json',
         )
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED, resp.data)
         self.assertEqual(
             RecordRevision.objects.filter(patient_record=self.patient_info, field='disease').count(),
             0,
         )
 
-    def test_revisions_endpoint_returns_history(self):
-        """GET .../revisions/ returns the field-level change history."""
+    def test_revisions_endpoint_returns_historical_entries(self):
+        """Existing revision entries remain readable; PATCH no longer creates them."""
         RecordRevision.objects.filter(patient_record=self.patient_info).delete()
-        self.write_client.patch(
-            f'/api/v1/patient-records/{self.person.person_id}/',
-            {'stage': 'IV'},
-            format='json',
+        RecordRevision.objects.create(
+            patient_record=self.patient_info, changed_by='system', field='stage',
+            old_value='III', new_value='IV',
         )
         resp = self.read_client.get(
             f'/api/v1/patient-records/{self.person.person_id}/revisions/'
@@ -3706,17 +3701,16 @@ class AccountHolderDataTest(_SmartBase):
         entry = next(r for r in resp.data if r['field'] == 'stage')
         self.assertEqual(entry['new_value'], 'IV')
 
-    def test_patch_write_through_still_succeeds_with_revision_logging(self):
-        """Revision logging must not break the OMOP write-through (lab PATCH still creates Measurement)."""
+    def test_mapped_lab_patch_is_rejected_without_omop_write_through(self):
         resp = self.write_client.patch(
             f'/api/v1/patient-records/{self.person.person_id}/',
             {'hemoglobin_g_dl': '12.5'},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200, resp.data)
-        self.assertTrue(
-            Measurement.objects.filter(person=self.person, measurement_source_value='718-7').exists()
-        )
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED, resp.data)
+        self.assertFalse(Measurement.objects.filter(
+            person=self.person, measurement_source_value='718-7',
+        ).exists())
 
     # --- PH.1.2#05 : consent-driven demographic redaction ----------------
 
@@ -3773,7 +3767,7 @@ class AccountHolderDataTest(_SmartBase):
 # ---------------------------------------------------------------------------
 
 class ProvenancePatchTest(_SmartBase):
-    """PATCH with provenance headers creates ProvenanceRecord entries."""
+    """Mapped PatientRecord PATCHes cannot create clinical provenance entries."""
 
     @classmethod
     def setUpTestData(cls):
@@ -3782,46 +3776,40 @@ class ProvenancePatchTest(_SmartBase):
         PatientRecord.objects.filter(person=cls.person).update(disease='Breast Cancer')
         cls.patient_info = PatientRecord.objects.get(person=cls.person)
 
-    def test_patch_with_source_creates_provenance_for_patient_info(self):
+    def test_mapped_patch_with_source_is_rejected_without_projection_provenance(self):
+        before = ProvenanceRecord.objects.count()
         resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
             {'disease': 'Lung Cancer', 'source': 'EHR_SYNC', 'source_user_id': 'svc-123'},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
-        p = ProvenanceRecord.objects.filter(
-            object_id=self.patient_info.pk,
-        ).first()
-        self.assertIsNotNone(p)
-        self.assertEqual(p.source, 'EHR_SYNC')
-        self.assertEqual(p.source_user_id, 'svc-123')
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertEqual(ProvenanceRecord.objects.count(), before)
 
-    def test_patch_with_source_creates_provenance_for_measurement(self):
-        self.write_client.patch(
+    def test_mapped_lab_patch_is_rejected_without_measurement_provenance(self):
+        before = ProvenanceRecord.objects.count()
+        resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
             {'hemoglobin_g_dl': '13.0', 'source': 'PATIENT_SELF'},
             format='json',
         )
-        m = Measurement.objects.filter(
-            person=self.person,
-            measurement_source_value='718-7',
-        ).first()
-        self.assertIsNotNone(m)
-        p = ProvenanceRecord.objects.filter(object_id=m.pk).first()
-        self.assertIsNotNone(p)
-        self.assertEqual(p.source, 'PATIENT_SELF')
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertFalse(Measurement.objects.filter(
+            person=self.person, measurement_source_value='718-7',
+        ).exists())
+        self.assertEqual(ProvenanceRecord.objects.count(), before)
 
     def test_patch_without_source_creates_no_provenance(self):
         before = ProvenanceRecord.objects.count()
-        self.write_client.patch(
+        resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
             {'disease': 'CLL'},
             format='json',
         )
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         self.assertEqual(ProvenanceRecord.objects.count(), before)
 
-    def test_patch_returns_previous_values(self):
-        """PATCH response must include previous_values snapshot of changed fields."""
+    def test_mapped_patch_has_no_previous_values_snapshot(self):
         self.patient_info.disease = 'Multiple Myeloma'
         self.patient_info.save()
         resp = self.write_client.patch(
@@ -3829,46 +3817,38 @@ class ProvenancePatchTest(_SmartBase):
             {'disease': 'CLL', 'source': 'EHR_SYNC'},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         data = resp.json()
-        self.assertIn('previous_values', data)
-        self.assertEqual(data['previous_values'].get('disease'), 'Multiple Myeloma')
+        self.assertNotIn('previous_values', data)
 
-    def test_admin_correction_requires_modification_reason(self):
+    def test_admin_correction_mapped_patch_is_rejected(self):
         resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
             {'disease': 'CLL', 'source': 'ADMIN_CORRECTION'},
             format='json',
         )
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn('modification_reason', resp.json().get('error', ''))
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
-    def test_admin_correction_with_reason_succeeds(self):
+    def test_admin_correction_with_reason_does_not_bypass_ownership_boundary(self):
         resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
             {'disease': 'CLL', 'source': 'ADMIN_CORRECTION', 'modification_reason': 'Correcting misdiagnosis'},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
-        p = ProvenanceRecord.objects.filter(object_id=self.patient_info.pk).first()
-        self.assertIsNotNone(p)
-        self.assertEqual(p.modification_reason, 'Correcting misdiagnosis')
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertFalse(ProvenanceRecord.objects.filter(object_id=self.patient_info.pk).exists())
 
-    def test_provenance_endpoint_returns_history(self):
-        self.write_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'disease': 'Myeloma', 'source': 'EHR_SYNC', 'source_user_id': 'ehr-456'},
-            format='json',
-        )
+    def test_provenance_endpoint_returns_omop_write_history(self):
+        self._create_omop_condition_with_provenance()
         resp = self.read_client.get(f'/api/patient-info/{self.person.person_id}/provenance/')
         self.assertEqual(resp.status_code, 200)
         sources = [r['source'] for r in resp.json()]
         self.assertIn('EHR_SYNC', sources)
 
 
-    def test_omop_write_endpoint_records_provenance(self):
-        """POST to a direct OMOP endpoint with source header records provenance."""
-        resp = self.write_client.post(
+    def _create_omop_condition_with_provenance(self):
+        """Use the OMOP resource, which owns clinical facts and provenance."""
+        return self.write_client.post(
             '/api/conditions/',
             {
                 'condition_occurrence_id': 79901,
@@ -3881,6 +3861,10 @@ class ProvenancePatchTest(_SmartBase):
             HTTP_X_PROVENANCE_SOURCE='EHR_SYNC',
             HTTP_X_PROVENANCE_USER_ID='ehr-omop-001',
         )
+
+    def test_omop_write_endpoint_records_provenance(self):
+        """POST to a direct OMOP endpoint with source header records provenance."""
+        resp = self._create_omop_condition_with_provenance()
         self.assertEqual(resp.status_code, 201)
         from omop_core.models import ConditionOccurrence
         co = ConditionOccurrence.objects.filter(person=self.person).order_by('-condition_occurrence_id').first()
@@ -6187,7 +6171,7 @@ class SctFieldsModelTest(FhirUploadBase):
         self.assertIn('stem_cell_transplant_history', pi_data)
         self.assertEqual(pi_data['sct_date'], '2022-05-10')
 
-    def test_sct_date_future_rejected(self):
+    def test_sct_date_is_read_only_via_patient_record_patch(self):
         from datetime import date, timedelta
         future = (date.today() + timedelta(days=30)).isoformat()
         resp = self.client.patch(
@@ -6195,8 +6179,7 @@ class SctFieldsModelTest(FhirUploadBase):
             {'sct_date': future},
             format='json',
         )
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn('sct_date', resp.data)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
     def test_sct_eligibility_patch(self):
         resp = self.client.patch(
@@ -6204,9 +6187,9 @@ class SctFieldsModelTest(FhirUploadBase):
             {'sct_eligibility': ['eligible for autologous SCT', 'ineligible for allogeneic SCT']},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         self.patient.refresh_from_db()
-        self.assertIn('eligible for autologous SCT', self.patient.sct_eligibility)
+        self.assertEqual(self.patient.sct_eligibility, ['eligible for autologous SCT'])
 
 
 class SctFhirUploadTest(FhirUploadBase):
@@ -7708,7 +7691,7 @@ class PatientRecordOmopActionTest(TestCase):
 class PatientRecordOrganizationReadOnlyTest(TestCase):
     """
     Verify that a client cannot PATCH organization or person onto a
-    PatientRecord record — these fields must be silently ignored (read-only).
+    PatientRecord record — these fields are rejected as read-only.
     """
 
     @classmethod
@@ -7739,7 +7722,7 @@ class PatientRecordOrganizationReadOnlyTest(TestCase):
             {'organization': self.org_b.id},
             format='json',
         )
-        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST])
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         self.patient.refresh_from_db()
         self.assertEqual(self.patient.organization_id, self.org_a.id)
 
@@ -15587,7 +15570,7 @@ class DerivationVersionReadOnlyAPITest(TestCase):
             {'derivation_version': 999},
             format='json',
         )
-        self.assertIn(resp.status_code, [200, 400])
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         self.pr.refresh_from_db()
         self.assertNotEqual(self.pr.derivation_version, 999)
 
