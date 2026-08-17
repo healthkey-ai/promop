@@ -43,6 +43,9 @@ from omop_oncology.models import CancerModifier, Episode, EpisodeEvent, Histolog
 
 def _make_vocab_fixtures():
     """Create the minimum OMOP vocabulary records required by Concept FKs."""
+    from omop_core.test_utils import ensure_test_concept_zero
+
+    ensure_test_concept_zero()
     vocab, _ = Vocabulary.objects.get_or_create(
         vocabulary_id='TEST',
         defaults={

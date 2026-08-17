@@ -31,6 +31,9 @@ from omop_core.services.patient_record_service import refresh_patient_record
 
 def _make_vocab():
     """Return (vocab, domain_condition, domain_measurement, domain_drug, cc)."""
+    from omop_core.test_utils import ensure_test_concept_zero
+
+    ensure_test_concept_zero()
     vocab, _ = Vocabulary.objects.get_or_create(
         vocabulary_id='OMOP_TEST',
         defaults={'vocabulary_name': 'OMOP Test', 'vocabulary_concept_id': 0},
