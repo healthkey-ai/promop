@@ -146,6 +146,39 @@ describe("OrgSignup", () => {
     });
   });
 
+  it("handles field-level errors dict from backend", async () => {
+    mockGet.mockResolvedValue({
+      data: { name: "Acme Clinic", slug: "acme", allows_patient_signup: true },
+    });
+    mockPost.mockRejectedValue({
+      response: {
+        data: {
+          errors: {
+            email: ["Enter a valid email address."],
+            password: ["This password is too short.", "This password is too common."],
+          },
+        },
+        status: 400,
+      },
+    });
+    renderOrgSignup();
+
+    await waitFor(() => {
+      expect(screen.getByText("Acme Clinic")).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: "test@test.com" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "validpassword1" } });
+    fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "validpassword1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Enter a valid email address. This password is too short. This password is too common.")
+      ).toBeInTheDocument();
+    });
+  });
+
   it("shows name fields as optional", async () => {
     mockGet.mockResolvedValue({
       data: { name: "Acme Clinic", slug: "acme", allows_patient_signup: true },
