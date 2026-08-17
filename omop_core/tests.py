@@ -3019,7 +3019,7 @@ class RemapLocalDrugConceptsCommandTest(TestCase):
 # Issue #434: re-derivation must not erase hand-entered values
 # ===========================================================================
 
-@unittest.skip("Retired: PatientRecord no longer preserves unmapped clinical edits")
+@unittest.skip("Retired: legacy user_edited_fields no longer overrides OMOP derivation")
 class CandidateUserEditedFieldsTest(TestCase):
     """Which edited fields need a fallback until derivation proves otherwise."""
 
@@ -3059,7 +3059,7 @@ class CandidateUserEditedFieldsTest(TestCase):
         self.assertEqual(candidate_user_edited_fields({'patient_age'}), {'patient_age'})
 
 
-@unittest.skip("Retired: PatientRecord no longer preserves unmapped clinical edits")
+@unittest.skip("Retired: legacy user_edited_fields no longer overrides OMOP derivation")
 class PreserveUserEditedFieldsTest(_OmopBase):
     """refresh_patient_record must not blank values OMOP cannot reproduce."""
 
