@@ -886,7 +886,7 @@ def _regimen_from_exposures(exposure_ids, de_info_by_id):
     if not infos:
         return 'Unknown', None, None
     for concept_id, vocab_id, name in infos:
-        if concept_id and vocab_id == 'HemOnc':
+        if concept_id and vocab_id in ('HemOnc', 'HK-Regimen'):
             return name, concept_id, 'inferred'
     display_names = [name for _, _, name in infos]
     norm_key = {normalize_drug_name(n).lower().strip() for n in display_names}

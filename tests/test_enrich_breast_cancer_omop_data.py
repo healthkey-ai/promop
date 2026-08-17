@@ -243,6 +243,18 @@ class TestRefreshesPatientRecord:
         assert exposure.drug_concept_id == record.first_line_therapy_id
         assert record.first_line_therapy
 
+        # Issue #450: when the genuine HemOnc concept is not loaded, the
+        # regimen must be quarantine-minted under HK-Regimen — never under
+        # HemOnc with a fabricated concept_code.
+        concept = Concept.objects.get(concept_id=exposure.drug_concept_id)
+        assert concept.vocabulary_id == 'HK-Regimen', (
+            f'Expected HK-Regimen quarantine vocabulary, got {concept.vocabulary_id}'
+        )
+        assert concept.source == 'HealthKey'
+        assert concept.concept_code.startswith('hkr:'), (
+            f'Expected hkr: slug concept_code, got {concept.concept_code!r}'
+        )
+
     def test_refresh_is_deferred_until_after_all_patients_are_enriched(self, monkeypatch):
         person_a = PersonFactory()
         person_b = PersonFactory()
