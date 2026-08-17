@@ -180,7 +180,10 @@ class Command(BaseCommand):
             self._validate_replace_loinc_scope()
 
         if self._direct:
+            self._hk_concepts = self._save_healthkey_concepts()
             self._clear()
+        else:
+            self._hk_concepts = []
 
         counts = {
             'relationship':         self._load_relationships(dry_run),
@@ -188,12 +191,18 @@ class Command(BaseCommand):
             'domain':               self._load_domains(dry_run),
             'concept_class':        self._load_concept_classes(dry_run),
             'concept':              self._load_concepts(dry_run),
+        }
+        # Restore HealthKey-minted concepts after the Athena concept load
+        # but before relationship/ancestor loads that reference concept IDs.
+        if self._hk_concepts and not dry_run:
+            self._restore_healthkey_concepts()
+        counts.update({
             'concept_relationship': self._load_concept_relationships(dry_run),
             'concept_ancestor':     self._load_concept_ancestors(dry_run),
             'concept_synonym':      self._load_concept_synonym(dry_run),
             'drug_strength':        self._load_drug_strength(dry_run),
             'source_to_concept_map': self._load_source_to_concept_map(dry_run),
-        }
+        })
         if not dry_run:
             self._seed_concept_zero()
             self._sync_cdm_source_metadata()
@@ -257,6 +266,65 @@ class Command(BaseCommand):
             if tmp.exists():
                 tmp.unlink()
                 self._log(f'  Cleaned up {filename}.')
+
+    # -- HealthKey concept preservation across --replace -----------------
+
+    _HK_CONCEPT_COLS = (
+        'concept_id', 'concept_name', 'domain_id', 'vocabulary_id',
+        'concept_class_id', 'standard_concept', 'concept_code',
+        'valid_start_date', 'valid_end_date', 'invalid_reason', 'source',
+    )
+
+    def _save_healthkey_concepts(self):
+        """Snapshot source='HealthKey' concept rows before TRUNCATE.
+
+        Returns a list of tuples matching ``_HK_CONCEPT_COLS`` order.
+        """
+        qs = Concept.objects.filter(source='HealthKey')
+        count = qs.count()
+        if not count:
+            self._log('  No HealthKey-minted concepts to preserve.')
+            return []
+        rows = list(qs.values_list(*self._HK_CONCEPT_COLS))
+        self._log(f'  Saved {len(rows):,} HealthKey concept(s) for restore after TRUNCATE.')
+        return rows
+
+    def _restore_healthkey_concepts(self):
+        """Re-insert saved HealthKey concepts after TRUNCATE + Athena reload.
+
+        FK references (vocabulary, domain, concept_class) that were not restored
+        by the Athena reload are created as minimal placeholder rows so the
+        INSERT does not violate FK constraints.
+        """
+        if not self._hk_concepts:
+            return
+        # Ensure FK targets exist — Athena reload may not include HK-specific
+        # vocabulary / domain / concept_class rows.
+        vocab_ids = {r[3] for r in self._hk_concepts}
+        domain_ids = {r[2] for r in self._hk_concepts}
+        class_ids = {r[4] for r in self._hk_concepts}
+
+        for vid in vocab_ids:
+            Vocabulary.objects.get_or_create(
+                vocabulary_id=vid,
+                defaults={'vocabulary_name': vid, 'vocabulary_concept_id': 0},
+            )
+        for did in domain_ids:
+            Domain.objects.get_or_create(
+                domain_id=did,
+                defaults={'domain_name': did, 'domain_concept_id': 0},
+            )
+        for cid in class_ids:
+            ConceptClass.objects.get_or_create(
+                concept_class_id=cid,
+                defaults={'concept_class_name': cid, 'concept_class_concept_id': 0},
+            )
+
+        _copy_rows(
+            'concept', self._HK_CONCEPT_COLS, self._hk_concepts,
+            self._log, direct=True,
+        )
+        self._log(f'  Restored {len(self._hk_concepts):,} HealthKey concept(s).')
 
     def _clear(self):
         self._log('Clearing existing vocabulary data (TRUNCATE)...')

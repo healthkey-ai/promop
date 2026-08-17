@@ -4682,3 +4682,178 @@ class LatLonCheckConstraintTest(TestCase):
                 PatientRecord.objects.create(
                     person=person, latitude=0, longitude=181,
                 )
+
+
+# ---------------------------------------------------------------------------
+# TEST-05: Local concept ID range (issue #425)
+# ---------------------------------------------------------------------------
+
+class LocalConceptIdRangeTest(TestCase):
+    """next_pk(Concept, 'concept_id') must return IDs >= 2,000,000,000."""
+
+    def setUp(self):
+        self.vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='OMOP_TEST',
+            defaults={'vocabulary_name': 'Test', 'vocabulary_concept_id': 0},
+        )
+        self.domain, _ = Domain.objects.get_or_create(
+            domain_id='Metadata',
+            defaults={'domain_name': 'Metadata', 'domain_concept_id': 0},
+        )
+        self.cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Undefined',
+            defaults={'concept_class_name': 'Undefined', 'concept_class_concept_id': 0},
+        )
+
+    def test_next_pk_concept_returns_local_range(self):
+        """next_pk for Concept must always return >= LOCAL_CONCEPT_MIN_ID."""
+        from omop_core.services.pk import next_pk, LOCAL_CONCEPT_MIN_ID
+        pk = next_pk(Concept, 'concept_id')
+        self.assertGreaterEqual(pk, LOCAL_CONCEPT_MIN_ID)
+
+    def test_next_pk_batch_concept_returns_local_range(self):
+        """next_pk_batch for Concept must return all IDs >= LOCAL_CONCEPT_MIN_ID."""
+        from omop_core.services.pk import next_pk_batch, LOCAL_CONCEPT_MIN_ID
+        pks = next_pk_batch(Concept, 'concept_id', 5)
+        self.assertEqual(len(pks), 5)
+        for pk in pks:
+            self.assertGreaterEqual(pk, LOCAL_CONCEPT_MIN_ID)
+
+    def test_next_pk_concept_above_athena_max(self):
+        """Even if an Athena concept exists below 2B, next_pk stays >= 2B."""
+        from omop_core.services.pk import next_pk, LOCAL_CONCEPT_MIN_ID
+        # Create a concept in the Athena range (below 2B)
+        Concept.objects.get_or_create(
+            concept_id=999_999,
+            defaults={
+                'concept_name': 'Athena test',
+                'domain_id': 'Metadata',
+                'vocabulary_id': 'OMOP_TEST',
+                'concept_class_id': 'Undefined',
+                'concept_code': 'TEST999999',
+                'valid_start_date': '1970-01-01',
+                'valid_end_date': '2099-12-31',
+            },
+        )
+        pk = next_pk(Concept, 'concept_id')
+        self.assertGreaterEqual(pk, LOCAL_CONCEPT_MIN_ID)
+
+    def test_next_pk_other_model_not_affected(self):
+        """The 2B floor must NOT apply to non-Concept models."""
+        from omop_core.services.pk import next_pk
+        # Person uses person_id — should not be subject to the 2B floor.
+        pk = next_pk(Person, 'person_id')
+        # It should be a small integer based on MAX(person_id)+1.
+        # We just verify it is NOT forced to >= 2B.
+        self.assertLess(pk, 2_000_000_000)
+
+
+class HealthKeyConceptSurvivesReloadTest(TestCase):
+    """source='HealthKey' concept rows must survive a --replace vocab reload."""
+
+    def setUp(self):
+        self.vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HK-Test',
+            defaults={'vocabulary_name': 'HK Test', 'vocabulary_concept_id': 0},
+        )
+        self.domain, _ = Domain.objects.get_or_create(
+            domain_id='Metadata',
+            defaults={'domain_name': 'Metadata', 'domain_concept_id': 0},
+        )
+        self.cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Undefined',
+            defaults={'concept_class_name': 'Undefined', 'concept_class_concept_id': 0},
+        )
+
+    def test_save_and_restore_healthkey_concepts(self):
+        """_save + TRUNCATE + _restore round-trips HealthKey concepts."""
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        import io
+
+        # Count pre-existing HK concepts (seeded by migrations)
+        pre_existing = Concept.objects.filter(source='HealthKey').count()
+
+        # Create an HK concept
+        Concept.objects.create(
+            concept_id=2_000_000_001,
+            concept_name='HK test concept',
+            domain_id='Metadata',
+            vocabulary_id='HK-Test',
+            concept_class_id='Undefined',
+            concept_code='HK-TEST-001',
+            valid_start_date='1970-01-01',
+            valid_end_date='2099-12-31',
+            source='HealthKey',
+        )
+
+        cmd = Command()
+        cmd.stdout = io.StringIO()
+
+        # Save
+        saved = cmd._save_healthkey_concepts()
+        self.assertEqual(len(saved), pre_existing + 1)
+        saved_ids = {r[0] for r in saved}
+        self.assertIn(2_000_000_001, saved_ids)
+
+        # Simulate TRUNCATE — delete all concepts
+        Concept.objects.all().delete()
+        self.assertFalse(Concept.objects.filter(concept_id=2_000_000_001).exists())
+
+        # Re-create FK targets (simulating what the Athena loader does)
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='HK-Test',
+            defaults={'vocabulary_name': 'HK Test', 'vocabulary_concept_id': 0},
+        )
+        Domain.objects.get_or_create(
+            domain_id='Metadata',
+            defaults={'domain_name': 'Metadata', 'domain_concept_id': 0},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Undefined',
+            defaults={'concept_class_name': 'Undefined', 'concept_class_concept_id': 0},
+        )
+
+        # Restore
+        cmd._hk_concepts = saved
+        cmd._restore_healthkey_concepts()
+
+        # Verify our test concept round-tripped
+        restored = Concept.objects.get(concept_id=2_000_000_001)
+        self.assertEqual(restored.concept_name, 'HK test concept')
+        self.assertEqual(restored.source, 'HealthKey')
+        self.assertEqual(restored.concept_code, 'HK-TEST-001')
+        # All saved HK concepts should be restored
+        self.assertEqual(
+            Concept.objects.filter(source='HealthKey').count(),
+            pre_existing + 1,
+        )
+
+    def test_non_healthkey_concepts_not_saved(self):
+        """Only source='HealthKey' rows are preserved; Athena rows are not."""
+        from omop_core.management.commands.load_athena_vocabularies import Command
+        import io
+
+        # Count pre-existing HK concepts (seeded by migrations)
+        pre_existing = Concept.objects.filter(source='HealthKey').count()
+
+        # Create an Athena concept (source=None)
+        Concept.objects.create(
+            concept_id=100,
+            concept_name='Athena concept',
+            domain_id='Metadata',
+            vocabulary_id='HK-Test',
+            concept_class_id='Undefined',
+            concept_code='ATHENA-100',
+            valid_start_date='1970-01-01',
+            valid_end_date='2099-12-31',
+            source=None,
+        )
+
+        cmd = Command()
+        cmd.stdout = io.StringIO()
+
+        saved = cmd._save_healthkey_concepts()
+        # Should only have pre-existing HK rows, not the new Athena one
+        self.assertEqual(len(saved), pre_existing)
+        saved_ids = {r[0] for r in saved}
+        self.assertNotIn(100, saved_ids)
