@@ -6305,6 +6305,18 @@ class SctFhirUploadTest(FhirUploadBase):
         self.assertIn('autologous SCT', pi.stem_cell_transplant_history)
         self.assertIn('tandem SCT', pi.stem_cell_transplant_history)
         self.assertIn('eligible for autologous SCT', pi.sct_eligibility)
+        sct_observations = Observation.objects.filter(person=pi.person)
+        self.assertTrue(sct_observations.filter(
+            observation_source_value='mm-sct-date', observation_date=date(2021, 3, 15),
+            value_as_string='2021-03-15',
+        ).exists())
+        self.assertTrue(sct_observations.filter(
+            observation_source_value='mm-sct-history', observation_date=date(2021, 3, 15),
+        ).exists())
+        self.assertTrue(ProvenanceRecord.objects.filter(
+            object_id=sct_observations.get(observation_source_value='mm-sct-date').observation_id,
+            content_type__model='observation', source='EHR_SYNC',
+        ).exists())
 
     def test_invalid_sct_date_string_is_ignored(self):
         """A malformed mm-sct-date value must be silently dropped; upload must still succeed."""
@@ -6333,8 +6345,8 @@ class SctFhirUploadTest(FhirUploadBase):
         self.assertEqual(pi.stem_cell_transplant_history or [], [],
                          'Comma-only valueString should produce an empty list')
 
-    def test_unknown_vocab_tokens_filtered_from_sct_history(self):
-        """Tokens not in the StemCellTransplant vocabulary are silently discarded."""
+    def test_undated_sct_history_is_not_invented_as_a_clinical_fact(self):
+        """An SCT Patient extension without an event date cannot enter OMOP."""
         resp = self._upload_bundle_with_extensions([
             {'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-history',
              'valueString': 'autologous SCT,unknown experimental SCT,allogeneic SCT'},
@@ -6343,10 +6355,10 @@ class SctFhirUploadTest(FhirUploadBase):
                       msg=f'Upload failed: {getattr(resp, "data", resp.content)}')
         pi = PatientRecord.objects.filter(person__family_name='TestSct005').first()
         self.assertIsNotNone(pi)
-        self.assertIn('autologous SCT', pi.stem_cell_transplant_history)
-        self.assertIn('allogeneic SCT', pi.stem_cell_transplant_history)
-        self.assertNotIn('unknown experimental SCT', pi.stem_cell_transplant_history,
-                         'Unrecognized vocab token must be filtered out')
+        self.assertEqual(pi.stem_cell_transplant_history or [], [])
+        self.assertFalse(Observation.objects.filter(
+            person=pi.person, observation_source_value='mm-sct-history',
+        ).exists())
 
 
 # ---------------------------------------------------------------------------

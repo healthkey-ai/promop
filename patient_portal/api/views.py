@@ -3336,6 +3336,81 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _timing_hash, _time.monotonic() - _pt_start, len(_pt_procedure_ids),
                     )
 
+                    # --- SCT Patient extensions -> dated OMOP Observation ---
+                    # A Patient extension is not itself an event.  The explicit
+                    # mm-sct-date is, however, a clinically asserted date for
+                    # the accompanying SCT facts, so it is safe to persist all
+                    # supplied SCT values as dated Observations and derive the
+                    # PatientRecord fields from them.  Without that date we do
+                    # not manufacture an import-time clinical event.
+                    _sct_event_date = None
+                    if sct_date_str:
+                        try:
+                            _candidate_sct_date = datetime.strptime(sct_date_str, '%Y-%m-%d').date()
+                            if _candidate_sct_date <= localdate():
+                                _sct_event_date = _candidate_sct_date
+                            else:
+                                logger.warning(
+                                    "Ignoring future mm-sct-date for patient (id_hash=%s)",
+                                    hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12],
+                                )
+                        except ValueError:
+                            logger.warning(
+                                "Ignoring invalid mm-sct-date for patient (id_hash=%s)",
+                                hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12],
+                            )
+
+                    if _sct_event_date is not None:
+                        _sct_values = [('mm-sct-date', _sct_event_date.isoformat())]
+                        if sct_history_str:
+                            _history = [
+                                token.strip() for token in sct_history_str.split(',')
+                                if token.strip() in _allowed_sct_titles
+                            ]
+                            if _history:
+                                _sct_values.append(('mm-sct-history', ','.join(_history)))
+                        if sct_eligibility_str:
+                            _eligibility = [
+                                token.strip() for token in sct_eligibility_str.split(',')
+                                if token.strip() in _allowed_elig_titles
+                            ]
+                            if _eligibility:
+                                _sct_values.append(('mm-sct-eligibility', ','.join(_eligibility)))
+
+                        for _sct_source, _sct_value in _sct_values:
+                            _sct_exists = Observation.objects.filter(
+                                person=person,
+                                observation_source_value=_sct_source,
+                                observation_date=_sct_event_date,
+                                value_as_string=_sct_value,
+                            ).exists()
+                            if _sct_exists:
+                                continue
+                            _sct_obs = Observation(
+                                observation_id=next_pk(Observation, 'observation_id'),
+                                person=person,
+                                observation_concept=_concept_ehr_type or _concept_tx_regimen,
+                                observation_date=_sct_event_date,
+                                observation_type_concept=_concept_ehr_type or _concept_tx_regimen,
+                                value_as_string=_sct_value,
+                                observation_source_value=_sct_source,
+                            )
+                            _sct_obs._skip_patient_record_refresh = True
+                            _sct_obs.save()
+                            _record_provenance(
+                                _sct_obs,
+                                prov_source or 'EHR_SYNC',
+                                prov_user_id,
+                                target_patient_id=fhir_patient_id,
+                                modification_reason=prov_reason,
+                                organization=get_request_org(request),
+                            )
+                    elif sct_history_str or sct_eligibility_str:
+                        logger.warning(
+                            "Skipping undated SCT Patient extension values (id_hash=%s)",
+                            hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12],
+                        )
+
                     # --- OMOP-first: refresh PatientRecord from OMOP tables ---
                     # Release suppression so the single intentional refresh can run.
                     # We stay inside the atomic block so that a refresh failure rolls
@@ -3394,27 +3469,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _patch['cytogenic_markers'] = cytogenetics_str
                     if measurable_disease_imwg is not None:
                         _patch['measurable_disease_imwg'] = measurable_disease_imwg
-                    if sct_date_str:
-                        try:
-                            parsed_sct_date = datetime.strptime(sct_date_str, '%Y-%m-%d').date()
-                            if parsed_sct_date <= localdate():
-                                _patch['sct_date'] = parsed_sct_date
-                        except ValueError:
-                            _id_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
-                            logger.warning(
-                                "Ignoring invalid mm-sct-date for patient (id_hash=%s)",
-                                _id_hash,
-                            )
-                    if sct_history_str:
-                        _patch['stem_cell_transplant_history'] = [
-                            t.strip() for t in sct_history_str.split(',')
-                            if t.strip() and t.strip() in _allowed_sct_titles
-                        ]
-                    if sct_eligibility_str:
-                        _patch['sct_eligibility'] = [
-                            t.strip() for t in sct_eligibility_str.split(',')
-                            if t.strip() and t.strip() in _allowed_elig_titles
-                        ]
                     if tumor_size:
                         _patch['tumor_size'] = tumor_size
                     if lymph_node_status:
