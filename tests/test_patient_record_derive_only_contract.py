@@ -21,6 +21,16 @@ def test_api_does_not_import_or_call_retired_write_through_service():
     assert "sync_to_omop" not in api_views
 
 
+def test_derivation_does_not_restore_legacy_user_edited_values():
+    """A legacy metadata value must not override absent OMOP clinical facts."""
+    derivation_service = (
+        REPOSITORY_ROOT / "omop_core/services/patient_record_service.py"
+    ).read_text()
+
+    assert "user_edited_fields" not in derivation_service
+    assert "_restore_user_edited" not in derivation_service
+
+
 def test_public_contract_documents_read_only_mapped_fields_and_legacy_policy():
     """Documentation guards the distinction between source facts and projections."""
     api_surface = (REPOSITORY_ROOT / "API_SURFACE.md").read_text()

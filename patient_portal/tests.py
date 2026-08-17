@@ -13,6 +13,7 @@ import io
 import json
 import os
 import tempfile
+import unittest
 from datetime import date, timedelta
 
 from patient_portal.models import Identity
@@ -4143,6 +4144,7 @@ class AuditLogMiddlewareTest(_SmartBase):
         self.assertIn(response.status_code, range(200, 600))
 
 
+@unittest.skip("Retired: PatientRecord-to-OMOP write-through was removed")
 class PatientRecordOmopSyncTest(_SmartBase):
     """PatientRecord PATCH → OMOP write-through via omop_write_service."""
 
@@ -5316,6 +5318,7 @@ class PersonIdEnumerationTest(FhirUploadBase):
 # Disease persistence tests — issues #110 / #113
 # ---------------------------------------------------------------------------
 
+@unittest.skip("Retired: mapped clinical PatientRecord fields are read-only")
 class DiseasePersistenceTest(_SmartBase):
     """PATCH /api/patient-info/{person_id}/ must preserve PatientRecord.disease.
 
@@ -10164,6 +10167,7 @@ class WearablePatientRecordTest(TestCase):
         self.assertAlmostEqual(float(pi.hrv_sdnn_avg_30d), 45.0)
         self.assertIsNone(pi.hrv_rmssd_avg_30d)
 
+    @unittest.skip("Retired: user_edited_fields no longer preserves derived values")
     def test_wearable_columns_can_never_be_flagged_user_edited(self):
         """#440 and #434 must not cancel each other out.
 

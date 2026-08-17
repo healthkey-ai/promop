@@ -8,6 +8,7 @@ TEST-04: FLBundleGenerator unit tests
 """
 
 import tempfile
+import unittest
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -3018,6 +3019,7 @@ class RemapLocalDrugConceptsCommandTest(TestCase):
 # Issue #434: re-derivation must not erase hand-entered values
 # ===========================================================================
 
+@unittest.skip("Retired: PatientRecord no longer preserves unmapped clinical edits")
 class CandidateUserEditedFieldsTest(TestCase):
     """Which edited fields need a fallback until derivation proves otherwise."""
 
@@ -3057,6 +3059,7 @@ class CandidateUserEditedFieldsTest(TestCase):
         self.assertEqual(candidate_user_edited_fields({'patient_age'}), {'patient_age'})
 
 
+@unittest.skip("Retired: PatientRecord no longer preserves unmapped clinical edits")
 class PreserveUserEditedFieldsTest(_OmopBase):
     """refresh_patient_record must not blank values OMOP cannot reproduce."""
 
@@ -3192,6 +3195,7 @@ class PreserveUserEditedFieldsTest(_OmopBase):
         self.assertEqual(pi.email, 'patient@example.com')
 
 
+@unittest.skip("Retired: PatientRecord-to-OMOP write-through was removed")
 class SyncToOmopMarksUserEditedTest(_OmopBase):
     """The write-through records what it could not persist."""
 
