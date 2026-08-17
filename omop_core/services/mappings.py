@@ -2,6 +2,24 @@
 from omop_core.models import Concept
 
 # Maps PatientRecord field name → (LOINC code, unit string, display name)
+#
+# Each LOINC code MUST appear at most once (issue #471). Nine codes were
+# previously mapped by two or three field names each, causing write collisions
+# (same Measurement row overwritten), stale projection values, and consumer
+# confusion. The duplicate entries were removed; only the canonical
+# unit-suffixed field name is retained. Legacy field names are still populated
+# during derivation — see _LAB_FIELD_ALIASES in patient_record_service.py.
+#
+# Deduplicated fields (canonical ← removed aliases):
+#   serum_calcium_mg_dl    ← calcium_mg_dl
+#   serum_creatinine_mg_dl ← creatinine_mg_dl
+#   egfr_ml_min_173m2      ← egfr
+#   bun_mg_dl              ← blood_urea_nitrogen
+#   sodium_meq_l           ← serum_sodium
+#   potassium_meq_l        ← serum_potassium
+#   magnesium_mg_dl        ← magnesium
+#   alkaline_phosphatase_u_l ← alkaline_phosphatase
+#   ldh_u_l                ← ldh_level, ldh
 LAB_FIELD_TO_LOINC = {
     # Blood counts
     'hemoglobin_g_dl':                ('718-7',    'g/dL',            'Hemoglobin [Mass/volume] in Blood'),
@@ -14,19 +32,12 @@ LAB_FIELD_TO_LOINC = {
     'amc_thousand_per_ul':            ('742-7',    '10*3/uL',         'Monocytes [#/volume] in Blood'),
     # Kidney / electrolytes
     'serum_creatinine_mg_dl':         ('2160-0',   'mg/dL',           'Creatinine [Mass/volume] in Serum or Plasma'),
-    'creatinine_mg_dl':               ('2160-0',   'mg/dL',           'Creatinine [Mass/volume] in Serum or Plasma'),
     'serum_calcium_mg_dl':            ('17861-6',  'mg/dL',           'Calcium [Mass/volume] in Serum or Plasma'),
-    'calcium_mg_dl':                  ('17861-6',  'mg/dL',           'Calcium [Mass/volume] in Serum or Plasma'),
     'egfr_ml_min_173m2':              ('62238-1',  'mL/min/1.73m2',   'GFR/BSA pred CKD-EPI ArA'),
-    'egfr':                           ('62238-1',  'mL/min/1.73m2',   'GFR/BSA pred CKD-EPI ArA'),
     'bun_mg_dl':                      ('3094-0',   'mg/dL',           'Urea nitrogen [Mass/volume] in Serum or Plasma'),
-    'blood_urea_nitrogen':            ('3094-0',   'mg/dL',           'Urea nitrogen [Mass/volume] in Serum or Plasma'),
     'sodium_meq_l':                   ('2951-2',   'mEq/L',           'Sodium [Moles/volume] in Serum or Plasma'),
-    'serum_sodium':                   ('2951-2',   'mEq/L',           'Sodium [Moles/volume] in Serum or Plasma'),
     'potassium_meq_l':                ('2823-3',   'mEq/L',           'Potassium [Moles/volume] in Serum or Plasma'),
-    'serum_potassium':                ('2823-3',   'mEq/L',           'Potassium [Moles/volume] in Serum or Plasma'),
     'magnesium_mg_dl':                ('2601-3',   'mg/dL',           'Magnesium [Mass/volume] in Serum or Plasma'),
-    'magnesium':                      ('2601-3',   'mg/dL',           'Magnesium [Mass/volume] in Serum or Plasma'),
     'phosphorus':                     ('2777-1',   'mg/dL',           'Phosphate [Mass/volume] in Serum or Plasma'),
     # Liver function
     'bilirubin_total_mg_dl':          ('1975-2',   'mg/dL',           'Bilirubin.total [Mass/volume] in Serum or Plasma'),
@@ -34,7 +45,6 @@ LAB_FIELD_TO_LOINC = {
     'alt_u_l':                        ('1742-6',   'U/L',             'Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma'),
     'ast_u_l':                        ('1920-8',   'U/L',             'Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma'),
     'alkaline_phosphatase_u_l':       ('6768-6',   'U/L',             'Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma'),
-    'alkaline_phosphatase':           ('6768-6',   'U/L',             'Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma'),
     'albumin_g_dl':                   ('1751-7',   'g/dL',            'Albumin [Mass/volume] in Serum or Plasma'),
     'total_protein':                  ('2885-2',   'g/dL',            'Protein [Mass/volume] in Serum or Plasma'),
     'troponin_ng_ml':                 ('10839-9',  'ng/mL',           'Troponin I.cardiac [Mass/volume] in Serum or Plasma'),
@@ -46,8 +56,6 @@ LAB_FIELD_TO_LOINC = {
     'ptt_seconds':                    ('3173-2',   's',               'aPTT in Platelet poor plasma'),
     # Oncology markers
     'ldh_u_l':                        ('2532-0',   'U/L',             'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma'),
-    'ldh_level':                      ('2532-0',   'U/L',             'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma'),
-    'ldh':                            ('2532-0',   'U/L',             'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma'),
     'beta2_microglobulin':            ('1952-1',   'mg/L',            'Beta-2-Microglobulin [Mass/volume] in Serum or Plasma'),
     'c_reactive_protein':             ('1988-5',   'mg/L',            'C reactive protein [Mass/volume] in Serum or Plasma'),
     'esr':                            ('30341-2',  'mm/h',            'Erythrocyte sedimentation rate'),
@@ -61,6 +69,22 @@ LAB_FIELD_TO_LOINC = {
     # Performance status
     'ecog_performance_status':        ('89247-1',  '{score}',         'ECOG Performance Status score'),
     'karnofsky_performance_score':    ('89243-0',  '{score}',         'Karnofsky Performance Status score'),
+}
+
+# Reverse lookup: legacy alias → canonical field name. Used by the write-
+# through so a PATCH to a legacy field name still creates the correct
+# Measurement row (issue #471).
+LAB_FIELD_ALIAS_TO_CANONICAL = {
+    'calcium_mg_dl':        'serum_calcium_mg_dl',
+    'creatinine_mg_dl':     'serum_creatinine_mg_dl',
+    'egfr':                 'egfr_ml_min_173m2',
+    'blood_urea_nitrogen':  'bun_mg_dl',
+    'serum_sodium':         'sodium_meq_l',
+    'serum_potassium':      'potassium_meq_l',
+    'magnesium':            'magnesium_mg_dl',
+    'alkaline_phosphatase': 'alkaline_phosphatase_u_l',
+    'ldh_level':            'ldh_u_l',
+    'ldh':                  'ldh_u_l',
 }
 
 CONDITION_FIELDS = frozenset({'disease', 'stage', 'condition_code_icd_10', 'condition_code_snomed_ct'})

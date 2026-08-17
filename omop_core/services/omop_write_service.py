@@ -10,6 +10,7 @@ from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.mappings import (
     LAB_FIELD_TO_LOINC,
+    LAB_FIELD_ALIAS_TO_CANONICAL,
     CONDITION_FIELDS,
     DEMOGRAPHIC_FIELDS,
     THERAPY_LINE_FIELDS,
@@ -49,8 +50,11 @@ def sync_to_omop(patient_info, changed_fields: set, today: date = None, changed_
         value = getattr(patient_info, field, None)
         if value is None:
             value = changed_data.get(field)
-        if field in LAB_FIELD_TO_LOINC and value is not None:
-            _sync_measurement(person, field, value, today)
+        # Resolve legacy alias → canonical field so the correct LOINC code is
+        # used for the Measurement row (issue #471).
+        resolved = LAB_FIELD_ALIAS_TO_CANONICAL.get(field, field)
+        if resolved in LAB_FIELD_TO_LOINC and value is not None:
+            _sync_measurement(person, resolved, value, today)
     if changed_fields & CONDITION_FIELDS:
         _sync_condition(person, patient_info, today, changed_data)
     if changed_fields & DEMOGRAPHIC_FIELDS:
