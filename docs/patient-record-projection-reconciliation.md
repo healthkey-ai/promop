@@ -13,7 +13,7 @@ reports only mapped numeric lab/vital tuples:
 
 Unmapped `PatientRecord` fields are projection-owned data and remain writable;
 they are deliberately excluded from this inventory and migration.  The mapping
-catalog used here distinguishes only API/repair-supported mapped tuples from
+catalog used here distinguishes only repair-supported mapped tuples from
 those unmapped fields—it is not a claim that all fields are OMOP-derived.
 
 An operator who has recovered and verified the actual clinical event date may
