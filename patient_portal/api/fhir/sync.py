@@ -37,7 +37,7 @@ from omop_core.models import (
 )
 from omop_core.services.pk import next_pk_batch
 from omop_core.signals import suppress_patient_record_refresh
-from patient_portal.api.permissions import ScopedTokenPermission, get_request_org
+from patient_portal.api.permissions import ScopedTokenPermission, get_request_org, is_service_token
 # Reuse the proven HK-Labs concept-fallback machinery.
 from patient_portal.api.lab_results.sync import HK_LABS_VOCAB_ID, _ensure_hk_deps
 

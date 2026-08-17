@@ -5,7 +5,7 @@ from rest_framework.test import APIClient
 
 from patient_portal.models import Identity, PatientUser
 from omop_core.models import (
-    ConditionOccurrence, DrugExposure, Measurement, ProvenanceRecord,
+    ConditionOccurrence, DrugExposure, Measurement, Person, ProvenanceRecord,
 )
 
 # OMOP tables use manually-assigned integer PKs fed by Postgres sequences that
@@ -120,6 +120,28 @@ class FhirSyncTests(TestCase):
         anon = APIClient()
         resp = anon.post('/api/fhir/sync/', {'bundle': SAMPLE_BUNDLE}, format='json')
         self.assertIn(resp.status_code, (401, 403))
+
+    def test_service_token_syncs_explicit_person_without_actor_identity(self):
+        """Trusted service callers may sync an explicit person without actor fields."""
+        from omop_core.services.pk import next_pk_batch
+
+        person = Person.objects.create(
+            person_id=next_pk_batch(Person, 'person_id', 1)[0],
+        )
+        service_user = Identity.objects.create(issuer='urn:service', sub='fhir-sync')
+        service_user.set_unusable_password()
+        service_user.save(update_fields=['password'])
+        client = APIClient()
+        client.force_authenticate(user=service_user, token='service-token')
+
+        resp = client.post('/api/fhir/sync/', {
+            'person_id': person.person_id,
+            'bundle': SAMPLE_BUNDLE,
+        }, format='json')
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()['person_id'], person.person_id)
+        self.assertEqual(Measurement.objects.filter(person=person).count(), 1)
 
     # ---- B0 connector: patient self-service ingest ---------------------- #
 
