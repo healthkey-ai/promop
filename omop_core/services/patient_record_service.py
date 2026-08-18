@@ -120,6 +120,10 @@ _OMOP_DERIVED_FIELDS = [
     # retain a projection-only copy after their source is removed.
     'inr', 'pt_seconds', 'ptt_seconds', 'cea_ng_ml', 'ca19_9_u_ml',
     'psa_ng_ml', 'phosphorus',
+    # Remaining numeric Measurement projections (#504).
+    'heartrate_variability', 'ejection_fraction', 'qtcf_value',
+    'liver_enzyme_levels_ast', 'liver_enzyme_levels_alt',
+    'liver_enzyme_levels_alp', 'liver_enzyme_levels',
     # Legacy aliases for deduplicated LOINC fields (issue #471).
     # These model columns still exist for backward compatibility; they are
     # populated with the same value as their canonical counterpart during
@@ -281,6 +285,11 @@ _LOINC_LAB_FIELDS = {
     '25390-6': ('ca19_9_u_ml',                    float),
     '2857-1':  ('psa_ng_ml',                      float),
     '2777-1':  ('phosphorus',                     float),
+    # Cardiac / electrophysiology.  HRV here is the current SDNN reading;
+    # the separate hrv_sdnn_avg_30d remains the wearable-window aggregate.
+    '80404-7': ('heartrate_variability',          int),
+    '8806-2':  ('ejection_fraction',              int),
+    '8632-1':  ('qtcf_value',                     float),
     # Other markers
     '1952-1':  ('beta2_microglobulin',            float),
     '1988-5':  ('c_reactive_protein',             float),
@@ -318,6 +327,9 @@ _LAB_FIELD_ALIASES = {
     'egfr_ml_min_173m2':      ['estimated_glomerular_filtration_rate'],
     'creatinine_clearance_ml_min': ['creatinine_clearance_rate'],
     'serum_bilirubin_level_direct': ['serum_bilirubin_level'],
+    'ast_u_l': ['liver_enzyme_levels_ast'],
+    'alt_u_l': ['liver_enzyme_levels_alt'],
+    'alkaline_phosphatase_u_l': ['liver_enzyme_levels_alp'],
 }
 
 # A FHIR Condition.stage summary is an asserted clinical fact, but the FHIR
