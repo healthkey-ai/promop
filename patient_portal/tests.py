@@ -19,6 +19,7 @@ from datetime import date, timedelta
 from patient_portal.models import Identity
 from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
+from django.contrib.contenttypes.models import ContentType
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -3963,7 +3964,7 @@ class ProvenancePatchTest(_SmartBase):
 
 
 class ProvenanceFhirUploadTest(_SmartBase):
-    """FHIR upload with provenance headers tags all created OMOP records."""
+    """FHIR upload tags OMOP facts; PatientRecord remains a derived read model."""
 
     def test_fhir_upload_with_ehr_sync_tags_records(self):
         bundle_bytes = json.dumps(_make_fhir_bundle()).encode('utf-8')
@@ -3978,9 +3979,30 @@ class ProvenanceFhirUploadTest(_SmartBase):
         person = Person.objects.filter(family_name='Smith', given_name='Jane').first()
         self.assertIsNotNone(person)
         pi = PatientRecord.objects.get(person=person)
+        # Clinical provenance belongs to the OMOP facts that were written from
+        # the bundle.  The PatientRecord projection must not receive a direct
+        # write-through provenance row or clinical values.
+        omop_models = (
+            ConditionOccurrence, Measurement, Observation,
+            DrugExposure, ProcedureOccurrence,
+        )
+        omop_types = [ContentType.objects.get_for_model(model) for model in omop_models]
         self.assertTrue(
-            ProvenanceRecord.objects.filter(object_id=pi.pk).exists(),
-            'PatientRecord was not tagged with provenance',
+            ProvenanceRecord.objects.filter(
+                source='EHR_SYNC',
+                source_user_id='ehr-001',
+                content_type__in=omop_types,
+            ).exists(),
+            'FHIR OMOP facts were not tagged with provenance',
+        )
+        self.assertFalse(
+            ProvenanceRecord.objects.filter(
+                source='EHR_SYNC',
+                source_user_id='ehr-001',
+                content_type=ContentType.objects.get_for_model(PatientRecord),
+                object_id=pi.pk,
+            ).exists(),
+            'FHIR upload wrote provenance directly to derived PatientRecord',
         )
 
     def test_fhir_upload_admin_correction_without_reason_rejected(self):
