@@ -29,6 +29,8 @@ VOCAB_SCOPE = frozenset({
     # (immunizations) is mapped in the ingest but isn't in the current Athena
     # export, so it loads once a CVX-inclusive bundle is fetched.
     'SNOMED', 'ICD10CM', 'CVX',
+    # Genomic + oncology coding vocabularies (#459)
+    'OMOP Genomic', 'ICDO3', 'NCIt',
 })
 # These vocabularies underpin the clinical concepts PROMOP presents and maps.
 # Do not include CVX here: it is deliberately absent from the current Athena
