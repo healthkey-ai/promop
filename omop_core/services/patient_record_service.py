@@ -69,6 +69,9 @@ _OMOP_DERIVED_FIELDS = [
     # cleared. date_of_birth is deliberately not cleared: a manually supplied
     # DOB remains useful when Person has only the registration placeholder.
     'patient_age',
+    # Person extension fields projected onto PatientRecord for compatibility.
+    'email', 'phone_number', 'facility_name', 'validated', 'validated_by',
+    'validation_date', 'suppress_demographics_for_others',
     # Disease / condition
     'disease', 'diagnosis_date', 'death_date', 'condition_clinical_status', 'disease_slug',
     # Therapy lines
@@ -514,6 +517,16 @@ def _get_demographics(person: Person) -> dict:
             for ls in lang_skills
         ]
         data['languages_skills'] = ', '.join(parts)
+
+    data.update({
+        'email': person.email,
+        'phone_number': person.phone_number,
+        'facility_name': person.facility_name,
+        'validated': person.validated,
+        'validated_by': person.validated_by,
+        'validation_date': person.validation_date,
+        'suppress_demographics_for_others': person.suppress_demographics_for_others,
+    })
 
     return data
 

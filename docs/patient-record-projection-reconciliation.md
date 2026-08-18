@@ -11,10 +11,10 @@ reports only mapped numeric lab/vital tuples:
   corresponding OMOP Measurement.  The report is still read-only: the
   projection does not contain a clinical event date.
 
-Unmapped `PatientRecord` fields are projection-owned data and remain writable;
-they are deliberately excluded from this inventory and migration.  The mapping
-catalog used here distinguishes only repair-supported mapped tuples from
-those unmapped fields—it is not a claim that all fields are OMOP-derived.
+Unmapped legacy `PatientRecord` fields are deliberately excluded from this
+clinical repair inventory. Profile/admin values displayed on PatientRecord are
+owned by HealthKey extension columns on `Person`; direct PatientRecord writes
+are not a source-of-truth path.
 
 An operator who has recovered and verified the actual clinical event date may
 create only the `RECONCILABLE` facts:
@@ -35,5 +35,4 @@ Bulk, whole-person, and whole-database repairs are deliberately prohibited;
 each migration must be an operator-reviewed clinical attestation.
 
 After a successful repair, re-derive the affected records using the existing
-`backfill_patient_records` command.  This process does not alter unmapped
-projection-owned values.
+`backfill_patient_records` command.

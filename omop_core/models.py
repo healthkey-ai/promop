@@ -815,6 +815,16 @@ class Person(models.Model):
     given_name = models.CharField(max_length=100, null=True, blank=True, help_text="First/Given name")
     family_name = models.CharField(max_length=100, null=True, blank=True, help_text="Last/Family name")
 
+    # Patient profile/admin fields (HealthKey extension to OMOP Person).
+    # PatientRecord copies these as a read-model projection; writes belong here.
+    email = models.EmailField(max_length=255, null=True, blank=True, db_index=True)
+    phone_number = models.CharField(max_length=20, blank=True, null=True)
+    facility_name = models.CharField(max_length=255, blank=True, null=True)
+    validated = models.BooleanField(blank=True, null=True)
+    validated_by = models.CharField(max_length=100, blank=True, null=True)
+    validation_date = models.DateField(blank=True, null=True)
+    suppress_demographics_for_others = models.BooleanField(default=False)
+
     # External identity (OpenID Connect) — used by phr-etl find_or_create
     actor_iss = models.CharField(max_length=255, null=True, blank=True, help_text="OIDC issuer URL")
     actor_sub = models.CharField(max_length=255, null=True, blank=True, help_text="OIDC subject (Firebase UID)")

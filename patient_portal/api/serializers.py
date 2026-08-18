@@ -270,7 +270,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
     patient_name = serializers.SerializerMethodField()
     name = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
-    gender = GenderField(required=False, allow_blank=True, allow_null=True)
+    gender = GenderField(read_only=True)
     refractory_status = serializers.CharField(source='treatment_refractory_status', read_only=True)
     first_line_therapy_display = serializers.SerializerMethodField()
     second_line_therapy_display = serializers.SerializerMethodField()

@@ -138,6 +138,7 @@ class PatientSignupView(APIView):
                         family_name=family_name or None,
                         actor_iss=actor_iss or None,
                         actor_sub=actor_sub or None,
+                        email=email or None,
                     )
                     PatientUser.objects.create(identity=identity, person=person)
                     created = True
@@ -147,11 +148,13 @@ class PatientSignupView(APIView):
                 if record.organization_id is None:
                     record.organization = org
                     update_fields.append('organization')
-                if email and not record.email:
-                    record.email = email
-                    update_fields.append('email')
                 if update_fields:
                     record.save(update_fields=update_fields)
+                if email and person.email != email:
+                    person.email = email
+                    person.save(update_fields=['email'])
+                from omop_core.services.patient_record_service import refresh_patient_record
+                refresh_patient_record(person)
         except IntegrityError:
             return Response(
                 {'error': 'Could not create the account. The identity may already be linked.'},
