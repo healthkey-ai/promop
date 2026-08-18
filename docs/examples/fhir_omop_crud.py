@@ -68,26 +68,37 @@ def main():
             {"resource": {"resourceType": "Observation", "code": {"coding": [{"system": "http://loinc.org", "code": "718-7"}]}, "valueQuantity": {"value": 13.2, "unit": "g/dL"}, "effectiveDateTime": event_date}},
             {"resource": {"resourceType": "Condition", "code": {"coding": [{"system": "http://snomed.info/sct", "code": "254837009"}]}, "onsetDateTime": event_date}},
             {"resource": {"resourceType": "Procedure", "code": {"coding": [{"system": "http://snomed.info/sct", "code": "387713003"}]}, "performedDateTime": event_date}},
+            {"resource": {"resourceType": "MedicationStatement", "medicationCodeableConcept": {"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "860975"}]}, "effectiveDateTime": event_date}},
         ],
     }
-    print(f"Parsed {len(bundle['entry'])} FHIR resources for person {PERSON_ID}")
+    resources = [entry["resource"] for entry in bundle["entry"]]
+    observation = next(r for r in resources if r["resourceType"] == "Observation")
+    condition = next(r for r in resources if r["resourceType"] == "Condition")
+    procedure = next(r for r in resources if r["resourceType"] == "Procedure")
+    medication = next(r for r in resources if r["resourceType"] == "MedicationStatement")
+    loinc_code = observation["code"]["coding"][0]["code"]
+    lab_value = observation["valueQuantity"]["value"]
+    condition_code = condition["code"]["coding"][0]["code"]
+    procedure_code = procedure["code"]["coding"][0]["code"]
+    drug_code = medication["medicationCodeableConcept"]["coding"][0]["code"]
+    print(f"Parsed {len(resources)} FHIR resources for person {PERSON_ID}")
 
     crud("/conditions/", {
         "person": PERSON_ID, "condition_concept": CONCEPT["condition"],
         "condition_start_date": event_date, "condition_type_concept": CONCEPT["condition_type"],
-        "condition_source_value": "254837009",
+        "condition_source_value": condition_code,
     }, {"condition_status_source_value": "active"})
     crud("/drug-exposures/", {
         "person": PERSON_ID, "drug_concept": CONCEPT["drug"],
         "drug_exposure_start_date": event_date, "drug_type_concept": CONCEPT["drug_type"],
-        "drug_source_value": "FHIR-example-drug",
+        "drug_source_value": drug_code,
     }, {"stop_reason": "example"})
     crud("/measurements/", {
         "person": PERSON_ID, "measurement_concept": CONCEPT["measurement"],
         "measurement_date": event_date, "measurement_type_concept": CONCEPT["type"],
-        "value_as_number": 13.2, "unit_source_value": "g/dL",
-        "measurement_source_value": "718-7",
-    }, {"value_as_number": 13.3})
+        "value_as_number": lab_value, "unit_source_value": observation["valueQuantity"]["unit"],
+        "measurement_source_value": loinc_code,
+    }, {"value_as_number": lab_value + 0.1})
     crud("/observations/", {
         "person": PERSON_ID, "observation_concept": CONCEPT["observation"],
         "observation_date": event_date, "observation_type_concept": CONCEPT["observation"],
@@ -96,7 +107,7 @@ def main():
     crud("/procedures/", {
         "person": PERSON_ID, "procedure_concept": CONCEPT["procedure"],
         "procedure_date": event_date, "procedure_type_concept": CONCEPT["procedure_type"],
-        "procedure_source_value": "387713003",
+        "procedure_source_value": procedure_code,
     }, {"quantity": 1})
 
     print("CRUD complete: each OMOP write triggers PatientRecord rederivation.")
