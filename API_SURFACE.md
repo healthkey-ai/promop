@@ -505,6 +505,15 @@ All use `_OmopFilterMixin`:
 
 All support: GET (list + retrieve), POST (create), PUT/PATCH (update), DELETE.
 
+### Detailed FHIR-to-OMOP CRUD sample
+
+See [`docs/examples/fhir_omop_crud.py`](docs/examples/fhir_omop_crud.py) for a
+small, runnable example that parses a minimal FHIR bundle shape and exercises
+create/retrieve/update/delete for ConditionOccurrence, DrugExposure,
+Measurement, Observation, and ProcedureOccurrence. It shows the required event
+date, concept, unit, provenance/token setup, and verifies that OMOP writes—not
+PatientRecord writes—are the source of the derived projection.
+
 ---
 
 ## Supplementary API
