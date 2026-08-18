@@ -50,6 +50,7 @@ from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import get_gender_concept
 from omop_core.services.pk import next_pk, next_pk_batch
+from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.services.regimen_resolution import (
     get_or_create_quarantine_drug,
@@ -1022,7 +1023,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def upload_csv(self, request):
-        """Upload patients from CSV file"""
+        """Upload the documented CSV shape into OMOP source tables.
+
+        CSV is intentionally limited to facts it can represent without making a
+        PatientRecord column a write interface.  ``disease`` needs a known
+        ``diagnosis_date`` (or ``disease_date``); it becomes a
+        ConditionOccurrence.  PatientRecord is created only by the final
+        refresh, never by this importer.
+        """
         if 'file' not in request.FILES:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
         
@@ -1037,6 +1045,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             
             created_count = 0
             errors = []
+            source = request.META.get('HTTP_X_PROVENANCE_SOURCE', 'EHR_SYNC')
+            request_user = getattr(request, 'user', None)
+            source_user_id = request.META.get(
+                'HTTP_X_PROVENANCE_USER_ID', str(getattr(request_user, 'pk', '') or ''),
+            )
+            provenance_org = get_request_org(request) if request_user is not None else None
             
             for row_num, row in enumerate(reader, start=2):
                 try:
@@ -1045,41 +1059,87 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         last_person = Person.objects.all().order_by('-person_id').first()
                         person_id = last_person.person_id + 1 if last_person else 1000
 
-                    # CSV has no schema for a complete clinical fact (concept,
-                    # event time, units, provenance). Never create a Person or
-                    # PatientRecord from a row that tries to submit mapped
-                    # clinical projection columns.
-                    unsupported = [
-                        field for field in ('disease', 'date_of_birth')
-                        if row.get(field)
-                    ]
-                    if unsupported:
-                        errors.append(
-                            f"Row {row_num}: mapped clinical columns are not supported by CSV upload: {', '.join(unsupported)}"
-                        )
-                        continue
-                    
-                    # Get gender concept
-                    gender_concept = get_gender_concept(row.get('gender', ''))
-                    gender_source = row.get('gender', 'unknown')
-                    
-                    person, created = Person.objects.get_or_create(
-                        person_id=person_id,
-                        defaults={
-                            'year_of_birth': int(row.get('year_of_birth', datetime.now().year - 50)),
+                    dob_raw = (row.get('date_of_birth') or '').strip()
+                    dob = parse_date(dob_raw) if dob_raw else None
+                    if dob_raw and dob is None:
+                        raise ValueError('date_of_birth must be ISO YYYY-MM-DD')
+
+                    disease = (row.get('disease') or '').strip()
+                    disease_date_raw = (row.get('diagnosis_date') or row.get('disease_date') or '').strip()
+                    disease_date = parse_date(disease_date_raw) if disease_date_raw else None
+                    if disease and disease_date is None:
+                        raise ValueError('disease requires diagnosis_date or disease_date (ISO YYYY-MM-DD)')
+
+                    with transaction.atomic(), suppress_patient_record_refresh():
+                        gender_source = (row.get('gender') or 'unknown').strip()
+                        gender_concept = get_gender_concept(gender_source)
+                        person_defaults = {
                             'gender_concept': gender_concept,
                             'gender_source_value': gender_source,
-                            'race_concept': None,
-                            'race_source_value': 'unknown',
-                            'ethnicity_concept': None,
-                            'ethnicity_source_value': 'unknown',
-                            'person_source_value': f"CSV-{person_id}",
+                            'race_source_value': (row.get('race') or 'unknown').strip(),
+                            'ethnicity_source_value': (row.get('ethnicity') or 'unknown').strip(),
                         }
-                    )
-                    
-                    patient_info, pi_created = PatientRecord.objects.get_or_create(person=person)
-                    refresh_patient_record(person)
-                    if pi_created:
+                        if dob:
+                            person_defaults.update({
+                                'year_of_birth': dob.year,
+                                'month_of_birth': dob.month,
+                                'day_of_birth': dob.day,
+                                'birth_datetime': timezone.make_aware(datetime.combine(dob, datetime.min.time())),
+                            })
+                        elif (year_raw := (row.get('year_of_birth') or '').strip()):
+                            person_defaults['year_of_birth'] = int(year_raw)
+
+                        person, created = Person.objects.get_or_create(
+                            person_id=person_id, defaults=person_defaults,
+                        )
+                        if not created:
+                            # CSV fields belong to Person, so update only values explicitly supplied.
+                            for field in ('phone_number', 'email', 'given_name', 'family_name', 'facility_name'):
+                                if row.get(field):
+                                    setattr(person, field, row[field].strip())
+                            if dob:
+                                person.year_of_birth, person.month_of_birth, person.day_of_birth = dob.year, dob.month, dob.day
+                                person.birth_datetime = timezone.make_aware(datetime.combine(dob, datetime.min.time()))
+                            elif (year_raw := (row.get('year_of_birth') or '').strip()):
+                                person.year_of_birth = int(year_raw)
+                            person.save()
+                        else:
+                            for field in ('phone_number', 'email', 'given_name', 'family_name', 'facility_name'):
+                                if row.get(field):
+                                    setattr(person, field, row[field].strip())
+                            person.save()
+
+                        if disease:
+                            concept = Concept.objects.filter(
+                                domain_id='Condition', concept_name__iexact=disease,
+                            ).order_by('-standard_concept').first()
+                            # OMOP concept 0 preserves an unmapped source value without inventing
+                            # a clinical code. A vocabulary mapping can be supplied in a future CSV
+                            # version; the PatientRecord derivation still reads disease_source_value.
+                            concept = concept or Concept.objects.get(concept_id=0)
+                            if not ConditionOccurrence.objects.filter(
+                                person=person,
+                                condition_concept=concept,
+                                condition_start_date=disease_date,
+                                condition_source_value=disease,
+                            ).exists():
+                                condition = ConditionOccurrence.objects.create(
+                                    condition_occurrence_id=next_pk(ConditionOccurrence, 'condition_occurrence_id'),
+                                    person=person,
+                                    condition_concept=concept,
+                                    condition_start_date=disease_date,
+                                    condition_type_concept=Concept.objects.get(concept_id=32817),
+                                    condition_source_value=disease,
+                                )
+                                _record_provenance(
+                                    condition, source, source_user_id,
+                                    target_patient_id=str(person.person_id), organization=provenance_org,
+                                )
+
+                        # This is the only projection operation in CSV ingestion. It upserts the
+                        # derived read model after all Person/OMOP source facts are committed.
+                        refresh_patient_record(person)
+                    if created:
                         created_count += 1
                         
                 except Exception as e:

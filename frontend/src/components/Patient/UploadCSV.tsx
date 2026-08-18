@@ -67,8 +67,8 @@ export default function UploadCSV() {
 
       <div className="max-w-xl rounded-lg border border-border bg-background p-6 shadow-sm">
         <p className="mb-4 text-sm text-muted-foreground">
-          Upload a CSV file containing patient data. The CSV should include columns for
-          person_id, phone_number, date_of_birth, disease, and other patient information.
+          Upload a CSV file containing Person demographics and dated diagnoses. PatientRecord is
+          derived from these OMOP source records; do not use it as a CSV write target.
         </p>
 
         <div className="mt-4">
@@ -118,10 +118,15 @@ export default function UploadCSV() {
         <div className="mt-6">
           <h3 className="mb-2 text-sm font-semibold">Expected CSV Format:</h3>
           <pre className="overflow-auto rounded-md bg-muted p-3 text-xs">
-{`person_id,phone_number,date_of_birth,disease,year_of_birth
-1000,555-1234,1970-01-01,Breast Cancer,1970
-1001,555-5678,1980-05-15,Lung Cancer,1980`}
+{`person_id,phone_number,date_of_birth,disease,diagnosis_date,gender
+1000,555-1234,1970-01-01,Breast Cancer,2020-06-15,F
+1001,555-5678,1980-05-15,Lung Cancer,2021-03-10,M`}
           </pre>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Supported Person columns: person_id, given_name, family_name, email, phone_number,
+            facility_name, gender, race, ethnicity, date_of_birth or year_of_birth. A disease
+            requires diagnosis_date (or disease_date) and is imported as an OMOP condition.
+          </p>
         </div>
       </div>
     </div>
