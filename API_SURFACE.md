@@ -1,7 +1,7 @@
 # PRomop API Surface
 
 > **Canonical base URL:** `https://promop.onrender.com/api/v1/` (production) | `http://localhost:8000/api/v1/` (dev)
-> Last revised: 2026-07-22
+> Last revised: 2026-08-18
 
 > **Versioning note:** All new integrations should target `/api/v1/` paths. The legacy
 > unversioned `/api/` paths still work but return `Deprecation: true` / `Sunset: Tue, 01 Sep 2026 00:00:00 GMT`
@@ -29,6 +29,11 @@ their OMOP source records change, and its profile/admin compatibility fields are
 from HealthKey extension columns on `Person`. The API rejects direct writes to
 `PatientRecord`; OMOP APIs, FHIR imports, and `Person` profile updates own writes, then
 the projection refreshes.
+
+The field-by-field ownership and migration plan is
+[`docs/omop_to_patientrecord.md`](docs/omop_to_patientrecord.md). It is the authoritative
+answer to which OMOP record supplies each output column; a PatientRecord field name is
+never a substitute for a clinical concept, event date, unit, or provenance.
 
 > **Legacy SQL compatibility only:** `public.patient_info` is a read-only database view
 > retained solely for existing consumers. New integrations must not query it or depend on
@@ -210,11 +215,32 @@ Returns the PatientRecord for the authenticated patient. Only available to patie
 
 ### PatientRecord mutation policy
 
-`PATCH /api/v1/patient-records/{person_id}/` rejects direct writes. Clinical values must
-be written through their OMOP resources (or FHIR import), after which the signal chain
-refreshes `PatientRecord` from OMOP. Profile/admin values that are displayed on
-PatientRecord, such as email and validation metadata, are written to HealthKey extension
-columns on `Person` via `PATCH /api/v1/persons/{person_id}/` and then projected back.
+`PATCH /api/v1/patient-records/{person_id}/` returns **405 Method Not Allowed** for every
+OMOP-mapped clinical field. It returns the rejected names so callers can migrate without
+guessing:
+
+```json
+{
+  "detail": "OMOP-mapped PatientRecord fields are read-only. Write a complete clinical fact to the appropriate OMOP resource, then rederive the record.",
+  "fields": ["hemoglobin_g_dl"]
+}
+```
+
+Clinical values must be written through their OMOP resources (or FHIR import), after
+which the signal chain refreshes `PatientRecord` from OMOP. Profile/admin values that are
+displayed on PatientRecord, such as email and validation metadata, are written to HealthKey
+extension columns on `Person` via `PATCH /api/v1/persons/{person_id}/` and then projected back.
+
+| PatientRecord output category | Write the source fact to | Required source detail |
+|---|---|---|
+| Laboratory, vital, tumour-marker, or numeric pathology value | `/api/v1/measurements/` or FHIR `Observation` | clinical concept, known event date, value, unit, provenance |
+| Coded clinical, eligibility, disease-state, imaging, or social assertion | `/api/v1/observations/`, `/api/v1/conditions/`, or equivalent FHIR resource | standard concept, known event date, coded/value assertion, provenance |
+| Medication or line-of-therapy fact | `/api/v1/drug-exposures/`, `/api/v1/episodes/`, `/api/v1/episode-events/`, or FHIR | medication/episode concept, known dates, provenance |
+| Demographic or supported profile value | `PATCH /api/v1/persons/{person_id}/` | the Person source attribute; refresh projects it |
+
+There are no writable concrete PatientRecord clinical columns. The field-level mapping,
+including the small set of server lifecycle attributes that are never client-writable, is
+maintained in [`docs/omop_to_patientrecord.md`](docs/omop_to_patientrecord.md).
 
 New integrations should write semantically complete OMOP facts to their own resource
 endpoint—for example a dated `Measurement` with its LOINC and unit—or use FHIR ingest.
@@ -868,7 +894,7 @@ Clinical write APIs operate on OMOP resources, not on projection fields. A numer
 observation must carry its clinical concept, event time, value, and unit; terminology
 mapping and canonical-unit policy are documented in
 [`docs/concept-mapping.md`](docs/concept-mapping.md) and
-[`docs/canonical-units-policy.md`](docs/canonical-units-policy.md). This prevents a
+[`docs/clinical-unit-policy.md`](docs/clinical-unit-policy.md). This prevents a
 lossy projection update from being mistaken for a source clinical fact.
 
 ---
