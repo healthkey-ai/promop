@@ -127,7 +127,7 @@ def resolve_or_create_person(identity, email=None, allow_create=True):
 
     Lookup order:
       1. Existing PatientUser link
-      2. PatientRecord whose email matches
+      2. Person whose HealthKey email extension matches
       3. Brand-new Person + PatientUser (+ PatientRecord if email known)
 
     When allow_create=False, steps 1 and 2 still run (an existing patient is
@@ -141,21 +141,27 @@ def resolve_or_create_person(identity, email=None, allow_create=True):
 
     email = (email or getattr(identity, 'email', None) or "").strip()
     if email:
+        person_qs = Person.objects.filter(email=email)
+        # Legacy fallback while older PatientRecord snapshots still exist.
         email_qs = PatientRecord.objects.filter(email=email)
         # Guard against cross-org collision: if multiple patients share the
         # same email, skip the email match and auto-provision a new person
         # rather than silently linking to the wrong patient.
-        pi = email_qs.first() if email_qs.count() == 1 else None
-        if pi:
+        if person_qs.count() == 1:
+            person = person_qs.first()
+        else:
+            pi = email_qs.first() if email_qs.count() == 1 else None
+            person = pi.person if pi else None
+        if person:
             # Re-point any existing PatientUser for this person to the current
             # identity. Needed when the Firebase emulator restarts and issues a
             # new UID for the same email: the old PatientUser row stays in the
             # DB (person unique constraint) but its identity is now stale.
             PatientUser.objects.update_or_create(
-                person=pi.person,
+                person=person,
                 defaults={"identity": identity},
             )
-            return pi.person
+            return person
 
     if not allow_create:
         return None
@@ -169,10 +175,12 @@ def resolve_or_create_person(identity, email=None, allow_create=True):
                 gender_source_value="unknown",
                 race_source_value="unknown",
                 ethnicity_source_value="unknown",
+                email=email or None,
             )
-            if email:
-                PatientRecord.objects.create(person=person, email=email)
+            PatientRecord.objects.create(person=person)
             PatientUser.objects.create(identity=identity, person=person)
+            from omop_core.services.patient_record_service import refresh_patient_record
+            refresh_patient_record(person)
     except IntegrityError:
         pu = PatientUser.objects.filter(identity=identity).select_related('person').first()
         if pu:

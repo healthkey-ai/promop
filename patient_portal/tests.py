@@ -2926,19 +2926,103 @@ class SmartPatientRecordReadOnlyTest(_SmartBase):
         )
         self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
-    def test_projection_owned_field_remains_writable(self):
-        """A field with no OMOP representation remains a projection-owned exception."""
+    def test_patient_info_patch_rejects_gender_as_omop_mapped(self):
+        """Gender is OMOP-backed and must not be writable through PatientRecord."""
+        record, _ = PatientRecord.objects.get_or_create(
+            person=self.person, defaults={'organization': self.organization},
+        )
+        record.gender = 'M'
+        record.save(update_fields=['gender'])
+
+        resp = self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'gender': 'Female'},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED, resp.data)
+        self.assertEqual(resp.data['fields'], ['gender'])
+        record.refresh_from_db()
+        self.assertEqual(record.gender, 'M')
+
+    def test_serializer_marks_gender_read_only(self):
+        """Declared serializer fields must agree with the mapped-field contract."""
+        from patient_portal.api.serializers import PatientRecordSerializer
+
+        serializer = PatientRecordSerializer()
+
+        self.assertTrue(serializer.fields['gender'].read_only)
+
+    def test_profile_field_is_written_on_person_and_projected_to_patient_record(self):
+        """Profile/admin fields are Person extensions, not PatientRecord writes."""
+        record, _ = PatientRecord.objects.get_or_create(
+            person=self.person, defaults={'organization': self.organization},
+        )
+        resp = self.write_client.patch(
+            f'/api/persons/{self.person.person_id}/',
+            {
+                'email': 'profile@example.test',
+                'phone_number': '555-0100',
+                'facility_name': 'Acme Oncology',
+                'validated': True,
+                'validated_by': 'Dr Reviewer',
+                'validation_date': '2026-08-18',
+                'suppress_demographics_for_others': True,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.person.refresh_from_db()
+        record.refresh_from_db()
+        self.assertEqual(self.person.email, 'profile@example.test')
+        self.assertEqual(self.person.phone_number, '555-0100')
+        self.assertEqual(self.person.facility_name, 'Acme Oncology')
+        self.assertTrue(self.person.validated)
+        self.assertEqual(self.person.validated_by, 'Dr Reviewer')
+        self.assertEqual(str(self.person.validation_date), '2026-08-18')
+        self.assertTrue(self.person.suppress_demographics_for_others)
+        self.assertEqual(record.email, 'profile@example.test')
+        self.assertEqual(record.phone_number, '555-0100')
+        self.assertEqual(record.facility_name, 'Acme Oncology')
+        self.assertTrue(record.validated)
+        self.assertEqual(record.validated_by, 'Dr Reviewer')
+        self.assertEqual(str(record.validation_date), '2026-08-18')
+        self.assertTrue(record.suppress_demographics_for_others)
+
+    def test_patient_info_patch_rejects_profile_fields(self):
+        """PatientRecord has no writable exceptions; write profile fields to Person."""
         record, _ = PatientRecord.objects.get_or_create(
             person=self.person, defaults={'organization': self.organization},
         )
         resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
-            {'email': 'projection-owned@example.test'},
+            {
+                'email': 'patient-record-write@example.test',
+                'phone_number': '555-0100',
+                'validated': True,
+                'suppress_demographics_for_others': True,
+            },
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED, resp.data)
+        self.assertEqual(
+            resp.data['fields'],
+            ['email', 'phone_number', 'suppress_demographics_for_others', 'validated'],
+        )
         record.refresh_from_db()
-        self.assertEqual(record.email, 'projection-owned@example.test')
+        self.assertIsNone(record.email)
+
+    def test_person_patch_rejects_invalid_profile_email(self):
+        PatientRecord.objects.get_or_create(
+            person=self.person, defaults={'organization': self.organization},
+        )
+        resp = self.write_client.patch(
+            f'/api/persons/{self.person.person_id}/',
+            {'email': 'not an email'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertEqual(resp.data['detail'], "'email' must be a valid email address.")
 
     def test_patient_info_delete_returns_405(self):
         resp = self.write_client.delete(f'/api/patient-info/{self.person.person_id}/')
@@ -11334,7 +11418,9 @@ class PatientInvitationTest(TestCase):
         inv = PatientInvitation.objects.get(person=self.person)
         self.assertEqual(inv.status, 'pending')
         self.assertEqual(inv.email, 'rae@example.com')
+        self.person.refresh_from_db()
         self.record.refresh_from_db()
+        self.assertEqual(self.person.email, 'rae@example.com')
         self.assertEqual(self.record.email, 'rae@example.com')
         self.assertEqual(len(_django_mail.outbox), 1)
         self.assertIn(inv.token, _django_mail.outbox[0].body)
@@ -11345,8 +11431,10 @@ class PatientInvitationTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_invite_uses_stored_email_when_none_provided(self):
-        self.record.email = 'stored@example.com'
-        self.record.save(update_fields=['email'])
+        self.person.email = 'stored@example.com'
+        self.person.save(update_fields=['email'])
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(self.person)
         resp = self._client_as(self.staff).post(self._invite_url(self.person), {}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
         self.assertEqual(resp.data['email'], 'stored@example.com')
@@ -11497,15 +11585,17 @@ class PatientInvitationTest(TestCase):
         self.assertTrue(placeholder.check_password('sup3r-secret-pass'))
         self.assertEqual(PatientUser.objects.get(person=self.person).identity, placeholder)
 
-    # --- Email editable (lock-in) ---
+    # --- Email editable through Person extension ---
 
-    def test_email_is_editable_via_patch(self):
+    def test_email_is_editable_via_person_patch(self):
         resp = self._client_as(self.staff).patch(
-            f'/api/patient-info/{self.person.person_id}/',
+            f'/api/persons/{self.person.person_id}/',
             {'email': 'edited@example.com'}, format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK, getattr(resp, 'data', None))
+        self.person.refresh_from_db()
         self.record.refresh_from_db()
+        self.assertEqual(self.person.email, 'edited@example.com')
         self.assertEqual(self.record.email, 'edited@example.com')
 
 

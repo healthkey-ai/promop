@@ -37,22 +37,20 @@ PRomop is currently organized around a simple pipeline:
 5. Downstream applications read from `PatientRecord` and the versioned API.
 
 Key implementation points:
-- The platform is OMOP-first and mapped clinical `PatientRecord` fields are a
-  read model, not the system of record. Clinical writes use OMOP APIs or FHIR
-  imports; projection-owned fields with no OMOP representation are explicit
-  direct-persistence exceptions. See
+- The platform is OMOP-first and `PatientRecord` is a read model, not the
+  system of record. Clinical writes use OMOP APIs or FHIR imports; profile and
+  administrative writes use HealthKey extension columns on `Person`. See
   [API_SURFACE.md](/Users/adamblum/promop/API_SURFACE.md).
 - `PatientRecord` is a large denormalized projection that combines demographics,
   disease state, therapy lines, labs, biomarkers, behavior, geography, and
   wearable summaries. See [omop_core/models.py](/Users/adamblum/promop/omop_core/models.py#L1210).
 - The derivation logic lives in
   [omop_core/services/patient_record_service.py](/Users/adamblum/promop/omop_core/services/patient_record_service.py).
-- Mapped clinical PatientRecord fields are read-only at the PatientRecord API.
-  Producers write complete, provenance-bearing OMOP facts (or FHIR), and the
-  derivation pipeline rebuilds those fields. A mapped clinical projection field
-  is never a substitute for a fact with its own concept, time, unit, and source.
-  Projection-owned fields with no OMOP representation are explicitly outside
-  that rule and may remain directly writable.
+- PatientRecord fields are read-only at the PatientRecord API. Producers write
+  complete, provenance-bearing OMOP facts (or FHIR), and the derivation pipeline
+  rebuilds those fields. Profile/admin compatibility fields are projected from
+  `Person`, so PatientRecord is never a substitute for a source row with its own
+  ownership and provenance.
 - `public.patient_info` is a legacy SQL compatibility view only. New consumers
   must use `public.patient_record` or the versioned PatientRecord API, and must
   not adopt `patient_info` as a new contract.

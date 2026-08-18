@@ -1,10 +1,9 @@
 # PatientInfo ↔ OMOP Bidirectional Sync — Design Spec
 
 > **Superseded by #489 (2026-08):** This is retained as historical design context.
-> Mapped clinical PatientRecord fields are read-only at the PatientRecord API. New
-> producers write complete clinical facts to OMOP/FHIR; the derivation pipeline refreshes
-> PatientRecord. Projection-owned fields with no OMOP representation remain explicit
-> direct-persistence exceptions.
+> PatientRecord fields are read-only at the PatientRecord API. New producers write
+> complete clinical facts to OMOP/FHIR; profile/admin writes go to Person extension
+> columns; the derivation pipeline refreshes PatientRecord.
 
 **Date:** 2026-05-16  
 **Status:** Approved  

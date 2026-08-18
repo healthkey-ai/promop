@@ -38,10 +38,12 @@ def test_public_contract_documents_read_only_mapped_fields_and_legacy_policy():
         REPOSITORY_ROOT / "docs/utah-rhtp-technical-architecture-brief.md"
     ).read_text()
 
-    assert "Mapped clinical fields on PatientRecord are read-only." in api_surface
-    assert "It rejects mapped clinical fields." in api_surface
-    assert "projection-owned field with no OMOP representation" in api_surface
+    assert "PatientRecord fields are read-only." in api_surface
+    assert "Profile/admin values that are displayed on" in api_surface
+    assert "PatientRecord, such as email and validation metadata" in api_surface
+    assert "PATCH /api/v1/persons/{person_id}/" in api_surface
     assert "Legacy SQL compatibility only:" in api_surface
     assert "New integrations must not query it" in api_surface
-    assert "Mapped clinical PatientRecord fields are read-only at the PatientRecord API." in architecture_brief
-    assert "Producers write complete, provenance-bearing OMOP facts (or FHIR)" in architecture_brief
+    assert "PatientRecord fields are read-only at the PatientRecord API." in architecture_brief
+    assert "Producers write" in architecture_brief
+    assert "complete, provenance-bearing OMOP facts (or FHIR)" in architecture_brief

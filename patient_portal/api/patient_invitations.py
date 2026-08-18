@@ -101,10 +101,11 @@ class PatientInviteView(APIView):
         if not _can_manage_patient(request, patient_record):
             return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Email may be supplied to set/update the record, else use the stored one.
+        # Email may be supplied to set/update Person, else use the stored one.
         email = (request.data.get('email') or '').strip().lower()
-        if not email and patient_record and patient_record.email:
-            email = patient_record.email.strip().lower()
+        stored_email = person.email or (patient_record.email if patient_record else None)
+        if not email and stored_email:
+            email = stored_email.strip().lower()
         if not email:
             return Response(
                 {'error': 'An email address is required. Add one to the patient record first.'},
@@ -132,11 +133,17 @@ class PatientInviteView(APIView):
             )
 
         with transaction.atomic():
+            person_update_fields = []
+            if person.email != email:
+                person.email = email
+                person_update_fields.append('email')
+            if person_update_fields:
+                person.save(update_fields=person_update_fields)
+
             if patient_record is None:
-                patient_record = PatientRecord.objects.create(person=person, email=email)
-            elif patient_record.email != email:
-                patient_record.email = email
-                patient_record.save(update_fields=['email'])
+                patient_record = PatientRecord.objects.create(person=person)
+            from omop_core.services.patient_record_service import refresh_patient_record
+            refresh_patient_record(person)
 
             token = secrets.token_hex(32)  # 64 hex chars
             expires_at = timezone.now() + timezone.timedelta(days=INVITE_TTL_DAYS)
@@ -279,11 +286,13 @@ def accept_patient_invitation(request):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Keep the record email aligned with the claimed account.
-            pr = PatientRecord.objects.filter(person=invitation.person).first()
-            if pr and pr.email != email:
-                pr.email = email
-                pr.save(update_fields=['email'])
+            # Keep Person and its PatientRecord projection aligned with the claimed account.
+            person = invitation.person
+            if person.email != email:
+                person.email = email
+                person.save(update_fields=['email'])
+            from omop_core.services.patient_record_service import refresh_patient_record
+            refresh_patient_record(person)
 
             # Grant patient-level access to the record's org so the patient
             # can use org-scoped views after signing in.

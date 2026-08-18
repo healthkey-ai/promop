@@ -13,9 +13,11 @@ from django.db.models import Q, F
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import validate_email
 from omop_core.models import (
     Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
@@ -4482,6 +4484,16 @@ _PERSON_PATCHABLE_FIELDS = {
     'ethnicity_source_value':('str',  _PERSON_STR_PLACEHOLDERS),
 }
 
+_PERSON_REPLACEABLE_FIELDS = {
+    'email': 'email',
+    'phone_number': 'str',
+    'facility_name': 'str',
+    'validated': 'bool',
+    'validated_by': 'str',
+    'validation_date': 'date',
+    'suppress_demographics_for_others': 'bool',
+}
+
 
 @method_decorator(csrf_exempt, name='dispatch')
 class PersonViewSet(viewsets.GenericViewSet):
@@ -4565,8 +4577,48 @@ class PersonViewSet(viewsets.GenericViewSet):
                 setattr(person, field, incoming)
                 changed.append(field)
 
+        for field, kind in _PERSON_REPLACEABLE_FIELDS.items():
+            if field not in request.data:
+                continue
+            incoming = request.data[field]
+            if kind in {'str', 'email'} and incoming is not None:
+                incoming = str(incoming).strip() or None
+                if kind == 'email' and incoming is not None:
+                    try:
+                        validate_email(incoming)
+                    except DjangoValidationError:
+                        return Response(
+                            {'detail': f"'{field}' must be a valid email address."},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+            elif kind == 'bool' and incoming is not None:
+                if isinstance(incoming, bool):
+                    pass
+                elif incoming in {0, 1}:
+                    incoming = bool(incoming)
+                elif isinstance(incoming, str) and incoming.lower() in {'true', '1', 'yes'}:
+                    incoming = True
+                elif isinstance(incoming, str) and incoming.lower() in {'false', '0', 'no'}:
+                    incoming = False
+                else:
+                    return Response(
+                        {'detail': f"'{field}' must be a boolean."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            elif kind == 'date' and incoming is not None:
+                incoming = parse_date(str(incoming))
+                if incoming is None:
+                    return Response(
+                        {'detail': f"'{field}' must be an ISO date."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            if getattr(person, field) != incoming:
+                setattr(person, field, incoming)
+                changed.append(field)
+
         if changed:
             person.save(update_fields=changed)
+            refresh_patient_record(person)
 
         return Response({'person_id': person.person_id, 'updated_fields': changed})
 

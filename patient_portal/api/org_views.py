@@ -554,12 +554,18 @@ def confirm_invitation(request):
                     gender_source_value='unknown',
                     race_source_value='unknown',
                     ethnicity_source_value='unknown',
+                    email=invitation.email,
                 )
                 PatientRecord.objects.create(
-                    person=person, email=invitation.email,
+                    person=person,
                     organization=invitation.org,
                 )
                 PatientUser.objects.create(identity=identity, person=person)
+            if person.email != invitation.email:
+                person.email = invitation.email
+                person.save(update_fields=['email'])
+            from omop_core.services.patient_record_service import refresh_patient_record
+            refresh_patient_record(person)
 
         invitation.confirmed_at = timezone.now()
         invitation.save(update_fields=['confirmed_at'])
@@ -837,11 +843,13 @@ class OrgPatientSignupView(APIView):
                 existing_pu = PatientUser.objects.filter(identity=identity).first()
                 if existing_pu:
                     person = existing_pu.person
+                    if person.email != email:
+                        person.email = email
+                        person.save(update_fields=['email'])
                     # Ensure a PatientRecord exists for this person in the new org
                     PatientRecord.objects.get_or_create(
                         person=person,
                         organization=org,
-                        defaults={'email': email},
                     )
                 else:
                     new_id = next_pk(Person, 'person_id')
@@ -853,9 +861,13 @@ class OrgPatientSignupView(APIView):
                         gender_source_value='unknown',
                         race_source_value='unknown',
                         ethnicity_source_value='unknown',
+                        email=email,
                     )
-                    PatientRecord.objects.create(person=person, email=email, organization=org)
+                    PatientRecord.objects.create(person=person, organization=org)
                     PatientUser.objects.create(identity=identity, person=person)
+
+                from omop_core.services.patient_record_service import refresh_patient_record
+                refresh_patient_record(person)
 
                 # Grant patient access to this org
                 GroupAccess.objects.get_or_create(
