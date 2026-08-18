@@ -107,6 +107,10 @@ _OMOP_DERIVED_FIELDS = [
     'bilirubin_total_mg_dl', 'serum_bilirubin_level_direct', 'alt_u_l', 'ast_u_l', 'alkaline_phosphatase_u_l',
     'albumin_g_dl', 'total_protein', 'troponin_ng_ml', 'bnp_pg_ml',
     'glucose_mg_dl', 'hba1c_percent', 'ldh_u_l',
+    # These FHIR Observations are persisted as OMOP Measurements and must not
+    # retain a projection-only copy after their source is removed.
+    'inr', 'pt_seconds', 'ptt_seconds', 'cea_ng_ml', 'ca19_9_u_ml',
+    'psa_ng_ml', 'phosphorus',
     # Legacy aliases for deduplicated LOINC fields (issue #471).
     # These model columns still exist for backward compatibility; they are
     # populated with the same value as their canonical counterpart during
@@ -114,6 +118,9 @@ _OMOP_DERIVED_FIELDS = [
     'calcium_mg_dl', 'creatinine_mg_dl', 'egfr', 'blood_urea_nitrogen',
     'serum_sodium', 'serum_potassium', 'magnesium', 'alkaline_phosphatase',
     'ldh_level', 'ldh',
+    'absolute_neutrophile_count', 'red_blood_cell_count',
+    'estimated_glomerular_filtration_rate', 'creatinine_clearance_rate',
+    'serum_bilirubin_level', 'lactate_dehydrogenase_level',
     # Other markers (LOINC-derived)
     'beta2_microglobulin', 'c_reactive_protein', 'esr',
     # MM disease burden (LOINC-derived)
@@ -242,6 +249,15 @@ _LOINC_LAB_FIELDS = {
     '42637-9': ('bnp_pg_ml',                      int),
     '4548-4':  ('hba1c_percent',                  float),
     '2532-0':  ('ldh_u_l',                        int),
+    # Coagulation and tumour-marker results are Measurements too.  Use their
+    # exact LOINC identities; never infer an analyte from a display name.
+    '6301-6':  ('inr',                            float),
+    '5902-2':  ('pt_seconds',                     float),
+    '3173-2':  ('ptt_seconds',                    float),
+    '2039-6':  ('cea_ng_ml',                      float),
+    '25390-6': ('ca19_9_u_ml',                    float),
+    '2857-1':  ('psa_ng_ml',                      float),
+    '2777-1':  ('phosphorus',                     float),
     # Other markers
     '1952-1':  ('beta2_microglobulin',            float),
     '1988-5':  ('c_reactive_protein',             float),
@@ -273,7 +289,12 @@ _LAB_FIELD_ALIASES = {
     'potassium_meq_l':        ['serum_potassium'],
     'magnesium_mg_dl':        ['magnesium'],
     'alkaline_phosphatase_u_l': ['alkaline_phosphatase'],
-    'ldh_u_l':                ['ldh_level', 'ldh'],
+    'ldh_u_l':                ['ldh_level', 'ldh', 'lactate_dehydrogenase_level'],
+    'anc_thousand_per_ul':    ['absolute_neutrophile_count'],
+    'rbc_million_per_ul':     ['red_blood_cell_count'],
+    'egfr_ml_min_173m2':      ['estimated_glomerular_filtration_rate'],
+    'creatinine_clearance_ml_min': ['creatinine_clearance_rate'],
+    'serum_bilirubin_level_direct': ['serum_bilirubin_level'],
 }
 
 # A FHIR Condition.stage summary is an asserted clinical fact, but the FHIR
