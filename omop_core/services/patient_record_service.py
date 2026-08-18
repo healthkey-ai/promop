@@ -140,6 +140,13 @@ _OMOP_DERIVED_FIELDS = [
     'pd_l1_ic_percentage', 'pd_l1_combined_positive_score', 'ki67_proliferation_index',
     'estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status', 'tnbc_status',
     'hr_status', 'hrd_status', 'menopausal_status',
+    # Genomics and pathology report metadata.  These are all projections of
+    # dated OMOP Measurement/Observation facts; keeping them here is important
+    # so deleting a source report cannot leave a stale clinical assertion.
+    'molecular_markers', 'test_methodology', 'test_date', 'test_specimen_type',
+    'report_interpretation', 'oncotype_dx_score', 'androgen_receptor_status',
+    'lymph_node_status', 'metastasis_status', 'mrd_status',
+    'biopsy_grade_depr',
     # Behavior / lifestyle
     'smoking_status', 'pack_years', 'alcohol_use', 'drinks_per_week',
     'exercise_frequency', 'exercise_minutes_per_week', 'diet_type',
@@ -457,6 +464,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             _get_treatment_data,
             _get_vitals_data,
             _get_biomarker_data,
+            _get_genomics_pathology_data,
             _get_staging_data,
             _get_social_data,
             _get_behavior_data,
@@ -1408,6 +1416,25 @@ _GENETIC_MUTATION_LOINCS = {
     '60033-8': 'PIK3CA',  # PIK3CA gene mutations found [Identifier] in Blood or Tissue
 }
 
+# Pathology report fields which have an unambiguous LOINC representation in
+# the FHIR payloads we accept.  The keys are source codes, not local concept
+# ids: Athena reloads may change concept ids, while the source code is the
+# durable vocabulary contract.
+_GENOMICS_PATHOLOGY_LOINCS = frozenset({
+    '85337-4',  # genomic/test methodology (also carries numeric Oncotype score)
+    '31208-2',  # specimen source
+    '69548-6',  # pathology test interpretation
+    '82185-1',  # androgen receptor status
+    '92837-4',  # lymph-node involvement
+    '21907-1',  # distant-metastasis status (not TNM M category)
+    '44648-4',  # Nottingham biopsy grade
+})
+
+# MRD does not have one universal LOINC across oncology programmes.  We only
+# accept an explicitly vocabulary-backed OMOP Genomic/NCIt/SNOMED assertion,
+# never a free-text source value or a name from an arbitrary local vocabulary.
+_MRD_VOCABULARIES = frozenset({'OMOP Genomic', 'NCIt', 'SNOMED'})
+
 
 _LOINC_CODE_RE = __import__('re').compile(r'^\d+-\d+$')
 
@@ -1632,6 +1659,117 @@ def _get_biomarker_data(person: Person) -> dict:
     )
     if histologic_obs and histologic_obs.value_as_string:
         data['histologic_type'] = histologic_obs.value_as_string
+
+    return data
+
+
+def _coded_value(row):
+    """Return the user-facing value carried by a coded OMOP fact.
+
+    Prefer a value concept, then an explicit string/source value.  A concept-0
+    value is intentionally suppressed by ``_usable_concept_name``.
+    """
+    return (
+        _usable_concept_name(getattr(row, 'value_as_concept', None))
+        or getattr(row, 'value_as_string', None)
+        or getattr(row, 'value_source_value', None)
+    )
+
+
+def _get_genomics_pathology_data(person: Person) -> dict:
+    """Derive report-level genomics/pathology fields from dated OMOP facts.
+
+    This deliberately keys off standard vocabulary codes (or the explicit
+    OMOP Genomic/NCIt/SNOMED MRD registry) rather than concept names.  It makes
+    the projection portable across Athena loads and prevents a similarly named
+    local concept from silently populating a clinical field.
+    """
+    data = {}
+    measurements = list(
+        Measurement.objects.filter(person=person, is_erroneous=False)
+        .filter(
+            models.Q(measurement_concept__concept_code__in=_GENOMICS_PATHOLOGY_LOINCS)
+            | models.Q(measurement_source_value__in=_GENOMICS_PATHOLOGY_LOINCS)
+        )
+        .select_related('measurement_concept', 'value_as_concept')
+        .order_by('-measurement_date', '-measurement_id')
+    )
+
+    def latest(code):
+        return next((m for m in measurements if _measurement_code(m) == code), None)
+
+    methodology = latest('85337-4')
+    if methodology:
+        value = _coded_value(methodology)
+        if value:
+            data['test_methodology'] = value[:50]
+        if methodology.value_as_number is not None:
+            data['oncotype_dx_score'] = int(methodology.value_as_number)
+
+    specimen = latest('31208-2')
+    if specimen:
+        value = _coded_value(specimen)
+        if value:
+            data['test_specimen_type'] = value[:50]
+
+    interpretation = latest('69548-6')
+    if interpretation:
+        value = _coded_value(interpretation)
+        if value:
+            data['report_interpretation'] = value[:50]
+
+    report_facts = [row for row in (methodology, specimen, interpretation) if row]
+    if report_facts:
+        # Reports are not a separate CDM table.  Their safest compatible date
+        # is therefore the newest dated report-level fact, never refresh time
+        # or an undated projection patch.
+        data['test_date'] = max(row.measurement_date for row in report_facts)
+
+    androgen_receptor = latest('82185-1')
+    if androgen_receptor:
+        value = _coded_value(androgen_receptor)
+        if value:
+            data['androgen_receptor_status'] = value[:50]
+
+    lymph_node = latest('92837-4')
+    if lymph_node:
+        value = _coded_value(lymph_node)
+        if value:
+            data['lymph_node_status'] = value[:50]
+
+    metastasis = latest('21907-1')
+    if metastasis:
+        value = _coded_value(metastasis)
+        if value:
+            data['metastasis_status'] = value[:50]
+
+    biopsy_grade = latest('44648-4')
+    if biopsy_grade and biopsy_grade.value_as_number is not None:
+        data['biopsy_grade_depr'] = str(int(biopsy_grade.value_as_number))
+
+    mrd_observation = next(
+        (
+            obs for obs in Observation.objects.filter(person=person, is_erroneous=False)
+            .select_related('observation_concept', 'value_as_concept', 'observation_concept__vocabulary')
+            .order_by('-observation_date', '-observation_id')
+            if obs.observation_concept.vocabulary.vocabulary_id in _MRD_VOCABULARIES
+            and 'minimal residual disease' in obs.observation_concept.concept_name.lower()
+        ),
+        None,
+    )
+    if mrd_observation:
+        value = _coded_value(mrd_observation)
+        if value:
+            data['mrd_status'] = value[:50]
+
+    mutations = _get_genetic_mutations(person).get('genetic_mutations', [])
+    if mutations:
+        # ``genetic_mutations`` remains the structured canonical projection;
+        # molecular_markers is its legacy display-compatible summary.
+        data['molecular_markers'] = '; '.join(
+            f"{mutation['gene'].upper()}: {mutation['variant']}"
+            for mutation in mutations
+        )
 
     return data
 
