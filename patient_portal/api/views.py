@@ -96,14 +96,139 @@ class PatientRecordPagination(PageNumberPagination):
     max_page_size = 100
 
 
-def _serialize_omop_row(obj):
+def _serialize_omop_row(obj, include=None):
+    """Serialize a model instance to a dict.
+
+    *include* restricts to the named fields when provided.  FK concept fields
+    use ``field.attname`` (e.g. ``drug_concept_id``) so the raw integer is
+    emitted instead of the related object.
+    """
     row = {}
     for field in obj._meta.fields:
+        name = field.name
+        if include is not None and name not in include:
+            continue
         value = getattr(obj, field.attname)
         if isinstance(value, Decimal):
             value = float(value)
-        row[field.name] = value
+        row[name] = value
     return row
+
+
+# -- OMOP tab: per-table column include lists --------------------------------
+# Only columns that are typically populated (>10 %) are included.  ``person``
+# is excluded from every clinical table (implied by page context).
+
+_OMOP_COLUMNS = {
+    'person': [
+        'person_id', 'gender_concept', 'gender_source_value',
+        'year_of_birth', 'month_of_birth', 'day_of_birth',
+        'race_source_value', 'ethnicity_source_value',
+        'given_name', 'family_name', 'email', 'location',
+    ],
+    'condition_occurrences': [
+        'condition_occurrence_id', 'condition_concept',
+        'condition_start_date', 'condition_start_datetime',
+        'condition_type_concept', 'condition_status_concept',
+        'condition_source_value', 'condition_status_source_value',
+    ],
+    'drug_exposures': [
+        'drug_exposure_id', 'drug_concept',
+        'drug_exposure_start_date', 'drug_exposure_start_datetime',
+        'drug_exposure_end_date', 'drug_exposure_end_datetime',
+        'drug_type_concept', 'lot_number', 'drug_source_value',
+    ],
+    'measurements': [
+        'measurement_id', 'measurement_concept',
+        'measurement_datetime',
+        'measurement_type_concept',
+        'value_as_number', 'value_as_string',
+        'measurement_source_value', 'unit_source_value',
+    ],
+    'observations': [
+        'observation_id', 'observation_concept',
+        'observation_date', 'observation_datetime',
+        'observation_type_concept',
+        'value_as_number', 'value_as_string',
+        'observation_source_value',
+    ],
+    'procedure_occurrences': [
+        'procedure_occurrence_id', 'procedure_concept',
+        'procedure_date', 'procedure_datetime',
+        'procedure_type_concept',
+        'procedure_source_value', 'procedure_source_concept',
+    ],
+    'episodes': [
+        'episode_id', 'episode_concept',
+        'episode_start_date', 'episode_end_date',
+        'episode_number', 'episode_object_concept',
+        'episode_type_concept',
+        'episode_source_value', 'episode_source_concept',
+    ],
+    'episode_events': [
+        'episode_id', 'event_id', 'episode_event_field_concept',
+    ],
+    'visit_occurrences': [
+        'visit_occurrence_id', 'visit_concept',
+        'visit_start_date', 'visit_start_datetime',
+        'visit_end_date', 'visit_end_datetime',
+        'visit_type_concept', 'visit_source_value',
+    ],
+    'visit_details': [
+        'visit_detail_id', 'visit_detail_concept',
+        'visit_detail_start_date', 'visit_detail_start_datetime',
+        'visit_detail_end_date', 'visit_detail_end_datetime',
+        'visit_detail_type_concept', 'visit_detail_source_value',
+        'visit_occurrence',
+    ],
+    'death': [
+        'death_date', 'death_datetime',
+        'death_type_concept', 'cause_source_value',
+    ],
+}
+
+
+def _resolve_concept_names(tables_data):
+    """Batch-resolve concept FK IDs → concept_name across all tables.
+
+    For every column whose name ends with ``_concept`` (the Django field name
+    for a FK to Concept), inject a companion ``<col>_name`` column right after
+    the ID with the concept's human-readable name.
+    """
+    # 1. Collect every concept ID referenced in all rows.
+    concept_ids = set()
+    for _key, rows in tables_data:
+        for row in rows:
+            for col, val in row.items():
+                if col.endswith('_concept') and isinstance(val, int) and val != 0:
+                    concept_ids.add(val)
+
+    if not concept_ids:
+        return
+
+    # 2. Single batch query.
+    names = dict(
+        Concept.objects.filter(concept_id__in=concept_ids)
+        .values_list('concept_id', 'concept_name')
+    )
+
+    # 3. Inject *_name columns.
+    for _key, rows in tables_data:
+        for row in rows:
+            additions = {}
+            for col, val in list(row.items()):
+                if col.endswith('_concept') and isinstance(val, int):
+                    additions[col + '_name'] = names.get(val) if val != 0 else None
+            # Insert name columns right after their ID columns.
+            if additions:
+                new_row = {}
+                for col, val in row.items():
+                    new_row[col] = val
+                    name_col = col + '_name'
+                    if name_col in additions:
+                        new_row[name_col] = additions[name_col]
+                row.clear()
+                row.update(new_row)
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +808,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         )
         table_specs = [
             ('person', 'Person', Person.objects.filter(person_id=person.person_id)),
-            ('death', 'Death', Death.objects.filter(person=person)),
             ('condition_occurrences', 'Condition Occurrences', ConditionOccurrence.objects.filter(person=person)),
             ('drug_exposures', 'Drug Exposures', DrugExposure.objects.filter(person=person)),
             ('measurements', 'Measurements', Measurement.objects.filter(person=person)),
@@ -693,17 +817,23 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             ('episode_events', 'Episode Events', EpisodeEvent.objects.filter(episode_id__in=episode_ids)),
             ('visit_occurrences', 'Visit Occurrences', VisitOccurrence.objects.filter(person=person)),
             ('visit_details', 'Visit Details', VisitDetail.objects.filter(person=person)),
+            ('death', 'Death', Death.objects.filter(person=person)),
         ]
 
         tables = []
+        tables_data = []   # (key, rows) pairs for concept name resolution
         for key, label, qs in table_specs:
-            rows = [_serialize_omop_row(obj) for obj in qs]
+            include = _OMOP_COLUMNS.get(key)
+            rows = [_serialize_omop_row(obj, include=include) for obj in qs]
+            tables_data.append((key, rows))
             tables.append({
                 'key': key,
                 'label': label,
                 'count': len(rows),
                 'rows': rows,
             })
+
+        _resolve_concept_names(tables_data)
 
         return Response({
             'person_id': person.person_id,
