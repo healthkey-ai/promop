@@ -3637,31 +3637,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     if upload_org is not None and patient_info.organization_id is None:
                         _patch['organization'] = upload_org
 
-                    # PatientRecord accepts only projection-owned values here.
-                    # Every mapped clinical field above has to be represented by
-                    # an OMOP row (and is picked up by the preceding refresh),
-                    # never copied from this FHIR parser into the projection.
-                    _mapped_patch_fields = set(_patch) & PATIENT_RECORD_OMOP_MAPPED_FIELDS
-                    if _mapped_patch_fields:
-                        logger.info(
-                            "FHIR mapped PatientRecord fields omitted after OMOP derivation "
-                            "person_id=%s fields=%s",
-                            person.person_id,
-                            ",".join(sorted(_mapped_patch_fields)),
-                        )
-                        _patch = {
-                            field: value for field, value in _patch.items()
-                            if field not in PATIENT_RECORD_OMOP_MAPPED_FIELDS
-                        }
-
-                    # Apply projection-owned fields only (suppress
-                    # signal-triggering save).  In particular, this must not
-                    # become a PatientRecord-to-OMOP compatibility bridge.
-                    for _field, _val in _patch.items():
-                        setattr(patient_info, _field, _val)
-                    patient_info.save()
-                    if prov_source:
-                        _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                    # All clinical values above were written to OMOP rows before
+                    # refresh_patient_record.  Do not copy the parser's legacy
+                    # compatibility dictionary into PatientRecord: doing so
+                    # creates a second clinical write authority.  Organization is
+                    # tenant metadata and is the sole intentional exception.
+                    if upload_org is not None and patient_info.organization_id is None:
+                        patient_info.organization = upload_org
+                        patient_info.save(update_fields=['organization', 'updated_at'])
 
                     # Commit all writes for this patient. Mark _atomic_entered=False
                     # so the finally block knows the transaction was cleanly committed.
