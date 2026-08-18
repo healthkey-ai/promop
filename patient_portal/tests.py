@@ -14099,6 +14099,8 @@ class PasswordResetFlowTest(TestCase):
     """Admin-initiated password reset via emailed single-use link (#302, TI.1.1#08)."""
 
     def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
         from django.core import mail
         self.identity = Identity.objects.create_user(email='reset-me@test.com', password='Zr7-quokka-vale')
         mail.outbox = []
@@ -15038,6 +15040,8 @@ class SelfServicePasswordResetTest(TestCase):
     """Test the public POST /api/v1/auth/request-reset/ endpoint."""
 
     def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
         from django.core import mail
         self.identity = Identity.objects.create_user(
             email='self-reset@test.com', password='Zr7-quokka-vale',

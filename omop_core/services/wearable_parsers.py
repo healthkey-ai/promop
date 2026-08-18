@@ -419,6 +419,14 @@ def parse_apple_health_export(zip_bytes: bytes) -> list[WearableSample]:
     general_hr: dict[date, list[float]] = defaultdict(list)
 
     with zf.open(xml_name) as xml_file:
+        # XXE protection: reject files containing DTD/ENTITY declarations.
+        # defusedxml does not expose iterparse, so we check the first 4KB
+        # for DTD markers before streaming with stdlib. Apple Health exports
+        # never contain DTDs; a crafted upload would.
+        header = xml_file.read(4096)
+        if b'<!DOCTYPE' in header or b'<!ENTITY' in header:
+            raise ValueError('XML file contains DTD/entity declarations; rejected for security.')
+        xml_file.seek(0)
         context = ET.iterparse(xml_file, events=('start', 'end'))
         root = None
         for event, elem in context:

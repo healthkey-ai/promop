@@ -1092,8 +1092,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             })
             
         except Exception as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    
+            logger.exception('CSV upload failed')
+            return Response({'error': 'Upload failed. Please check the file format and try again.'}, status=status.HTTP_400_BAD_REQUEST)
+
     @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def upload_fhir(self, request):
         """Upload patients from FHIR JSON file"""
@@ -2823,12 +2824,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             try:
                                 first_line_start_date = datetime.strptime(therapy_lines[1]['start_date'][:10], '%Y-%m-%d').date()
                                 first_line_date = first_line_start_date  # Keep for backwards compatibility
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         if therapy_lines[1].get('end_date'):
                             try:
                                 first_line_end_date = datetime.strptime(therapy_lines[1]['end_date'][:10], '%Y-%m-%d').date()
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         first_line_outcome = therapy_lines[1].get('outcome')
                     
@@ -2838,12 +2839,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             try:
                                 second_line_start_date = datetime.strptime(therapy_lines[2]['start_date'][:10], '%Y-%m-%d').date()
                                 second_line_date = second_line_start_date  # Keep for backwards compatibility
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         if therapy_lines[2].get('end_date'):
                             try:
                                 second_line_end_date = datetime.strptime(therapy_lines[2]['end_date'][:10], '%Y-%m-%d').date()
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         second_line_outcome = therapy_lines[2].get('outcome')
                     
@@ -2854,12 +2855,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             try:
                                 later_start_date = datetime.strptime(therapy_lines[4]['start_date'][:10], '%Y-%m-%d').date()
                                 later_date = later_start_date  # Keep for backwards compatibility
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         if therapy_lines[4].get('end_date'):
                             try:
                                 later_end_date = datetime.strptime(therapy_lines[4]['end_date'][:10], '%Y-%m-%d').date()
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         later_outcome = therapy_lines[4].get('outcome')
                     elif 3 in therapy_lines:
@@ -2868,12 +2869,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             try:
                                 later_start_date = datetime.strptime(therapy_lines[3]['start_date'][:10], '%Y-%m-%d').date()
                                 later_date = later_start_date  # Keep for backwards compatibility
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         if therapy_lines[3].get('end_date'):
                             try:
                                 later_end_date = datetime.strptime(therapy_lines[3]['end_date'][:10], '%Y-%m-%d').date()
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         later_outcome = therapy_lines[3].get('outcome')
                     
@@ -3726,7 +3727,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             })
 
         except Exception as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            logger.exception('FHIR upload failed')
+            return Response({'error': 'Upload failed. Please check the bundle format and try again.'}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=['post'], url_path='upload-wearable',
             permission_classes=[IsAuthenticated])
@@ -4172,7 +4174,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             })
 
         except Exception as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            logger.exception('Bulk delete failed')
+            return Response({'error': 'Delete operation failed.'}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=['delete'], permission_classes=[ScopedTokenPermission])
     def bulk_delete_filtered(self, request):
@@ -5331,13 +5334,11 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
             return qs
         # Org / per-patient scoping: EpisodeEvent.episode_id is a bare integer FK to Episode.
         # Resolve allowed episode_ids via the Episode → person → org chain.
-        # Bootstrap patients (organization=NULL) are included so that create-path
-        # and read-path are symmetric.
+        # Org-scoped tokens see only their org's patients (not unassigned).
         org = get_request_org(self.request)
         if org is not None:
-            from django.db.models import Q
             allowed_pids = PatientRecord.objects.filter(
-                Q(organization=org) | Q(organization__isnull=True)
+                organization=org
             ).values('person_id')
             allowed_episodes = Episode.objects.filter(person_id__in=allowed_pids).values('episode_id')
             qs = qs.filter(episode_id__in=allowed_episodes)
@@ -6282,8 +6283,14 @@ class PatientConsentViewSet(viewsets.ModelViewSet):
         person = patient_person_for(self.request.user)
         if person is not None:
             return PatientConsent.objects.filter(patient_user__person=person)
-        # Staff / superuser — return all consents
-        return PatientConsent.objects.all()
+        # Staff sees all; providers see only their org's patients' consents.
+        if getattr(self.request.user, 'is_staff', False):
+            return PatientConsent.objects.all()
+        from omop_core.services.access import get_admin_orgs
+        admin_org_ids = get_admin_orgs(self.request.user).values_list('id', flat=True)
+        return PatientConsent.objects.filter(
+            patient_user__person__patientrecord__organization_id__in=admin_org_ids
+        )
 
     def list(self, request, *args, **kwargs):
         from patient_portal.models import PatientConsent, PatientUser
@@ -6399,6 +6406,16 @@ class PatientMessageViewSet(viewsets.ModelViewSet):
                 kwargs['patient_user'] = parent.patient_user
             elif not serializer.validated_data.get('patient_user'):
                 raise ValidationError({'patient_user': 'Staff must specify patient_user when starting a new thread.'})
+
+            # Verify staff has access to the target patient's org
+            resolved_pu = kwargs.get('patient_user') or serializer.validated_data.get('patient_user')
+            if resolved_pu and not getattr(user, 'is_staff', False):
+                from omop_core.services.access import get_admin_orgs
+                pr = PatientRecord.objects.filter(person=resolved_pu.person).first()
+                if pr and pr.organization_id:
+                    admin_org_ids = set(get_admin_orgs(user).values_list('id', flat=True))
+                    if pr.organization_id not in admin_org_ids:
+                        raise PermissionDenied('You do not have access to this patient.')
 
         # Validate parent belongs to the same patient thread
         parent = serializer.validated_data.get('parent')
