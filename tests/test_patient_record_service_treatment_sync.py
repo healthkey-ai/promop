@@ -4,9 +4,87 @@ import pytest
 
 from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.patient_record_service import _get_treatment_data
-from tests.factories import ConceptFactory, DrugExposureFactory, PersonFactory, VocabularyFactory
+from tests.factories import (
+    ConceptFactory, DrugExposureFactory, MeasurementFactory, ObservationFactory,
+    PersonFactory, VocabularyFactory,
+)
 
 pytestmark = pytest.mark.django_db
+
+
+def _therapy_episode(person, episode_id, line, start, end):
+    vocab = VocabularyFactory(vocabulary_id='HemOnc', vocabulary_name='HemOnc')
+    regimen = ConceptFactory(
+        concept_id=35804232 + episode_id,
+        concept_name=f'Regimen {line}', vocabulary=vocab,
+    )
+    exposure = DrugExposureFactory(
+        person=person, drug_exposure_start_date=start, drug_exposure_end_date=end,
+    )
+    episode = Episode.objects.create(
+        episode_id=episode_id, person=person,
+        episode_concept=ConceptFactory(concept_name='Treatment Regimen', vocabulary=vocab),
+        episode_start_date=start, episode_end_date=end, episode_number=line,
+        episode_object_concept=ConceptFactory(concept_name='Disease Episode', vocabulary=vocab),
+        episode_type_concept=ConceptFactory(concept_name='Derived Episode', vocabulary=vocab),
+        episode_source_concept=regimen,
+    )
+    EpisodeEvent.objects.create(
+        episode_id=episode.episode_id, event_id=exposure.drug_exposure_id,
+        episode_event_field_concept=ConceptFactory(concept_name='Episode event field'),
+    )
+    return episode
+
+
+def test_treatment_assertions_derive_from_dated_omop_facts():
+    person = PersonFactory()
+    _therapy_episode(person, 901, 1, date(2024, 1, 1), date(2024, 1, 21))
+    _therapy_episode(person, 902, 2, date(2024, 2, 1), date(2024, 2, 21))
+
+    # Explicit line fact wins for line 1; standard FHIR LOINC Measurement is
+    # safely associated with line 2 by its unambiguous event date.
+    ObservationFactory(
+        person=person, observation_date=date(2024, 1, 1),
+        observation_source_value='LOT-1-intent', value_as_string='Adjuvant',
+    )
+    ObservationFactory(
+        person=person, observation_date=date(2024, 1, 21),
+        observation_source_value='LOT-1-discontinuation', value_as_string='Completion',
+    )
+    MeasurementFactory(
+        person=person, measurement_date=date(2024, 2, 2),
+        measurement_source_value='42804-5', value_as_string='Salvage',
+    )
+    MeasurementFactory(
+        person=person, measurement_date=date(2024, 2, 21),
+        measurement_source_value='91379-3', value_as_string='Progression',
+    )
+
+    data = _get_treatment_data(person)
+
+    assert data['first_line_intent'] == 'Adjuvant'
+    assert data['first_line_discontinuation_reason'] == 'Completion'
+    assert data['second_line_intent'] == 'Salvage'
+    assert data['second_line_discontinuation_reason'] == 'Progression'
+    assert data['therapy_intent'] == 'Salvage'
+    assert data['reason_for_discontinuation'] == 'Progression'
+    assert data['washout_period_duration'] == '11 days'
+    assert data['line_of_therapy'] == '2'
+
+
+def test_treatment_assertion_does_not_cross_overlapping_episode_lines():
+    person = PersonFactory()
+    _therapy_episode(person, 911, 1, date(2024, 1, 1), date(2024, 1, 31))
+    _therapy_episode(person, 912, 2, date(2024, 1, 15), date(2024, 2, 15))
+    MeasurementFactory(
+        person=person, measurement_date=date(2024, 1, 20),
+        measurement_source_value='42804-5', value_as_string='Ambiguous',
+    )
+
+    data = _get_treatment_data(person)
+
+    assert 'first_line_intent' not in data
+    assert 'second_line_intent' not in data
 
 
 def test_episode_treatment_data_populates_start_dates_and_line_count():
