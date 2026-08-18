@@ -1,0 +1,36 @@
+# OMOP to PatientRecord mapping
+
+`PatientRecord` is a derived read model.  It is never a clinical write target.
+Every source row must carry a known event date (and a source/provenance record);
+unknown-date facts are not projected.  On refresh, absence of a backing fact
+clears the projection value.
+
+## Column mapping and implementation plan
+
+| PatientRecord columns | OMOP table and coding | Derivation / implementation work |
+|---|---|---|
+| `date_of_birth`, `gender`, `race`, `ethnicity`, `languages_skills`, `email`, `phone_number`, `facility_name`, `validated`, `validated_by`, `validation_date`, `suppress_demographics_for_others` | `Person`, `Location`, `PersonLanguageSkill` | Copy current Person/location attributes. Profile APIs write Person, then refresh. |
+| `disease`, `disease_slug`, `diagnosis_date`, `condition_code_icd_10`, `condition_code_snomed_ct`, `no_other_active_malignancies`, `preexisting_conditions`, `myeloma_type`, `progression` | `ConditionOccurrence`; ICD10CM/SNOMED/ICDO3 standard concepts; dated status `Observation` | Select relevant current condition; derive negatives only from explicit dated assertion. Add concept-set definitions for disease subtype/progression. |
+| `first_line_*`, `second_line_*`, `later_*`, `prior_therapy`, `line_of_therapy`, `planned_therapies`, `supportive_*`, `relapse_count`, `treatment_refractory_status`, `therapy_intent`, `reason_for_discontinuation`, `remission_duration_min`, `washout_period_duration` | `DrugExposure`, `Episode`, `EpisodeEvent`; dated LOINC/SNOMED `Observation` for intent, outcome, discontinuation, washout | Derive lines via Artemis/episode inference; associate assertions to line start/end date. HealthTree rules are an additional inference input, never a PatientRecord writer. |
+| `inr`, `pt_seconds`, `ptt_seconds`, `cea_ng_ml`, `ca19_9_u_ml`, `psa_ng_ml`, `phosphorus`, `absolute_neutrophile_count`, `red_blood_cell_count`, `creatinine_clearance_rate`, `estimated_glomerular_filtration_rate`, legacy bilirubin/liver/LDH aliases | `Measurement`; LOINC and UCUM units | Latest valid dated result. Canonical codes: 6301-6, 5902-2, 3173-2, 2039-6, 25390-6, 2857-1, 2777-1; aliases derive only from canonical result. |
+| `heartrate_variability`, `qtcf_value`, `ejection_fraction`, `pulmonary_function_test_result`, `bone_imaging_result` | `Measurement`/`Observation`; LOINC where available, SNOMED for coded imaging result | Latest dated result; document selected LOINC/SNOMED concept set in mapping registry before writer support. |
+| `molecular_markers`, `genetic_mutations`, `test_methodology`, `test_date`, `test_specimen_type`, `report_interpretation`, `oncotype_dx_score`, `androgen_receptor_status`, `tumor_size`, `lymph_node_status`, `metastasis_status`, `mrd_status`, `largest_lymph_node_size`, `spleen_size`, `biopsy_grade_depr` | `Measurement`/`Observation`; LOINC, OMOP Genomic, ICDO3, NCIt/SNOMED | Latest dated/coded fact; retain method/specimen as qualifiers or linked Observation. Vocabulary gaps are loaded before enabling the field writer. |
+| `pregnancy_test_*`, `contraceptive_use`, `consent_capability`, `caregiver_availability_status`, `no_pregnancy_or_lactation_status`, `no_mental_health_disorder_status`, `no_concomitant_medication_status`, `no_substance_use_status`, `substance_use_details`, `no_geographic_exposure_risk`, `geographic_exposure_risk_details`, `no_active_infection_status` | dated coded `Observation` | Latest explicit assertion only; no fact means unknown, never a fabricated negative. |
+| `id`, `person`, `organization`, `created_at`, `updated_at`, `derived_at`, `derivation_version`, `user_edited_fields` | server lifecycle metadata | Never writable through PatientRecord. `user_edited_fields` is inert legacy metadata. |
+
+## Write policy
+
+There are **no writable concrete PatientRecord columns**. A compatibility
+endpoint may update a Person attribute (for example a name), but it writes the
+source row and rederives; it never writes PatientRecord directly. `patient_info`
+is legacy-only and must not gain consumers.
+
+## Delivery order
+
+1. Finish LOINC Measurement derivations and aliases.
+2. Add the observation concept-set registry for eligibility, pathology and
+   treatment assertions, with tests for date/provenance and stale clearing.
+3. Add missing vocabulary packages (OMOP Genomic, ICDO3, NCIt/CTCAE where used)
+   before accepting writers for their fields.
+4. Reject all PatientRecord PATCH fields; rederive affected records and verify
+   every mapping with OMOP-only fixtures.

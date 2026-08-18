@@ -54,6 +54,9 @@ LAB_FIELD_TO_LOINC = {
     'inr':                            ('6301-6',   '{INR}',           'INR in Platelet poor plasma'),
     'pt_seconds':                     ('5902-2',   's',               'Prothrombin time (PT)'),
     'ptt_seconds':                    ('3173-2',   's',               'aPTT in Platelet poor plasma'),
+    'cea_ng_ml':                      ('2039-6',   'ng/mL',           'Carcinoembryonic Ag [Mass/volume] in Serum or Plasma'),
+    'ca19_9_u_ml':                    ('25390-6',  'U/mL',            'Cancer Ag 19-9 [Units/volume] in Serum or Plasma'),
+    'psa_ng_ml':                      ('2857-1',   'ng/mL',           'Prostate specific Ag [Mass/volume] in Serum or Plasma'),
     # Oncology markers
     'ldh_u_l':                        ('2532-0',   'U/L',             'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma'),
     'beta2_microglobulin':            ('1952-1',   'mg/L',            'Beta-2-Microglobulin [Mass/volume] in Serum or Plasma'),

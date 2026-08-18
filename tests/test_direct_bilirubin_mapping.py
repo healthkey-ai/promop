@@ -76,3 +76,43 @@ def test_rederivation_does_not_preserve_legacy_projection_edits():
     refreshed = refresh_patient_record(record.person)
 
     assert refreshed.stage is None
+
+
+@pytest.mark.parametrize(
+    ('field', 'loinc_code', 'value'),
+    [
+        ('inr', '6301-6', 1.1),
+        ('pt_seconds', '5902-2', 12.4),
+        ('cea_ng_ml', '2039-6', 3.2),
+        ('phosphorus', '2777-1', 3.8),
+    ],
+)
+def test_remaining_dated_labs_are_derived_and_clear_when_deleted(field, loinc_code, value):
+    """#501: a PatientRecord lab is only a projection of its OMOP Measurement."""
+    loinc = VocabularyFactory(vocabulary_id='LOINC')
+    domain = DomainFactory(domain_id='Measurement')
+    concept_class = ConceptClassFactory(concept_class_id='Lab Test')
+    lab = ConceptFactory(
+        concept_id=1_700_000_000 + int(loinc_code.replace('-', '')),
+        concept_name=f'LOINC {loinc_code}',
+        concept_code=loinc_code,
+        vocabulary=loinc,
+        domain=domain,
+        concept_class=concept_class,
+    )
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    measurement = Measurement.objects.create(
+        measurement_id=1_700_100_000 + int(loinc_code.replace('-', '')),
+        person=person,
+        measurement_concept=lab,
+        measurement_date=date(2026, 8, 14),
+        measurement_type_concept=lab,
+        value_as_number=value,
+        measurement_source_value=loinc_code,
+    )
+
+    assert float(getattr(refresh_patient_record(person), field)) == value
+
+    measurement.delete()
+    assert getattr(refresh_patient_record(person), field) is None
