@@ -153,6 +153,13 @@ _OMOP_DERIVED_FIELDS = [
     'sleep_hours_per_night', 'sleep_quality', 'stress_level', 'social_support',
     'employment_status', 'education_level', 'marital_status', 'insurance_type',
     'number_of_dependents', 'annual_household_income',
+    # Dated clinical eligibility / social assertions (#505).  These columns
+    # are nullable because no OMOP assertion means unknown, not the model's
+    # historical default answer.
+    'pregnancy_test_date', 'pregnancy_test_result_value',
+    'contraceptive_use', 'consent_capability', 'caregiver_availability_status',
+    'no_mental_health_disorder_status', 'no_substance_use_status',
+    'no_geographic_exposure_risk',
     # Staging
     'stage', 'tumor_stage', 'nodes_stage', 'distant_metastasis_stage', 'staging_modalities',
     'metastatic_status', 'bone_only_metastasis_status',
@@ -414,6 +421,26 @@ _BEHAVIOR_MEASUREMENT_FIELDS = {
 }
 
 
+# #505 assertion registry.  The importer represents FHIR Observation answers
+# as OMOP Measurement rows; native OMOP producers may use Observation instead.
+# The registry intentionally accepts only these reviewed LOINC questions.  A
+# missing row is unknown, and an arbitrary string or concept-name match cannot
+# accidentally turn into a clinical assertion.
+#
+# (PatientRecord field, value kind).  ``inverse_boolean`` is for questions
+# whose answer describes the *presence* of a risk whereas the projection says
+# ``no_*``.
+_ASSERTION_FIELDS = {
+    '2106-3': ('pregnancy_test_result_value', 'string'),
+    '8659-8': ('contraceptive_use', 'boolean'),
+    '75985-6': ('consent_capability', 'boolean'),
+    '74014-2': ('caregiver_availability_status', 'boolean'),
+    '75618-3': ('no_mental_health_disorder_status', 'inverse_boolean'),
+    '74204-0': ('no_substance_use_status', 'inverse_boolean'),
+    '82593-5': ('no_geographic_exposure_risk', 'inverse_boolean'),
+}
+
+
 def _clear_derived_fields(patient_info: PatientRecord) -> None:
     """Reset all OMOP-derived fields to None so deletions are reflected."""
     for field in _OMOP_DERIVED_FIELDS:
@@ -468,6 +495,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             _get_staging_data,
             _get_social_data,
             _get_behavior_data,
+            _get_assertion_data,
             _get_infection_data,
             _get_assessment_data,
             _get_laboratory_data,
@@ -1460,9 +1488,13 @@ def _measurement_code(measurement):
 
 def _observation_code(observation):
     """Return a stable observation code from concept mapping or FHIR source_value."""
-    if observation.observation_concept and observation.observation_concept.concept_code:
-        return observation.observation_concept.concept_code
-    return observation.observation_source_value
+    concept_code = getattr(observation.observation_concept, 'concept_code', None)
+    source_value = observation.observation_source_value
+    if concept_code and _LOINC_CODE_RE.match(concept_code):
+        return concept_code
+    if source_value and _LOINC_CODE_RE.match(source_value):
+        return source_value
+    return source_value or concept_code
 
 
 def _get_biomarker_data(person: Person) -> dict:
@@ -2027,6 +2059,86 @@ def _get_behavior_data(person: Person) -> dict:
         value = float(measurement.value_as_number)
         data[field_name] = caster(value) if caster is not str else str(value)
 
+    return data
+
+
+def _assertion_value(row, value_kind):
+    """Return a typed assertion value, or None when the answer is unusable."""
+    value = row.value_as_string
+    if value in (None, '') and getattr(row, 'value_as_concept_id', None):
+        value = _usable_concept_name(row.value_as_concept)
+    if value in (None, ''):
+        value = row.value_as_number
+    if value is None:
+        return None
+    if value_kind == 'string':
+        return str(value)
+
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized not in {'true', 'false', 'yes', 'no', '1', '0'}:
+            return None
+        parsed = normalized in {'true', 'yes', '1'}
+    else:
+        # Numeric values originate from FHIR valueBoolean (1/0). Do not treat
+        # arbitrary quantities such as 2 as a boolean clinical assertion.
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if numeric not in (0, 1):
+            return None
+        parsed = bool(numeric)
+    return not parsed if value_kind == 'inverse_boolean' else parsed
+
+
+def _get_assertion_data(person: Person) -> dict:
+    """Project latest dated, typed OMOP eligibility/social assertions.
+
+    Both OMOP tables are supported because FHIR ingestion uses Measurement for
+    its coded Observations, while native OMOP integrations correctly use
+    Observation for non-measurement facts.  OMOP requires a date and type
+    concept for both tables; erroneous rows are excluded.  No row, or an
+    unparseable answer, deliberately leaves the projection unknown.
+    """
+    measurement_rows = list(
+        Measurement.objects.filter(person=person, is_erroneous=False)
+        .select_related('measurement_concept', 'value_as_concept')
+    )
+    observation_rows = list(
+        Observation.objects.filter(person=person, is_erroneous=False)
+        .select_related('observation_concept', 'value_as_concept')
+    )
+    rows = [
+        (m.measurement_date, m.measurement_id, _measurement_code(m), m)
+        for m in measurement_rows
+    ] + [
+        (o.observation_date, o.observation_id, _observation_code(o), o)
+        for o in observation_rows
+    ]
+    rows.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+    data = {}
+    seen_fields = set()
+    for _, _, code, row in rows:
+        spec = _ASSERTION_FIELDS.get(code)
+        if not spec:
+            continue
+        field, value_kind = spec
+        if field in seen_fields:
+            continue
+        # A newer row with no valid typed answer supersedes an older answer:
+        # falling back would resurrect a stale assertion after the source has
+        # explicitly replaced it with an unknown/unusable value.
+        seen_fields.add(field)
+        value = _assertion_value(row, value_kind)
+        if value is None:
+            continue
+        data[field] = value
+        if field == 'pregnancy_test_result_value':
+            # The event date comes from the same fact; it is never copied from
+            # a separately patched PatientRecord column.
+            data['pregnancy_test_date'] = row.measurement_date if isinstance(row, Measurement) else row.observation_date
     return data
 
 

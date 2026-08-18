@@ -2384,12 +2384,12 @@ class PatientRecord(models.Model):
     ejection_fraction = models.IntegerField(blank=True, null=True)
 
     # Behavioral and risk factors
-    consent_capability = models.BooleanField(help_text="Does the patient have cognitive ability to consent?", blank=False, null=False, default=True)
-    caregiver_availability_status = models.BooleanField(help_text="Is there an available caregiver for the patient?", blank=False, null=False, default=False)
-    contraceptive_use = models.BooleanField(help_text="Does the patient use contraceptives?", blank=False, null=False, default=False)
+    consent_capability = models.BooleanField(help_text="Does the patient have cognitive ability to consent?", blank=True, null=True, default=None)
+    caregiver_availability_status = models.BooleanField(help_text="Is there an available caregiver for the patient?", blank=True, null=True, default=None)
+    contraceptive_use = models.BooleanField(help_text="Does the patient use contraceptives?", blank=True, null=True, default=None)
     no_pregnancy_or_lactation_status = models.BooleanField(help_text="Does the patient self assess as not pregnant or lactating?", blank=False, null=False, default=True)
     pregnancy_test_result = models.BooleanField(help_text="Does the female patient of childbearing age have a negative test result for pregnancy?", blank=False, null=False, default=False)
-    no_mental_health_disorder_status = models.BooleanField(help_text="Does the patient have a mental health disorder?", blank=False, null=False, default=True)
+    no_mental_health_disorder_status = models.BooleanField(help_text="Does the patient have a mental health disorder?", blank=True, null=True, default=None)
     no_concomitant_medication_status = models.BooleanField(help_text="Does the patient have concomitant medication?", blank=False, null=False, default=True)
     concomitant_medication_details = models.CharField(max_length=255, help_text="Details about the patient's concomitant medications", blank=True, null=True)
     
@@ -2441,9 +2441,9 @@ class PatientRecord(models.Model):
 
     no_tobacco_use_status = models.BooleanField(help_text="Does the patient use tobacco?", blank=False, null=False, default=True)
     tobacco_use_details = models.CharField(max_length=255, help_text="Details about the patient's tobacco use", blank=True, null=True)
-    no_substance_use_status = models.BooleanField(help_text="Does the patient use substances?", blank=False, null=False, default=True)
+    no_substance_use_status = models.BooleanField(help_text="Does the patient use substances?", blank=True, null=True, default=None)
     substance_use_details = models.CharField(max_length=255, help_text="Details about the patient's substance use", blank=True, null=True)
-    no_geographic_exposure_risk = models.BooleanField(help_text="Has the patient had geographic exposure to risk?", blank=False, null=False, default=True)
+    no_geographic_exposure_risk = models.BooleanField(help_text="Has the patient had geographic exposure to risk?", blank=True, null=True, default=None)
     geographic_exposure_risk_details = models.CharField(max_length=255, help_text="Details about the patient's geographic exposure risk", blank=True, null=True)
 
     no_hiv_status = models.BooleanField(help_text="Does the patient has had HIV?", blank=False, null=False, default=True)
