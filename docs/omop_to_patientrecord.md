@@ -15,7 +15,6 @@ clears the projection value.
 | `planned_therapies`, `supportive_*`, `remission_duration_min` | pending treatment assertion registry | **Not enabled by #506.** These need a dated, line-associated concept set and must not be inferred from free text or from a PatientRecord patch. |
 | `inr`, `pt_seconds`, `ptt_seconds`, `cea_ng_ml`, `ca19_9_u_ml`, `psa_ng_ml`, `phosphorus`, `absolute_neutrophile_count`, `red_blood_cell_count`, `creatinine_clearance_rate`, `estimated_glomerular_filtration_rate`, legacy bilirubin/liver/LDH aliases | `Measurement`; LOINC and UCUM units | Latest valid dated result. Canonical codes: 6301-6, 5902-2, 3173-2, 2039-6, 25390-6, 2857-1, 2777-1; aliases derive only from canonical result. |
 | `heartrate_variability`, `qtcf_value`, `ejection_fraction`, `pulmonary_function_test_result`, `bone_imaging_result` | `Measurement`/`Observation`; LOINC where available, SNOMED for coded imaging result | Latest dated result; document selected LOINC/SNOMED concept set in mapping registry before writer support. |
-| `first_line_*`, `second_line_*`, `later_*`, `prior_therapy`, `line_of_therapy`, `planned_therapies`, `supportive_*`, `relapse_count`, `treatment_refractory_status`, `therapy_intent`, `reason_for_discontinuation`, `remission_duration_min`, `washout_period_duration` | `DrugExposure`, `Episode`, `EpisodeEvent`; dated LOINC/SNOMED `Observation` for intent, outcome, discontinuation, washout | Derive lines via Artemis/episode inference; associate assertions to line start/end date. HealthTree rules are an additional inference input, never a PatientRecord writer. |
 | `inr`, `pt_seconds`, `ptt_seconds`, `cea_ng_ml`, `ca19_9_u_ml`, `psa_ng_ml`, `phosphorus`, `absolute_neutrophile_count`, `red_blood_cell_count`, `creatinine_clearance_rate`, `estimated_glomerular_filtration_rate`, legacy bilirubin/liver/LDH aliases | `Measurement`; LOINC and UCUM units | Latest valid dated result. Canonical codes: 6301-6, 5902-2, 3173-2, 2039-6, 25390-6, 2857-1, 2777-1; aliases derive only from canonical result. #504 adds aliases `liver_enzyme_levels_ast` ← AST 1920-8, `liver_enzyme_levels_alt` ← ALT 1742-6, and `liver_enzyme_levels_alp` ← ALP 6768-6. |
 | `heartrate_variability`, `qtcf_value`, `ejection_fraction` | `Measurement`; LOINC | **Implemented in #504.** Latest dated numeric result: HRV SDNN 80404-7 (milliseconds), QTcF 8632-1 (milliseconds), and ejection fraction 8806-2 (percent). HRV SDNN is not interchangeable with RMSSD; the latter remains only in `hrv_rmssd_avg_30d`. |
 | `liver_enzyme_levels` | none | Retired ambiguous legacy composite. It cannot represent AST, ALT, and ALP without losing analyte identity, so it is permanently cleared and read-only; consumers must read the three distinct OMOP-derived fields. |
@@ -38,6 +37,11 @@ There are **no writable concrete PatientRecord columns**. A compatibility
 endpoint may update a Person attribute (for example a name), but it writes the
 source row and rederives; it never writes PatientRecord directly. `patient_info`
 is legacy-only and must not gain consumers.
+
+Management commands follow the same rule. `backfill_therapy_concept_ids`
+rederives therapy summaries from OMOP treatment facts; it never reverse-maps
+PatientRecord display text. `seed_test_patients` is an explicitly acknowledged
+DEBUG-only fixture helper, not an import or production data path.
 
 ## Delivery order
 

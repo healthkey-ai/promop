@@ -16058,15 +16058,15 @@ class MeetsCrabSlimFieldTest(_SmartBase):
         self.assertIn('myeloma_type', data)
         self.assertEqual(data['myeloma_type'], 'IgG Kappa')
 
-    def test_myeloma_type_patchable(self):
+    def test_myeloma_type_is_derive_only(self):
         resp = self.write_client.patch(
             f'/api/v1/patient-records/{self.mm_person.person_id}/',
             data=json.dumps({'myeloma_type': 'IgA Lambda'}),
             content_type='application/json',
         )
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 405)
         self.mm_record.refresh_from_db()
-        self.assertEqual(self.mm_record.myeloma_type, 'IgA Lambda')
+        self.assertEqual(self.mm_record.myeloma_type, 'IgG Kappa')
 
 
 # =============================================================================

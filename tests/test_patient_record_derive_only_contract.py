@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+from omop_core.models import PatientRecord
+from omop_core.services.patient_record_service import PATIENT_RECORD_OMOP_MAPPED_FIELDS
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -38,7 +41,7 @@ def test_public_contract_documents_read_only_mapped_fields_and_legacy_policy():
         REPOSITORY_ROOT / "docs/utah-rhtp-technical-architecture-brief.md"
     ).read_text()
 
-    assert "PatientRecord fields are read-only." in api_surface
+    assert "Mapped PatientRecord fields are read-only." in api_surface
     assert "Profile/admin values that are\ndisplayed on PatientRecord" in api_surface
     assert "PatientRecord, such as email and validation metadata" in api_surface
     assert "PATCH /api/v1/persons/{person_id}/" in api_surface
@@ -47,7 +50,7 @@ def test_public_contract_documents_read_only_mapped_fields_and_legacy_policy():
     assert "405 Method Not Allowed" in api_surface
     assert '"fields": ["hemoglobin_g_dl"]' in api_surface
     assert "docs/omop_to_patientrecord.md" in api_surface
-    assert "There are no writable concrete PatientRecord clinical columns." in api_surface
+    assert "The target state has no writable concrete PatientRecord clinical columns." in api_surface
     assert "`PATCH /api/v1/persons/{person_id}/`" in api_surface
     assert "PatientRecord fields are read-only at the PatientRecord API." in architecture_brief
     assert "Producers write" in architecture_brief
@@ -61,3 +64,18 @@ def test_partial_update_schema_description_explains_omop_write_migration():
     assert "returns 405" in api_views
     assert "docs/omop_to_patientrecord.md" in api_views
     assert "Write the appropriate OMOP resource" in api_views
+
+
+def test_every_concrete_patientrecord_data_column_is_api_read_only():
+    """No pending derivation is a temporary PatientRecord write exception."""
+    lifecycle_fields = {
+        'id', 'person', 'organization', 'created_at', 'updated_at',
+        'derived_at', 'derivation_version', 'user_edited_fields',
+    }
+    writable = {
+        field.name for field in PatientRecord._meta.concrete_fields
+        if field.name not in lifecycle_fields
+        and field.name not in PATIENT_RECORD_OMOP_MAPPED_FIELDS
+    }
+
+    assert writable == set()
