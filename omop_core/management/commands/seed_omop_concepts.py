@@ -311,7 +311,10 @@ _CONCEPTS = [
     _c(9001003, 'Protein [electrophoresis] in Urine',             'Measurement', 'LOINC', 'Lab Test', 'S', '32730-5'),  # M-spike urine
     _c(9001004, 'Kappa free light chains [Mass/volume] in Serum', 'Measurement', 'LOINC', 'Lab Test', 'S', '33944-8'),
     _c(9001005, 'Lambda free light chains [Mass/volume] in Serum','Measurement', 'LOINC', 'Lab Test', 'S', '33945-5'),
-    _c(9001006, 'Plasma cells [#/volume] in Bone marrow',         'Measurement', 'LOINC', 'Lab Test', 'S', '26098-4'),
+    # 26098-4 is 'XR Ankle - left Views' in LOINC, 11118-7 is the marrow code.
+    _c(9001006, 'Plasma cells/100 cells in Bone marrow by Manual count', 'Measurement', 'LOINC', 'Lab Test', 'S', '11118-7'),
+    # 9001019 is skipped, a test uses it to stand in for a retired mint.
+    _c(9001020, 'Kappa light chains.free/Lambda light chains.free [Mass Ratio] in Serum', 'Measurement', 'LOINC', 'Lab Test', 'S', '48378-4'),
 
     # ------------------------------------------------------------------
     # Beta-2 microglobulin and other MM markers

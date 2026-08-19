@@ -26,7 +26,9 @@ from omop_core.services.mappings import (
     WEARABLE_CONCEPT_CODE, WEARABLE_ARTIFACT_BOUNDS, WEARABLE_MIN_VALID_DAYS,
     WEARABLE_TREND_IMPROVING_PCT, WEARABLE_TREND_DECLINING_PCT,
 )
-from omop_core.services.clinical_units import canonical_wbc_unit, wbc_to_canonical
+from omop_core.services.clinical_units import (
+    canonical_wbc_unit, flc_to_canonical, wbc_to_canonical,
+)
 from omop_core.services.lot_regimens import (
     get_regimen_concept_id,
     get_regimen_name,
@@ -138,7 +140,7 @@ _OMOP_DERIVED_FIELDS = [
     'beta2_microglobulin', 'c_reactive_protein', 'esr',
     # MM disease burden (LOINC-derived)
     'monoclonal_protein_serum', 'monoclonal_protein_urine',
-    'kappa_flc', 'lambda_flc', 'clonal_plasma_cells',
+    'kappa_flc', 'lambda_flc', 'clonal_plasma_cells', 'free_light_chain_ratio',
     # MM boolean/coded fields (derived by _get_mm_specific_data)
     'plasma_cell_leukemia', 'bone_lesions', 'meets_crab', 'meets_slim',
     # MM cytogenetics + SCT (derived by _get_sct_cytogenetic_data)
@@ -313,13 +315,37 @@ _LOINC_LAB_FIELDS = {
     '1952-1':  ('beta2_microglobulin',            float),
     '1988-5':  ('c_reactive_protein',             float),
     '30341-2': ('esr',                            int),
-    # MM-specific disease burden labs
-    '51435-6': ('monoclonal_protein_serum',       float),  # Serum M-spike (M-protein)
+    # MM disease burden labs. Real-world data codes these differently from the
+    # demo concepts this app seeds, so both spellings are listed. '33944-8' and
+    # '33945-5' are not LOINC at all and only resolve against seeded rows.
+    #
+    # CAUTION: '33944-8' (seeded kappa) and '33944-0' (real LOINC lambda) differ
+    # by one character and are opposite analytes. Do not tidy them together.
+    '51435-6': ('monoclonal_protein_serum',       float),  # M-protein band 1, SPEP
+    '33358-3': ('monoclonal_protein_serum',       float),  # M-protein, SPEP (3046299)
     '32730-5': ('monoclonal_protein_urine',       float),  # Urine M-spike 24h
-    '33944-8': ('kappa_flc',                      float),  # Kappa free light chains
-    '33945-5': ('lambda_flc',                     float),  # Lambda free light chains
-    '26098-4': ('clonal_plasma_cells',            float),  # Plasma cells % in bone marrow
+    '33944-8': ('kappa_flc',                      float),  # seeded demo concept only
+    '36916-5': ('kappa_flc',                      float),  # Kappa FLC, Serum (3034860)
+    '80515-0': ('kappa_flc',                      float),  # Kappa FLC by nephelometry
+    '33945-5': ('lambda_flc',                     float),  # seeded demo concept only
+    '33944-0': ('lambda_flc',                     float),  # Lambda FLC, Serum (3047169)
+    '80516-8': ('lambda_flc',                     float),  # Lambda FLC by nephelometry
+    '48378-4': ('free_light_chain_ratio',         float),  # Kappa/lambda ratio (3053209)
+    '80517-6': ('free_light_chain_ratio',         float),  # ratio by nephelometry
+    '104546-7': ('free_light_chain_ratio',        float),  # ratio, newer LOINC
+    # '26098-4' is "XR Ankle - left Views" in LOINC, so it used to project ankle
+    # radiographs into clonal_plasma_cells. '11118-7' is the real marrow code.
+    '11118-7': ('clonal_plasma_cells',            float),  # Plasma cells/100 cells in marrow (3003879)
 }
+
+# Keyed by field name not by code, so a new LOINC spelling above feeds both the
+# lab projection and the SLiM criteria.
+_SLIM_FIELDS = frozenset({
+    'clonal_plasma_cells', 'kappa_flc', 'lambda_flc', 'free_light_chain_ratio',
+})
+
+# Projected in mg/L when the source unit says which unit it is in.
+_FLC_FIELDS = frozenset({'kappa_flc', 'lambda_flc'})
 
 # Legacy field aliases for deduplicated LOINC codes (issue #471).
 #
@@ -423,7 +449,15 @@ _SOURCE_VALUE_LAB_FIELDS = {
     'Kappa free light chains':                    'kappa_flc',
     'Lambda free light chains':                   'lambda_flc',
     'Clonal plasma cells in bone marrow (%)':     'clonal_plasma_cells',
+    'Free light chain ratio':                     'free_light_chain_ratio',
 }
+
+# Bounds the SLiM query. Without it the criteria walk every Measurement a person
+# owns, which on a bulk loaded patient is tens of thousands of rows.
+_SLIM_MATCH_VALUES = frozenset(
+    [code for code, (field, _) in _LOINC_LAB_FIELDS.items() if field in _SLIM_FIELDS]
+    + [name for name, field in _SOURCE_VALUE_LAB_FIELDS.items() if field in _SLIM_FIELDS]
+)
 
 # Historic, non-LOINC test names for the old paired lab fields. This fallback
 # must be an explicit allowlist: substring matching turns distinct analytes
@@ -2350,6 +2384,57 @@ def _get_infection_data(person: Person) -> dict:
     return data
 
 
+#: IMWG 2014: involved/uninvolved ratio >= 100 with involved chain >= 100 mg/L.
+_SLIM_FLC_RATIO = 100.0
+_SLIM_INVOLVED_FLC_MG_L = 100.0
+
+
+def _meets_flc_criterion(
+    kappas: list[tuple[float, str | None]],
+    lambdas: list[tuple[float, str | None]],
+    ratios: list[float],
+    person: Person,
+) -> bool:
+    """Whether the SLiM light chain criterion is established.
+
+    Chains are (value, unit_source_value) in date order. Both halves must hold,
+    and the absolute half needs mg/L, so a ratio with no chain result is
+    unproven rather than satisfied.
+    """
+    if not kappas or not lambdas:
+        return False
+
+    k_raw, k_unit = kappas[-1]
+    lam_raw, lam_unit = lambdas[-1]
+
+    # A reported ratio beats one divided out of two results that may come from
+    # different draws.
+    ratio = None
+    if ratios:
+        ratio = ratios[-1]
+    elif lam_raw > 0 and k_raw > 0:
+        ratio = k_raw / lam_raw
+    if ratio is None or ratio <= 0:
+        return False
+
+    if ratio >= _SLIM_FLC_RATIO:
+        involved, involved_unit = k_raw, k_unit
+    elif ratio <= 1 / _SLIM_FLC_RATIO:
+        involved, involved_unit = lam_raw, lam_unit
+    else:
+        return False
+
+    involved_mg_l = flc_to_canonical(involved, involved_unit)
+    if involved_mg_l is None:
+        logger.warning(
+            'SLiM light-chain criterion left unproven for person_id=%s: involved '
+            'free light chain has unit_source_value=%r, which is not convertible '
+            'to mg/L', getattr(person, 'person_id', None), involved_unit,
+        )
+        return False
+    return involved_mg_l >= _SLIM_INVOLVED_FLC_MG_L
+
+
 def _get_mm_specific_data(person: Person) -> dict:
     """Derive MM-specific boolean and coded fields from OMOP Observation table.
 
@@ -2409,37 +2494,41 @@ def _get_mm_specific_data(person: Person) -> dict:
     # ── meets_slim: derived from plasma cells and FLC ratio in OMOP ─────────
     # SLiM = Sixty (plasma cells ≥60%), Light chain ratio ≥100, or MRI lesions
     # (MRI lesions are not tracked in OMOP, so we check plasma cells and FLC)
-    slim_rows = (
-        Measurement.objects
-        .filter(
-            person=person,
-            measurement_source_value__in=['26098-4', '33944-8', '33945-5'],
-            value_as_number__isnull=False,
-        )
-        .values('measurement_source_value', 'value_as_number')
-    )
+    # EHR rows carry the display name in source_value and the LOINC on the
+    # concept, so a source_value-only filter saw demo data and nothing else.
     slim_vals = {}
-    for row in slim_rows:
-        slim_vals.setdefault(row['measurement_source_value'], []).append(
-            float(row['value_as_number'])
-        )
+    for m in (
+        Measurement.objects
+        .filter(person=person, value_as_number__isnull=False)
+        .filter(Q(measurement_concept__concept_code__in=_SLIM_MATCH_VALUES)
+                | Q(measurement_source_value__in=_SLIM_MATCH_VALUES))
+        .select_related('measurement_concept')
+        .order_by('measurement_date', 'measurement_id')
+    ):
+        code = _measurement_code(m)
+        field = _LOINC_LAB_FIELDS.get(code, (None, None))[0]
+        if field is None:
+            # The row matched on source_value, so its concept resolved to some
+            # other code. Fall back to the display name map.
+            field = _SOURCE_VALUE_LAB_FIELDS.get(m.measurement_source_value)
+        if field in _SLIM_FIELDS:
+            slim_vals.setdefault(field, []).append(
+                (float(m.value_as_number), m.unit_source_value))
 
-    plasma_pcts = slim_vals.get('26098-4', [])
-    kappas = slim_vals.get('33944-8', [])
-    lambdas = slim_vals.get('33945-5', [])
+    plasma_pcts = [v for v, _unit in slim_vals.get('clonal_plasma_cells', [])]
+    kappas = slim_vals.get('kappa_flc', [])
+    lambdas = slim_vals.get('lambda_flc', [])
+    ratios = [v for v, _unit in slim_vals.get('free_light_chain_ratio', [])]
 
     meets_slim = False
     # Sixty criterion: any plasma cells measurement ≥60%
     if any(v >= 60.0 for v in plasma_pcts):
         meets_slim = True
-    # Light-chain ratio criterion: ratio ≥100 in either direction
-    elif kappas and lambdas:
-        k = kappas[-1]
-        lam = lambdas[-1]
-        if lam > 0 and k / lam >= 100:
-            meets_slim = True
-        elif k > 0 and lam / k >= 100:
-            meets_slim = True
+    # Ratio alone is not enough. A patient with both chains low reaches a ratio
+    # of 100 without the absolute burden, and this decides a myeloma defining
+    # event.
+    elif _meets_flc_criterion(kappas, lambdas, ratios, person):
+        meets_slim = True
 
     data['meets_slim'] = meets_slim
 
@@ -2598,6 +2687,21 @@ def _get_laboratory_data(person: Person) -> dict:
                     'WBC projections skipped for person_id=%s: unsupported or absent '
                     'unit_source_value=%r', person.person_id, m.unit_source_value,
                 )
+                continue
+        if field in _FLC_FIELDS:
+            canonical_flc = flc_to_canonical(m.value_as_number, m.unit_source_value)
+            if canonical_flc is None:
+                # Unlike WBC this still projects: blanking thousands of patients
+                # is worse than the lab's own unit. The SLiM threshold refuses
+                # it instead, which is where a 10x error changes the answer.
+                logger.warning(
+                    'FLC projected without unit conversion for person_id=%s: '
+                    'unit_source_value=%r is not convertible to mg/L',
+                    person.person_id, m.unit_source_value,
+                )
+            else:
+                if field not in data:
+                    data[field] = cast(canonical_flc)
                 continue
         if field not in data:
             if code != '6690-2' or canonical_value is not None:

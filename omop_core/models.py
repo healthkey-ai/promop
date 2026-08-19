@@ -2366,8 +2366,13 @@ class PatientRecord(models.Model):
     c_reactive_protein = models.DecimalField(decimal_places=2, max_digits=6, blank=True, null=True, help_text="C-Reactive Protein (mg/L)")
     esr = models.IntegerField(blank=True, null=True, help_text="ESR (mm/hr)")
     
-    kappa_flc = models.IntegerField(blank=True, null=True)
-    lambda_flc = models.IntegerField(blank=True, null=True)
+    # Normal serum kappa is ~0.33-1.94 mg/dL, so an IntegerField truncated every
+    # result to 0 or 1. Do not turn these back into integers.
+    kappa_flc = models.DecimalField(decimal_places=2, max_digits=10, blank=True, null=True, help_text="Serum free kappa light chains")
+    lambda_flc = models.DecimalField(decimal_places=2, max_digits=10, blank=True, null=True, help_text="Serum free lambda light chains")
+    # Normal is ~0.26-1.65 and the SLiM threshold is >= 100, so both ends of the
+    # range need decimals.
+    free_light_chain_ratio = models.DecimalField(decimal_places=3, max_digits=12, blank=True, null=True, help_text="Serum free light chain ratio (kappa/lambda)")
     meets_slim = models.BooleanField(blank=True, null=True)
 
     # Legacy blood work fields
@@ -2380,7 +2385,8 @@ class PatientRecord(models.Model):
     lactate_dehydrogenase_level = models.IntegerField(blank=True, null=True)
     pulmonary_function_test_result = models.BooleanField(blank=False, null=False, default=False)
     bone_imaging_result = models.BooleanField(blank=False, null=False, default=False)
-    clonal_plasma_cells = models.IntegerField(blank=True, null=True)
+    # Values like 4.2% are routine and 60% is a decision point.
+    clonal_plasma_cells = models.DecimalField(decimal_places=2, max_digits=6, blank=True, null=True, help_text="Clonal plasma cells in bone marrow (%)")
     ejection_fraction = models.IntegerField(blank=True, null=True)
 
     # Behavioral and risk factors
