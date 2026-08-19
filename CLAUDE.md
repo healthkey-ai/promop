@@ -750,15 +750,24 @@ append-only writes.
 
 | Model | Event identity |
 |---|---|
-| ConditionOccurrence, DrugExposure, Observation, ProcedureOccurrence | `(source_value, date)` |
+| ConditionOccurrence, DrugExposure, ProcedureOccurrence | `(source_value, date)` |
 | Measurement | `(source_value, date, datetime, value_as_number)` |
+| Observation | `(source_value, date, datetime, value_as_number, value_as_string, value_source_value)` |
 
-Measurement is the deliberate divergence: a patient legitimately has several
-distinct results for one analyte on one day, so `(source_value, date)` alone
-would not dedup a re-run — it would delete real results. The wider key matches
-what `fhir/sync.py::_insert_discrete_observations` already dedups on. The concept
-column stays *outside* every key, which is what lets a vocabulary load upgrade a
-stored row in place instead of stranding a duplicate beside it.
+Measurement and Observation diverge on purpose: a patient legitimately has
+several distinct results for one analyte on one day, so `(source_value, date)`
+alone would delete real results instead of deduping a re-run.
+
+The concept column stays outside every key, which lets a vocabulary load upgrade
+a stored row in place instead of stranding a duplicate beside it. The same rule
+picks which value columns may join a key: only raw ones. `value_as_concept` is
+re-resolved by a vocabulary load just like `observation_concept`, so keying on
+it would strand the duplicate the design prevents. `value_source_value` is the
+raw text behind that resolution, so it separates two coded answers safely.
+
+A batch that trips a database constraint returns **409** with the driver's first
+error line, not 500. The whole batch rolled back, so the caller can retry, and a
+500 reads as "the service is down".
 
 A row with no `source_value` or no date has no identity and is always inserted.
 
