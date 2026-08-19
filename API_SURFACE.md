@@ -26,9 +26,12 @@ Client writes → OMOP tables (Measurement, ConditionOccurrence, DrugExposure, �
 `PatientRecord` (Django model: `PatientInfo`, API path: `/api/v1/patient-records/`) is a
 **denormalized read model**. Its clinical fields are regenerated automatically whenever
 their OMOP source records change, and its profile/admin compatibility fields are copied
-from HealthKey extension columns on `Person`. The API rejects direct writes to
-`PatientRecord`; OMOP APIs, FHIR imports, and `Person` profile updates own writes, then
-the projection refreshes.
+from HealthKey extension columns on `Person`. The API rejects writes to
+**OMOP-mapped** PatientRecord fields; OMOP APIs, FHIR imports, and `Person`
+profile updates own those writes, then the projection refreshes. Unmapped
+projection-owned compatibility fields remain temporarily writable only where
+the implementation explicitly permits them; new integrations must not use that
+exception.
 
 The field-by-field ownership and migration plan is
 [`docs/omop_to_patientrecord.md`](docs/omop_to_patientrecord.md). It is the authoritative
@@ -48,7 +51,7 @@ The sanctioned write paths are:
 | `POST/PATCH/DELETE /api/v1/conditions/`, `/api/v1/measurements/`, etc. | Granular OMOP record writes |
 | `PATCH /api/v1/persons/{person_id}/` | Person demographic/profile extension updates |
 
-PatientRecord fields are read-only. New integrations must use granular OMOP APIs or FHIR
+Mapped PatientRecord fields are read-only. New integrations must use granular OMOP APIs or FHIR
 for clinical writes, where concept, time, unit, and provenance are explicit; use
 `PATCH /api/v1/persons/{person_id}/` for supported Person profile fields such as email,
 phone number, validation metadata, facility name, and demographic redaction preference.
@@ -238,9 +241,11 @@ extension columns on `Person` via `PATCH /api/v1/persons/{person_id}/` and then 
 | Medication or line-of-therapy fact | `/api/v1/drug-exposures/`, `/api/v1/episodes/`, `/api/v1/episode-events/`, or FHIR | medication/episode concept, known dates, provenance |
 | Demographic or supported profile value | `PATCH /api/v1/persons/{person_id}/` | the Person source attribute; refresh projects it |
 
-There are no writable concrete PatientRecord clinical columns. The field-level mapping,
-including the small set of server lifecycle attributes that are never client-writable, is
-maintained in [`docs/omop_to_patientrecord.md`](docs/omop_to_patientrecord.md).
+The target state has no writable concrete PatientRecord clinical columns. At
+runtime, only fields outside `PATIENT_RECORD_OMOP_MAPPED_FIELDS` may still be
+accepted as projection-owned compatibility fields; this temporary exception is
+not available to new integrations. The field-level mapping and migration status
+are maintained in [`docs/omop_to_patientrecord.md`](docs/omop_to_patientrecord.md).
 
 New integrations should write semantically complete OMOP facts to their own resource
 endpoint—for example a dated `Measurement` with its LOINC and unit—or use FHIR ingest.

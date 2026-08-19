@@ -41,7 +41,7 @@ def test_public_contract_documents_read_only_mapped_fields_and_legacy_policy():
         REPOSITORY_ROOT / "docs/utah-rhtp-technical-architecture-brief.md"
     ).read_text()
 
-    assert "PatientRecord fields are read-only." in api_surface
+    assert "Mapped PatientRecord fields are read-only." in api_surface
     assert "Profile/admin values that are\ndisplayed on PatientRecord" in api_surface
     assert "PatientRecord, such as email and validation metadata" in api_surface
     assert "PATCH /api/v1/persons/{person_id}/" in api_surface
@@ -50,7 +50,7 @@ def test_public_contract_documents_read_only_mapped_fields_and_legacy_policy():
     assert "405 Method Not Allowed" in api_surface
     assert '"fields": ["hemoglobin_g_dl"]' in api_surface
     assert "docs/omop_to_patientrecord.md" in api_surface
-    assert "There are no writable concrete PatientRecord clinical columns." in api_surface
+    assert "The target state has no writable concrete PatientRecord clinical columns." in api_surface
     assert "`PATCH /api/v1/persons/{person_id}/`" in api_surface
     assert "PatientRecord fields are read-only at the PatientRecord API." in architecture_brief
     assert "Producers write" in architecture_brief
