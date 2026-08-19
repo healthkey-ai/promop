@@ -88,6 +88,15 @@ _OMOP_DERIVED_FIELDS = [
     'therapy_ids_provenance',
     'therapy_lines_count', 'last_treatment',
     'concomitant_medications',
+    # Treatment assertions and summaries. These are set from dated OMOP rows
+    # below; clearing them prevents legacy PatientRecord patches surviving a
+    # source deletion.
+    'first_line_outcome', 'first_line_intent', 'first_line_discontinuation_reason',
+    'second_line_outcome', 'second_line_intent', 'second_line_discontinuation_reason',
+    'later_outcome', 'later_intent', 'later_discontinuation_reason',
+    'therapy_intent', 'reason_for_discontinuation', 'relapse_count',
+    'treatment_refractory_status', 'washout_period_duration',
+    'remission_duration_min', 'line_of_therapy', 'prior_therapy',
     # Legacy labs (derived via name-based Measurement lookup)
     'hemoglobin_level', 'hemoglobin_level_units',
     'white_blood_cell_count', 'white_blood_cell_count_units',
@@ -699,9 +708,6 @@ def _get_treatment_data(person: Person) -> dict:
         .order_by('drug_exposure_start_date', 'drug_exposure_id')
     )
 
-    if not drug_exposures:
-        return data
-
     recent_drugs = list(reversed(drug_exposures[-10:]))
 
     current_meds = []
@@ -726,6 +732,9 @@ def _get_treatment_data(person: Person) -> dict:
     # read-only (dry_run) mode, so the same grouping algorithm the enrich/import
     # steps use to *persist* Episodes also drives derivation. No OMOP rows are
     # written here; refresh_patient_record stays read-only.
+    if not drug_exposures:
+        return data
+
     from omop_core.services.lot_inference_service import infer_lot_for_person
     lots = infer_lot_for_person(person, dry_run=True)
     _apply_inferred_lots(data, lots)
@@ -1301,6 +1310,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         Observation.objects
         .filter(
             person=person,
+            is_erroneous=False,
             observation_source_value__startswith='LOT-',
             observation_source_value__endswith='-outcome',
         )
@@ -1326,7 +1336,105 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
     if later_lots:
         data['later_outcome'] = lot_outcomes[later_lots[0]]
 
+    _apply_treatment_assertions(data, person, episodes)
+
     return data
+
+
+def _treatment_assertion_value(row):
+    """Read a typed treatment assertion without treating source codes as values."""
+    value_concept = getattr(row, 'value_as_concept', None)
+    return (
+        _usable_concept_name(value_concept)
+        or getattr(row, 'value_as_string', None)
+        or getattr(row, 'value_source_value', None)
+    )
+
+
+def _apply_treatment_assertions(data, person, episodes):
+    """Project dated intent/discontinuation assertions onto their Episode line.
+
+    Explicit ``LOT-N-*`` source values win.  FHIR's standard LOINC therapy
+    intent/discontinuation observations are persisted as Measurements; when
+    they do not carry a line number, they are associated only when their event
+    date falls within exactly one persisted Episode interval.  Ambiguous facts
+    are deliberately left unprojected.
+    """
+    import re
+
+    bounds = {
+        e.episode_number: (e.episode_start_date, e.episode_end_date or e.episode_start_date)
+        for e in episodes if e.episode_number and e.episode_start_date
+    }
+    if not bounds:
+        return
+
+    assertions = []  # (date, line, kind, value)
+    pattern = re.compile(r'^LOT-(\d+)-(intent|discontinuation)$')
+    for obs in (
+        Observation.objects.filter(person=person, is_erroneous=False)
+        .select_related('value_as_concept').order_by('observation_date', 'observation_id')
+    ):
+        match = pattern.match(obs.observation_source_value or '')
+        if not match:
+            continue
+        value = _treatment_assertion_value(obs)
+        line = int(match.group(1))
+        if value and line in bounds:
+            assertions.append((obs.observation_date, line, match.group(2), value))
+
+    # The FHIR import writes these non-laboratory observations to Measurement.
+    # They are only assigned where the date has one unambiguous line owner.
+    for measurement in (
+        Measurement.objects.filter(person=person, is_erroneous=False)
+        .select_related('measurement_concept', 'value_as_concept')
+        .filter(
+            models.Q(measurement_concept__concept_code__in=('42804-5', '91379-3'))
+            | models.Q(measurement_source_value__in=('42804-5', '91379-3'))
+        ).order_by('measurement_date', 'measurement_id')
+    ):
+        candidate_lines = [
+            line for line, (start, end) in bounds.items()
+            if start <= measurement.measurement_date <= end
+        ]
+        if len(candidate_lines) != 1:
+            continue
+        value = _treatment_assertion_value(measurement)
+        if value:
+            kind = 'intent' if _measurement_code(measurement) == '42804-5' else 'discontinuation'
+            assertions.append((measurement.measurement_date, candidate_lines[0], kind, value))
+
+    latest = {}
+    for event_date, line, kind, value in assertions:
+        latest[(line, kind)] = (event_date, value)
+
+    field_prefix = {1: 'first_line', 2: 'second_line'}
+    for (line, kind), (_, value) in latest.items():
+        prefix = field_prefix.get(line, 'later' if line >= 3 else None)
+        if prefix:
+            field = f'{prefix}_{"intent" if kind == "intent" else "discontinuation_reason"}'
+            data[field] = value[:50]
+
+    # Legacy aggregate fields represent the most recently asserted line fact.
+    for kind, aggregate in (
+        ('intent', 'therapy_intent'),
+        ('discontinuation', 'reason_for_discontinuation'),
+    ):
+        candidates = [entry for (line, entry_kind), entry in latest.items() if entry_kind == kind]
+        if candidates:
+            data[aggregate] = max(candidates, key=lambda entry: entry[0])[1][:100 if kind == 'discontinuation' else 50]
+
+    # A washout is an observed gap between *persisted* therapy episodes, not a
+    # guess from refresh time.  Preserve the minimum positive inter-line gap.
+    ordered = sorted(bounds.items())
+    gaps = [
+        (next_start - current_end).days
+        for (_, (_, current_end)), (_, (next_start, _)) in zip(ordered, ordered[1:])
+        if next_start > current_end
+    ]
+    if gaps:
+        data['washout_period_duration'] = f'{min(gaps)} days'
+    data['line_of_therapy'] = str(max(bounds))
 
 
 def _get_vitals_data(person: Person) -> dict:
