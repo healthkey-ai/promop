@@ -20,16 +20,13 @@ function formatValue(value: unknown) {
   return String(value);
 }
 
-/** Columns whose name ends with `_concept_name` are hidden; their value is
- *  shown as a tooltip on the matching `_concept` ID cell instead. */
 function OmopTableView({ table }: { table: OmopTable }) {
   const columns = useMemo(() => {
     const seen = new Set<string>();
     table.rows.forEach((row) => {
       Object.keys(row).forEach((key) => seen.add(key));
     });
-    // Hide *_concept_name columns — they feed tooltips, not visible cells.
-    return Array.from(seen).filter((col) => !col.endsWith("_concept_name"));
+    return Array.from(seen);
   }, [table.rows]);
 
   return (
@@ -63,13 +60,6 @@ function OmopTableView({ table }: { table: OmopTable }) {
                   {columns.map((column) => {
                     const value = row[column];
                     const empty = value === null || value === undefined || value === "";
-                    // For *_concept columns, use the companion _concept_name as tooltip
-                    const nameCol = column.endsWith("_concept") ? column + "_name" : null;
-                    const conceptName = nameCol ? row[nameCol] : null;
-                    const tooltip = conceptName
-                      ? `${formatValue(value)} — ${conceptName}`
-                      : formatValue(value);
-                    const hasName = typeof conceptName === "string";
                     return (
                       <td
                         key={column}
@@ -77,16 +67,9 @@ function OmopTableView({ table }: { table: OmopTable }) {
                           "max-w-[260px] whitespace-nowrap px-3 py-2 font-mono",
                           empty ? "text-slate-400" : "text-slate-700",
                         ].join(" ")}
-                        title={tooltip}
+                        title={formatValue(value)}
                       >
-                        <span className="block truncate">
-                          {formatValue(value)}
-                          {hasName && (
-                            <span className="ml-1 font-sans text-[10px] text-slate-400">
-                              {conceptName}
-                            </span>
-                          )}
-                        </span>
+                        <span className="block truncate">{formatValue(value)}</span>
                       </td>
                     );
                   })}
