@@ -58,7 +58,8 @@ function OmopTableView({ table }: { table: OmopTable }) {
               {table.rows.map((row, rowIndex) => (
                 <tr key={rowIndex} className="bg-background align-top">
                   {columns.map((column) => {
-                    const empty = row[column] === null || row[column] === undefined || row[column] === "";
+                    const value = row[column];
+                    const empty = value === null || value === undefined || value === "";
                     return (
                       <td
                         key={column}
@@ -66,9 +67,9 @@ function OmopTableView({ table }: { table: OmopTable }) {
                           "max-w-[260px] whitespace-nowrap px-3 py-2 font-mono",
                           empty ? "text-slate-400" : "text-slate-700",
                         ].join(" ")}
-                        title={formatValue(row[column])}
+                        title={formatValue(value)}
                       >
-                        <span className="block truncate">{formatValue(row[column])}</span>
+                        <span className="block truncate">{formatValue(value)}</span>
                       </td>
                     );
                   })}
