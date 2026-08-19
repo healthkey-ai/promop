@@ -39,6 +39,11 @@ endpoint may update a Person attribute (for example a name), but it writes the
 source row and rederives; it never writes PatientRecord directly. `patient_info`
 is legacy-only and must not gain consumers.
 
+Management commands follow the same rule. `backfill_therapy_concept_ids`
+rederives therapy summaries from OMOP treatment facts; it never reverse-maps
+PatientRecord display text. `seed_test_patients` is an explicitly acknowledged
+DEBUG-only fixture helper, not an import or production data path.
+
 ## Delivery order
 
 1. Finish LOINC Measurement derivations and aliases.

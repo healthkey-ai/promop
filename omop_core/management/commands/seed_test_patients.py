@@ -1,5 +1,5 @@
 """
-Management command: seed_test_patients
+Debug-only fixture command: seed_test_patients
 
 Creates a small set of fake PatientRecord records for local end-to-end testing.
 Covers all four diseases supported by exact (MM, FL, BC, CLL).
@@ -8,10 +8,15 @@ Each patient is designed to match at least one of the trials created by
 exact's seed_test_trials command.
 
 Usage:
-    python manage.py seed_test_patients
-    python manage.py seed_test_patients --clear   # wipe first
+    python manage.py seed_test_patients --allow-test-fixtures
+    python manage.py seed_test_patients --allow-test-fixtures --clear
+
+This command is intentionally not a data-import route.  It writes synthetic
+PatientRecord fixtures for local demo use only and refuses to run outside
+DEBUG mode.  Clinical integrations must write OMOP facts and rederive.
 """
 from django.core.management.base import BaseCommand
+from django.conf import settings
 
 from omop_core.models import PatientRecord, Person
 
@@ -235,9 +240,14 @@ TEST_PATIENTS = [
 
 
 class Command(BaseCommand):
-    help = 'Create fake test patients (Person + PatientRecord) for local end-to-end testing.'
+    help = 'DEBUG-only: create fake PatientRecord fixtures for local end-to-end testing.'
 
     def add_arguments(self, parser):
+        parser.add_argument(
+            '--allow-test-fixtures',
+            action='store_true',
+            help='Required acknowledgement that this creates non-clinical local fixtures.',
+        )
         parser.add_argument(
             '--clear',
             action='store_true',
@@ -245,6 +255,17 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        if not settings.DEBUG:
+            self.stderr.write(self.style.ERROR(
+                'seed_test_patients is DEBUG-only and cannot run in a production deployment.'
+            ))
+            return
+        if not options['allow_test_fixtures']:
+            self.stderr.write(self.style.ERROR(
+                'Refusing to create fixtures. Re-run with --allow-test-fixtures in a DEBUG environment.'
+            ))
+            return
+
         if options['clear']:
             deleted, _ = Person.objects.filter(
                 person_id__gte=9001, person_id__lte=9999
