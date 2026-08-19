@@ -516,7 +516,10 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
         extractor="_get_mm_specific_data",
         selection_rule="composite",
         description="Composite SLiM criteria: sixty% plasma cells, light chain ratio, MRI lesions",
-        constituent_fields=["clonal_plasma_cells", "kappa_flc", "lambda_flc"],
+        constituent_fields=[
+            "clonal_plasma_cells", "kappa_flc", "lambda_flc",
+            "free_light_chain_ratio",
+        ],
     ),
 }
 

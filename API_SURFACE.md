@@ -969,6 +969,36 @@ systolic_blood_pressure            8480-6     mm[Hg]          Systolic blood pre
 diastolic_blood_pressure           8462-4     mm[Hg]          Diastolic blood pressure
 heartrate                          8867-4     /min            Heart rate
 
+# Multiple myeloma disease burden
+# Several spellings map to one field: real-world EHR extracts do not agree on a
+# single LOINC for the free light chains, and both must project.
+monoclonal_protein_serum           51435-6    g/dL            M-protein band 1 [Mass/volume] in Serum by Electrophoresis
+monoclonal_protein_serum           33358-3    g/dL            Protein.monoclonal [Mass/volume] in Serum by Electrophoresis
+monoclonal_protein_urine           32730-5    mg/24h          Protein.monoclonal [Mass/time] in 24 hour Urine
+kappa_flc                          36916-5    mg/dL           Kappa light chains.free [Mass/volume] in Serum
+kappa_flc                          80515-0    mg/dL           Kappa light chains.free [Mass/volume] in Serum by nephelometry
+lambda_flc                         33944-0    mg/dL           Lambda light chains.free [Mass/volume] in Serum
+lambda_flc                         80516-8    mg/dL           Lambda light chains.free [Mass/volume] in Serum by nephelometry
+free_light_chain_ratio             48378-4    {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
+free_light_chain_ratio             80517-6    {ratio}         Kappa/Lambda light chains.free ratio by nephelometry
+free_light_chain_ratio             104546-7   {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
+clonal_plasma_cells                11118-7    %               Plasma cells/100 cells in Bone marrow
+
+# 33944-8 (kappa) and 33945-5 (lambda) also project, but they are NOT real LOINC
+# codes — they exist only as this app's seeded demo concepts and are kept so
+# demo patients keep rendering. Note that 33944-8 (seeded kappa) and 33944-0
+# (real LOINC lambda) differ by one character and are opposite analytes.
+#
+# UNITS: kappa_flc and lambda_flc are converted to mg/L from the Measurement's
+# unit_source_value (mg/L, mg/dL, mg/100mL, ug/mL, g/L). Labs report FLC in mg/L
+# and mg/dL interchangeably — a 10x difference under one field name — so a row
+# whose unit is absent or unrecognised is projected UNCONVERTED and logged at
+# WARNING. Such a row is not a valid input to any absolute threshold: the SLiM
+# light-chain criterion (IMWG 2014: ratio >= 100 AND involved chain >= 100 mg/L)
+# treats it as unproven rather than assuming a unit. Senders should always
+# populate unit_source_value. Every other field in this table is projected in
+# the source's own unit without conversion.
+
 # Performance status
 ecog_performance_status            89247-1    {score}         ECOG Performance Status score
 karnofsky_performance_score        89243-0    {score}         Karnofsky Performance Status score

@@ -61,7 +61,7 @@ _L = {
     'urine_m':    '32730-5',  # Protein M-spike [Mass/time] in 24h Urine
     'kflc':       '33944-8',  # Kappa free light chains [Mass/vol] in Serum
     'lflc':       '33945-5',  # Lambda free light chains [Mass/vol] in Serum
-    'bmpc':       '26098-4',  # Plasma cells [%] in Bone marrow
+    'bmpc':       '11118-7',  # Plasma cells/100 cells in Bone marrow
     'ef':         '8806-2',   # Left ventricular Ejection fraction by US
     'ecog':       '89247-1',  # ECOG Performance Status score
     'kps':        '89243-0',  # Karnofsky Performance Status score
