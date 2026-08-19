@@ -2,7 +2,8 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
-    CurrentUserViewSet, PatientRecordViewSet, login_view, logout_view, auth_test,
+    CurrentUserViewSet, PatientRecordViewSet,
+    PatientRecordV1ViewSet, login_view, logout_view, auth_test,
     change_password,
     PersonViewSet,
     ConditionOccurrenceViewSet, DrugExposureViewSet, MeasurementViewSet,
@@ -40,7 +41,7 @@ from .break_glass import break_glass
 router = DefaultRouter()
 
 router.register(r'user', CurrentUserViewSet, basename='v1-user')
-router.register(r'patient-records', PatientRecordViewSet, basename='v1-patient-records')
+router.register(r'patient-records', PatientRecordV1ViewSet, basename='v1-patient-records')
 router.register(r'persons', PersonViewSet, basename='v1-persons')
 router.register(r'conditions', ConditionOccurrenceViewSet, basename='v1-conditions')
 router.register(r'drug-exposures', DrugExposureViewSet, basename='v1-drug-exposures')

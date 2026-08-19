@@ -700,6 +700,28 @@ The FHIR upload endpoint in `patient_portal/api/views.py` (`upload_fhir_bundle`)
 
 ---
 
+## Deferring the PatientRecord Derivation
+
+Every clinical write re-derives the whole `PatientRecord`, and derivation cost
+grows with the rows the person already holds. On a bulk loaded patient that is
+12-32s per row level write.
+
+`?skip_refresh=true` suppresses it, on the bulk POST and on the row level
+`PATCH` and `DELETE` of the five clinical endpoints. Opt-in: without it every
+verb still derives, because existing callers depend on that.
+
+A client that defers must derive afterwards:
+
+```
+POST /api/v1/patient-records/{person_id}/refresh/
+```
+
+Admin or service-token only. It does not swallow a failing derivation, unlike
+the signal path in `omop_core/signals.py`, because a 2xx over a record that did
+not re-derive would be a lie on an endpoint that exists only to derive.
+
+---
+
 ## Bulk OMOP Row Writes
 
 The five OMOP clinical CRUD endpoints (`conditions`, `drug-exposures`, `measurements`,

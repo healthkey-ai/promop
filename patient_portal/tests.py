@@ -17716,3 +17716,181 @@ class BulkOmopUpsertTest(TestCase):
             PatientRecord.objects.get(person=self.person).derived_at,
             derived_before,
             'the collapse landed without refreshing the read model')
+
+
+from unittest.mock import patch  # noqa: E402
+from rest_framework.response import Response  # noqa: E402
+from patient_portal.models import PatientUser  # noqa: E402
+
+
+class OmopDeferRefreshTest(TestCase):
+    """Deferring the derivation on row level writes, and triggering one."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(person_id=32201)
+        PatientRecord.objects.create(person=cls.person)
+        cls.concept = Concept.objects.get(concept_id=3000963)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='defer-refresh-test',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token")
+        self.measurement = Measurement.objects.create(
+            measurement_id=920001,
+            person=self.person,
+            measurement_concept=self.concept,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='718-7',
+            value_as_number=5,
+        )
+
+    def _patch(self, query: str = '') -> Response:
+        return self.client.patch(
+            f'/api/v1/measurements/{self.measurement.pk}/{query}',
+            {'value_as_number': 9}, format='json')
+
+    def _delete(self, query: str = '') -> Response:
+        return self.client.delete(
+            f'/api/v1/measurements/{self.measurement.pk}/{query}')
+
+    def test_patch_with_skip_refresh_does_not_derive(self):
+        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+            resp = self._patch('?skip_refresh=true')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        refresh.assert_not_called()
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.value_as_number, 9)
+
+    def test_delete_with_skip_refresh_does_not_derive(self):
+        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+            resp = self._delete('?skip_refresh=true')
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        refresh.assert_not_called()
+        self.assertFalse(Measurement.objects.filter(pk=920001).exists())
+
+    def test_patch_without_the_flag_still_derives(self):
+        # The flag must not become the default, every existing caller depends
+        # on a write deriving.
+        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+            self._patch()
+
+        self.assertTrue(refresh.called)
+
+    def test_delete_without_the_flag_still_derives(self):
+        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+            self._delete()
+
+        self.assertTrue(refresh.called)
+
+    def test_skip_refresh_false_still_derives(self):
+        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+            self._patch('?skip_refresh=false')
+
+        self.assertTrue(refresh.called)
+
+    def test_refresh_endpoint_derives_once(self):
+        with patch('patient_portal.api.views.refresh_patient_record') as refresh:
+            # The response reads attributes off the record, and a bare
+            # MagicMock makes the JSON encoder walk it forever.
+            refresh.return_value = PatientRecord.objects.get(person=self.person)
+            resp = self.client.post(
+                f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(refresh.call_count, 1)
+        self.assertEqual(resp.data['person_id'], self.person.person_id)
+        self.assertTrue(resp.data['refreshed'])
+
+    def test_refresh_endpoint_reflects_deferred_writes(self):
+        # Asserted on a field the measurement actually projects into. A
+        # timestamp proves nothing here, setUp already populated it.
+        record = PatientRecord.objects.get(person=self.person)
+        self.assertEqual(float(record.hemoglobin_g_dl), 5.0)
+
+        self.client.patch(
+            f'/api/v1/measurements/{self.measurement.pk}/?skip_refresh=true',
+            {'value_as_number': 42}, format='json')
+
+        record.refresh_from_db()
+        self.assertEqual(float(record.hemoglobin_g_dl), 5.0,
+                         'the deferred PATCH derived anyway')
+
+        resp = self.client.post(
+            f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        record.refresh_from_db()
+        self.assertEqual(float(record.hemoglobin_g_dl), 42.0,
+                         'refresh did not pick up the deferred write')
+
+    def test_refresh_endpoint_rejects_a_non_admin(self):
+        patient_identity = Identity.objects.create_user(
+            email='defer-patient@example.test', password='pw')
+        PatientUser.objects.create(identity=patient_identity, person=self.person)
+        client = APIClient()
+        client.force_authenticate(user=patient_identity)
+
+        resp = client.post(
+            f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_a_non_admin_cannot_defer(self):
+        # Otherwise a patient defers their own write and cannot rebuild, because
+        # the refresh action is admin only.
+        patient_identity = Identity.objects.create_user(
+            email='defer-nonadmin@example.test', password='pw')
+        PatientUser.objects.create(identity=patient_identity, person=self.person)
+        client = APIClient()
+        client.force_authenticate(user=patient_identity)
+
+        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+            client.patch(
+                f'/api/v1/measurements/{self.measurement.pk}/?skip_refresh=true',
+                {'value_as_number': 9}, format='json')
+
+        self.assertTrue(refresh.called, 'a non-admin deferred and cannot recover')
+
+    def test_refresh_is_not_published_on_the_legacy_prefix(self):
+        # The legacy router registers PatientRecordViewSet itself, so an action
+        # added there would widen a frozen API. Asserted on resolution rather
+        # than status, because the unmatched path falls through to the SPA
+        # catch-all and its status is not this test's business.
+        from django.urls import resolve
+
+        legacy = resolve(f'/api/patient-info/{self.person.person_id}/refresh/')
+        v1 = resolve(f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+        self.assertEqual(getattr(v1.func, 'actions', {}).get('post'), 'refresh')
+        self.assertNotEqual(getattr(legacy.func, 'actions', {}).get('post'), 'refresh')
+
+    def test_refresh_endpoint_is_post_only(self):
+        resp = self.client.get(
+            f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_refresh_endpoint_404s_for_an_unknown_person(self):
+        resp = self.client.post('/api/v1/patient-records/99999999/refresh/')
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_a_failing_derivation_is_reported_not_swallowed(self):
+        with patch('patient_portal.api.views.refresh_patient_record',
+                   side_effect=ValueError('derivation exploded')):
+            with self.assertRaises(ValueError):
+                self.client.post(
+                    f'/api/v1/patient-records/{self.person.person_id}/refresh/')
