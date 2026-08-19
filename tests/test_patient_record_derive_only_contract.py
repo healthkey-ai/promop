@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+from omop_core.models import PatientRecord
+from omop_core.services.patient_record_service import PATIENT_RECORD_OMOP_MAPPED_FIELDS
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,3 +64,18 @@ def test_partial_update_schema_description_explains_omop_write_migration():
     assert "returns 405" in api_views
     assert "docs/omop_to_patientrecord.md" in api_views
     assert "Write the appropriate OMOP resource" in api_views
+
+
+def test_every_concrete_patientrecord_data_column_is_api_read_only():
+    """No pending derivation is a temporary PatientRecord write exception."""
+    lifecycle_fields = {
+        'id', 'person', 'organization', 'created_at', 'updated_at',
+        'derived_at', 'derivation_version', 'user_edited_fields',
+    }
+    writable = {
+        field.name for field in PatientRecord._meta.concrete_fields
+        if field.name not in lifecycle_fields
+        and field.name not in PATIENT_RECORD_OMOP_MAPPED_FIELDS
+    }
+
+    assert writable == set()
