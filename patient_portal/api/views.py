@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Callable, ContextManager
 
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
@@ -11,7 +11,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, models, transaction
 from django.db.models import Q, F
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
@@ -22,6 +22,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import validate_email
 from omop_core.models import (
+    Organization,
     Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
@@ -4988,13 +4989,14 @@ def _prefetch_bulk_related(serializer, rows):
 #: vocabulary load resolves a code that previously fell back to 'No matching
 #: concept'.
 #:
-#: Measurement is the one deliberate divergence. A patient legitimately has
-#: several distinct results for one analyte on one day (repeat draws, sub-daily
-#: vitals), so keying it on (source_value, date) alone would not dedup a re-run
-#: — it would delete real results and keep one. Its timestamp and value
-#: therefore join the key, which is exactly what
-#: ``fhir/sync.py::_insert_discrete_observations`` already dedups discrete
-#: readings on.
+#: Measurement and Observation diverge on purpose. A patient legitimately has
+#: several distinct results for one analyte on one day, so keying them on
+#: (source_value, date) alone would delete real results instead of deduping.
+#:
+#: Only raw value columns may join a key. ``value_as_concept`` is re-resolved by
+#: a vocabulary load just like the concept column, so keying on it would strand
+#: a duplicate beside the row it should have upgraded. ``value_source_value`` is
+#: the raw text behind that resolution, so it separates two coded answers safely.
 #:
 #: Format: model name -> (source_value field, date field, concept field, extra key fields)
 _UPSERT_KEYS = {
@@ -5006,7 +5008,9 @@ _UPSERT_KEYS = {
                             'measurement_concept',
                             ('measurement_datetime', 'value_as_number')),
     'Observation':         ('observation_source_value', 'observation_date',
-                            'observation_concept', ()),
+                            'observation_concept',
+                            ('observation_datetime', 'value_as_number',
+                             'value_as_string', 'value_source_value')),
     'ProcedureOccurrence': ('procedure_source_value', 'procedure_date',
                             'procedure_concept', ()),
 }
@@ -5347,6 +5351,42 @@ class _OmopBulkCreateMixin:
 
         from omop_core.signals import suppress_patient_record_refresh
 
+        try:
+            return self._bulk_write(
+                request, person, org, model_cls, pk_field, model_name, validated,
+                source, source_user_id, reason, skip_refresh, upsert,
+                suppress_patient_record_refresh)
+        except IntegrityError as exc:
+            # A conflict over data, not a server fault. The distinction decides
+            # whether the caller retries, and a 500 reads as "service is down".
+            logger.exception(
+                'bulk %s write for person %s failed on a database constraint',
+                model_name, person.person_id)
+            return Response(
+                {'detail': (
+                    'The batch conflicted with a database constraint and was '
+                    'rolled back whole; no rows were written. Retrying is safe.'
+                ), 'error': str(exc).strip().partition('\n')[0]},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+    def _bulk_write(
+        self,
+        request: Request,
+        person: Person,
+        org: Organization | None,
+        model_cls: type[models.Model],
+        pk_field: str,
+        model_name: str,
+        validated: list[dict[str, Any]],
+        source: str | None,
+        source_user_id: str | None,
+        reason: str | None,
+        skip_refresh: bool,
+        upsert: bool,
+        suppress_patient_record_refresh: Callable[[], ContextManager[None]],
+    ) -> Response:
+        """Write one validated batch and derive the read model once."""
         with transaction.atomic():
             # bulk_create does not fire post_save today, so the per-row refresh
             # receivers would not run anyway. Suppressing explicitly is the

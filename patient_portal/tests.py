@@ -11,6 +11,7 @@ Test flow:
 
 import io
 import json
+from typing import Any
 import os
 import tempfile
 import unittest
@@ -17894,3 +17895,223 @@ class OmopDeferRefreshTest(TestCase):
             with self.assertRaises(ValueError):
                 self.client.post(
                     f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+
+class BulkUpsertObservationIdentityTest(TestCase):
+    """Observation event identity, and how a constraint failure is reported."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(person_id=32101)
+        PatientRecord.objects.create(person=cls.person)
+        cls.concept = Concept.objects.get(concept_id=3000963)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='bulk-upsert-obs-test',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token")
+
+    def _obs(self, source_value: str | None, day: str = '2024-01-01',
+             value: str | None = None) -> dict[str, Any]:
+        row = {
+            'person': self.person.person_id,
+            'observation_concept': self.concept.concept_id,
+            'observation_date': day,
+            'observation_type_concept': self.type_concept.concept_id,
+            'observation_source_value': source_value,
+        }
+        if value is not None:
+            row['value_as_string'] = value
+        return row
+
+    def _repeated_key_batch(self) -> list[dict[str, Any]]:
+        """176 rows over 116 distinct events, 20 of them repeated 4 times.
+
+        Repeats have to match in every key column, not just source_value. The
+        key includes raw values, so rows differing by value are distinct events
+        and exercise nothing.
+        """
+        rows = []
+        for i in range(20):
+            rows += [self._obs(f'OBS-{i}', value='result') for _ in range(4)]
+        rows += [self._obs(f'FILL-{i}', value='tail') for i in range(96)]
+        assert len(rows) == 176
+        return rows
+
+    def test_batch_with_repeated_new_keys_does_not_500(self):
+        rows = self._repeated_key_batch()
+
+        resp = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        # Without this the batch can stop containing repeats, which a key
+        # change already did once, and the test keeps passing regardless.
+        self.assertEqual(resp.data['created'], 116)
+        self.assertEqual(
+            Observation.objects.filter(person=self.person).count(), 116,
+            'within-batch repeats did not collapse')
+
+    def test_batch_with_repeated_new_keys_does_not_500_with_refresh(self):
+        rows = self._repeated_key_batch()
+
+        resp = self.client.post('/api/v1/observations/', rows, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+    def test_batch_with_repeated_new_keys_does_not_500_with_provenance(self):
+        rows = self._repeated_key_batch()
+
+        resp = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json',
+            HTTP_X_PROVENANCE_SOURCE='healthtree', HTTP_X_PROVENANCE_USER_ID='etl')
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+    def test_repeated_keys_repost_does_not_500(self):
+        """Second run: now the repeated keys DO already exist on file."""
+        rows = self._repeated_key_batch()
+
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+        resp = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+    def test_batch_with_repeated_new_keys_does_not_500_unprefixed_route(self):
+        rows = self._repeated_key_batch()
+
+        resp = self.client.post(
+            '/api/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+    def test_distinct_results_on_one_date_both_survive(self):
+        """Two different results on one date are two events, not one."""
+        rows = [
+            self._obs('OBS-1', value='positive'),
+            self._obs('OBS-1', value='negative'),
+        ]
+
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        stored = set(
+            Observation.objects.filter(person=self.person)
+            .values_list('value_as_string', flat=True))
+        self.assertEqual(stored, {'positive', 'negative'})
+
+    def test_distinct_results_still_converge_on_repost(self):
+        """Widening the key must not cost idempotency."""
+        rows = [
+            self._obs('OBS-1', value='positive'),
+            self._obs('OBS-1', value='negative'),
+        ]
+
+        first = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+        second = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(first.data['created'], 2)
+        self.assertEqual(second.data['created'], 0)
+        self.assertEqual(second.data['ids'], first.data['ids'])
+        self.assertEqual(Observation.objects.filter(person=self.person).count(), 2)
+
+    def test_concept_still_upgrades_in_place(self):
+        """The concept stays outside the key, so a vocabulary load corrects it."""
+        upgraded = Concept.objects.get(concept_id=4112853)
+        rows = [self._obs('OBS-1', value='positive')]
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        rows[0]['observation_concept'] = upgraded.concept_id
+        resp = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(resp.data['created'], 0)
+        self.assertEqual(resp.data['updated'], 1)
+        stored = Observation.objects.filter(person=self.person)
+        self.assertEqual(stored.count(), 1, 'the concept change duplicated the row')
+        self.assertEqual(stored.first().observation_concept_id, upgraded.concept_id)
+
+    def test_value_as_concept_stays_out_of_the_key(self):
+        """value_as_concept is vocabulary resolved, so it must update in place."""
+        resolved = Concept.objects.get(concept_id=4112853)
+        rows = [self._obs('OBS-1', value='positive')]
+        rows[0]['value_source_value'] = 'POS'
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        rows[0]['value_as_concept'] = resolved.concept_id
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(
+            Observation.objects.filter(person=self.person).count(), 1,
+            'resolving value_as_concept stranded a duplicate')
+
+    def test_rows_without_an_identity_are_still_always_inserted(self):
+        rows = [self._obs(None, value='a'), self._obs(None, value='b')]
+
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(Observation.objects.filter(person=self.person).count(), 4)
+
+    def test_database_constraint_failure_is_a_409_not_a_500(self):
+        """A 500 reads as "service is down", which changes whether to retry."""
+        from unittest.mock import patch
+        from django.db import IntegrityError
+
+        rows = [self._obs('OBS-1', value='x')]
+
+        with patch.object(Observation.objects, 'bulk_create',
+                          side_effect=IntegrityError('duplicate key value')):
+            resp = self.client.post(
+                '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT, resp.data)
+        self.assertIn('rolled back whole', resp.data['detail'])
+        self.assertEqual(resp.data['error'], 'duplicate key value')
+        self.assertEqual(Observation.objects.filter(person=self.person).count(), 0)
+
+    def test_constraint_failure_with_an_empty_message_is_still_a_409(self):
+        """Summarising the driver message must not itself raise."""
+        from unittest.mock import patch
+        from django.db import IntegrityError
+
+        rows = [self._obs('OBS-1', value='x')]
+
+        with patch.object(Observation.objects, 'bulk_create',
+                          side_effect=IntegrityError('   ')):
+            resp = self.client.post(
+                '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT, resp.data)
+        self.assertEqual(resp.data['error'], '')
+
+    def test_distinct_times_on_one_date_are_distinct_events(self):
+        rows = [
+            self._obs('OBS-1', value='x'),
+            self._obs('OBS-1', value='x'),
+        ]
+        rows[0]['observation_datetime'] = '2024-01-01T08:00:00Z'
+        rows[1]['observation_datetime'] = '2024-01-01T20:00:00Z'
+
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(Observation.objects.filter(person=self.person).count(), 2)
