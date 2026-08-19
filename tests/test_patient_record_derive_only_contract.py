@@ -39,11 +39,25 @@ def test_public_contract_documents_read_only_mapped_fields_and_legacy_policy():
     ).read_text()
 
     assert "PatientRecord fields are read-only." in api_surface
-    assert "Profile/admin values that are displayed on" in api_surface
+    assert "Profile/admin values that are\ndisplayed on PatientRecord" in api_surface
     assert "PatientRecord, such as email and validation metadata" in api_surface
     assert "PATCH /api/v1/persons/{person_id}/" in api_surface
     assert "Legacy SQL compatibility only:" in api_surface
     assert "New integrations must not query it" in api_surface
+    assert "405 Method Not Allowed" in api_surface
+    assert '"fields": ["hemoglobin_g_dl"]' in api_surface
+    assert "docs/omop_to_patientrecord.md" in api_surface
+    assert "There are no writable concrete PatientRecord clinical columns." in api_surface
+    assert "`PATCH /api/v1/persons/{person_id}/`" in api_surface
     assert "PatientRecord fields are read-only at the PatientRecord API." in architecture_brief
     assert "Producers write" in architecture_brief
     assert "complete, provenance-bearing OMOP facts (or FHIR)" in architecture_brief
+
+
+def test_partial_update_schema_description_explains_omop_write_migration():
+    """The generated OpenAPI operation inherits this method documentation."""
+    api_views = (REPOSITORY_ROOT / "patient_portal/api/views.py").read_text()
+
+    assert "returns 405" in api_views
+    assert "docs/omop_to_patientrecord.md" in api_views
+    assert "Write the appropriate OMOP resource" in api_views

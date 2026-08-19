@@ -603,12 +603,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         })
 
     def partial_update(self, request, pk=None):
-        """PATCH only projection-owned fields with no OMOP representation.
+        """Patch the PatientRecord compatibility surface.
 
-        A mapped clinical PatientRecord field is output from an OMOP fact.  It
+        A mapped clinical PatientRecord field is output from an OMOP fact. It
         cannot safely supply the fact's concept, time, unit, or provenance, so
-        this endpoint rejects it rather than recreating the retired
-        PatientRecord-to-OMOP write-through path.
+        it returns 405 rather than recreating the retired PatientRecord-to-OMOP
+        write-through path. Write the appropriate OMOP resource (or ingest
+        FHIR) and let refresh_patient_record rebuild this read model. See
+        docs/omop_to_patientrecord.md for the field-to-source mapping.
         """
         try:
             person = Person.objects.get(person_id=pk)
