@@ -13,8 +13,10 @@ Covers:
 """
 
 import pytest
+from django.contrib.contenttypes.models import ContentType
 from omop_core.management.commands.populate_patient_record import Command
-from omop_core.models import PersonLanguageSkill
+from omop_core.models import PersonLanguageSkill, ProvenanceRecord
+from omop_core.services.patient_record_service import _get_tumor_size_data, refresh_patient_record
 from tests.factories import (
     ConceptFactory, PersonFactory, PatientRecordFactory,
     MeasurementFactory, ObservationFactory,
@@ -153,9 +155,60 @@ class TestCllMeasurements:
     def test_largest_lymph_node_size(self):
         person = PersonFactory()
         concept = _loinc_concept('21889-1', 'Lymph node greatest dimension')
-        MeasurementFactory(person=person, measurement_concept=concept, value_as_number=3.2)
+        MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            value_as_number=3.2,
+            qualifier_source_value='lymph-node',
+        )
         data = _cmd().get_cll_data(person)
         assert data['largest_lymph_node_size'] == pytest.approx(3.2)
+
+    def test_code_only_21889_is_not_treated_as_lymph_node(self):
+        person = PersonFactory()
+        concept = _loinc_concept('21889-1', 'Size Tumor')
+        MeasurementFactory(person=person, measurement_concept=concept, value_as_number=4.1)
+        data = _cmd().get_cll_data(person)
+        assert 'largest_lymph_node_size' not in data
+
+    def test_tumor_and_lymph_node_contexts_derive_separately(self):
+        person = PersonFactory()
+        concept = _loinc_concept('21889-1', 'Size Tumor')
+        tumor_measurement = MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            measurement_date='2024-01-01',
+            value_as_number=4.1,
+            unit_source_value='cm',
+        )
+        ProvenanceRecord.objects.create(
+            source='EHR_SYNC',
+            source_user_id='tumor-fixture',
+            content_type=ContentType.objects.get_for_model(tumor_measurement),
+            object_id=tumor_measurement.pk,
+        )
+        MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            measurement_date='2024-01-02',
+            value_as_number=2.2,
+            unit_source_value='cm',
+            qualifier_source_value='lymph-node',
+        )
+        assert _get_tumor_size_data(person) == {'tumor_size': pytest.approx(4.1)}
+        record = refresh_patient_record(person)
+        assert record.tumor_size == pytest.approx(4.1)
+        assert record.largest_lymph_node_size == pytest.approx(2.2)
+        assert ProvenanceRecord.objects.filter(
+            source='EHR_SYNC', source_user_id='tumor-fixture',
+            object_id=tumor_measurement.pk,
+        ).exists()
+
+        # Removing the source facts must clear both projections on refresh.
+        MeasurementFactory._meta.model.objects.filter(person=person).delete()
+        record = refresh_patient_record(person)
+        assert record.tumor_size is None
+        assert record.largest_lymph_node_size is None
 
     def test_missing_measurement_not_in_data(self):
         person = PersonFactory()

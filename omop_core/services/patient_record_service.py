@@ -176,6 +176,10 @@ _OMOP_DERIVED_FIELDS = [
     # Staging
     'stage', 'tumor_stage', 'nodes_stage', 'distant_metastasis_stage', 'staging_modalities',
     'metastatic_status', 'bone_only_metastasis_status',
+    # Tumour measurements.  LOINC 21889-1 is tumour size; a lymph-node
+    # measurement using that code is accepted only with an explicit OMOP
+    # qualifier_source_value of ``lymph-node``.
+    'tumor_size', 'largest_lymph_node_size',
     # Biopsy
     'histologic_type', 'biopsy_grade',
     # Genomics
@@ -522,6 +526,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             _get_laboratory_data,
             _get_performance_data,
             _get_genetic_mutations,
+            _get_tumor_size_data,
             _get_cll_data,
             _get_lymphoma_data,
             _get_bc_clinical_data,
@@ -2722,6 +2727,28 @@ def _get_genetic_mutations(person: Person) -> dict:
     return data
 
 
+def _get_tumor_size_data(person: Person) -> dict:
+    """Derive tumour size from the semantically tumour-specific LOINC row.
+
+    LOINC 21889-1 is ``Size Tumor``.  Some legacy feeds reused it for a
+    lymph-node measurement; those rows must carry an explicit
+    ``qualifier_source_value=lymph-node`` and are routed by ``_get_cll_data``.
+    A code-only row is therefore never allowed to populate both projections.
+    """
+    rows = (
+        Measurement.objects
+        .filter(person=person, value_as_number__isnull=False)
+        .filter(
+            Q(measurement_concept__concept_code='21889-1')
+            | Q(measurement_source_value='21889-1')
+        )
+        .exclude(qualifier_source_value__iexact='lymph-node')
+        .order_by('-measurement_date', '-measurement_id')
+    )
+    row = rows.first()
+    return {'tumor_size': float(row.value_as_number)} if row else {}
+
+
 def _get_cll_data(person: Person) -> dict:
     data = {}
     measurements = (
@@ -2743,7 +2770,6 @@ def _get_cll_data(person: Person) -> dict:
         '48094-6': 'serum_beta2_microglobulin_level',
         '8632-1':  'qtcf_value',
         '44996-6': 'spleen_size',
-        '21889-1': 'largest_lymph_node_size',
     }
     for loinc_code, field in loinc_map.items():
         m = measurements.filter(
@@ -2752,6 +2778,22 @@ def _get_cll_data(person: Person) -> dict:
         ).first()
         if m:
             data[field] = float(m.value_as_number)
+
+    # A lymph-node size is a distinct clinical meaning from LOINC 21889-1
+    # (Size Tumor).  Require the explicit source qualifier so the same row can
+    # never populate both PatientRecord columns.
+    lymph_node = (
+        measurements
+        .filter(
+            Q(measurement_concept__concept_code='21889-1')
+            | Q(measurement_source_value='21889-1')
+        )
+        .filter(qualifier_source_value__iexact='lymph-node')
+        .exclude(value_as_number__isnull=True)
+        .first()
+    )
+    if lymph_node:
+        data['largest_lymph_node_size'] = float(lymph_node.value_as_number)
 
     for m in measurements:
         if not m.measurement_concept:

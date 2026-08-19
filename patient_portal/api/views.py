@@ -2459,11 +2459,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             if observation.get('note'):
                                 geographic_exposure_risk_details = observation['note'][0].get('text')
                         
-                        # Check for tumor size
-                        if 'tumor size' in obs_text or 'size tumor' in obs_text:
-                            if observation.get('valueQuantity'):
-                                tumor_size = observation['valueQuantity'].get('value')
-                        
                         # Check for lymph node status — exclude TNM N-stage LOINC (21906-3)
                         # which carries AJCC notation, not a binary status
                         elif ('lymph node' in obs_text or 'lymph nodes' in obs_text) and loinc_code != '21906-3':
@@ -2652,6 +2647,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         value_number = None
                         value_string = None
                         unit = None
+                        qualifier_source_value = None
                         
                         if observation.get('valueQuantity'):
                             value_qty = observation['valueQuantity']
@@ -2746,6 +2742,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             # Use LOINC code as source_value when available — it's short,
                             # unique, and avoids collisions from truncating long display names.
                             source_value = obs_loinc if obs_loinc else obs_name[:50]
+                            # LOINC 21889-1 is officially Size Tumor.  A
+                            # legacy lymph-node feed may reuse that code, but
+                            # only its explicit text/context can authorize the
+                            # separate lymph-node projection.
+                            if obs_loinc == '21889-1' and 'lymph node' in obs_name.lower():
+                                qualifier_source_value = 'lymph-node'
                             _mkey = (
                                 measurement_concept.pk if measurement_concept else None,
                                 obs_date.date(),
@@ -2759,6 +2761,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                         or existing_m.value_as_string != value_string):
                                     existing_m.value_as_number = value_number
                                     existing_m.value_as_string = value_string
+                                    existing_m.qualifier_source_value = qualifier_source_value
                                     existing_m._skip_patient_record_refresh = True
                                     existing_m.save()
                             else:
@@ -2773,6 +2776,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     value_as_string=value_string,
                                     measurement_source_value=source_value,
                                     unit_source_value=unit[:50] if unit else None,
+                                    qualifier_source_value=qualifier_source_value,
                                 )
                                 _m._skip_patient_record_refresh = True
                                 # Keep the dict current so duplicate observations
@@ -3707,8 +3711,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _patch['cytogenic_markers'] = cytogenetics_str
                     if measurable_disease_imwg is not None:
                         _patch['measurable_disease_imwg'] = measurable_disease_imwg
-                    if tumor_size:
-                        _patch['tumor_size'] = tumor_size
                     if lymph_node_status:
                         _patch['lymph_node_status'] = lymph_node_status
                     if metastasis_status:
