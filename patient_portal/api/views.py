@@ -1,6 +1,9 @@
+from typing import Any
+
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -4676,6 +4679,39 @@ _PERSON_REPLACEABLE_FIELDS = {
 
 
 @method_decorator(csrf_exempt, name='dispatch')
+class PatientRecordV1ViewSet(PatientRecordViewSet):
+    """v1-only PatientRecord surface.
+
+    The legacy /api/patient-info/ prefix registers PatientRecordViewSet itself,
+    so anything added there widens a frozen API. New actions belong here.
+    """
+
+    @action(detail=True, methods=['post'], url_path='refresh',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def refresh(self, request: Request, pk: str | None = None) -> Response:
+        """Re-derive this person's PatientRecord once, on demand."""
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+
+        if not _is_admin_actor(request):
+            return Response(
+                {'detail': 'Only administrators can trigger a derivation.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Unguarded on purpose. A 2xx over a record that did not re-derive
+        # would be a lie on an endpoint that exists only to derive.
+        record: PatientRecord = refresh_patient_record(person)
+        return Response({
+            'person_id': person.person_id,
+            'refreshed': True,
+            'derived_at': getattr(record, 'derived_at', None),
+            'derivation_version': getattr(record, 'derivation_version', None),
+        })
+
+
+
 class PersonViewSet(viewsets.GenericViewSet):
     """
     Endpoints:
@@ -5133,6 +5169,52 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
     return ids, new_ids
 
 
+def _is_admin_actor(request: Request) -> bool:
+    """Whether this caller may act on a patient administratively."""
+    actor = request.user
+    return (
+        is_service_token(request)
+        or bool(getattr(actor, 'is_staff', False))
+        or get_admin_orgs(actor).exists()
+    )
+
+
+def _skip_refresh_requested(request: Request) -> bool:
+    """Whether the caller asked to defer, and is allowed to.
+
+    Only actors who can call the refresh action may defer. Otherwise a patient
+    could PATCH their own row with the flag and strand their PatientRecord
+    stale with no way to rebuild it.
+    """
+    asked = str(
+        request.query_params.get('skip_refresh', 'false')
+    ).strip().lower() in ('1', 'true', 'yes')
+    return asked and _is_admin_actor(request)
+
+
+class _OmopDeferRefreshMixin:
+    """Let row level writes defer the PatientRecord derivation.
+
+    Derivation cost grows with the rows a person already holds, so on a
+    bulk loaded patient one PATCH or DELETE costs 12-32s. A caller that defers
+    has to call the refresh action afterwards.
+    """
+
+    def update(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        if not _skip_refresh_requested(request):
+            return super().update(request, *args, **kwargs)
+        from omop_core.signals import suppress_patient_record_refresh
+        with suppress_patient_record_refresh():
+            return super().update(request, *args, **kwargs)
+
+    def destroy(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        if not _skip_refresh_requested(request):
+            return super().destroy(request, *args, **kwargs)
+        from omop_core.signals import suppress_patient_record_refresh
+        with suppress_patient_record_refresh():
+            return super().destroy(request, *args, **kwargs)
+
+
 class _OmopBulkCreateMixin:
     """Accept a JSON *list* on POST and insert the rows in one batched transaction.
 
@@ -5408,7 +5490,7 @@ class _ProvenanceMixin:
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ConditionOccurrenceViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class ConditionOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ConditionOccurrenceSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = ConditionOccurrence.objects.all()
@@ -5417,7 +5499,7 @@ class ConditionOccurrenceViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFi
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class DrugExposureViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class DrugExposureViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = DrugExposureSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = DrugExposure.objects.all()
@@ -5426,7 +5508,7 @@ class DrugExposureViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMix
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class MeasurementViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class MeasurementViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Measurement.objects.all()
@@ -5464,7 +5546,7 @@ class MeasurementViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixi
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ObservationViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class ObservationViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ObservationSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Observation.objects.all()
@@ -5473,7 +5555,7 @@ class ObservationViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixi
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ProcedureOccurrenceViewSet(_OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class ProcedureOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ProcedureOccurrenceSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = ProcedureOccurrence.objects.all()
