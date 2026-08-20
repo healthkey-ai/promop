@@ -495,7 +495,7 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
         selection_rule="composite",
         description="iwCLL measurable disease based on ALC, node size, spleen, liver",
         constituent_fields=[
-            "absolute_lymphocyte_count", "largest_lymph_node_size",
+            "alc_thousand_per_ul", "largest_lymph_node_size",
             "splenomegaly", "hepatomegaly",
         ],
     ),
