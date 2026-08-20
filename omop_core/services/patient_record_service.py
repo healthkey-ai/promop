@@ -186,8 +186,10 @@ _OMOP_DERIVED_FIELDS = [
     'histologic_type', 'biopsy_grade',
     # Genomics
     'genetic_mutations',
-    # CLL (absolute_lymphocyte_count removed — canonical source is
-    # alc_thousand_per_ul via _get_laboratory_data; see issue #544)
+    # CLL (absolute_lymphocyte_count is no longer actively derived —
+    # canonical source is alc_thousand_per_ul; kept here so the API
+    # contract test still treats it as a read-only derived column)
+    'absolute_lymphocyte_count',
     'serum_beta2_microglobulin_level',
     'binet_stage', 'tumor_burden', 'disease_activity',
     'bone_marrow_involvement', 'hepatomegaly', 'splenomegaly', 'lymphadenopathy',
