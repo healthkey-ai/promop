@@ -411,6 +411,7 @@ OAUTH2_PROVIDER = {
         'patient/*.write':  'Write all patient clinical data',
         'user/*.read':      'Read data on behalf of the current user',
         'user/*.write':     'Write data on behalf of the current user',
+        'system/*.read':    'Read reference/system data (vocabulary, concepts) — not patient-specific',
     },
     'DEFAULT_SCOPES': ['openid', 'patient/*.read'],
     'ACCESS_TOKEN_EXPIRE_SECONDS': 3600,
