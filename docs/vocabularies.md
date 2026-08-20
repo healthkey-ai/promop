@@ -2,7 +2,10 @@
 
 What each vocabulary is, where it is stored, what its concept codes look like, and what they refer to.
 
-All figures are from **staging** (`ctomop_dev`), the reference environment for this work.
+The row counts below are a captured staging snapshot, included to explain the
+shape of the loaded vocabulary corpus. They are not a required database name
+or deployment hostname; deployments select their PostgreSQL database through
+the `DATABASE_URL` environment variable.
 
 Companion documents:
 - [concept-mapping.md](concept-mapping.md) — how FHIR codes are resolved to OMOP concepts at ingestion
