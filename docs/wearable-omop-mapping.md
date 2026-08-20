@@ -259,14 +259,14 @@ history.
 
 ## Gaps and proposed work
 
-> **Environments.** Concept resolution claims here were verified against **staging**
-> (`ctomop_dev`, `promop-staging.onrender.com`, full Athena load: 1,979,424 concepts /
-> 277,790 LOINC rows) and against local `promop_dev` (partial `seed_omop_concepts` set only).
-> Staging is the reference environment for this work.
+> **Environments.** Concept resolution claims here were verified against a
+> captured staging vocabulary snapshot (1,979,424 concepts / 277,790 LOINC rows)
+> and against local `promop_dev` (partial `seed_omop_concepts` set only).
+> Staging is the reference environment for this work; the PostgreSQL database
+> name and hostname are deployment-specific and come from `DATABASE_URL`.
 >
-> Note that CLAUDE.md's Database Selection table is stale: it references a `STAGING_DATABASE_URL`
-> that is not defined in `.env`, and a production host that does not match the one `DATABASE_URL`
-> actually points at — which is staging (`ctomop_dev`).
+> Do not infer a database name or host from this document. Use the deployment's
+> configured `DATABASE_URL` for migrations and validation.
 
 ### Gap A — Garmin has no adapter for six metrics (#444)
 
