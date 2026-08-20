@@ -186,8 +186,9 @@ _OMOP_DERIVED_FIELDS = [
     'histologic_type', 'biopsy_grade',
     # Genomics
     'genetic_mutations',
-    # CLL
-    'absolute_lymphocyte_count', 'serum_beta2_microglobulin_level',
+    # CLL (absolute_lymphocyte_count removed — canonical source is
+    # alc_thousand_per_ul via _get_laboratory_data; see issue #544)
+    'serum_beta2_microglobulin_level',
     'binet_stage', 'tumor_burden', 'disease_activity',
     'bone_marrow_involvement', 'hepatomegaly', 'splenomegaly', 'lymphadenopathy',
     'btk_inhibitor_refractory', 'bcl2_inhibitor_refractory', 'lymphocyte_doubling_time',
@@ -2884,8 +2885,11 @@ def _get_cll_data(person: Person) -> dict:
     )
     conditions = ConditionOccurrence.objects.filter(person=person)
 
+    # 731-0 (ALC) is intentionally absent — the canonical column is
+    # alc_thousand_per_ul, populated by _get_laboratory_data via
+    # _LOINC_LAB_FIELDS.  Deriving absolute_lymphocyte_count here duplicated
+    # the value under an ambiguous name (see issue #544).
     loinc_map = {
-        '731-0':   'absolute_lymphocyte_count',
         '48094-6': 'serum_beta2_microglobulin_level',
         '8632-1':  'qtcf_value',
         '44996-6': 'spleen_size',
@@ -3201,7 +3205,9 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
         imwg = False
     patient_info.measurable_disease_imwg = imwg
 
-    alc = patient_info.absolute_lymphocyte_count
+    # Use the canonical LOINC-derived column (10³/µL) for the iwCLL 5.0
+    # threshold.  absolute_lymphocyte_count is no longer derived (issue #544).
+    alc = patient_info.alc_thousand_per_ul
     lns = patient_info.largest_lymph_node_size
     spleen = patient_info.splenomegaly
     liver = patient_info.hepatomegaly
