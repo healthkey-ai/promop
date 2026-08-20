@@ -1,0 +1,85 @@
+name: Deploy to cancerbot host
+
+on:
+  push:
+    branches: [cancerbot]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-cancerbot
+  cancel-in-progress: false
+
+env:
+  GCP_REGION: ${{ vars.CANCERBOT_GCP_REGION || 'us-central1' }}
+  # us-central1-docker.pkg.dev/healthkey-504816/healthkey-ai
+  ARTIFACT_REPO: ${{ vars.DOCKER_REPOSITORY }}
+  IMAGE_NAME: promop
+  IMAGE_TAG: ${{ github.sha }}
+  DEPLOY_DIR: /apps/cancerbot-promop
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # promop-cancerbot-github@healthkey-504816, artifactregistry.writer
+      # scoped to the healthkey-ai repository only.
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.CANCERBOT_GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
+
+      # Dockerfile.gcp, not Dockerfile: it builds the federation remote into
+      # frontend/dist/remote and bakes WHITENOISE_ROOT to match. Both run
+      # collectstatic at build time, so no post-deploy collectstatic is needed.
+      - name: Build and push
+        run: |
+          docker build --platform linux/amd64 --provenance=false \
+            -f Dockerfile.gcp \
+            -t ${ARTIFACT_REPO}/${IMAGE_NAME}:${IMAGE_TAG} \
+            -t ${ARTIFACT_REPO}/${IMAGE_NAME}:cancerbot .
+          docker push ${ARTIFACT_REPO}/${IMAGE_NAME}:${IMAGE_TAG}
+          docker push ${ARTIFACT_REPO}/${IMAGE_NAME}:cancerbot
+
+  deploy:
+    name: Deploy
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: cancerbot-prod
+    steps:
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.CANCERBOT_SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.CANCERBOT_SSH_HOST }}
+
+      - name: Deploy
+        run: |
+          ssh -o BatchMode=yes "$SSH_USER@$SSH_HOST" <<EOF
+            set -Eeuo pipefail
+            cd ${DEPLOY_DIR}
+            printf 'IMAGE_REPO=%s\nIMAGE_TAG=%s\n' "${ARTIFACT_REPO}" "${IMAGE_TAG}" > .env
+            gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
+            docker compose pull
+            /bin/secret2env -backend gcp ${SECRET_RESOURCE_NAME} sh -c \
+              "docker compose run --rm migrate && docker compose up -d --remove-orphans --wait"
+            docker compose ps
+          EOF
+        env:
+          SECRET_RESOURCE_NAME: ${{ vars.CANCERBOT_SECRET_RESOURCE_NAME }}
+          SSH_HOST: ${{ secrets.CANCERBOT_SSH_HOST }}
+          SSH_USER: ${{ secrets.CANCERBOT_SSH_USER }}
