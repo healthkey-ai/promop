@@ -1,10 +1,8 @@
-version: "3.9"
-
 services:
   db:
     image: postgres:15
     restart: always
-    container_name: promop_db
+    container_name: ${PROMOP_DB_CONTAINER:-promop_db}
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -22,7 +20,7 @@ services:
   web:
     build: .
     restart: always
-    container_name: promop_web
+    container_name: ${PROMOP_WEB_CONTAINER:-promop_web}
     depends_on:
       db:
         condition: service_healthy
@@ -35,20 +33,50 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       PORT: 8000
+
+      # Settings REQUIRE these whenever DEBUG is off, so without them a
+      # production-shaped container cannot start at all.
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+      # Origins of the browsers that call this API directly. Comma-separated.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}
+
+      # Firebase identity. Two modes:
+      #  - emulator: set FIREBASE_AUTH_EMULATOR_HOST; the Admin SDK then uses a
+      #    null credential and accepts unsigned tokens. No GCP access needed.
+      #  - real project: leave it unset and mount Application Default
+      #    Credentials (see the adc profile below). Without them the SDK
+      #    initialises but the first verify_id_token raises
+      #    DefaultCredentialsError, so every request 401s with no explanation.
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      FIREBASE_AUTH_EMULATOR_HOST: ${FIREBASE_AUTH_EMULATOR_HOST:-}
+      FIREBASE_SKIP_REVOCATION_CHECK: ${FIREBASE_SKIP_REVOCATION_CHECK:-}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+
+      # phr identity service, when verifying phr-issued tokens.
+      PHR_ISSUER: ${PHR_ISSUER:-}
+      PHR_BASE_URL: ${PHR_BASE_URL:-}
+
+      SERVICE_AUTH_TOKEN: ${SERVICE_AUTH_TOKEN:-}
     ports:
-      - "8000:8000"
+      # Host port is configurable: 8000 is commonly taken by a sibling service
+      # in a full local stack. The container always listens on 8000.
+      - "${PROMOP_HOST_PORT:-8000}:8000"
+    volumes:
+      # Present only so a caller can mount ADC without an override file:
+      #   GOOGLE_APPLICATION_CREDENTIALS=/adc.json
+      #   PROMOP_ADC_SOURCE=$HOME/.config/gcloud/application_default_credentials.json
+      # Defaults to a harmless self-mount when unset, so the stanza is inert.
+      - ${PROMOP_ADC_SOURCE:-/dev/null}:${PROMOP_ADC_TARGET:-/dev/null}:ro
+    # The gunicorn flags stay on ONE line. A folded scalar (">") keeps the
+    # newline of any line indented deeper than the block's first, so wrapped
+    # flags arrive as separate shell commands — "sh: --bind: not found" — and
+    # the server never starts.
     command: >
       sh -c "
         python manage.py migrate --noinput &&
         python manage.py setup_admin &&
-        gunicorn ctomop.wsgi:application
-          --bind 0.0.0.0:8000
-          --workers 4
-          --threads 2
-          --timeout 120
-          --access-logfile -
-          --error-logfile -
-          --log-level info
+        gunicorn ctomop.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-4} --threads ${GUNICORN_THREADS:-2} --timeout ${GUNICORN_TIMEOUT:-120} --access-logfile - --error-logfile - --log-level ${GUNICORN_LOG_LEVEL:-info}
       "
 
 volumes:
