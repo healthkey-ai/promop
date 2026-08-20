@@ -24,30 +24,45 @@ bibliography: paper.bib
 
 # Summary
 
-Health systems and biopharma face a persistent gap between holding patient data and acting on it.
-Records remain fragmented across providers, standards-conformant but manually mapped, and
-structured for storage rather than decision-making. Every downstream application — analytics,
-trial matching, clinical decision support — re-derives patient clinical state from scratch,
-multiplying effort and inconsistency.
+Caring for a patient produces a long trail of separate records: a lab result one week, a diagnosis
+the next, a prescription from a different clinic, often stored in different systems and different
+formats. Answering an ordinary clinical question — *is this patient's cancer currently responding
+to treatment? what was their most recent blood count? which drug regimens have they already
+tried?* — means collecting those scattered pieces and working out what they add up to. Today every
+piece of software that needs such an answer redoes that work for itself, and two programs looking
+at the same patient often disagree.
 
-PRomop is an open-source longitudinal patient health record built on the OMOP Common Data Model
-(CDM 5.4) [@OHDSI2021] with oncology extensions. Its keystone is `PatientRecord`, a flattened,
-denormalized projection that collapses each patient's complete longitudinal history into a single
-decision-ready row of over 300 columns. While the transactional CDM tables preserve everything that
-ever happened, `PatientRecord` represents what is true *now* — computing patient-state derivations
-once rather than repeatedly per consumer. Population analytics, clinical trial matching, and
-standard-of-care evaluation all operate on one shared substrate rather than maintaining divergent
-copies of the truth.
+PRomop is open-source software that does this assembly once, in advance, and saves the result.
+Incoming records are stored in the OMOP Common Data Model (CDM 5.4) [@OHDSI2021] — the database
+layout used by the OHDSI observational-research community — extended with fields specific to
+cancer care. Like most clinical databases, OMOP spreads a patient's history across many tables,
+one per kind of event: all lab results in one table, all diagnoses in another, all medications in
+a third. That layout is excellent for recording faithfully what happened, but awkward for asking
+what is true about a patient *right now*, because the answer has to be reassembled from many
+tables every time it is needed.
+
+PRomop adds a table called `PatientRecord` that holds one wide row per patient — over 300
+columns — containing the current best answer for each clinical fact: disease stage, most recent
+lab values, current line of therapy, and so on. The row is *flattened* (or *denormalized*): facts
+that would normally have to be gathered by joining many tables are pre-computed and copied into a
+single place, so a program can simply read the answer instead of deriving it. Whenever new
+clinical data arrives, PRomop updates the affected parts of that row automatically. The
+underlying OMOP tables remain the complete historical record of everything that ever happened;
+the `PatientRecord` row records what is true now. Analytics dashboards, clinical trial matching,
+and treatment-guideline checking then all read the same pre-computed answers instead of each
+maintaining its own version of the truth.
 
 PRomop is deployed in production across the HealthTree Foundation (14,000 blood-cancer patients)
 and CancerBot (3,500 patients), supporting trial matching against 6,000 actively recruiting
-trials across five cancer types. Benchmarks show a ~37× speedup for eligibility screening
-compared to querying raw OMOP tables directly [@Blum2025].
+trials across five cancer types. Checking whether a patient meets a trial's eligibility criteria
+runs about 37 times faster against `PatientRecord` than against the raw OMOP tables
+[@Blum2025].
 
 # Statement of Need
 
 PRomop is designed for clinical informaticists, data scientists, and developers who need to build
-or integrate with a longitudinal patient health record — whether to power a trial matching engine,
+or integrate with a longitudinal patient health record — a record covering a patient's full
+history over time rather than a single visit — whether to power a trial matching engine,
 construct feature sets for clinical ML models, or deploy patient-level clinical decision support.
 
 Today, answering "what is this patient's current disease status, most recent lab values, and prior
@@ -101,7 +116,9 @@ PRomop's central design trade-off is **normalization for writes versus denormali
 Clinical data arrives as FHIR R4 Bundles and is written into normalized OMOP CDM 5.4 tables
 (`Measurement`, `ConditionOccurrence`, `DrugExposure`, `Episode`), preserving full longitudinal
 history and OHDSI-ecosystem compatibility. A Django `post_save` signal chain then derives
-`PatientRecord` — a wide materialized projection (currently over 300 columns), one row per patient — on every write.
+`PatientRecord` — a wide, pre-computed summary table (currently over 300 columns), one row per
+patient, storing values that would otherwise be recalculated from the OMOP tables on every
+query — on every write.
 
 ```
 FHIR R4 Bundle ingest
