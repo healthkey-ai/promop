@@ -1,5 +1,7 @@
 import csv
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
@@ -8,6 +10,29 @@ from omop_core.models import LoincClass, LoincCodeClass
 
 csv.field_size_limit(sys.maxsize)
 BATCH = 2000
+
+
+def _extract_from_archive(archive_path, stdout):
+    """Pull the two CSVs out of a loinc.org archive zip.
+
+    The archive is how the files are actually kept — ~110MB unzipped, ~12MB
+    zipped — so a deployment that has the zip should not also need the CSVs
+    unpacked beside it at a bucket root.
+    """
+    tmpdir = Path(tempfile.mkdtemp(prefix='loinc_classes_'))
+    wanted = ('LoincClass.csv', 'Loinc.csv')
+    with zipfile.ZipFile(archive_path) as zf:
+        names = {Path(n).name: n for n in zf.namelist()}
+        missing = [w for w in wanted if w not in names]
+        if missing:
+            raise CommandError(
+                f'Archive {archive_path} is missing {", ".join(missing)}'
+            )
+        for w in wanted:
+            with zf.open(names[w]) as src, (tmpdir / w).open('wb') as dst:
+                dst.write(src.read())
+    stdout.write(f'  Extracted {", ".join(wanted)} from archive.')
+    return tmpdir / 'LoincClass.csv', tmpdir / 'Loinc.csv'
 
 
 def _download_gcs_blob(bucket, filename, stdout):
@@ -39,14 +64,35 @@ class Command(BaseCommand):
                             help='Path to Loinc.csv (loads LOINC_NUM → CLASS mapping)')
         parser.add_argument('--bucket',
                             help='GCS bucket name to download files from')
+        parser.add_argument('--archive',
+                            help=('Path or gs:// URI of a loinc.org archive zip '
+                                  'containing LoincClass.csv and Loinc.csv'))
         parser.add_argument('--replace', action='store_true',
                             help='Clear existing rows before loading')
 
     def handle(self, *args, **options):
         bucket_name = options.get('bucket')
+        archive = options.get('archive')
         gcs_bucket = None
+        archive_loinc_path = None
 
-        if bucket_name:
+        if archive:
+            if archive.startswith('gs://'):
+                from google.cloud import storage as gcs
+
+                bkt, _, blob_name = archive[len('gs://'):].partition('/')
+                if not bkt or not blob_name:
+                    raise CommandError(
+                        f'Archive URI needs a bucket and an object: {archive}'
+                    )
+                self.stdout.write(f'Loading from {archive}')
+                archive = _download_gcs_blob(gcs.Client().bucket(bkt), blob_name, self.stdout)
+            else:
+                archive = Path(archive)
+                if not archive.exists():
+                    raise CommandError(f'File not found: {archive}')
+            classes_path, archive_loinc_path = _extract_from_archive(archive, self.stdout)
+        elif bucket_name:
             from google.cloud import storage as gcs
             gcs_bucket = gcs.Client().bucket(bucket_name)
             self.stdout.write(f'Loading from gs://{bucket_name}/')
@@ -65,7 +111,9 @@ class Command(BaseCommand):
 
         self._load_classes(classes_path)
 
-        if gcs_bucket:
+        if archive_loinc_path is not None:
+            self._load_code_class_mapping(archive_loinc_path)
+        elif gcs_bucket:
             loinc_path = _download_gcs_blob(gcs_bucket, 'Loinc.csv', self.stdout)
             self._load_code_class_mapping(loinc_path)
             loinc_path.unlink()

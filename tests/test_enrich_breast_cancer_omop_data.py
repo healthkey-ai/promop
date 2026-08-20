@@ -13,41 +13,80 @@ from io import StringIO
 import pytest
 from django.core.management import call_command, CommandError
 
-from omop_core.models import DrugExposure, Measurement, Observation, PatientRecord
+from omop_core.models import Concept, DrugExposure, Measurement, Observation, PatientRecord
+from omop_core.services.mappings import (
+    WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB,
+)
 from tests.factories import (
-    ConceptFactory, PersonFactory, PatientRecordFactory,
+    ConceptFactory, DomainFactory, PersonFactory, PatientRecordFactory,
     MeasurementFactory, VocabularyFactory,
 )
 
 pytestmark = pytest.mark.django_db
 
 
-def _loinc_concept(code, name):
-    vocab = VocabularyFactory(vocabulary_id='LOINC')
-    return ConceptFactory(concept_code=code, concept_name=name, vocabulary=vocab)
+def _loinc_concept(code, name, vocabulary_id='LOINC', domain_id='Measurement'):
+    vocab = VocabularyFactory(vocabulary_id=vocabulary_id)
+    domain = DomainFactory(domain_id=domain_id)
+    return ConceptFactory(
+        concept_code=code, concept_name=name, vocabulary=vocab, domain=domain)
 
 
 @pytest.fixture(autouse=True)
 def _seed_loinc_concepts_the_command_assumes_exist():
-    """enrich_breast_cancer_omop_data assumes the T/M-staging and wearable
-    LOINC concepts already exist (true on the real staging DB — verified
-    directly — where these were loaded by load_athena_vocabularies.py /
-    seed_omop_concepts.py). A fresh test DB has none of them, so seed the
-    same set here; the command itself only creates the SNOMED concepts that
-    were confirmed missing on staging (tobacco/response-status)."""
-    codes = {
+    """enrich_breast_cancer_omop_data assumes the staging and wearable concepts
+    already exist (true on the real staging DB, where load_athena_vocabularies
+    and seed_omop_concepts put them there). A fresh test DB has none, so seed
+    them here.
+
+    The wearable set is derived from WEARABLE_CONCEPT_CODE rather than
+    hard-coded: the command requires EVERY entry to resolve and aborts with
+    CommandError on the first miss, so a literal list silently rots the moment a
+    metric is added or a code corrected — which is exactly what happened when
+    active_minutes moved off the IPAQ code in #413. Deriving it also gets the
+    vocabulary and domain right for the HK-Wearable and Observation-domain
+    metrics, which a LOINC/Measurement-only helper cannot express."""
+    for code, name in {
         '21905-5': 'Primary tumor.clinical [Class] Cancer',
         '21901-4': 'Distant metastases.pathology [Class] Cancer',
-        '55423-8': 'Number of steps in unspecified time Pedometer',
-        '77592-4': 'Moderate physical activity [IPAQ]',
-        '40443-4': 'Heart rate --resting',
-        '80404-7': 'R-R interval.standard deviation (Heart rate variability)',
-        '59408-5': 'Oxygen saturation in Arterial blood by Pulse oximetry',
-        '9279-1': 'Respiratory rate',
-        '93832-4': 'Sleep duration',
-    }
-    for code, name in codes.items():
+    }.items():
         _loinc_concept(code, name)
+
+    # Behaviour and response concepts, derived from the command's own tables.
+    # The command resolves these by (vocabulary_id, concept_code) and raises if
+    # one is missing — it no longer mints them, because minting at
+    # concept_id=int(code) produced duplicates shadowing the genuine SNOMED
+    # concepts (#415). Deriving the fixture keeps it in step when a code changes,
+    # which a literal list would not.
+    #
+    # The four response codes remain the SNOMED 1828xxxx values even though they
+    # mean "Drug treatment stopped - medical advice / ineffective / side effect
+    # / inconvenient" rather than treatment response. That mismatch is a known
+    # defect left in place deliberately: six consumers read them, and the fix is
+    # per-disease outcome value sets, since only breast cancer uses RECIST
+    # (lymphoma uses Lugano, myeloma IMWG, CLL iwCLL).
+    from omop_core.management.commands.enrich_breast_cancer_omop_data import (
+        _RESPONSE_CODES, _TOBACCO_QUESTION_CODE, _TOBACCO_ANSWER_CODES,
+    )
+    # Tobacco question concept (LOINC 72166-2)
+    q_vocab, q_code = _TOBACCO_QUESTION_CODE
+    _loinc_concept(q_code, 'Tobacco smoking status', vocabulary_id=q_vocab, domain_id='Observation')
+    # Tobacco answer concepts
+    for (vocab, code), (name, _weight) in _TOBACCO_ANSWER_CODES.items():
+        _loinc_concept(code, name, vocabulary_id=vocab, domain_id='Meas Value')
+    for (vocab, code), name in _RESPONSE_CODES.items():
+        _loinc_concept(code, name, vocabulary_id=vocab, domain_id='Observation')
+
+    observation_domain = {
+        'steps', 'active_minutes', 'sleep_duration', 'flights_climbed',
+    }
+    for metric_key, code in WEARABLE_CONCEPT_CODE.items():
+        _loinc_concept(
+            code,
+            f'Wearable {metric_key}',
+            vocabulary_id=WEARABLE_CONCEPT_VOCAB[metric_key],
+            domain_id='Observation' if metric_key in observation_domain else 'Measurement',
+        )
 
 
 class TestPerformanceAndStageBackfill:
@@ -97,17 +136,24 @@ class TestPerformanceAndStageBackfill:
 
 class TestMissingObservations:
 
-    def test_creates_tobacco_status_observation(self):
+    def test_creates_tobacco_status_observation_question_answer(self):
+        """Tobacco status uses question/answer pattern (#451):
+        observation_concept = LOINC 72166-2, value_as_concept = answer."""
         person = PersonFactory()
         PatientRecordFactory(person=person, stage='II')
 
         call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id), confirm=True)
 
-        codes = set(
-            Observation.objects.filter(person=person)
-            .values_list('observation_concept__concept_code', flat=True)
+        tobacco_obs = Observation.objects.filter(
+            person=person,
+            observation_concept__concept_code='72166-2',
+            observation_concept__vocabulary_id='LOINC',
         )
-        assert codes & {'266919005', '8517006', '77176002'}
+        assert tobacco_obs.exists(), 'Expected a tobacco observation with LOINC 72166-2'
+        obs = tobacco_obs.first()
+        assert obs.value_as_concept_id is not None, 'Expected value_as_concept_id to be set'
+        answer_codes = {'LA18978-9', 'LA15920-4', 'LA18976-3'}
+        assert obs.value_as_concept.concept_code in answer_codes
 
     def test_creates_staging_observations_consistent_with_existing_stage(self):
         person = PersonFactory()
@@ -143,10 +189,22 @@ class TestWearableMeasurements:
 
         call_command('enrich_breast_cancer_omop_data', person_ids=str(person.person_id), confirm=True)
 
-        steps_rows = Measurement.objects.filter(
-            person=person, measurement_concept__concept_code='55423-8',
+        # steps is an Observation-domain concept, so the command routes it to
+        # `observation`; resting_hr is Measurement-domain and stays put. Rows are
+        # routed by concept.domain_id rather than a hard-coded metric list.
+        steps_rows = Observation.objects.filter(
+            person=person, observation_concept__concept_code='55423-8',
         ).count()
         assert steps_rows >= WEARABLE_MIN_VALID_DAYS
+
+        assert Measurement.objects.filter(
+            person=person, measurement_concept__concept_code='55423-8',
+        ).count() == 0, 'steps must not be written to measurement'
+
+        rhr_rows = Measurement.objects.filter(
+            person=person, measurement_concept__concept_code='40443-4',
+        ).count()
+        assert rhr_rows >= WEARABLE_MIN_VALID_DAYS
 
 
 class TestDryRun:
@@ -195,6 +253,18 @@ class TestRefreshesPatientRecord:
         assert record.first_line_therapy_id is not None
         assert exposure.drug_concept_id == record.first_line_therapy_id
         assert record.first_line_therapy
+
+        # Issue #450: when the genuine HemOnc concept is not loaded, the
+        # regimen must be quarantine-minted under HK-Regimen — never under
+        # HemOnc with a fabricated concept_code.
+        concept = Concept.objects.get(concept_id=exposure.drug_concept_id)
+        assert concept.vocabulary_id == 'HK-Regimen', (
+            f'Expected HK-Regimen quarantine vocabulary, got {concept.vocabulary_id}'
+        )
+        assert concept.source == 'HealthKey'
+        assert concept.concept_code.startswith('hkr:'), (
+            f'Expected hkr: slug concept_code, got {concept.concept_code!r}'
+        )
 
     def test_refresh_is_deferred_until_after_all_patients_are_enriched(self, monkeypatch):
         person_a = PersonFactory()
@@ -257,6 +327,30 @@ class TestRefreshesPatientRecord:
         org = PatientRecordFactory(person=breast_person, disease='Breast Cancer').organization
         PatientRecordFactory(person=other_person, organization=org, disease='Multiple Myeloma')
         refreshed = []
+
+        monkeypatch.setattr(
+            'omop_core.management.commands.enrich_breast_cancer_omop_data.refresh_patient_record',
+            lambda person: refreshed.append(person.person_id),
+        )
+
+        call_command(
+            'enrich_breast_cancer_omop_data',
+            org_slugs=org.slug,
+            refresh_only=True,
+        )
+
+        assert refreshed == [breast_person.person_id]
+
+    def test_refresh_only_does_not_require_wearable_concepts(self, monkeypatch):
+        breast_person = PersonFactory()
+        org = PatientRecordFactory(person=breast_person, disease='Breast Cancer').organization
+        refreshed = []
+        wearable_filters = [
+            {'vocabulary_id': WEARABLE_CONCEPT_VOCAB[metric_key], 'concept_code': code}
+            for metric_key, code in WEARABLE_CONCEPT_CODE.items()
+        ]
+        for lookup in wearable_filters:
+            Concept.objects.filter(**lookup).delete()
 
         monkeypatch.setattr(
             'omop_core.management.commands.enrich_breast_cancer_omop_data.refresh_patient_record',

@@ -16,6 +16,7 @@ interface FieldProps {
   options?: string[];
   onChange: (name: string, value: unknown) => void;
   disabled?: boolean;
+  readOnly?: boolean;
   vocabSource?: VocabSource | null;
   fullWidth?: boolean;
 }
@@ -28,8 +29,10 @@ export default function Field({
   options = [],
   onChange,
   disabled,
+  readOnly,
   vocabSource,
 }: FieldProps) {
+  const isDisabled = disabled || readOnly;
   const optionObjects = useMemo(() => stringsToOptions(options), [options]);
 
   const selectedValues = useMemo<string[]>(() => {
@@ -72,7 +75,7 @@ export default function Field({
           <SelectControl
             value={value != null && value !== '' ? String(value) : ''}
             options={optionObjects}
-            disabled={disabled}
+            disabled={isDisabled}
             placeholder="Select…"
             allowClear={true}
             clearLabel="— None —"
@@ -87,7 +90,7 @@ export default function Field({
             options={optionObjects}
             selectedValues={selectedValues}
             display={msDisplay}
-            disabled={disabled}
+            disabled={isDisabled}
             onChange={(nextValues) => {
               onChange(
                 name,
@@ -101,7 +104,7 @@ export default function Field({
         return (
           <BooleanControl
             value={value as boolean | null | undefined}
-            disabled={disabled}
+            disabled={isDisabled}
             onChange={(v) => onChange(name, v)}
           />
         );
@@ -110,7 +113,7 @@ export default function Field({
         return (
           <DateControl
             value={formatDateForInput(value as string)}
-            disabled={disabled}
+            disabled={isDisabled}
             onChange={(v) => onChange(name, v)}
           />
         );
@@ -120,18 +123,21 @@ export default function Field({
           <TextNumberControl
             type={type}
             value={value === 0 ? 0 : ((value ?? '') as string | number | null)}
-            disabled={disabled}
+            disabled={isDisabled}
             onChange={(v) => onChange(name, v)}
           />
         );
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [type, value, optionObjects, disabled, name, selectedValues, msDisplay]);
+  }, [type, value, optionObjects, isDisabled, name, selectedValues, msDisplay]);
 
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-1.5">
-        <label className="text-sm font-medium text-portal-text-primary">{label}</label>
+        <label className="text-sm font-medium text-portal-text-primary">
+          {label}
+          {readOnly && <span className="ml-1 text-xs font-normal text-portal-text-secondary">(computed)</span>}
+        </label>
         {vocabSource && <VocabularyTooltip name={vocabSource.name} url={vocabSource.url} />}
       </div>
       {control}

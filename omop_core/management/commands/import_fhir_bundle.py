@@ -140,10 +140,10 @@ class Command(BaseCommand):
             if options['email']:
                 user = User.objects.get(email=options['email'])
             else:
-                user = User.objects.filter(is_superuser=True).order_by('created_at').first()
+                user = User.objects.filter(is_staff=True).order_by('created_at').first()
                 if user is None:
-                    raise CommandError('No superuser found. Run: manage.py createsuperuser')
-                self._print(f'Authenticating as superuser: {user.email or user.uid}')
+                    raise CommandError('No staff user found. Run: manage.py createsuperuser (or set is_staff=True on an existing user)')
+                self._print(f'Authenticating as staff user: {user.email or user.uid}')
         except User.DoesNotExist:
             raise CommandError(
                 f"User with email '{options['email']}' not found."

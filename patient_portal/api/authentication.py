@@ -168,7 +168,7 @@ def _claim_placeholder_access(identity: Identity, email: str | None) -> None:
         issuer="urn:local",
     ).exclude(pk=identity.pk)
 
-    role_rank = {"org_admin": 3, "doctor": 2, "analyst": 1}
+    role_rank = {"org_admin": 3, "doctor": 2, "analyst": 1, "patient": 0}
     for placeholder in placeholders:
         if placeholder.has_usable_password():
             continue
@@ -184,7 +184,10 @@ def _claim_placeholder_access(identity: Identity, email: str | None) -> None:
                     existing.role = grant.role
                     existing.granted_by = grant.granted_by
                     existing.expires_at = grant.expires_at
-                    existing.save(update_fields=["role", "granted_by", "expires_at"])
+                    existing.redirect_url = grant.redirect_url if grant.role == "analyst" else ""
+                    existing.save(
+                        update_fields=["role", "granted_by", "expires_at", "redirect_url"]
+                    )
                 grant.delete()
             else:
                 grant.identity = identity

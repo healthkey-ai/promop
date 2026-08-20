@@ -8,11 +8,18 @@ csv.field_size_limit(sys.maxsize)
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection
+from django.db.models import Count
+
+import logging
 
 from omop_core.models import (
     Vocabulary, Domain, ConceptClass, Concept,
     Relationship, ConceptRelationship, ConceptAncestor, CdmSource,
+    VocabularyVersionHistory, record_vocabulary_version_history,
+    VocabularyRelease,
 )
+
+logger = logging.getLogger(__name__)
 
 VOCAB_SCOPE = frozenset({
     'HemOnc', 'RxNorm', 'RxNorm Extension', 'ATC', 'LOINC', 'UCUM',
@@ -22,9 +29,23 @@ VOCAB_SCOPE = frozenset({
     # (immunizations) is mapped in the ingest but isn't in the current Athena
     # export, so it loads once a CVX-inclusive bundle is fetched.
     'SNOMED', 'ICD10CM', 'CVX',
+    # Genomic + oncology coding vocabularies (#459)
+    'OMOP Genomic', 'ICDO3', 'NCIt',
+    # Oncology staging/grading modifiers + cancer registry
+    'Cancer Modifier', 'NAACCR',
 })
+# These vocabularies underpin the clinical concepts PROMOP presents and maps.
+# Do not include CVX here: it is deliberately absent from the current Athena
+# bundle, even though the importer supports it when a CVX-inclusive bundle is
+# used.
+REQUIRED_CLINICAL_VOCABULARIES = frozenset({'LOINC', 'RxNorm', 'SNOMED', 'ICD10CM'})
 RXNORM_CLASS_SCOPE = frozenset({'Ingredient', 'Clinical Drug', 'Branded Drug', 'Clinical Drug Comp'})
-LOINC_DOMAIN_SCOPE = frozenset({'Measurement', 'Observation'})
+# A --replace reload deletes the entire vocabulary before applying this filter.
+# Keep every LOINC domain already required by our deployed vocabulary; the
+# preflight below turns any future scope drift into a safe, actionable failure.
+LOINC_DOMAIN_SCOPE = frozenset({
+    'Measurement', 'Observation', 'Meas Value', 'Procedure', 'Note',
+})
 BATCH = 100_000
 PROGRESS_EVERY = 500_000
 
@@ -127,12 +148,15 @@ class Command(BaseCommand):
                             help='Clear vocabulary rows before loading')
         parser.add_argument('--dry-run', action='store_true', dest='dry_run',
                             help='Count rows without writing to DB')
+        parser.add_argument('--skip-clinical-vocabulary-verification', action='store_true',
+                            help='Do not verify that required clinical vocabularies loaded')
 
     def handle(self, *args, **options):
         base = options['path']
         bucket_name = options['bucket']
         replace = options['replace']
         dry_run = options['dry_run']
+        skip_clinical_vocabulary_verification = options['skip_clinical_vocabulary_verification']
 
         if not base and not bucket_name:
             raise CommandError('Provide either --path or --bucket')
@@ -144,13 +168,26 @@ class Command(BaseCommand):
             self._log(f'Loading from gs://{bucket_name}/ (download-one-process-delete)')
 
         t0 = time.monotonic()
+        self._build_start = time.time()  # wall-clock for VocabularyRelease
 
         self._base = base
 
         self._direct = replace and not dry_run
 
+        if replace:
+            logger.warning(
+                '--replace uses TRUNCATE CASCADE and will destroy clinical '
+                'data in tables that FK to concept (drug_exposure, measurement, '
+                'condition_occurrence, etc.). The default upsert path (no flag) '
+                'is safe for databases with clinical data.'
+            )
+            self._validate_replace_loinc_scope()
+
         if self._direct:
+            self._hk_concepts = self._save_healthkey_concepts()
             self._clear()
+        else:
+            self._hk_concepts = []
 
         counts = {
             'relationship':         self._load_relationships(dry_run),
@@ -158,14 +195,25 @@ class Command(BaseCommand):
             'domain':               self._load_domains(dry_run),
             'concept_class':        self._load_concept_classes(dry_run),
             'concept':              self._load_concepts(dry_run),
+        }
+        # Restore HealthKey-minted concepts after the Athena concept load
+        # but before relationship/ancestor loads that reference concept IDs.
+        if self._hk_concepts and not dry_run:
+            self._restore_healthkey_concepts()
+        counts.update({
             'concept_relationship': self._load_concept_relationships(dry_run),
             'concept_ancestor':     self._load_concept_ancestors(dry_run),
             'concept_synonym':      self._load_concept_synonym(dry_run),
             'drug_strength':        self._load_drug_strength(dry_run),
-        }
+            'source_to_concept_map': self._load_source_to_concept_map(dry_run),
+        })
         if not dry_run:
             self._seed_concept_zero()
             self._sync_cdm_source_metadata()
+            if not skip_clinical_vocabulary_verification:
+                self._verify_required_clinical_vocabularies()
+            self._record_version_history(replace)
+            self._publish_release(counts)
         elapsed = time.monotonic() - t0
         verb = 'would load' if dry_run else 'loaded'
         total = sum(counts.values())
@@ -189,6 +237,28 @@ class Command(BaseCommand):
         self.stdout.write(msg)
         self.stdout.flush()
 
+    def _verify_required_clinical_vocabularies(self):
+        """Fail the load when a partial Athena bundle omits core clinical vocabularies."""
+        counts = dict(
+            Concept.objects.filter(vocabulary_id__in=REQUIRED_CLINICAL_VOCABULARIES)
+            .values('vocabulary_id')
+            .annotate(total=Count('concept_id'))
+            .values_list('vocabulary_id', 'total')
+        )
+        missing = sorted(REQUIRED_CLINICAL_VOCABULARIES - counts.keys())
+        if missing:
+            raise CommandError(
+                'Required clinical vocabularies are missing after the load: '
+                f"{', '.join(missing)}. This database cannot reliably map clinical "
+                'conditions, diagnoses, medications, and labs. Fetch an Athena bundle '
+                'that includes the missing vocabularies and rerun this command without '
+                '--replace; --replace truncates clinical data.'
+            )
+        self._log(
+            '  verified required clinical vocabularies: ' +
+            ', '.join(f'{vid} ({counts[vid]:,})' for vid in sorted(counts))
+        )
+
     def _open(self, filename):
         if self._gcs_bucket:
             return _download_gcs_blob(self._gcs_bucket, filename, self._log)
@@ -200,6 +270,65 @@ class Command(BaseCommand):
             if tmp.exists():
                 tmp.unlink()
                 self._log(f'  Cleaned up {filename}.')
+
+    # -- HealthKey concept preservation across --replace -----------------
+
+    _HK_CONCEPT_COLS = (
+        'concept_id', 'concept_name', 'domain_id', 'vocabulary_id',
+        'concept_class_id', 'standard_concept', 'concept_code',
+        'valid_start_date', 'valid_end_date', 'invalid_reason', 'source',
+    )
+
+    def _save_healthkey_concepts(self):
+        """Snapshot source='HealthKey' concept rows before TRUNCATE.
+
+        Returns a list of tuples matching ``_HK_CONCEPT_COLS`` order.
+        """
+        qs = Concept.objects.filter(source='HealthKey')
+        count = qs.count()
+        if not count:
+            self._log('  No HealthKey-minted concepts to preserve.')
+            return []
+        rows = list(qs.values_list(*self._HK_CONCEPT_COLS))
+        self._log(f'  Saved {len(rows):,} HealthKey concept(s) for restore after TRUNCATE.')
+        return rows
+
+    def _restore_healthkey_concepts(self):
+        """Re-insert saved HealthKey concepts after TRUNCATE + Athena reload.
+
+        FK references (vocabulary, domain, concept_class) that were not restored
+        by the Athena reload are created as minimal placeholder rows so the
+        INSERT does not violate FK constraints.
+        """
+        if not self._hk_concepts:
+            return
+        # Ensure FK targets exist — Athena reload may not include HK-specific
+        # vocabulary / domain / concept_class rows.
+        vocab_ids = {r[3] for r in self._hk_concepts}
+        domain_ids = {r[2] for r in self._hk_concepts}
+        class_ids = {r[4] for r in self._hk_concepts}
+
+        for vid in vocab_ids:
+            Vocabulary.objects.get_or_create(
+                vocabulary_id=vid,
+                defaults={'vocabulary_name': vid, 'vocabulary_concept_id': 0},
+            )
+        for did in domain_ids:
+            Domain.objects.get_or_create(
+                domain_id=did,
+                defaults={'domain_name': did, 'domain_concept_id': 0},
+            )
+        for cid in class_ids:
+            ConceptClass.objects.get_or_create(
+                concept_class_id=cid,
+                defaults={'concept_class_name': cid, 'concept_class_concept_id': 0},
+            )
+
+        _copy_rows(
+            'concept', self._HK_CONCEPT_COLS, self._hk_concepts,
+            self._log, direct=True,
+        )
+        self._log(f'  Restored {len(self._hk_concepts):,} HealthKey concept(s).')
 
     def _clear(self):
         self._log('Clearing existing vocabulary data (TRUNCATE)...')
@@ -214,6 +343,30 @@ class Command(BaseCommand):
                   'including cdm_source, observation_period, and clinical event tables. '
                   'cdm_source is re-seeded after load; re-run populate_observation_period '
                   'to re-derive observation periods.')
+
+    def _validate_replace_loinc_scope(self):
+        """Abort before TRUNCATE if loaded LOINC data falls outside the filter.
+
+        `--replace` first clears ``concept`` and then reloads only the configured
+        LOINC domains. Without this check, adding a new LOINC domain to a live
+        database can make a later ordinary reload silently delete its concepts.
+        """
+        excluded = Concept.objects.filter(vocabulary_id='LOINC').exclude(
+            domain_id__in=LOINC_DOMAIN_SCOPE,
+        )
+        count = excluded.count()
+        if not count:
+            return
+
+        domains = list(
+            excluded.order_by('domain_id').values_list('domain_id', flat=True).distinct()
+        )
+        raise CommandError(
+            '--replace aborted before TRUNCATE: '
+            f'{count:,} loaded LOINC concept(s) use domain(s) outside '
+            f'LOINC_DOMAIN_SCOPE: {", ".join(domains)}. '
+            'Add the required domain(s) to LOINC_DOMAIN_SCOPE, then rerun.'
+        )
 
     def _seed_concept_zero(self):
         Vocabulary.objects.get_or_create(
@@ -703,3 +856,153 @@ class Command(BaseCommand):
             fields['cdm_version_concept_id'] = version_concept_id
         if fields and CdmSource.objects.filter(pk=row.pk).update(**fields):
             self._log(f'  cdm_source: updated {fields}')
+
+    def _record_version_history(self, replace):
+        """Append an immutable version-history row per loaded vocabulary.
+
+        Because --replace TRUNCATEs the vocabulary snapshot, the only durable
+        record of which release was implemented when is this append-only table
+        (promop#305, TI.4.2#01/#09). action='replaced' when --replace cleared a
+        prior snapshot, else 'loaded'. cdm_release_date is taken from the
+        self-describing cdm_source row.
+        """
+        action = (
+            VocabularyVersionHistory.ACTION_REPLACED if replace
+            else VocabularyVersionHistory.ACTION_LOADED
+        )
+        cdm_release_date = (
+            CdmSource.objects.filter(cdm_source_abbreviation='PRomop')
+            .values_list('cdm_release_date', flat=True).first()
+        )
+        recorded = 0
+        for vid, version in (
+            Vocabulary.objects.order_by('vocabulary_id')
+            .values_list('vocabulary_id', 'vocabulary_version')
+        ):
+            record_vocabulary_version_history(
+                vocabulary_id=vid,
+                version=version,
+                action=action,
+                cdm_release_date=cdm_release_date,
+            )
+            recorded += 1
+        self._log(f'  vocabulary_version_history: recorded {recorded} {action} row(s)')
+
+    def _load_source_to_concept_map(self, dry_run):
+        self._log('Loading SOURCE_TO_CONCEPT_MAP.csv...')
+        t = time.monotonic()
+        try:
+            f = self._open('SOURCE_TO_CONCEPT_MAP.csv')
+        except CommandError:
+            self._log('  SOURCE_TO_CONCEPT_MAP.csv not found, skipping.')
+            return 0
+        loaded_ids = set(Concept.objects.values_list('concept_id', flat=True))
+        count = scanned = 0
+        rows = []
+        cols_out = (
+            'source_code', 'source_concept_id', 'source_vocabulary_id',
+            'source_code_description', 'target_concept_id', 'target_vocabulary_id',
+            'valid_start_date', 'valid_end_date', 'invalid_reason',
+        )
+        with f:
+            reader = csv.reader(f, delimiter='\t')
+            idx = _header_index(next(reader))
+            i_src_code = idx['source_code']
+            i_src_cid = idx['source_concept_id']
+            i_src_vid = idx['source_vocabulary_id']
+            i_src_desc = idx['source_code_description']
+            i_tgt_cid = idx['target_concept_id']
+            i_tgt_vid = idx['target_vocabulary_id']
+            i_start = idx['valid_start_date']
+            i_end = idx['valid_end_date']
+            i_inv = idx['invalid_reason']
+            for row in reader:
+                scanned += 1
+                if scanned % PROGRESS_EVERY == 0:
+                    self._log(f'  stcm: scanned {scanned:,}, {count:,} matched ({time.monotonic() - t:.0f}s)...')
+                try:
+                    src_cid = int(row[i_src_cid])
+                    tgt_cid = int(row[i_tgt_cid])
+                except (ValueError, IndexError):
+                    continue
+                if src_cid not in loaded_ids or tgt_cid not in loaded_ids:
+                    continue
+                count += 1
+                if not dry_run:
+                    rows.append((
+                        row[i_src_code][:50],
+                        src_cid,
+                        row[i_src_vid][:20],
+                        (row[i_src_desc] or None) if i_src_desc < len(row) else None,
+                        tgt_cid,
+                        row[i_tgt_vid][:20],
+                        _parse_date(row[i_start]),
+                        _parse_date(row[i_end]),
+                        row[i_inv][:1] if row[i_inv] else None,
+                    ))
+                    if len(rows) >= BATCH:
+                        _copy_rows('source_to_concept_map', cols_out, rows, self._log, direct=self._direct)
+                        rows = []
+        if not dry_run:
+            _copy_rows('source_to_concept_map', cols_out, rows, self._log, direct=self._direct)
+        self._cleanup('SOURCE_TO_CONCEPT_MAP.csv')
+        self._log(f'  stcm: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
+        return count
+
+    def _publish_release(self, counts):
+        """Create a published VocabularyRelease row capturing this load."""
+        from datetime import datetime as dt, timezone as _tz
+        from django.utils import timezone
+
+        vocab_versions = dict(
+            Vocabulary.objects.order_by('vocabulary_id')
+            .values_list('vocabulary_id', 'vocabulary_version')
+        )
+        # row_counts must reflect the ACTUAL table content the snapshot streams
+        # (SELECT COUNT(*)), not this run's load counts — the table can hold rows
+        # from prior loads / seed data / metadata vocabularies, so a consumer that
+        # cross-checks streamed rows against the manifest (EXACT's fail-closed
+        # completeness gate) would otherwise always mismatch.
+        checksums = {}
+        real_counts = {}
+        for table_name in counts:
+            try:
+                with connection.cursor() as cur:
+                    cur.execute(
+                        f'SELECT COUNT(*), MIN(ctid::text), MAX(ctid::text) '
+                        f'FROM {table_name}'
+                    )
+                    row = cur.fetchone()
+                    real_counts[table_name] = row[0]
+                    checksums[table_name] = {
+                        'count': row[0],
+                        'min_ctid': row[1],
+                        'max_ctid': row[2],
+                    }
+            except Exception as exc:
+                # Fall back to this run's load count, but never silently: a bare
+                # swallow here reintroduces the manifest↔stream mismatch (#343)
+                # with no server-side signal for the consumer's fail-closed gate.
+                logger.warning(
+                    "vocabulary_release: COUNT(*)/ctid probe failed for %s (%s); "
+                    "falling back to this run's load count — the manifest may "
+                    "disagree with the streamed table for %s.",
+                    table_name, exc, table_name, exc_info=True,
+                )
+                real_counts[table_name] = counts[table_name]
+                checksums[table_name] = {'count': counts[table_name]}
+
+        now = timezone.now()
+        build_ts = dt.fromtimestamp(self._build_start, tz=_tz.utc)
+        release = VocabularyRelease.objects.create(
+            schema_version='5.4',
+            scope=sorted(VOCAB_SCOPE),
+            build_timestamp=build_ts,
+            athena_version=getattr(self, '_cdm_vocab_version', None),
+            vocab_versions=vocab_versions,
+            row_counts=real_counts,
+            checksums=checksums,
+            status='published',
+            published_at=now,
+        )
+        self._log(f'  vocabulary_release: published release pk={release.pk}')

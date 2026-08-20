@@ -64,6 +64,37 @@ concept table.
 
 ---
 
+## Concept graph API
+
+PROMOP exposes the loaded OMOP graph to API consumers:
+
+- `GET /api/v1/concepts/{concept_id}/ancestors/`
+- `GET /api/v1/concepts/{concept_id}/descendants/`
+- `GET /api/v1/concepts/graph/`
+
+Use these endpoints when a consumer needs runtime traversal instead of relying on PRomop's internal `refresh_patient_record()` expansion.
+
+Traversal rules:
+
+- If `relationship_id` is supplied, PRomop traverses direct `concept_relationship` edges, following stored edge direction: `ancestors` returns in-neighbors (edges pointing *at* the source), `descendants` returns out-neighbors. For OMOP hierarchical relationships authored child → parent (e.g. `Is a`), use closure mode for true ancestor traversal.
+- Edges with `invalid_reason` set are excluded from relationship-mode traversal.
+- Otherwise PRomop traverses `concept_ancestor` closure rows.
+- `max_levels` applies only to `concept_ancestor` traversal.
+- `vocabulary_id` and `concept_class_id` filter the returned concepts, not the source concept.
+- Results are capped at 1000 nodes per source concept (`truncated` flag in the response); the batch endpoint accepts at most 200 `concept_id` params.
+
+Common HemOnc patterns:
+
+| Use case | Endpoint shape |
+|---|---|
+| Regimen → component drugs | `GET /api/v1/concepts/{regimen_id}/descendants/?relationship_id=Has targeted therapy` |
+| Component drug → class | `GET /api/v1/concepts/{drug_id}/ancestors/?max_levels=1&vocabulary_id=HemOnc` |
+| Batch expand multiple trial regimen ids | `GET /api/v1/concepts/graph/?direction=descendants&concept_id=...&relationship_id=...` |
+
+The canonical endpoint contract is documented in [API_SURFACE.md](../API_SURFACE.md#concept-graph-endpoints).
+
+---
+
 ## FHIR → OMOP Concept Resolution
 
 ### 1. LOINC Observation codes → `measurement_concept_id`
@@ -272,8 +303,10 @@ name-based matching, which is functional but loses semantic precision.
 
 1. Go to [athena.ohdsi.org](https://athena.ohdsi.org) and create a free account.
 2. Select the vocabularies your deployment needs:
-   - **Always required**: LOINC, SNOMED CT, RxNorm, HemOnc, OMOP Extension
-   - **Recommended**: RxNorm Extension, NDF-RT, ATC
+   - **Required for deployed clinical environments**: LOINC, SNOMED CT,
+     RxNorm, ICD10CM
+   - **Required for PROMOP oncology features**: HemOnc
+   - **Included when available**: RxNorm Extension and ATC
 3. Download the ZIP — it contains one TSV file per vocabulary table.
 
 ### Step 2 — Load into PostgreSQL
@@ -285,8 +318,7 @@ unzip athena_download.zip -d /tmp/athena_vocab
 # Run the loader (uses PostgreSQL COPY for fast bulk insert)
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
   .venv/bin/python manage.py load_athena_vocabularies \
-    --path /tmp/athena_vocab \
-    --vocabularies LOINC SNOMED RxNorm HemOnc
+    --path /tmp/athena_vocab
 
 # Verify
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
@@ -294,7 +326,8 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 from omop_core.models import Concept
 print('LOINC:', Concept.objects.filter(vocabulary_id='LOINC').count())
 print('SNOMED:', Concept.objects.filter(vocabulary_id='SNOMED').count())
-print('HemOnc:', Concept.objects.filter(vocabulary_id='HemOnc').count())
+print('RxNorm:', Concept.objects.filter(vocabulary_id='RxNorm').count())
+print('ICD10CM:', Concept.objects.filter(vocabulary_id='ICD10CM').count())
 "
 ```
 
@@ -304,11 +337,13 @@ On Render (or any production platform), vocabulary loading is a one-time operati
 the first deploy. Upload the Athena TSV files to object storage (GCS or S3) and run:
 
 ```bash
-python manage.py load_athena_vocabularies --gcs-bucket your-bucket-name
+python manage.py load_athena_vocabularies --bucket your-bucket-name
 ```
 
-The `load_athena_vocabularies` command supports `--replace` to overwrite existing vocabulary
-data on a vocabulary update, and `--dry-run` to count records without writing.
+The command verifies LOINC, RxNorm, SNOMED, and ICD10CM after a non-dry-run
+load. `--dry-run` counts records without writing. Avoid `--replace` for a
+partial-load repair: it truncates vocabulary tables and cascades to clinical
+tables; the normal upsert is safe for an existing clinical environment.
 
 ---
 

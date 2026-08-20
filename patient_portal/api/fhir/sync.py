@@ -37,7 +37,7 @@ from omop_core.models import (
 )
 from omop_core.services.pk import next_pk_batch
 from omop_core.signals import suppress_patient_record_refresh
-from patient_portal.api.permissions import ScopedTokenPermission, get_request_org
+from patient_portal.api.permissions import ScopedTokenPermission, get_request_org, is_service_token
 # Reuse the proven HK-Labs concept-fallback machinery.
 from patient_portal.api.lab_results.sync import HK_LABS_VOCAB_ID, _ensure_hk_deps
 
@@ -76,6 +76,7 @@ def _ensure_concept(concept_id):
         vocabulary_id=HK_LABS_VOCAB_ID,
         concept_class_id=concept_class_id,
         standard_concept=None,
+        source='HealthKey',
         concept_code=f'hkl:fallback-{concept_id}',
         valid_start_date=date(1970, 1, 1),
         valid_end_date=date(2099, 12, 31),
@@ -184,6 +185,28 @@ class FhirSyncView(APIView):
 
     @transaction.atomic
     def post(self, request):
+        # Bounded multi-version interchange (TI.5.2#01): decline non-R4 requests.
+        from patient_portal.api.fhir.integrity import (
+            check_fhir_version, verify_content_digest,
+        )
+        version_error = check_fhir_version(request)
+        if version_error:
+            return Response({'detail': version_error},
+                            status=status.HTTP_406_NOT_ACCEPTABLE)
+
+        # Content integrity (S.3.6#10 / PH.2.3#09): opt-in digest of the raw
+        # request body. No integrity header → unchanged behavior. Guarded so a
+        # consumed request stream can never break existing (no-header) clients.
+        try:
+            raw_body = request.body
+        except Exception:
+            raw_body = None
+        if raw_body is not None:
+            digest_error = verify_content_digest(request, raw_body)
+            if digest_error:
+                return Response({'detail': digest_error},
+                                status=status.HTTP_400_BAD_REQUEST)
+
         serializer = FhirSyncRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -530,6 +553,7 @@ class FhirSyncView(APIView):
                 drug_exposure_start_date=date,
                 drug_type_concept=ehr_type,
                 drug_source_value=_source_text(imm.get('vaccineCode'))[:50],
+                route_source_value='VACCINE',
             ))
         return self._upsert_clinical(
             DrugExposure, 'drug_exposure_id', 'drug_concept_id',
@@ -537,15 +561,21 @@ class FhirSyncView(APIView):
 
     def _ingest_clinical_observations(self, person, allergies, reports, ehr_type, no_match, cache, source_user_id, org):
         # AllergyIntolerance + DiagnosticReport land in the OMOP observation table.
+        # Allergies are tagged with qualifier_source_value='ALLERGY' so they can
+        # be filtered separately for the allergy list endpoint (PHR-S FM PH.2.5).
         items = [
             {'code': a.get('code'),
              'effective': a.get('recordedDate') or a.get('onsetDateTime'),
-             'value': a.get('criticality') or _source_text(a.get('clinicalStatus'))}
+             'value': a.get('criticality') or '',
+             'qualifier': 'ALLERGY',
+             'value_source': _source_text(a.get('clinicalStatus'))[:50]}
             for a in allergies
         ] + [
             {'code': r.get('code'),
              'effective': r.get('effectiveDateTime') or r.get('issued'),
-             'value': r.get('conclusion') or ''}
+             'value': r.get('conclusion') or '',
+             'qualifier': None,
+             'value_source': None}
             for r in reports
         ]
         rows = []
@@ -562,6 +592,8 @@ class FhirSyncView(APIView):
                 observation_type_concept=ehr_type,
                 value_as_string=(item['value'] or '')[:60],
                 observation_source_value=_source_text(item['code'])[:50],
+                qualifier_source_value=item.get('qualifier'),
+                value_source_value=item.get('value_source'),
             ))
         return self._upsert_clinical(
             Observation, 'observation_id', 'observation_concept_id',
@@ -687,7 +719,7 @@ class FhirSyncView(APIView):
                 if not can_access_patient(actor_identity, person_id):
                     return Response({'detail': 'Actor does not have access to this patient.'},
                                     status=status.HTTP_403_FORBIDDEN)
-            elif not has_explicit_actor and not getattr(request.user, 'is_superuser', False):
+            elif not has_explicit_actor and not is_service_token(request):
                 return Response(
                     {'detail': 'actor_iss and actor_sub required when writing on behalf of another person.'},
                     status=status.HTTP_400_BAD_REQUEST)

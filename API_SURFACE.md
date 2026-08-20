@@ -1,7 +1,7 @@
 # PRomop API Surface
 
 > **Canonical base URL:** `https://promop.onrender.com/api/v1/` (production) | `http://localhost:8000/api/v1/` (dev)
-> Last revised: 2026-07-14
+> Last revised: 2026-08-18
 
 > **Versioning note:** All new integrations should target `/api/v1/` paths. The legacy
 > unversioned `/api/` paths still work but return `Deprecation: true` / `Sunset: Tue, 01 Sep 2026 00:00:00 GMT`
@@ -9,7 +9,7 @@
 
 ---
 
-## Architecture: OMOP-first, PatientRecord is read-only
+## Architecture: OMOP-first, mapped PatientRecord clinical fields are read-only
 
 **The authoritative clinical record lives in OMOP tables.**
 
@@ -24,31 +24,51 @@ Client writes → OMOP tables (Measurement, ConditionOccurrence, DrugExposure, �
 ```
 
 `PatientRecord` (Django model: `PatientInfo`, API path: `/api/v1/patient-records/`) is a
-**denormalized read model**. Callers must not write to it directly. It is regenerated
-automatically whenever any OMOP record for that patient is saved or deleted.
+**denormalized read model**. Its clinical fields are regenerated automatically whenever
+their OMOP source records change, and its profile/admin compatibility fields are copied
+from HealthKey extension columns on `Person`. The API rejects writes to
+**OMOP-mapped** PatientRecord fields; OMOP APIs, FHIR imports, and `Person`
+profile updates own those writes, then the projection refreshes. Unmapped
+projection-owned compatibility fields remain temporarily writable only where
+the implementation explicitly permits them; new integrations must not use that
+exception.
 
-The two sanctioned write paths are:
+The field-by-field ownership and migration plan is
+[`docs/omop_to_patientrecord.md`](docs/omop_to_patientrecord.md). It is the authoritative
+answer to which OMOP record supplies each output column; a PatientRecord field name is
+never a substitute for a clinical concept, event date, unit, or provenance.
+
+> **Legacy SQL compatibility only:** `public.patient_info` is a read-only database view
+> retained solely for existing consumers. New integrations must not query it or depend on
+> its column set; use `public.patient_record` for SQL access or `/api/v1/patient-records/`
+> for supported application access.
+
+The sanctioned write paths are:
 
 | Path | Use case |
 |---|---|
 | `POST /api/v1/patient-records/upload_fhir/` | Bulk ingest from an EHR / FHIR R4 Bundle |
 | `POST/PATCH/DELETE /api/v1/conditions/`, `/api/v1/measurements/`, etc. | Granular OMOP record writes |
+| `PATCH /api/v1/persons/{person_id}/` | Person demographic/profile extension updates |
 
-The convenience `PATCH /api/v1/patient-records/{person_id}/` endpoint exists for field-level UI
-updates. It does **not** write to PatientRecord directly — it translates each field into the
-appropriate OMOP table write, then the signal chain re-derives PatientRecord.
+Mapped PatientRecord fields are read-only. New integrations must use granular OMOP APIs or FHIR
+for clinical writes, where concept, time, unit, and provenance are explicit; use
+`PATCH /api/v1/persons/{person_id}/` for supported Person profile fields such as email,
+phone number, validation metadata, facility name, and demographic redaction preference.
 
 ---
 
 ## Table of contents
 
 1. [Authentication & authorization](#authentication--authorization)
-2. [PatientRecord endpoints](#patientrecord-endpoints) — list, detail, provenance, me, PATCH, upload_fhir, bulk_delete
+2. [PatientRecord endpoints](#patientrecord-endpoints) — list, detail, provenance, me, upload_fhir, bulk_delete
 3. [OMOP table CRUD](#omop-table-crud) — granular clinical event writes
 4. Supplementary API
    - [Person identity endpoints](#person-identity-endpoints)
    - [Document & trial endpoints](#document--trial-endpoints)
    - [Vocabulary & concept lookup endpoints](#vocabulary--concept-lookup-endpoints)
+   - [Concept graph endpoints](#concept-graph-endpoints)
+   - [Vocabulary release & snapshot (consumer mirror)](#vocabulary-release--snapshot-consumer-mirror)
    - [OAuth2 endpoints](#oauth2-endpoints)
 5. [OMOP write internals](#omop-write-internals) — _upsert_omop_measurement, _LAB_FIELD_TO_LOINC, FHIR pipeline, signal chain
 6. [Provenance tagging](#provenance-tagging)
@@ -81,7 +101,10 @@ Grant type: `client_credentials` via `POST /o/token/`
 
 ## PatientRecord endpoints
 
-`PatientRecord` is the 286-column denormalized projection that is the core of PRomop. It is read from directly but never written to directly — all clinical data enters through OMOP tables or FHIR ingest, and PatientRecord is re-derived automatically.
+`PatientRecord` is the 286-column denormalized projection that is the core of PRomop.
+Mapped clinical data enters through OMOP tables or FHIR ingest and is re-derived
+automatically. Profile/admin values enter through HealthKey extension columns on
+`Person` and are copied into PatientRecord for compatibility.
 
 Base path: `/api/v1/patient-records/`
 URL parameter `{person_id}` is `Person.person_id` (integer).
@@ -132,6 +155,21 @@ All field values originate from OMOP tables and are kept current by the signal c
     "serum_creatinine_mg_dl": 0.9,
     "first_line_therapy": "AC-T",
     "first_line_start_date": "2022-03-01",
+    "lines_of_therapy": [
+      {
+        "line": 1,
+        "regimen": "AC-T",
+        "regimen_concept_id": 35806260,
+        "regimen_source": "asserted",
+        "release_id": "rel-20260723-a1b2c3",
+        "component_ids": [1790099, 1719640],
+        "start_date": "2022-03-01",
+        "end_date": "2022-09-01",
+        "outcome": "CR",
+        "intent": "Neoadjuvant",
+        "discontinuation_reason": "Completion"
+      }
+    ],
     "...": "all PatientRecord fields"
   },
   "user": {
@@ -142,6 +180,8 @@ All field values originate from OMOP tables and are kept current by the signal c
   }
 }
 ```
+
+`lines_of_therapy[]` is a read-only structured view of the flat `first/second/later_*` therapy fields. `line` numbers reflect populated lines only, so the array may not start at 1 and may be non-contiguous (e.g. begins at 2 if 1L is empty, skips a gap if 2L is empty). `regimen_source` is `asserted` or `inferred` (from `therapy_ids_provenance`); while provenance is not yet populated by the derivation pipeline, a resolved `regimen_concept_id` is reported as `inferred` and is never labelled `asserted` — trust `asserted`, verify `inferred`. 3L+ lines are emitted one per later line (from `later_therapies`, including lines whose regimen did not resolve to a concept_id — so `regimen_concept_id` may be `null`), each naming its own regimen with its own dates; their `component_ids`/outcome are the aggregate `later_*` values, flagged `later_aggregate: true` (do not union `component_ids` across `later_aggregate` entries — they repeat the same aggregate set).
 
 ---
 
@@ -176,39 +216,41 @@ Returns the PatientRecord for the authenticated patient. Only available to patie
 
 ---
 
-### PATCH /api/v1/patient-records/{person_id}/ — field update
+### PatientRecord mutation policy
 
-A convenience endpoint that accepts PatientRecord field names and **translates them into OMOP table writes**. PatientRecord is **not** written to directly — the signal chain re-derives it after the OMOP write completes.
+`PATCH /api/v1/patient-records/{person_id}/` returns **405 Method Not Allowed** for every
+OMOP-mapped clinical field. It returns the rejected names so callers can migrate without
+guessing:
 
-Returns **403** if patient's org ≠ caller's org.
-
-**Request body** (all fields optional)
 ```json
 {
-  "hemoglobin_g_dl": 14.5,
-  "wbc_count_thousand_per_ul": 6.8,
-  "disease": "Diffuse Large B-Cell Lymphoma",
-  "source": "ADMIN_CORRECTION",
-  "source_user_id": "dr.jones",
-  "modification_reason": "Corrected after lab review"
+  "detail": "OMOP-mapped PatientRecord fields are read-only. Write a complete clinical fact to the appropriate OMOP resource, then rederive the record.",
+  "fields": ["hemoglobin_g_dl"]
 }
 ```
 
-`source` choices: `PATIENT_SELF` · `ADMIN_CORRECTION` · `EHR_SYNC` · `DOCUMENT_EXTRACTION`
+Clinical values must be written through their OMOP resources (or FHIR import), after
+which the signal chain refreshes `PatientRecord` from OMOP. Profile/admin values that are
+displayed on PatientRecord, such as email and validation metadata, are written to HealthKey
+extension columns on `Person` via `PATCH /api/v1/persons/{person_id}/` and then projected back.
 
-`modification_reason` is **required** when `source == ADMIN_CORRECTION` — omitting it returns **400**.
+| PatientRecord output category | Write the source fact to | Required source detail |
+|---|---|---|
+| Laboratory, vital, tumour-marker, or numeric pathology value | `/api/v1/measurements/` or FHIR `Observation` | clinical concept, known event date, value, unit, provenance |
+| Coded clinical, eligibility, disease-state, imaging, or social assertion | `/api/v1/observations/`, `/api/v1/conditions/`, or equivalent FHIR resource | standard concept, known event date, coded/value assertion, provenance |
+| Medication or line-of-therapy fact | `/api/v1/drug-exposures/`, `/api/v1/episodes/`, `/api/v1/episode-events/`, or FHIR | medication/episode concept, known dates, provenance |
+| Demographic or supported profile value | `PATCH /api/v1/persons/{person_id}/` | the Person source attribute; refresh projects it |
 
-**What actually gets written**
+The target state has no writable concrete PatientRecord clinical columns. At
+runtime, only fields outside `PATIENT_RECORD_OMOP_MAPPED_FIELDS` may still be
+accepted as projection-owned compatibility fields; this temporary exception is
+not available to new integrations. The field-level mapping and migration status
+are maintained in [`docs/omop_to_patientrecord.md`](docs/omop_to_patientrecord.md).
 
-For every field in [`_LAB_FIELD_TO_LOINC`](#_lab_field_to_loinc-mapping) present in the request body:
-
-1. `_upsert_omop_measurement(person, field_name, value, today)` writes or updates a row in the `measurement` table.
-2. `refresh_patient_record(person)` then re-derives PatientRecord from the updated Measurement rows.
-3. If `source` is present, ProvenanceRecords are created for the Measurement row(s).
-
-Fields not yet modelled in OMOP (some behavioral/socioeconomic fields) are patched directly on PatientRecord as a temporary measure until they have a proper OMOP home. This is a transitional state; those fields will move to OMOP tables over time.
-
-**Response 200** — PatientRecord as re-derived from OMOP after the write.
+New integrations should write semantically complete OMOP facts to their own resource
+endpoint—for example a dated `Measurement` with its LOINC and unit—or use FHIR ingest.
+Include source/provenance on that fact. The PatientRecord API is a read surface, not a
+write model for new consumers.
 
 ---
 
@@ -294,6 +336,186 @@ Deletes patients and all their OMOP records (via CASCADE). PatientRecord is remo
 
 ---
 
+## Concept graph endpoints
+
+These endpoints expose the OMOP concept graph loaded by `load_athena_vocabularies`, so consumers can traverse:
+
+- regimen → component drugs via `concept_relationship`
+- component drug → class / superclass via `concept_ancestor`
+
+Base path: `/api/v1/concepts/...` (v1 only — these endpoints are not registered on the legacy `/api/` URLconf).
+
+All concept graph endpoints require the same OAuth/session auth as the rest of the API. Service clients typically use `patient/*.read`.
+
+Result caps: each source concept returns at most **1000** nodes; when more exist the response includes `"truncated": true` (single-concept endpoints) or lists the capped source ids in `"truncated"` (batch endpoint). The batch endpoint accepts at most **200** `concept_id` parameters.
+
+Direction semantics: without `relationship_id`, traversal uses the `concept_ancestor` closure table (true hierarchy). With `relationship_id`, traversal follows stored edge direction — `ancestors` returns in-neighbors (concepts with an edge pointing *at* the source) and `descendants` returns out-neighbors. For OMOP hierarchical relationships authored child → parent (e.g. `Is a`), use closure mode for true ancestor traversal. Edges with `invalid_reason` set are excluded from relationship-mode traversal.
+
+For background on how PRomop loads and uses `concept`, `concept_relationship`, and `concept_ancestor`, see [docs/concept-mapping.md](docs/concept-mapping.md#concept-graph-api).
+
+### GET /api/v1/concepts/{concept_id}/ancestors/
+
+Returns upstream concepts for one source concept.
+
+Default behavior:
+
+- uses `concept_ancestor`
+- excludes the self-row (`ancestor_concept_id == descendant_concept_id`)
+- orders by `min_levels_of_separation`, then `concept_id`
+
+Optional query params:
+
+| Param | Meaning |
+|---|---|
+| `max_levels` | Keep only rows with `min_levels_of_separation <= max_levels` |
+| `vocabulary_id` | Repeatable filter on returned concepts |
+| `concept_class_id` | Repeatable filter on returned concepts |
+| `relationship_id` | If present, switch to direct `concept_relationship` traversal instead of `concept_ancestor` |
+
+Example:
+
+```http
+GET /api/v1/concepts/9901002/ancestors/?max_levels=1&vocabulary_id=HemOnc
+```
+
+Response:
+
+```json
+{
+  "concept_id": 9901002,
+  "direction": "ancestors",
+  "count": 1,
+  "truncated": false,
+  "results": [
+    {
+      "concept_id": 9901003,
+      "concept_name": "HER2 inhibitor",
+      "concept_code": "CLASS-HER2",
+      "vocabulary_id": "HemOnc",
+      "vocabulary_version": "HemOnc 2024-12-19",
+      "concept_class_id": "Drug Class",
+      "domain_id": "Drug",
+      "standard_concept": null,
+      "relationship_id": null,
+      "min_levels_of_separation": 1,
+      "max_levels_of_separation": 1
+    }
+  ]
+}
+```
+
+### GET /api/v1/concepts/{concept_id}/descendants/
+
+Returns downstream concepts for one source concept.
+
+Default behavior:
+
+- uses `concept_ancestor`
+- excludes the self-row
+- orders by `min_levels_of_separation`, then `concept_id`
+
+If `relationship_id` is supplied, the endpoint switches to direct `concept_relationship` edges. This is the main regimen → component expansion path for HemOnc consumers.
+
+Example:
+
+```http
+GET /api/v1/concepts/9901001/descendants/?relationship_id=Has%20targeted%20therapy
+```
+
+Response:
+
+```json
+{
+  "concept_id": 9901001,
+  "direction": "descendants",
+  "count": 1,
+  "truncated": false,
+  "results": [
+    {
+      "concept_id": 9901002,
+      "concept_name": "trastuzumab",
+      "concept_code": "RX-TRAST",
+      "vocabulary_id": "RxNorm",
+      "vocabulary_version": "RxNorm 2024-09-03",
+      "concept_class_id": "Ingredient",
+      "domain_id": "Drug",
+      "standard_concept": null,
+      "relationship_id": "Has targeted therapy",
+      "min_levels_of_separation": null,
+      "max_levels_of_separation": null
+    }
+  ]
+}
+```
+
+### GET /api/v1/concepts/graph/
+
+Batch traversal endpoint to avoid N+1 calls from consumers.
+
+Required query params:
+
+| Param | Meaning |
+|---|---|
+| `direction` | `ancestors` or `descendants` |
+| `concept_id` | Repeatable source concept id (max 200) |
+
+Optional query params:
+
+| Param | Meaning |
+|---|---|
+| `relationship_id` | Repeatable direct-edge filter |
+| `max_levels` | Ancestor/descendant depth cap when using `concept_ancestor` |
+| `vocabulary_id` | Repeatable returned-concept filter |
+| `concept_class_id` | Repeatable returned-concept filter |
+
+Example:
+
+```http
+GET /api/v1/concepts/graph/?direction=descendants&concept_id=9901001&concept_id=999999&relationship_id=Has%20targeted%20therapy
+```
+
+Response:
+
+```json
+{
+  "direction": "descendants",
+  "results": {
+    "9901001": [
+      {
+        "concept_id": 9901002,
+        "concept_name": "trastuzumab",
+        "concept_code": "RX-TRAST",
+        "vocabulary_id": "RxNorm",
+        "vocabulary_version": "RxNorm 2024-09-03",
+        "concept_class_id": "Ingredient",
+        "domain_id": "Drug",
+        "standard_concept": null,
+        "relationship_id": "Has targeted therapy",
+        "min_levels_of_separation": null,
+        "max_levels_of_separation": null
+      }
+    ],
+    "999999": []
+  },
+  "truncated": []
+}
+```
+
+Unknown `concept_id` keys return empty lists (no per-key 404).
+
+### Error responses
+
+| Case | Status |
+|---|---|
+| missing `concept_id` on batch endpoint | `400` |
+| more than 200 `concept_id` params on batch endpoint | `400` |
+| invalid `direction` | `400` |
+| non-integer `concept_id` | `400` |
+| invalid `max_levels` | `400` |
+| unknown concept on single-concept endpoint | `404` |
+
+---
+
 ## OMOP table CRUD
 
 Direct read/write access to individual OMOP clinical event tables. Every write fires a signal that automatically re-derives PatientRecord. Use these endpoints when you need granular control over individual clinical records; use `upload_fhir` for bulk ingest.
@@ -313,6 +535,15 @@ All use `_OmopFilterMixin`:
 | `/api/episode-events/` | `episode_event` | `?episode_id=` |
 
 All support: GET (list + retrieve), POST (create), PUT/PATCH (update), DELETE.
+
+### Detailed FHIR-to-OMOP CRUD sample
+
+See [`docs/examples/fhir_omop_crud.py`](docs/examples/fhir_omop_crud.py) for a
+small, runnable example that parses a minimal FHIR bundle shape and exercises
+create/retrieve/update/delete for ConditionOccurrence, DrugExposure,
+Measurement, Observation, and ProcedureOccurrence. It shows the required event
+date, concept, unit, provenance/token setup, and verifies that OMOP writes—not
+PatientRecord writes—are the source of the derived projection.
 
 ---
 
@@ -417,6 +648,15 @@ GET /api/v1/concepts/lookup/?lookup=LOINC:2160-0&lookup=LOINC:2345-7&lookup=SNOM
 
 Unknown codes return `null`. Requires `patient/*.read` scope (read-only).
 
+**Opt-in `?include_versions=1`** — adds a top-level `_vocabulary_versions` map (release/version per requested vocabulary) so consumers can pin a release and detect drift. The default `{vocab: {code: id}}` shape is unchanged (phr-etl reads `result[vocab][code]`), so this is additive and off by default.
+```json
+{
+  "LOINC":  { "2160-0": 3013682 },
+  "SNOMED": { "44054006": 201826 },
+  "_vocabulary_versions": { "LOINC": "LOINC 2.77", "SNOMED": "SNOMED 2024-09-01" }
+}
+```
+
 **Response 400** — no `lookup` params supplied, or a param is missing the `:` separator.
 
 ---
@@ -431,7 +671,7 @@ Query params:
 
 | Param | Required | Description |
 |---|---:|---|
-| `q` | yes | Search string; minimum 2 characters after trimming |
+| `q` | yes | Search string; minimum 3 characters (trigram) after trimming |
 | `vocabulary_id` | no | Exact match filter, e.g. `LOINC`, `SNOMED`, `RxNorm`, `HemOnc` |
 | `domain_id` | no | Exact match filter, e.g. `Measurement`, `Condition`, `Drug` |
 | `concept_class_id` | no | Exact match filter, e.g. `Lab Test`, `Clinical Finding` |
@@ -455,6 +695,7 @@ GET /api/v1/concepts/search/?q=creatinine&vocabulary_id=LOINC&domain_id=Measurem
       "concept_id": 3016723,
       "concept_name": "Creatinine [Mass/volume] in Serum or Plasma",
       "vocabulary_id": "LOINC",
+      "vocabulary_version": "LOINC 2.77",
       "concept_code": "2160-0",
       "domain_id": "Measurement",
       "concept_class_id": "Lab Test",
@@ -467,7 +708,74 @@ GET /api/v1/concepts/search/?q=creatinine&vocabulary_id=LOINC&domain_id=Measurem
 Results are ordered by `concept_id` for stable pagination. Unknown search strings return an
 empty paginated result (`count: 0`). Requires `patient/*.read` or `user/*.read` scope.
 
-**Response 400** — `q` is missing or shorter than 2 characters.
+**Response 400** — `q` is missing or shorter than 3 characters.
+
+---
+
+### GET /api/v1/concepts/{concept_id}/synonyms/
+
+List the synonyms (alternate names) for one concept, so a consumer mirroring promop's vocabulary can cache them.
+
+**Request**
+```
+GET /api/v1/concepts/7001/synonyms/
+```
+
+**Response 200**
+```json
+{
+  "concept_id": 7001,
+  "count": 2,
+  "results": [
+    { "concept_synonym_name": "RVD", "language_concept_id": 4180186 },
+    { "concept_synonym_name": "VRd", "language_concept_id": 4180186 }
+  ]
+}
+```
+
+**Response 404** — `concept_id` not found. Requires `patient/*.read` or `user/*.read` scope.
+
+---
+
+### GET /api/v1/concepts/synonyms/
+
+Find concepts by a synonym (alternate name) substring — the reverse of `concepts/lookup/`, for alias resolution (e.g. regimen alias `VRd` → the HemOnc concept). Backed by a GIN trigram index on `concept_synonym_name`.
+
+Query params:
+
+| Param | Required | Description |
+|---|---:|---|
+| `q` | yes | Synonym substring; minimum 3 characters (trigram) |
+| `vocabulary_id` | no | Exact-match filter on the matched concept |
+| `concept_class_id` | no | Exact-match filter on the matched concept |
+| `page` / `page_size` | no | Pagination; `page_size` capped at 100 |
+
+**Request**
+```
+GET /api/v1/concepts/synonyms/?q=VRd&vocabulary_id=HemOnc
+```
+
+**Response 200**
+```json
+{
+  "count": 1,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "concept_id": 7001,
+      "concept_name": "Bortezomib, Lenalidomide, Dexamethasone",
+      "vocabulary_id": "HemOnc",
+      "concept_code": "HO-VRD",
+      "concept_class_id": "Regimen",
+      "standard_concept": "S",
+      "concept_synonym_name": "VRd"
+    }
+  ]
+}
+```
+
+**Response 400** — `q` is missing or shorter than 3 characters. Requires `patient/*.read` or `user/*.read` scope.
 
 ---
 
@@ -507,6 +815,7 @@ GET /api/v1/concepts/?domain_id=Measurement&concept_class_id=Lab%20Test&page_siz
       "concept_id": 3016723,
       "concept_name": "Creatinine [Mass/volume] in Serum or Plasma",
       "vocabulary_id": "LOINC",
+      "vocabulary_version": "LOINC 2.77",
       "concept_code": "2160-0",
       "domain_id": "Measurement",
       "concept_class_id": "Lab Test",
@@ -544,6 +853,42 @@ Available `model_name` slugs (37 total):
 
 ---
 
+## Vocabulary release & snapshot (consumer mirror)
+
+A consumer (e.g. EXACT) mirrors promop's vocabulary by pinning a **release** and
+cross-checking a streamed **snapshot** against the release **manifest**.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v1/vocab-releases/` | List published releases |
+| GET | `/api/v1/vocab-releases/latest/` | Current release pointer |
+| GET | `/api/v1/vocab-releases/{id}/` | **Manifest** for a release: `id`, `vocab_versions`, `row_counts` (per table), `checksums`, `schema_version`, `scope`, `status`, `published_at` |
+| GET | `/api/v1/vocab-releases/{id}/snapshot/{table}/` | **Snapshot**: streaming NDJSON, one row per line, terminated by a `{"__done": true, "rows": N}` sentinel |
+| GET | `/api/v1/vocab-releases/latest/snapshot/{table}/` | Snapshot of the current release |
+
+**Snapshot response** is `Content-Type: application/x-ndjson`, `Content-Disposition:
+attachment`, carries an `ETag` (supports `If-None-Match` → **304**), and is streamed
+from a server-side cursor (constant memory for large tables).
+
+**Completeness gate (consumer side).** A consumer counts the streamed rows and
+compares against `row_counts[table]` in the manifest; a missing `__done` sentinel
+means the stream was truncated (fail closed). Note the following:
+
+- **Only unfiltered downloads are completeness-checkable.** The `concept` snapshot
+  accepts `?source=HealthKey` / `?source=external`, which streams a **subset**;
+  `row_counts` is the **full-table** count, so a filtered download will (correctly)
+  not match it. Use the unfiltered snapshot for the full-mirror completeness check.
+- **The snapshot reads the live table, not an isolated view of the pinned release.**
+  If a `load_athena_vocabularies` run mutates a table between a release's publish and
+  the consumer's download, the streamed rows can disagree with that release's
+  manifest. Loads are infrequent and each publishes a fresh release/ETag, so the
+  window is small; treat a mismatch as fail-closed and re-pin to `latest`.
+- **Auth is coarse today.** Any token with `patient/*.read` or `user/*.read` can read
+  the manifest and snapshot — there is no dedicated system scope for reference data.
+  Tightening this is tracked separately (**#344**).
+
+---
+
 ## OAuth2 endpoints
 
 | Method | Path | Description |
@@ -557,30 +902,23 @@ Available `model_name` slugs (37 total):
 
 ---
 
-## OMOP write internals
+## OMOP write and derivation internals
 
-### _upsert_omop_measurement
-
-```python
-# patient_portal/api/views.py
-def _upsert_omop_measurement(person, field_name, value, today):
-```
-
-Writes a single lab or vital value into the OMOP `measurement` table. This is the primary write target for numeric clinical observations — PatientRecord is updated downstream by the signal chain.
-
-1. Looks up `(loinc_code, unit, display)` from `_LAB_FIELD_TO_LOINC[field_name]`.
-2. Resolves `Concept` by `concept_code = loinc_code, vocabulary_id = 'LOINC'`. Falls back to concept_id 3000963 (generic lab result) if the LOINC Concept is not loaded.
-3. **UPDATE** if a row already exists for `(person, concept, date)`.
-4. **CREATE** otherwise; `measurement_source_value` = display name (≤ 50 chars); `unit_source_value` = unit string.
-5. Saves with `_skip_patient_record_refresh = True` — the caller is responsible for triggering `refresh_patient_record` once, rather than once per measurement row.
-
-Called from `PatientInfoViewSet.partial_update()` for every field in the PATCH body that has a LOINC entry.
+Clinical write APIs operate on OMOP resources, not on projection fields. A numeric
+observation must carry its clinical concept, event time, value, and unit; terminology
+mapping and canonical-unit policy are documented in
+[`docs/concept-mapping.md`](docs/concept-mapping.md) and
+[`docs/clinical-unit-policy.md`](docs/clinical-unit-policy.md). This prevents a
+lossy projection update from being mistaken for a source clinical fact.
 
 ---
 
-### _LAB_FIELD_TO_LOINC mapping
+### PatientRecord output mapping reference
 
-Defines which PatientRecord field names map to OMOP `measurement` rows. Any field in this mapping is written to OMOP — not to PatientRecord directly.
+Shows selected OMOP-to-PatientRecord mappings. This is a derivation/output reference, not
+an input API or permission to construct a Measurement from a PatientRecord field name.
+New integrations should use the granular OMOP/FHIR representation rather than projection
+field names.
 
 ```
 PatientInfo field                  LOINC      Unit            Display
@@ -636,6 +974,36 @@ systolic_blood_pressure            8480-6     mm[Hg]          Systolic blood pre
 diastolic_blood_pressure           8462-4     mm[Hg]          Diastolic blood pressure
 heartrate                          8867-4     /min            Heart rate
 
+# Multiple myeloma disease burden
+# Several spellings map to one field: real-world EHR extracts do not agree on a
+# single LOINC for the free light chains, and both must project.
+monoclonal_protein_serum           51435-6    g/dL            M-protein band 1 [Mass/volume] in Serum by Electrophoresis
+monoclonal_protein_serum           33358-3    g/dL            Protein.monoclonal [Mass/volume] in Serum by Electrophoresis
+monoclonal_protein_urine           32730-5    mg/24h          Protein.monoclonal [Mass/time] in 24 hour Urine
+kappa_flc                          36916-5    mg/dL           Kappa light chains.free [Mass/volume] in Serum
+kappa_flc                          80515-0    mg/dL           Kappa light chains.free [Mass/volume] in Serum by nephelometry
+lambda_flc                         33944-0    mg/dL           Lambda light chains.free [Mass/volume] in Serum
+lambda_flc                         80516-8    mg/dL           Lambda light chains.free [Mass/volume] in Serum by nephelometry
+free_light_chain_ratio             48378-4    {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
+free_light_chain_ratio             80517-6    {ratio}         Kappa/Lambda light chains.free ratio by nephelometry
+free_light_chain_ratio             104546-7   {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
+clonal_plasma_cells                11118-7    %               Plasma cells/100 cells in Bone marrow
+
+# 33944-8 (kappa) and 33945-5 (lambda) also project, but they are NOT real LOINC
+# codes — they exist only as this app's seeded demo concepts and are kept so
+# demo patients keep rendering. Note that 33944-8 (seeded kappa) and 33944-0
+# (real LOINC lambda) differ by one character and are opposite analytes.
+#
+# UNITS: kappa_flc and lambda_flc are converted to mg/L from the Measurement's
+# unit_source_value (mg/L, mg/dL, mg/100mL, ug/mL, g/L). Labs report FLC in mg/L
+# and mg/dL interchangeably — a 10x difference under one field name — so a row
+# whose unit is absent or unrecognised is projected UNCONVERTED and logged at
+# WARNING. Such a row is not a valid input to any absolute threshold: the SLiM
+# light-chain criterion (IMWG 2014: ratio >= 100 AND involved chain >= 100 mg/L)
+# treats it as unproven rather than assuming a unit. Senders should always
+# populate unit_source_value. Every other field in this table is projected in
+# the source's own unit without conversion.
+
 # Performance status
 ecog_performance_status            89247-1    {score}         ECOG Performance Status score
 karnofsky_performance_score        89243-0    {score}         Karnofsky Performance Status score
@@ -673,8 +1041,6 @@ FHIR Bundle
    └── refresh_patient_record(person)   ← explicit call after all OMOP writes complete
          PatientRecord re-derived entirely from the OMOP records written above.
          PatientRecord.organization stamped from the uploading token's org.
-         (A small set of fields not yet modelled in OMOP are patched here
-          as a transitional measure until they have a proper OMOP table.)
 ```
 
 ---
@@ -753,7 +1119,8 @@ Row-level tenant isolation enforced across all read and write paths (HKI-SEC-04,
 |---|---|
 | `GET /api/v1/patient-records/` | Queryset filtered to `PatientRecord.organization = token.org` |
 | `GET /api/v1/patient-records/{person_id}/` | Returns **404** if patient's org ≠ caller's org |
-| `PATCH /api/v1/patient-records/{person_id}/` | Returns **403** if patient's org ≠ caller's org |
+| Mapped clinical fields on `/api/v1/patient-records/{person_id}/` | Read-only; clinical writes belong to scoped OMOP endpoints/imports |
+| Profile/admin fields displayed on PatientRecord | Read-only projection from scoped `Person` extension writes |
 | All OMOP ViewSets (list) | `_OmopFilterMixin` restricts to persons whose PatientRecord belongs to caller's org |
 | `POST /api/v1/patient-records/upload_fhir/` | Stamps `PatientRecord.organization` from uploading token's org |
 

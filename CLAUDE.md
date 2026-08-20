@@ -36,7 +36,6 @@ This file tells LLMs (Claude, Copilot, etc.) how to work on this codebase consis
 | FHIR bundle generator | `omop_core/management/commands/generate_fhir_bundle.py` — `--disease breast-cancer\|mm\|fl` |
 | FHIR bundle importer | `omop_core/management/commands/import_fhir_bundle.py` |
 | FHIR upload handler | `patient_portal/api/views.py` — `upload_fhir_bundle` function/view |
-| BQ loader (HealthTree) | `omop_core/management/commands/load_from_healthtree_bq.py` |
 | SCT sample data seeder | `omop_core/management/commands/populate_sct_sample_data.py` |
 | SCT migration audit | `omop_core/management/commands/audit_sct_history.py` |
 | Backend tests | `omop_core/tests.py`, `patient_portal/tests.py` |
@@ -372,24 +371,36 @@ describe('LabsTab - new_field', () => {
 ### Running Tests
 
 ```bash
-# Backend tests — run against local PostgreSQL (matches CI)
+# Backend tests, Django runner — omop_core + patient_portal
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
+
+# Backend tests, pytest — the tests/ package (18 files, 166 tests)
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
+  .venv/bin/python -m pytest -q
 
 # Frontend tests (install deps first if needed: cd frontend && npm ci)
 cd frontend && npm test -- --run
 ```
 
+**Both backend suites must be run.** Django's test runner discovers only
+`omop_core.tests` and `patient_portal.tests`; the `tests/` package is
+pytest-based and is invisible to it. CI runs both as of PR #426 — before that
+those 166 tests had never run in CI and sat at 14 failures for some time
+without anyone noticing.
+
 ### Rule: Feature Branch + PR for Every Code Change
 
 **Never commit directly to `dev` or `main`.** All fixes, enhancements, and refactors must go on a feature branch and land via a pull request.
 
-1. `git checkout -b <descriptive-branch-name>` before writing any code
-2. Commit the work on the feature branch
-3. Run the test suites (see below)
-4. Open a PR targeting `dev`
-5. Perform a code review on the PR before merging — the only exception is if a full code review was done immediately before opening the PR in the same work session (no need to review twice)
-6. **After the PR merges into `dev` successfully, delete the feature branch.** Prefer `gh pr merge --delete-branch`, which removes the remote branch as part of the merge. Then delete the local copy (`git branch -d <branch>`) and remove any worktree created for it (`git worktree remove <path>`). Do not leave merged feature branches lingering locally or on the remote.
+1. File a GitHub issue describing the work item
+2. `git checkout -b <descriptive-branch-name>` before writing any code
+3. Commit the work on the feature branch
+4. Run the test suites (see below)
+5. Open a PR targeting `dev`
+6. Perform a code review on the PR. **Stop and present the review to the user before merging** — the user must read the review and approve the merge.
+   - **Exception — small, local, low-risk fixes** (typos, docstring updates, single-line bug fixes, config tweaks): these may proceed all the way through to a merge into `dev` without waiting for user review, provided the code review found no unfixable issues.
+7. **After the PR merges into `dev` successfully, delete the feature branch.** Prefer `gh pr merge --delete-branch`, which removes the remote branch as part of the merge. Then delete the local copy (`git branch -d <branch>`) and remove any worktree created for it (`git worktree remove <path>`). Do not leave merged feature branches lingering locally or on the remote.
 
 ### Rule: Run Tests Before Every Push
 
@@ -428,6 +439,15 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d postgres \
 # Apply migrations
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py migrate --noinput
+
+# Enable pg_trgm on template1 — REQUIRED by the pytest suite.
+# pytest runs with --no-migrations, so the test DB is built by reflecting model
+# state, which recreates concept's GIN trigram index during CREATE TABLE before
+# any fixture can enable the extension. Putting it on template1 means every
+# database cloned from it already has pg_trgm. Without this, all 166 pytest
+# tests error with: operator class "gin_trgm_ops" does not exist
+PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d template1 \
+  -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
 
 # Connect (use @14 bin directly — system psql binary has OpenSSL crash on this machine)
 PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -d promop_test
@@ -484,16 +504,6 @@ The MM FHIR generator (`generate_fhir_bundle --disease mm`) emits three extensio
 | `mm-sct-eligibility` | `sct_eligibility` (comma-joined → split on ingest) |
 
 On ingest, both comma-split lists are filtered against the live vocabulary tables before storing — unrecognized tokens are discarded.
-
-### BigQuery loader
-
-`load_from_healthtree_bq.py` maps the `has_transplant` / `procedures` BQ columns to vocabulary strings via `_infer_sct_type(procedures)`:
-
-- contains `'allogeneic'` or `'allo'` → `'allogeneic SCT'`
-- contains `'tandem'` → `'tandem SCT'`
-- anything else / empty → `'autologous SCT'` (default for MM)
-
-Multiple transplant lines of the same type are deduplicated.
 
 ### Serializer validation
 
@@ -653,12 +663,10 @@ If `remoteEntry.js` returns 500 on staging, check that `WHITENOISE_ROOT` points 
 
 ## Deployment
 
-- **Render service**: `https://promop.onrender.com`
 - **`start.sh`** runs `python manage.py migrate` on every deploy — so migrations pushed to `main` are auto-applied on next Render deploy.
 - **Push to `main`** triggers deploy (once Render GitHub App access is granted in dashboard).
 - **Admin credentials**: set via `ADMIN_EMAIL` / `ADMIN_PASSWORD` env vars on Render (no hardcoded default)
-- **Render DB internal hostname**: `dpg-d6ptpqi4d50c739fufqg-a` (only reachable from Render)
-- **Render DB external hostname**: `dpg-d6ptpqi4d50c739fufqg-a.oregon-postgres.render.com`
+- **Hostnames and connection strings**: do not commit them — this is a public repo. Service URLs and database hostnames live in `.env` and the Render/GCP dashboards.
 
 ## Database Selection Rule
 
@@ -687,6 +695,96 @@ The FHIR upload endpoint in `patient_portal/api/views.py` (`upload_fhir_bundle`)
 6. After all OMOP writes, `refresh_patient_record` is called once to rebuild the `PatientRecord` read model from OMOP data
 
 **`PatientRecord` is never written to directly during FHIR upload.** All clinical data goes into OMOP tables; `PatientRecord` is derived automatically via the `post_save` signal chain.
+
+---
+
+## Deferring the PatientRecord Derivation
+
+Every clinical write re-derives the whole `PatientRecord`, and derivation cost
+grows with the rows the person already holds. On a bulk loaded patient that is
+12-32s per row level write.
+
+`?skip_refresh=true` suppresses it, on the bulk POST and on the row level
+`PATCH` and `DELETE` of the five clinical endpoints. Opt-in: without it every
+verb still derives, because existing callers depend on that.
+
+A client that defers must derive afterwards:
+
+```
+POST /api/v1/patient-records/{person_id}/refresh/
+```
+
+Admin or service-token only. It does not swallow a failing derivation, unlike
+the signal path in `omop_core/signals.py`, because a 2xx over a record that did
+not re-derive would be a lie on an endpoint that exists only to derive.
+
+---
+
+## Bulk OMOP Row Writes
+
+The five OMOP clinical CRUD endpoints (`conditions`, `drug-exposures`, `measurements`,
+`observations`, `procedures`) accept a **JSON array** on POST for callers that have
+already parsed FHIR into OMOP rows. Single-dict POSTs are unchanged.
+
+Contract: `201` with `{"created": N, "updated": M, "ids": [...]}`, one id per
+request row in request order. One transaction, all-or-nothing. One batch is one
+person (mixed-person → 400). Server assigns PKs via `next_pk_batch`
+(client-supplied PKs → 400). Per-index validation errors. Max 1,000 rows
+(`OMOP_BULK_MAX_ROWS`) → 413. Provenance comes from the `X-Provenance-Source` /
+`X-Provenance-User-Id` headers and applies to the whole batch; no source means no
+`ProvenanceRecord`, matching the single-row path.
+
+**The write is idempotent by default** (issue #454). Rows are upserted on the
+event identity in `_UPSERT_KEYS`, the same identity
+`fhir/sync.py::_upsert_clinical` uses — so an ETL re-run, a retry after a read
+timeout, or a re-parse converges instead of duplicating. Semantics per key:
+event already present → left in place, its concept updated when it changed and
+any stacked historical duplicates collapsed onto the earliest row; otherwise
+inserted. Repeats within one batch collapse to a single row (last occurrence
+wins). Only the concept column is rewritten on a matched row — every other
+column is left as stored, so a re-run cannot quietly overwrite a corrected
+value. Only inserted rows get a `ProvenanceRecord`. `?upsert=false` restores
+append-only writes.
+
+| Model | Event identity |
+|---|---|
+| ConditionOccurrence, DrugExposure, ProcedureOccurrence | `(source_value, date)` |
+| Measurement | `(source_value, date, datetime, value_as_number)` |
+| Observation | `(source_value, date, datetime, value_as_number, value_as_string, value_source_value)` |
+
+Measurement and Observation diverge on purpose: a patient legitimately has
+several distinct results for one analyte on one day, so `(source_value, date)`
+alone would delete real results instead of deduping a re-run.
+
+The concept column stays outside every key, which lets a vocabulary load upgrade
+a stored row in place instead of stranding a duplicate beside it. The same rule
+picks which value columns may join a key: only raw ones. `value_as_concept` is
+re-resolved by a vocabulary load just like `observation_concept`, so keying on
+it would strand the duplicate the design prevents. `value_source_value` is the
+raw text behind that resolution, so it separates two coded answers safely.
+
+A batch that trips a database constraint returns **409** with the driver's first
+error line, not 500. The whole batch rolled back, so the caller can retry, and a
+500 reads as "the service is down".
+
+A row with no `source_value` or no date has no identity and is always inserted.
+
+Three things to know before touching this code:
+
+- **`bulk_create` does not fire `post_save`**, so the `omop_core/signals.py` receivers
+  that rebuild `PatientRecord` do not run. The bulk path calls `refresh_patient_record`
+  explicitly, once per batch. Any new bulk write path must do the same, or it will land
+  rows that the read model never reflects.
+- **Query count must stay flat in batch size.** DRF resolves FKs with a per-row
+  `queryset.get(pk=...)`; `_prefetch_bulk_related` collapses that to one query per FK
+  column. The upsert match is one superset `SELECT` for the whole batch, not the
+  per-key query `_upsert_clinical` can afford on a small FHIR compartment.
+  `BulkOmopWriteTest` and `BulkOmopUpsertTest` assert this with
+  `CaptureQueriesContext` at two batch sizes — treat a failure there as a real
+  regression, not a flaky threshold.
+- **The collapse path deletes rows, and `post_delete` receivers are live.** The
+  whole write block runs inside `suppress_patient_record_refresh()`; without it a
+  batch that collapses duplicates fires one refresh per deleted row.
 
 ---
 

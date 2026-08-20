@@ -27,7 +27,10 @@ requests-oauthlib==2.0.0
 sqlparse==0.5.1
 urllib3==2.2.3
 whitenoise==6.7.0
+django-anymail[mailgun]==12.0
 drf-spectacular==0.28.0
+
+python-fitparse>=2.0.0
 
 # Testing
 pytest==8.4.2

@@ -96,7 +96,7 @@ class SyncViewTest(TestCase):
     def setUp(self):
         _setup_vocab()
         self.user = Identity.objects.create_user(email='labsync@test.com', password='test')
-        self.user.is_superuser = True
+        self.user.is_staff = True
         self.user.save()
         self.person = Person.objects.create(person_id=1001)
         PatientRecord.objects.create(person=self.person)
@@ -514,14 +514,52 @@ class VisitDeleteViewTest(TestCase):
         resp = self.client.delete('/api/lab-results/visits/9999/')
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_patient_can_delete_own_visit(self):
+        """hk-labs forwards the patient's own token when they delete a report.
+
+        Non-staff patients were denied DELETE, so the report vanished from
+        hk-labs while its measurements stayed in the record forever.
+        """
+        self.user.is_staff = False
+        self.user.save(update_fields=['is_staff'])
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+
+        resp = client.delete('/api/lab-results/visits/500/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['deleted_measurements'], 3)
+        self.assertFalse(VisitOccurrence.objects.filter(visit_occurrence_id=500).exists())
+
+    def test_patient_cannot_delete_another_persons_visit(self):
+        """Widening the permission must not widen who a patient can reach."""
+        other_person = Person.objects.create(person_id=5002)
+        PatientRecord.objects.create(person=other_person)
+        stranger = Identity.objects.create_user(email='stranger@test.com', password='test')
+        PatientUser.objects.create(identity=stranger, person=other_person)
+        client = APIClient()
+        client.force_authenticate(user=stranger)
+
+        resp = client.delete('/api/lab-results/visits/500/')
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(VisitOccurrence.objects.filter(visit_occurrence_id=500).exists())
+        self.assertEqual(Measurement.objects.filter(visit_occurrence_id=500).count(), 3)
+
 
 class SyncOnBehalfOfTest(TestCase):
-    """Tests for actor_iss/actor_sub on-behalf-of sync flow."""
+    """Tests for actor_iss/actor_sub on-behalf-of sync flow.
+
+    On-behalf-of writes are a service-token feature: the caller supplies
+    actor_iss/actor_sub to attribute the write to a specific user.
+    """
 
     def setUp(self):
         _setup_vocab()
-        self.service_user = Identity.objects.create_user(email='service@test.com', password='test')
-        self.service_user.is_superuser = True
+        self.service_user = Identity.objects.get_or_create(
+            issuer='urn:service', sub='hk-labs-sync',
+        )[0]
+        self.service_user.set_unusable_password()
         self.service_user.save()
 
         self.actor = Identity.objects.create_user(email='actor@test.com', password='test')
@@ -530,7 +568,7 @@ class SyncOnBehalfOfTest(TestCase):
         PatientUser.objects.create(identity=self.actor, person=self.person)
 
         self.client = APIClient()
-        self.client.force_authenticate(user=self.service_user)
+        self.client.force_authenticate(user=self.service_user, token="service-token")
 
     def _sync_payload(self, **overrides):
         base = {
@@ -586,13 +624,13 @@ class SyncOnBehalfOfTest(TestCase):
             }],
             'source_type': 'document_extraction',
         }, format='json')
-        # A non-superuser end user may now POST (LabSyncPermission); attribution
+        # A non-staff end user may now POST (LabSyncPermission); attribution
         # is bound to the authenticated user, who does not own person 2001, so
         # the write is denied by can_access_patient().
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_patient_self_commit_succeeds(self):
-        """A regular (non-superuser) patient can commit labs to a record they own.
+        """A regular (non-staff) patient can commit labs to a record they own.
 
         Every lab result must be attributed to a user; here the authenticated
         patient is that user."""
@@ -652,7 +690,7 @@ class PipeCharacterValidationTest(TestCase):
     def setUp(self):
         _setup_vocab()
         self.user = Identity.objects.create_user(email='pipe@test.com', password='test')
-        self.user.is_superuser = True
+        self.user.is_staff = True
         self.user.save()
         Person.objects.create(person_id=3001)
         self.client = APIClient()
@@ -998,9 +1036,24 @@ class FirebaseAuthedSyncTest(TestCase):
         self.assertEqual(synced_person_id, pu.person_id)
 
     def test_firebase_authed_with_explicit_person_id_for_other_person_denied(self):
+        """Non-staff patient cannot write labs to another person's record."""
+        # Use a non-staff user — staff has cross-patient access via is_staff.
+        own_person = Person.objects.create(person_id=8887)
+        PatientRecord.objects.create(person=own_person, email='nonstaff@example.com')
+        non_staff_user = Identity.objects.get_or_create(
+            issuer='https://securetoken.google.com/promop-test',
+            sub='firebase-uid-non-staff',
+            defaults={'email': 'nonstaff@example.com'},
+        )[0]
+        non_staff_user.set_unusable_password()
+        non_staff_user.save()
+        PatientUser.objects.create(identity=non_staff_user, person=own_person)
+        client = APIClient()
+        client.force_authenticate(user=non_staff_user)
+
         other_person = Person.objects.create(person_id=8888)
         PatientRecord.objects.create(person=other_person)
-        resp = self.client.post(
+        resp = client.post(
             '/api/lab-results/sync/',
             self._sync_payload(person_id=other_person.person_id),
             format='json',
@@ -1095,8 +1148,8 @@ class ServiceTokenSyncFallbackTest(TestCase):
         self.assertEqual(m.person_id, self.person.person_id)
 
 
-class SyncNonSuperuserTest(TestCase):
-    """A non-superuser patient may commit labs, but only to records they own.
+class SyncNonStaffTest(TestCase):
+    """A non-staff patient may commit labs, but only to records they own.
 
     Committing a lab is a legitimate patient self-service write (every result is
     attributed to the authenticated user). The endpoint allows it, while
@@ -1154,7 +1207,7 @@ class DedupSyncTest(TestCase):
     def setUp(self):
         _setup_vocab()
         self.user = Identity.objects.create_user(email='dedup@test.com', password='test')
-        self.user.is_superuser = True
+        self.user.is_staff = True
         self.user.save()
         self.person = Person.objects.create(person_id=3001)
         PatientRecord.objects.create(person=self.person)
@@ -1324,16 +1377,16 @@ class ResolvePersonIdEmailFallbackTest(TestCase):
         client = APIClient()
         client.force_authenticate(user=user)
         resp = client.get('/api/lab-results/summary/')
-        # No PatientUser link + no org + not superuser → 404
+        # No PatientUser link + no org + not staff → 404
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_superuser_without_org_can_use_email_fallback(self):
-        """Superuser with no PatientUser link may still resolve by email."""
-        user = self._user(is_superuser=True, is_staff=True)
+    def test_staff_without_org_can_use_email_fallback(self):
+        """Staff user with no PatientUser link may still resolve by email."""
+        user = self._user(is_staff=True)
         client = APIClient()
         client.force_authenticate(user=user)
         resp = client.get('/api/lab-results/summary/')
-        # Superuser email fallback succeeds (200 even if no measurements)
+        # Staff email fallback succeeds (200 even if no measurements)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_patient_with_patientuser_link_still_resolves(self):
@@ -1468,7 +1521,7 @@ class SyncVisitIdempotencyTest(TestCase):
     def setUp(self):
         _setup_vocab()
         self.user = Identity.objects.create_user(email='idemp@test.com', password='test')
-        self.user.is_superuser = True
+        self.user.is_staff = True
         self.user.save()
         self.person = Person.objects.create(person_id=19001)
         PatientRecord.objects.create(person=self.person)
@@ -1537,7 +1590,7 @@ class SyncProvenanceDedupTest(TestCase):
     def setUp(self):
         _setup_vocab()
         self.user = Identity.objects.create_user(email='prov@test.com', password='test')
-        self.user.is_superuser = True
+        self.user.is_staff = True
         self.user.save()
         self.person = Person.objects.create(person_id=20001)
         PatientRecord.objects.create(person=self.person)

@@ -1710,11 +1710,11 @@ class Command(BaseCommand):
         """Generate 30 days of synthetic wearable Observations (steps, HR, SpO2, sleep, etc.)."""
         today = datetime.now().date()
         entries = []
-        # LOINC codes matching WEARABLE_LOINC in omop_core/services/mappings.py
+        # LOINC codes matching WEARABLE_CONCEPT_CODE in omop_core/services/mappings.py
         metrics = [
             ('55423-8', 'Steps count', 'steps', '/d',  '/d',
              lambda: round(random.gauss(7500, 2500))),
-            ('77592-4', 'Active minutes', 'min',  'min', 'min',
+            ('55411-3', 'Exercise duration', 'min',  'min', 'min',
              lambda: round(random.gauss(35, 12))),
             ('40443-4', 'Resting heart rate', 'bpm', '/min', '/min',
              lambda: round(random.gauss(68, 8))),

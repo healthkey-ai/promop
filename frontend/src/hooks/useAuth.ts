@@ -8,7 +8,7 @@ interface OrgAccess {
   expires_at: string | null;
 }
 
-interface User {
+export interface User {
   id: number;
   sub: string;
   email: string;
@@ -17,6 +17,14 @@ interface User {
   is_superuser?: boolean;
   is_org_admin?: boolean;
   org_accesses?: OrgAccess[];
+  // PHR Account Holder (patient) role — see PHR-S FM PH.1. When is_patient is
+  // true, person_id is the patient's own record and the UI runs in patient mode.
+  is_patient?: boolean;
+  person_id?: number | null;
+  // Force-change-at-next-login (PHR-S FM TI.1.1#09). When true, the backend
+  // refuses every /api/ request except change-password until the password is
+  // reset, and the SPA shows a blocking change-password screen.
+  must_change_password?: boolean;
 }
 
 export const useAuth = () => {
@@ -57,12 +65,16 @@ export const useAuth = () => {
       setCurrentUser(userData);
       return { success: true as const, user: userData };
     } catch (error) {
-      const msg =
+      let errorMessage = "Login failed";
+      if (
         error &&
         typeof error === "object" &&
-        "response" in error &&
-        (error as { response?: { data?: { error?: string } } }).response?.data?.error;
-      return { success: false as const, error: msg || "Login failed" };
+        "response" in error
+      ) {
+        const serverMsg = (error as { response?: { data?: { error?: string } } }).response?.data?.error;
+        if (serverMsg) errorMessage = serverMsg;
+      }
+      return { success: false as const, error: errorMessage };
     }
   };
 
@@ -71,7 +83,8 @@ export const useAuth = () => {
       await api.post("/auth/logout/");
     } finally {
       setCurrentUser(null);
-      window.location.href = "/login";
+      const orgMatch = window.location.pathname.match(/^\/org\/([^/]+)/);
+      window.location.href = orgMatch ? `/org/${orgMatch[1]}/login` : "/login";
     }
   };
 

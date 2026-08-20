@@ -15,11 +15,18 @@ from pathlib import Path
 import dj_database_url
 from dotenv import load_dotenv
 
+from ctomop.frontend_paths import resolve_frontend_root
+
 # Load environment variables from .env file (for local development)
 load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Directory holding the built frontend. Feeds BOTH the Django template loader
+# (for the SPA catch-all in ctomop.urls) and WhiteNoise (for index.html and the
+# hashed assets) — see ctomop/frontend_paths.py for why they must agree.
+FRONTEND_ROOT = resolve_frontend_root(BASE_DIR, os.environ.get('WHITENOISE_ROOT', ''))
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-your-default-key-change-this')
@@ -87,6 +94,7 @@ INSTALLED_APPS = [
     'omop_genomics',
     'omop_oncology',
     'patient_portal',
+    'anymail',
 ]
 
 MIDDLEWARE = [
@@ -100,6 +108,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'patient_portal.api.middleware.AuditLogMiddleware',
+    'patient_portal.api.middleware.ForcePasswordChangeMiddleware',
     'patient_portal.api.middleware.DeprecationWarningMiddleware',
 ]
 
@@ -151,12 +160,20 @@ LOGGING = {
     },
 }
 
+# Audit-event retention (HL7 PHR-S FM TI.2.2 — Audit Log Management).
+# AuditEvent rows older than this many days are eligible for pruning by the
+# `prune_audit_events` management command (typically run as a scheduled job).
+# Default 2190 days (~6 years): a common minimum retention for healthcare audit
+# logs (e.g. HIPAA record-retention practice). Override per-deployment via the
+# AUDIT_EVENT_RETENTION_DAYS env var, or per-run via `--days N`.
+AUDIT_EVENT_RETENTION_DAYS = int(os.environ.get('AUDIT_EVENT_RETENTION_DAYS', '2190'))
+
 ROOT_URLCONF = 'ctomop.urls'
 
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'frontend' / 'build'],
+        'DIRS': [FRONTEND_ROOT] if FRONTEND_ROOT else [],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -202,6 +219,9 @@ AUTH_PASSWORD_VALIDATORS = [
     },
     {
         'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+        # 12 chars — matches the analytics (PRism) app, which shares this identity
+        # table, so a credential set in promop always satisfies the analytics bar.
+        'OPTIONS': {'min_length': 12},
     },
     {
         'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
@@ -211,24 +231,44 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-_smtp_env_configured = bool(
-    os.environ.get('EMAIL_HOST_USER') and os.environ.get('EMAIL_HOST_PASSWORD')
+# Authentication-policy controls for local (email/password) accounts — PHR-S FM TI.1.1.
+# All env-configurable per organizational policy.
+AUTH_LOCKOUT_THRESHOLD = int(os.environ.get('AUTH_LOCKOUT_THRESHOLD', '5'))   # #03 consecutive failures before lockout
+AUTH_LOCKOUT_SECONDS = int(os.environ.get('AUTH_LOCKOUT_SECONDS', '900'))     # #03 lockout duration (15 min)
+PASSWORD_HISTORY_SIZE = int(os.environ.get('PASSWORD_HISTORY_SIZE', '5'))     # #05 last-N passwords that may not be reused
+PASSWORD_REUSE_DAYS = int(os.environ.get('PASSWORD_REUSE_DAYS', '180'))       # #04 no reuse within this many days
+
+# Audit tamper-evidence (TI.2.2.1) and break-glass (TI.2.3#04).
+AUDIT_HMAC_KEY = os.environ.get('AUDIT_HMAC_KEY', '')                          # falls back to SECRET_KEY when empty
+BREAK_GLASS_TTL_SECONDS = int(os.environ.get('BREAK_GLASS_TTL_SECONDS', '3600'))  # emergency-access window (1h)
+# Hash-chain audit rows so row deletion/insertion is detectable (TI.2.2.1). Serializes
+# audit writes via an advisory lock; can be disabled under extreme write load.
+AUDIT_HASH_CHAIN_ENABLED = os.environ.get('AUDIT_HASH_CHAIN_ENABLED', 'true').lower() in ('1', 'true', 'yes')
+
+# Data-exchange integrity & non-repudiation (S.3.6#10 / PH.2.3#09, issue #306).
+# Key used to sign exported FHIR bundles (HMAC-SHA256). Falls back to SECRET_KEY
+# when empty, mirroring the AUDIT_HMAC_KEY pattern.
+EXPORT_SIGNING_KEY = os.environ.get('EXPORT_SIGNING_KEY', '')
+
+_mailgun_configured = bool(
+    os.environ.get('MAILGUN_API_KEY') and os.environ.get('MAILGUN_SENDER_DOMAIN')
 )
 
-# Email
+# Email — uses Mailgun HTTP API via django-anymail when configured,
+# falls back to console backend for local development.
 EMAIL_BACKEND = os.environ.get(
     'EMAIL_BACKEND',
     (
-        'django.core.mail.backends.smtp.EmailBackend'
-        if (not DEBUG or _smtp_env_configured)
+        'anymail.backends.mailgun.EmailBackend'
+        if _mailgun_configured
         else 'django.core.mail.backends.console.EmailBackend'
     ),
 )
-EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.mailgun.org')
-EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))
-EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'true').lower() == 'true'
-EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
-EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
+ANYMAIL = {}
+if os.environ.get('MAILGUN_API_KEY'):
+    ANYMAIL['MAILGUN_API_KEY'] = os.environ['MAILGUN_API_KEY']
+if os.environ.get('MAILGUN_SENDER_DOMAIN'):
+    ANYMAIL['MAILGUN_SENDER_DOMAIN'] = os.environ['MAILGUN_SENDER_DOMAIN']
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'PROMOP <noreply@healthkey.ai>')
 
 # Base URL used to build invitation accept links in emails.
@@ -249,16 +289,13 @@ STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = []
 
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
-_whitenoise_root = os.environ.get('WHITENOISE_ROOT', '')
-if _whitenoise_root:
-    WHITENOISE_ROOT = Path(_whitenoise_root)
-else:
-    for _candidate in (BASE_DIR / 'frontend' / 'dist' / 'remote', BASE_DIR / 'frontend' / 'build'):
-        if _candidate.exists():
-            WHITENOISE_ROOT = _candidate
-            break
+if FRONTEND_ROOT:
+    WHITENOISE_ROOT = FRONTEND_ROOT
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
@@ -280,7 +317,24 @@ CORS_ALLOW_CREDENTIALS = True
 # recognises the bearer token wins.
 PARTNER_AUTH_PROVIDERS = [
     "patient_portal.api.providers.firebase.FirebaseTokenProvider",
+    "patient_portal.api.providers.phr.PhrTokenProvider",
 ]
+
+# ── phr identity service (the accounts DB for the service family) ─────────
+# RS256 tokens verify offline via the JWKS document; HS256 deployments fall
+# back to introspection.
+PHR_ISSUER = os.environ.get("PHR_ISSUER", "healthkey-phr")
+PHR_BASE_URL = os.environ.get(
+    "PHR_BASE_URL", "http://127.0.0.1:9000" if DEBUG else ""
+).rstrip("/")
+PHR_JWKS_URL = os.environ.get(
+    "PHR_JWKS_URL", f"{PHR_BASE_URL}/api/v1/auth/jwks/" if PHR_BASE_URL else ""
+)
+PHR_INTROSPECT_URL = os.environ.get(
+    "PHR_INTROSPECT_URL",
+    f"{PHR_BASE_URL}/api/v1/auth/introspect/" if PHR_BASE_URL else "",
+)
+PHR_JWKS_CACHE_TTL = int(os.environ.get("PHR_JWKS_CACHE_TTL", "3600"))
 
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "promop-test" if DEBUG else "")
 FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(
@@ -303,6 +357,16 @@ if DEBUG:
         'rest_framework.authentication.BasicAuthentication',
     ]
 
+# Pinned rather than inherited so the value is visible, but note the scope:
+# this bounds form/multipart bodies and anything read via HttpRequest.body. It
+# does NOT bound DRF JSON bodies — Request._load_stream hands JSONParser the raw
+# WSGI stream, bypassing HttpRequest.body entirely, which is the only place
+# Django enforces this. The bulk OMOP write endpoint therefore does its own
+# pre-parse CONTENT_LENGTH check (OMOP_BULK_MAX_BYTES in patient_portal/api/views.py).
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(
+    os.environ.get('DATA_UPLOAD_MAX_MEMORY_SIZE', 2621440)
+)
+
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_AUTHENTICATION_CLASSES': _auth_classes,
@@ -323,6 +387,15 @@ REST_FRAMEWORK = {
         # Patient self-service ingest (/api/fhir/patient-sync/) — per-patient, so
         # a more generous bucket than the shared service-token /sync/ endpoint.
         'patient_sync': os.environ.get('PATIENT_SYNC_THROTTLE_RATE', '120/minute'),
+        'patient_signup': '10/hour',
+        # OMOP clinical-row CRUD (conditions / drug-exposures / measurements /
+        # observations / procedures). These viewsets set throttle_scope='omop_write'
+        # and override throttle_classes, so this bucket REPLACES 'user' for them
+        # rather than stacking with it. The default matches the old 'user' rate, so
+        # behaviour is unchanged out of the box; raise it for bulk backfills, where
+        # 300/minute would otherwise become the new ceiling once per-row request
+        # overhead is gone.
+        'omop_write': os.environ.get('OMOP_WRITE_THROTTLE_RATE', '300/minute'),
     },
 }
 
@@ -338,6 +411,7 @@ OAUTH2_PROVIDER = {
         'patient/*.write':  'Write all patient clinical data',
         'user/*.read':      'Read data on behalf of the current user',
         'user/*.write':     'Write data on behalf of the current user',
+        'system/*.read':    'Read reference/system data (vocabulary, concepts) — not patient-specific',
     },
     'DEFAULT_SCOPES': ['openid', 'patient/*.read'],
     'ACCESS_TOKEN_EXPIRE_SECONDS': 3600,

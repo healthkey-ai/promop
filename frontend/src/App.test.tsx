@@ -1,0 +1,207 @@
+import { render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
+import { vi, describe, it, expect, beforeEach } from "vitest";
+import App from "./App";
+
+// Controllable useAuth mock.
+const { mockUseAuth } = vi.hoisted(() => ({ mockUseAuth: vi.fn() }));
+vi.mock("@/hooks/useAuth", () => ({ useAuth: () => mockUseAuth() }));
+
+// Replace route targets with identifiable markers so we assert on routing only.
+vi.mock("@/components/Patient/PatientList", () => ({ default: () => <div>PROVIDER_LIST</div> }));
+vi.mock("@/components/Patient/PatientHome", () => ({ default: () => <div>PATIENT_HOME</div> }));
+vi.mock("@/components/Patient/PatientDetail", () => ({
+  default: (props: { user?: { id?: number } | null }) => (
+    <div>{`PATIENT_DETAIL:${props.user?.id ?? "none"}`}</div>
+  ),
+}));
+vi.mock("@/components/Patient/UploadFHIR", () => ({ default: () => <div>UPLOAD_FHIR</div> }));
+vi.mock("@/components/Patient/UploadCSV", () => ({ default: () => <div>UPLOAD_CSV</div> }));
+vi.mock("@/components/OrgAdmin/OrgAdminPage", () => ({ default: () => <div>ORG_ADMIN</div> }));
+vi.mock("@/components/User/UserProfilePage", () => ({ default: () => <div>USER_PROFILE</div> }));
+vi.mock("@/components/Auth/Login", () => ({ Login: () => <div>LOGIN</div> }));
+vi.mock("@/components/Auth/AuthCallback", () => ({ AuthCallback: () => <div>AUTH_CALLBACK</div> }));
+vi.mock("@/components/Auth/AcceptInvite", () => ({ default: () => <div>ACCEPT_INVITE</div> }));
+vi.mock("@/components/Auth/AcceptPatientInvite", () => ({ default: () => <div>ACCEPT_PATIENT_INVITE</div> }));
+vi.mock("@/components/Auth/ResetPassword", () => ({ default: () => <div>RESET_PASSWORD</div> }));
+vi.mock("@/components/Auth/ChangePassword", () => ({ default: () => <div>CHANGE_PASSWORD</div> }));
+vi.mock("@/components/Auth/OrgLogin", () => ({ default: () => <div>ORG_LOGIN</div> }));
+vi.mock("@/components/Auth/OrgSignup", () => ({ default: () => <div>ORG_SIGNUP</div> }));
+
+const baseAuth = { loading: false, refresh: vi.fn(), logout: vi.fn(), login: vi.fn() };
+
+function renderAt(path: string) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <App />
+    </MemoryRouter>
+  );
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
+describe("App role-gated routing", () => {
+  it("routes a patient to PatientHome at /", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 1, is_patient: true, person_id: 5 } });
+    renderAt("/");
+    expect(screen.getByText("PATIENT_HOME")).toBeInTheDocument();
+    expect(screen.queryByText("PROVIDER_LIST")).not.toBeInTheDocument();
+  });
+
+  it("routes a provider to the provider patient list at /", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
+    renderAt("/");
+    expect(screen.getByText("PROVIDER_LIST")).toBeInTheDocument();
+    expect(screen.queryByText("PATIENT_HOME")).not.toBeInTheDocument();
+  });
+
+  it("redirects a logged-out user to login at /", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+    renderAt("/");
+    expect(screen.getByText("LOGIN")).toBeInTheDocument();
+  });
+
+  it("blocks a patient from a provider-only route (org-admin -> home)", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 1, is_patient: true, person_id: 5 } });
+    renderAt("/org-admin");
+    expect(screen.getByText("PATIENT_HOME")).toBeInTheDocument();
+    expect(screen.queryByText("ORG_ADMIN")).not.toBeInTheDocument();
+  });
+
+  it("blocks a patient from the provider patient-detail route", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 1, is_patient: true, person_id: 5 } });
+    renderAt("/patient/999");
+    expect(screen.getByText("PATIENT_HOME")).toBeInTheDocument();
+    expect(screen.queryByText(/PATIENT_DETAIL/)).not.toBeInTheDocument();
+  });
+
+  it("passes currentUser to provider patient detail routes", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
+    renderAt("/patient/999");
+    expect(screen.getByText("PATIENT_DETAIL:2")).toBeInTheDocument();
+  });
+
+  it("allows a provider on a provider-only route (org-admin)", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
+    renderAt("/org-admin");
+    expect(screen.getByText("ORG_ADMIN")).toBeInTheDocument();
+  });
+});
+
+describe("Org-scoped routes", () => {
+  it("renders OrgLogin at /org/:slug/login without auth", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+    renderAt("/org/acme/login");
+    expect(screen.getByText("ORG_LOGIN")).toBeInTheDocument();
+  });
+
+  it("renders OrgSignup at /org/:slug/signup without auth", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+    renderAt("/org/acme/signup");
+    expect(screen.getByText("ORG_SIGNUP")).toBeInTheDocument();
+  });
+
+  it("renders AcceptInvite at the bare /accept-invite route", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+    renderAt("/accept-invite?token=abc");
+    expect(screen.getByText("ACCEPT_INVITE")).toBeInTheDocument();
+  });
+
+  it("renders AcceptInvite at the legacy /org/:slug/accept-invite alias (older emails)", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+    renderAt("/org/acme/accept-invite?token=abc");
+    expect(screen.getByText("ACCEPT_INVITE")).toBeInTheDocument();
+  });
+
+  it("renders PatientHome at /org/:slug for an authenticated patient with matching org", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: {
+        id: 1, is_patient: true, person_id: 5,
+        org_accesses: [{ org_slug: 'acme', org_name: 'Acme', role: 'patient', expires_at: null }],
+      },
+    });
+    renderAt("/org/acme");
+    expect(screen.getByText("PATIENT_HOME")).toBeInTheDocument();
+  });
+
+  it("redirects patient to their own org when visiting wrong org URL", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: {
+        id: 1, is_patient: true, person_id: 5,
+        org_accesses: [{ org_slug: 'my-clinic', org_name: 'My Clinic', role: 'patient', expires_at: null }],
+      },
+    });
+    renderAt("/org/wrong-clinic");
+    // Should redirect to /org/my-clinic/ which then renders OrgHome → PatientHome
+    // Since OrgHome redirects via Navigate, we end up at the patient's own org
+    expect(screen.getByText("PATIENT_HOME")).toBeInTheDocument();
+  });
+
+  it("redirects patient with no org_accesses to / from /org/:slug", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 1, is_patient: true, person_id: 5 },
+    });
+    renderAt("/org/acme");
+    // No org_accesses → redirects to / → PatientHome
+    expect(screen.getByText("PATIENT_HOME")).toBeInTheDocument();
+  });
+
+  it("redirects non-patient to / at /org/:slug", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
+    renderAt("/org/acme");
+    expect(screen.getByText("PROVIDER_LIST")).toBeInTheDocument();
+  });
+
+  it("redirects unauthenticated user to /org/:slug/login at /org/:slug", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+    renderAt("/org/acme");
+    expect(screen.getByText("ORG_LOGIN")).toBeInTheDocument();
+  });
+
+  it("does not gate org login/signup with force-change screen", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 1, is_patient: true, person_id: 5, must_change_password: true },
+    });
+    renderAt("/org/acme/login");
+    expect(screen.getByText("ORG_LOGIN")).toBeInTheDocument();
+    expect(screen.queryByText("CHANGE_PASSWORD")).not.toBeInTheDocument();
+  });
+});
+
+describe("App force-password-change gate (TI.1.1#09)", () => {
+  it("holds a flagged user on the change-password screen instead of their route", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 1, is_patient: true, person_id: 5, must_change_password: true },
+    });
+    renderAt("/");
+    expect(screen.getByText("CHANGE_PASSWORD")).toBeInTheDocument();
+    expect(screen.queryByText("PATIENT_HOME")).not.toBeInTheDocument();
+  });
+
+  it("gates provider routes too", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 2, is_org_admin: true, must_change_password: true },
+    });
+    renderAt("/org-admin");
+    expect(screen.getByText("CHANGE_PASSWORD")).toBeInTheDocument();
+    expect(screen.queryByText("ORG_ADMIN")).not.toBeInTheDocument();
+  });
+
+  it("does not gate the public reset-password page", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 1, is_patient: true, person_id: 5, must_change_password: true },
+    });
+    renderAt("/reset-password");
+    expect(screen.getByText("RESET_PASSWORD")).toBeInTheDocument();
+    expect(screen.queryByText("CHANGE_PASSWORD")).not.toBeInTheDocument();
+  });
+});

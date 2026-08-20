@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ArrowLeft, Trash2, X } from 'lucide-react';
 import api from '@/api/axios';
+
+const DEFAULT_ANALYST_REDIRECT_URL = 'https://analytics.healthkey.ai';
 
 interface OrgDetailProps {
   slug: string;
@@ -14,6 +16,7 @@ interface Org {
   slug: string;
   is_active: boolean;
   allows_public_aggregated_data: boolean;
+  allows_patient_signup: boolean;
   created_at: string;
 }
 
@@ -30,9 +33,16 @@ interface Invitation {
   org_slug: string;
   email: string;
   role: string;
+  redirect_url: string | null;
+  person_id: number | null;
   status: string;
   expires_at: string;
   created_at: string;
+}
+
+interface PatientSearchResult {
+  person_id: number;
+  patient_name: string;
 }
 
 interface InviteResponse extends Invitation {
@@ -48,6 +58,7 @@ interface AccessGrant {
   org_slug: string;
   group_name: string | null;
   role: string;
+  redirect_url: string | null;
   expires_at: string | null;
   granted_at: string;
 }
@@ -67,7 +78,38 @@ interface OrgStatsData {
   disease_counts: DiseaseCount[];
 }
 
-type Section = 'settings' | 'trusts' | 'admins' | 'invitations' | 'stats';
+interface VocabularyUsageDetail {
+  table: string;
+  column: string;
+  role: string;
+  instance_count: number;
+}
+
+interface VocabularyConcept {
+  concept_id: number;
+  vocabulary_id: string;
+  concept_code: string;
+  concept_name: string;
+  domain_id: string;
+  standard_concept: string | null;
+  source: string | null;
+  group: 'athena' | 'healthkey' | 'nonconforming';
+  group_label: string;
+  group_order: number;
+  patient_count: number;
+  instance_count: number;
+  usage: VocabularyUsageDetail[];
+}
+
+interface OrgVocabularyData {
+  org_slug: string;
+  org_name: string;
+  concept_count: number;
+  concepts: VocabularyConcept[];
+}
+
+type Section = 'settings' | 'trusts' | 'admins' | 'invitations' | 'stats' | 'vocabulary';
+type VocabularySort = 'default' | 'patients' | 'instances' | 'name';
 
 export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   const [org, setOrg] = useState<Org | null>(null);
@@ -76,6 +118,11 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [accessGrants, setAccessGrants] = useState<AccessGrant[]>([]);
   const [orgStats, setOrgStats] = useState<OrgStatsData | null>(null);
+  const [vocabularyData, setVocabularyData] = useState<OrgVocabularyData | null>(null);
+  const [vocabularyLoading, setVocabularyLoading] = useState(false);
+  const [vocabularyError, setVocabularyError] = useState<string | null>(null);
+  const [vocabularySearch, setVocabularySearch] = useState('');
+  const [vocabularySort, setVocabularySort] = useState<VocabularySort>('default');
   const [activeSection, setActiveSection] = useState<Section>('settings');
   const [error, setError] = useState<string | null>(null);
 
@@ -83,6 +130,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   const [orgName, setOrgName] = useState('');
   const [isActive, setIsActive] = useState(true);
   const [allowsPublicData, setAllowsPublicData] = useState(false);
+  const [allowsPatientSignup, setAllowsPatientSignup] = useState(false);
   const [settingsSaved, setSettingsSaved] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
 
@@ -98,8 +146,24 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   // Invite form state
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState('doctor');
+  const [inviteRedirectUrl, setInviteRedirectUrl] = useState(DEFAULT_ANALYST_REDIRECT_URL);
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteSuccess, setInviteSuccess] = useState<string | null>(null);
+
+  // Patient search state (for patient invites)
+  const [patientSearchQuery, setPatientSearchQuery] = useState('');
+  const [patientSearchResults, setPatientSearchResults] = useState<PatientSearchResult[]>([]);
+  const [selectedPerson, setSelectedPerson] = useState<PatientSearchResult | null>(null);
+  const [patientSearchLoading, setPatientSearchLoading] = useState(false);
+  const patientSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const patientSearchSeq = useRef(0);
+
+  // Clean up debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (patientSearchTimer.current) clearTimeout(patientSearchTimer.current);
+    };
+  }, []);
 
   const base = `/orgs/${slug}`;
 
@@ -117,6 +181,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       setOrgName(orgRes.data.name);
       setIsActive(orgRes.data.is_active);
       setAllowsPublicData(orgRes.data.allows_public_aggregated_data ?? false);
+      setAllowsPatientSignup(orgRes.data.allows_patient_signup ?? false);
       setTrusts(trustRes.data);
       setInvitations(invRes.data);
       setAccessGrants(accessRes.data);
@@ -129,6 +194,19 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  const fetchVocabulary = useCallback(async () => {
+    try {
+      setVocabularyLoading(true);
+      setVocabularyError(null);
+      const res = await api.get<OrgVocabularyData>(`${base}/vocabulary/`);
+      setVocabularyData(res.data);
+    } catch {
+      setVocabularyError('Failed to load vocabulary usage.');
+    } finally {
+      setVocabularyLoading(false);
+    }
+  }, [base]);
 
   const handleSaveSettings = async () => {
     try {
@@ -150,6 +228,42 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     } catch {
       setAllowsPublicData(!checked); // revert on error
     }
+  };
+
+  const handlePatientSignupToggle = async (checked: boolean) => {
+    setAllowsPatientSignup(checked);
+    try {
+      await api.patch(`${base}/`, { allows_patient_signup: checked });
+    } catch {
+      setAllowsPatientSignup(!checked);
+    }
+  };
+
+  const handlePatientSearch = (query: string) => {
+    setPatientSearchQuery(query);
+    if (patientSearchTimer.current) clearTimeout(patientSearchTimer.current);
+    if (query.length < 2) {
+      setPatientSearchResults([]);
+      setPatientSearchLoading(false);
+      return;
+    }
+    const seq = ++patientSearchSeq.current;
+    patientSearchTimer.current = setTimeout(async () => {
+      setPatientSearchLoading(true);
+      try {
+        const res = await api.get(
+          `/v1/patient-records/?org=${encodeURIComponent(slug)}&search=${encodeURIComponent(query)}`
+        );
+        if (seq !== patientSearchSeq.current) return; // stale response
+        const data = res.data;
+        const results: PatientSearchResult[] = Array.isArray(data) ? data : (data.results ?? []);
+        setPatientSearchResults(results);
+      } catch {
+        if (seq === patientSearchSeq.current) setPatientSearchResults([]);
+      } finally {
+        if (seq === patientSearchSeq.current) setPatientSearchLoading(false);
+      }
+    }, 300);
   };
 
   const handleAddTrust = async () => {
@@ -193,7 +307,14 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     try {
       setInviteError(null);
       setInviteSuccess(null);
-      const res = await api.post<InviteResponse>(`${base}/invite/`, { email: inviteEmail, role: inviteRole });
+      const payload: Record<string, unknown> = { email: inviteEmail, role: inviteRole };
+      if (inviteRole === 'analyst') {
+        payload.redirect_url = inviteRedirectUrl;
+      }
+      if (inviteRole === 'patient' && selectedPerson) {
+        payload.person_id = selectedPerson.person_id;
+      }
+      const res = await api.post<InviteResponse>(`${base}/invite/`, payload);
       if (res.data.email_warning) {
         setInviteSuccess(`User access was updated for ${inviteEmail}, but the invitation email was not sent.`);
       } else if (res.data.access_granted) {
@@ -202,6 +323,10 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
         setInviteSuccess(`Invitation sent to ${inviteEmail}.`);
       }
       setInviteEmail('');
+      setInviteRedirectUrl(DEFAULT_ANALYST_REDIRECT_URL);
+      setSelectedPerson(null);
+      setPatientSearchQuery('');
+      setPatientSearchResults([]);
       fetchAll();
     } catch {
       setInviteError('Failed to send invitation.');
@@ -237,7 +362,8 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   const handleUpdateGrant = async (grantId: number, patch: { role?: string; is_premium?: boolean }) => {
     setAccessGrants(prev => prev.map(g => g.id === grantId ? { ...g, ...patch } : g));
     try {
-      await api.patch(`${base}/access/${grantId}/`, patch);
+      const res = await api.patch<AccessGrant>(`${base}/access/${grantId}/`, patch);
+      setAccessGrants(prev => prev.map(g => g.id === grantId ? res.data : g));
     } catch (err) {
       console.error('Failed to update access grant:', err);
       setAccessError('Failed to update access grant. Please try again.');
@@ -251,10 +377,44 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   const sections: { key: Section; label: string }[] = [
     { key: 'settings', label: 'Settings' },
     { key: 'stats', label: 'Stats' },
+    { key: 'vocabulary', label: 'Vocabulary' },
     { key: 'trusts', label: 'Access Rules' },
-    { key: 'admins', label: 'Admins' },
+    { key: 'admins', label: 'Access Grants' },
     { key: 'invitations', label: 'Invitations' },
   ];
+  const vocabularyQuery = vocabularySearch.trim().toLowerCase();
+  const vocabularyRows = [...(vocabularyData?.concepts ?? [])]
+    .filter(row => !vocabularyQuery || [
+      row.vocabulary_id,
+      row.concept_code,
+      row.concept_name,
+      row.domain_id,
+      row.source ?? '',
+    ].some(value => value.toLowerCase().includes(vocabularyQuery)))
+    .sort((a, b) => {
+      if (vocabularySort === 'patients') {
+        return b.patient_count - a.patient_count || b.instance_count - a.instance_count;
+      }
+      if (vocabularySort === 'instances') {
+        return b.instance_count - a.instance_count || b.patient_count - a.patient_count;
+      }
+      if (vocabularySort === 'name') {
+        return a.concept_name.localeCompare(b.concept_name);
+      }
+      return (
+        a.group_order - b.group_order ||
+        a.vocabulary_id.localeCompare(b.vocabulary_id) ||
+        b.patient_count - a.patient_count ||
+        b.instance_count - a.instance_count ||
+        a.concept_name.localeCompare(b.concept_name)
+      );
+    });
+  const handleSectionChange = (section: Section) => {
+    setActiveSection(section);
+    if (section === 'vocabulary' && !vocabularyData && !vocabularyLoading) {
+      fetchVocabulary();
+    }
+  };
 
   return (
     <div className="p-6 space-y-4">
@@ -273,7 +433,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
         {sections.map(s => (
           <button
             key={s.key}
-            onClick={() => setActiveSection(s.key)}
+            onClick={() => handleSectionChange(s.key)}
             className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px ${
               activeSection === s.key
                 ? 'border-blue-600 text-blue-600'
@@ -310,6 +470,15 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
               <label htmlFor="is_active" className="text-sm text-gray-700">Active</label>
             </div>
           )}
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={allowsPatientSignup}
+              onChange={(e) => handlePatientSignupToggle(e.target.checked)}
+              className="h-4 w-4 rounded border-gray-300 text-blue-600"
+            />
+            <span className="text-sm text-gray-700">Allow direct patient signup</span>
+          </label>
           <button
             onClick={handleSaveSettings}
             className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
@@ -364,6 +533,113 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                 )}
               </tfoot>
             </table>
+          )}
+        </div>
+      )}
+
+      {/* Vocabulary */}
+      {activeSection === 'vocabulary' && (
+        <div className="space-y-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+            <div>
+              <h2 className="font-medium text-gray-900">Vocabulary Usage</h2>
+              <p className="text-sm text-gray-500">
+                Org-scoped clinical concepts with distinct patient counts and total OMOP row counts.
+              </p>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <input
+                type="search"
+                value={vocabularySearch}
+                onChange={e => setVocabularySearch(e.target.value)}
+                placeholder="Search vocabulary, code, name..."
+                className="w-full min-w-64 border border-gray-300 rounded px-3 py-1.5 text-sm sm:w-72"
+              />
+              <select
+                value={vocabularySort}
+                onChange={e => setVocabularySort(e.target.value as VocabularySort)}
+                className="border border-gray-300 rounded px-2 py-1.5 text-sm"
+              >
+                <option value="default">Vocabulary order</option>
+                <option value="patients">Patient count</option>
+                <option value="instances">Instance count</option>
+                <option value="name">Concept name</option>
+              </select>
+            </div>
+          </div>
+
+          {vocabularyLoading && <p className="text-sm text-gray-500">Loading vocabulary usage...</p>}
+          {vocabularyError && <p className="text-sm text-red-500">{vocabularyError}</p>}
+          {!vocabularyLoading && !vocabularyError && vocabularyRows.length === 0 && (
+            <p className="text-sm text-gray-500">No vocabulary usage found for this organization.</p>
+          )}
+          {vocabularyRows.length > 0 && (
+            <div className="overflow-x-auto border border-gray-200 rounded-lg">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">Vocabulary</th>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">Concept</th>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">Domain</th>
+                    <th className="px-4 py-2 text-right font-medium text-gray-600">Patients</th>
+                    <th className="px-4 py-2 text-right font-medium text-gray-600">Instances</th>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">Usage</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {vocabularyRows.map(row => (
+                    <tr key={row.concept_id} className="border-t border-gray-100 align-top">
+                      <td className="px-4 py-3">
+                        <div className="flex flex-col gap-1">
+                          <span className="font-medium text-gray-900">{row.vocabulary_id}</span>
+                          <span className={`w-fit rounded px-2 py-0.5 text-xs font-medium ${
+                            row.group === 'nonconforming'
+                              ? 'bg-amber-100 text-amber-800'
+                              : row.group === 'healthkey'
+                                ? 'bg-emerald-100 text-emerald-700'
+                                : 'bg-blue-100 text-blue-700'
+                          }`}>
+                            {row.group_label}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="max-w-md">
+                          <div className="font-medium text-gray-900">{row.concept_name}</div>
+                          <div className="mt-1 text-xs text-gray-500">
+                            {row.concept_code} <span className="text-gray-300">|</span> #{row.concept_id}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-gray-700">
+                        <div>{row.domain_id}</div>
+                        <div className="mt-1 text-xs text-gray-400">
+                          {row.standard_concept || 'non-standard'}{row.source ? ` / ${row.source}` : ''}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-right font-medium text-gray-900">{row.patient_count}</td>
+                      <td className="px-4 py-3 text-right font-medium text-gray-900">{row.instance_count}</td>
+                      <td className="px-4 py-3 text-xs text-gray-600">
+                        <div className="flex max-w-xs flex-wrap gap-1.5">
+                          {row.usage.slice(0, 3).map(usage => (
+                            <span
+                              key={`${row.concept_id}-${usage.table}-${usage.column}`}
+                              className="rounded bg-gray-100 px-2 py-0.5"
+                              title={`${usage.table}.${usage.column}`}
+                            >
+                              {usage.table}: {usage.instance_count}
+                            </span>
+                          ))}
+                          {row.usage.length > 3 && (
+                            <span className="rounded bg-gray-100 px-2 py-0.5">+{row.usage.length - 3}</span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}
@@ -452,7 +728,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
         </div>
       )}
 
-      {/* Admins (org_admin access grants) */}
+      {/* Access grants */}
       {activeSection === 'admins' && (
         <div className="space-y-4">
           <h2 className="font-medium text-gray-900">Access Grants</h2>
@@ -460,48 +736,83 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
           {accessGrants.length === 0 ? (
             <p className="text-sm text-gray-500">No access grants.</p>
           ) : (
-            <ul className="divide-y divide-gray-100 border border-gray-200 rounded-lg overflow-hidden">
-              {accessGrants.map(g => (
-                <li key={g.id} className="flex items-center justify-between px-4 py-3 gap-3">
-                  <div className="flex flex-col gap-0.5 min-w-0">
-                    <span className="text-sm font-medium truncate">{g.name || g.email}</span>
-                    {g.name && <span className="text-xs text-gray-400 truncate">{g.email}</span>}
-                  </div>
-                  <div className="flex items-center gap-3 shrink-0">
-                    {g.role === 'org_admin' ? (
-                      <span className="text-xs px-2 py-0.5 rounded bg-purple-100 text-purple-700 font-medium">Org Admin</span>
-                    ) : (
-                      <>
-                        <select
-                          value={g.role}
-                          onChange={e => handleUpdateGrant(g.id, { role: e.target.value })}
-                          className="border border-gray-300 rounded px-2 py-1 text-xs"
+            <div className="overflow-x-auto border border-gray-200 rounded-lg">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">User</th>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">Role</th>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">Site</th>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">Premium</th>
+                    <th className="px-4 py-2 text-right font-medium text-gray-600">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {accessGrants.map(g => (
+                    <tr key={g.id} className="border-t border-gray-100 align-top">
+                      <td className="px-4 py-3">
+                        <div className="flex flex-col gap-0.5 min-w-0">
+                          <span className="text-sm font-medium truncate">{g.name || g.email}</span>
+                          {g.name && <span className="text-xs text-gray-400 truncate">{g.email}</span>}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        {g.role === 'org_admin' ? (
+                          <span className="text-xs px-2 py-0.5 rounded bg-purple-100 text-purple-700 font-medium">Org Admin</span>
+                        ) : (
+                          <select
+                            value={g.role}
+                            onChange={e => handleUpdateGrant(g.id, { role: e.target.value })}
+                            className="border border-gray-300 rounded px-2 py-1 text-xs"
+                          >
+                            <option value="doctor">Doctor</option>
+                            <option value="analyst">Analyst</option>
+                          </select>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-gray-700">
+                        {g.redirect_url ? (
+                          <a
+                            href={g.redirect_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-blue-600 hover:text-blue-800 break-all"
+                          >
+                            {g.redirect_url}
+                          </a>
+                        ) : (
+                          'PROMOP'
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        {g.role === 'org_admin' ? (
+                          <span className="text-xs text-gray-400">N/A</span>
+                        ) : (
+                          <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={g.is_premium}
+                              onChange={e => handleUpdateGrant(g.id, { is_premium: e.target.checked })}
+                              className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600"
+                            />
+                            Premium
+                          </label>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          onClick={() => handleRevokeAccess(g.id)}
+                          className="text-red-400 hover:text-red-600"
+                          title="Revoke access"
                         >
-                          <option value="doctor">Doctor</option>
-                          <option value="analyst">Analyst</option>
-                        </select>
-                        <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer select-none">
-                          <input
-                            type="checkbox"
-                            checked={g.is_premium}
-                            onChange={e => handleUpdateGrant(g.id, { is_premium: e.target.checked })}
-                            className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600"
-                          />
-                          Premium
-                        </label>
-                      </>
-                    )}
-                    <button
-                      onClick={() => handleRevokeAccess(g.id)}
-                      className="text-red-400 hover:text-red-600"
-                      title="Revoke access"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
+                          <Trash2 size={14} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
 
           {/* Invite form */}
@@ -519,12 +830,24 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
             <div className="flex gap-2">
               <select
                 value={inviteRole}
-                onChange={e => setInviteRole(e.target.value)}
+                onChange={e => {
+                  const nextRole = e.target.value;
+                  setInviteRole(nextRole);
+                  if (nextRole !== 'analyst') {
+                    setInviteRedirectUrl(DEFAULT_ANALYST_REDIRECT_URL);
+                  }
+                  if (nextRole !== 'patient') {
+                    setSelectedPerson(null);
+                    setPatientSearchQuery('');
+                    setPatientSearchResults([]);
+                  }
+                }}
                 className="border border-gray-300 rounded px-2 py-1.5 text-sm"
               >
                 <option value="org_admin">Org Admin</option>
                 <option value="doctor">Doctor</option>
                 <option value="analyst">Analyst</option>
+                <option value="patient">Patient</option>
               </select>
               <button
                 onClick={handleInvite}
@@ -533,6 +856,77 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                 Send Invite
               </button>
             </div>
+            {inviteRole === 'analyst' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Analyst redirect site</label>
+                <input
+                  type="url"
+                  placeholder={DEFAULT_ANALYST_REDIRECT_URL}
+                  value={inviteRedirectUrl}
+                  onChange={e => setInviteRedirectUrl(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                />
+              </div>
+            )}
+            {inviteRole === 'patient' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Link to patient record <span className="font-normal text-gray-400">(optional)</span>
+                </label>
+                {selectedPerson ? (
+                  <div className="flex items-center gap-2 border border-gray-300 rounded px-3 py-1.5 text-sm bg-gray-50">
+                    <span className="flex-1 truncate">
+                      {selectedPerson.patient_name} <span className="text-gray-400">(#{selectedPerson.person_id})</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedPerson(null);
+                        setPatientSearchQuery('');
+                        setPatientSearchResults([]);
+                      }}
+                      className="text-gray-400 hover:text-gray-600"
+                      title="Clear selection"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="relative">
+                    <input
+                      type="text"
+                      placeholder="Search by name or ID..."
+                      value={patientSearchQuery}
+                      onChange={e => handlePatientSearch(e.target.value)}
+                      onBlur={() => setTimeout(() => setPatientSearchResults([]), 150)}
+                      className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                    />
+                    {patientSearchLoading && (
+                      <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-gray-400">...</span>
+                    )}
+                    {patientSearchResults.length > 0 && (
+                      <ul className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded shadow-lg max-h-40 overflow-y-auto">
+                        {patientSearchResults.map(p => (
+                          <li key={p.person_id}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedPerson(p);
+                                setPatientSearchQuery('');
+                                setPatientSearchResults([]);
+                              }}
+                              className="w-full text-left px-3 py-1.5 text-sm hover:bg-blue-50"
+                            >
+                              {p.patient_name} <span className="text-gray-400">(#{p.person_id})</span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -551,6 +945,9 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                   <span className="text-sm">
                     <span className="font-medium">{inv.email}</span>
                     <span className="text-gray-400 ml-2">({inv.role})</span>
+                    {inv.role === 'patient' && inv.person_id && (
+                      <span className="text-gray-400 ml-1">#{inv.person_id}</span>
+                    )}
                     <span className={`ml-2 text-xs px-1.5 py-0.5 rounded font-medium ${
                       inv.status === 'pending' ? 'bg-yellow-100 text-yellow-700'
                         : inv.status === 'confirmed' ? 'bg-green-100 text-green-700'

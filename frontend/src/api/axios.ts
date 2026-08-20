@@ -71,8 +71,13 @@ api.interceptors.response.use(
       }
 
       clearTokens();
-      if (!window.location.pathname.includes('/login')) {
-        window.location.href = '/login';
+      const path = window.location.pathname;
+      const isPublicPage =
+        ['/login', '/signup', '/forgot-password', '/accept-invite', '/accept-patient-invite', '/reset-password', '/auth/callback']
+          .some(p => path.includes(p));
+      if (!isPublicPage) {
+        const orgMatch = path.match(/^\/org\/([^/]+)/);
+        window.location.href = orgMatch ? `/org/${orgMatch[1]}/login` : '/login';
       }
     }
 

@@ -5,6 +5,7 @@ from django.contrib import messages
 from django.utils import timezone
 from .models import PatientUser, PatientMessage, PatientConsent
 from omop_core.models import PatientRecord, Measurement, ConditionOccurrence
+from omop_core.services.patient_record_service import PATIENT_RECORD_OMOP_MAPPED_FIELDS
 
 def index(request):
     """Root view - redirect to portal or show login info"""
@@ -190,9 +191,14 @@ def update_health_records(request):
     try:
         patient_user = get_object_or_404(PatientUser, identity=request.user)
         patient_info, created = PatientRecord.objects.get_or_create(person=patient_user.person)
+        mapped_before = {
+            field: getattr(patient_info, field)
+            for field in PATIENT_RECORD_OMOP_MAPPED_FIELDS
+            if hasattr(patient_info, field)
+        }
         
         tab = request.POST.get('tab', 'general')
-        
+
         # Helper function to convert empty strings to None
         def get_value(field_name, convert_type=None):
             value = request.POST.get(field_name, '').strip()
@@ -313,8 +319,20 @@ def update_health_records(request):
             patient_info.spanish_speak_understand = get_bool('spanish_speak_understand')
             patient_info.spanish_read_write = get_bool('spanish_read_write')
         
+        # Legacy templates may still submit a mixture of projection-owned and
+        # mapped fields. Preserve the former, but never persist an in-memory
+        # assignment to a mapped clinical read-model field.
+        rejected = sorted(set(request.POST) & set(mapped_before))
+        for field, value in mapped_before.items():
+            setattr(patient_info, field, value)
         patient_info.save()
-        messages.success(request, f'✅ {tab.title()} information updated successfully!')
+        if rejected:
+            messages.warning(
+                request,
+                'Mapped clinical fields were not updated. Use the OMOP or FHIR APIs for clinical facts.',
+            )
+        else:
+            messages.success(request, f'✅ {tab.title()} information updated successfully!')
         
     except Exception as e:
         messages.error(request, f'❌ Error updating records: {str(e)}')

@@ -39,73 +39,73 @@
   --text-caption--line-height: 16px;
   --text-caption--font-weight: 500;
 
-  /* shadcn compatibility bridge — maps through --hk-labs-* contract */
-  --color-background: hsl(var(--hk-labs-bg-primary));
-  --color-foreground: hsl(var(--hk-labs-text-primary));
-  --color-card: hsl(var(--hk-labs-bg-primary));
-  --color-card-foreground: hsl(var(--hk-labs-text-primary));
-  --color-popover: hsl(var(--hk-labs-bg-primary));
-  --color-popover-foreground: hsl(var(--hk-labs-text-primary));
-  --color-primary: hsl(var(--hk-labs-brand-700));
-  --color-primary-foreground: hsl(var(--hk-labs-text-white));
-  --color-secondary: hsl(var(--hk-labs-gray-100));
-  --color-secondary-foreground: hsl(var(--hk-labs-text-primary));
-  --color-destructive: hsl(var(--hk-labs-error-700));
-  --color-destructive-foreground: hsl(var(--hk-labs-text-white));
-  --color-muted: hsl(var(--hk-labs-gray-100));
-  --color-muted-foreground: hsl(var(--hk-labs-text-tertiary));
-  --color-accent: hsl(var(--hk-labs-gray-100));
-  --color-accent-foreground: hsl(var(--hk-labs-text-primary));
-  --color-border: hsl(var(--hk-labs-border-secondary));
-  --color-input: hsl(var(--hk-labs-border-secondary));
-  --color-ring: hsl(var(--hk-labs-brand-700));
+  /* shadcn compatibility bridge — maps through --promop-* contract */
+  --color-background: hsl(var(--promop-bg-primary));
+  --color-foreground: hsl(var(--promop-text-primary));
+  --color-card: hsl(var(--promop-bg-primary));
+  --color-card-foreground: hsl(var(--promop-text-primary));
+  --color-popover: hsl(var(--promop-bg-primary));
+  --color-popover-foreground: hsl(var(--promop-text-primary));
+  --color-primary: hsl(var(--promop-brand-700));
+  --color-primary-foreground: hsl(var(--promop-text-white));
+  --color-secondary: hsl(var(--promop-gray-100));
+  --color-secondary-foreground: hsl(var(--promop-text-primary));
+  --color-destructive: hsl(var(--promop-error-700));
+  --color-destructive-foreground: hsl(var(--promop-text-white));
+  --color-muted: hsl(var(--promop-gray-100));
+  --color-muted-foreground: hsl(var(--promop-text-tertiary));
+  --color-accent: hsl(var(--promop-gray-100));
+  --color-accent-foreground: hsl(var(--promop-text-primary));
+  --color-border: hsl(var(--promop-border-secondary));
+  --color-input: hsl(var(--promop-border-secondary));
+  --color-ring: hsl(var(--promop-brand-700));
 
   /* HealthKey design tokens */
-  --color-healthkey-bg-primary: hsl(var(--hk-labs-bg-primary));
-  --color-healthkey-bg-secondary: hsl(var(--hk-labs-bg-secondary));
-  --color-healthkey-bg-active: hsl(var(--hk-labs-bg-active));
-  --color-healthkey-text-primary: hsl(var(--hk-labs-text-primary));
-  --color-healthkey-text-secondary: hsl(var(--hk-labs-text-secondary));
-  --color-healthkey-text-tertiary: hsl(var(--hk-labs-text-tertiary));
-  --color-healthkey-text-disabled: hsl(var(--hk-labs-text-disabled));
-  --color-healthkey-text-brand: hsl(var(--hk-labs-text-brand));
-  --color-healthkey-text-white: hsl(var(--hk-labs-text-white));
-  --color-healthkey-border-secondary: hsl(var(--hk-labs-border-secondary));
-  --color-healthkey-gray-50: hsl(var(--hk-labs-gray-50));
-  --color-healthkey-gray-100: hsl(var(--hk-labs-gray-100));
-  --color-healthkey-gray-200: hsl(var(--hk-labs-gray-200));
-  --color-healthkey-gray-700: hsl(var(--hk-labs-gray-700));
-  --color-healthkey-brand-25: hsl(var(--hk-labs-brand-25));
-  --color-healthkey-brand-50: hsl(var(--hk-labs-brand-50));
-  --color-healthkey-brand-200: hsl(var(--hk-labs-brand-200));
-  --color-healthkey-brand-700: hsl(var(--hk-labs-brand-700));
-  --color-healthkey-brand-alt: hsl(var(--hk-labs-brand-alt));
-  --color-healthkey-brand-green: hsl(var(--hk-labs-brand-green));
-  --color-healthkey-link-primary: hsl(var(--hk-labs-link-primary));
-  --color-healthkey-link-hover: hsl(var(--hk-labs-link-hover));
+  --color-healthkey-bg-primary: hsl(var(--promop-bg-primary));
+  --color-healthkey-bg-secondary: hsl(var(--promop-bg-secondary));
+  --color-healthkey-bg-active: hsl(var(--promop-bg-active));
+  --color-healthkey-text-primary: hsl(var(--promop-text-primary));
+  --color-healthkey-text-secondary: hsl(var(--promop-text-secondary));
+  --color-healthkey-text-tertiary: hsl(var(--promop-text-tertiary));
+  --color-healthkey-text-disabled: hsl(var(--promop-text-disabled));
+  --color-healthkey-text-brand: hsl(var(--promop-text-brand));
+  --color-healthkey-text-white: hsl(var(--promop-text-white));
+  --color-healthkey-border-secondary: hsl(var(--promop-border-secondary));
+  --color-healthkey-gray-50: hsl(var(--promop-gray-50));
+  --color-healthkey-gray-100: hsl(var(--promop-gray-100));
+  --color-healthkey-gray-200: hsl(var(--promop-gray-200));
+  --color-healthkey-gray-700: hsl(var(--promop-gray-700));
+  --color-healthkey-brand-25: hsl(var(--promop-brand-25));
+  --color-healthkey-brand-50: hsl(var(--promop-brand-50));
+  --color-healthkey-brand-200: hsl(var(--promop-brand-200));
+  --color-healthkey-brand-700: hsl(var(--promop-brand-700));
+  --color-healthkey-brand-alt: hsl(var(--promop-brand-alt));
+  --color-healthkey-brand-green: hsl(var(--promop-brand-green));
+  --color-healthkey-link-primary: hsl(var(--promop-link-primary));
+  --color-healthkey-link-hover: hsl(var(--promop-link-hover));
 
-  --color-brand-25: hsl(var(--hk-labs-brand-25));
-  --color-brand-50: hsl(var(--hk-labs-brand-50));
-  --color-brand-200: hsl(var(--hk-labs-brand-200));
-  --color-brand-700: hsl(var(--hk-labs-brand-700));
-  --color-brand-alt: hsl(var(--hk-labs-brand-alt));
-  --color-brand-green: hsl(var(--hk-labs-brand-green));
+  --color-brand-25: hsl(var(--promop-brand-25));
+  --color-brand-50: hsl(var(--promop-brand-50));
+  --color-brand-200: hsl(var(--promop-brand-200));
+  --color-brand-700: hsl(var(--promop-brand-700));
+  --color-brand-alt: hsl(var(--promop-brand-alt));
+  --color-brand-green: hsl(var(--promop-brand-green));
 
-  --color-success-50: hsl(var(--hk-labs-success-50));
-  --color-success-200: hsl(var(--hk-labs-success-200));
-  --color-success-700: hsl(var(--hk-labs-success-700));
-  --color-warning-50: hsl(var(--hk-labs-warning-50));
-  --color-warning-200: hsl(var(--hk-labs-warning-200));
-  --color-warning-700: hsl(var(--hk-labs-warning-700));
-  --color-error-50: hsl(var(--hk-labs-error-50));
-  --color-error-200: hsl(var(--hk-labs-error-200));
-  --color-error-700: hsl(var(--hk-labs-error-700));
+  --color-success-50: hsl(var(--promop-success-50));
+  --color-success-200: hsl(var(--promop-success-200));
+  --color-success-700: hsl(var(--promop-success-700));
+  --color-warning-50: hsl(var(--promop-warning-50));
+  --color-warning-200: hsl(var(--promop-warning-200));
+  --color-warning-700: hsl(var(--promop-warning-700));
+  --color-error-50: hsl(var(--promop-error-50));
+  --color-error-200: hsl(var(--promop-error-200));
+  --color-error-700: hsl(var(--promop-error-700));
 
-  --radius-sm: calc(var(--hk-labs-radius) - 4px);
-  --radius-DEFAULT: var(--hk-labs-radius);
-  --radius-md: calc(var(--hk-labs-radius) - 2px);
-  --radius-lg: var(--hk-labs-radius);
-  --radius-xl: calc(var(--hk-labs-radius) + 4px);
+  --radius-sm: calc(var(--promop-radius) - 4px);
+  --radius-DEFAULT: var(--promop-radius);
+  --radius-md: calc(var(--promop-radius) - 2px);
+  --radius-lg: var(--promop-radius);
+  --radius-xl: calc(var(--promop-radius) + 4px);
   --radius-full: 9999px;
 
   --shadow-sm: 0 1px 2px rgba(10, 13, 18, 0.05);
@@ -137,54 +137,54 @@
 
 @layer theme {
   :root {
-    --hk-labs-bg-primary: 0 0% 100%;
-    --hk-labs-bg-secondary: 0 0% 98%;
-    --hk-labs-bg-active: 0 0% 98%;
+    --promop-bg-primary: 0 0% 100%;
+    --promop-bg-secondary: 0 0% 98%;
+    --promop-bg-active: 0 0% 98%;
 
-    --hk-labs-text-primary: 216 17% 14%;
-    --hk-labs-text-secondary: 220 9% 32%;
-    --hk-labs-text-tertiary: 218 8% 46%;
-    --hk-labs-text-disabled: 0 0% 83%;
-    --hk-labs-text-brand: 212 87% 33%;
-    --hk-labs-text-white: 0 0% 100%;
+    --promop-text-primary: 216 17% 14%;
+    --promop-text-secondary: 220 9% 32%;
+    --promop-text-tertiary: 218 8% 46%;
+    --promop-text-disabled: 0 0% 83%;
+    --promop-text-brand: 212 87% 33%;
+    --promop-text-white: 0 0% 100%;
 
-    --hk-labs-border-secondary: 0 0% 91.4%;
+    --promop-border-secondary: 0 0% 91.4%;
 
-    --hk-labs-gray-50: 0 0% 98%;
-    --hk-labs-gray-100: 0 0% 96%;
-    --hk-labs-gray-200: 0 0% 91.4%;
-    --hk-labs-gray-700: 220 9% 32%;
+    --promop-gray-50: 0 0% 98%;
+    --promop-gray-100: 0 0% 96%;
+    --promop-gray-200: 0 0% 91.4%;
+    --promop-gray-700: 220 9% 32%;
 
-    --hk-labs-brand-25: 199 100% 97%;
-    --hk-labs-brand-50: 199 100% 92%;
-    --hk-labs-brand-200: 199 100% 64%;
-    --hk-labs-brand-700: 212 87% 33%;
-    --hk-labs-brand-alt: 212 95% 40%;
-    --hk-labs-brand-green: 146 70% 45%;
+    --promop-brand-25: 199 100% 97%;
+    --promop-brand-50: 199 100% 92%;
+    --promop-brand-200: 199 100% 64%;
+    --promop-brand-700: 212 87% 33%;
+    --promop-brand-alt: 212 95% 40%;
+    --promop-brand-green: 146 70% 45%;
 
-    --hk-labs-link-primary: 212 95% 40%;
-    --hk-labs-link-hover: 212 87% 33%;
+    --promop-link-primary: 212 95% 40%;
+    --promop-link-hover: 212 87% 33%;
 
-    --hk-labs-success-50: 152 88% 95%;
-    --hk-labs-success-200: 152 68% 81%;
-    --hk-labs-success-700: 152 91% 29%;
+    --promop-success-50: 152 88% 95%;
+    --promop-success-200: 152 68% 81%;
+    --promop-success-700: 152 91% 29%;
 
-    --hk-labs-warning-50: 48 100% 96%;
-    --hk-labs-warning-200: 43 98% 77%;
-    --hk-labs-warning-700: 25 95% 37%;
+    --promop-warning-50: 48 100% 96%;
+    --promop-warning-200: 43 98% 77%;
+    --promop-warning-700: 25 95% 37%;
 
-    --hk-labs-error-50: 4 86% 97%;
-    --hk-labs-error-200: 5 86% 89%;
-    --hk-labs-error-700: 5 79% 40%;
+    --promop-error-50: 4 86% 97%;
+    --promop-error-200: 5 86% 89%;
+    --promop-error-700: 5 79% 40%;
 
-    --hk-labs-radius: 0.5rem;
+    --promop-radius: 0.5rem;
   }
 }
 
 @layer components {
-  .hk-labs-root {
+  .promop-root {
     font-family: var(--font-sans);
-    color: hsl(var(--hk-labs-text-primary));
+    color: hsl(var(--promop-text-primary));
   }
 }
 

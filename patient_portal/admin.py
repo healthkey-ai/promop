@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import Identity, PatientMessage, PatientConsent
+from .models import Identity, PatientMessage, PatientConsent, PatientInvitation, AuditEvent, BreakGlassGrant
 
 
 @admin.register(Identity)
@@ -10,11 +10,12 @@ class IdentityAdmin(UserAdmin):
     search_fields = ['email', 'name', 'sub']
     ordering = ['email']
     readonly_fields = ['uid', 'issuer', 'sub', 'created_at']
-    actions = ['grant_premium', 'revoke_premium']
+    actions = ['grant_premium', 'revoke_premium', 'reset_password', 'require_password_change']
 
     fieldsets = (
         (None,          {'fields': ('uid', 'issuer', 'sub', 'email', 'name')}),
         ('Access',      {'fields': ('is_active', 'is_staff', 'is_superuser', 'is_premium')}),
+        ('Security',    {'fields': ('must_change_password',)}),
         ('Timestamps',  {'fields': ('created_at',)}),
     )
     add_fieldsets = ()
@@ -28,6 +29,32 @@ class IdentityAdmin(UserAdmin):
     def revoke_premium(self, request, queryset):
         updated = queryset.update(is_premium=False)
         self.message_user(request, f'Revoked Premium from {updated} user(s).')
+
+    @admin.action(description='Email password reset link')
+    def reset_password(self, request, queryset):
+        """Administrative password reset (PHR-S FM TI.1.1#08): email each selected
+        account a single-use reset link (via the configured Mailgun/anymail backend).
+        No password is set or emailed — the user chooses their own via the link."""
+        from django.contrib import messages
+        from patient_portal.api.password_reset import send_password_reset_email, PasswordResetEmailError
+        sent, failed = 0, []
+        for identity in queryset:
+            try:
+                send_password_reset_email(identity)
+                sent += 1
+            except PasswordResetEmailError:
+                failed.append(identity.email or str(identity))
+        self.message_user(request, f'Sent {sent} password-reset email(s).')
+        if failed:
+            self.message_user(request, f'Could not email: {", ".join(failed)}', level=messages.WARNING)
+
+    @admin.action(description='Require password change at next login')
+    def require_password_change(self, request, queryset):
+        """Force a password change (PHR-S FM TI.1.1#09): set the force-change flag so
+        the account is refused every /api/ request except change-password until it sets
+        a new password. Enforced by ForcePasswordChangeMiddleware."""
+        updated = queryset.update(must_change_password=True)
+        self.message_user(request, f'Flagged {updated} account(s) to change password at next login.')
 
 @admin.register(PatientMessage)
 class PatientMessageAdmin(admin.ModelAdmin):
@@ -51,3 +78,44 @@ class PatientConsentAdmin(admin.ModelAdmin):
     search_fields = ['patient_user__identity__email', 'consent_type']
     list_filter = ['consent_type', 'consent_date']
     readonly_fields = ['consent_date']
+
+
+@admin.register(PatientInvitation)
+class PatientInvitationAdmin(admin.ModelAdmin):
+    list_display = ['email', 'person', 'status', 'invited_by', 'created_at', 'expires_at']
+    search_fields = ['email', 'person__person_id']
+    list_filter = ['created_at']
+    readonly_fields = ['token', 'created_at', 'accepted_at']
+
+
+@admin.register(AuditEvent)
+class AuditEventAdmin(admin.ModelAdmin):
+    list_display = ['timestamp', 'event_type', 'method', 'path', 'status_code', 'user_email', 'ip_address']
+    list_filter = ['event_type', 'method', 'timestamp']
+    search_fields = ['path', 'user_id', 'user_email', 'client_id', 'resource_id', 'ip_address']
+    readonly_fields = [f.name for f in AuditEvent._meta.fields]
+    ordering = ['-timestamp']
+
+    def has_add_permission(self, request):
+        return False  # audit rows are written only by the middleware
+
+    def has_change_permission(self, request, obj=None):
+        return False  # immutable audit trail (TI.2.2.1)
+
+    def has_delete_permission(self, request, obj=None):
+        return False  # indelible via admin; deletion only through the audited retention job
+
+
+@admin.register(BreakGlassGrant)
+class BreakGlassGrantAdmin(admin.ModelAdmin):
+    """Review emergency-access authorizations (PHR-S FM TI.2.3#04)."""
+    list_display = ['created_at', 'identity', 'person_id', 'expires_at', 'reason']
+    list_filter = ['created_at']
+    search_fields = ['identity__email', 'person_id', 'reason']
+    readonly_fields = [f.name for f in BreakGlassGrant._meta.fields]
+
+    def has_add_permission(self, request):
+        return False  # grants are created only via the break-glass endpoint
+
+    def has_change_permission(self, request, obj=None):
+        return False  # immutable record of the emergency authorization

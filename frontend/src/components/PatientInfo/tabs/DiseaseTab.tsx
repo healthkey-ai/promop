@@ -11,7 +11,7 @@ import {
   YES_NO_OPTIONS, ER_OPTIONS, PR_OPTIONS, HER2_OPTIONS, HR_OPTIONS, HRD_OPTIONS,
   DISEASE_OPTIONS,
   FLIPI_RISK_OPTIONS, FLIPI_FACTOR_OPTIONS, GELF_OPTIONS, FL_TUMOR_GRADE_OPTIONS,
-  ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS,
+  ISS_STAGE_OPTIONS, MM_PROGRESSION_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS, MYELOMA_TYPE_OPTIONS,
   MRD_STATUS_OPTIONS, CYTOGENETIC_RISK_OPTIONS,
   BINET_STAGE_OPTIONS, TUMOR_BURDEN_OPTIONS, DISEASE_ACTIVITY_OPTIONS,
   RICHTER_TRANSFORMATION_OPTIONS, PROTEIN_EXPRESSION_OPTIONS,
@@ -171,6 +171,7 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
   const { source: gelfSource }    = useVocabulary('gelf-criteria', 'title');
   const { source: flipiSource }   = useVocabulary('flipi-score', 'code');
   const { source: flGradeSource } = useVocabulary('follicular-lymphoma-grade', 'title');
+  const { options: txOutcomeOptions, source: txOutcomeSource } = useVocabulary('post-transformation-outcome', 'title');
   const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
   const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
 
@@ -194,6 +195,14 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
         </div>
       </Section>
 
+      <Section title="Transformation to DLBCL">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <Field label="Transformed to DLBCL" name="transformed_to_dlbcl" type="boolean" value={formData?.transformed_to_dlbcl} onChange={onChange} />
+          <Field label="Transformation Date" name="dlbcl_transformation_date" type="date" value={formData?.dlbcl_transformation_date} onChange={onChange} />
+          <Field label="Post-Transformation Outcome" name="post_transformation_outcome" type="select" value={formData?.post_transformation_outcome} options={txOutcomeOptions.length ? txOutcomeOptions.map((o: { value: string }) => o.value) : []} onChange={onChange} vocabSource={txOutcomeSource} />
+        </div>
+      </Section>
+
       <Section title="Laboratory Markers">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <Field label="LDH Level (U/L)" name="ldh_level" type="number" value={formData?.ldh_level} onChange={onChange} />
@@ -211,18 +220,21 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
   const { source: progressionSource } = useVocabulary('disease-progression', 'title');
   const { options: sctTypeOptions, source: sctTypeSource } = useVocabulary('stem-cell-transplant', 'title');
   const { options: sctEligibilityOptions, source: sctEligibilitySource } = useVocabulary('sct-eligibility', 'title');
+  const { options: myelomaTypeOptions, source: myelomaTypeSource } = useVocabulary('myeloma-type', 'title');
 
   return (
     <>
       <Section title="Disease Characteristics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Myeloma Type" name="myeloma_type" type="text" value={formData?.myeloma_type} onChange={onChange} />
+          <Field label="Myeloma Type" name="myeloma_type" type="select" value={formData?.myeloma_type} options={myelomaTypeOptions.length ? myelomaTypeOptions.map((o: { value: string }) => o.value) : MYELOMA_TYPE_OPTIONS} onChange={onChange} vocabSource={myelomaTypeSource} />
           <Field label="ISS Stage" name="stage" type="select" value={formData?.stage} options={ISS_STAGE_OPTIONS} onChange={onChange} />
           <Field label="R-ISS Stage" name="r_iss_stage" type="select" value={formData?.r_iss_stage} options={ISS_STAGE_OPTIONS} onChange={onChange} />
           <Field label="Durie-Salmon Stage" name="durie_salmon_stage" type="text" value={formData?.durie_salmon_stage} onChange={onChange} />
           <Field label="Progression Status" name="progression" type="select" value={formData?.progression} options={MM_PROGRESSION_OPTIONS} onChange={onChange} vocabSource={progressionSource} />
           <Field label="Measurable Disease (IMWG)" name="measurable_disease_imwg" type="boolean" value={formData?.measurable_disease_imwg} onChange={onChange} />
           <Field label="MRD Status" name="mrd_status" type="select" value={formData?.mrd_status} options={MRD_STATUS_OPTIONS} onChange={onChange} />
+          <Field label="Meets CRAB Criteria" name="meets_crab" type="boolean" value={formData?.meets_crab} onChange={onChange} readOnly />
+          <Field label="Meets SLiM Criteria" name="meets_slim" type="boolean" value={formData?.meets_slim} onChange={onChange} readOnly />
           <div className="sm:col-span-2">
             <Field label="Prior SCT Type" name="stem_cell_transplant_history" type="multiselect" value={formData?.stem_cell_transplant_history} options={sctTypeOptions.length ? sctTypeOptions.map((o: { value: string }) => o.value) : STEM_CELL_TRANSPLANT_OPTIONS} onChange={onChange} vocabSource={sctTypeSource} />
           </div>
@@ -235,12 +247,15 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
 
       <Section title="Myeloma Markers">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="M-Protein Type" name="m_protein_type" type="text" value={formData?.m_protein_type} onChange={onChange} />
-          <Field label="Serum M-Protein (g/dL)" name="serum_m_protein" type="number" value={formData?.serum_m_protein} onChange={onChange} />
-          <Field label="Urine M-Protein (mg/24h)" name="urine_m_protein" type="number" value={formData?.urine_m_protein} onChange={onChange} />
-          <Field label="Free Light Chain Ratio" name="free_light_chain_ratio" type="number" value={formData?.free_light_chain_ratio} onChange={onChange} />
-          <Field label="Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" type="number" value={formData?.beta2_microglobulin} onChange={onChange} />
-          <Field label="LDH Level (U/L)" name="ldh_level" type="number" value={formData?.ldh_level} onChange={onChange} />
+          {/* OMOP derived, so read_only on the serializer. An editable input
+              here would silently drop the edit. */}
+          <Field label="Serum M-Protein (g/dL)" name="monoclonal_protein_serum" type="number" value={formData?.monoclonal_protein_serum} onChange={onChange} readOnly />
+          <Field label="Urine M-Protein (mg/24h)" name="monoclonal_protein_urine" type="number" value={formData?.monoclonal_protein_urine} onChange={onChange} readOnly />
+          <Field label="Kappa Free Light Chains" name="kappa_flc" type="number" value={formData?.kappa_flc} onChange={onChange} readOnly />
+          <Field label="Lambda Free Light Chains" name="lambda_flc" type="number" value={formData?.lambda_flc} onChange={onChange} readOnly />
+          <Field label="Free Light Chain Ratio" name="free_light_chain_ratio" type="number" value={formData?.free_light_chain_ratio} onChange={onChange} readOnly />
+          <Field label="Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" type="number" value={formData?.beta2_microglobulin} onChange={onChange} readOnly />
+          <Field label="LDH Level (U/L)" name="ldh_level" type="number" value={formData?.ldh_level} onChange={onChange} readOnly />
         </div>
       </Section>
 
@@ -250,7 +265,7 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
           <Field label="Hypercalcemia" name="hypercalcemia" type="select" value={formData?.hypercalcemia} options={YES_NO_OPTIONS} onChange={onChange} />
           <Field label="Renal Impairment" name="renal_impairment" type="select" value={formData?.renal_impairment} options={YES_NO_OPTIONS} onChange={onChange} />
           <Field label="Anemia" name="anemia" type="select" value={formData?.anemia} options={YES_NO_OPTIONS} onChange={onChange} />
-          <Field label="Plasma Cell Percentage (%)" name="plasma_cell_percentage" type="number" value={formData?.plasma_cell_percentage} onChange={onChange} />
+          <Field label="Bone Marrow Plasma Cells (%)" name="clonal_plasma_cells" type="number" value={formData?.clonal_plasma_cells} onChange={onChange} readOnly />
         </div>
       </Section>
 

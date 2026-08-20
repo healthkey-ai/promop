@@ -38,6 +38,9 @@ export interface PatientInfo {
   flipi_score?: number;
   flipi_score_options?: string;
   tumor_grade?: string;
+  transformed_to_dlbcl?: boolean;
+  dlbcl_transformation_date?: string;
+  post_transformation_outcome?: string;
   
   // Multiple Myeloma specific
   cytogenic_markers?: string;
@@ -82,11 +85,23 @@ export interface PatientInfo {
   second_line_outcome?: string;
   later_therapy?: string;
   later_line_therapy?: string;  // UI uses this name
-  later_therapies?: Array<{ therapy: string; startDate?: string | null; endDate?: string | null; lineNumber?: number | null }> | null;
+  later_therapies?: Array<{ therapy: string; startDate?: string | null; endDate?: string | null; lineNumber?: number | null; concept_id?: number | null }> | null;
   // HemOnc concept_id fields
   first_line_therapy_id?: number | null;
   second_line_therapy_id?: number | null;
   later_therapy_ids?: number[] | null;
+  // Component drug concept_ids per line (HemOnc regimen expansion ∪ exposure drugs, ingredient-leveled)
+  first_line_component_ids?: number[] | null;
+  second_line_component_ids?: number[] | null;
+  later_component_ids?: number[] | null;
+  therapy_component_ids?: number[] | null;
+  // Therapy-class ("type") concept_ids per line (HemOnc Is-a→Component Class expansion of the components above, ADR 0002)
+  first_line_therapy_type_ids?: number[] | null;
+  second_line_therapy_type_ids?: number[] | null;
+  later_therapy_type_ids?: number[] | null;
+  therapy_type_ids?: number[] | null;
+  // Per-field provenance for the derived therapy-id fields above (read-only, written by the derivation pipeline)
+  therapy_ids_provenance?: Record<string, { value?: unknown; origin?: 'asserted' | 'inferred'; release_id?: string | null }> | null;
   first_line_therapy_display?: string | null;
   second_line_therapy_display?: string | null;
   later_therapy_display?: string[] | null;
@@ -262,9 +277,30 @@ export interface PatientInfo {
   activity_trend_30d?: 'improving' | 'stable' | 'declining' | 'insufficient_data';
   resting_heart_rate_avg_30d?: number;
   hrv_sdnn_avg_30d?: string | number;
+  hrv_rmssd_avg_30d?: string | number;
   oxygen_saturation_min_30d?: string | number;
+  oxygen_saturation_avg_30d?: string | number;
   respiratory_rate_avg_30d?: string | number;
   sleep_duration_hours_avg_30d?: string | number;
+  vo2_max_avg_30d?: string | number;
+  distance_km_per_day_30d?: string | number;
+  walking_speed_avg_30d?: string | number;
+  walking_step_length_avg_30d?: string | number;
+  walking_double_support_pct_avg_30d?: string | number;
+  walking_hr_avg_30d?: number;
+  flights_climbed_per_day_30d?: string | number;
+  active_energy_per_day_30d?: string | number;
+  basal_energy_per_day_30d?: string | number;
+  body_mass_avg_30d?: string | number;
+
+  // Myeloma diagnostic criteria (computed, read-only)
+  meets_crab?: boolean | null;
+  meets_slim?: boolean | null;
+  myeloma_type?: string | null;
+
+  // Derivation versioning (read-only)
+  derivation_version?: number;
+  derived_at?: string;
 }
 
 export interface PatientDocument {
