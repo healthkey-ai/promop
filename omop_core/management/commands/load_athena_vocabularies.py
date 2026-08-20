@@ -31,6 +31,8 @@ VOCAB_SCOPE = frozenset({
     'SNOMED', 'ICD10CM', 'CVX',
     # Genomic + oncology coding vocabularies (#459)
     'OMOP Genomic', 'ICDO3', 'NCIt',
+    # Oncology staging/grading modifiers + cancer registry
+    'Cancer Modifier', 'NAACCR',
 })
 # These vocabularies underpin the clinical concepts PROMOP presents and maps.
 # Do not include CVX here: it is deliberately absent from the current Athena
