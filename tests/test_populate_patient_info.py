@@ -124,12 +124,15 @@ class TestLaterTherapies:
 
 class TestCllMeasurements:
 
-    def test_absolute_lymphocyte_count(self):
+    def test_alc_not_derived_by_cll_data(self):
+        """731-0 ALC is no longer derived by _get_cll_data — the canonical
+        column alc_thousand_per_ul is populated by _get_laboratory_data
+        instead (issue #544)."""
         person = PersonFactory()
         concept = _loinc_concept('731-0', 'Lymphocytes [#/volume] in Blood')
         MeasurementFactory(person=person, measurement_concept=concept, value_as_number=12.5)
         data = _cmd().get_cll_data(person)
-        assert data['absolute_lymphocyte_count'] == pytest.approx(12.5)
+        assert 'absolute_lymphocyte_count' not in data
 
     def test_serum_beta2_microglobulin_level(self):
         person = PersonFactory()
@@ -213,7 +216,7 @@ class TestCllMeasurements:
     def test_missing_measurement_not_in_data(self):
         person = PersonFactory()
         data = _cmd().get_cll_data(person)
-        for field in ('absolute_lymphocyte_count', 'serum_beta2_microglobulin_level',
+        for field in ('serum_beta2_microglobulin_level',
                       'qtcf_value', 'spleen_size', 'largest_lymph_node_size'):
             assert field not in data
 
@@ -575,6 +578,46 @@ class TestMeasurableDiseaseImwg:
                       kappa_flc=None, lambda_flc=None)
         _cmd()._compute_derived_fields(pi)
         assert pi.measurable_disease_imwg is None
+
+
+# ---------------------------------------------------------------------------
+# _compute_derived_fields — measurable_disease_iwcll (issue #544)
+# ---------------------------------------------------------------------------
+
+class TestMeasurableDiseaseIwcll:
+
+    def _pi(self, **kwargs):
+        """PatientRecord with controlled CLL fields; skip save() side effects."""
+        return PatientRecordFactory.build(**kwargs)
+
+    def test_alc_above_threshold_sets_true(self):
+        """alc_thousand_per_ul >= 5.0 (10³/µL) → iwCLL measurable."""
+        pi = self._pi(alc_thousand_per_ul=5.5)
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_iwcll is True
+
+    def test_alc_below_threshold_alone_sets_false(self):
+        """alc_thousand_per_ul < 5.0 with no other criteria → not measurable."""
+        pi = self._pi(alc_thousand_per_ul=3.0, largest_lymph_node_size=None,
+                      splenomegaly=None, hepatomegaly=None)
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_iwcll is False
+
+    def test_all_none_stays_none(self):
+        pi = self._pi(alc_thousand_per_ul=None, largest_lymph_node_size=None,
+                      splenomegaly=None, hepatomegaly=None)
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_iwcll is None
+
+    def test_old_absolute_lymphocyte_count_ignored(self):
+        """absolute_lymphocyte_count is no longer read by the IWCLL check."""
+        pi = self._pi(absolute_lymphocyte_count=50.0, alc_thousand_per_ul=None,
+                      largest_lymph_node_size=None, splenomegaly=None,
+                      hepatomegaly=None)
+        _cmd()._compute_derived_fields(pi)
+        # absolute_lymphocyte_count is set but alc_thousand_per_ul is None
+        # and no other criteria are present → None
+        assert pi.measurable_disease_iwcll is None
 
 
 # ---------------------------------------------------------------------------
