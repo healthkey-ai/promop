@@ -287,6 +287,58 @@ class CanonicalizeDiseaseTest(_OmopBase):
         self.assertEqual(pi.disease, 'multiple myeloma')
         self.assertEqual(pi.disease_slug, 'multiple-myeloma')
 
+    def test_cb_source_value_wins_over_status_variant_concept(self):
+        # A CB profile-write stores the canonical disease title in condition_source_value while the
+        # resolved standard concept may be a status/subtype variant ("Multiple myeloma in remission").
+        # The canonical source value must win, else PatientRecord.disease is a name that does not match
+        # EXACT's trial disease strings and the matcher scopes to zero (or wrong) trials.
+        remission = _concept(90051, 'Multiple myeloma in remission', self.dom_cond, self.vocab, self.cc)
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=92206,
+            person=self.person,
+            condition_concept=remission,
+            condition_source_value='multiple myeloma',
+            condition_start_date=date(2022, 5, 1),
+            condition_type_concept=self.type_concept,
+        )
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.disease, 'multiple myeloma')  # source value, NOT 'Multiple myeloma in remission'
+
+    def test_non_canonical_source_value_keeps_concept_first(self):
+        # A non-CB row (e.g. FHIR import with a coded/free-text source value) is NOT a recognized
+        # canonical disease, so the mapped concept name is still preferred (unchanged behavior).
+        concept = _concept(90052, 'Breast Cancer', self.dom_cond, self.vocab, self.cc)
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=92207,
+            person=self.person,
+            condition_concept=concept,
+            condition_source_value='C50.9',  # ICD code, not a CB canonical title
+            condition_start_date=date(2022, 6, 1),
+            condition_type_concept=self.type_concept,
+        )
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.disease, 'Breast Cancer')  # concept name, not the raw code
+
+    def test_sync_condition_resolves_exact_concept_not_status_variant(self):
+        # _sync_condition must deterministically resolve the EXACT Condition concept, not arbitrarily
+        # .first() a status/subtype variant (the old `concept_name__icontains(...).first()` could pick
+        # "Multiple myeloma in remission").
+        from omop_core.services.omop_write_service import _sync_condition
+        from omop_core.services.mappings import CONCEPT_EHR_TYPE
+        _concept(CONCEPT_EHR_TYPE, 'EHR', self.dom_cond, self.vocab, self.cc)  # _sync_condition needs the type concept
+        _concept(90060, 'Multiple myeloma in remission', self.dom_cond, self.vocab, self.cc)  # variant, lower id
+        _concept(90061, 'multiple myeloma', self.dom_cond, self.vocab, self.cc)               # exact match
+
+        class _PI:  # duck-typed patient_info the writer reads
+            disease = 'multiple myeloma'
+            stage = condition_code_icd_10 = condition_code_snomed_ct = None
+
+        _sync_condition(self.person, _PI(), date(2022, 7, 1))
+        co = ConditionOccurrence.objects.filter(
+            person=self.person, condition_source_value='multiple myeloma').first()
+        self.assertIsNotNone(co)
+        self.assertEqual(co.condition_concept.concept_name, 'multiple myeloma')  # exact, not the remission variant
+
 
 class RefreshPatientRecordLabsFromMeasurementTest(_OmopBase):
     """Labs are derived from Measurement records using source_value fallback."""
