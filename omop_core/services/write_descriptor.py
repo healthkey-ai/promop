@@ -29,15 +29,115 @@ from omop_core.services.patient_record_service import (
 # Every field resolves to exactly one kind. A binary writable/not left a third of
 # the record looking broken — a field is not "unwritable" because it is a unit
 # picker or because it is height and weight multiplied together.
-KIND_EDITABLE = 'editable'      # write an OMOP fact; derivation follows
-KIND_SELECTABLE = 'selectable'  # choose from a bounded set, carried on the fact
-KIND_COMPUTED = 'computed'      # derived from other fields; never authored alone
-KIND_ALIAS = 'alias'            # mirrors a canonical field; edit that one instead
-
 _NO_MAPPING_REASON = (
     'No reviewed concept set for this field yet — it cannot be written as a '
     'complete OMOP fact. See docs/omop_to_patientrecord.md.'
 )
+
+KIND_EDITABLE = 'editable'      # write an OMOP fact; derivation follows
+KIND_SELECTABLE = 'selectable'  # choose from a bounded set, carried on the fact
+KIND_COMPUTED = 'computed'      # derived from other fields; never authored alone
+KIND_ALIAS = 'alias'            # mirrors a canonical field; edit that one instead
+KIND_PROFILE = 'profile'        # a Person attribute, written at the persons endpoint
+KIND_UNMAPPED = 'unmapped'      # no write path yet — grouped by WHY, not lumped
+
+# Why a field has no write path. Reported rather than omitted so the descriptor
+# documents the whole record: a reader can see every column and what stands
+# between it and being editable, instead of inferring it from an absence.
+GROUP_THERAPY = 'therapy-inference'
+GROUP_LOCATION = 'location'
+GROUP_WEARABLE_META = 'wearable-metadata'
+GROUP_NEEDS_CONCEPT = 'needs-concept-set'
+
+_LOCATION_FIELDS = frozenset({
+    'country', 'region', 'city', 'postal_code', 'latitude', 'longitude',
+})
+
+# Values inferred across many DrugExposure/Episode rows by regimen detection.
+# There is no single fact to write: authoring one means writing a therapy
+# episode, which is a different endpoint and a different design.
+_THERAPY_PREFIXES = (
+    'first_line', 'second_line', 'later_', 'supportive_', 'prior_therapy',
+    'therapy_', 'line_of_therapy', 'planned_', 'relapse_',
+    'treatment_refractory', 'reason_for_disc', 'washout', 'last_treatment',
+)
+
+_UNMAPPED_GROUP_REASONS = {
+    GROUP_THERAPY: (
+        'Inferred from drug exposures and episodes by regimen detection, not from '
+        'one fact. Editing means writing a therapy episode.'
+    ),
+    GROUP_LOCATION: (
+        'A Location attribute. Needs a location write path; the persons endpoint '
+        'does not accept it.'
+    ),
+    GROUP_WEARABLE_META: (
+        'Bookkeeping about the device feed rather than a reading; follows from '
+        'ingesting wearable data.'
+    ),
+    GROUP_NEEDS_CONCEPT: _NO_MAPPING_REASON,
+}
+
+
+def _unmapped_group(field):
+    if field in _LOCATION_FIELDS:
+        return GROUP_LOCATION
+    if field.startswith('wearable_'):
+        return GROUP_WEARABLE_META
+    if field.startswith(_THERAPY_PREFIXES):
+        return GROUP_THERAPY
+    return GROUP_NEEDS_CONCEPT
+
+# PatientRecord field → the Person field the persons endpoint accepts.
+#
+# These are not clinical facts and never were: they describe the person, not an
+# event, so they have no concept and no date. PATCH /api/v1/persons/{person_id}/
+# already writes them and derivation copies them forward.
+_PROFILE_REPLACEABLE = {
+    'email': 'email',
+    'phone_number': 'phone_number',
+    'facility_name': 'facility_name',
+    'validated': 'validated',
+    'validated_by': 'validated_by',
+    'validation_date': 'validation_date',
+    'suppress_demographics_for_others': 'suppress_demographics_for_others',
+}
+
+# Same endpoint, but fill-if-empty: it populates a blank and refuses to clobber an
+# existing value. Reported separately because "writable" would be a lie — a
+# clinician cannot correct a wrong gender here, only supply a missing one.
+_PROFILE_FILL_IF_EMPTY = {
+    'gender': 'gender_source_value',
+    'race': 'race_source_value',
+    'ethnicity': 'ethnicity_source_value',
+    'date_of_birth': 'year_of_birth / month_of_birth / day_of_birth',
+}
+
+# Thirty-day aggregates over a stream of device readings. A clinician does not
+# type a median: the reading is the fact, and the aggregate follows from it.
+_WEARABLE_METRIC = {
+    'median_daily_steps_30d': 'steps',
+    'activity_trend_30d': 'steps',
+    'active_minutes_per_day_30d': 'active_minutes',
+    'resting_heart_rate_avg_30d': 'resting_hr',
+    'hrv_sdnn_avg_30d': 'hrv_sdnn',
+    'hrv_rmssd_avg_30d': 'hrv_rmssd',
+    'oxygen_saturation_min_30d': 'spo2',
+    'oxygen_saturation_avg_30d': 'spo2',
+    'respiratory_rate_avg_30d': 'respiratory_rate',
+    'sleep_duration_hours_avg_30d': 'sleep_duration',
+    'vo2_max_avg_30d': 'vo2_max',
+    'distance_km_per_day_30d': 'distance',
+    'walking_speed_avg_30d': 'walking_speed',
+    'walking_step_length_avg_30d': 'walking_step_length',
+    'walking_double_support_pct_avg_30d': 'walking_double_support_pct',
+    'walking_hr_avg_30d': 'walking_hr_avg',
+    'flights_climbed_per_day_30d': 'flights_climbed',
+    'active_energy_per_day_30d': 'active_energy',
+    'basal_energy_per_day_30d': 'basal_energy',
+    'body_mass_avg_30d': 'body_mass',
+}
+
 
 # field → the field it mirrors. Writing an alias directly would collide with its
 # canonical on the same LOINC row, which is the failure #471 removed.
@@ -145,6 +245,51 @@ def build_writable_field_descriptor():
             }
             continue
 
+        if field in _PROFILE_REPLACEABLE:
+            descriptor[field] = {
+                'kind': KIND_PROFILE,
+                'writable': True,
+                'target': 'person',
+                'endpoint': 'PATCH /api/v1/persons/{person_id}/',
+                'person_field': _PROFILE_REPLACEABLE[field],
+                'value_kind': _value_kind(field),
+            }
+            continue
+
+        if field in _PROFILE_FILL_IF_EMPTY:
+            descriptor[field] = {
+                'kind': KIND_PROFILE,
+                # Not writable in the sense the editor means. The endpoint fills a
+                # blank and silently leaves an existing value alone, so offering a
+                # box that appears to accept a correction would lie about the
+                # outcome — the save would succeed and change nothing.
+                'writable': False,
+                'fill_if_empty': True,
+                'target': 'person',
+                'endpoint': 'PATCH /api/v1/persons/{person_id}/',
+                'person_field': _PROFILE_FILL_IF_EMPTY[field],
+                'value_kind': _value_kind(field),
+                'reason': (
+                    'Set on the Person record, and only while it is empty — this '
+                    'endpoint never overwrites an existing value.'
+                ),
+            }
+            continue
+
+        if field in _WEARABLE_METRIC:
+            metric = _WEARABLE_METRIC[field]
+            descriptor[field] = {
+                'kind': KIND_COMPUTED,
+                'writable': False,
+                'inputs': [metric],
+                'window_days': 30,
+                'reason': (
+                    f'A 30-day aggregate of {metric} readings. Upload device data '
+                    'rather than entering a summary value.'
+                ),
+            }
+            continue
+
         if field in _COMPUTED_INPUTS:
             descriptor[field] = {
                 'kind': KIND_COMPUTED,
@@ -213,8 +358,12 @@ def build_writable_field_descriptor():
 
         mapping = LAB_FIELD_TO_LOINC.get(field)
         if mapping is None:
+            group = _unmapped_group(field)
             descriptor[field] = {
-                'kind': None, 'writable': False, 'reason': _NO_MAPPING_REASON,
+                'kind': KIND_UNMAPPED,
+                'writable': False,
+                'group': group,
+                'reason': _UNMAPPED_GROUP_REASONS[group],
             }
             continue
 

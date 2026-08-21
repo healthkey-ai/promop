@@ -191,13 +191,14 @@ _CONCEPTS = [
     _c(1147094, 'drug_exposure.drug_exposure_id', 'Metadata', 'CDM', 'Field', 'S', 'CDM150'),
 
     # ------------------------------------------------------------------
-    # Generic lab fallback — used when no specific LOINC concept is found.
-    # concept_id 3000963 is pre-hoisted in upload_fhir as _concept_generic_lab.
-    # vocabulary_id='None' and concept_code='0' are intentional non-LOINC
-    # placeholders so this concept is never matched by LOINC code lookups
-    # and cannot pollute specific lab fields (e.g. hemoglobin_g_dl).
+    # No generic-lab placeholder is seeded here any more. One used to be minted
+    # at concept_id 3000963, on the reasoning that vocabulary_id='None' and
+    # concept_code='0' kept it out of LOINC lookups. That was true and beside
+    # the point: Athena owns 3000963 as 'Hemoglobin [Mass/volume] in Blood', so
+    # loading a real vocabulary turned every unmapped lab into a haemoglobin
+    # result. The fallback is now CONCEPT_GENERIC_LAB (concept_id 0, OMOP's
+    # 'No matching concept'), which no vocabulary can repurpose.
     # ------------------------------------------------------------------
-    _c(3000963, 'Generic Lab Measurement', 'Measurement', 'None', 'Lab Test', 'S', '0'),
 
     # ------------------------------------------------------------------
     # Breast cancer condition

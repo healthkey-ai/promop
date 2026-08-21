@@ -2127,7 +2127,7 @@ def _get_bc_clinical_data(person: Person) -> dict:
     data = {}
 
     observations = (
-        Observation.objects.filter(person=person)
+        Observation.objects.filter(person=person, is_erroneous=False)
         .select_related('observation_concept')
         .order_by('-observation_date')
     )
@@ -2156,7 +2156,7 @@ def _get_bc_clinical_data(person: Person) -> dict:
 def _get_social_data(person: Person) -> dict:
     data = {}
 
-    observations = Observation.objects.filter(person=person)
+    observations = Observation.objects.filter(person=person, is_erroneous=False)
 
     employment_obs = observations.filter(
         observation_concept__concept_code__in=['224362002', '160903007']
@@ -2176,9 +2176,9 @@ def _get_social_data(person: Person) -> dict:
 def _get_behavior_data(person: Person) -> dict:
     data = {}
 
-    observations = Observation.objects.filter(person=person)
+    observations = Observation.objects.filter(person=person, is_erroneous=False)
     measurements = (
-        Measurement.objects.filter(person=person)
+        Measurement.objects.filter(person=person, is_erroneous=False)
         .select_related('measurement_concept')
         .order_by('-measurement_date')
     )
@@ -2336,7 +2336,7 @@ def _get_assertion_data(person: Person) -> dict:
 def _get_infection_data(person: Person) -> dict:
     data = {}
 
-    measurements = Measurement.objects.filter(person=person)
+    measurements = Measurement.objects.filter(person=person, is_erroneous=False)
 
     def _infection_value(m):
         """Return 'negative', 'positive', or None from a Measurement row."""
@@ -2593,6 +2593,7 @@ def _get_sct_cytogenetic_data(person: Person) -> dict:
     ]
     obs_qs = (
         Observation.objects.filter(
+            is_erroneous=False,
             person=person,
             observation_source_value__in=_SOURCE_KEYS,
         )
@@ -2638,10 +2639,12 @@ def _get_assessment_data(person: Person) -> dict:
     )
 
     tumor_stage_obs = Observation.objects.filter(
+        is_erroneous=False,
         person=person,
         observation_concept__concept_code__in=['21905-5'],
     ).order_by('-observation_date').first()
     metastasis_obs = Observation.objects.filter(
+        is_erroneous=False,
         person=person,
         observation_concept__concept_code__in=['21901-4'],
     ).order_by('-observation_date').first()
@@ -2664,7 +2667,7 @@ def _get_laboratory_data(person: Person) -> dict:
     data = {}
 
     measurements = (
-        Measurement.objects.filter(person=person)
+        Measurement.objects.filter(person=person, is_erroneous=False)
         .select_related('measurement_concept')
         .order_by('-measurement_date', '-measurement_id')
     )
@@ -2770,7 +2773,7 @@ def _performance_rows(person: Person, name_fragment: str, loinc_code: str) -> li
     vocabulary is not loaded and the code survives only in the source value.
     """
     obs = (
-        Observation.objects.filter(person=person)
+        Observation.objects.filter(person=person, is_erroneous=False)
         .filter(
             Q(observation_concept__concept_name__icontains=name_fragment)
             | Q(observation_concept__concept_code=loinc_code)
@@ -2781,7 +2784,7 @@ def _performance_rows(person: Person, name_fragment: str, loinc_code: str) -> li
         .values_list('observation_date', 'value_as_number')
     )
     meas = (
-        Measurement.objects.filter(person=person)
+        Measurement.objects.filter(person=person, is_erroneous=False)
         .filter(
             Q(measurement_concept__concept_name__icontains=name_fragment)
             | Q(measurement_concept__concept_code=loinc_code)
@@ -2829,6 +2832,7 @@ def _get_genetic_mutations(person: Person) -> dict:
     mutations = []
 
     genetic_measurements = Measurement.objects.filter(
+        is_erroneous=False,
         person=person,
     ).filter(
         models.Q(measurement_concept__concept_code__in=_GENETIC_MUTATION_LOINCS.keys())
@@ -3023,6 +3027,7 @@ def _get_cll_data(person: Person) -> dict:
     if alc_concept:
         alc_measurements = (
             Measurement.objects.filter(
+                is_erroneous=False,
                 person=person,
                 measurement_concept=alc_concept,
                 value_as_number__isnull=False,
@@ -3307,6 +3312,7 @@ def _get_wearable_data(person: Person) -> dict:
 
     def _wearable_measurements(date_filter=None):
         qs = Measurement.objects.filter(
+            is_erroneous=False,
             person=person,
             value_as_number__isnull=False,
         )
@@ -3331,6 +3337,7 @@ def _get_wearable_data(person: Person) -> dict:
         # — not just sleep — and return the code alongside the value so rows are
         # keyed identically to the Measurement rows below.
         qs = Observation.objects.filter(
+            is_erroneous=False,
             person=person,
             value_as_number__isnull=False,
         )
