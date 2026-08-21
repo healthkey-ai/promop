@@ -745,6 +745,25 @@ class OrgVocabularyUsageView(APIView):
 
 @api_view(['GET'])
 @permission_classes([AllowAny])
+def org_signup_directory(request):
+    """List orgs a logged-out visitor may self-register with.
+
+    The homepage Sign Up tab needs to know which orgs accept registrations, and
+    an anonymous visitor cannot read the authenticated org list. Only name and
+    slug are exposed — the same two fields `org_public_info` already publishes
+    per org, just enumerated.
+    """
+    orgs = (
+        Organization.objects
+        .filter(is_active=True, allows_patient_signup=True)
+        .order_by('name')
+        .values('name', 'slug')
+    )
+    return Response(list(orgs))
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
 def org_public_info(request, slug):
     """Return minimal public info about an org for the login/signup pages."""
     org = get_object_or_404(Organization, slug=slug, is_active=True)

@@ -15131,6 +15131,57 @@ class OrgPublicInfoTest(TestCase):
         self.assertEqual(resp.status_code, 404)
 
 
+class OrgSignupDirectoryTest(TestCase):
+    """The homepage Sign Up tab's org list — public, and signup-enabled orgs only."""
+
+    URL = '/api/v1/orgs/signup-directory/'
+
+    def setUp(self):
+        Organization.objects.create(
+            name='Zeta Clinic', slug='zeta-clinic', allows_patient_signup=True,
+        )
+        Organization.objects.create(
+            name='Alpha Clinic', slug='alpha-clinic', allows_patient_signup=True,
+        )
+        Organization.objects.create(
+            name='Closed Clinic', slug='closed-clinic', allows_patient_signup=False,
+        )
+        Organization.objects.create(
+            name='Retired Clinic', slug='retired-clinic',
+            allows_patient_signup=True, is_active=False,
+        )
+
+    def test_reachable_unauthenticated(self):
+        resp = APIClient().get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_lists_only_active_signup_enabled_orgs(self):
+        resp = APIClient().get(self.URL)
+        slugs = [o['slug'] for o in resp.data]
+        self.assertEqual(slugs, ['alpha-clinic', 'zeta-clinic'])  # ordered by name
+        self.assertNotIn('closed-clinic', slugs)
+        self.assertNotIn('retired-clinic', slugs)
+
+    def test_exposes_name_and_slug_only(self):
+        resp = APIClient().get(self.URL)
+        self.assertEqual(set(resp.data[0].keys()), {'name', 'slug'})
+
+    def test_empty_when_no_org_allows_signup(self):
+        Organization.objects.all().update(allows_patient_signup=False)
+        resp = APIClient().get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(list(resp.data), [])
+
+    def test_does_not_shadow_org_detail_route(self):
+        """A real org slugged 'signup-directory' must not break the directory URL."""
+        Organization.objects.create(
+            name='Signup Directory', slug='signup-directory', allows_patient_signup=True,
+        )
+        resp = APIClient().get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsInstance(resp.data, list)
+
+
 class OrganizationSerializerTest(TestCase):
     """Test that allows_patient_signup is in the serializer output and writable."""
 

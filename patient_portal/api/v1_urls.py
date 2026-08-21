@@ -27,7 +27,8 @@ from .org_views import (
     OrgInviteView, OrgInvitationListView, OrgInvitationDetailView,
     OrgTrustListCreateView, OrgTrustDetailView,
     OrgAccessListView, OrgAccessDetailView, OrgVocabularyUsageView,
-    confirm_invitation, org_invitation_lookup, org_public_info, OrgPatientSignupView,
+    confirm_invitation, org_invitation_lookup, org_public_info, org_signup_directory,
+    OrgPatientSignupView,
 )
 from .patient_invitations import (
     PatientInviteView, accept_patient_invitation, patient_invitation_lookup,
@@ -94,6 +95,8 @@ urlpatterns = [
     path('orgs/', OrgListCreateView.as_view(), name='v1-org-list'),
     path('orgs/confirm-invitation/', confirm_invitation, name='v1-org-confirm-invitation'),
     path('orgs/invitation-lookup/', org_invitation_lookup, name='v1-org-invitation-lookup'),
+    # Must precede orgs/<slug>/ — "signup-directory" is itself a valid slug.
+    path('orgs/signup-directory/', org_signup_directory, name='v1-org-signup-directory'),
     path('orgs/<slug:slug>/', OrgDetailView.as_view(), name='v1-org-detail'),
     path('orgs/<slug:slug>/invite/', OrgInviteView.as_view(), name='v1-org-invite'),
     path('orgs/<slug:slug>/invitations/', OrgInvitationListView.as_view(), name='v1-org-invitation-list'),
