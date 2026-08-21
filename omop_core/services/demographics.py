@@ -46,10 +46,19 @@ ETHNICITY_CHOICES = (
     ('Not Hispanic', 'Not Hispanic or Latino'),
 )
 
+# Codes that resolve but are not offered in a picker. OMOP's Gender vocabulary
+# carries non-standard OTHER (O) and AMBIGUOUS (A) alongside the three standard
+# answers. Ingest sees them — a FHIR bundle may say 'ambiguous' — so they must
+# resolve; a clinician choosing from a list should not be offered them.
+GENDER_EXTRA = (
+    ('O', 'Other'),
+    ('A', 'Ambiguous'),
+)
+
 _KINDS = {
-    'gender': (GENDER_VOCABULARY, GENDER_CHOICES),
-    'race': (RACE_VOCABULARY, RACE_CHOICES),
-    'ethnicity': (ETHNICITY_VOCABULARY, ETHNICITY_CHOICES),
+    'gender': (GENDER_VOCABULARY, GENDER_CHOICES, GENDER_EXTRA),
+    'race': (RACE_VOCABULARY, RACE_CHOICES, ()),
+    'ethnicity': (ETHNICITY_VOCABULARY, ETHNICITY_CHOICES, ()),
 }
 
 # Spellings a caller may send for a curated answer. FHIR, free text and the
@@ -59,7 +68,12 @@ _ALIASES = {
     'gender': {
         'f': 'F', 'female': 'F', 'w': 'F', 'woman': 'F',
         'm': 'M', 'male': 'M', 'man': 'M',
-        'u': 'U', 'unknown': 'U', 'other': 'U', 'ambiguous': 'U',
+        'u': 'U', 'unknown': 'U',
+        # Preserved from the id-keyed map this replaced: 'other' resolved to
+        # UNKNOWN there, not to OTHER. Repointing it at 8521 would be a change in
+        # meaning for every FHIR import, so it is left as a separate decision.
+        'other': 'U',
+        'ambiguous': 'A',
     },
     'race': {
         'white': '5', 'caucasian': '5',
@@ -81,7 +95,10 @@ _ALIASES = {
 
 
 def choices(kind):
-    """The curated (code, display) pairs a picker should offer for `kind`."""
+    """The curated (code, display) pairs a picker should offer for `kind`.
+
+    Deliberately narrower than what resolves: see GENDER_EXTRA.
+    """
     return _KINDS[kind][1]
 
 
@@ -96,12 +113,19 @@ def resolve_concept_code(kind, value):
     text = str(value).strip()
     if not text:
         return None
-    _vocabulary, options = _KINDS[kind]
+    _vocabulary, options, extra = _KINDS[kind]
     lowered = text.casefold()
-    for code, display in options:
+    # Aliases are consulted first so an explicit mapping beats a coincidental
+    # match on a display name. 'other' is the case that matters: it is aliased to
+    # UNKNOWN for continuity with the id-keyed table this replaced, while an
+    # OTHER concept also exists whose display name it would otherwise match.
+    aliased = _ALIASES[kind].get(lowered)
+    if aliased is not None:
+        return aliased
+    for code, display in tuple(options) + tuple(extra):
         if lowered in (code.casefold(), display.casefold()):
             return code
-    return _ALIASES[kind].get(lowered)
+    return None
 
 
 def resolve_concept(kind, value):
@@ -114,7 +138,7 @@ def resolve_concept(kind, value):
     code = resolve_concept_code(kind, value)
     if code is None:
         return None
-    vocabulary, _options = _KINDS[kind]
+    vocabulary = _KINDS[kind][0]
     return Concept.objects.filter(
         vocabulary_id=vocabulary, concept_code=code
     ).order_by('concept_id').first()

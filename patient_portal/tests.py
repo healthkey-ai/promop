@@ -114,10 +114,35 @@ def _make_vocab_fixtures():
     _concept(19136160, 'Drug',                    domain_drug)
     # Generic procedure concept — fallback for FHIR Procedure ingestion
     _concept(20000001, 'Procedure',               domain_procedure)
-    # Gender concepts used by get_gender_concept() in views.py
-    _concept(8532, 'FEMALE', domain_gender)
-    _concept(8507, 'MALE',   domain_gender)
-    _concept(8551, 'UNKNOWN', domain_gender)
+    # Gender concepts used by get_gender_concept() in views.py.
+    #
+    # These carry their real OMOP vocabulary and codes rather than the generic
+    # `concept_code=str(concept_id)` the helper above assigns. get_gender_concept
+    # resolves by (vocabulary_id, concept_code) — the natural key — so a concept
+    # with the right id but a code of '8507' is not a gender concept as far as the
+    # resolver is concerned, and rightly so.
+    gender_vocab, _ = Vocabulary.objects.get_or_create(
+        vocabulary_id='Gender',
+        defaults={'vocabulary_name': 'OMOP Gender', 'vocabulary_concept_id': 0},
+    )
+
+    def _gender_concept(cid, name, code):
+        Concept.objects.get_or_create(
+            concept_id=cid,
+            defaults={
+                'concept_name': name,
+                'domain': domain_gender,
+                'vocabulary': gender_vocab,
+                'concept_class': cc,
+                'concept_code': code,
+                'valid_start_date': today,
+                'valid_end_date': far_future,
+            },
+        )
+
+    _gender_concept(8532, 'FEMALE', 'F')
+    _gender_concept(8507, 'MALE', 'M')
+    _gender_concept(8551, 'UNKNOWN', 'U')
 
 
 def _make_fhir_bundle():
