@@ -15482,6 +15482,160 @@ class UserlessOAuthTokenDetailTest(TestCase):
         self.assertFalse(can_access_patient(None, pid))
         self.assertFalse(can_write_patient(None, pid))
         self.assertIsNone(get_actor_role(None, pid))
+
+
+class ClinicalSessionAuthorizationTest(TestCase):
+    """Regression coverage for session-auth clinical row access.
+
+    Patient-auth writes should be accepted for the patient's own person_id, and
+    professional org grants should apply to both list filtering and create-time
+    write checks. Patient-role grants must not become org-wide access.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        _make_vocab_fixtures()
+        cls.org = Organization.objects.create(
+            name='Clinical Auth Org', slug='clinical-auth-org',
+        )
+        cls.patient_person = Person.objects.create(person_id=452001)
+        cls.other_person = Person.objects.create(person_id=452002)
+        PatientRecord.objects.create(person=cls.patient_person, organization=cls.org)
+        PatientRecord.objects.create(person=cls.other_person, organization=cls.org)
+
+        cls.patient_identity = Identity.objects.create_user(
+            email='clinical-patient@example.com', password='pw',
+        )
+        PatientUser.objects.create(
+            identity=cls.patient_identity, person=cls.patient_person,
+        )
+        cls.patient_role_identity = Identity.objects.create_user(
+            email='patient-role@example.com', password='pw',
+        )
+        GroupAccess.objects.create(
+            identity=cls.patient_role_identity, org=cls.org, role='patient',
+        )
+        cls.doctor = Identity.objects.create_user(
+            email='clinical-doctor@example.com', password='pw',
+        )
+        GroupAccess.objects.create(identity=cls.doctor, org=cls.org, role='doctor')
+        cls.analyst = Identity.objects.create_user(
+            email='clinical-analyst@example.com', password='pw',
+        )
+        GroupAccess.objects.create(identity=cls.analyst, org=cls.org, role='analyst')
+
+        cls.observation_concept = Concept.objects.get(concept_id=0)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        Observation.objects.create(
+            observation_id=452010,
+            person=cls.patient_person,
+            observation_concept=cls.observation_concept,
+            observation_date=date(2026, 1, 1),
+            observation_type_concept=cls.type_concept,
+            value_as_string='existing',
+        )
+
+    def _client(self, identity):
+        client = APIClient()
+        client.force_authenticate(user=identity)
+        return client
+
+    def _observation_payload(self, observation_id, person_id):
+        return {
+            'observation_id': observation_id,
+            'person': person_id,
+            'observation_concept': self.observation_concept.concept_id,
+            'observation_date': '2026-01-02',
+            'observation_type_concept': self.type_concept.concept_id,
+            'value_as_string': 'created',
+        }
+
+    def test_org_doctor_grant_allows_read_write_and_role_lookup(self):
+        from omop_core.authorization import (
+            can_access_patient, can_write_patient, get_actor_role,
+        )
+
+        pid = self.patient_person.person_id
+        self.assertTrue(can_access_patient(self.doctor, pid))
+        self.assertTrue(can_write_patient(self.doctor, pid))
+        self.assertEqual(get_actor_role(self.doctor, pid), 'doctor')
+
+        client = self._client(self.doctor)
+        list_resp = client.get('/api/observations/', {'person_id': pid})
+        self.assertEqual(list_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [row['observation_id'] for row in list_resp.data], [452010],
+        )
+
+        create_resp = client.post(
+            '/api/observations/',
+            self._observation_payload(452011, pid),
+            format='json',
+        )
+        self.assertEqual(create_resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Observation.objects.filter(observation_id=452011).exists())
+
+    def test_org_analyst_grant_is_read_only(self):
+        from omop_core.authorization import (
+            can_access_patient, can_write_patient, get_actor_role,
+        )
+
+        pid = self.patient_person.person_id
+        self.assertTrue(can_access_patient(self.analyst, pid))
+        self.assertFalse(can_write_patient(self.analyst, pid))
+        self.assertEqual(get_actor_role(self.analyst, pid), 'analyst')
+
+        client = self._client(self.analyst)
+        list_resp = client.get('/api/observations/', {'person_id': pid})
+        self.assertEqual(list_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [row['observation_id'] for row in list_resp.data], [452010],
+        )
+
+        create_resp = client.post(
+            '/api/observations/',
+            self._observation_payload(452012, pid),
+            format='json',
+        )
+        self.assertEqual(create_resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(Observation.objects.filter(observation_id=452012).exists())
+
+    def test_patient_role_grant_does_not_allow_org_wide_access(self):
+        from omop_core.authorization import (
+            can_access_patient, can_write_patient, get_actor_role,
+        )
+
+        pid = self.patient_person.person_id
+        self.assertFalse(can_access_patient(self.patient_role_identity, pid))
+        self.assertFalse(can_write_patient(self.patient_role_identity, pid))
+        self.assertIsNone(get_actor_role(self.patient_role_identity, pid))
+
+        resp = self._client(self.patient_role_identity).get(
+            '/api/observations/', {'person_id': pid},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(list(resp.data), [])
+
+    def test_patient_can_create_own_observation_but_not_another_patients(self):
+        client = self._client(self.patient_identity)
+
+        own_resp = client.post(
+            '/api/observations/',
+            self._observation_payload(452013, self.patient_person.person_id),
+            format='json',
+        )
+        self.assertEqual(own_resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Observation.objects.filter(observation_id=452013).exists())
+
+        other_resp = client.post(
+            '/api/observations/',
+            self._observation_payload(452014, self.other_person.person_id),
+            format='json',
+        )
+        self.assertEqual(other_resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(Observation.objects.filter(observation_id=452014).exists())
 # ---------------------------------------------------------------------------
 # Vocabulary Snapshot (streaming NDJSON) tests
 # ---------------------------------------------------------------------------

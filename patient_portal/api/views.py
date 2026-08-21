@@ -5558,7 +5558,7 @@ class _ProvenanceMixin:
 @method_decorator(csrf_exempt, name='dispatch')
 class ConditionOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ConditionOccurrenceSerializer
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = ConditionOccurrence.objects.all()
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'omop_write'
@@ -5567,7 +5567,7 @@ class ConditionOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _
 @method_decorator(csrf_exempt, name='dispatch')
 class DrugExposureViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = DrugExposureSerializer
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = DrugExposure.objects.all()
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'omop_write'
@@ -5576,7 +5576,7 @@ class DrugExposureViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provena
 @method_decorator(csrf_exempt, name='dispatch')
 class MeasurementViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = Measurement.objects.all()
     allowed_list_query_params = _OmopFilterMixin.allowed_list_query_params | frozenset({
         'measurement_concept_id',
@@ -5622,7 +5622,7 @@ class MeasurementViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provenan
 @method_decorator(csrf_exempt, name='dispatch')
 class ObservationViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ObservationSerializer
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = Observation.objects.all()
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'omop_write'
@@ -5631,7 +5631,7 @@ class ObservationViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provenan
 @method_decorator(csrf_exempt, name='dispatch')
 class ProcedureOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ProcedureOccurrenceSerializer
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = ProcedureOccurrence.objects.all()
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'omop_write'
@@ -5640,7 +5640,7 @@ class ProcedureOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _
 @method_decorator(csrf_exempt, name='dispatch')
 class EpisodeViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = EpisodeSerializer
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = Episode.objects.all()
     allowed_list_query_params = frozenset({'person_id', 'format'})
 
