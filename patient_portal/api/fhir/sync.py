@@ -395,10 +395,15 @@ class FhirSyncView(APIView):
         }
 
     def _insert_discrete_observations(self, person, observations, ehr_type, cache, source_user_id, org, skipped):
-        # Dedup includes measurement_datetime so distinct sub-daily readings
-        # (e.g. per-reading heart rate) coexist while exact re-syncs collapse.
+        # Mapped rows dedup by resolved concept, not producer display text. If
+        # no concept resolved, keep source text in the key so unrelated local
+        # metrics do not collapse into one concept_id=0 row.
+        def identity(date_value, datetime_value, concept_id, source_value, value):
+            source_key = source_value if not concept_id else None
+            return (date_value, datetime_value, concept_id, source_key,
+                    _norm_num(value))
         existing = {
-            (d, dt, cid, sv, _norm_num(v))
+            identity(d, dt, cid, sv, v)
             for d, dt, cid, sv, v in Measurement.objects.filter(person=person).values_list(
                 'measurement_date', 'measurement_datetime', 'measurement_concept_id',
                 'measurement_source_value', 'value_as_number')
@@ -410,7 +415,7 @@ class FhirSyncView(APIView):
             if o['date'] is None:
                 self._count_skipped(skipped, 'Observation', 'missing_effective_date')
                 continue
-            key = (o['date'], o['dt'], o['cid'], o['sv'], _norm_num(o['value']))
+            key = identity(o['date'], o['dt'], o['cid'], o['sv'], o['value'])
             if key in seen:
                 continue
             seen.add(key)
