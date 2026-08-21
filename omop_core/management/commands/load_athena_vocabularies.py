@@ -182,6 +182,7 @@ class Command(BaseCommand):
                 'is safe for databases with clinical data.'
             )
             self._validate_replace_loinc_scope()
+            self._validate_replace_vocab_coverage()
 
         if self._direct:
             self._hk_concepts = self._save_healthkey_concepts()
@@ -366,6 +367,62 @@ class Command(BaseCommand):
             f'{count:,} loaded LOINC concept(s) use domain(s) outside '
             f'LOINC_DOMAIN_SCOPE: {", ".join(domains)}. '
             'Add the required domain(s) to LOINC_DOMAIN_SCOPE, then rerun.'
+        )
+
+    def _validate_replace_vocab_coverage(self):
+        """Abort before TRUNCATE if the incoming CSV would drop entire vocabularies.
+
+        When ``--replace`` TRUNCATEs the concept table, only HealthKey-sourced
+        concepts are preserved. If the Athena CSV omits a vocabulary that has
+        existing rows in the DB, those concepts are silently deleted with no way
+        to recover them. This pre-flight check compares the vocabularies present
+        in the DB against what the incoming CONCEPT.csv will provide and aborts
+        if any vocabulary would lose all its rows.
+        """
+        # Vocabularies currently stored in the DB (within VOCAB_SCOPE).
+        db_vocabs = set(
+            Concept.objects.filter(vocabulary_id__in=VOCAB_SCOPE)
+            .exclude(source='HealthKey')
+            .values_list('vocabulary_id', flat=True)
+            .distinct()
+        )
+        if not db_vocabs:
+            return  # Nothing to lose.
+
+        # Scan the incoming CONCEPT.csv to find which vocabularies it covers.
+        csv_vocabs = set()
+        try:
+            f = self._open('CONCEPT.csv')
+        except CommandError:
+            raise CommandError(
+                '--replace aborted: CONCEPT.csv not found. Cannot verify '
+                'vocabulary coverage before TRUNCATE.'
+            )
+        with f:
+            reader = csv.reader(f, delimiter='\t')
+            idx = _header_index(next(reader))
+            i_vid = idx['vocabulary_id']
+            for cols in reader:
+                try:
+                    vid = cols[i_vid]
+                except IndexError:
+                    continue
+                if vid in VOCAB_SCOPE:
+                    csv_vocabs.add(vid)
+
+        missing = sorted(db_vocabs - csv_vocabs)
+        if missing:
+            raise CommandError(
+                '--replace aborted before TRUNCATE: the incoming CONCEPT.csv '
+                f'contains no rows for {len(missing)} vocabulary/ies that have '
+                f'existing concepts in the database: {", ".join(missing)}. '
+                'A TRUNCATE would permanently delete those concepts. Either '
+                'fetch an Athena bundle that includes the missing vocabularies, '
+                'or run without --replace to upsert.'
+            )
+        self._log(
+            f'  --replace pre-flight: all {len(db_vocabs)} in-scope DB '
+            f'vocabularies covered by incoming CSV.'
         )
 
     def _seed_concept_zero(self):
@@ -671,11 +728,11 @@ class Command(BaseCommand):
     def _load_concept_ancestors(self, dry_run):
         self._log('Loading CONCEPT_ANCESTOR.csv...')
         t = time.monotonic()
-        hemonc_ids = set(
-            Concept.objects.filter(vocabulary_id='HemOnc')
+        loaded_ids = set(
+            Concept.objects.filter(vocabulary_id__in=VOCAB_SCOPE)
                            .values_list('concept_id', flat=True)
         )
-        self._log(f'  {len(hemonc_ids):,} HemOnc IDs in filter set')
+        self._log(f'  {len(loaded_ids):,} concept IDs in filter set')
         count = 0
         scanned = 0
         rows = []
@@ -695,7 +752,7 @@ class Command(BaseCommand):
                     desc = int(cols[i_desc])
                 except (ValueError, IndexError):
                     continue
-                if anc not in hemonc_ids or desc not in hemonc_ids:
+                if anc not in loaded_ids or desc not in loaded_ids:
                     continue
                 count += 1
                 if not dry_run:
