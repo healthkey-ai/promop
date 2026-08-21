@@ -4855,6 +4855,32 @@ _MODEL_PK_MAP = {
 
 class _OmopFilterMixin:
     """Filter by person_id query param and restrict to the requesting org's patients."""
+    allowed_list_query_params = frozenset({'person_id', 'include_erroneous', 'format'})
+
+    def get_allowed_list_query_params(self):
+        return set(self.allowed_list_query_params)
+
+    def _unsupported_list_query_params(self):
+        allowed = self.get_allowed_list_query_params()
+        return sorted(set(self.request.query_params) - allowed)
+
+    def list(self, request, *args, **kwargs):
+        unsupported = self._unsupported_list_query_params()
+        if unsupported:
+            supported = sorted(self.get_allowed_list_query_params())
+            return Response(
+                {
+                    'detail': (
+                        'Unsupported query parameter(s): '
+                        + ', '.join(unsupported)
+                    ),
+                    'unsupported_params': unsupported,
+                    'supported_params': supported,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().list(request, *args, **kwargs)
+
     def get_queryset(self):
         qs = super().get_queryset()
         person_id = self.request.query_params.get('person_id')
@@ -5552,6 +5578,14 @@ class MeasurementViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provenan
     serializer_class = MeasurementSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Measurement.objects.all()
+    allowed_list_query_params = _OmopFilterMixin.allowed_list_query_params | frozenset({
+        'measurement_concept_id',
+        'measurement_source_concept_id',
+        'concept_code',
+        'measurement_date__gte',
+        'measurement_date__lte',
+        'visit_occurrence_id',
+    })
     ordering_fields = ['measurement_date', 'measurement_id']
     ordering = ['-measurement_date']
     throttle_classes = [ScopedRateThrottle]
@@ -5608,14 +5642,32 @@ class EpisodeViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = EpisodeSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = Episode.objects.all()
+    allowed_list_query_params = frozenset({'person_id', 'format'})
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class EpisodeEventViewSet(viewsets.ModelViewSet):
     serializer_class = EpisodeEventSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    allowed_list_query_params = frozenset({'episode_id', 'person_id', 'format'})
+
+    def _unsupported_list_query_params(self):
+        return sorted(set(self.request.query_params) - self.allowed_list_query_params)
 
     def list(self, request, *args, **kwargs):
+        unsupported = self._unsupported_list_query_params()
+        if unsupported:
+            return Response(
+                {
+                    'detail': (
+                        'Unsupported query parameter(s): '
+                        + ', '.join(unsupported)
+                    ),
+                    'unsupported_params': unsupported,
+                    'supported_params': sorted(self.allowed_list_query_params),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if not request.query_params.get('episode_id'):
             return Response(
                 {'detail': 'episode_id query parameter is required.'},
@@ -6392,6 +6444,9 @@ class PatientDocumentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = PatientDocumentSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientDocument.objects.all()
+    allowed_list_query_params = _OmopFilterMixin.allowed_list_query_params | frozenset({
+        'doc_type', 'status',
+    })
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -6534,6 +6589,9 @@ class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = PatientSurveyResponse.objects.select_related('survey').all()
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    allowed_list_query_params = _OmopFilterMixin.allowed_list_query_params | frozenset({
+        'survey',
+    })
 
     def get_queryset(self):
         qs = super().get_queryset()

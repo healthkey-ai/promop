@@ -1518,6 +1518,68 @@ class OmopEndpointAuthTest(FhirUploadBase):
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
 
+class OmopUnknownQueryFilterTest(TestCase):
+    """Clinical list endpoints must reject filters they do not implement."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = Identity.objects.create_superuser(
+            email='omop-filter-admin@test.com',
+            password='not-used',
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.staff)
+
+    def assertUnsupportedParam(self, url, param='definitely_not_supported'):
+        resp = self.client.get(url, {param: '1'})
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn(param, resp.data['unsupported_params'])
+        self.assertIn('supported_params', resp.data)
+
+    def test_common_omop_lists_reject_unknown_query_params(self):
+        for url in [
+            '/api/conditions/',
+            '/api/drug-exposures/',
+            '/api/observations/',
+            '/api/procedures/',
+            '/api/episodes/',
+        ]:
+            with self.subTest(url=url):
+                self.assertUnsupportedParam(url)
+
+    def test_measurements_accept_declared_filters_but_reject_unknown(self):
+        accepted = self.client.get('/api/measurements/', {
+            'person_id': '1',
+            'include_erroneous': 'true',
+            'measurement_concept_id': '0',
+            'measurement_source_concept_id': '0',
+            'concept_code': '718-7',
+            'measurement_date__gte': '2024-01-01',
+            'measurement_date__lte': '2024-12-31',
+            'visit_occurrence_id': '10',
+        })
+        self.assertNotEqual(
+            accepted.status_code,
+            status.HTTP_400_BAD_REQUEST,
+            msg=getattr(accepted, 'data', accepted.content),
+        )
+
+        self.assertUnsupportedParam('/api/measurements/', 'measurement_source_value')
+
+    def test_episode_events_reject_unknown_query_params_before_required_episode_check(self):
+        self.assertUnsupportedParam('/api/episode-events/')
+
+        missing_episode = self.client.get('/api/episode-events/')
+        self.assertEqual(missing_episode.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            missing_episode.data['detail'],
+            'episode_id query parameter is required.',
+        )
+
+
 class OmopObservationsEndpointTest(FhirUploadBase):
     """Tests for /api/observations/ — list, filter, create, update, delete."""
 
