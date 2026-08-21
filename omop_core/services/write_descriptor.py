@@ -18,6 +18,7 @@ fields cannot tell "you may not edit this" from "I forgot to send it".
 """
 
 from omop_core.models import Concept, PatientRecord
+from omop_core.services.demographics import choices as demographic_choices
 from omop_core.services.mappings import (
     CONCEPT_LAB_TYPE, DERIVED_FIELD_TO_CODE, LAB_FIELD_TO_LOINC,
 )
@@ -104,13 +105,19 @@ _PROFILE_REPLACEABLE = {
     'suppress_demographics_for_others': 'suppress_demographics_for_others',
 }
 
+# Written as a coded answer plus the raw text, both at once: derivation reads the
+# concept before the source value, so a correction that set only text would be
+# outranked by the concept already stored.
+_PROFILE_DEMOGRAPHIC = {
+    'gender': ('gender_concept + gender_source_value', 'gender'),
+    'race': ('race_concept + race_source_value', 'race'),
+    'ethnicity': ('ethnicity_concept + ethnicity_source_value', 'ethnicity'),
+}
+
 # Same endpoint, but fill-if-empty: it populates a blank and refuses to clobber an
 # existing value. Reported separately because "writable" would be a lie — a
-# clinician cannot correct a wrong gender here, only supply a missing one.
+# clinician cannot correct one here, only supply a missing one.
 _PROFILE_FILL_IF_EMPTY = {
-    'gender': 'gender_source_value',
-    'race': 'race_source_value',
-    'ethnicity': 'ethnicity_source_value',
     'date_of_birth': 'year_of_birth / month_of_birth / day_of_birth',
 }
 
@@ -243,6 +250,26 @@ def build_writable_field_descriptor():
                 'writable': False,
                 'canonical': canonical,
                 'reason': f'Mirrors {canonical}; edit that field instead.',
+            }
+            continue
+
+        if field in _PROFILE_DEMOGRAPHIC:
+            person_field, kind = _PROFILE_DEMOGRAPHIC[field]
+            descriptor[field] = {
+                'kind': KIND_PROFILE,
+                'writable': True,
+                'target': 'person',
+                'endpoint': 'PATCH /api/v1/persons/{person_id}/',
+                'person_field': person_field,
+                'value_kind': 'string',
+                # A curated set, not the whole vocabulary: OMOP's Race holds 1,409
+                # concepts and Ethnicity 150 nationality-style entries, which is
+                # not the question a clinical form asks. Anything sent is still
+                # preserved verbatim in the source value.
+                'options': [
+                    {'value': display, 'code': code}
+                    for code, display in demographic_choices(kind)
+                ],
             }
             continue
 

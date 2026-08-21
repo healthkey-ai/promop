@@ -372,8 +372,13 @@ class TestProfileFields:
 
     def test_a_fill_if_empty_field_is_not_reported_writable(self):
         """The endpoint populates a blank and silently leaves a value alone, so a
-        box that looked editable would succeed and change nothing."""
-        entry = build_writable_field_descriptor()['gender']
+        box that looked editable would succeed and change nothing.
+
+        gender/race/ethnicity used to be in this category. They are now fully
+        correctable; date_of_birth deliberately is not — overwriting a recorded
+        birth date is a different decision.
+        """
+        entry = build_writable_field_descriptor()['date_of_birth']
 
         assert entry['kind'] == 'profile'
         assert entry['writable'] is False
