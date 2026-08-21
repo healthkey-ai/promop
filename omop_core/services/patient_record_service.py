@@ -2148,13 +2148,13 @@ def _get_social_data(person: Person) -> dict:
         observation_concept__concept_code__in=['224362002', '160903007']
     )
     if employment_obs.exists():
-        data['no_pre_existing_conditions'] = employment_obs.first().value_as_string
+        data['employment_status'] = employment_obs.first().value_as_string
 
     insurance_obs = observations.filter(
         observation_concept__concept_code__in=['408729009']
     )
     if insurance_obs.exists():
-        data['concomitant_medication_details'] = insurance_obs.first().value_as_string
+        data['insurance_type'] = insurance_obs.first().value_as_string
 
     return data
 
