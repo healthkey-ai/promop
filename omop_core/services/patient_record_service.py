@@ -1633,7 +1633,14 @@ _GENOMICS_PATHOLOGY_LOINCS = frozenset({
     '85337-4',  # genomic/test methodology (also carries numeric Oncotype score)
     '31208-2',  # specimen source
     '69548-6',  # pathology test interpretation
-    '82185-1',  # androgen receptor status
+    # Androgen receptor. 49457-5 ("Androgen receptor Ag [Presence] in Tissue by
+    # Immune stain") is the only standard LOINC concept for this analyte and is
+    # what new writes use. 82185-1 is not a LOINC code at all — it resolves
+    # against no vocabulary release, so rows carrying it exist only as
+    # source_value text. It stays readable so any deployment that already wrote
+    # one still projects; nothing new is written under it.
+    '49457-5',
+    '82185-1',
     '92837-4',  # lymph-node involvement
     '21907-1',  # distant-metastasis status (not TNM M category)
     '44648-4',  # Nottingham biopsy grade
@@ -1938,7 +1945,10 @@ def _get_genomics_pathology_data(person: Person) -> dict:
         # or an undated projection patch.
         data['test_date'] = max(row.measurement_date for row in report_facts)
 
-    androgen_receptor = latest('82185-1')
+    # Prefer the real LOINC concept; fall back to the legacy non-code so an
+    # existing row still projects. Order matters — a deployment holding both
+    # should read the standard one.
+    androgen_receptor = latest('49457-5') or latest('82185-1')
     if androgen_receptor:
         value = _coded_value(androgen_receptor)
         if value:

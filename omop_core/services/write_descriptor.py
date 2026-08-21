@@ -17,8 +17,10 @@ writable with a reason, rather than omitted. A client that only sees writable
 fields cannot tell "you may not edit this" from "I forgot to send it".
 """
 
-from omop_core.models import Concept
-from omop_core.services.mappings import CONCEPT_LAB_TYPE, LAB_FIELD_TO_LOINC
+from omop_core.models import Concept, PatientRecord
+from omop_core.services.mappings import (
+    CONCEPT_LAB_TYPE, DERIVED_FIELD_TO_CODE, LAB_FIELD_TO_LOINC,
+)
 from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
     _LAB_FIELD_ALIASES,
@@ -79,6 +81,43 @@ def _resolve_concept_ids(codes, vocabulary_id):
     return dict(rows)
 
 
+_FIELD_TYPE_TO_VALUE_KIND = {
+    'BooleanField': 'boolean',
+    'IntegerField': 'number', 'SmallIntegerField': 'number',
+    'BigIntegerField': 'number', 'FloatField': 'number',
+    'DecimalField': 'number',
+    'DateField': 'date', 'DateTimeField': 'datetime',
+}
+
+
+def _value_kind(field_name):
+    """Derive the value kind from the model column rather than restating it.
+
+    Keeps the descriptor honest when a column's type changes: a field that becomes
+    numeric stops being advertised as free text without anyone editing a table.
+    """
+    for f in PatientRecord._meta.fields:
+        if f.name == field_name:
+            return _FIELD_TYPE_TO_VALUE_KIND.get(type(f).__name__, 'string')
+    return 'string'
+
+
+def _resolve_concepts(pairs):
+    """(vocabulary_id, concept_code) → Concept, in one query.
+
+    Scoped by vocabulary because a bare concept_code is ambiguous — codes are
+    reused across vocabularies, which is why WEARABLE_CONCEPT_VOCAB exists.
+    """
+    if not pairs:
+        return {}
+    codes = {c for _v, c in pairs}
+    vocabs = {v for v, _c in pairs}
+    rows = Concept.objects.filter(
+        concept_code__in=codes, vocabulary_id__in=vocabs
+    ).only('concept_id', 'concept_code', 'vocabulary_id', 'domain_id')
+    return {(c.vocabulary_id, c.concept_code): c for c in rows}
+
+
 def build_writable_field_descriptor():
     """Return {field: descriptor} for every mapped PatientRecord clinical field.
 
@@ -89,6 +128,9 @@ def build_writable_field_descriptor():
     )
     unit_ids = _resolve_concept_ids(
         {unit for _code, unit, _display in LAB_FIELD_TO_LOINC.values()}, 'UCUM'
+    )
+    derived_concepts = _resolve_concepts(
+        {(vocab, code) for code, vocab, _fn in DERIVED_FIELD_TO_CODE.values()}
     )
 
     descriptor = {}
@@ -126,6 +168,46 @@ def build_writable_field_descriptor():
                     f'Unit of {field[: -len("_units")]}; selected alongside that '
                     'value and stored on the measurement.'
                 ),
+            }
+            continue
+
+        derived = DERIVED_FIELD_TO_CODE.get(field)
+        if derived is not None:
+            code, vocabulary, extractor = derived
+            concept = derived_concepts.get((vocabulary, code))
+            if concept is None:
+                descriptor[field] = {
+                    'kind': KIND_EDITABLE,
+                    'writable': False,
+                    'reason': (
+                        f'{vocabulary} {code} is not loaded in this deployment\'s '
+                        'vocabulary.'
+                    ),
+                    'code': code,
+                    'vocabulary': vocabulary,
+                    'attributed_from': extractor,
+                }
+                continue
+            descriptor[field] = {
+                'kind': KIND_EDITABLE,
+                'writable': True,
+                # From the concept's own domain, not a guess: a code that moves
+                # domain in a vocabulary release moves table with it.
+                'target': (
+                    'observation' if concept.domain_id == 'Observation'
+                    else 'measurement'
+                ),
+                'concept_id': concept.concept_id,
+                'code': code,
+                'vocabulary': vocabulary,
+                'display': concept.concept_name,
+                'value_kind': _value_kind(field),
+                'unit': None,
+                'unit_concept_id': None,
+                'type_concept_id': CONCEPT_LAB_TYPE,
+                'source_value': code,
+                # Provenance for review: the extractor this attribution came from.
+                'attributed_from': extractor,
             }
             continue
 

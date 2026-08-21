@@ -230,3 +230,67 @@ def get_gender_concept(gender_str):
         except Concept.DoesNotExist:
             return None
     return None
+
+
+# PatientRecord field → the concept its derivation reads, recovered from the
+# extractors rather than chosen by hand.
+#
+# Provenance. If derivation reads code X into field F, then writing X is correct
+# by construction: a round trip through derivation returns the same value. That
+# makes these mappings auditable — the third element names the extractor the
+# attribution came from, so a reviewer can check the claim at its source instead
+# of re-deriving it. They were found by AST-walking patient_record_service.py for
+# `data['field'] = ...` assignments and the code literal governing them.
+#
+# The one rule that governs membership: a code here must be claimed by exactly
+# one field, across this table AND LAB_FIELD_TO_LOINC. Ten further fields were
+# attributed to a single code and deliberately left out because another field
+# claims the same code — writing either would overwrite the other's row, which is
+# the collision #471 removed. They fall into three shapes, all needing review:
+#
+#   legacy duplicate   white_blood_cell_count shares 6690-2 with
+#                      wbc_count_thousand_per_ul; biopsy_grade_depr shares
+#                      44648-4 with biopsy_grade
+#   two parts of one   pd_l1_assay and pd_l1_tumor_cells are the assay and the
+#   fact               numeric result of ONE 83052-1 measurement, as are
+#                      test_methodology and oncotype_dx_score of one 85337-4
+#                      report, and ecog_assessment_date is the date of the
+#                      ecog_performance_status observation
+#   genuinely          btk_inhibitor_refractory and bcl2_inhibitor_refractory
+#   ambiguous          both read SNOMED 182842009; the code alone cannot say
+#                      which drug failed
+#
+# field → (concept_code, vocabulary_id, attributed_from_extractor)
+DERIVED_FIELD_TO_CODE = {
+    # Biomarkers — _get_biomarker_data
+    'bone_only_metastasis_status':   ('44667-4',   'LOINC',  '_get_biomarker_data'),
+    'estrogen_receptor_status':      ('16112-5',   'LOINC',  '_get_biomarker_data'),
+    'her2_status':                   ('48676-1',   'LOINC',  '_get_biomarker_data'),
+    'histologic_type':               ('59847-4',   'LOINC',  '_get_biomarker_data'),
+    'progesterone_receptor_status':  ('16113-3',   'LOINC',  '_get_biomarker_data'),
+    'pd_l1_combined_positive_score': ('83054-7',   'LOINC',  '_get_biomarker_data'),
+    'pd_l1_ic_percentage':           ('83055-4',   'LOINC',  '_get_biomarker_data'),
+    # Genomics / pathology — _get_genomics_pathology_data
+    # Derivation historically read 82185-1, which is not a LOINC code — it
+    # resolves against no vocabulary release, so a fact written under it could
+    # never carry a concept. 49457-5 ("Androgen receptor Ag [Presence] in Tissue
+    # by Immune stain") is the only standard LOINC concept for the analyte, and
+    # [Presence] matches this column holding a qualitative Positive/Negative.
+    # Derivation now reads 49457-5 first and 82185-1 second, so the round trip
+    # holds and any pre-existing row still projects.
+    'androgen_receptor_status':      ('49457-5',   'LOINC',  '_get_genomics_pathology_data'),
+    'lymph_node_status':             ('92837-4',   'LOINC',  '_get_genomics_pathology_data'),
+    'metastasis_status':             ('21907-1',   'LOINC',  '_get_genomics_pathology_data'),
+    'report_interpretation':         ('69548-6',   'LOINC',  '_get_genomics_pathology_data'),
+    'test_specimen_type':            ('31208-2',   'LOINC',  '_get_genomics_pathology_data'),
+    # Staging — _get_staging_data
+    'distant_metastasis_stage':      ('21901-4',   'LOINC',  '_get_staging_data'),
+    'nodes_stage':                   ('21906-3',   'LOINC',  '_get_staging_data'),
+    'stage':                         ('21908-9',   'LOINC',  '_get_staging_data'),
+    'tumor_stage':                   ('21905-5',   'LOINC',  '_get_staging_data'),
+    # CLL — _get_cll_data. 21889-1 is 'Size Tumor'; a lymph-node row carries
+    # qualifier_source_value='lymph-node' to separate it from tumor_size.
+    'largest_lymph_node_size':       ('21889-1',   'LOINC',  '_get_cll_data'),
+    # Social — _get_social_data
+    'concomitant_medication_details': ('408729009', 'SNOMED', '_get_social_data'),
+}

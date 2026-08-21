@@ -14,7 +14,7 @@ from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
 )
 from omop_core.services.write_descriptor import build_writable_field_descriptor
-from tests.factories import ConceptFactory, VocabularyFactory
+from tests.factories import ConceptFactory, DomainFactory, VocabularyFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -168,7 +168,10 @@ class TestCost:
         with CaptureQueriesContext(connection) as ctx:
             build_writable_field_descriptor()
 
-        assert len(ctx) <= 2, [q['sql'][:80] for q in ctx]
+        # One batch lookup per source table (LOINC codes, UCUM units, attributed
+        # codes) — constant, not one per field. The bound guards the shape, not
+        # the exact number.
+        assert len(ctx) <= 3, [q['sql'][:80] for q in ctx]
 
 
 class TestEndpoint:
@@ -218,3 +221,108 @@ class TestAliasMapIntegrity:
             assert field in prs._OMOP_DERIVED_FIELDS, field
             assert field not in LAB_FIELD_TO_LOINC, field
             assert field in repopulated, f'{field} is cleared but never repopulated'
+
+
+class TestExtractorAttributedMappings:
+    """Mappings recovered from the extractors rather than chosen by hand.
+
+    If derivation reads code X into field F, writing X round-trips. The table
+    records which extractor each attribution came from so a reviewer can audit
+    the claim at its source.
+    """
+
+    def test_an_attributed_field_is_editable_and_names_its_extractor(self):
+        VocabularyFactory(vocabulary_id='LOINC')
+        DomainFactory(domain_id='Measurement', domain_name='Measurement')
+        ConceptFactory(concept_code='48676-1', vocabulary_id='LOINC',
+                       concept_name='HER2 [Interpretation]', domain_id='Measurement')
+
+        entry = build_writable_field_descriptor()['her2_status']
+
+        assert entry['kind'] == 'editable'
+        assert entry['writable'] is True
+        assert entry['code'] == '48676-1'
+        assert entry['attributed_from'] == '_get_biomarker_data'
+
+    def test_target_table_follows_the_concept_domain(self):
+        """An Observation-domain concept must not be written to measurement."""
+        VocabularyFactory(vocabulary_id='SNOMED', vocabulary_name='SNOMED')
+        DomainFactory(domain_id='Observation', domain_name='Observation')
+        ConceptFactory(concept_code='408729009', vocabulary_id='SNOMED',
+                       concept_name='Concomitant medication', domain_id='Observation')
+
+        entry = build_writable_field_descriptor()['concomitant_medication_details']
+
+        assert entry['target'] == 'observation'
+
+    def test_value_kind_comes_from_the_model_column(self):
+        VocabularyFactory(vocabulary_id='LOINC')
+        DomainFactory(domain_id='Measurement', domain_name='Measurement')
+        ConceptFactory(concept_code='83054-7', vocabulary_id='LOINC',
+                       concept_name='PD-L1 CPS', domain_id='Measurement')
+
+        entry = build_writable_field_descriptor()['pd_l1_combined_positive_score']
+
+        assert entry['value_kind'] == 'number'   # IntegerField on PatientRecord
+
+    def test_a_code_absent_from_the_vocabulary_is_reported_not_written(self):
+        """No concepts are loaded here, so an attributed field reports unwritable."""
+        entry = build_writable_field_descriptor()['androgen_receptor_status']
+
+        assert entry['writable'] is False
+        assert '49457-5' in entry['reason']
+        assert entry['attributed_from'] == '_get_genomics_pathology_data'
+
+
+class TestNoCodeIsClaimedTwice:
+    def test_every_attributed_code_is_unique_across_both_tables(self):
+        """Two fields on one code overwrite each other's row — the #471 collision.
+
+        Ten further fields were attributed to a single code and deliberately left
+        out of DERIVED_FIELD_TO_CODE for exactly this reason.
+        """
+        from omop_core.services.mappings import (
+            DERIVED_FIELD_TO_CODE, LAB_FIELD_TO_LOINC,
+        )
+
+        seen = {}
+        for field, (code, _unit, _display) in LAB_FIELD_TO_LOINC.items():
+            seen.setdefault(('LOINC', code), []).append(field)
+        for field, (code, vocab, _fn) in DERIVED_FIELD_TO_CODE.items():
+            seen.setdefault((vocab, code), []).append(field)
+
+        collisions = {k: v for k, v in seen.items() if len(v) > 1}
+        assert not collisions, f'code claimed by more than one field: {collisions}'
+
+    def test_every_attribution_names_a_real_extractor(self):
+        import inspect
+        from omop_core.services import patient_record_service as prs
+        from omop_core.services.mappings import DERIVED_FIELD_TO_CODE
+
+        for field, (_code, _vocab, extractor) in DERIVED_FIELD_TO_CODE.items():
+            assert hasattr(prs, extractor), f'{field} cites missing {extractor}'
+            assert inspect.isfunction(getattr(prs, extractor)), field
+
+
+class TestAndrogenReceptorCode:
+    """82185-1 is not a LOINC code; 49457-5 is the standard concept for the analyte.
+
+    Both sides had to move together. Changing only the write mapping would emit
+    facts derivation never reads back, breaking the round trip that justifies
+    DERIVED_FIELD_TO_CODE existing at all.
+    """
+
+    def test_write_mapping_uses_the_standard_loinc_concept(self):
+        from omop_core.services.mappings import DERIVED_FIELD_TO_CODE
+
+        code, vocab, _fn = DERIVED_FIELD_TO_CODE['androgen_receptor_status']
+        assert (code, vocab) == ('49457-5', 'LOINC')
+
+    def test_derivation_reads_both_the_new_and_legacy_code(self):
+        """A row already written under the legacy non-code must still project."""
+        from omop_core.services.patient_record_service import (
+            _GENOMICS_PATHOLOGY_LOINCS,
+        )
+
+        assert '49457-5' in _GENOMICS_PATHOLOGY_LOINCS
+        assert '82185-1' in _GENOMICS_PATHOLOGY_LOINCS
