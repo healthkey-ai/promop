@@ -113,10 +113,21 @@ def _sync_condition(person, patient_info, today: date, changed_data: dict = None
     if type_concept is None:
         return
 
-    condition_concept = (
-        Concept.objects.filter(concept_name__icontains=(disease or '')[:50]).first()
-        if disease else None
-    ) or type_concept
+    # Resolve the condition concept deterministically. The previous
+    # `concept_name__icontains(...).first()` had no ordering, so it could pick a
+    # status/subtype variant (e.g. "Multiple myeloma in remission") arbitrarily.
+    # Prefer an exact, standard concept; fall back to a deterministic substring
+    # match ordered by concept_id; else the generic EHR type concept.
+    _disease = (disease or '')[:50]
+    condition_concept = None
+    if _disease:
+        _cond = Concept.objects.filter(domain_id='Condition')
+        condition_concept = (
+            _cond.filter(concept_name__iexact=_disease, standard_concept='S').order_by('concept_id').first()
+            or _cond.filter(concept_name__iexact=_disease).order_by('concept_id').first()
+            or _cond.filter(concept_name__icontains=_disease).order_by('concept_id').first()
+        )
+    condition_concept = condition_concept or type_concept
 
     # Upsert: if a row already exists for this person+source_value, update it
     # rather than appending a duplicate on every PATCH.
