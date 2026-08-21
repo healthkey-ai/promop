@@ -105,38 +105,52 @@ read-only with the reason as a tooltip, rather than silently failing on save.
 
 The rename keeps its current route — it is a `Person` write, not a clinical fact.
 
-### 3. Every clinical edit needs a date
+### 3. Event date — defaults to today, stays editable
 
-This is the real UX change, not the plumbing. A lab value without an event date is not a
-fact, and derivation drops undated rows ("unknown-date facts are not projected"). The
-editor currently offers no date input for most fields. Each editable field needs one,
-defaulting to today.
+**Decided:** a manual edit is dated today by default.
 
-### 4. Corrections vs new results
+Kept editable rather than hard-coded, for one reason worth stating. Before #484, values
+written to the projection were reverse-synced into OMOP stamped with the current date;
+`projection_reconciliation.py` records the verdict on that — *"That date is not the clinical
+event time and must never be recreated."* A clinician typing a value today is genuinely
+asserting it today, which is not the same failure. But a result drawn last month and entered
+today would sort as today's value, and "most recent hemoglobin" is exactly what trial
+matching reads. Defaulting to today covers the common case; leaving the field editable keeps
+the back-dated case from silently corrupting recency.
 
-Editing a value that already exists on the same day is ambiguous: a second result, or a fix
-to a mistyped one? The bulk upsert key for `Measurement` is
-`(source_value, date, datetime, value_as_number)`, so a changed value inserts a new row —
-correct for a genuine second result, wrong for a typo.
+Derivation drops undated rows ("unknown-date facts are not projected"), so a date is
+mandatory on every write — the editor has no date input today, and each editable field needs
+one.
 
-`Measurement` already carries `is_erroneous` / `erroneous_reason` from the PHR-S FM
-entered-in-error work. Proposal: a correction marks the prior row erroneous and inserts the
-replacement, leaving an auditable trail; a plain new value on a new date just inserts.
-**Open question** — needs a call before implementation.
+### 4. Corrections — mark the old row erroneous, insert the replacement
+
+**Decided.** The `Measurement` upsert key is `(source_value, date, datetime, value_as_number)`,
+so a changed value inserts a new row rather than overwriting. On a correction the prior row
+is marked `is_erroneous` with an `erroneous_reason`, using the PHR-S FM entered-in-error
+fields already on the model, and the replacement is inserted beside it. Nothing is destroyed
+and the audit trail shows what was superseded. A genuine new result on a new date is a plain
+insert with no erroneous marking.
 
 ## Phasing
 
-1. **Descriptor endpoint + tests.** No UI change; safe to land alone.
+1. **Descriptor endpoint + tests.** ✅ Implemented — `GET /api/v1/patient-records/writable-fields/`,
+   backed by `omop_core/services/write_descriptor.py`. No UI change.
 2. **Labs tab** — the 45 mapped fields, with date input and the read-only treatment for
    everything else. Proves the pattern on the best-mapped group.
 3. **Remaining tabs**, as concept sets are reviewed and added to the descriptor.
 4. **Retire clinical PATCH** on `/api/patient-info/{id}/` once no caller depends on it.
 
-## Open questions
+## Settled
 
-- Correction semantics (above).
-- `measurement_type_concept` for a clinician-entered value — needs a chosen concept.
-- Whether an org-scoped clinician should be able to trigger derivation explicitly, or
-  whether relying on `post_save` is sufficient (it is, for single-row writes).
+- Event date defaults to today, editable (§3).
+- Corrections mark the prior row erroneous and insert the replacement (§4).
+- `measurement_type_concept` is `CONCEPT_LAB_TYPE` (32856, "Lab"), already defined in
+  `omop_core/services/mappings.py` and returned by the descriptor as `type_concept_id`.
+- Derivation needs no explicit trigger: single-row OMOP writes fire `post_save`, so the
+  admin-only `refresh` endpoint stays out of the clinician path.
+
+## Still open
+
 - Fields whose UI control is a free-text box but whose OMOP representation needs a coded
   value: these should stay read-only rather than minting local concepts.
+- Whether the 274 unmapped fields get concept sets field-by-field or by clinical group.
