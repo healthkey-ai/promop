@@ -1,4 +1,6 @@
 """Tests for POST /api/fhir/sync/ — identity-resolved FHIR ingest."""
+from copy import deepcopy
+
 from django.db import connection
 from django.test import TestCase
 from rest_framework.test import APIClient
@@ -120,6 +122,40 @@ class FhirSyncTests(TestCase):
         anon = APIClient()
         resp = anon.post('/api/fhir/sync/', {'bundle': SAMPLE_BUNDLE}, format='json')
         self.assertIn(resp.status_code, (401, 403))
+
+    def test_response_reports_unsupported_resources(self):
+        bundle = deepcopy(SAMPLE_BUNDLE)
+        bundle['entry'].append({'resource': {
+            'resourceType': 'Encounter',
+            'id': 'enc-1',
+            'status': 'finished',
+        }})
+
+        resp = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertIn(
+            {'resourceType': 'Encounter', 'reason': 'unsupported_resource_type', 'count': 1},
+            resp.json()['skipped'],
+        )
+        self.assertEqual(Measurement.objects.count(), 1)
+
+    def test_response_reports_supported_resources_skipped_for_missing_dates(self):
+        bundle = deepcopy(SAMPLE_BUNDLE)
+        bundle['entry'].append({'resource': {
+            'resourceType': 'Observation',
+            'code': {'coding': [{'system': 'http://loinc.org', 'code': '8867-4'}]},
+            'valueQuantity': {'value': 61, 'unit': '/min'},
+        }})
+
+        resp = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertIn(
+            {'resourceType': 'Observation', 'reason': 'missing_effective_date', 'count': 1},
+            resp.json()['skipped'],
+        )
+        self.assertEqual(len(resp.json()['measurement_ids']), 1)
 
     def test_service_token_syncs_explicit_person_without_actor_identity(self):
         """Trusted service callers may sync an explicit person without actor fields."""

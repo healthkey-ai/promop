@@ -232,6 +232,7 @@ class FhirSyncView(APIView):
 
         # Group bundle resources.
         patient_res = None
+        skipped = defaultdict(int)
         observations, conditions, medications = [], [], []
         allergies, immunizations, procedures, diagnostic_reports = [], [], [], []
         for entry in bundle.get('entry', []) or []:
@@ -255,6 +256,9 @@ class FhirSyncView(APIView):
                 procedures.append(res)
             elif rtype == 'DiagnosticReport':
                 diagnostic_reports.append(res)
+            else:
+                self._count_skipped(skipped, rtype or 'Unknown',
+                                    'unsupported_resource_type')
 
         concept_cache = self._preload_concepts(
             observations, conditions, medications, allergies, immunizations,
@@ -264,18 +268,25 @@ class FhirSyncView(APIView):
             'person_id': person.person_id,
             'demographics_updated': bool(patient_res) and self._update_demographics(person, patient_res),
             'measurement_ids': self._ingest_observations(
-                person, observations, ehr_type, concept_cache, source_user_id, org),
+                person, observations, ehr_type, concept_cache, source_user_id, org,
+                skipped),
             'condition_ids': self._ingest_conditions(
-                person, conditions, ehr_type, no_match, concept_cache, source_user_id, org),
+                person, conditions, ehr_type, no_match, concept_cache, source_user_id, org,
+                skipped),
             'drug_exposure_ids': self._ingest_medications(
-                person, medications, ehr_type, no_match, concept_cache, source_user_id, org),
+                person, medications, ehr_type, no_match, concept_cache, source_user_id, org,
+                skipped),
             'procedure_ids': self._ingest_procedures(
-                person, procedures, ehr_type, no_match, concept_cache, source_user_id, org),
+                person, procedures, ehr_type, no_match, concept_cache, source_user_id, org,
+                skipped),
             'immunization_ids': self._ingest_immunizations(
-                person, immunizations, ehr_type, no_match, concept_cache, source_user_id, org),
+                person, immunizations, ehr_type, no_match, concept_cache, source_user_id, org,
+                skipped),
             'observation_ids': self._ingest_clinical_observations(
-                person, allergies, diagnostic_reports, ehr_type, no_match, concept_cache, source_user_id, org),
+                person, allergies, diagnostic_reports, ehr_type, no_match, concept_cache, source_user_id, org,
+                skipped),
         }
+        result['skipped'] = self._skipped_summary(skipped)
 
         # The person's CURRENT record totals after this ingest — the accurate
         # "records on file" the connector displays (immune to re-sync dedup or
@@ -299,6 +310,15 @@ class FhirSyncView(APIView):
     # ------------------------------------------------------------------ #
     # Concept resolution (batched)
     # ------------------------------------------------------------------ #
+    def _count_skipped(self, skipped, resource_type, reason):
+        skipped[(resource_type or 'Unknown', reason)] += 1
+
+    def _skipped_summary(self, skipped):
+        return [
+            {'resourceType': resource_type, 'reason': reason, 'count': count}
+            for (resource_type, reason), count in sorted(skipped.items())
+        ]
+
     def _preload_concepts(self, *resource_lists) -> dict:
         """Resolve every coding in the bundle with a few `__in` queries.
 
@@ -347,16 +367,16 @@ class FhirSyncView(APIView):
     # ------------------------------------------------------------------ #
     # Batched ingestion
     # ------------------------------------------------------------------ #
-    def _ingest_observations(self, person, observations, ehr_type, cache, source_user_id, org):
+    def _ingest_observations(self, person, observations, ehr_type, cache, source_user_id, org, skipped):
         # Daily rollups (steps/energy/daily-avg) upsert by (person, concept, date);
         # everything else dedups on (date, datetime, concept, source, value).
         rollups = [o for o in observations if _is_daily_rollup(o)]
         discrete = [o for o in observations if not _is_daily_rollup(o)]
         ids = self._insert_discrete_observations(
-            person, discrete, ehr_type, cache, source_user_id, org)
+            person, discrete, ehr_type, cache, source_user_id, org, skipped)
         if rollups:
             ids += self._upsert_rollup_observations(
-                person, rollups, ehr_type, cache, source_user_id, org)
+                person, rollups, ehr_type, cache, source_user_id, org, skipped)
         return ids
 
     def _parse_obs(self, obs, cache):
@@ -374,7 +394,7 @@ class FhirSyncView(APIView):
             'vstr': (obs.get('valueString') or _source_text(obs.get('valueCodeableConcept')) or '')[:60],
         }
 
-    def _insert_discrete_observations(self, person, observations, ehr_type, cache, source_user_id, org):
+    def _insert_discrete_observations(self, person, observations, ehr_type, cache, source_user_id, org, skipped):
         # Dedup includes measurement_datetime so distinct sub-daily readings
         # (e.g. per-reading heart rate) coexist while exact re-syncs collapse.
         existing = {
@@ -388,6 +408,7 @@ class FhirSyncView(APIView):
         for obs in observations:
             o = self._parse_obs(obs, cache)
             if o['date'] is None:
+                self._count_skipped(skipped, 'Observation', 'missing_effective_date')
                 continue
             key = (o['date'], o['dt'], o['cid'], o['sv'], _norm_num(o['value']))
             if key in seen:
@@ -406,20 +427,22 @@ class FhirSyncView(APIView):
             ))
         return self._bulk_insert(Measurement, 'measurement_id', rows, source_user_id, person, org)
 
-    def _upsert_rollup_observations(self, person, observations, ehr_type, cache, source_user_id, org):
+    def _upsert_rollup_observations(self, person, observations, ehr_type, cache, source_user_id, org, skipped):
         """Replace any prior row for (person, concept, date) with the new daily
         value, collapsing stale stacked rows — so a changed daily aggregate
         updates in place instead of accumulating duplicates."""
         desired = {}  # key -> parsed obs; last in the bundle wins
         for obs in observations:
             o = self._parse_obs(obs, cache)
-            if o['date'] is not None:
-                # Unmapped rows all share concept_id 0, so a plain (cid, date) key
-                # collapses every distinct unmapped metric into one slot per day.
-                # Add source_value to the key for cid == 0 so they coexist; mapped
-                # rows keep the natural (concept, date) grain.
-                sv_key = o['sv'] if not o['cid'] else None
-                desired[(o['cid'], o['date'], sv_key)] = o
+            if o['date'] is None:
+                self._count_skipped(skipped, 'Observation', 'missing_effective_date')
+                continue
+            # Unmapped rows all share concept_id 0, so a plain (cid, date) key
+            # collapses every distinct unmapped metric into one slot per day.
+            # Add source_value to the key for cid == 0 so they coexist; mapped
+            # rows keep the natural (concept, date) grain.
+            sv_key = o['sv'] if not o['cid'] else None
+            desired[(o['cid'], o['date'], sv_key)] = o
         if not desired:
             return []
 
@@ -474,12 +497,13 @@ class FhirSyncView(APIView):
                 Measurement, 'measurement_id', new_rows, source_user_id, person, org)
         return touched + inserted
 
-    def _ingest_conditions(self, person, conditions, ehr_type, no_match, cache, source_user_id, org):
+    def _ingest_conditions(self, person, conditions, ehr_type, no_match, cache, source_user_id, org, skipped):
         rows = []
         for cond in conditions:
             start = _parse_date(cond.get('onsetDateTime')) or _parse_date(
                 (cond.get('onsetPeriod') or {}).get('start'))
             if start is None:
+                self._count_skipped(skipped, 'Condition', 'missing_onset_date')
                 continue
             concept = self._lookup(cond.get('code'), cache)
             rows.append(ConditionOccurrence(
@@ -493,7 +517,7 @@ class FhirSyncView(APIView):
             ConditionOccurrence, 'condition_occurrence_id', 'condition_concept_id',
             'condition_start_date', 'condition_source_value', person, rows, source_user_id, org)
 
-    def _ingest_medications(self, person, medications, ehr_type, no_match, cache, source_user_id, org):
+    def _ingest_medications(self, person, medications, ehr_type, no_match, cache, source_user_id, org, skipped):
         rows = []
         for med in medications:
             # MedicationStatement: effectivePeriod/effectiveDateTime.
@@ -504,6 +528,8 @@ class FhirSyncView(APIView):
                 or _parse_date(med.get('authoredOn'))
             )
             if start is None:
+                self._count_skipped(skipped, med.get('resourceType') or 'MedicationStatement',
+                                    'missing_effective_or_authored_date')
                 continue
             codeable = med.get('medicationCodeableConcept')
             concept = self._lookup(codeable, cache)
@@ -519,12 +545,13 @@ class FhirSyncView(APIView):
             DrugExposure, 'drug_exposure_id', 'drug_concept_id',
             'drug_exposure_start_date', 'drug_source_value', person, rows, source_user_id, org)
 
-    def _ingest_procedures(self, person, procedures, ehr_type, no_match, cache, source_user_id, org):
+    def _ingest_procedures(self, person, procedures, ehr_type, no_match, cache, source_user_id, org, skipped):
         rows = []
         for proc in procedures:
             date = _parse_date(proc.get('performedDateTime')) or _parse_date(
                 (proc.get('performedPeriod') or {}).get('start'))
             if date is None:
+                self._count_skipped(skipped, 'Procedure', 'missing_performed_date')
                 continue
             concept = self._lookup(proc.get('code'), cache)
             rows.append(ProcedureOccurrence(
@@ -539,12 +566,13 @@ class FhirSyncView(APIView):
             ProcedureOccurrence, 'procedure_occurrence_id', 'procedure_concept_id',
             'procedure_date', 'procedure_source_value', person, rows, source_user_id, org)
 
-    def _ingest_immunizations(self, person, immunizations, ehr_type, no_match, cache, source_user_id, org):
+    def _ingest_immunizations(self, person, immunizations, ehr_type, no_match, cache, source_user_id, org, skipped):
         # OMOP models immunizations as drug exposures (shares the DrugExposure table).
         rows = []
         for imm in immunizations:
             date = _parse_date(imm.get('occurrenceDateTime'))
             if date is None:
+                self._count_skipped(skipped, 'Immunization', 'missing_occurrence_date')
                 continue
             concept = self._lookup(imm.get('vaccineCode'), cache)
             rows.append(DrugExposure(
@@ -559,13 +587,14 @@ class FhirSyncView(APIView):
             DrugExposure, 'drug_exposure_id', 'drug_concept_id',
             'drug_exposure_start_date', 'drug_source_value', person, rows, source_user_id, org)
 
-    def _ingest_clinical_observations(self, person, allergies, reports, ehr_type, no_match, cache, source_user_id, org):
+    def _ingest_clinical_observations(self, person, allergies, reports, ehr_type, no_match, cache, source_user_id, org, skipped):
         # AllergyIntolerance + DiagnosticReport land in the OMOP observation table.
         # Allergies are tagged with qualifier_source_value='ALLERGY' so they can
         # be filtered separately for the allergy list endpoint (PHR-S FM PH.2.5).
         items = [
             {'code': a.get('code'),
              'effective': a.get('recordedDate') or a.get('onsetDateTime'),
+             'resource_type': 'AllergyIntolerance',
              'value': a.get('criticality') or '',
              'qualifier': 'ALLERGY',
              'value_source': _source_text(a.get('clinicalStatus'))[:50]}
@@ -573,6 +602,7 @@ class FhirSyncView(APIView):
         ] + [
             {'code': r.get('code'),
              'effective': r.get('effectiveDateTime') or r.get('issued'),
+             'resource_type': 'DiagnosticReport',
              'value': r.get('conclusion') or '',
              'qualifier': None,
              'value_source': None}
@@ -582,6 +612,8 @@ class FhirSyncView(APIView):
         for item in items:
             date = _parse_date(item['effective'])
             if date is None:
+                self._count_skipped(skipped, item['resource_type'],
+                                    'missing_effective_date')
                 continue
             concept = self._lookup(item['code'], cache)
             rows.append(Observation(
