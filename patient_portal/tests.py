@@ -33,6 +33,7 @@ from omop_core.models import (
     SctEligibility,
     FhirConnection, FhirOauthState, Institution,
     ObservationPeriod, PatientSurveyResponse, PersonLanguageSkill, Survey,
+    VisitOccurrence,
     Organization, GroupAccess,
 )
 from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
@@ -1579,6 +1580,9 @@ class OmopUnknownQueryFilterTest(TestCase):
             'episode_id query parameter is required.',
         )
 
+    def test_episodes_reject_visit_filter_because_they_have_no_visit_fk(self):
+        self.assertUnsupportedParam('/api/episodes/', 'visit_occurrence_id')
+
 
 class OmopClinicalPaginationTest(TestCase):
     """Clinical list endpoints expose opt-in pagination without breaking arrays."""
@@ -1695,6 +1699,272 @@ class OmopClinicalPaginationTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.assertIsInstance(resp.data, list)
         self.assertEqual(len(resp.data), 3)
+
+
+class OmopClinicalFilterTest(TestCase):
+    """Clinical list endpoints expose concept, code, date, and visit filters."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.staff = Identity.objects.create_superuser(
+            email='omop-clinical-filter-admin@test.com',
+            password='not-used',
+        )
+        cls.person = Person.objects.create(person_id=88911, year_of_birth=1975)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.source_concept = Concept.objects.get(concept_id=32856)
+        cls.other_source_concept = Concept.objects.get(concept_id=32869)
+        cls.condition_concept = Concept.objects.get(concept_id=4112853)
+        cls.drug_concept = Concept.objects.get(concept_id=19136160)
+        cls.measurement_concept = Concept.objects.get(concept_id=3000963)
+        cls.episode_concept = Concept.objects.get(concept_id=32531)
+        cls.procedure_concept = Concept.objects.get(concept_id=20000001)
+        cls.visit = VisitOccurrence.objects.create(
+            visit_occurrence_id=889110,
+            person=cls.person,
+            visit_concept=cls.type_concept,
+            visit_start_date=date(2024, 1, 10),
+            visit_end_date=date(2024, 1, 10),
+            visit_type_concept=cls.type_concept,
+            visit_source_value='filter-visit',
+        )
+        cls.other_visit = VisitOccurrence.objects.create(
+            visit_occurrence_id=889111,
+            person=cls.person,
+            visit_concept=cls.type_concept,
+            visit_start_date=date(2024, 1, 1),
+            visit_end_date=date(2024, 1, 1),
+            visit_type_concept=cls.type_concept,
+            visit_source_value='other-filter-visit',
+        )
+        cls._create_rows()
+
+    @classmethod
+    def _create_rows(cls):
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=8891110,
+            person=cls.person,
+            condition_concept=cls.condition_concept,
+            condition_start_date=date(2024, 1, 10),
+            condition_type_concept=cls.type_concept,
+            condition_source_concept=cls.source_concept,
+            visit_occurrence=cls.visit,
+        )
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=8891111,
+            person=cls.person,
+            condition_concept=cls.measurement_concept,
+            condition_start_date=date(2024, 1, 1),
+            condition_type_concept=cls.type_concept,
+            condition_source_concept=cls.other_source_concept,
+            visit_occurrence=cls.other_visit,
+        )
+        DrugExposure.objects.create(
+            drug_exposure_id=8891120,
+            person=cls.person,
+            drug_concept=cls.drug_concept,
+            drug_exposure_start_date=date(2024, 1, 10),
+            drug_exposure_end_date=date(2024, 1, 10),
+            drug_type_concept=cls.type_concept,
+            drug_source_concept=cls.source_concept,
+            visit_occurrence=cls.visit,
+        )
+        DrugExposure.objects.create(
+            drug_exposure_id=8891121,
+            person=cls.person,
+            drug_concept=cls.measurement_concept,
+            drug_exposure_start_date=date(2024, 1, 1),
+            drug_exposure_end_date=date(2024, 1, 1),
+            drug_type_concept=cls.type_concept,
+            drug_source_concept=cls.other_source_concept,
+            visit_occurrence=cls.other_visit,
+        )
+        Measurement.objects.create(
+            measurement_id=8891130,
+            person=cls.person,
+            measurement_concept=cls.measurement_concept,
+            measurement_date=date(2024, 1, 10),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_concept=cls.source_concept,
+            visit_occurrence=cls.visit,
+        )
+        Measurement.objects.create(
+            measurement_id=8891131,
+            person=cls.person,
+            measurement_concept=cls.condition_concept,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_concept=cls.other_source_concept,
+            visit_occurrence=cls.other_visit,
+        )
+        Observation.objects.create(
+            observation_id=8891140,
+            person=cls.person,
+            observation_concept=cls.measurement_concept,
+            observation_date=date(2024, 1, 10),
+            observation_type_concept=cls.type_concept,
+            observation_source_concept=cls.source_concept,
+            visit_occurrence=cls.visit,
+        )
+        Observation.objects.create(
+            observation_id=8891141,
+            person=cls.person,
+            observation_concept=cls.condition_concept,
+            observation_date=date(2024, 1, 1),
+            observation_type_concept=cls.type_concept,
+            observation_source_concept=cls.other_source_concept,
+            visit_occurrence=cls.other_visit,
+        )
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=8891150,
+            person=cls.person,
+            procedure_concept=cls.procedure_concept,
+            procedure_date=date(2024, 1, 10),
+            procedure_type_concept=cls.type_concept,
+            procedure_source_concept=cls.source_concept,
+            visit_occurrence=cls.visit,
+        )
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=8891151,
+            person=cls.person,
+            procedure_concept=cls.condition_concept,
+            procedure_date=date(2024, 1, 1),
+            procedure_type_concept=cls.type_concept,
+            procedure_source_concept=cls.other_source_concept,
+            visit_occurrence=cls.other_visit,
+        )
+        Episode.objects.create(
+            episode_id=8891160,
+            person=cls.person,
+            episode_concept=cls.episode_concept,
+            episode_start_date=date(2024, 1, 10),
+            episode_object_concept=cls.drug_concept,
+            episode_type_concept=cls.type_concept,
+            episode_source_concept=cls.source_concept,
+            episode_number=1,
+        )
+        Episode.objects.create(
+            episode_id=8891161,
+            person=cls.person,
+            episode_concept=cls.condition_concept,
+            episode_start_date=date(2024, 1, 1),
+            episode_object_concept=cls.drug_concept,
+            episode_type_concept=cls.type_concept,
+            episode_source_concept=cls.other_source_concept,
+            episode_number=2,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.staff)
+
+    def assertClinicalFilter(self, route, params, id_field, expected_id):
+        resp = self.client.get(
+            f'/api/{route}/',
+            {
+                'person_id': self.person.person_id,
+                'visit_occurrence_id': self.visit.visit_occurrence_id,
+                **params,
+            },
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual([row[id_field] for row in resp.data], [expected_id])
+
+    def assertEpisodeFilter(self, params, expected_id):
+        resp = self.client.get(
+            '/api/episodes/',
+            {
+                'person_id': self.person.person_id,
+                **params,
+            },
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual([row['episode_id'] for row in resp.data], [expected_id])
+
+    def test_conditions_accept_clinical_filters(self):
+        self.assertClinicalFilter(
+            'conditions',
+            {
+                'condition_concept_id': self.condition_concept.concept_id,
+                'condition_source_concept_id': self.source_concept.concept_id,
+                'concept_code': self.condition_concept.concept_code,
+                'condition_start_date__gte': '2024-01-05',
+                'condition_start_date__lte': '2024-01-20',
+            },
+            'condition_occurrence_id',
+            8891110,
+        )
+
+    def test_drug_exposures_accept_clinical_filters(self):
+        self.assertClinicalFilter(
+            'drug-exposures',
+            {
+                'drug_concept_id': self.drug_concept.concept_id,
+                'drug_source_concept_id': self.source_concept.concept_id,
+                'concept_code': self.drug_concept.concept_code,
+                'drug_exposure_start_date__gte': '2024-01-05',
+                'drug_exposure_start_date__lte': '2024-01-20',
+            },
+            'drug_exposure_id',
+            8891120,
+        )
+
+    def test_measurements_keep_existing_clinical_filters(self):
+        self.assertClinicalFilter(
+            'measurements',
+            {
+                'measurement_concept_id': self.measurement_concept.concept_id,
+                'measurement_source_concept_id': self.source_concept.concept_id,
+                'concept_code': self.measurement_concept.concept_code,
+                'measurement_date__gte': '2024-01-05',
+                'measurement_date__lte': '2024-01-20',
+            },
+            'measurement_id',
+            8891130,
+        )
+
+    def test_observations_accept_clinical_filters(self):
+        self.assertClinicalFilter(
+            'observations',
+            {
+                'observation_concept_id': self.measurement_concept.concept_id,
+                'observation_source_concept_id': self.source_concept.concept_id,
+                'concept_code': self.measurement_concept.concept_code,
+                'observation_date__gte': '2024-01-05',
+                'observation_date__lte': '2024-01-20',
+            },
+            'observation_id',
+            8891140,
+        )
+
+    def test_procedures_accept_clinical_filters(self):
+        self.assertClinicalFilter(
+            'procedures',
+            {
+                'procedure_concept_id': self.procedure_concept.concept_id,
+                'procedure_source_concept_id': self.source_concept.concept_id,
+                'concept_code': self.procedure_concept.concept_code,
+                'procedure_date__gte': '2024-01-05',
+                'procedure_date__lte': '2024-01-20',
+            },
+            'procedure_occurrence_id',
+            8891150,
+        )
+
+    def test_episodes_accept_clinical_filters(self):
+        self.assertEpisodeFilter(
+            {
+                'episode_concept_id': self.episode_concept.concept_id,
+                'episode_source_concept_id': self.source_concept.concept_id,
+                'concept_code': self.episode_concept.concept_code,
+                'episode_start_date__gte': '2024-01-05',
+                'episode_start_date__lte': '2024-01-20',
+            },
+            8891160,
+        )
 
 
 class OmopObservationsEndpointTest(FhirUploadBase):
