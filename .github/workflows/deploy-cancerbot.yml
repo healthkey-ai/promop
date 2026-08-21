@@ -11,9 +11,9 @@ concurrency:
 
 env:
   GCP_REGION: ${{ vars.CANCERBOT_GCP_REGION || 'us-central1' }}
-  # us-central1-docker.pkg.dev/healthkey-504816/healthkey-ai
-  ARTIFACT_REPO: ${{ vars.DOCKER_REPOSITORY }}
-  IMAGE_NAME: promop
+  # Full image path, no image name appended:
+  # us-central1-docker.pkg.dev/healthkey-504816/healthkey-ai/promop
+  IMAGE: ${{ vars.DOCKER_REPOSITORY }}
   IMAGE_TAG: ${{ github.sha }}
   DEPLOY_DIR: /apps/cancerbot-promop
 
@@ -46,10 +46,10 @@ jobs:
         run: |
           docker build --platform linux/amd64 --provenance=false \
             -f Dockerfile.gcp \
-            -t ${ARTIFACT_REPO}/${IMAGE_NAME}:${IMAGE_TAG} \
-            -t ${ARTIFACT_REPO}/${IMAGE_NAME}:cancerbot .
-          docker push ${ARTIFACT_REPO}/${IMAGE_NAME}:${IMAGE_TAG}
-          docker push ${ARTIFACT_REPO}/${IMAGE_NAME}:cancerbot
+            -t ${IMAGE}:${IMAGE_TAG} \
+            -t ${IMAGE}:cancerbot .
+          docker push ${IMAGE}:${IMAGE_TAG}
+          docker push ${IMAGE}:cancerbot
 
   deploy:
     name: Deploy
@@ -72,7 +72,7 @@ jobs:
           ssh -o BatchMode=yes "$SSH_USER@$SSH_HOST" <<EOF
             set -Eeuo pipefail
             cd ${DEPLOY_DIR}
-            printf 'IMAGE_REPO=%s\nIMAGE_TAG=%s\n' "${ARTIFACT_REPO}" "${IMAGE_TAG}" > .env
+            printf 'IMAGE_REPO=%s\nIMAGE_TAG=%s\n' "${IMAGE}" "${IMAGE_TAG}" > .env
             gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
             docker compose pull
             /bin/secret2env -backend gcp ${SECRET_RESOURCE_NAME} sh -c \
