@@ -45,13 +45,20 @@ KIND_UNMAPPED = 'unmapped'      # no write path yet — grouped by WHY, not lump
 # documents the whole record: a reader can see every column and what stands
 # between it and being editable, instead of inferring it from an absence.
 GROUP_THERAPY = 'therapy-inference'
-GROUP_LOCATION = 'location'
 GROUP_WEARABLE_META = 'wearable-metadata'
 GROUP_NEEDS_CONCEPT = 'needs-concept-set'
 
-_LOCATION_FIELDS = frozenset({
-    'country', 'region', 'city', 'postal_code', 'latitude', 'longitude',
-})
+# Written at the persons endpoint, which upserts the OMOP Location row that
+# Person.location points at. The projection name and the CDM column differ for
+# two of them, so the descriptor reports the column the write lands in.
+_PROFILE_LOCATION = {
+    'city': 'Location.city',
+    'region': 'Location.state',
+    'postal_code': 'Location.zip',
+    'country': 'Location.country',
+    'latitude': 'Location.latitude',
+    'longitude': 'Location.longitude',
+}
 
 # Values inferred across many DrugExposure/Episode rows by regimen detection.
 # There is no single fact to write: authoring one means writing a therapy
@@ -67,10 +74,6 @@ _UNMAPPED_GROUP_REASONS = {
         'Inferred from drug exposures and episodes by regimen detection, not from '
         'one fact. Editing means writing a therapy episode.'
     ),
-    GROUP_LOCATION: (
-        'A Location attribute. Needs a location write path; the persons endpoint '
-        'does not accept it.'
-    ),
     GROUP_WEARABLE_META: (
         'Bookkeeping about the device feed rather than a reading; follows from '
         'ingesting wearable data.'
@@ -80,8 +83,6 @@ _UNMAPPED_GROUP_REASONS = {
 
 
 def _unmapped_group(field):
-    if field in _LOCATION_FIELDS:
-        return GROUP_LOCATION
     if field.startswith('wearable_'):
         return GROUP_WEARABLE_META
     if field.startswith(_THERAPY_PREFIXES):
@@ -242,6 +243,17 @@ def build_writable_field_descriptor():
                 'writable': False,
                 'canonical': canonical,
                 'reason': f'Mirrors {canonical}; edit that field instead.',
+            }
+            continue
+
+        if field in _PROFILE_LOCATION:
+            descriptor[field] = {
+                'kind': KIND_PROFILE,
+                'writable': True,
+                'target': 'person',
+                'endpoint': 'PATCH /api/v1/persons/{person_id}/',
+                'person_field': _PROFILE_LOCATION[field],
+                'value_kind': _value_kind(field),
             }
             continue
 

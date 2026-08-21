@@ -353,9 +353,12 @@ class TestEveryFieldIsCategorised:
         for field in ('first_line_outcome', 'relapse_count', 'line_of_therapy'):
             assert d[field]['group'] == 'therapy-inference', field
 
-    def test_location_fields_are_grouped_separately(self):
+    def test_location_fields_are_writable_not_grouped_as_missing(self):
+        """They were grouped as 'location' only while they had no write path.
+        The persons endpoint now upserts the OMOP Location row."""
         d = build_writable_field_descriptor()
-        assert d['city']['group'] == 'location'
+        assert d['city']['kind'] == 'profile'
+        assert d['city']['writable'] is True
 
 
 class TestProfileFields:
