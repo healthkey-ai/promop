@@ -34,7 +34,7 @@ from rest_framework.views import APIView
 from omop_core.authorization import can_access_patient
 from omop_core.models import (
     Concept, ConditionOccurrence, DrugExposure, Measurement, Observation, Person,
-    ProcedureOccurrence, ProvenanceRecord,
+    PatientDocument, ProcedureOccurrence, ProvenanceRecord,
 )
 from omop_core.services.pk import next_pk_batch
 from omop_core.signals import suppress_patient_record_refresh
@@ -269,6 +269,7 @@ class FhirSyncView(APIView):
         skipped = defaultdict(int)
         observations, conditions, medications = [], [], []
         allergies, immunizations, procedures, diagnostic_reports = [], [], [], []
+        document_references = []
         for entry in bundle.get('entry', []) or []:
             res = (entry or {}).get('resource', {}) or {}
             rtype = res.get('resourceType')
@@ -290,6 +291,8 @@ class FhirSyncView(APIView):
                 procedures.append(res)
             elif rtype == 'DiagnosticReport':
                 diagnostic_reports.append(res)
+            elif rtype == 'DocumentReference':
+                document_references.append(res)
             else:
                 self._count_skipped(skipped, rtype or 'Unknown',
                                     'unsupported_resource_type')
@@ -319,6 +322,8 @@ class FhirSyncView(APIView):
             'observation_ids': self._ingest_clinical_observations(
                 person, allergies, diagnostic_reports, ehr_type, no_match, concept_cache, source_user_id, org,
                 skipped),
+            'document_ids': self._ingest_document_references(
+                person, document_references, source_user_id, org, skipped),
         }
         result['skipped'] = self._skipped_summary(skipped)
 
@@ -331,6 +336,7 @@ class FhirSyncView(APIView):
             'medications': DrugExposure.objects.filter(person=person).count(),
             'procedures': ProcedureOccurrence.objects.filter(person=person).count(),
             'observations': Observation.objects.filter(person=person).count(),
+            'documents': PatientDocument.objects.filter(person=person).count(),
         }
 
         # NOTE: the denormalized PatientRecord is intentionally NOT rebuilt here.
@@ -699,6 +705,106 @@ class FhirSyncView(APIView):
         return self._upsert_clinical(
             Observation, 'observation_id', 'observation_concept_id',
             'observation_date', 'observation_source_value', person, rows, source_user_id, org)
+
+    def _document_doc_type(self, doc):
+        doc_type = doc.get('type') if isinstance(doc.get('type'), dict) else None
+        categories = doc.get('category') or []
+        if not isinstance(categories, list):
+            categories = []
+        text = ' '.join(
+            part for part in [
+                _source_text(doc_type),
+                ' '.join(_source_text(cat) for cat in categories if isinstance(cat, dict)),
+                doc.get('description') or '',
+            ]
+            if part
+        ).lower()
+        if any(term in text for term in ('imaging', 'radiology', 'scan', 'mri', 'ct ')):
+            return 'IMAGING'
+        if any(term in text for term in ('lab', 'laboratory', 'pathology', 'result')):
+            return 'LAB_RESULTS'
+        if 'consent' in text:
+            return 'CONSENT'
+        if any(term in text for term in ('advance directive', 'living will')):
+            return 'ADVANCE_DIRECTIVE'
+        return 'OTHER'
+
+    def _document_status(self, doc):
+        status_value = (doc.get('docStatus') or doc.get('status') or '').lower()
+        if status_value == 'superseded':
+            return PatientDocument.STATUS_SUPERSEDED
+        if status_value in ('entered-in-error', 'revoked'):
+            return PatientDocument.STATUS_REVOKED
+        return PatientDocument.STATUS_ACTIVE
+
+    def _document_attachment(self, doc):
+        contents = doc.get('content') or []
+        if not isinstance(contents, list):
+            return {}
+        for content in contents:
+            if not isinstance(content, dict):
+                continue
+            attachment = content.get('attachment') or {}
+            if isinstance(attachment, dict) and attachment:
+                return attachment
+        return {}
+
+    def _ingest_document_references(self, person, document_references, source_user_id, org, skipped):
+        ids = []
+        for doc in document_references:
+            attachment = self._document_attachment(doc)
+            file_url = (attachment.get('url') or '')[:200]
+            title = (
+                attachment.get('title')
+                or doc.get('description')
+                or _source_text(doc.get('type'))
+                or doc.get('id')
+                or ''
+            )
+            if not file_url and not title:
+                self._count_skipped(skipped, 'DocumentReference', 'missing_content')
+                continue
+            context = doc.get('context') or {}
+            if not isinstance(context, dict):
+                context = {}
+            period = context.get('period') or {}
+            if not isinstance(period, dict):
+                period = {}
+            effective_date = (
+                _parse_date(doc.get('date'))
+                or _parse_date(period.get('start'))
+            )
+            defaults = {
+                'doc_type': self._document_doc_type(doc),
+                'title': title[:255] or None,
+                'file_url': file_url or None,
+                'file_name': (attachment.get('title') or file_url.rsplit('/', 1)[-1])[:255] or None,
+                'status': self._document_status(doc),
+                'effective_date': effective_date,
+            }
+            lookup = {'person': person}
+            if file_url:
+                lookup['file_url'] = file_url
+            else:
+                lookup['title'] = defaults['title']
+                lookup['effective_date'] = effective_date
+
+            obj, _created = PatientDocument.objects.update_or_create(
+                **lookup,
+                defaults=defaults,
+            )
+            ids.append(obj.id)
+
+            if _created:
+                ProvenanceRecord.objects.create(
+                    source=self.provenance_source,
+                    source_user_id=source_user_id or '',
+                    target_patient_id=str(person.person_id),
+                    organization=org,
+                    content_type=ContentType.objects.get_for_model(PatientDocument),
+                    object_id=obj.id,
+                )
+        return ids
 
     def _upsert_clinical(self, model, pk_field, cid_field, date_field, sv_field,
                          person, rows, source_user_id, org):
