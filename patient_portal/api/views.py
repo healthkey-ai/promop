@@ -4738,6 +4738,46 @@ class PersonViewSet(viewsets.GenericViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        from patient_portal.models import Identity, PatientUser
+        identity = Identity.objects.filter(
+            issuer=actor_iss, sub=actor_sub,
+        ).first()
+        if identity is not None:
+            patient_user = (
+                PatientUser.objects
+                .select_related('person')
+                .filter(identity=identity)
+                .first()
+            )
+            if patient_user is not None:
+                person = patient_user.person
+                updates = []
+                current_iss = person.actor_iss or ''
+                current_sub = person.actor_sub or ''
+                if (
+                    current_iss in ('', actor_iss)
+                    and current_sub in ('', actor_sub)
+                ):
+                    if not current_iss:
+                        person.actor_iss = actor_iss
+                        updates.append('actor_iss')
+                    if not current_sub:
+                        person.actor_sub = actor_sub
+                        updates.append('actor_sub')
+                if updates:
+                    try:
+                        person.save(update_fields=updates)
+                    except IntegrityError:
+                        # A prior buggy find_or_create may already have minted
+                        # a duplicate with these actor columns. The account
+                        # holder link is authoritative, so return it without
+                        # clobbering either row.
+                        pass
+                return Response(
+                    {'person_id': person.person_id, 'created': False},
+                    status=status.HTTP_200_OK,
+                )
+
         try:
             _new_person_id = next_pk(Person, 'person_id')
             person, created = Person.objects.get_or_create(
