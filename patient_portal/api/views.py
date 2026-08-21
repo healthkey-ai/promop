@@ -280,12 +280,37 @@ def smart_configuration(request):
 @method_decorator(csrf_exempt, name='dispatch')
 class CurrentUserViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
+
+    def _ensure_patient_identity_resolved(self, user):
+        """Auto-provision first-login patient identities for /api/v1/user/."""
+        if not (user and user.is_authenticated):
+            return
+        if getattr(user, 'is_staff', False):
+            return
+
+        from omop_core.models import GroupAccess
+        from patient_portal.models import PatientUser
+        if PatientUser.objects.filter(identity=user).exists():
+            return
+
+        has_active_clinical_grant = GroupAccess.objects.filter(
+            identity=user,
+            role__in=['org_admin', 'doctor', 'analyst'],
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+        ).exists()
+        if has_active_clinical_grant:
+            return
+
+        from patient_portal.services import resolve_or_create_person
+        resolve_or_create_person(user)
     
     def list(self, request):
         """Just return the logged-in user info - they don't need to be a patient"""
         if not request.user.is_authenticated:
             return Response({'error': 'Not authenticated'}, status=status.HTTP_401_UNAUTHORIZED)
         
+        self._ensure_patient_identity_resolved(request.user)
         user_serializer = UserSerializer(request.user)
         return Response({
             'user': user_serializer.data

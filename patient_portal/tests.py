@@ -11487,6 +11487,13 @@ class PatientRoleUserEndpointTest(TestCase):
         cls.org = Organization.objects.create(name='Beta Onc', slug='beta-onc')
         GroupAccess.objects.create(identity=cls.provider_identity, org=cls.org, role='org_admin')
 
+        cls.first_login_identity = Identity.objects.create_user(
+            email='first-login-v1@test.com', password='pw',
+        )
+        cls.staff_identity = Identity.objects.create_user(
+            email='staff-v1@test.com', password='pw', is_staff=True,
+        )
+
     def _client_as(self, identity):
         c = APIClient()
         c.force_authenticate(user=identity)
@@ -11500,12 +11507,39 @@ class PatientRoleUserEndpointTest(TestCase):
         self.assertEqual(user['person_id'], self.person.person_id)
 
     def test_provider_user_endpoint_reports_not_patient(self):
+        from patient_portal.models import PatientUser
+
         resp = self._client_as(self.provider_identity).get('/api/v1/user/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         user = resp.data['user']
         self.assertFalse(user['is_patient'])
         self.assertIsNone(user['person_id'])
         self.assertTrue(user['is_org_admin'])
+        self.assertFalse(PatientUser.objects.filter(identity=self.provider_identity).exists())
+
+    def test_first_login_patient_user_endpoint_auto_provisions_person_id(self):
+        from patient_portal.models import PatientUser
+
+        resp = self._client_as(self.first_login_identity).get('/api/v1/user/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        user = resp.data['user']
+        self.assertTrue(user['is_patient'])
+        self.assertIsNotNone(user['person_id'])
+        patient_user = PatientUser.objects.get(identity=self.first_login_identity)
+        self.assertEqual(user['person_id'], patient_user.person_id)
+        self.assertTrue(PatientRecord.objects.filter(person=patient_user.person).exists())
+
+    def test_staff_user_endpoint_does_not_auto_provision_patient(self):
+        from patient_portal.models import PatientUser
+
+        resp = self._client_as(self.staff_identity).get('/api/v1/user/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        user = resp.data['user']
+        self.assertFalse(user['is_patient'])
+        self.assertIsNone(user['person_id'])
+        self.assertFalse(PatientUser.objects.filter(identity=self.staff_identity).exists())
 
 
 # ---------------------------------------------------------------------------
