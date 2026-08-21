@@ -246,9 +246,10 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             '--org',
-            required=True,
+            default=None,
             help=(
-                'Target organization slug (e.g. synthea-bc). '
+                'Target organization slug (e.g. synthea-bc). Defaults to the slug '
+                'the export was taken from, which is recorded in the file. '
                 'Pass --create-org to create it if it does not exist.'
             ),
         )
@@ -324,6 +325,18 @@ class Command(BaseCommand):
                 f'  Exported at: {meta.get("exported_at")!r}'
             )
         self.stdout.write('')
+
+        # An export records the org it came from, so --org is a re-targeting
+        # option rather than a required one. Defaulting to it lets the import
+        # line published alongside a dataset stand on its own.
+        if not org_slug:
+            org_slug = (meta.get('org_slug') or '').strip()
+            if not org_slug:
+                raise CommandError(
+                    'No --org given and the export records no org_slug to fall back on.'
+                )
+            self.stdout.write(f'No --org given; using the export\'s own slug {org_slug!r}.')
+            create_org = True
 
         # ------------------------------------------------------------------
         # 2. Resolve (or create) organization
