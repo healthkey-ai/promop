@@ -6,6 +6,7 @@ Usage:
     patient_info = refresh_patient_record(person)
 """
 
+import dataclasses
 import logging
 import math
 import statistics
@@ -546,6 +547,103 @@ def _is_empty(value) -> bool:
     return value is None or value == '' or value == [] or value == {}
 
 
+@dataclasses.dataclass(frozen=True)
+class OmopSnapshot:
+    """Pre-fetched OMOP rows for a single person.
+
+    Built once per refresh call; passed to every section extractor so each table
+    is queried at most once instead of 10-15 times.  Indexes (``meas_by_code``,
+    ``obs_by_code``, ``meas_by_source``, ``obs_by_source``) give O(1) lookup by
+    concept code or source value.
+    """
+    measurements: list          # non-erroneous, -date -id, select_related(concept, value_as_concept, qualifier_concept)
+    observations: list          # non-erroneous, -date -id, select_related(concept, value_as_concept, vocabulary)
+    conditions: list            # all, -start_date, select_related(concept, status_concept)
+    drug_exposures: list        # all, start_date id, select_related(drug_concept)
+    procedures: list            # all, -date, select_related(procedure_concept)
+    death: object | None        # Death row or None
+    # Computed indexes for O(1) lookup:
+    meas_by_code: dict          # concept_code → [Measurement]
+    obs_by_code: dict           # concept_code → [Observation]
+    meas_by_source: dict        # source_value → [Measurement]
+    obs_by_source: dict         # source_value → [Observation]
+
+
+def _build_snapshot(person: Person) -> OmopSnapshot:
+    """Fetch all OMOP rows for *person* in ~6 SQL queries and build lookup indexes."""
+    measurements = list(
+        Measurement.objects
+        .filter(person=person, is_erroneous=False)
+        .select_related(
+            'measurement_concept', 'value_as_concept',
+            'qualifier_concept', 'measurement_concept__vocabulary',
+        )
+        .order_by('-measurement_date', '-measurement_id')
+    )
+    observations = list(
+        Observation.objects
+        .filter(person=person, is_erroneous=False)
+        .select_related(
+            'observation_concept', 'value_as_concept',
+            'observation_concept__vocabulary',
+        )
+        .order_by('-observation_date', '-observation_id')
+    )
+    conditions = list(
+        ConditionOccurrence.objects
+        .filter(person=person)
+        .select_related('condition_concept', 'condition_status_concept')
+        .order_by('-condition_start_date')
+    )
+    drug_exposures = list(
+        DrugExposure.objects
+        .filter(person=person)
+        .select_related('drug_concept')
+        .order_by('drug_exposure_start_date', 'drug_exposure_id')
+    )
+    procedures = list(
+        ProcedureOccurrence.objects
+        .filter(person=person)
+        .select_related('procedure_concept')
+        .order_by('-procedure_date')
+    )
+    death = Death.objects.filter(person=person).only('death_date').first()
+
+    # Build code/source indexes
+    meas_by_code: dict[str, list] = defaultdict(list)
+    meas_by_source: dict[str, list] = defaultdict(list)
+    for m in measurements:
+        cc = getattr(m.measurement_concept, 'concept_code', None)
+        if cc:
+            meas_by_code[cc].append(m)
+        sv = m.measurement_source_value
+        if sv:
+            meas_by_source[sv].append(m)
+
+    obs_by_code: dict[str, list] = defaultdict(list)
+    obs_by_source: dict[str, list] = defaultdict(list)
+    for o in observations:
+        cc = getattr(o.observation_concept, 'concept_code', None)
+        if cc:
+            obs_by_code[cc].append(o)
+        sv = o.observation_source_value
+        if sv:
+            obs_by_source[sv].append(o)
+
+    return OmopSnapshot(
+        measurements=measurements,
+        observations=observations,
+        conditions=conditions,
+        drug_exposures=drug_exposures,
+        procedures=procedures,
+        death=death,
+        meas_by_code=dict(meas_by_code),
+        obs_by_code=dict(obs_by_code),
+        meas_by_source=dict(meas_by_source),
+        obs_by_source=dict(obs_by_source),
+    )
+
+
 def refresh_patient_record(person: Person) -> PatientRecord:
     """Derive and upsert PatientRecord from OMOP tables for a given person.
 
@@ -563,6 +661,9 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
         # Clear all OMOP-derived fields before re-deriving so deletions are reflected.
         _clear_derived_fields(patient_info)
+
+        # Pre-fetch all OMOP rows once (~6 queries) instead of per-section.
+        snapshot = _build_snapshot(person)
 
         # Populate all sections
         for section_fn in [
@@ -591,7 +692,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             _get_mm_specific_data,
             _get_sct_cytogenetic_data,
         ]:
-            for field, value in section_fn(person).items():
+            for field, value in section_fn(person, snapshot).items():
                 setattr(patient_info, field, value)
 
         _compute_derived_fields(patient_info)
@@ -607,12 +708,12 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 # Section extractors — each returns a dict of {field_name: value}
 # ---------------------------------------------------------------------------
 
-def _get_demographics(person: Person) -> dict:
+def _get_demographics(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
+    snapshot = snapshot or _build_snapshot(person)
 
-    death = Death.objects.filter(person=person).only('death_date').first()
-    if death:
-        data['death_date'] = death.death_date
+    if snapshot.death:
+        data['death_date'] = snapshot.death.death_date
 
     if person.year_of_birth not in PERSON_YEAR_PLACEHOLDERS:
         try:
@@ -670,8 +771,9 @@ def _get_demographics(person: Person) -> dict:
     return data
 
 
-def _get_location_data(person: Person) -> dict:
+def _get_location_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
+    snapshot = snapshot or _build_snapshot(person)
 
     if person.location_id:
         try:
@@ -719,26 +821,25 @@ def _canonicalize_disease(name: str) -> str:
     return _DISEASE_ALIASES.get(normalized, name)
 
 
-def _get_disease_data(person: Person) -> dict:
+def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
+    snapshot = snapshot or _build_snapshot(person)
 
     # Most-recent oncologic condition — match common OMOP oncology terms
     # in either the mapped concept_name OR the original condition_source_value
     # (concept_id=0 rows store the disease name only in source_value).
-    from django.db.models import Q
     _ONCO_KEYWORDS = [
         'cancer', 'neoplasm', 'malignant', 'lymphoma', 'leukemia',
         'myeloma', 'carcinoma', 'sarcoma', 'tumor',
     ]
-    concept_q = Q()
-    source_q = Q()
-    for kw in _ONCO_KEYWORDS:
-        concept_q |= Q(condition_concept__concept_name__icontains=kw)
-        source_q |= Q(condition_source_value__icontains=kw)
 
-    cancer_condition = ConditionOccurrence.objects.filter(
-        person=person,
-    ).filter(concept_q | source_q).order_by('-condition_start_date').first()
+    def _is_oncologic(cond):
+        cname = (cond.condition_concept.concept_name or '').lower() if cond.condition_concept else ''
+        src = (cond.condition_source_value or '').lower()
+        return any(kw in cname or kw in src for kw in _ONCO_KEYWORDS)
+
+    # snapshot.conditions is already ordered -condition_start_date
+    cancer_condition = next((c for c in snapshot.conditions if _is_oncologic(c)), None)
 
     if cancer_condition:
         # Prefer source_value when concept is unmapped (id=0 / sentinel)
@@ -749,19 +850,16 @@ def _get_disease_data(person: Person) -> dict:
         if cancer_condition.condition_start_date:
             data['diagnosis_date'] = cancer_condition.condition_start_date
 
-    # Any condition for diagnosis_date fallback (most-recent)
+    # Any condition for diagnosis_date fallback (earliest)
     if 'diagnosis_date' not in data:
-        earliest = ConditionOccurrence.objects.filter(
-            person=person,
-            condition_start_date__isnull=False,
-        ).order_by('condition_start_date').first()
-        if earliest:
+        dated = [c for c in snapshot.conditions if c.condition_start_date]
+        if dated:
+            earliest = min(dated, key=lambda c: c.condition_start_date)
             data['diagnosis_date'] = earliest.condition_start_date
 
     # condition_clinical_status — from condition_status_concept
-    most_recent_condition = ConditionOccurrence.objects.filter(
-        person=person,
-    ).order_by('-condition_start_date').first()
+    # snapshot.conditions is -start_date ordered, so first is most recent
+    most_recent_condition = snapshot.conditions[0] if snapshot.conditions else None
 
     if most_recent_condition:
         if most_recent_condition.condition_status_concept:
@@ -799,15 +897,11 @@ def _disease_name_to_slug(name: str) -> str:
     return slug[:100]
 
 
-def _get_treatment_data(person: Person) -> dict:
+def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
+    snapshot = snapshot or _build_snapshot(person)
 
-    drug_exposures = list(
-        DrugExposure.objects
-        .filter(person=person)
-        .select_related('drug_concept')
-        .order_by('drug_exposure_start_date', 'drug_exposure_id')
-    )
+    drug_exposures = snapshot.drug_exposures  # already ordered by start_date, id
 
     recent_drugs = list(reversed(drug_exposures[-10:]))
 
@@ -825,7 +919,7 @@ def _get_treatment_data(person: Person) -> dict:
         episodes = Episode.objects.filter(person=person).select_related(
             'episode_source_concept', 'episode_object_concept').order_by('episode_number')
         if episodes.exists():
-            return _get_treatment_data_from_episodes(person, data, episodes, drug_exposures)
+            return _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, snapshot)
     except Exception:
         pass
 
@@ -1168,7 +1262,7 @@ def _apply_inferred_lots(data: dict, lots) -> None:
         data['therapy_type_ids'] = sorted(all_classes)
 
 
-def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
+def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, snapshot: OmopSnapshot = None):
     """Use Episode records for structured therapy line grouping."""
     try:
         from omop_oncology.models import EpisodeEvent
@@ -1407,17 +1501,26 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
         '182842009': 'Progressive Disease',
     }
     lot_outcomes: dict = {}
-    outcome_obs = (
-        Observation.objects
-        .filter(
-            person=person,
-            is_erroneous=False,
-            observation_source_value__startswith='LOT-',
-            observation_source_value__endswith='-outcome',
-        )
-        .select_related('observation_concept')
-        .order_by('observation_date')
+    # Use snapshot observations filtered in Python
+    outcome_obs = sorted(
+        (o for o in (snapshot.observations if snapshot else [])
+         if (o.observation_source_value or '').startswith('LOT-')
+         and (o.observation_source_value or '').endswith('-outcome')),
+        key=lambda o: o.observation_date or date.min,
     )
+    if not outcome_obs and not snapshot:
+        # Legacy path: no snapshot provided
+        outcome_obs = (
+            Observation.objects
+            .filter(
+                person=person,
+                is_erroneous=False,
+                observation_source_value__startswith='LOT-',
+                observation_source_value__endswith='-outcome',
+            )
+            .select_related('observation_concept')
+            .order_by('observation_date')
+        )
     for obs in outcome_obs:
         src = obs.observation_source_value or ''
         try:
@@ -1437,7 +1540,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures):
     if later_lots:
         data['later_outcome'] = lot_outcomes[later_lots[0]]
 
-    _apply_treatment_assertions(data, person, episodes)
+    _apply_treatment_assertions(data, person, episodes, snapshot)
 
     return data
 
@@ -1452,7 +1555,7 @@ def _treatment_assertion_value(row):
     )
 
 
-def _apply_treatment_assertions(data, person, episodes):
+def _apply_treatment_assertions(data, person, episodes, snapshot: OmopSnapshot = None):
     """Project dated intent/discontinuation assertions onto their Episode line.
 
     Explicit ``LOT-N-*`` source values win.  FHIR's standard LOINC therapy
@@ -1472,10 +1575,12 @@ def _apply_treatment_assertions(data, person, episodes):
 
     assertions = []  # (date, line, kind, value)
     pattern = re.compile(r'^LOT-(\d+)-(intent|discontinuation)$')
-    for obs in (
+    # Use snapshot observations (already non-erroneous, ordered -date -id)
+    obs_list = snapshot.observations if snapshot else list(
         Observation.objects.filter(person=person, is_erroneous=False)
         .select_related('value_as_concept').order_by('observation_date', 'observation_id')
-    ):
+    )
+    for obs in obs_list:
         match = pattern.match(obs.observation_source_value or '')
         if not match:
             continue
@@ -1486,14 +1591,31 @@ def _apply_treatment_assertions(data, person, episodes):
 
     # The FHIR import writes these non-laboratory observations to Measurement.
     # They are only assigned where the date has one unambiguous line owner.
-    for measurement in (
-        Measurement.objects.filter(person=person, is_erroneous=False)
-        .select_related('measurement_concept', 'value_as_concept')
-        .filter(
-            models.Q(measurement_concept__concept_code__in=('42804-5', '91379-3'))
-            | models.Q(measurement_source_value__in=('42804-5', '91379-3'))
-        ).order_by('measurement_date', 'measurement_id')
-    ):
+    _INTENT_CODES = ('42804-5', '91379-3')
+    if snapshot:
+        intent_measurements = sorted(
+            (m for code in _INTENT_CODES
+             for m in snapshot.meas_by_code.get(code, []) + snapshot.meas_by_source.get(code, [])),
+            key=lambda m: (m.measurement_date or date.min, m.measurement_id),
+        )
+        # Deduplicate (a row may appear in both code and source lists)
+        seen_ids = set()
+        deduped = []
+        for m in intent_measurements:
+            if m.measurement_id not in seen_ids:
+                seen_ids.add(m.measurement_id)
+                deduped.append(m)
+        intent_measurements = deduped
+    else:
+        intent_measurements = list(
+            Measurement.objects.filter(person=person, is_erroneous=False)
+            .select_related('measurement_concept', 'value_as_concept')
+            .filter(
+                models.Q(measurement_concept__concept_code__in=_INTENT_CODES)
+                | models.Q(measurement_source_value__in=_INTENT_CODES)
+            ).order_by('measurement_date', 'measurement_id')
+        )
+    for measurement in intent_measurements:
         candidate_lines = [
             line for line, (start, end) in bounds.items()
             if start <= measurement.measurement_date <= end
@@ -1538,8 +1660,9 @@ def _apply_treatment_assertions(data, person, episodes):
     data['line_of_therapy'] = str(max(bounds))
 
 
-def _get_vitals_data(person: Person) -> dict:
+def _get_vitals_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
+    snapshot = snapshot or _build_snapshot(person)
 
     vital_sign_concepts = {
         'systolic_bp': '8480-6',
@@ -1551,19 +1674,13 @@ def _get_vitals_data(person: Person) -> dict:
     }
 
     codes = set(vital_sign_concepts.values())
-    # Matched on source_value as well as concept_code, like the lab, staging and
-    # performance extractors already are. A row whose concept never resolved
-    # keeps its LOINC only in measurement_source_value, and vitals was the one
-    # extractor that could not see those — so an unresolved weight or height
-    # left the field blank and BMI uncomputed.
-    measurements = (
-        Measurement.objects
-        .filter(person=person, value_as_number__isnull=False)
-        .filter(Q(measurement_concept__concept_code__in=codes)
-                | Q(measurement_source_value__in=codes))
-        .select_related('measurement_concept')
-        .order_by('-measurement_date')
-    )
+    # Filter from snapshot: measurements with value_as_number, matching codes
+    measurements = [
+        m for m in snapshot.measurements
+        if m.value_as_number is not None
+        and (getattr(m.measurement_concept, 'concept_code', None) in codes
+             or m.measurement_source_value in codes)
+    ]
     first_by_code = {}
     for measurement in measurements:
         code = _measurement_code(measurement)
@@ -1685,37 +1802,27 @@ def _observation_code(observation):
     return source_value or concept_code
 
 
-def _get_biomarker_data(person: Person) -> dict:
-    from django.db.models import Q
+def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
+    snapshot = snapshot or _build_snapshot(person)
 
-    measurements = list(
-        Measurement.objects
-        .filter(person=person)
-        .filter(
-            Q(measurement_concept__concept_code__in=_BIOMARKER_MEASUREMENT_LOINCS)
-            | Q(measurement_concept__concept_code__in=_HISTOLOGIC_TYPE_LOINCS)
-            | Q(measurement_source_value__in=_BIOMARKER_MEASUREMENT_LOINCS)
-            | Q(measurement_source_value__in=_HISTOLOGIC_TYPE_LOINCS)
-        )
-        .select_related('measurement_concept', 'value_as_concept')
-        .order_by('-measurement_date')
-    )
-    observations = list(
-        Observation.objects
-        .filter(person=person)
-        .filter(
-            Q(observation_concept__concept_code__in=_BIOMARKER_OBS_LOINCS)
-            | Q(observation_concept__concept_code__in=_HISTOLOGIC_TYPE_LOINCS)
-            | Q(observation_source_value__in=_BIOMARKER_OBS_LOINCS)
-            | Q(observation_source_value__in=_HISTOLOGIC_TYPE_LOINCS)
-            | Q(observation_concept__concept_name__icontains='homologous recombination')
-            | Q(observation_concept__concept_name__icontains='bone only metastas')
-            | Q(observation_concept__concept_name__icontains='histologic')
-        )
-        .select_related('observation_concept', 'value_as_concept')
-        .order_by('-observation_date')
-    )
+    _all_biomarker_codes = _BIOMARKER_MEASUREMENT_LOINCS | _HISTOLOGIC_TYPE_LOINCS
+    measurements = [
+        m for m in snapshot.measurements
+        if (getattr(m.measurement_concept, 'concept_code', None) in _all_biomarker_codes
+            or m.measurement_source_value in _all_biomarker_codes)
+    ]
+
+    _all_obs_codes = _BIOMARKER_OBS_LOINCS | _HISTOLOGIC_TYPE_LOINCS
+    observations = [
+        o for o in snapshot.observations
+        if (getattr(o.observation_concept, 'concept_code', None) in _all_obs_codes
+            or o.observation_source_value in _all_obs_codes
+            or (o.observation_concept and o.observation_concept.concept_name and any(
+                term in o.observation_concept.concept_name.lower()
+                for term in ('homologous recombination', 'bone only metastas', 'histologic')
+            )))
+    ]
 
     pdl1_test = next((m for m in measurements if _measurement_code(m) == '83052-1'), None)
     if pdl1_test:
@@ -1896,7 +2003,7 @@ def _coded_value(row):
     )
 
 
-def _get_genomics_pathology_data(person: Person) -> dict:
+def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Derive report-level genomics/pathology fields from dated OMOP facts.
 
     This deliberately keys off standard vocabulary codes (or the explicit
@@ -1904,16 +2011,13 @@ def _get_genomics_pathology_data(person: Person) -> dict:
     the projection portable across Athena loads and prevents a similarly named
     local concept from silently populating a clinical field.
     """
+    snapshot = snapshot or _build_snapshot(person)
     data = {}
-    measurements = list(
-        Measurement.objects.filter(person=person, is_erroneous=False)
-        .filter(
-            models.Q(measurement_concept__concept_code__in=_GENOMICS_PATHOLOGY_LOINCS)
-            | models.Q(measurement_source_value__in=_GENOMICS_PATHOLOGY_LOINCS)
-        )
-        .select_related('measurement_concept', 'value_as_concept')
-        .order_by('-measurement_date', '-measurement_id')
-    )
+    measurements = [
+        m for m in snapshot.measurements
+        if (getattr(m.measurement_concept, 'concept_code', None) in _GENOMICS_PATHOLOGY_LOINCS
+            or m.measurement_source_value in _GENOMICS_PATHOLOGY_LOINCS)
+    ]
 
     def latest(code):
         return next((m for m in measurements if _measurement_code(m) == code), None)
@@ -1972,10 +2076,11 @@ def _get_genomics_pathology_data(person: Person) -> dict:
 
     mrd_observation = next(
         (
-            obs for obs in Observation.objects.filter(person=person, is_erroneous=False)
-            .select_related('observation_concept', 'value_as_concept', 'observation_concept__vocabulary')
-            .order_by('-observation_date', '-observation_id')
-            if obs.observation_concept.vocabulary.vocabulary_id in _MRD_VOCABULARIES
+            obs for obs in snapshot.observations
+            if obs.observation_concept
+            and hasattr(obs.observation_concept, 'vocabulary') and obs.observation_concept.vocabulary
+            and obs.observation_concept.vocabulary.vocabulary_id in _MRD_VOCABULARIES
+            and obs.observation_concept.concept_name
             and 'minimal residual disease' in obs.observation_concept.concept_name.lower()
         ),
         None,
@@ -1985,7 +2090,7 @@ def _get_genomics_pathology_data(person: Person) -> dict:
         if value:
             data['mrd_status'] = value[:50]
 
-    mutations = _get_genetic_mutations(person).get('genetic_mutations', [])
+    mutations = _get_genetic_mutations(person, snapshot).get('genetic_mutations', [])
     if mutations:
         # ``genetic_mutations`` remains the structured canonical projection;
         # molecular_markers is its legacy display-compatible summary.
@@ -2003,36 +2108,27 @@ def _get_genomics_pathology_data(person: Person) -> dict:
 _STAGING_LOINCS = frozenset({'21908-9', '21908-9-riss', '21905-5', '21906-3', '21901-4'})
 
 
-def _get_staging_data(person: Person) -> dict:
+def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Derive TNM staging and overall stage group from OMOP Measurement/Observation rows.
 
     Reads staging data by LOINC code matched on either the concept code
     (OMOP-native path) or the source_value (FHIR upload path), across both
     Measurement and Observation rows.
     """
-    from django.db.models import Q
+    snapshot = snapshot or _build_snapshot(person)
     data = {}
 
-    measurements = list(
-        Measurement.objects
-        .filter(person=person)
-        .filter(
-            Q(measurement_concept__concept_code__in=_STAGING_LOINCS)
-            | Q(measurement_source_value__in=_STAGING_LOINCS)
-        )
-        .select_related('measurement_concept')
-        .order_by('-measurement_date')
-    )
-    observations = list(
-        Observation.objects
-        .filter(person=person)
-        .filter(
-            Q(observation_concept__concept_code__in=_STAGING_LOINCS)
-            | Q(observation_source_value__in=(*_STAGING_LOINCS, FHIR_CONDITION_STAGE_SOURCE_VALUE))
-        )
-        .select_related('observation_concept')
-        .order_by('-observation_date')
-    )
+    measurements = [
+        m for m in snapshot.measurements
+        if (getattr(m.measurement_concept, 'concept_code', None) in _STAGING_LOINCS
+            or m.measurement_source_value in _STAGING_LOINCS)
+    ]
+    _staging_obs_sources = _STAGING_LOINCS | {FHIR_CONDITION_STAGE_SOURCE_VALUE}
+    observations = [
+        o for o in snapshot.observations
+        if (getattr(o.observation_concept, 'concept_code', None) in _STAGING_LOINCS
+            or o.observation_source_value in _staging_obs_sources)
+    ]
 
     def _stage_value(loinc_code):
         """Return the best string value for a staging LOINC code (Measurement then Observation)."""
@@ -2119,78 +2215,79 @@ def _get_staging_data(person: Person) -> dict:
     return data
 
 
-def _get_bc_clinical_data(person: Person) -> dict:
+def _get_bc_clinical_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Derive breast-cancer clinical assessment fields from OMOP Observation rows.
 
     Covers CTCAE toxicity/neuropathy grades stored as clinical assessments.
     """
+    snapshot = snapshot or _build_snapshot(person)
     data = {}
 
-    observations = (
-        Observation.objects.filter(person=person, is_erroneous=False)
-        .select_related('observation_concept')
-        .order_by('-observation_date')
-    )
-
     # Peripheral neuropathy CTCAE grade — concept name match
-    pn_obs = observations.filter(
-        observation_concept__concept_name__icontains='peripheral neuropathy',
-    ).first()
+    pn_obs = next(
+        (o for o in snapshot.observations
+         if o.observation_concept and o.observation_concept.concept_name
+         and 'peripheral neuropathy' in o.observation_concept.concept_name.lower()),
+        None,
+    )
     if pn_obs and pn_obs.value_as_number is not None:
         data['peripheral_neuropathy_grade'] = int(pn_obs.value_as_number)
 
     # Toxicity grade — CTCAE adverse event grade
-    tox_obs = observations.filter(
-        observation_concept__concept_name__icontains='toxicity grade',
-    ).first()
+    tox_obs = next(
+        (o for o in snapshot.observations
+         if o.observation_concept and o.observation_concept.concept_name
+         and 'toxicity grade' in o.observation_concept.concept_name.lower()),
+        None,
+    )
     if not tox_obs:
-        tox_obs = observations.filter(
-            observation_concept__concept_name__icontains='adverse event',
-        ).first()
+        tox_obs = next(
+            (o for o in snapshot.observations
+             if o.observation_concept and o.observation_concept.concept_name
+             and 'adverse event' in o.observation_concept.concept_name.lower()),
+            None,
+        )
     if tox_obs and tox_obs.value_as_number is not None:
         data['toxicity_grade'] = int(tox_obs.value_as_number)
 
     return data
 
 
-def _get_social_data(person: Person) -> dict:
+def _get_social_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
+    snapshot = snapshot or _build_snapshot(person)
 
-    observations = Observation.objects.filter(person=person, is_erroneous=False)
-
-    employment_obs = observations.filter(
-        observation_concept__concept_code__in=['224362002', '160903007']
+    _EMPLOYMENT_CODES = {'224362002', '160903007'}
+    employment_obs = next(
+        (o for o in snapshot.observations
+         if getattr(o.observation_concept, 'concept_code', None) in _EMPLOYMENT_CODES),
+        None,
     )
-    if employment_obs.exists():
-        data['employment_status'] = employment_obs.first().value_as_string
+    if employment_obs:
+        data['employment_status'] = employment_obs.value_as_string
 
-    insurance_obs = observations.filter(
-        observation_concept__concept_code__in=['408729009']
+    insurance_obs = next(
+        (o for o in snapshot.observations
+         if getattr(o.observation_concept, 'concept_code', None) == '408729009'),
+        None,
     )
-    if insurance_obs.exists():
-        data['insurance_type'] = insurance_obs.first().value_as_string
+    if insurance_obs:
+        data['insurance_type'] = insurance_obs.value_as_string
 
     return data
 
 
-def _get_behavior_data(person: Person) -> dict:
+def _get_behavior_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
-
-    observations = Observation.objects.filter(person=person, is_erroneous=False)
-    measurements = (
-        Measurement.objects.filter(person=person, is_erroneous=False)
-        .select_related('measurement_concept')
-        .order_by('-measurement_date')
-    )
+    snapshot = snapshot or _build_snapshot(person)
 
     # New format (question/answer, #451): observation_concept = LOINC 72166-2,
     # answer in value_as_concept (LA18978-9 / LA15920-4 / LA18976-3).
-    tobacco_qa_obs = (
-        observations
-        .filter(observation_concept__concept_code='72166-2',
-                observation_concept__vocabulary_id='LOINC')
-        .select_related('value_as_concept')
-    )
+    tobacco_qa_obs = [
+        o for o in snapshot.observations
+        if getattr(o.observation_concept, 'concept_code', None) == '72166-2'
+        and getattr(o.observation_concept, 'vocabulary_id', None) == 'LOINC'
+    ]
     _ANSWER_MAP = {
         'LA18978-9': (True,  'Never smoker'),
         'LA15920-4': (False, None),           # date appended below
@@ -2211,9 +2308,11 @@ def _get_behavior_data(person: Person) -> dict:
     # Backward compat: old format wrote SNOMED codes directly into
     # observation_concept_id. Only apply if the new format didn't match.
     if 'no_tobacco_use_status' not in data:
-        old_tobacco_obs = observations.filter(
-            observation_concept__concept_code__in=['266919005', '8517006', '77176002']
-        )
+        _OLD_TOBACCO_CODES = {'266919005', '8517006', '77176002'}
+        old_tobacco_obs = [
+            o for o in snapshot.observations
+            if getattr(o.observation_concept, 'concept_code', None) in _OLD_TOBACCO_CODES
+        ]
         for obs in old_tobacco_obs:
             code = obs.observation_concept.concept_code
             if code == '266919005':
@@ -2226,7 +2325,8 @@ def _get_behavior_data(person: Person) -> dict:
                 data['no_tobacco_use_status'] = False
                 data['tobacco_use_details'] = 'Current smoker'
 
-    for measurement in measurements:
+    # snapshot.measurements is already ordered -date -id
+    for measurement in snapshot.measurements:
         code = _measurement_code(measurement)
         field_info = _BEHAVIOR_MEASUREMENT_FIELDS.get(code)
         if not field_info:
@@ -2283,7 +2383,7 @@ def _assertion_value(row, value_kind):
     return not parsed if value_kind == 'inverse_boolean' else parsed
 
 
-def _get_assertion_data(person: Person) -> dict:
+def _get_assertion_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Project latest dated, typed OMOP eligibility/social assertions.
 
     Both OMOP tables are supported because FHIR ingestion uses Measurement for
@@ -2292,14 +2392,9 @@ def _get_assertion_data(person: Person) -> dict:
     concept for both tables; erroneous rows are excluded.  No row, or an
     unparseable answer, deliberately leaves the projection unknown.
     """
-    measurement_rows = list(
-        Measurement.objects.filter(person=person, is_erroneous=False)
-        .select_related('measurement_concept', 'value_as_concept')
-    )
-    observation_rows = list(
-        Observation.objects.filter(person=person, is_erroneous=False)
-        .select_related('observation_concept', 'value_as_concept')
-    )
+    snapshot = snapshot or _build_snapshot(person)
+    measurement_rows = snapshot.measurements
+    observation_rows = snapshot.observations
     rows = [
         (m.measurement_date, m.measurement_id, _measurement_code(m), m)
         for m in measurement_rows
@@ -2333,10 +2428,11 @@ def _get_assertion_data(person: Person) -> dict:
     return data
 
 
-def _get_infection_data(person: Person) -> dict:
+def _get_infection_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
+    snapshot = snapshot or _build_snapshot(person)
 
-    measurements = Measurement.objects.filter(person=person, is_erroneous=False)
+    measurements = snapshot.measurements  # already non-erroneous
 
     def _infection_value(m):
         """Return 'negative', 'positive', or None from a Measurement row."""
@@ -2356,11 +2452,12 @@ def _get_infection_data(person: Person) -> dict:
                 return 'positive'
         return None
 
-    hiv_measurements = measurements.filter(
-        measurement_concept__concept_code__in=['5221-7', '7917-8']
-    ).union(
-        measurements.filter(measurement_source_value__in=['5221-7', '7917-8'])
-    )
+    _HIV_CODES = {'5221-7', '7917-8'}
+    hiv_measurements = [
+        m for m in measurements
+        if getattr(m.measurement_concept, 'concept_code', None) in _HIV_CODES
+        or m.measurement_source_value in _HIV_CODES
+    ]
     for m in hiv_measurements:
         result = _infection_value(m)
         if result == 'negative':
@@ -2370,11 +2467,12 @@ def _get_infection_data(person: Person) -> dict:
             data['no_hiv_status'] = False
             data['hiv_status'] = True
 
-    hepb_measurements = measurements.filter(
-        measurement_concept__concept_code__in=['5195-3']
-    ).union(
-        measurements.filter(measurement_source_value__in=['5195-3'])
-    )
+    _HEPB_CODES = {'5195-3'}
+    hepb_measurements = [
+        m for m in measurements
+        if getattr(m.measurement_concept, 'concept_code', None) in _HEPB_CODES
+        or m.measurement_source_value in _HEPB_CODES
+    ]
     for m in hepb_measurements:
         result = _infection_value(m)
         if result == 'negative':
@@ -2384,11 +2482,12 @@ def _get_infection_data(person: Person) -> dict:
             data['no_hepatitis_b_status'] = False
             data['hepatitis_b_status'] = True
 
-    hepc_measurements = measurements.filter(
-        measurement_concept__concept_code__in=['5196-1']
-    ).union(
-        measurements.filter(measurement_source_value__in=['5196-1'])
-    )
+    _HEPC_CODES = {'5196-1'}
+    hepc_measurements = [
+        m for m in measurements
+        if getattr(m.measurement_concept, 'concept_code', None) in _HEPC_CODES
+        or m.measurement_source_value in _HEPC_CODES
+    ]
     for m in hepc_measurements:
         result = _infection_value(m)
         if result == 'negative':
@@ -2452,7 +2551,7 @@ def _meets_flc_criterion(
     return involved_mg_l >= _SLIM_INVOLVED_FLC_MG_L
 
 
-def _get_mm_specific_data(person: Person) -> dict:
+def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Derive MM-specific boolean and coded fields from OMOP Observation table.
 
     Covers fields not derivable via _LOINC_LAB_FIELDS (boolean / string-valued
@@ -2460,6 +2559,7 @@ def _get_mm_specific_data(person: Person) -> dict:
     Uses measurement_source_value as the LOINC lookup since Concept rows may not
     be loaded in all environments.
     """
+    snapshot = snapshot or _build_snapshot(person)
     data = {}
 
     # Query Measurement first (upload handler routes all FHIR Obs through Measurement
@@ -2470,11 +2570,10 @@ def _get_mm_specific_data(person: Person) -> dict:
         '89599-5': 'meets_crab',              # CRAB criteria met (boolean)
     }
 
-    mm_measurements = (
-        Measurement.objects
-        .filter(person=person,
-                measurement_source_value__in=list(MM_LOINC_CODES.keys()))
-        .order_by('measurement_date')
+    mm_measurements = sorted(
+        (m for m in snapshot.measurements
+         if m.measurement_source_value in MM_LOINC_CODES),
+        key=lambda m: m.measurement_date or date.min,
     )
     def _coerce_mm_boolean(number_value, string_value):
         if number_value is not None:
@@ -2498,11 +2597,10 @@ def _get_mm_specific_data(person: Person) -> dict:
     # Observation rows should supplement missing fields, not only act as an
     # all-or-nothing fallback, because some environments split MM facts across
     # Measurement and Observation tables.
-    mm_obs = (
-        Observation.objects
-        .filter(person=person,
-                observation_source_value__in=list(MM_LOINC_CODES.keys()))
-        .order_by('observation_date')
+    mm_obs = sorted(
+        (o for o in snapshot.observations
+         if o.observation_source_value in MM_LOINC_CODES),
+        key=lambda o: o.observation_date or date.min,
     )
     for o in mm_obs:
         field = MM_LOINC_CODES.get(o.observation_source_value)
@@ -2514,14 +2612,14 @@ def _get_mm_specific_data(person: Person) -> dict:
     # EHR rows carry the display name in source_value and the LOINC on the
     # concept, so a source_value-only filter saw demo data and nothing else.
     slim_vals = {}
-    for m in (
-        Measurement.objects
-        .filter(person=person, value_as_number__isnull=False)
-        .filter(Q(measurement_concept__concept_code__in=_SLIM_MATCH_VALUES)
-                | Q(measurement_source_value__in=_SLIM_MATCH_VALUES))
-        .select_related('measurement_concept')
-        .order_by('measurement_date', 'measurement_id')
-    ):
+    slim_measurements = sorted(
+        (m for m in snapshot.measurements
+         if m.value_as_number is not None
+         and (getattr(m.measurement_concept, 'concept_code', None) in _SLIM_MATCH_VALUES
+              or m.measurement_source_value in _SLIM_MATCH_VALUES)),
+        key=lambda m: (m.measurement_date or date.min, m.measurement_id),
+    )
+    for m in slim_measurements:
         code = _measurement_code(m)
         field = _LOINC_LAB_FIELDS.get(code, (None, None))[0]
         if field is None:
@@ -2551,18 +2649,11 @@ def _get_mm_specific_data(person: Person) -> dict:
 
     # ── meets_crab fallback: compute from OMOP Measurements when obs missing ─
     if 'meets_crab' not in data:
-        crab_rows = (
-            Measurement.objects
-            .filter(
-                person=person,
-                measurement_source_value__in=['718-7', '59260-0', '17861-6', '2000-0', '2164-2', '33914-3'],
-                value_as_number__isnull=False,
-            )
-            .values('measurement_source_value', 'value_as_number')
-        )
+        _CRAB_CODES = {'718-7', '59260-0', '17861-6', '2000-0', '2164-2', '33914-3'}
         crab_vals = {}
-        for row in crab_rows:
-            crab_vals.setdefault(row['measurement_source_value'], []).append(float(row['value_as_number']))
+        for m in snapshot.measurements:
+            if m.measurement_source_value in _CRAB_CODES and m.value_as_number is not None:
+                crab_vals.setdefault(m.measurement_source_value, []).append(float(m.value_as_number))
 
         hgb_vals = crab_vals.get('718-7', []) or crab_vals.get('59260-0', [])
         ca_vals = crab_vals.get('17861-6', []) or crab_vals.get('2000-0', [])
@@ -2579,26 +2670,24 @@ def _get_mm_specific_data(person: Person) -> dict:
     return data
 
 
-def _get_sct_cytogenetic_data(person: Person) -> dict:
+def _get_sct_cytogenetic_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Derive cytogenetic markers and SCT fields from OMOP Observation rows.
 
     These values are written as Observation rows by the bulk FHIR import
     (and eventually the upload handler) with custom observation_source_value
     keys: mm-cytogenetic-markers, mm-sct-date, mm-sct-history, mm-sct-eligibility.
     """
+    snapshot = snapshot or _build_snapshot(person)
     data = {}
-    _SOURCE_KEYS = [
+    _SOURCE_KEYS = frozenset({
         'mm-cytogenetic-markers', 'mm-sct-date',
         'mm-sct-history', 'mm-sct-eligibility',
+    })
+    # snapshot.observations is already ordered -observation_date
+    obs_qs = [
+        o for o in snapshot.observations
+        if o.observation_source_value in _SOURCE_KEYS
     ]
-    obs_qs = (
-        Observation.objects.filter(
-            is_erroneous=False,
-            person=person,
-            observation_source_value__in=_SOURCE_KEYS,
-        )
-        .order_by('-observation_date')
-    )
     seen = set()
     for obs in obs_qs:
         src = obs.observation_source_value
@@ -2628,26 +2717,21 @@ def _get_sct_cytogenetic_data(person: Person) -> dict:
     return data
 
 
-def _get_assessment_data(person: Person) -> dict:
+def _get_assessment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
+    snapshot = snapshot or _build_snapshot(person)
 
-    observations = (
-        Observation.objects
-        .filter(person=person)
-        .select_related('observation_concept')
-        .order_by('-observation_date')
+    # snapshot.observations is already ordered -observation_date, non-erroneous
+    tumor_stage_obs = next(
+        (o for o in snapshot.observations
+         if getattr(o.observation_concept, 'concept_code', None) == '21905-5'),
+        None,
     )
-
-    tumor_stage_obs = Observation.objects.filter(
-        is_erroneous=False,
-        person=person,
-        observation_concept__concept_code__in=['21905-5'],
-    ).order_by('-observation_date').first()
-    metastasis_obs = Observation.objects.filter(
-        is_erroneous=False,
-        person=person,
-        observation_concept__concept_code__in=['21901-4'],
-    ).order_by('-observation_date').first()
+    metastasis_obs = next(
+        (o for o in snapshot.observations
+         if getattr(o.observation_concept, 'concept_code', None) == '21901-4'),
+        None,
+    )
 
     t_stage_val = tumor_stage_obs.value_as_string if tumor_stage_obs else None
     m_stage_val = metastasis_obs.value_as_string if metastasis_obs else None
@@ -2663,14 +2747,12 @@ def _get_assessment_data(person: Person) -> dict:
     return data
 
 
-def _get_laboratory_data(person: Person) -> dict:
+def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
+    snapshot = snapshot or _build_snapshot(person)
 
-    measurements = (
-        Measurement.objects.filter(person=person, is_erroneous=False)
-        .select_related('measurement_concept')
-        .order_by('-measurement_date', '-measurement_id')
-    )
+    # snapshot.measurements already ordered -date -id, non-erroneous, select_related
+    measurements = snapshot.measurements
 
     # --- Legacy fields via exact historic concept-name matching ---
     for measurement in measurements:
@@ -2685,9 +2767,7 @@ def _get_laboratory_data(person: Person) -> dict:
             data[f'{field_name}_units'] = measurement.unit_source_value
 
     # --- New UI fields via LOINC concept code (primary path) ---
-    loinc_ms = measurements.filter(
-        value_as_number__isnull=False,
-    ).select_related('measurement_concept')
+    loinc_ms = [m for m in measurements if m.value_as_number is not None]
     wbc_projection_blocked = False
     for m in loinc_ms:
         code = _measurement_code(m)
@@ -2738,10 +2818,11 @@ def _get_laboratory_data(person: Person) -> dict:
     # --- New UI fields via display-name source_value (legacy/generator path) ---
     unfound = {f for (f, _) in _LOINC_LAB_FIELDS.values() if f not in data}
     if unfound:
-        sv_ms = measurements.filter(
-            measurement_source_value__in=_SOURCE_VALUE_LAB_FIELDS.keys(),
-            value_as_number__isnull=False,
-        )
+        sv_ms = [
+            m for m in measurements
+            if m.measurement_source_value in _SOURCE_VALUE_LAB_FIELDS
+            and m.value_as_number is not None
+        ]
         for m in sv_ms:
             field = _SOURCE_VALUE_LAB_FIELDS.get(m.measurement_source_value)
             if field == 'wbc_count_thousand_per_ul' and wbc_projection_blocked:
@@ -2766,78 +2847,80 @@ _ECOG_LOINC = '89247-1'
 _KARNOFSKY_LOINC = '89243-0'
 
 
-def _performance_rows(person: Person, name_fragment: str, loinc_code: str) -> list:
+def _performance_rows(snapshot: OmopSnapshot, name_fragment: str, loinc_code: str) -> list:
     """Latest-first performance scores from both `observation` and `measurement`.
 
     Matches on concept name or LOINC code so a row still resolves when the
     vocabulary is not loaded and the code survives only in the source value.
     """
-    obs = (
-        Observation.objects.filter(person=person, is_erroneous=False)
-        .filter(
-            Q(observation_concept__concept_name__icontains=name_fragment)
-            | Q(observation_concept__concept_code=loinc_code)
-            | Q(observation_source_value=loinc_code)
+    name_lower = name_fragment.lower()
+    obs = [
+        (o.observation_date, o.value_as_number)
+        for o in snapshot.observations
+        if o.value_as_number is not None
+        and (
+            (o.observation_concept and o.observation_concept.concept_name
+             and name_lower in o.observation_concept.concept_name.lower())
+            or getattr(o.observation_concept, 'concept_code', None) == loinc_code
+            or o.observation_source_value == loinc_code
         )
-        .exclude(value_as_number__isnull=True)
-        .order_by('-observation_date', '-observation_id')
-        .values_list('observation_date', 'value_as_number')
-    )
-    meas = (
-        Measurement.objects.filter(person=person, is_erroneous=False)
-        .filter(
-            Q(measurement_concept__concept_name__icontains=name_fragment)
-            | Q(measurement_concept__concept_code=loinc_code)
-            | Q(measurement_source_value=loinc_code)
+    ]
+    meas = [
+        (m.measurement_date, m.value_as_number)
+        for m in snapshot.measurements
+        if m.value_as_number is not None
+        and (
+            (m.measurement_concept and m.measurement_concept.concept_name
+             and name_lower in m.measurement_concept.concept_name.lower())
+            or getattr(m.measurement_concept, 'concept_code', None) == loinc_code
+            or m.measurement_source_value == loinc_code
         )
-        .exclude(value_as_number__isnull=True)
-        .order_by('-measurement_date', '-measurement_id')
-        .values_list('measurement_date', 'value_as_number')
-    )
+    ]
     # Measurements first, and the sort below is stable (reverse=True preserves
     # the order of equal keys), so a same-date tie resolves in favour of
     # `measurement`. That is the PATCH write-through's table and
     # _sync_measurement always stamps today, so the tie case is "clinician
     # corrected a score a bundle loaded the same day" — the correction has to
     # win, or the refresh silently reverts it.
-    rows = list(meas) + list(obs)
+    rows = meas + obs
     # date.min for undated rows so a dated score always outranks one with no date.
     rows.sort(key=lambda r: (r[0] or date.min), reverse=True)
     return rows
 
 
-def _get_performance_data(person: Person) -> dict:
+def _get_performance_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
+    snapshot = snapshot or _build_snapshot(person)
 
-    ecog = _performance_rows(person, 'ecog', _ECOG_LOINC)
+    ecog = _performance_rows(snapshot, 'ecog', _ECOG_LOINC)
     if ecog:
         ecog_date, ecog_value = ecog[0]
         data['ecog_performance_status'] = int(ecog_value)
         if ecog_date:
             data['ecog_assessment_date'] = ecog_date
 
-    karnofsky = _performance_rows(person, 'karnofsky', _KARNOFSKY_LOINC)
+    karnofsky = _performance_rows(snapshot, 'karnofsky', _KARNOFSKY_LOINC)
     if karnofsky:
         data['karnofsky_performance_score'] = int(karnofsky[0][1])
 
     return data
 
 
-def _get_genetic_mutations(person: Person) -> dict:
+def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
+    snapshot = snapshot or _build_snapshot(person)
 
     origin_concepts = {255395001: 'germline', 255461003: 'somatic'}
     interpretation_concepts = {30166007: 'pathogenic', 10828004: 'benign', 42425007: 'vus'}
 
     mutations = []
 
-    genetic_measurements = Measurement.objects.filter(
-        is_erroneous=False,
-        person=person,
-    ).filter(
-        models.Q(measurement_concept__concept_code__in=_GENETIC_MUTATION_LOINCS.keys())
-        | models.Q(measurement_source_value__in=_GENETIC_MUTATION_LOINCS.keys())
-    ).order_by('-measurement_date')
+    _gen_codes = set(_GENETIC_MUTATION_LOINCS.keys())
+    genetic_measurements = [
+        m for m in snapshot.measurements
+        if (getattr(m.measurement_concept, 'concept_code', None) in _gen_codes
+            or m.measurement_source_value in _gen_codes)
+    ]
 
     for measurement in genetic_measurements:
         if not measurement.value_as_string:
@@ -2867,7 +2950,7 @@ def _get_genetic_mutations(person: Person) -> dict:
     return data
 
 
-def _get_tumor_size_data(person: Person) -> dict:
+def _get_tumor_size_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Derive tumour size from the semantically tumour-specific LOINC row.
 
     LOINC 21889-1 is ``Size Tumor``.  Some legacy feeds reused it for a
@@ -2875,35 +2958,24 @@ def _get_tumor_size_data(person: Person) -> dict:
     ``qualifier_source_value=lymph-node`` and are routed by ``_get_cll_data``.
     A code-only row is therefore never allowed to populate both projections.
     """
-    rows = (
-        Measurement.objects
-        .filter(person=person, value_as_number__isnull=False)
-        .filter(
-            Q(measurement_concept__concept_code='21889-1')
-            | Q(measurement_source_value='21889-1')
-        )
-        .exclude(qualifier_source_value__iexact='lymph-node')
-        .order_by('-measurement_date', '-measurement_id')
+    snapshot = snapshot or _build_snapshot(person)
+    row = next(
+        (m for m in snapshot.measurements
+         if m.value_as_number is not None
+         and (getattr(m.measurement_concept, 'concept_code', None) == '21889-1'
+              or m.measurement_source_value == '21889-1')
+         and (m.qualifier_source_value or '').lower() != 'lymph-node'),
+        None,
     )
-    row = rows.first()
     return {'tumor_size': float(row.value_as_number)} if row else {}
 
 
-def _get_cll_data(person: Person) -> dict:
+def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
-    measurements = (
-        Measurement.objects
-        .filter(person=person)
-        .select_related('measurement_concept')
-        .order_by('-measurement_date')
-    )
-    observations = (
-        Observation.objects
-        .filter(person=person)
-        .select_related('observation_concept')
-        .order_by('-observation_date')
-    )
-    conditions = ConditionOccurrence.objects.filter(person=person)
+    snapshot = snapshot or _build_snapshot(person)
+    measurements = snapshot.measurements
+    observations = snapshot.observations
+    conditions = snapshot.conditions
 
     # 731-0 (ALC) is intentionally absent — the canonical column is
     # alc_thousand_per_ul, populated by _get_laboratory_data via
@@ -2915,25 +2987,25 @@ def _get_cll_data(person: Person) -> dict:
         '44996-6': 'spleen_size',
     }
     for loinc_code, field in loinc_map.items():
-        m = measurements.filter(
-            measurement_concept__concept_code=loinc_code,
-            value_as_number__isnull=False,
-        ).first()
+        m = next(
+            (m for m in measurements
+             if getattr(m.measurement_concept, 'concept_code', None) == loinc_code
+             and m.value_as_number is not None),
+            None,
+        )
         if m:
             data[field] = float(m.value_as_number)
 
     # A lymph-node size is a distinct clinical meaning from LOINC 21889-1
     # (Size Tumor).  Require the explicit source qualifier so the same row can
     # never populate both PatientRecord columns.
-    lymph_node = (
-        measurements
-        .filter(
-            Q(measurement_concept__concept_code='21889-1')
-            | Q(measurement_source_value='21889-1')
-        )
-        .filter(qualifier_source_value__iexact='lymph-node')
-        .exclude(value_as_number__isnull=True)
-        .first()
+    lymph_node = next(
+        (m for m in measurements
+         if (getattr(m.measurement_concept, 'concept_code', None) == '21889-1'
+             or m.measurement_source_value == '21889-1')
+         and (m.qualifier_source_value or '').lower() == 'lymph-node'
+         and m.value_as_number is not None),
+        None,
     )
     if lymph_node:
         data['largest_lymph_node_size'] = float(lymph_node.value_as_number)
@@ -2997,7 +3069,7 @@ def _get_cll_data(person: Person) -> dict:
         if 'lymphadenopathy' in cname and 'lymphadenopathy' not in data:
             data['lymphadenopathy'] = True
 
-    drug_exposures = DrugExposure.objects.filter(person=person)
+    drug_exposures = snapshot.drug_exposures
     btk_terms = ('ibrutinib', 'zanubrutinib', 'acalabrutinib', 'pirtobrutinib')
     bcl2_terms = ('venetoclax',)
 
@@ -3010,52 +3082,37 @@ def _get_cll_data(person: Person) -> dict:
         for de in drug_exposures if de.drug_concept
     )
 
-    has_progression = observations.filter(
-        observation_concept__concept_code='182842009'
-    ).exists()
+    has_progression = any(
+        getattr(o.observation_concept, 'concept_code', None) == '182842009'
+        for o in observations
+    )
 
     if had_btk:
         data['btk_inhibitor_refractory'] = has_progression
     if had_bcl2:
         data['bcl2_inhibitor_refractory'] = has_progression
 
-    alc_loinc = '731-0'
-    alc_concept = Concept.objects.filter(
-        concept_code=alc_loinc,
-        vocabulary__vocabulary_id='LOINC',
-    ).first()
-    if alc_concept:
-        alc_measurements = (
-            Measurement.objects.filter(
-                is_erroneous=False,
-                person=person,
-                measurement_concept=alc_concept,
-                value_as_number__isnull=False,
-            ).order_by('measurement_date')
-        )
-        if alc_measurements.count() >= 2:
-            pts = list(alc_measurements.values_list('measurement_date', 'value_as_number'))
-            ldt = _compute_lymphocyte_doubling_time(pts)
-            if ldt is not None:
-                data['lymphocyte_doubling_time'] = ldt
+    # ALC doubling time — filter from snapshot by concept code 731-0
+    alc_rows = sorted(
+        (m for m in measurements
+         if getattr(m.measurement_concept, 'concept_code', None) == '731-0'
+         and m.value_as_number is not None),
+        key=lambda m: m.measurement_date or date.min,
+    )
+    if len(alc_rows) >= 2:
+        pts = [(m.measurement_date, m.value_as_number) for m in alc_rows]
+        ldt = _compute_lymphocyte_doubling_time(pts)
+        if ldt is not None:
+            data['lymphocyte_doubling_time'] = ldt
 
     return data
 
 
-def _get_lymphoma_data(person: Person) -> dict:
+def _get_lymphoma_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
-    observations = (
-        Observation.objects
-        .filter(person=person)
-        .select_related('observation_concept')
-        .order_by('-observation_date')
-    )
-    measurements = (
-        Measurement.objects
-        .filter(person=person)
-        .select_related('measurement_concept')
-        .order_by('-measurement_date')
-    )
+    snapshot = snapshot or _build_snapshot(person)
+    observations = snapshot.observations
+    measurements = snapshot.measurements
 
     for obs in observations:
         if not obs.observation_concept:
@@ -3076,7 +3133,7 @@ def _get_lymphoma_data(person: Person) -> dict:
         if 'grade' in cname and m.value_as_number is not None:
             data['tumor_grade'] = int(m.value_as_number)
 
-    data.update(_get_dlbcl_transformation(person, observations))
+    data.update(_get_dlbcl_transformation(person, observations, snapshot))
 
     return data
 
@@ -3108,7 +3165,7 @@ def _normalize_transformation_outcome(outcome: str) -> str:
     return 'Unknown'
 
 
-def _get_dlbcl_transformation(person: Person, observations) -> dict:
+def _get_dlbcl_transformation(person: Person, observations, snapshot: OmopSnapshot = None) -> dict:
     """Derive FL → DLBCL transformation fields from OMOP.
 
     Evidence, in order:
@@ -3120,18 +3177,15 @@ def _get_dlbcl_transformation(person: Person, observations) -> dict:
     'Deceased'; else the latest post-transformation LOT-line outcome
     Observation; else None (manual entry).
 
-    `observations` is the person's Observation queryset ordered by
+    `observations` is the person's Observation list ordered by
     -observation_date (already fetched by _get_lymphoma_data).
     """
+    snapshot = snapshot or _build_snapshot(person)
     data = {}
 
     transformation_date = None
-    dlbcl_conditions = (
-        ConditionOccurrence.objects
-        .filter(person=person)
-        .select_related('condition_concept')
-        .order_by('condition_start_date')
-    )
+    # snapshot.conditions is -start_date ordered; we need earliest DLBCL, so sort ascending
+    dlbcl_conditions = sorted(snapshot.conditions, key=lambda c: c.condition_start_date or date.min)
     for cond in dlbcl_conditions:
         cname = (cond.condition_concept.concept_name or '').lower() if cond.condition_concept else ''
         if any(term in cname for term in _DLBCL_CONDITION_TERMS):
@@ -3153,7 +3207,7 @@ def _get_dlbcl_transformation(person: Person, observations) -> dict:
     data['transformed_to_dlbcl'] = True
     data['dlbcl_transformation_date'] = transformation_date
 
-    death = Death.objects.filter(person=person).only('death_date').first()
+    death = snapshot.death
     if death and death.death_date and death.death_date >= transformation_date:
         data['post_transformation_outcome'] = 'Deceased'
     else:
@@ -3168,15 +3222,14 @@ def _get_dlbcl_transformation(person: Person, observations) -> dict:
     return data
 
 
-def _get_prior_procedures(person: Person) -> dict:
+def _get_prior_procedures(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Extract ProcedureOccurrence records into prior_procedures JSONField."""
+    snapshot = snapshot or _build_snapshot(person)
     data = {}
 
-    procedures = ProcedureOccurrence.objects.filter(
-        person=person,
-    ).select_related('procedure_concept').order_by('-procedure_date')
+    procedures = snapshot.procedures  # already ordered -procedure_date
 
-    if procedures.exists():
+    if procedures:
         procedure_list = []
         for proc in procedures:
             procedure_list.append({
@@ -3301,60 +3354,38 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
         patient_info.last_treatment = max(_lt_candidates)
 
 
-def _get_wearable_data(person: Person) -> dict:
+def _get_wearable_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Derive 30-day wearable summaries from OMOP Measurement/Observation rows."""
+    snapshot = snapshot or _build_snapshot(person)
     data = {}
 
     # Prefer recent data (last 90 days) so stale/synthetic rows from years
     # ago don't anchor the 30-day window. Fall back to all data if nothing
     # exists within the recency window.
     recency_cutoff = (timezone.now() - timedelta(days=90)).date()
+    _wearable_codes = set(WEARABLE_CONCEPT_CODE.values())
 
     def _wearable_measurements(date_filter=None):
-        qs = Measurement.objects.filter(
-            is_erroneous=False,
-            person=person,
-            value_as_number__isnull=False,
-        )
-        if date_filter is not None:
-            qs = qs.filter(measurement_date__gte=date_filter)
-        return list(
-            qs.filter(
-                models.Q(measurement_concept__concept_code__in=WEARABLE_CONCEPT_CODE.values())
-                | models.Q(measurement_source_value__in=WEARABLE_CONCEPT_CODE.values())
-            )
-            .values_list(
-                'measurement_concept__concept_code',
-                'measurement_source_value',
-                'measurement_date',
-                'value_as_number',
-            )
-        )
+        return [
+            (getattr(m.measurement_concept, 'concept_code', None),
+             m.measurement_source_value, m.measurement_date, m.value_as_number)
+            for m in snapshot.measurements
+            if m.value_as_number is not None
+            and (getattr(m.measurement_concept, 'concept_code', None) in _wearable_codes
+                 or m.measurement_source_value in _wearable_codes)
+            and (date_filter is None or (m.measurement_date and m.measurement_date >= date_filter))
+        ]
 
     def _wearable_observations(date_filter=None):
-        # Several wearable concepts are Observation-domain (steps, active_minutes,
-        # sleep_duration, flights_climbed), so this must match every wearable code
-        # — not just sleep — and return the code alongside the value so rows are
-        # keyed identically to the Measurement rows below.
-        qs = Observation.objects.filter(
-            is_erroneous=False,
-            person=person,
-            value_as_number__isnull=False,
-        )
-        if date_filter is not None:
-            qs = qs.filter(observation_date__gte=date_filter)
-        return list(
-            qs.filter(
-                models.Q(observation_concept__concept_code__in=WEARABLE_CONCEPT_CODE.values())
-                | models.Q(observation_source_value__in=WEARABLE_CONCEPT_CODE.values())
-            )
-            .values_list(
-                'observation_concept__concept_code',
-                'observation_source_value',
-                'observation_date',
-                'value_as_number',
-            )
-        )
+        return [
+            (getattr(o.observation_concept, 'concept_code', None),
+             o.observation_source_value, o.observation_date, o.value_as_number)
+            for o in snapshot.observations
+            if o.value_as_number is not None
+            and (getattr(o.observation_concept, 'concept_code', None) in _wearable_codes
+                 or o.observation_source_value in _wearable_codes)
+            and (date_filter is None or (o.observation_date and o.observation_date >= date_filter))
+        ]
 
     # Try recent data first; fall back to all data if nothing within 90 days
     measurement_rows = _wearable_measurements(recency_cutoff)

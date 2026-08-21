@@ -4883,7 +4883,14 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
 
         # Unguarded on purpose. A 2xx over a record that did not re-derive
         # would be a lie on an endpoint that exists only to derive.
-        record: PatientRecord = refresh_patient_record(person)
+        # Safety net: abort any single SQL statement that exceeds 25 s so a
+        # pathologically large patient cannot hold a DB connection indefinitely.
+        # SET LOCAL scopes to the enclosing transaction and auto-reverts on commit.
+        from django.db import connection
+        with transaction.atomic():
+            with connection.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '25s'")
+            record: PatientRecord = refresh_patient_record(person)
         return Response({
             'person_id': person.person_id,
             'refreshed': True,
