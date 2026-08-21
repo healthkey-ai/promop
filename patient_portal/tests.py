@@ -18785,20 +18785,24 @@ class OmopDeferRefreshTest(TestCase):
 
     def test_patch_without_the_flag_still_derives(self):
         # The flag must not become the default, every existing caller depends
-        # on a write deriving.
-        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+        # on a write deriving. The mixin now calls refresh directly (not via
+        # signal), so we patch the view-level reference.
+        with patch('patient_portal.api.views.refresh_patient_record') as refresh:
+            refresh.return_value = PatientRecord.objects.get(person=self.person)
             self._patch()
 
         self.assertTrue(refresh.called)
 
     def test_delete_without_the_flag_still_derives(self):
-        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+        with patch('patient_portal.api.views.refresh_patient_record') as refresh:
+            refresh.return_value = PatientRecord.objects.get(person=self.person)
             self._delete()
 
         self.assertTrue(refresh.called)
 
     def test_skip_refresh_false_still_derives(self):
-        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+        with patch('patient_portal.api.views.refresh_patient_record') as refresh:
+            refresh.return_value = PatientRecord.objects.get(person=self.person)
             self._patch('?skip_refresh=false')
 
         self.assertTrue(refresh.called)
@@ -18859,7 +18863,8 @@ class OmopDeferRefreshTest(TestCase):
         client = APIClient()
         client.force_authenticate(user=patient_identity)
 
-        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+        with patch('patient_portal.api.views.refresh_patient_record') as refresh:
+            refresh.return_value = PatientRecord.objects.get(person=self.person)
             client.patch(
                 f'/api/v1/measurements/{self.measurement.pk}/?skip_refresh=true',
                 {'value_as_number': 9}, format='json')
@@ -18896,6 +18901,46 @@ class OmopDeferRefreshTest(TestCase):
             with self.assertRaises(ValueError):
                 self.client.post(
                     f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+    # -- Issue #533: PATCH/DELETE must surface refresh failures as 502 --
+
+    def test_patch_returns_502_when_refresh_fails(self):
+        """A refresh failure after PATCH must not be swallowed — return 502."""
+        with patch('patient_portal.api.views.refresh_patient_record',
+                   side_effect=RuntimeError('boom')):
+            resp = self._patch()
+
+        self.assertEqual(resp.status_code, status.HTTP_502_BAD_GATEWAY)
+        self.assertIn('projection failed', resp.data['detail'])
+        # The OMOP row was still updated despite the refresh failure.
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.value_as_number, 9)
+
+    def test_delete_returns_502_when_refresh_fails(self):
+        """A refresh failure after DELETE must not be swallowed — return 502."""
+        with patch('patient_portal.api.views.refresh_patient_record',
+                   side_effect=RuntimeError('boom')):
+            resp = self._delete()
+
+        self.assertEqual(resp.status_code, status.HTTP_502_BAD_GATEWAY)
+        self.assertIn('projection failed', resp.data['detail'])
+        # The OMOP row was still deleted despite the refresh failure.
+        self.assertFalse(Measurement.objects.filter(pk=920001).exists())
+
+    def test_patch_returns_200_when_refresh_succeeds(self):
+        """Normal PATCH returns 200 when refresh succeeds (end-to-end)."""
+        resp = self._patch()
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.value_as_number, 9)
+
+    def test_delete_returns_204_when_refresh_succeeds(self):
+        """Normal DELETE returns 204 when refresh succeeds (end-to-end)."""
+        resp = self._delete()
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Measurement.objects.filter(pk=920001).exists())
 
 
 class BulkUpsertObservationIdentityTest(TestCase):
@@ -19071,6 +19116,38 @@ class BulkUpsertObservationIdentityTest(TestCase):
             '/api/v1/observations/?skip_refresh=true', rows, format='json')
 
         self.assertEqual(Observation.objects.filter(person=self.person).count(), 4)
+
+    def test_naive_datetime_repost_converges(self):
+        """A naive observation_datetime must match the DB's aware value.
+
+        When USE_TZ=True, PostgreSQL stores aware datetimes. If the request
+        sends a naive datetime string (no trailing Z or offset), the upsert
+        key built from the unsaved instance used to differ from the key built
+        from the DB row, causing every repost to insert a duplicate instead of
+        converging — ultimately hitting a constraint and returning 500.
+        """
+        rows = [{
+            'person': self.person.person_id,
+            'observation_concept': self.concept.concept_id,
+            'observation_date': '2024-06-15',
+            'observation_datetime': '2024-06-15T10:30:00',  # naive — no Z
+            'observation_type_concept': self.type_concept.concept_id,
+            'observation_source_value': 'NAIVE-DT-TEST',
+            'value_as_string': 'result',
+        }]
+
+        first = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.data)
+        self.assertEqual(first.data['created'], 1)
+
+        second = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED, second.data)
+        self.assertEqual(second.data['created'], 0,
+                         'naive datetime caused a duplicate instead of converging')
+        self.assertEqual(
+            Observation.objects.filter(person=self.person).count(), 1)
 
     def test_database_constraint_failure_is_a_409_not_a_500(self):
         """A 500 reads as "service is down", which changes whether to retry."""

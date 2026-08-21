@@ -67,7 +67,8 @@ from omop_core.services.regimen_resolution import (
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
 from omop_core.services.access import get_visible_orgs, build_trusting_map, get_admin_orgs
 from datetime import date as _date, datetime, timedelta
-from django.utils.timezone import localdate
+from django.utils.timezone import localdate, make_aware, is_naive
+import datetime as _dt
 import csv
 import hashlib
 import json
@@ -5232,7 +5233,16 @@ def _upsert_key(instance, sv_field, date_field, extra_fields):
     event_date = getattr(instance, date_field, None)
     if not sv or event_date is None:
         return None
-    return (sv, event_date) + tuple(getattr(instance, f, None) for f in extra_fields)
+    extras = []
+    for f in extra_fields:
+        v = getattr(instance, f, None)
+        # Naive datetimes from the request body will never match the
+        # timezone-aware values PostgreSQL returns when USE_TZ=True.
+        # Normalise to UTC so both sides of the key comparison hash equally.
+        if isinstance(v, datetime) and is_naive(v):
+            v = make_aware(v, _dt.timezone.utc)
+        extras.append(v)
+    return (sv, event_date) + tuple(extras)
 
 
 class _UpsertPlan:
@@ -5288,7 +5298,16 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances):
             f'{date_field}__in': {k[1] for k in keyed},
         }).order_by(pk_field).values_list(*columns)
         for row in rows:
-            key = (row[2], row[3]) + tuple(row[4:])
+            # Normalise DB-side datetimes the same way _upsert_key does for
+            # in-memory instances: naive → UTC-aware. In practice PostgreSQL
+            # with USE_TZ=True already returns aware values, but the explicit
+            # normalisation keeps the two sides provably symmetric.
+            tail = []
+            for v in row[4:]:
+                if isinstance(v, datetime) and is_naive(v):
+                    v = make_aware(v, _dt.timezone.utc)
+                tail.append(v)
+            key = (row[2], row[3]) + tuple(tail)
             if key in existing:
                 existing[key].append(row[0])
             else:
@@ -5400,21 +5419,72 @@ class _OmopDeferRefreshMixin:
     Derivation cost grows with the rows a person already holds, so on a
     bulk loaded patient one PATCH or DELETE costs 12-32s. A caller that defers
     has to call the refresh action afterwards.
+
+    When *not* deferring, the mixin suppresses the signal-driven refresh and
+    calls ``refresh_patient_record`` explicitly so that failures propagate as
+    a 502 instead of being swallowed by the signal handler's ``try/except``.
     """
 
     def update(self, request: Request, *args: Any, **kwargs: Any) -> Response:
-        if not _skip_refresh_requested(request):
-            return super().update(request, *args, **kwargs)
         from omop_core.signals import suppress_patient_record_refresh
+
+        if _skip_refresh_requested(request):
+            with suppress_patient_record_refresh():
+                return super().update(request, *args, **kwargs)
+
+        # Suppress signal-driven refresh and call it explicitly so failures
+        # surface as an HTTP error instead of being silently swallowed.
+        instance = self.get_object()
+        person = instance.person
         with suppress_patient_record_refresh():
-            return super().update(request, *args, **kwargs)
+            response = super().update(request, *args, **kwargs)
+        try:
+            refresh_patient_record(person)
+        except Exception:
+            logger.exception(
+                'PatientRecord refresh failed after PATCH on %s pk=%s '
+                'for person_id=%s',
+                type(instance).__name__, instance.pk, person.person_id,
+            )
+            return Response(
+                {'detail': 'The clinical row was updated but the '
+                 'PatientRecord projection failed to refresh. '
+                 'Retry POST /api/v1/patient-records/'
+                 f'{person.person_id}/refresh/ to reconcile.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return response
 
     def destroy(self, request: Request, *args: Any, **kwargs: Any) -> Response:
-        if not _skip_refresh_requested(request):
-            return super().destroy(request, *args, **kwargs)
         from omop_core.signals import suppress_patient_record_refresh
+
+        if _skip_refresh_requested(request):
+            with suppress_patient_record_refresh():
+                return super().destroy(request, *args, **kwargs)
+
+        # Capture person before the row is deleted.
+        instance = self.get_object()
+        person = instance.person
+        instance_type = type(instance).__name__
+        instance_pk = instance.pk
         with suppress_patient_record_refresh():
-            return super().destroy(request, *args, **kwargs)
+            response = super().destroy(request, *args, **kwargs)
+        try:
+            refresh_patient_record(person)
+        except Exception:
+            logger.exception(
+                'PatientRecord refresh failed after DELETE on %s pk=%s '
+                'for person_id=%s',
+                instance_type, instance_pk, person.person_id,
+            )
+            return Response(
+                {'detail': 'The clinical row was deleted but the '
+                 'PatientRecord projection failed to refresh. '
+                 'Retry POST /api/v1/patient-records/'
+                 f'{person.person_id}/refresh/ to reconcile.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return response
 
 
 class _OmopBulkCreateMixin:
