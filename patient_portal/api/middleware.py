@@ -50,6 +50,14 @@ _AUDITED_METHODS = frozenset({'GET', 'POST', 'PUT', 'PATCH', 'DELETE'})
 # admin (privileged/security-config actions — TI.2.1). Static assets, the SPA
 # shell, and health checks are skipped.
 _AUDITED_PREFIXES = ('/api/', '/o/', '/admin/')
+_AUDIT_CLIENT_ID_MAX_LENGTH = 255
+
+
+def _bounded_text(value, max_length):
+    if value is None:
+        return None
+    text = str(value)
+    return text[:max_length] or None
 
 
 def _classify_event_type(request):
@@ -106,8 +114,14 @@ def _get_client_id(request):
     # django-oauth-toolkit AccessToken has an `application` FK
     app = getattr(token, 'application', None)
     if app:
-        return app.client_id
-    return str(token)
+        return _bounded_text(app.client_id, _AUDIT_CLIENT_ID_MAX_LENGTH)
+    from patient_portal.api.providers.base import TokenClaims
+    if isinstance(token, TokenClaims):
+        return _bounded_text(
+            f'{token.issuer}|{token.sub}',
+            _AUDIT_CLIENT_ID_MAX_LENGTH,
+        )
+    return _bounded_text(token, _AUDIT_CLIENT_ID_MAX_LENGTH)
 
 
 def _get_resource_id(request):
@@ -198,7 +212,9 @@ class AuditLogMiddleware:
             status_code=entry['status_code'],
             user_id=entry['user_id'],
             user_email=(entry['user_email'] or '')[:254] or None,
-            client_id=entry['client_id'],
+            client_id=_bounded_text(
+                entry['client_id'], _AUDIT_CLIENT_ID_MAX_LENGTH,
+            ),
             resource_id=entry['resource_id'],
             ip_address=(entry['ip_address'] or '')[:64] or None,
             duration_ms=entry['duration_ms'],
