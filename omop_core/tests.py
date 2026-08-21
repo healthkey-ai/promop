@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from django.core.management import call_command
+from omop_core.concept_fixtures import seed_test_concepts
 from django.core.management.base import CommandError
 from django.db import IntegrityError, ProgrammingError, connection, transaction
 from django.test import TestCase
@@ -79,7 +80,7 @@ class _AllowsDuplicateConceptCodes(TestCase):
             raise NotImplementedError('PERSON_ID is required')
         _allow_duplicate_concept_codes()
         from omop_core.models import Person
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         cls.person = Person.objects.create(person_id=cls.PERSON_ID, year_of_birth=1970)
 
 
@@ -1377,7 +1378,7 @@ class SeedOmopConceptsTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         from django.core.management import call_command
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
 
     def _concept(self, concept_id):
         return Concept.objects.filter(concept_id=concept_id).first()
@@ -1416,7 +1417,7 @@ class SeedOmopConceptsTest(TestCase):
 
     def test_seed_is_idempotent(self):
         from django.core.management import call_command
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         self.assertEqual(Concept.objects.filter(concept_id=8532).count(), 1,
                          'Duplicate concept created on second seed_omop_concepts run')
 
@@ -2338,7 +2339,7 @@ class WearableConceptMappingTest(TestCase):
     """
 
     def _seed_rows(self):
-        from omop_core.management.commands.seed_omop_concepts import _CONCEPTS
+        from omop_core.concept_fixtures import _CONCEPTS
         return _CONCEPTS
 
     def test_every_wearable_metric_is_seeded(self):
@@ -2481,7 +2482,7 @@ class WearableConceptMappingTest(TestCase):
 
     def test_local_mints_are_quarantined(self):
         """source='HealthKey' <-> HK-* vocabulary <-> concept_id >= 2e9."""
-        from omop_core.management.commands.seed_omop_concepts import (
+        from omop_core.concept_fixtures import (
             _assert_local_mint_convention, LOCAL_CONCEPT_ID_MIN,
         )
         _assert_local_mint_convention()  # raises CommandError on violation
@@ -2542,7 +2543,7 @@ class PurgeBrokenWearableRowsCommandTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         from omop_core.models import Person
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         cls.person = Person.objects.create(person_id=770001, year_of_birth=1970)
 
     def setUp(self):
@@ -2722,7 +2723,7 @@ class ConceptZeroTest(TestCase):
 
     @classmethod
     def setUpTestData(cls):
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
 
     def test_seeded_with_omop_specified_metadata(self):
         from omop_core.models import Concept
@@ -2795,7 +2796,7 @@ class BackfillConceptSourceCommandTest(TestCase):
 
     @classmethod
     def setUpTestData(cls):
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
 
     def _concept(self, concept_id, code, vocabulary_id='LOINC', source=None):
         from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
@@ -2893,7 +2894,7 @@ class RemapLocalDrugConceptsCommandTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         from omop_core.models import Person
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         cls.person = Person.objects.create(person_id=780001, year_of_birth=1970)
 
     def _concept(self, concept_id, code, name, vocabulary_id, standard=None):
@@ -3637,7 +3638,7 @@ class ConceptIdIsNotAConceptCodeTest(TestCase):
     """
 
     def test_no_seeded_concept_uses_its_code_as_its_id(self):
-        from omop_core.management.commands.seed_omop_concepts import _CONCEPTS
+        from omop_core.concept_fixtures import _CONCEPTS
 
         offenders = [
             (r['concept_id'], r['concept_code']) for r in _CONCEPTS
@@ -3692,7 +3693,7 @@ class ConceptIdIsNotAConceptCodeTest(TestCase):
         """The database constraint now blocks the shadow rows #415 cleaned up."""
         from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
 
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         vocab = Vocabulary.objects.get(vocabulary_id='SNOMED')
         domain = Domain.objects.get(domain_id='Observation')
         cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
@@ -3709,7 +3710,7 @@ class ConceptIdIsNotAConceptCodeTest(TestCase):
         """Invalid/retired duplicates cannot share the same vocabulary code."""
         from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
 
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         vocab = Vocabulary.objects.get(vocabulary_id='SNOMED')
         domain = Domain.objects.get(domain_id='Observation')
         cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
@@ -3765,7 +3766,7 @@ class RemapLocalDrugConceptsCommandTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         from omop_core.models import Person
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         cls.person = Person.objects.create(person_id=780001, year_of_birth=1970)
 
     def _concept(self, concept_id, code, name, vocabulary_id, standard=None):

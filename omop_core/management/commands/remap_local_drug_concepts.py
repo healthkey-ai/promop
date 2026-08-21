@@ -25,7 +25,7 @@ Pointing drug_concept_id at HemOnc would swap one non-standard concept for
 another.
 
 The mapping below is a reviewed constant, NOT resolved by name at runtime.
-Name matching is how seed_omop_concepts came to map LOINC 10839-9 (Troponin I)
+Name matching is how the retired concept seeder came to map LOINC 10839-9 (Troponin I)
 to a concept named Troponin T. Each Standard target here was taken from the
 vocabulary's own 'Maps to' edge, which is also what settles the "Ado-" question:
 HemOnc "Trastuzumab emtansine" maps to a Standard concept named

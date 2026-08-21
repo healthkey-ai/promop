@@ -65,7 +65,9 @@ class TestTheConstant:
         offenders = []
         for rel in ('patient_portal/api/views.py',
                     'omop_core/services/mappings.py',
-                    'omop_core/management/commands/seed_omop_concepts.py'):
+                    # The retired seeder's data, now a test-only fixture. It is
+                    # where the placeholder was minted, so still worth watching.
+                    'omop_core/concept_fixtures.py'):
             tree = ast.parse((root / rel).read_text())
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Constant)

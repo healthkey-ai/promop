@@ -76,7 +76,7 @@ version of this map resolved to BMI and body-fat-percentage concepts, and three 
 LOINC at all. That defect is fixed; the section below explains the rules that keep it fixed.
 
 `spo2` (59408-5 / 40762499) and `body_mass` (29463-7 / 3025315) are seeded in the **vitals** block
-of `seed_omop_concepts`, not the wearable block. They must not be seeded twice — a second row for
+of `omop_core/concept_fixtures.py`, not the wearable block. They must not be seeded twice — a second row for
 the same `(vocabulary_id, concept_code)` is exactly the duplication the seeding rules exist to
 prevent.
 
@@ -110,14 +110,14 @@ domain routed it to.
 Where a metric has no LOINC, the local mint **must** follow the project's quarantine convention
 (`omop_core/models.py:566`) — and all five wearable mints do:
 
-- `vocabulary_id='HK-Wearable'` (declared in `seed_omop_concepts._VOCABULARIES`)
+- `vocabulary_id='HK-Wearable'` (declared in `concept_fixtures._VOCABULARIES`, and by migration 0143 for real deployments)
 - `source='HealthKey'`
 - an `HK-*`-shaped `concept_code`
 - `concept_id >= 2,000,000,000` — OHDSI reserves that range for locally-authored concepts, and
   Athena never allocates there
 
 The four ids are allocated contiguously from `_HK_WEARABLE_ID_BASE = 2_029_606_350`
-(`seed_omop_concepts.py:140`), continuing the existing `HK-Labs` block. New wearable mints should
+(`omop_core/concept_fixtures.py`), continuing the existing `HK-Labs` block. New wearable mints should
 continue upward from there.
 
 **Never mint a real LOINC code under `vocabulary_id='LOINC'`.** Doing so creates a duplicate

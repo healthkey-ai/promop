@@ -278,7 +278,7 @@ def _resolve_concept(vocabulary_id, concept_code, concept_name):
     if not candidates:
         raise CommandError(
             f'Concept ({vocabulary_id}, {concept_code}) — {concept_name} — not found. '
-            f'Run seed_omop_concepts, or load the full vocabulary with '
+            f'Run load_athena_vocabularies --concepts-only, or the full vocabulary with '
             f'load_athena_vocabularies. This command no longer mints OBSERVATION '
             f'concepts: creating one at concept_id=int(code) produced duplicates '
             f'shadowing the genuine concepts (#415). (Regimen concepts are '
@@ -531,7 +531,7 @@ class Command(BaseCommand):
                 if concept is None:
                     raise CommandError(
                         f'Required wearable concept {concept_code!r} ({metric_key}) '
-                        f'not found in Concept table. Run seed_omop_concepts first.'
+                        f'not found in Concept table. Run load_athena_vocabularies --concepts-only first.'
                 )
                 wearable_concepts[metric_key] = concept
 
@@ -765,7 +765,7 @@ class Command(BaseCommand):
                     raise CommandError(
                         f'Concept ({vocabulary_id}, {concept_code}) not found. This '
                         f'command does not create observation concepts; seed them with '
-                        f'seed_omop_concepts or load the full vocabulary.'
+                        f'load_athena_vocabularies --concepts-only, or the full vocabulary load.'
                     )
                 # Dry run with the vocabulary absent. Nothing would be created —
                 # this command no longer mints — so report the observation as

@@ -153,7 +153,7 @@ class Command(BaseCommand):
         if type_concept is None:
             raise CommandError(
                 f'Measurement type concept {CONCEPT_LAB_TYPE} is missing. '
-                f'Run seed_omop_concepts first.')
+                f'Run load_athena_vocabularies --concepts-only first.')
 
         records = self._select_records(options)
         self.stdout.write(f'{len(records)} patient(s) in scope.\n')
@@ -214,7 +214,7 @@ class Command(BaseCommand):
         if any(c is None for c in concepts.values()):
             raise CommandError(
                 f'Generic lab concept {CONCEPT_GENERIC_LAB} is missing and some '
-                f'LOINC concepts are unresolved. Run seed_omop_concepts first.')
+                f'LOINC concepts are unresolved. Run load_athena_vocabularies --concepts-only first.')
         return concepts, fallbacks
 
     def _select_records(self, options):

@@ -85,7 +85,7 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
   DEBUG=True SECRET_KEY=dev-only-secret \
-  python manage.py seed_omop_concepts
+  python manage.py load_athena_vocabularies --path /path/to/athena --concepts-only
 ```
 
 This is the minimum viable vocabulary for development and testing. If you later load the full Athena vocabulary, the seed command is safe to re-run — it uses `get_or_create` and won't clobber existing rows.

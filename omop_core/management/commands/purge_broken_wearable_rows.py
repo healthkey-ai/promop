@@ -47,7 +47,7 @@ from omop_core.signals import suppress_patient_record_refresh
 
 logger = logging.getLogger(__name__)
 
-# Retired local mints from seed_omop_concepts, pre-#413.
+# Retired local mints from the retired concept seeder, pre-#413.
 RETIRED_MINT_BY_METRIC = {
     'steps':            9001019,
     'active_minutes':   9001020,
