@@ -4865,3 +4865,56 @@ class HealthKeyConceptSurvivesReloadTest(TestCase):
         self.assertEqual(len(saved), pre_existing)
         saved_ids = {r[0] for r in saved}
         self.assertNotIn(100, saved_ids)
+
+
+# ---------------------------------------------------------------------------
+# TEST — _get_social_data field mapping (#524)
+# ---------------------------------------------------------------------------
+
+class SocialDataFieldMappingTest(TestCase):
+    """Verify _get_social_data writes to the correct PatientRecord fields."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.test_utils import ensure_test_concept_zero
+        ensure_test_concept_zero()
+        vocab, dom_cond, dom_meas, dom_drug, dom_type, dom_obs, cc = _make_vocab()
+        cls.person = Person.objects.create(person_id=88524, year_of_birth=1980)
+        # SNOMED employment concept
+        cls.employment_concept = _concept(
+            900524, 'Employed', dom_obs, vocab, cc, code='224362002',
+        )
+        # SNOMED insurance concept
+        cls.insurance_concept = _concept(
+            900525, 'Health insurance', dom_obs, vocab, cc, code='408729009',
+        )
+
+    def test_employment_maps_to_employment_status(self):
+        """Employment observations must write to employment_status, not no_pre_existing_conditions."""
+        Observation.objects.create(
+            observation_id=880001,
+            person=self.person,
+            observation_concept=self.employment_concept,
+            observation_date=date(2025, 1, 1),
+            observation_type_concept_id=0,
+            value_as_string='Full-time',
+        )
+        from omop_core.services.patient_record_service import _get_social_data
+        data = _get_social_data(self.person)
+        self.assertEqual(data.get('employment_status'), 'Full-time')
+        self.assertNotIn('no_pre_existing_conditions', data)
+
+    def test_insurance_maps_to_insurance_type(self):
+        """Insurance observations must write to insurance_type, not concomitant_medication_details."""
+        Observation.objects.create(
+            observation_id=880002,
+            person=self.person,
+            observation_concept=self.insurance_concept,
+            observation_date=date(2025, 1, 1),
+            observation_type_concept_id=0,
+            value_as_string='Private',
+        )
+        from omop_core.services.patient_record_service import _get_social_data
+        data = _get_social_data(self.person)
+        self.assertEqual(data.get('insurance_type'), 'Private')
+        self.assertNotIn('concomitant_medication_details', data)
