@@ -773,7 +773,7 @@ def _get_demographics(person: Person, snapshot: OmopSnapshot = None) -> dict:
 
 def _get_location_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
-    snapshot = snapshot or _build_snapshot(person)
+    # No snapshot usage — Location is a Person FK, not an OMOP scan.
 
     if person.location_id:
         try:
@@ -1575,8 +1575,10 @@ def _apply_treatment_assertions(data, person, episodes, snapshot: OmopSnapshot =
 
     assertions = []  # (date, line, kind, value)
     pattern = re.compile(r'^LOT-(\d+)-(intent|discontinuation)$')
-    # Use snapshot observations (already non-erroneous, ordered -date -id)
-    obs_list = snapshot.observations if snapshot else list(
+    # Snapshot observations are ordered -date -id (descending).  The dict
+    # below uses last-write-wins, so iterate in ascending order so the
+    # latest observation wins.
+    obs_list = list(reversed(snapshot.observations)) if snapshot else list(
         Observation.objects.filter(person=person, is_erroneous=False)
         .select_related('value_as_concept').order_by('observation_date', 'observation_id')
     )
@@ -3092,10 +3094,11 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     if had_bcl2:
         data['bcl2_inhibitor_refractory'] = has_progression
 
-    # ALC doubling time — filter from snapshot by concept code 731-0
+    # ALC doubling time — filter from snapshot by LOINC concept code 731-0
     alc_rows = sorted(
         (m for m in measurements
          if getattr(m.measurement_concept, 'concept_code', None) == '731-0'
+         and getattr(getattr(m.measurement_concept, 'vocabulary', None), 'vocabulary_id', None) == 'LOINC'
          and m.value_as_number is not None),
         key=lambda m: m.measurement_date or date.min,
     )
