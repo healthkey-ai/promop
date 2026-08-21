@@ -31,6 +31,7 @@ Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? S
 - OpenAPI schema: `GET /api/v1/schema/`
 - Full API surface reference: **[API_SURFACE.md](API_SURFACE.md)**
 - LOINC / SNOMED / HemOnc concept mapping: **[docs/concept-mapping.md](docs/concept-mapping.md)**
+- Required Athena vocabulary download and selection scope: **[docs/vocabularies.md](docs/vocabularies.md)**
 
 ---
 
