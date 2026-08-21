@@ -33,6 +33,11 @@ VOCAB_SCOPE = frozenset({
     'OMOP Genomic', 'ICDO3', 'NCIt',
     # Oncology staging/grading modifiers + cancer registry
     'Cancer Modifier', 'NAACCR',
+    # OMOP-generated metadata. 'Episode' carries the Treatment Regimen concept the
+    # line-of-therapy episodes point at; 'CDM' carries the field concepts
+    # EpisodeEvent references. Both were hand-seeded until the seeder was retired —
+    # Athena has them, with the same ids, names and codes.
+    'Episode', 'CDM',
     # Demographics. Person.gender_concept / race_concept / ethnicity_concept are
     # standard OMOP FKs, and derivation reads the concept before falling back to
     # the source value — so without these loaded a demographic correction cannot
