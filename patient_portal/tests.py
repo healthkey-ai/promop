@@ -4316,6 +4316,54 @@ class AuditLogMiddlewareTest(_SmartBase):
         self.assertEqual(len(logs), 1)
         self.assertIsNone(logs[0]['client_id'])
 
+    def test_partner_token_claims_client_id_is_bounded_issuer_subject(self):
+        """TokenClaims must not be stringified into the audit client_id."""
+        from django.test import RequestFactory
+        from patient_portal.api.middleware import _get_client_id
+        from patient_portal.api.providers.base import TokenClaims
+
+        claims = TokenClaims(
+            issuer='https://securetoken.google.com/proj',
+            sub='uid-123',
+            email='pat@example.com',
+            name=None,
+            raw={'nested': 'x' * 1000},
+        )
+        request = RequestFactory().get('/api/v1/user/')
+        request.auth = claims
+
+        client_id = _get_client_id(request)
+
+        self.assertEqual(client_id, 'https://securetoken.google.com/proj|uid-123')
+        self.assertLessEqual(len(client_id), 255)
+        self.assertNotIn('nested', client_id)
+        self.assertNotIn('TokenClaims', client_id)
+
+    def test_audit_persistence_truncates_long_partner_client_id(self):
+        from django.http import HttpResponse
+        from django.test import RequestFactory
+        from patient_portal.api.middleware import AuditLogMiddleware
+        from patient_portal.api.providers.base import TokenClaims
+        from patient_portal.models import AuditEvent
+
+        claims = TokenClaims(
+            issuer='https://issuer.example/' + 'i' * 300,
+            sub='subject-' + 's' * 300,
+            email='pat@example.com',
+            name=None,
+            raw={'large': 'x' * 1000},
+        )
+        request = RequestFactory().get('/api/v1/user/')
+        request.user = self.foundation_user
+        request.auth = claims
+
+        AuditLogMiddleware(lambda _request: HttpResponse(status=200))(request)
+
+        event = AuditEvent.objects.filter(path='/api/v1/user/').latest('id')
+        self.assertLessEqual(len(event.client_id), 255)
+        self.assertTrue(event.client_id.startswith('https://issuer.example/'))
+        self.assertNotIn('large', event.client_id)
+
     # ------------------------------------------------------------------
     # Reliability: logging failure must not block the response
     # ------------------------------------------------------------------
