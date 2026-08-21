@@ -360,6 +360,77 @@ def _extract_provenance(request):
     return source, source_user_id, modification_reason
 
 
+def _echoed_unchanged_fields(patient_info, patch_data):
+    """Keys whose submitted value already equals what GET renders for this record.
+
+    The React patient editor holds the whole GET response as its edit buffer and
+    PATCHes all of it on every autosave, so each save carries ~270 OMOP-mapped and
+    computed fields the user never touched, each one bearing the value the server
+    itself just rendered. Judging the read-only guards on *presence* therefore
+    rejects every ordinary edit: change one writable field and the untouched
+    derived fields riding along trip a 405.
+
+    Judging on *change* keeps the contract intact — an attempt to move a derived
+    value is still refused — while letting an echo through as the no-op it is.
+    Comparison is against the serialized representation rather than the model
+    attributes, because that is the exact form the client received and is sending
+    back; comparing to model attributes would read '12.5' != Decimal('12.5') and
+    call an untouched field an edit.
+    """
+    if not patch_data:
+        return set()
+    rendered = PatientRecordSerializer(patient_info).data
+    return {k for k, v in patch_data.items() if k in rendered and rendered[k] == v}
+
+
+def _rendered_patient_name(person):
+    """The display name PatientRecordSerializer.get_patient_name would return.
+
+    Kept in step with the serializer deliberately: _apply_patient_name compares
+    against it to recognise the server's own value coming back.
+    """
+    full_name = f"{person.given_name or ''} {person.family_name or ''}".strip()
+    return full_name or f"Patient {person.person_id}"
+
+
+def _pop_patient_name(data):
+    """Split patient_name out of a PATCH body, returning (name_or_None, rest).
+
+    patient_name is a SerializerMethodField over Person.given_name/family_name —
+    an OMOP column, not a PatientRecord one — so it can only be applied by hand.
+    Left in the body it is not merely ignored: it is not projection-owned, so it
+    trips the writable-fields check and 405s the whole request.
+    """
+    if 'patient_name' not in data:
+        return None, data
+    return data['patient_name'], {k: v for k, v in data.items() if k != 'patient_name'}
+
+
+def _apply_patient_name(person, name):
+    """Write a display name onto the OMOP Person row. Returns True if it changed.
+
+    The name lives on Person, never on PatientRecord: the projection is a derived
+    read model and its patient_name is rendered from these two columns.
+
+    No-ops on the value the serializer would already render. The React client
+    PATCHes back the whole GET response, so patient_name arrives on every autosave
+    carrying the server's own value. Writing that back is pointless for a named
+    person and destructive for an unnamed one, because the rendered value is then
+    the synthesised "Patient {id}", which would split into given_name='Patient',
+    family_name='<id>'.
+    """
+    if name is None:
+        return False
+    name = str(name).strip()
+    if not name or name == _rendered_patient_name(person):
+        return False
+    parts = name.split(None, 1)
+    person.given_name = parts[0]
+    person.family_name = parts[1] if len(parts) > 1 else ''
+    person.save(update_fields=['given_name', 'family_name'])
+    return True
+
+
 def _record_provenance(record, source, source_user_id, target_patient_id=None, modification_reason=None, organization=None):
     """Create or update a ProvenanceRecord pointing at any model instance."""
     ProvenanceRecord.objects.update_or_create(
@@ -690,7 +761,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-        mapped_fields = sorted(set(request.data) & PATIENT_RECORD_OMOP_MAPPED_FIELDS)
+        # patient_name targets Person, not PatientRecord, so it is handled by hand
+        # here exactly as /patient-info/me/ handles it — through the same pair of
+        # helpers, so the two routes cannot drift apart again. This is the route
+        # the provider UI PATCHes, and leaving the key in the body would 405 the
+        # request below as a non-projection-owned field.
+        patient_name, patch_data = _pop_patient_name(request.data)
+
+        echoed = _echoed_unchanged_fields(patient_info, patch_data)
+        mapped_fields = sorted((set(patch_data) & PATIENT_RECORD_OMOP_MAPPED_FIELDS) - echoed)
         if mapped_fields:
             return Response(
                 {
@@ -703,16 +782,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_405_METHOD_NOT_ALLOWED,
             )
 
-        serializer = PatientRecordSerializer(patient_info, data=request.data, partial=True)
+        serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
         serializer.is_valid(raise_exception=True)
 
         # DRF intentionally discards serializer read-only fields. Surface those
         # attempts instead of returning success for a no-op, so ownership
-        # boundaries are visible to API consumers.
+        # boundaries are visible to API consumers — but only when the value is
+        # actually being moved, not when the client echoes back what it read.
         writable_fields = {
             name for name, field in serializer.fields.items() if not field.read_only
         }
-        unsupported_fields = sorted(set(request.data) - writable_fields)
+        unsupported_fields = sorted(set(patch_data) - writable_fields - echoed)
         if unsupported_fields:
             return Response(
                 {'detail': 'Only projection-owned PatientRecord fields are writable.', 'fields': unsupported_fields},
@@ -725,10 +805,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         previous_values = {
             field: previous_value(patient_info, field)
-            for field in request.data
+            for field in patch_data
             if hasattr(patient_info, field)
         }
         with transaction.atomic():
+            _apply_patient_name(person, patient_name)
             serializer.save()
             _write_record_revisions(patient_info, previous_values, request)
 
@@ -981,8 +1062,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 'patient_name': full_name,
             })
 
-        patch_data = {key: value for key, value in request.data.items() if key != 'patient_name'}
-        mapped_fields = sorted(set(patch_data) & PATIENT_RECORD_OMOP_MAPPED_FIELDS)
+        patient_name, patch_data = _pop_patient_name(request.data)
+        echoed = _echoed_unchanged_fields(patient_info, patch_data)
+        mapped_fields = sorted((set(patch_data) & PATIENT_RECORD_OMOP_MAPPED_FIELDS) - echoed)
         if mapped_fields:
             return Response(
                 {
@@ -1000,7 +1082,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         writable_fields = {
             name for name, field in serializer.fields.items() if not field.read_only
         }
-        unsupported_fields = sorted(set(patch_data) - writable_fields)
+        unsupported_fields = sorted(set(patch_data) - writable_fields - echoed)
         if unsupported_fields:
             return Response(
                 {'detail': 'Only projection-owned PatientRecord fields are writable.', 'fields': unsupported_fields},
@@ -1023,11 +1105,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if hasattr(patient_info, field)
         }
         with transaction.atomic():
-            if 'patient_name' in request.data:
-                parts = str(request.data['patient_name']).strip().split(None, 1)
-                person.given_name = parts[0] if parts else ''
-                person.family_name = parts[1] if len(parts) > 1 else ''
-                person.save(update_fields=['given_name', 'family_name'])
+            _apply_patient_name(person, patient_name)
             serializer.save()
             _write_record_revisions(patient_info, previous_values, request)
 
