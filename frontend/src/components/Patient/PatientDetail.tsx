@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, Download } from "lucide-react";
 import api from "@/api/axios";
+import { fetchWritableFields, type FieldDescriptors } from "@/hooks/useWritableFields";
+import { writeClinicalFact } from "@/api/clinicalFacts";
 import { getActiveBranding } from "@/config/branding";
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -233,6 +235,10 @@ export default function PatientDetail({
   const [saveErrorMsg, setSaveErrorMsg] = useState<string | null>(null);
 
   const [patientInfo, setPatientInfo] = useState<Record<string, unknown> | null>(null);
+  // Server-side baseline for change detection. A clinical edit is only written
+  // when its value actually moved: the editor holds the whole record, so without
+  // this every autosave would rewrite every lab as a fresh dated result.
+  const patientInfoRef = useRef<Record<string, unknown> | null>(null);
    
   const [editedInfo, setEditedInfo] = useState<Record<string, unknown>>({});
   const [patientName, setPatientName] = useState("");
@@ -292,6 +298,7 @@ export default function PatientDetail({
         }
 
         setPatientInfo(d);
+        patientInfoRef.current = { ...d };
         setEditedInfo(d);
 
         const user = res.data.user;
@@ -330,9 +337,37 @@ export default function PatientDetail({
       // it is harmful: the rendered value is the synthesised "Patient 3542".
       const { patient_name: _echoed, ...info } = data.info as Record<string, unknown>;
       const renamed = !!data.name && data.name !== patientNameRef.current;
+
+      // A clinical field is not a column on this record — it is the projection of
+      // an OMOP fact, and PatientRecord owns no writable clinical column. Writing
+      // one means writing the fact and letting derivation follow, so those edits
+      // leave through writeClinicalFact rather than riding along in the PATCH,
+      // which would refuse them.
+      const descriptors: FieldDescriptors = await fetchWritableFields().catch(
+        // Fail closed: with no descriptor nothing is treated as writable, so the
+        // save degrades to the projection-only path instead of guessing.
+        () => ({} as FieldDescriptors),
+      );
+      const baseline = patientInfoRef.current ?? {};
+      const clinicalEdits = Object.keys(info).filter(
+        (f) => descriptors[f]?.writable && info[f] !== baseline[f],
+      );
+      for (const field of clinicalEdits) {
+        await writeClinicalFact(personId, field, descriptors[field], info[field]);
+        // Advance the baseline so a later keystroke elsewhere does not re-write
+        // this same value as another result.
+        if (patientInfoRef.current) patientInfoRef.current[field] = info[field];
+      }
+
+      // Everything the projection still owns goes the old way. Clinical keys are
+      // dropped: they are read-only there, and an unchanged echo would pass but a
+      // changed one would 405 the whole request.
+      const projectionInfo = Object.fromEntries(
+        Object.entries(info).filter(([f]) => !descriptors[f]?.writable),
+      );
       await api.patch(
         `/patient-info/${personId}/`,
-        renamed ? { ...info, patient_name: data.name } : info,
+        renamed ? { ...projectionInfo, patient_name: data.name } : projectionInfo,
       );
       if (seq === saveSeqRef.current) {
         // Header name is state set once on load, so without this the rename
