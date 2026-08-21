@@ -17929,6 +17929,94 @@ class BulkOmopUpsertTest(TestCase):
         # keep using ids positionally without knowing whether it inserted.
         self.assertEqual(second['ids'], first['ids'])
 
+    def test_reposting_single_dict_uses_same_upsert_identity(self):
+        """A single-row retry converges on the same row instead of duplicating."""
+        row = self._rows(1)[0]
+
+        first = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            row,
+            format='json',
+        )
+        second = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            row,
+            format='json',
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.data)
+        self.assertEqual(second.status_code, status.HTTP_200_OK, second.data)
+        self.assertEqual(first.data['measurement_id'], second.data['measurement_id'])
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(),
+            1,
+        )
+        self.assertNotIn('created', first.data)
+
+    def test_single_dict_and_one_element_list_resolve_to_same_row(self):
+        """Dict and one-element list POSTs share the same natural-key identity."""
+        row = self._rows(1, start_day=20)[0]
+
+        single = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            row,
+            format='json',
+        )
+        one_element_list = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            [row],
+            format='json',
+        )
+
+        self.assertEqual(single.status_code, status.HTTP_201_CREATED, single.data)
+        self.assertEqual(
+            one_element_list.status_code,
+            status.HTTP_201_CREATED,
+            one_element_list.data,
+        )
+        self.assertEqual(one_element_list.data['created'], 0)
+        self.assertEqual(one_element_list.data['ids'], [single.data['measurement_id']])
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(),
+            1,
+        )
+
+    def test_reposting_single_dict_writes_no_extra_provenance(self):
+        """Only the first inserted single row gets provenance attribution."""
+        from django.contrib.contenttypes.models import ContentType
+        from omop_core.models import ProvenanceRecord
+
+        row = self._rows(1, start_day=40)[0]
+        headers = {
+            'HTTP_X_PROVENANCE_SOURCE': 'EHR_SYNC',
+            'HTTP_X_PROVENANCE_USER_ID': 'etl-retry-1',
+        }
+        first = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            row,
+            format='json',
+            **headers,
+        )
+        second = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            row,
+            format='json',
+            **headers,
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.data)
+        self.assertEqual(second.status_code, status.HTTP_200_OK, second.data)
+        ct = ContentType.objects.get_for_model(Measurement)
+        self.assertEqual(
+            ProvenanceRecord.objects.filter(
+                content_type=ct,
+                object_id=first.data['measurement_id'],
+                source='EHR_SYNC',
+                source_user_id='etl-retry-1',
+            ).count(),
+            1,
+        )
+
     def test_changed_concept_updates_in_place_instead_of_duplicating(self):
         """A vocabulary load upgrading 'No matching concept' must not strand a
         duplicate — the stored row's concept is corrected in place."""
