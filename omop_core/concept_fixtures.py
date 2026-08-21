@@ -1,25 +1,27 @@
-"""
-Seed the minimal set of OMOP CDM concepts required for the mCODE FHIR import
-pipeline to write Measurements, ConditionOccurrences, and DrugExposures and for
-refresh_patient_record to derive PatientRecord fields from them.
+"""OMOP concept rows for tests and local development. **Not a production path.**
 
-This is a dev/test shortcut.  Production environments should load concepts via
-the full load_athena_vocabularies command instead.
+This was the ``seed_omop_concepts`` management command. It is no longer one, and
+that is the point: 97 of its 99 concepts are ones ``load_athena_vocabularies``
+already supplies, and the remaining two (``32531`` Treatment Regimen, ``1147094``
+``drug_exposure.drug_exposure_id``) are now in ``VOCAB_SCOPE``. Offering it as an
+operator command made it a competing source of truth for concepts, which is how a
+locally invented concept ends up occupying an id the vocabulary owns — the failure
+that put 19 staging patients on a haemoglobin of 1.0 g/dL (#599).
 
-Usage:
-    DATABASE_URL=... python manage.py seed_omop_concepts
+Tests still need concepts without a 4.6 GB Athena bundle, so the data stays, as a
+fixture that only test code imports. Deployments load the real vocabulary; see
+CHANGELOG 1.2.
+
+Locally-minted ``HK-Wearable`` concepts — the one thing Athena cannot supply —
+are installed by migration 0143, which runs on every deploy. They are duplicated
+here so a test database has them too.
 """
 from datetime import date
 
-from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
 
-
-# ---------------------------------------------------------------------------
-# Minimal vocabularies, domains, and concept-classes required by the rows below
-# ---------------------------------------------------------------------------
 
 _VOCABULARIES = [
     dict(vocabulary_id='Type Concept',
@@ -479,127 +481,51 @@ def _assert_local_mint_convention():
             + '\n  '.join(problems))
 
 
-class Command(BaseCommand):
-    help = (
-        'Seed the minimal OMOP concept rows required for mCODE FHIR import. '
-        'Use load_athena_vocabularies for a full production vocabulary load.'
-    )
+def seed_test_concepts(stdout=None):
+    """Create the fixture concepts. Idempotent; safe on a partially seeded DB.
 
-    def add_arguments(self, parser):
-        parser.add_argument(
-            '--dry-run', action='store_true',
-            help='Print what would be seeded without writing to the DB.',
-        )
+    Returns a summary dict. Skips any row whose (vocabulary_id, concept_code) is
+    already held by a *different* concept_id rather than inserting a second one:
+    get_or_create keys on concept_id alone, so without this check it would
+    manufacture the very shadow concept this data exists to avoid (#415).
+    """
+    _assert_local_mint_convention()
 
-    def handle(self, *args, **options):
-        dry_run = options['dry_run']
+    created = {'vocabularies': 0, 'domains': 0, 'concept_classes': 0,
+               'concepts': 0, 'existing': 0, 'skipped': 0}
 
-        _assert_local_mint_convention()
+    with transaction.atomic():
+        for v in _VOCABULARIES:
+            _, made = Vocabulary.objects.get_or_create(
+                vocabulary_id=v['vocabulary_id'], defaults=v)
+            created['vocabularies'] += bool(made)
 
-        if dry_run:
-            self.stdout.write(self.style.WARNING('Dry-run mode — no changes will be written.\n'))
+        for d in _DOMAINS:
+            _, made = Domain.objects.get_or_create(
+                domain_id=d['domain_id'], defaults=d)
+            created['domains'] += bool(made)
 
-        with transaction.atomic():
-            # Vocabularies
-            v_created = 0
-            for v in _VOCABULARIES:
-                if dry_run:
-                    if not Vocabulary.objects.filter(vocabulary_id=v['vocabulary_id']).exists():
-                        self.stdout.write(f"  [would create vocabulary] {v['vocabulary_id']}")
-                        v_created += 1
-                else:
-                    _, created = Vocabulary.objects.get_or_create(
-                        vocabulary_id=v['vocabulary_id'], defaults=v)
-                    if created:
-                        v_created += 1
+        for cc in _CONCEPT_CLASSES:
+            _, made = ConceptClass.objects.get_or_create(
+                concept_class_id=cc['concept_class_id'], defaults=cc)
+            created['concept_classes'] += bool(made)
 
-            # Domains
-            d_created = 0
-            for d in _DOMAINS:
-                if dry_run:
-                    if not Domain.objects.filter(domain_id=d['domain_id']).exists():
-                        self.stdout.write(f"  [would create domain] {d['domain_id']}")
-                        d_created += 1
-                else:
-                    _, created = Domain.objects.get_or_create(
-                        domain_id=d['domain_id'], defaults=d)
-                    if created:
-                        d_created += 1
+        for row in _CONCEPTS:
+            clash = (
+                Concept.objects
+                .filter(vocabulary_id=row['vocabulary_id'],
+                        concept_code=row['concept_code'])
+                .exclude(concept_id=row['concept_id'])
+                .exists()
+            )
+            if clash:
+                created['skipped'] += 1
+                continue
+            _, made = Concept.objects.get_or_create(
+                concept_id=row['concept_id'], defaults=row)
+            if made:
+                created['concepts'] += 1
+            else:
+                created['existing'] += 1
 
-            # Concept classes
-            cc_created = 0
-            for cc in _CONCEPT_CLASSES:
-                if dry_run:
-                    if not ConceptClass.objects.filter(concept_class_id=cc['concept_class_id']).exists():
-                        self.stdout.write(f"  [would create concept_class] {cc['concept_class_id']}")
-                        cc_created += 1
-                else:
-                    _, created = ConceptClass.objects.get_or_create(
-                        concept_class_id=cc['concept_class_id'], defaults=cc)
-                    if created:
-                        cc_created += 1
-
-            # Concepts
-            c_created = c_existing = c_skipped = 0
-            for row in _CONCEPTS:
-                clash_ids = list(
-                    Concept.objects
-                    .filter(vocabulary_id=row['vocabulary_id'],
-                            concept_code=row['concept_code'])
-                    .exclude(concept_id=row['concept_id'])
-                    .values_list('concept_id', flat=True)[:5]
-                )
-                if dry_run:
-                    if clash_ids:
-                        # Reported in the preview too: without this the dry run
-                        # promised rows the real run skips.
-                        self.stdout.write(self.style.WARNING(
-                            f"  [would skip] {row['concept_id']:>8}  "
-                            f"{row['concept_code']:<12}  already present under "
-                            f"concept_id {clash_ids} — would duplicate"))
-                        c_skipped += 1
-                        continue
-                    exists = Concept.objects.filter(concept_id=row['concept_id']).exists()
-                    status = 'exists' if exists else 'would create'
-                    self.stdout.write(
-                        f"  [{status}] {row['concept_id']:>8}  {row['concept_code']:<12}  {row['concept_name']}")
-                    if not exists:
-                        c_created += 1
-                    else:
-                        c_existing += 1
-                else:
-                    # get_or_create keys on concept_id alone, so on a database
-                    # that already holds a different row for this
-                    # (vocabulary_id, concept_code) — e.g. a legacy mint at
-                    # concept_id=int(code) — it would insert a second one and
-                    # manufacture the very shadow this seeding exists to avoid.
-                    # There is no unique constraint to stop it (see #415).
-                    if clash_ids:
-                        self.stdout.write(self.style.WARNING(
-                            f"  skipped {row['concept_id']} "
-                            f"({row['vocabulary_id']}, {row['concept_code']}): already "
-                            f"present under concept_id {clash_ids} — seeding would "
-                            f"create a duplicate. Clean up first (#415)."))
-                        c_skipped += 1
-                        continue
-                    _, created = Concept.objects.get_or_create(
-                        concept_id=row['concept_id'], defaults=row)
-                    if created:
-                        c_created += 1
-                    else:
-                        c_existing += 1
-
-            if dry_run:
-                transaction.set_rollback(True)
-
-        summary = (
-            f'Vocabularies: {v_created} new  |  '
-            f'Domains: {d_created} new  |  '
-            f'ConceptClasses: {cc_created} new  |  '
-            f'Concepts: {c_created} new, {c_existing} already present'
-            + (f', {c_skipped} skipped (would duplicate)' if c_skipped else '')
-        )
-        if dry_run:
-            self.stdout.write(self.style.WARNING(f'\nDry-run summary: {summary}'))
-        else:
-            self.stdout.write(self.style.SUCCESS(summary))
+    return created

@@ -30,7 +30,7 @@ def _convert_tobacco_observations(apps, schema_editor):
     if question_concept is None:
         logger.warning(
             'LOINC 72166-2 concept not found — skipping tobacco migration. '
-            'Run seed_omop_concepts first.'
+            'Run load_athena_vocabularies --concepts-only first.'
         )
         return
 
@@ -43,7 +43,7 @@ def _convert_tobacco_observations(apps, schema_editor):
         if answer is None:
             logger.warning(
                 'LOINC answer concept %s not found — rows with SNOMED %s '
-                'will not be converted. Run seed_omop_concepts first.',
+                'will not be converted. Run load_athena_vocabularies --concepts-only first.',
                 loinc_answer_code, snomed_code,
             )
         else:

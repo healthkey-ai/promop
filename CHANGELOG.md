@@ -67,12 +67,16 @@ simply never loaded:
   `EpisodeEvent`). Both were hand-seeded; Athena supplies them with identical ids,
   names and codes.
 
-`seed_omop_concepts` remains for now but is **not** the supported path: it
-maintains 99 concepts by hand, 97 of which Athena already supplies. A
-hand-maintained parallel list is how a locally invented concept ends up occupying
-an id the vocabulary owns — which is what happened with `3000963`, turning every
-unmapped lab into a haemoglobin result and leaving 19 staging patients with a
-haemoglobin of 1.0 g/dL. Retiring it is tracked separately.
+**`seed_omop_concepts` is removed.** It maintained 99 concepts by hand, 97 of
+which Athena already supplies. Offering it as an operator command made it a
+competing source of truth for concepts, which is how a locally invented concept
+ends up occupying an id the vocabulary owns — what happened with `3000963`,
+turning every unmapped lab into a haemoglobin result and leaving 19 staging
+patients with a haemoglobin of 1.0 g/dL.
+
+The data survives as `omop_core/concept_fixtures.py`, imported only by tests,
+which need concepts without a 4.6 GB Athena bundle. There is no management
+command and no deploy step.
 
 Locally-minted `HK-Wearable` concepts — the one thing Athena cannot supply —
 arrive via migration 0143, which runs on every deploy.

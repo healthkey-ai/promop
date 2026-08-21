@@ -4132,7 +4132,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if unresolved:
             logger.warning(
                 'wearable_concepts_unresolved person_id=%s metrics=%s — samples for these '
-                'metrics will be discarded. Run seed_omop_concepts or load_athena_vocabularies.',
+                'metrics will be discarded. Run load_athena_vocabularies.',
                 person.person_id, unresolved,
             )
 
@@ -4149,10 +4149,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         #
         # There is deliberately no fallback now: refusing to write is better
         # than writing a row that misstates where the data came from. The
-        # concept is seeded by seed_omop_concepts, so an unseeded database is
-        # a setup error the operator needs to see.
         # Migration 0143 installs this concept, so the deploy path guarantees it
-        # rather than depending on someone remembering to run seed_omop_concepts.
+        # rather than leaving it to whoever remembers to run a load.
         #
         # The vocabulary check is not redundant. lab_results.sync._ensure_concept
         # mints concept_id 32865 into HK-Labs as a fallback when Athena is absent
