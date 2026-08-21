@@ -1580,6 +1580,123 @@ class OmopUnknownQueryFilterTest(TestCase):
         )
 
 
+class OmopClinicalPaginationTest(TestCase):
+    """Clinical list endpoints expose opt-in pagination without breaking arrays."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.staff = Identity.objects.create_superuser(
+            email='omop-pagination-admin@test.com',
+            password='not-used',
+        )
+        cls.person = Person.objects.create(person_id=88901, year_of_birth=1975)
+        cls.concept = Concept.objects.get(concept_id=3000963)
+        cls.drug_concept = Concept.objects.get(concept_id=19136160)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.episode_concept = Concept.objects.get(concept_id=32531)
+        base = date(2024, 1, 1)
+        for i in range(3):
+            ConditionOccurrence.objects.create(
+                condition_occurrence_id=889010 + i,
+                person=cls.person,
+                condition_concept=cls.concept,
+                condition_start_date=base + timedelta(days=i),
+                condition_type_concept=cls.type_concept,
+                condition_source_value=f'condition-{i}',
+            )
+            DrugExposure.objects.create(
+                drug_exposure_id=889020 + i,
+                person=cls.person,
+                drug_concept=cls.drug_concept,
+                drug_exposure_start_date=base + timedelta(days=i),
+                drug_type_concept=cls.type_concept,
+                drug_source_value=f'drug-{i}',
+            )
+            Measurement.objects.create(
+                measurement_id=889030 + i,
+                person=cls.person,
+                measurement_concept=cls.concept,
+                measurement_date=base + timedelta(days=i),
+                measurement_type_concept=cls.type_concept,
+                measurement_source_value=f'measurement-{i}',
+            )
+            Observation.objects.create(
+                observation_id=889040 + i,
+                person=cls.person,
+                observation_concept=cls.concept,
+                observation_date=base + timedelta(days=i),
+                observation_type_concept=cls.type_concept,
+                observation_source_value=f'observation-{i}',
+            )
+            ProcedureOccurrence.objects.create(
+                procedure_occurrence_id=889050 + i,
+                person=cls.person,
+                procedure_concept=cls.concept,
+                procedure_date=base + timedelta(days=i),
+                procedure_type_concept=cls.type_concept,
+                procedure_source_value=f'procedure-{i}',
+            )
+            Episode.objects.create(
+                episode_id=889060 + i,
+                person=cls.person,
+                episode_concept=cls.episode_concept,
+                episode_start_date=base + timedelta(days=i),
+                episode_object_concept=cls.drug_concept,
+                episode_type_concept=cls.type_concept,
+                episode_number=i + 1,
+                episode_source_value=f'episode-{i}',
+            )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.staff)
+
+    def assertPaginated(self, route):
+        resp = self.client.get(
+            f'/api/{route}/',
+            {'person_id': self.person.person_id, 'limit': 2},
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['count'], 3)
+        self.assertEqual(len(resp.data['results']), 2)
+        self.assertIn('next', resp.data)
+        self.assertIn('previous', resp.data)
+
+    def test_limit_returns_paginated_envelope_for_clinical_lists(self):
+        for route in [
+            'conditions',
+            'drug-exposures',
+            'measurements',
+            'observations',
+            'procedures',
+            'episodes',
+        ]:
+            with self.subTest(route=route):
+                self.assertPaginated(route)
+
+    def test_page_size_alias_returns_paginated_envelope(self):
+        resp = self.client.get(
+            '/api/measurements/',
+            {'person_id': self.person.person_id, 'page_size': 2},
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['count'], 3)
+        self.assertEqual(len(resp.data['results']), 2)
+
+    def test_legacy_list_shape_is_preserved_without_pagination_params(self):
+        resp = self.client.get(
+            '/api/measurements/',
+            {'person_id': self.person.person_id},
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIsInstance(resp.data, list)
+        self.assertEqual(len(resp.data), 3)
+
+
 class OmopObservationsEndpointTest(FhirUploadBase):
     """Tests for /api/observations/ — list, filter, create, update, delete."""
 
