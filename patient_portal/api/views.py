@@ -4951,10 +4951,23 @@ class _OmopFilterMixin:
         frozenset({'person_id', 'include_erroneous', 'format'})
         | pagination_query_params
     )
+    clinical_filter_fields = None
     pagination_class = ClinicalOmopPagination
 
     def get_allowed_list_query_params(self):
-        return set(self.allowed_list_query_params)
+        allowed = set(self.allowed_list_query_params)
+        config = self.clinical_filter_fields
+        if config:
+            allowed.update({
+                config['concept_param'],
+                config['source_concept_param'],
+                'concept_code',
+                f"{config['date_field']}__gte",
+                f"{config['date_field']}__lte",
+            })
+            if config.get('visit_filter', True):
+                allowed.add('visit_occurrence_id')
+        return allowed
 
     def _pagination_requested(self):
         return bool(set(self.request.query_params) & self.pagination_query_params)
@@ -5012,7 +5025,7 @@ class _OmopFilterMixin:
         # Trusted backend (service-token): full visibility. Already
         # validated at the permission layer (ScopedTokenPermission).
         if is_service_token(self.request):
-            return qs
+            return self._apply_clinical_filters(qs)
         org = get_request_org(self.request)
         if org is not None:
             from omop_core.models import PatientRecord
@@ -5039,6 +5052,52 @@ class _OmopFilterMixin:
                     qs = qs.filter(person_id=own_pid)
                 except PatientUser.DoesNotExist:
                     return qs.none()
+        return self._apply_clinical_filters(qs)
+
+    def _apply_clinical_filters(self, qs):
+        config = self.clinical_filter_fields
+        if not config:
+            return qs
+
+        concept_id = self.request.query_params.get(config['concept_param'])
+        filter_requested = False
+        if concept_id:
+            filter_requested = True
+            qs = qs.filter(**{config['concept_field']: concept_id})
+
+        source_concept_id = self.request.query_params.get(
+            config['source_concept_param'])
+        if source_concept_id:
+            filter_requested = True
+            qs = qs.filter(**{config['source_concept_field']: source_concept_id})
+
+        concept_code = self.request.query_params.get('concept_code')
+        if concept_code:
+            filter_requested = True
+            from omop_core.models import Concept
+            cids = list(
+                Concept.objects.filter(concept_code=concept_code)
+                .values_list('concept_id', flat=True)
+            )
+            qs = qs.filter(**{f"{config['concept_field']}__in": cids})
+
+        date_gte = self.request.query_params.get(f"{config['date_field']}__gte")
+        if date_gte:
+            filter_requested = True
+            qs = qs.filter(**{f"{config['date_field']}__gte": date_gte})
+        date_lte = self.request.query_params.get(f"{config['date_field']}__lte")
+        if date_lte:
+            filter_requested = True
+            qs = qs.filter(**{f"{config['date_field']}__lte": date_lte})
+
+        visit_id = self.request.query_params.get('visit_occurrence_id')
+        if visit_id and config.get('visit_filter', True):
+            filter_requested = True
+            qs = qs.filter(visit_occurrence_id=visit_id)
+
+        ordering = config.get('ordering')
+        if filter_requested and ordering:
+            qs = qs.order_by(*ordering)
         return qs
 
 
@@ -5770,6 +5829,14 @@ class ConditionOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _
     serializer_class = ConditionOccurrenceSerializer
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = ConditionOccurrence.objects.all()
+    clinical_filter_fields = {
+        'concept_param': 'condition_concept_id',
+        'concept_field': 'condition_concept_id',
+        'source_concept_param': 'condition_source_concept_id',
+        'source_concept_field': 'condition_source_concept_id',
+        'date_field': 'condition_start_date',
+        'ordering': ('-condition_start_date', '-condition_occurrence_id'),
+    }
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'omop_write'
 
@@ -5779,6 +5846,14 @@ class DrugExposureViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provena
     serializer_class = DrugExposureSerializer
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = DrugExposure.objects.all()
+    clinical_filter_fields = {
+        'concept_param': 'drug_concept_id',
+        'concept_field': 'drug_concept_id',
+        'source_concept_param': 'drug_source_concept_id',
+        'source_concept_field': 'drug_source_concept_id',
+        'date_field': 'drug_exposure_start_date',
+        'ordering': ('-drug_exposure_start_date', '-drug_exposure_id'),
+    }
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'omop_write'
 
@@ -5788,45 +5863,18 @@ class MeasurementViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provenan
     serializer_class = MeasurementSerializer
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = Measurement.objects.all()
-    allowed_list_query_params = _OmopFilterMixin.allowed_list_query_params | frozenset({
-        'measurement_concept_id',
-        'measurement_source_concept_id',
-        'concept_code',
-        'measurement_date__gte',
-        'measurement_date__lte',
-        'visit_occurrence_id',
-    })
+    clinical_filter_fields = {
+        'concept_param': 'measurement_concept_id',
+        'concept_field': 'measurement_concept_id',
+        'source_concept_param': 'measurement_source_concept_id',
+        'source_concept_field': 'measurement_source_concept_id',
+        'date_field': 'measurement_date',
+        'ordering': ('-measurement_date', '-measurement_id'),
+    }
     ordering_fields = ['measurement_date', 'measurement_id']
     ordering = ['-measurement_date']
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'omop_write'
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-        concept_id = self.request.query_params.get('measurement_concept_id')
-        if concept_id:
-            qs = qs.filter(measurement_concept_id=concept_id)
-        source_concept_id = self.request.query_params.get('measurement_source_concept_id')
-        if source_concept_id:
-            qs = qs.filter(measurement_source_concept_id=source_concept_id)
-        concept_code = self.request.query_params.get('concept_code')
-        if concept_code:
-            from omop_core.models import Concept
-            cids = list(
-                Concept.objects.filter(concept_code=concept_code)
-                .values_list('concept_id', flat=True)
-            )
-            qs = qs.filter(measurement_concept_id__in=cids)
-        date_gte = self.request.query_params.get('measurement_date__gte')
-        if date_gte:
-            qs = qs.filter(measurement_date__gte=date_gte)
-        date_lte = self.request.query_params.get('measurement_date__lte')
-        if date_lte:
-            qs = qs.filter(measurement_date__lte=date_lte)
-        visit_id = self.request.query_params.get('visit_occurrence_id')
-        if visit_id:
-            qs = qs.filter(visit_occurrence_id=visit_id)
-        return qs
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -5834,6 +5882,14 @@ class ObservationViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provenan
     serializer_class = ObservationSerializer
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = Observation.objects.all()
+    clinical_filter_fields = {
+        'concept_param': 'observation_concept_id',
+        'concept_field': 'observation_concept_id',
+        'source_concept_param': 'observation_source_concept_id',
+        'source_concept_field': 'observation_source_concept_id',
+        'date_field': 'observation_date',
+        'ordering': ('-observation_date', '-observation_id'),
+    }
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'omop_write'
 
@@ -5843,6 +5899,14 @@ class ProcedureOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _
     serializer_class = ProcedureOccurrenceSerializer
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = ProcedureOccurrence.objects.all()
+    clinical_filter_fields = {
+        'concept_param': 'procedure_concept_id',
+        'concept_field': 'procedure_concept_id',
+        'source_concept_param': 'procedure_source_concept_id',
+        'source_concept_field': 'procedure_source_concept_id',
+        'date_field': 'procedure_date',
+        'ordering': ('-procedure_date', '-procedure_occurrence_id'),
+    }
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'omop_write'
 
@@ -5856,6 +5920,15 @@ class EpisodeViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
         frozenset({'person_id', 'format'})
         | _OmopFilterMixin.pagination_query_params
     )
+    clinical_filter_fields = {
+        'concept_param': 'episode_concept_id',
+        'concept_field': 'episode_concept_id',
+        'source_concept_param': 'episode_source_concept_id',
+        'source_concept_field': 'episode_source_concept_id',
+        'date_field': 'episode_start_date',
+        'ordering': ('-episode_start_date', '-episode_id'),
+        'visit_filter': False,
+    }
 
 
 @method_decorator(csrf_exempt, name='dispatch')
