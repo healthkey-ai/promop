@@ -1,5 +1,6 @@
 """Tests for POST /api/fhir/sync/ — identity-resolved FHIR ingest."""
 from copy import deepcopy
+from decimal import Decimal
 
 from django.db import connection
 from django.test import TestCase
@@ -156,6 +157,79 @@ class FhirSyncTests(TestCase):
             resp.json()['skipped'],
         )
         self.assertEqual(len(resp.json()['measurement_ids']), 1)
+
+    def test_observation_reference_range_and_interpretation_are_stored(self):
+        from datetime import date
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0})
+        domain, _ = Domain.objects.get_or_create(
+            domain_id='Meas Value',
+            defaults={'domain_name': 'Meas Value', 'domain_concept_id': 0})
+        concept_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Qualifier Value',
+            defaults={'concept_class_name': 'Qualifier Value',
+                      'concept_class_concept_id': 0})
+        positive = Concept.objects.create(
+            concept_id=99006201,
+            concept_name='Positive',
+            domain=domain,
+            vocabulary=vocab,
+            concept_class=concept_class,
+            standard_concept='S',
+            concept_code='10828004',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        bundle = {'resourceType': 'Bundle', 'type': 'collection', 'entry': [
+            {'resource': {
+                'resourceType': 'Observation',
+                'code': {'coding': [{'system': 'http://loinc.org', 'code': '718-7',
+                                      'display': 'Hemoglobin'}]},
+                'effectiveDateTime': '2026-07-01T09:00:00Z',
+                'valueQuantity': {'value': 13.2, 'unit': 'g/dL'},
+                'referenceRange': [{'low': {'value': 12.0}, 'high': {'value': 16.0}}],
+                'interpretation': [{'coding': [{
+                    'system': 'http://snomed.info/sct',
+                    'code': '10828004',
+                    'display': 'Positive',
+                }]}],
+            }},
+        ]}
+
+        resp = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+        row = Measurement.objects.get(person_id=resp.json()['person_id'])
+        self.assertEqual(row.range_low, Decimal('12.0'))
+        self.assertEqual(row.range_high, Decimal('16.0'))
+        self.assertEqual(row.value_as_concept_id, positive.concept_id)
+        self.assertEqual(row.value_source_value, 'Positive')
+
+    def test_unresolved_observation_interpretation_is_preserved_as_source(self):
+        bundle = {'resourceType': 'Bundle', 'type': 'collection', 'entry': [
+            {'resource': {
+                'resourceType': 'Observation',
+                'code': {'coding': [{'system': 'http://loinc.org', 'code': '718-7',
+                                      'display': 'Hemoglobin'}]},
+                'effectiveDateTime': '2026-07-01T09:00:00Z',
+                'valueQuantity': {'value': 17.2, 'unit': 'g/dL'},
+                'interpretation': [{'coding': [{
+                    'system': 'http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation',
+                    'code': 'H',
+                    'display': 'High',
+                }]}],
+            }},
+        ]}
+
+        resp = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+        row = Measurement.objects.get(person_id=resp.json()['person_id'])
+        self.assertIsNone(row.value_as_concept_id)
+        self.assertEqual(row.value_source_value, 'High')
 
     def test_service_token_syncs_explicit_person_without_actor_identity(self):
         """Trusted service callers may sync an explicit person without actor fields."""

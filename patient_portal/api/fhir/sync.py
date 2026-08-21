@@ -22,6 +22,7 @@ import json
 import logging
 from collections import defaultdict
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
@@ -132,6 +133,39 @@ def _source_text(codeable):
 def _norm_num(value):
     """Normalize a measurement value to a comparable form for dedup (float | None)."""
     return float(value) if value is not None else None
+
+
+def _parse_decimal(value):
+    if value is None or value == '':
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _reference_range_bound(obs, bound):
+    ranges = obs.get('referenceRange') or []
+    if not isinstance(ranges, list):
+        return None
+    for ref_range in ranges:
+        if not isinstance(ref_range, dict):
+            continue
+        quantity = ref_range.get(bound) or {}
+        value = quantity.get('value')
+        parsed = _parse_decimal(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _first_codeable(items):
+    if isinstance(items, dict):
+        return items
+    for item in items or []:
+        if isinstance(item, dict):
+            return item
+    return None
 
 
 # Observation.extension marker the phr-mobile-bridge sets on daily aggregates
@@ -343,6 +377,12 @@ class FhirSyncView(APIView):
                 collect(res.get('code'))
                 collect(res.get('medicationCodeableConcept'))
                 collect(res.get('vaccineCode'))
+                interpretation = res.get('interpretation')
+                if isinstance(interpretation, dict):
+                    collect(interpretation)
+                elif isinstance(interpretation, list):
+                    for item in interpretation or []:
+                        collect(item)
 
         cache: dict = {}
         for vocab, codes in by_vocab.items():
@@ -383,15 +423,21 @@ class FhirSyncView(APIView):
         """Pull the fields one Observation maps onto a Measurement."""
         effective = obs.get('effectiveDateTime') or (obs.get('effectivePeriod') or {}).get('start')
         concept = self._lookup(obs.get('code'), cache)
+        interpretation = _first_codeable(obs.get('interpretation'))
+        interpretation_concept = self._lookup(interpretation, cache)
         qty = obs.get('valueQuantity') or {}
         return {
             'date': _parse_date(effective),
             'dt': _parse_datetime(effective),
             'cid': concept.concept_id if concept else 0,
+            'vcid': interpretation_concept.concept_id if interpretation_concept else None,
             'sv': _source_text(obs.get('code'))[:50],
             'value': qty.get('value'),
             'unit': (qty.get('unit') or qty.get('code') or '')[:50],
             'vstr': (obs.get('valueString') or _source_text(obs.get('valueCodeableConcept')) or '')[:60],
+            'value_source': _source_text(interpretation)[:50],
+            'range_low': _reference_range_bound(obs, 'low'),
+            'range_high': _reference_range_bound(obs, 'high'),
         }
 
     def _insert_discrete_observations(self, person, observations, ehr_type, cache, source_user_id, org, skipped):
@@ -427,8 +473,12 @@ class FhirSyncView(APIView):
                 measurement_type_concept=ehr_type,
                 value_as_number=o['value'],
                 value_as_string=o['vstr'],
+                value_as_concept_id=o['vcid'],
                 measurement_source_value=o['sv'],
                 unit_source_value=o['unit'],
+                value_source_value=o['value_source'],
+                range_low=o['range_low'],
+                range_high=o['range_high'],
             ))
         return self._bulk_insert(Measurement, 'measurement_id', rows, source_user_id, person, org)
 
@@ -470,8 +520,12 @@ class FhirSyncView(APIView):
                         measurement_type_concept=ehr_type,
                         value_as_number=o['value'],
                         value_as_string=o['vstr'],
+                        value_as_concept_id=o['vcid'],
                         measurement_source_value=o['sv'],
                         unit_source_value=o['unit'],
+                        value_source_value=o['value_source'],
+                        range_low=o['range_low'],
+                        range_high=o['range_high'],
                     ))
                     continue
 
@@ -486,16 +540,26 @@ class FhirSyncView(APIView):
                     _norm_num(keep.value_as_number) != _norm_num(o['value'])
                     or keep.measurement_datetime != o['dt']
                     or keep.value_as_string != o['vstr']
+                    or keep.value_as_concept_id != o['vcid']
                     or keep.unit_source_value != o['unit']
+                    or keep.value_source_value != o['value_source']
+                    or keep.range_low != o['range_low']
+                    or keep.range_high != o['range_high']
                 )
                 if changed:
                     keep.value_as_number = o['value']
                     keep.measurement_datetime = o['dt']
                     keep.value_as_string = o['vstr']
+                    keep.value_as_concept_id = o['vcid']
                     keep.unit_source_value = o['unit']
+                    keep.value_source_value = o['value_source']
+                    keep.range_low = o['range_low']
+                    keep.range_high = o['range_high']
                     keep._skip_patient_record_refresh = True
                     keep.save(update_fields=['value_as_number', 'measurement_datetime',
-                                             'value_as_string', 'unit_source_value'])
+                                             'value_as_string', 'value_as_concept',
+                                             'unit_source_value', 'value_source_value',
+                                             'range_low', 'range_high'])
                 if changed or extras:
                     touched.append(keep.measurement_id)
             inserted = self._bulk_insert(
