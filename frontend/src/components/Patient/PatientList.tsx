@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, FileText, Trash2, LogOut, Settings } from "lucide-react";
+import { Upload, FileText, Trash2, LogOut, Settings, Database } from "lucide-react";
 import api from "@/api/axios";
 import { clearTokens } from "@/utils/oauth";
 import { useAuth } from "@/hooks/useAuth";
@@ -217,6 +217,15 @@ export default function PatientList() {
             >
               <Settings size={14} />
               Org Admin
+            </button>
+          )}
+          {currentUser?.is_staff && (
+            <button
+              onClick={() => navigate("/field-mappings")}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
+            >
+              <Database size={14} />
+              Field Mappings
             </button>
           )}
           <button
