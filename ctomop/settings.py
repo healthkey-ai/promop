@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import dj_database_url
 from dotenv import load_dotenv
+from corsheaders.defaults import default_headers
 
 from ctomop.frontend_paths import resolve_frontend_root
 
@@ -311,6 +312,11 @@ else:
         if origin.strip()
     ]
 CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_HEADERS = (
+    *default_headers,
+    'x-provenance-source',
+    'x-provenance-user-id',
+)
 
 # ── Pluggable partner auth providers ──────────────────────────────────────
 # PartnerAuthentication iterates these in order; the first provider that
