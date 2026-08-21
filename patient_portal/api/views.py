@@ -53,6 +53,7 @@ from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import CONCEPT_GENERIC_LAB, get_gender_concept
+from omop_core.services.demographics import resolve_concept as resolve_demographic_concept
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
@@ -4800,6 +4801,17 @@ _PERSON_PATCHABLE_FIELDS = {
     'ethnicity_source_value':('str',  _PERSON_STR_PLACEHOLDERS),
 }
 
+# PatientRecord field → (Person concept FK, Person source column). Both are
+# written together: derivation reads the concept first and falls back to the
+# source value, so writing text alone leaves a stale concept outranking it and the
+# correction silently appears not to have taken.
+_PERSON_DEMOGRAPHIC_FIELDS = {
+    'gender': ('gender_concept', 'gender_source_value'),
+    'race': ('race_concept', 'race_source_value'),
+    'ethnicity': ('ethnicity_concept', 'ethnicity_source_value'),
+}
+
+
 # PatientRecord field → (Location column, kind). These live on the OMOP Location
 # row that Person.location points at, not on Person, which is why the projection
 # name and the column name differ for two of them.
@@ -5042,6 +5054,25 @@ class PersonViewSet(viewsets.GenericViewSet):
             if getattr(person, field) != incoming:
                 setattr(person, field, incoming)
                 changed.append(field)
+
+        # ---- Demographics -------------------------------------------------
+        # Replaceable, unlike the *_source_value entries above: a wrong gender or
+        # race must be correctable, not merely fillable when blank.
+        for field, (concept_attr, source_attr) in _PERSON_DEMOGRAPHIC_FIELDS.items():
+            if field not in request.data:
+                continue
+            incoming = request.data[field]
+            incoming = str(incoming).strip() or None if incoming is not None else None
+            concept = resolve_demographic_concept(field, incoming)
+            # Clear the concept when the new value is not a curated answer. Leaving
+            # the old one would let derivation keep reporting the value that was
+            # just corrected, since it reads the concept before the source text.
+            if getattr(person, f'{concept_attr}_id') != (concept.concept_id if concept else None):
+                setattr(person, concept_attr, concept)
+                changed.append(concept_attr)
+            if getattr(person, source_attr) != incoming:
+                setattr(person, source_attr, incoming)
+                changed.append(source_attr)
 
         # ---- Location -----------------------------------------------------
         # Six projection fields resolve to the OMOP Location row rather than to

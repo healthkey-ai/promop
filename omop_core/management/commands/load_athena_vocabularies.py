@@ -33,6 +33,12 @@ VOCAB_SCOPE = frozenset({
     'OMOP Genomic', 'ICDO3', 'NCIt',
     # Oncology staging/grading modifiers + cancer registry
     'Cancer Modifier', 'NAACCR',
+    # Demographics. Person.gender_concept / race_concept / ethnicity_concept are
+    # standard OMOP FKs, and derivation reads the concept before falling back to
+    # the source value — so without these loaded a demographic correction cannot
+    # be recorded as anything but free text. All three are present in the Athena
+    # bundle and were simply never in scope, so no deployment has ever had them.
+    'Gender', 'Race', 'Ethnicity',
 })
 # These vocabularies underpin the clinical concepts PROMOP presents and maps.
 # Do not include CVX here: it is deliberately absent from the current Athena
@@ -150,6 +156,12 @@ class Command(BaseCommand):
                             help='Count rows without writing to DB')
         parser.add_argument('--skip-clinical-vocabulary-verification', action='store_true',
                             help='Do not verify that required clinical vocabularies loaded')
+        parser.add_argument('--concepts-only', action='store_true',
+                            help=(
+                                'Load vocabulary/domain/concept_class/concept and stop. '
+                                'Skips concept_relationship, concept_ancestor, '
+                                'concept_synonym and drug_strength.'
+                            ))
 
     def handle(self, *args, **options):
         base = options['path']
@@ -201,13 +213,24 @@ class Command(BaseCommand):
         # but before relationship/ancestor loads that reference concept IDs.
         if self._hk_concepts and not dry_run:
             self._restore_healthkey_concepts()
-        counts.update({
-            'concept_relationship': self._load_concept_relationships(dry_run),
-            'concept_ancestor':     self._load_concept_ancestors(dry_run),
-            'concept_synonym':      self._load_concept_synonym(dry_run),
-            'drug_strength':        self._load_drug_strength(dry_run),
-            'source_to_concept_map': self._load_source_to_concept_map(dry_run),
-        })
+        if options['concepts_only']:
+            # Adding a small vocabulary to VOCAB_SCOPE means ~1.5k new concepts,
+            # but the relationship, ancestor and synonym files are ~26M rows that
+            # would be re-streamed to change almost nothing. Those tables are
+            # keyed on concept membership, so they stay valid; a later full load
+            # backfills anything the new concepts participate in.
+            self.stdout.write(self.style.WARNING(
+                '  --concepts-only: skipping concept_relationship, '
+                'concept_ancestor, concept_synonym and drug_strength.'
+            ))
+        else:
+            counts.update({
+                'concept_relationship': self._load_concept_relationships(dry_run),
+                'concept_ancestor':     self._load_concept_ancestors(dry_run),
+                'concept_synonym':      self._load_concept_synonym(dry_run),
+                'drug_strength':        self._load_drug_strength(dry_run),
+                'source_to_concept_map': self._load_source_to_concept_map(dry_run),
+            })
         if not dry_run:
             self._seed_concept_zero()
             self._sync_cdm_source_metadata()
