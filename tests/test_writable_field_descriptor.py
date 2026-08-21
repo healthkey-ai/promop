@@ -250,9 +250,9 @@ class TestExtractorAttributedMappings:
         VocabularyFactory(vocabulary_id='SNOMED', vocabulary_name='SNOMED')
         DomainFactory(domain_id='Observation', domain_name='Observation')
         ConceptFactory(concept_code='408729009', vocabulary_id='SNOMED',
-                       concept_name='Concomitant medication', domain_id='Observation')
+                       concept_name='Health insurance', domain_id='Observation')
 
-        entry = build_writable_field_descriptor()['concomitant_medication_details']
+        entry = build_writable_field_descriptor()['insurance_type']
 
         assert entry['target'] == 'observation'
 
@@ -393,3 +393,51 @@ class TestWearableAggregates:
 
         unknown = set(_WEARABLE_METRIC.values()) - set(WEARABLE_CONCEPT_CODE)
         assert not unknown, unknown
+
+
+class TestAttributionsTrackDerivation:
+    """An attribution is only true while its extractor still behaves that way.
+
+    DERIVED_FIELD_TO_CODE is recovered from the derivation source: if derivation
+    reads code X into field F, writing X round-trips. That reasoning has an
+    expiry date. #596 fixed _get_social_data, which had been writing SNOMED
+    408729009 into concomitant_medication_details — the very line the attribution
+    was read from. The moment the bug was fixed the mapping became a lie: the
+    descriptor would have told a client to write 408729009 for concomitant
+    medication details, and derivation would have surfaced it as insurance type.
+
+    The uniqueness guard could not catch it. A code claimed by exactly one field
+    is still wrong if it is the wrong field.
+    """
+
+    def test_every_attribution_still_matches_its_extractor(self):
+        import inspect
+        from omop_core.services import patient_record_service as prs
+        from omop_core.services.mappings import DERIVED_FIELD_TO_CODE
+
+        stale = []
+        for field, (code, _vocab, extractor) in DERIVED_FIELD_TO_CODE.items():
+            source = inspect.getsource(getattr(prs, extractor))
+            writes_field = f"data['{field}']" in source or f'data["{field}"]' in source
+            # The code may be inline or reached through a module-level constant
+            # the function names; both count as this extractor reading it.
+            mentions_code = f"'{code}'" in source or f'"{code}"' in source
+            if not mentions_code:
+                mentions_code = any(
+                    f"'{code}'" in inspect.getsource(prs).split(const)[0][-4000:]
+                    for const in [n for n in dir(prs) if n.isupper() and n in source]
+                ) or f"'{code}'" in inspect.getsource(prs)
+            if not (writes_field and mentions_code):
+                stale.append(
+                    f'{field}: {extractor} '
+                    f'{"does not write it" if not writes_field else ""}'
+                    f'{" / does not read " + code if not mentions_code else ""}'
+                )
+        assert not stale, 'attributions no longer match derivation: ' + '; '.join(stale)
+
+    def test_the_social_data_codes_are_attributed_to_the_fields_they_now_write(self):
+        """Pins the specific drift #596 introduced."""
+        from omop_core.services.mappings import DERIVED_FIELD_TO_CODE
+
+        assert DERIVED_FIELD_TO_CODE.get('insurance_type', (None,))[0] == '408729009'
+        assert 'concomitant_medication_details' not in DERIVED_FIELD_TO_CODE

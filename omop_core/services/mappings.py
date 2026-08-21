@@ -304,5 +304,10 @@ DERIVED_FIELD_TO_CODE = {
     # qualifier_source_value='lymph-node' to separate it from tumor_size.
     'largest_lymph_node_size':       ('21889-1',   'LOINC',  '_get_cll_data'),
     # Social — _get_social_data
-    'concomitant_medication_details': ('408729009', 'SNOMED', '_get_social_data'),
+    # #596 corrected _get_social_data: 408729009 had been writing to
+    # concomitant_medication_details, which is what this attribution was
+    # recovered from. The attribution was right about the code and wrong
+    # about the field the moment the bug was fixed — see
+    # test_every_attribution_still_matches_its_extractor.
+    'insurance_type':                ('408729009', 'SNOMED', '_get_social_data'),
 }
