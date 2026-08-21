@@ -78,7 +78,8 @@ describe('writeClinicalFact', () => {
 
   it('supersedes a same-day value instead of overwriting it', async () => {
     mockGet.mockResolvedValue({
-      data: [{ measurement_id: 500, measurement_date: '2026-08-21', is_erroneous: false }],
+      data: [{ measurement_id: 500, person: 1, measurement_source_value: '718-7',
+               measurement_date: '2026-08-21', is_erroneous: false }],
     });
 
     const res = await writeClinicalFact(1, 'hemoglobin_g_dl', HGB, 13.1, '2026-08-21');
@@ -93,7 +94,8 @@ describe('writeClinicalFact', () => {
 
   it('leaves a value on a different date alone', async () => {
     mockGet.mockResolvedValue({
-      data: [{ measurement_id: 500, measurement_date: '2026-01-01', is_erroneous: false }],
+      data: [{ measurement_id: 500, person: 1, measurement_source_value: '718-7',
+               measurement_date: '2026-01-01', is_erroneous: false }],
     });
 
     const res = await writeClinicalFact(1, 'hemoglobin_g_dl', HGB, 13.1, '2026-08-21');
@@ -104,7 +106,8 @@ describe('writeClinicalFact', () => {
 
   it('does not re-supersede a row already marked erroneous', async () => {
     mockGet.mockResolvedValue({
-      data: [{ measurement_id: 500, measurement_date: '2026-08-21', is_erroneous: true }],
+      data: [{ measurement_id: 500, person: 1, measurement_source_value: '718-7',
+               measurement_date: '2026-08-21', is_erroneous: true }],
     });
 
     await writeClinicalFact(1, 'hemoglobin_g_dl', HGB, 13.1, '2026-08-21');
@@ -123,7 +126,8 @@ describe('writeClinicalFact', () => {
 
   it('handles a paginated list response', async () => {
     mockGet.mockResolvedValue({
-      data: { results: [{ measurement_id: 77, measurement_date: '2026-08-21' }] },
+      data: { results: [{ measurement_id: 77, person: 1, measurement_source_value: '718-7',
+                         measurement_date: '2026-08-21' }] },
     });
 
     const res = await writeClinicalFact(1, 'hemoglobin_g_dl', HGB, 1, '2026-08-21');
@@ -136,5 +140,62 @@ describe('writeClinicalFact', () => {
 
     await expect(writeClinicalFact(1, 'bmi', ro, 22)).rejects.toThrow(/not writable/);
     expect(mockPost).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('writeClinicalFact — supersede targeting', () => {
+  /* Running it against a real server exposed what mocks hid: the endpoint honours
+     only `person_id`, and silently ignores anything else — an ignored filter
+     returns the entire measurement table, 274k rows across every patient. Matching
+     on date alone there would flag a stranger's unrelated result as erroneous. */
+
+  it('queries by person_id, the only filter the endpoint honours', async () => {
+    await writeClinicalFact(258, 'hemoglobin_g_dl', HGB, 13.4, '2026-08-21');
+
+    expect(mockGet).toHaveBeenCalledWith('/v1/measurements/', {
+      params: { person_id: 258 },
+    });
+  });
+
+  it('never supersedes another patient\'s row', async () => {
+    mockGet.mockResolvedValue({
+      data: [{ measurement_id: 999, person: 77, measurement_source_value: '718-7',
+               measurement_date: '2026-08-21', is_erroneous: false }],
+    });
+
+    const res = await writeClinicalFact(258, 'hemoglobin_g_dl', HGB, 13.4, '2026-08-21');
+
+    expect(mockPatch).not.toHaveBeenCalled();
+    expect(res.supersededId).toBeNull();
+  });
+
+  it('never supersedes a different analyte on the same date', async () => {
+    mockGet.mockResolvedValue({
+      data: [{ measurement_id: 999, person: 258, measurement_source_value: '777-3',
+               measurement_date: '2026-08-21', is_erroneous: false }],
+    });
+
+    const res = await writeClinicalFact(258, 'hemoglobin_g_dl', HGB, 13.4, '2026-08-21');
+
+    expect(mockPatch).not.toHaveBeenCalled();
+    expect(res.supersededId).toBeNull();
+  });
+
+  it('supersedes the right row when the response holds many patients', async () => {
+    mockGet.mockResolvedValue({
+      data: [
+        { measurement_id: 1, person: 77, measurement_source_value: '718-7',
+          measurement_date: '2026-08-21', is_erroneous: false },
+        { measurement_id: 2, person: 258, measurement_source_value: '777-3',
+          measurement_date: '2026-08-21', is_erroneous: false },
+        { measurement_id: 3, person: 258, measurement_source_value: '718-7',
+          measurement_date: '2026-08-21', is_erroneous: false },
+      ],
+    });
+
+    const res = await writeClinicalFact(258, 'hemoglobin_g_dl', HGB, 13.4, '2026-08-21');
+
+    expect(res.supersededId).toBe(3);
   });
 });

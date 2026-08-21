@@ -67,16 +67,25 @@ export async function writeClinicalFact(
     : 'observation_type_concept';
 
   // Find a fact already recorded for this analyte on this date.
+  //
+  // `person_id` is the only filter this endpoint honours — `person` and a
+  // source-value param are ignored, and an ignored filter returns the WHOLE
+  // measurement table. Matching on date alone across that would supersede an
+  // unrelated patient's unrelated result, so the analyte and person are both
+  // re-checked here rather than trusted to the query. The server already
+  // excludes entered-in-error rows; the is_erroneous check is belt and braces.
   let supersededId: number | null = null;
   try {
-    const existing = await api.get(base, {
-      params: { person: personId, [sourceField]: descriptor.source_value },
-    });
+    const existing = await api.get(base, { params: { person_id: personId } });
     const rows = Array.isArray(existing.data)
       ? existing.data
       : existing.data?.results ?? [];
     const sameDay = rows.find(
-      (r: Record<string, unknown>) => r[dateField] === date && !r.is_erroneous,
+      (r: Record<string, unknown>) =>
+        String(r.person) === String(personId) &&
+        r[sourceField] === descriptor.source_value &&
+        r[dateField] === date &&
+        !r.is_erroneous,
     );
     if (sameDay) {
       supersededId = (sameDay.measurement_id ?? sameDay.observation_id) as number;

@@ -112,7 +112,19 @@ THERAPY_LINE_FIELDS = frozenset(
 )
 
 # OMOP concept IDs used by the sync service
-CONCEPT_GENERIC_LAB       = 3000963   # Laboratory test result (fallback)
+# Fallback for a lab with no resolvable concept. OMOP CDM reserves concept_id 0
+# ("No matching concept") for exactly this, and it is the only id guaranteed not
+# to mean something else.
+#
+# This was 3000963, seeded locally as a placeholder named "Generic Lab
+# Measurement". The seed reasoned that vocabulary_id='None' and concept_code='0'
+# kept it from being matched by LOINC lookups — true, but beside the point. The
+# collision is on the *id*: Athena owns 3000963 as "Hemoglobin [Mass/volume] in
+# Blood" (LOINC 718-7). Loading a real vocabulary silently turned every unmapped
+# lab ever written into a haemoglobin result, and derivation duly projected them
+# — 3,773 such rows on staging, 116,219 on a dev box. See
+# remap_generic_lab_fallback for the repair.
+CONCEPT_GENERIC_LAB       = 0         # No matching concept (OMOP CDM sentinel)
 CONCEPT_LAB_TYPE          = 32856     # Lab (measurement type)
 CONCEPT_EHR_TYPE          = 32817     # EHR (condition type)
 CONCEPT_TREATMENT_REGIMEN = 32531     # Treatment Regimen (episode concept)

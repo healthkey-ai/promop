@@ -52,7 +52,7 @@ from omop_core.services.patient_record_service import (
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.episode_service import upsert_therapy_line_episode
-from omop_core.services.mappings import get_gender_concept
+from omop_core.services.mappings import CONCEPT_GENERIC_LAB, get_gender_concept
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
@@ -1596,7 +1596,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             _concept_drug_type     = _cc_by_id(32869)    # EHR prescription
             _concept_tx_regimen    = _cc_by_id(32531)    # Treatment Regimen
             _concept_de_field      = _cc_by_id(1147094)  # DrugExposure field
-            _concept_generic_lab   = _cc_by_id(3000963)  # Generic lab
+            # OMOP's 'No matching concept'. Never a real analyte's id — see
+            # CONCEPT_GENERIC_LAB in omop_core/services/mappings.py.
+            _concept_generic_lab   = _cc_by_id(CONCEPT_GENERIC_LAB)
 
             def _get_or_create_visit_concept(class_code: str, class_display: str):
                 concept_code = f'FHIR-VISIT-{class_code or "UNKNOWN"}'
