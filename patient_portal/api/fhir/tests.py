@@ -334,6 +334,81 @@ class FhirSyncTests(TestCase):
         self.assertEqual(second['drug_exposure_ids'], [])
         self.assertEqual(Measurement.objects.filter(person_id=first['person_id']).count(), 1)
 
+    def test_mapped_observation_dedup_uses_resolved_concept_not_display(self):
+        from datetime import date
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_concept_id': 0})
+        domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21})
+        concept_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0})
+        Concept.objects.create(
+            concept_id=99007187,
+            concept_name='Albumin lab test',
+            domain=domain,
+            vocabulary=vocab,
+            concept_class=concept_class,
+            standard_concept='S',
+            concept_code='9999-9',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+
+        def albumin(display):
+            return {'resource': {
+                'resourceType': 'Observation',
+                'code': {'coding': [{'system': 'http://loinc.org', 'code': '9999-9',
+                                      'display': display}]},
+                'effectiveDateTime': '2026-06-01T08:00:00Z',
+                'valueQuantity': {'value': 4.2, 'unit': 'g/dL'},
+            }}
+
+        bundle = {'resourceType': 'Bundle', 'type': 'collection',
+                  'entry': [albumin('Serum albumin'), albumin('Albumin [Mass/volume]')]}
+        first = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        self.assertEqual(first.status_code, 201, first.content)
+        pid = first.json()['person_id']
+
+        rows = Measurement.objects.filter(person_id=pid)
+        self.assertEqual(rows.count(), 1)
+        self.assertEqual(rows.get().measurement_concept_id, 99007187)
+        self.assertIn(rows.get().measurement_source_value,
+                      {'Serum albumin', 'Albumin [Mass/volume]'})
+
+        second = self.client.post(
+            '/api/fhir/sync/',
+            {'bundle': {'resourceType': 'Bundle', 'type': 'collection',
+                        'entry': [albumin('Albumin lab result')]}},
+            format='json',
+        )
+        self.assertEqual(second.json()['measurement_ids'], [])
+        self.assertEqual(Measurement.objects.filter(person_id=pid).count(), 1)
+
+    def test_unmapped_observation_dedup_keeps_source_text(self):
+        def local_metric(display):
+            return {'resource': {
+                'resourceType': 'Observation',
+                'code': {'coding': [{'system': 'http://loinc.org', 'code': 'hk-local',
+                                      'display': display}]},
+                'effectiveDateTime': '2026-06-01T08:00:00Z',
+                'valueQuantity': {'value': 4.2, 'unit': 'score'},
+            }}
+
+        bundle = {'resourceType': 'Bundle', 'type': 'collection',
+                  'entry': [local_metric('Local score A'), local_metric('Local score B')]}
+        resp = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        rows = Measurement.objects.filter(person_id=resp.json()['person_id'])
+        self.assertEqual(rows.count(), 2)
+        self.assertEqual(set(rows.values_list('measurement_source_value', flat=True)),
+                         {'Local score A', 'Local score B'})
+
     def test_clinical_concept_upgrade_updates_in_place(self):
         """Re-syncing a clinical record after its code becomes resolvable (e.g. a
         vocabulary load) updates the existing row's concept in place keyed on
