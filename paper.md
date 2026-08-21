@@ -56,7 +56,7 @@ PRomop is deployed in production across the HealthTree Foundation (14,000 blood-
 and CancerBot (3,500 patients), supporting trial matching against 6,000 actively recruiting
 trials across five cancer types. Checking whether a patient meets a trial's eligibility criteria
 runs about 37 times faster against `PatientRecord` than against the raw OMOP tables
-[@Blum2025].
+[@Blum2026].
 
 # Statement of Need
 
@@ -78,7 +78,7 @@ PRomop fills this gap by:
 
 - Storing records in OMOP CDM 5.4, inheriting compatibility with the OHDSI ecosystem
   [@OHDSI2021]
-- Accepting FHIR R4 Bundle uploads that map directly into OMOP tables (observations →
+- Accepting FHIR R4 [@HL7FHIR] Bundle uploads that map directly into OMOP tables (observations →
   `Measurement`, conditions → `ConditionOccurrence`, medications → `DrugExposure` + `Episode`)
 - Automatically deriving `PatientRecord` via a signal chain whenever any underlying OMOP record
   changes, so downstream consumers never reconstruct state themselves
@@ -138,7 +138,7 @@ This design accepts higher write cost (the projection must be refreshed on each 
 exchange for dramatically lower read cost. A representative 20-criterion eligibility search
 over raw OMOP requires 27–39 joins; against `PatientRecord` it is a flat predicate over a
 single table. Benchmarks on a synthetic breast-cancer cohort measured a 37× speedup (0.30 ms
-vs. 11.0 ms per patient) for eligibility screening [@Blum2025] (\autoref{tab:benchmark}).
+vs. 11.0 ms per patient) for eligibility screening [@Blum2026] (\autoref{tab:benchmark}).
 
 | Approach | Joins | Time per patient |
 |---|---|---|
@@ -146,7 +146,7 @@ vs. 11.0 ms per patient) for eligibility screening [@Blum2025] (\autoref{tab:ben
 | PatientRecord, 20 criteria | 0 | 0.30 ms |
 | **Measured speedup** | | **~37×** |
 
-: Eligibility screening cost per patient (synthetic breast-cancer cohort) [@Blum2025]. []{label="tab:benchmark"}
+: Eligibility screening cost per patient (synthetic breast-cancer cohort) [@Blum2026]. []{label="tab:benchmark"}
 
 Key implementation components include:
 
@@ -171,7 +171,7 @@ The `PatientRecord` projection has enabled integration with two downstream syste
 population analytics dashboard, and EXACT, a clinical trial matching engine. Both consume the
 same pre-computed patient state rather than independently deriving it, eliminating a class of
 inconsistency bugs between applications that previously disagreed on patient status. A companion
-paper [@Blum2025] provides architectural details and empirical benchmarks of the projection
+paper [@Blum2026] provides architectural details and empirical benchmarks of the projection
 approach.
 
 The software is openly available, includes synthetic FHIR data generators for each supported
