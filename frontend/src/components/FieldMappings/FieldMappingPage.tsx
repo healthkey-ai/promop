@@ -132,11 +132,12 @@ export default function FieldMappingPage() {
   };
 
   const handleDeleteMapping = async (mappingId: number) => {
+    if (!window.confirm("Remove this concept mapping? This cannot be undone.")) return;
     try {
       await api.delete(`/v1/field-mappings/${mappingId}/`);
       fetchDescriptors();
     } catch {
-      // ignore
+      setError("Failed to remove mapping.");
     }
   };
 
@@ -145,7 +146,7 @@ export default function FieldMappingPage() {
       await api.patch(`/v1/field-mappings/${mappingId}/`, { status: "approved" });
       fetchDescriptors();
     } catch {
-      // ignore
+      setError("Failed to approve mapping.");
     }
   };
 
@@ -164,7 +165,10 @@ export default function FieldMappingPage() {
   if (error) {
     return (
       <div className="mx-auto max-w-7xl p-6">
-        <div className="rounded border border-red-300 bg-red-50 p-4 text-red-700">{error}</div>
+        <div className="rounded border border-red-300 bg-red-50 p-4 text-red-700">
+          {error}
+          <button onClick={fetchDescriptors} className="ml-3 underline">Retry</button>
+        </div>
       </div>
     );
   }

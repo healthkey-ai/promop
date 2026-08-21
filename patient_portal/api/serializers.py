@@ -963,16 +963,16 @@ class InterchangeAgreementSerializer(serializers.ModelSerializer):
 
 
 class FieldConceptMappingSerializer(serializers.ModelSerializer):
-    reviewer_name = serializers.CharField(source='reviewer.username', read_only=True, default=None)
+    reviewer = serializers.CharField(source='reviewer.username', read_only=True, default=None)
 
     class Meta:
         model = FieldConceptMapping
         fields = [
             'id', 'field_name', 'concept', 'vocabulary_id', 'concept_code',
-            'unit', 'omop_table', 'status', 'reviewer', 'reviewer_name',
+            'unit', 'omop_table', 'status', 'reviewer',
             'reviewed_at', 'notes', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'reviewer', 'reviewer_name', 'reviewed_at', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'reviewer', 'reviewed_at', 'created_at', 'updated_at']
 
     def validate_concept_code(self, value):
         if not value:

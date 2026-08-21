@@ -33,17 +33,21 @@ export function ConceptAssignDialog({ fieldName, fieldType, onClose, onSaved }: 
   const overlayRef = useRef<HTMLDivElement>(null);
 
   const doSearch = useCallback(async (q: string) => {
-    if (q.length < 2) {
+    if (q.length < 3) {
       setResults([]);
       return;
     }
     setSearching(true);
     try {
-      const params: Record<string, string> = { q };
+      const params: Record<string, string> = { q, limit: "50" };
       if (vocabFilter) params.vocabulary_id = vocabFilter;
       const resp = await api.get("/v1/concepts/search/", { params });
       setResults(resp.data.results || resp.data || []);
-    } catch {
+    } catch (err: unknown) {
+      if (err && typeof err === "object" && "response" in err) {
+        const status = (err as { response: { status: number } }).response?.status;
+        if (status === 401 || status === 403) throw err;
+      }
       setResults([]);
     } finally {
       setSearching(false);
@@ -82,6 +86,13 @@ export function ConceptAssignDialog({ fieldName, fieldType, onClose, onSaved }: 
       setSaving(false);
     }
   };
+
+  // Close on Escape key
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [onClose]);
 
   // Close on overlay click
   const handleOverlayClick = (e: React.MouseEvent) => {
@@ -138,7 +149,7 @@ export function ConceptAssignDialog({ fieldName, fieldType, onClose, onSaved }: 
           {searching && (
             <div className="p-3 text-center text-sm text-gray-400">Searching...</div>
           )}
-          {!searching && results.length === 0 && searchQuery.length >= 2 && (
+          {!searching && results.length === 0 && searchQuery.length >= 3 && (
             <div className="p-3 text-center text-sm text-gray-400">No results found.</div>
           )}
           {!searching && results.length > 0 && (
