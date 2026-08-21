@@ -2444,9 +2444,10 @@ class WearableConceptMappingTest(TestCase):
     def test_locally_minted_wearable_concepts_are_installed_by_migration(self):
         """Athena can never supply a local mint, so a migration must.
 
-        start.sh runs only `migrate`; seed_omop_concepts is manual. A metric
-        whose concept is locally minted is silently discarded on any deployment
-        that never ran the seed command.
+        A migration is the only step guaranteed to run everywhere. start.sh now
+        also runs seed_omop_concepts, but that is belt and braces, not the
+        guarantee: a metric whose concept is locally minted would be silently
+        discarded on any deployment reached by some other path.
         """
         from importlib import import_module
         from omop_core.services.mappings import (
