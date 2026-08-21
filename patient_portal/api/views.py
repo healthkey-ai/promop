@@ -337,15 +337,17 @@ def _extract_provenance(request):
 
 
 def _record_provenance(record, source, source_user_id, target_patient_id=None, modification_reason=None, organization=None):
-    """Create a ProvenanceRecord pointing at any model instance."""
-    ProvenanceRecord.objects.create(
-        source=source,
-        source_user_id=source_user_id or '',
-        target_patient_id=target_patient_id,
-        modification_reason=modification_reason,
-        organization=organization,
+    """Create or update a ProvenanceRecord pointing at any model instance."""
+    ProvenanceRecord.objects.update_or_create(
         content_type=ContentType.objects.get_for_model(record),
         object_id=record.pk,
+        source_user_id=source_user_id or '',
+        source=source,
+        defaults={
+            'target_patient_id': target_patient_id,
+            'modification_reason': modification_reason,
+            'organization': organization,
+        },
     )
 
 
