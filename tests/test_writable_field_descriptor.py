@@ -155,7 +155,7 @@ class TestKinds:
 
     def test_kind_is_one_of_the_known_values(self):
         allowed = {'editable', 'selectable', 'computed', 'alias', 'profile',
-                   'unmapped'}
+                   'unmapped', 'authored'}
         for field, entry in build_writable_field_descriptor().items():
             assert entry['kind'] in allowed, (field, entry['kind'])
 

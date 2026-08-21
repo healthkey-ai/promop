@@ -41,6 +41,7 @@ KIND_COMPUTED = 'computed'      # derived from other fields; never authored alon
 KIND_ALIAS = 'alias'            # mirrors a canonical field; edit that one instead
 KIND_PROFILE = 'profile'        # a Person attribute, written at the persons endpoint
 KIND_UNMAPPED = 'unmapped'      # no write path yet — grouped by WHY, not lumped
+KIND_AUTHORED = 'authored'      # written by authoring a different resource entirely
 
 # Why a field has no write path. Reported rather than omitted so the descriptor
 # documents the whole record: a reader can see every column and what stands
@@ -70,11 +71,26 @@ _THERAPY_PREFIXES = (
     'treatment_refractory', 'reason_for_disc', 'washout', 'last_treatment',
 )
 
+# How a therapy line is authored. Not a missing mapping — the write path exists
+# and works; it is simply not a single fact, so no concept could describe it. A
+# line is an Episode grouping the DrugExposures given during it, and derivation
+# reads that back into every first_line_*/second_line_*/later_* field.
+_THERAPY_RECIPE = {
+    'target': 'episode',
+    'endpoint': 'POST /api/v1/episodes/',
+    'steps': [
+        'POST /api/v1/drug-exposures/ for each drug given in the line',
+        'POST /api/v1/episodes/ with episode_concept=32531 (Treatment Regimen), '
+        'episode_number=<line number>, and the line start/end dates',
+        'POST /api/v1/episode-events/ linking each drug_exposure_id to the '
+        'episode with episode_event_field_concept=1147094',
+    ],
+    # Optional but worth setting: it makes the regimen an asserted fact rather
+    # than one inferred from the drug set, and is what populates *_therapy_id.
+    'asserted_regimen_field': 'episode_source_concept',
+}
+
 _UNMAPPED_GROUP_REASONS = {
-    GROUP_THERAPY: (
-        'Inferred from drug exposures and episodes by regimen detection, not from '
-        'one fact. Editing means writing a therapy episode.'
-    ),
     GROUP_WEARABLE_META: (
         'Bookkeeping about the device feed rather than a reading; follows from '
         'ingesting wearable data.'
@@ -398,6 +414,22 @@ def build_writable_field_descriptor():
         mapping = LAB_FIELD_TO_LOINC.get(field)
         if mapping is None:
             group = _unmapped_group(field)
+            if group == GROUP_THERAPY:
+                # These are authored, not unmapped. Reporting them as unmapped
+                # reads as "nothing you can do", when in fact the write path
+                # exists and derivation already reads it back.
+                descriptor[field] = {
+                    'kind': KIND_AUTHORED,
+                    'writable': False,
+                    'group': group,
+                    'authored_via': _THERAPY_RECIPE,
+                    'reason': (
+                        'Derived from the therapy episodes, not from one fact. '
+                        'Author a line as an Episode grouping its drug exposures '
+                        'and this field follows.'
+                    ),
+                }
+                continue
             descriptor[field] = {
                 'kind': KIND_UNMAPPED,
                 'writable': False,
