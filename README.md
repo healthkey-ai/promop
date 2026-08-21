@@ -155,7 +155,7 @@ See [docs/sample-patient-data.md](docs/sample-patient-data.md) for instructions 
 
 ## Reproducing Benchmark Results
 
-See **[docs/reproducing-benchmark-results.md](docs/reproducing-benchmark-results.md)** for step-by-step instructions to reproduce the trial-eligibility and full PatientRecord benchmarks from the paper. The cohort is generated locally with Synthea — no real patient data and no downloaded data bundle are needed. Includes a complete reference table of every OMOP source (LOINC code, concept name filter, source-value alias) that feeds each PatientRecord column.
+See **[docs/reproducing-benchmark-results.md](docs/reproducing-benchmark-results.md)** for step-by-step instructions to reproduce the trial-eligibility and full PatientRecord benchmarks from the paper. Two routes: import the published 1,000-patient cohort from Zenodo ([10.5281/zenodo.21430170](https://doi.org/10.5281/zenodo.21430170)), or generate an equivalent one locally with Synthea. Both cohorts are fully synthetic. Includes a complete reference table of every OMOP source (LOINC code, concept name filter, source-value alias) that feeds each PatientRecord column.
 
 ---
 
