@@ -52,7 +52,13 @@ class TestTheConstant:
         assert CONCEPT_GENERIC_LAB == 0
 
     def test_no_code_path_writes_the_stranded_id(self):
-        """Structural guard: the id must not reappear as a fallback anywhere."""
+        """Structural guard: the id must not reappear as a fallback anywhere.
+
+        Checks numeric literals in the parsed source rather than raw text, so
+        prose about the incident in a docstring does not register — only a number
+        the code would actually use.
+        """
+        import ast
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[1]
@@ -60,11 +66,14 @@ class TestTheConstant:
         for rel in ('patient_portal/api/views.py',
                     'omop_core/services/mappings.py',
                     'omop_core/management/commands/seed_omop_concepts.py'):
-            for i, line in enumerate((root / rel).read_text().splitlines(), 1):
-                if '3000963' in line and not line.lstrip().startswith('#'):
-                    offenders.append(f'{rel}:{i}: {line.strip()[:70]}')
+            tree = ast.parse((root / rel).read_text())
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Constant)
+                        and isinstance(node.value, int)
+                        and not isinstance(node.value, bool)
+                        and node.value == STRANDED):
+                    offenders.append(f'{rel}:{node.lineno}')
         assert not offenders, offenders
-
 
 class TestRepairCommand:
     def test_dry_run_reports_without_writing(self):

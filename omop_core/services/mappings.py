@@ -227,21 +227,22 @@ WEARABLE_TREND_DECLINING_PCT = -10.0
 
 
 def get_gender_concept(gender_str):
-    """Map a gender string to an OMOP Concept. Returns None if not found."""
-    if not gender_str:
-        return None
-    gender_map = {
-        'male': 8507, 'm': 8507,
-        'female': 8532, 'f': 8532,
-        'unknown': 8551, 'other': 8551, 'ambiguous': 8570,
-    }
-    concept_id = gender_map.get(gender_str.lower().strip())
-    if concept_id:
-        try:
-            return Concept.objects.get(concept_id=concept_id)
-        except Concept.DoesNotExist:
-            return None
-    return None
+    """Map a gender string to an OMOP Concept. Returns None if not found.
+
+    Delegates to the demographics resolver, which looks concepts up by
+    (vocabulary_id, concept_code) — the natural key. This used to hold its own
+    table of concept_ids (8507, 8532, 8551, 8570). Those ids are correct today and
+    were correct when written, which is exactly what makes the pattern dangerous:
+    an id belongs to a vocabulary release, and the same assumption applied to 3000963
+    turned every unmapped lab into a haemoglobin result once Athena was loaded.
+
+    The mapping itself is unchanged, deliberately — including 'other' resolving to
+    UNKNOWN rather than to the OTHER concept that also exists. Repointing it would
+    change the meaning of every FHIR import and is a separate decision.
+    """
+    from omop_core.services.demographics import resolve_concept
+
+    return resolve_concept('gender', gender_str)
 
 
 # PatientRecord field → the concept its derivation reads, recovered from the

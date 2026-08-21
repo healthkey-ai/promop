@@ -216,3 +216,86 @@ class TestDescriptor:
         entry = build_writable_field_descriptor()['date_of_birth']
         assert entry['writable'] is False
         assert entry['fill_if_empty'] is True
+
+
+class TestGetGenderConceptDelegation:
+    """get_gender_concept resolves by natural key, with unchanged behaviour.
+
+    It used to carry its own table of concept_ids — 8507, 8532, 8551, 8570. Those
+    were correct, which is what makes the pattern dangerous: an id belongs to a
+    vocabulary release, and the same assumption applied to 3000963 turned every
+    unmapped lab into a haemoglobin result once Athena was loaded.
+
+    Four callers depend on it (FHIR upload twice, bulk import twice), so the
+    mapping had to be preserved exactly rather than improved.
+    """
+
+    # The table this replaced, verbatim.
+    LEGACY_IDS = {
+        'male': 8507, 'm': 8507,
+        'female': 8532, 'f': 8532,
+        'unknown': 8551, 'other': 8551, 'ambiguous': 8570,
+    }
+
+    @pytest.fixture(autouse=True)
+    def full_gender_vocabulary(self):
+        """All five OMOP Gender concepts, including the two non-standard ones."""
+        for code, name, cid in (
+            ('M', 'MALE', 8507), ('F', 'FEMALE', 8532), ('U', 'UNKNOWN', 8551),
+            ('O', 'OTHER', 8521), ('A', 'AMBIGUOUS', 8570),
+        ):
+            Concept.objects.filter(vocabulary_id='Gender', concept_code=code).delete()
+            ConceptFactory(
+                concept_id=cid, vocabulary_id='Gender', concept_code=code,
+                concept_name=name,
+            )
+
+    @pytest.mark.parametrize('value,concept_id', sorted(LEGACY_IDS.items()))
+    def test_every_legacy_input_resolves_to_the_same_concept(self, value, concept_id):
+        from omop_core.services.mappings import get_gender_concept
+
+        assert get_gender_concept(value).concept_id == concept_id
+
+    def test_other_still_means_unknown_not_the_other_concept(self):
+        """OMOP has an OTHER concept (8521) whose display name 'other' would match.
+        The legacy table sent 'other' to UNKNOWN, and repointing it would change the
+        meaning of every FHIR import — a separate decision, not a refactor."""
+        from omop_core.services.mappings import get_gender_concept
+
+        assert get_gender_concept('other').concept_id == 8551
+
+    def test_ambiguous_is_resolvable_but_not_offered_in_a_picker(self):
+        """Ingest sees it; a clinician choosing from a list should not."""
+        from omop_core.services.demographics import choices
+        from omop_core.services.mappings import get_gender_concept
+
+        assert get_gender_concept('ambiguous').concept_id == 8570
+        assert 'A' not in [code for code, _display in choices('gender')]
+
+    @pytest.mark.parametrize('value', ['', None, '   ', 'zzz'])
+    def test_unresolvable_input_returns_none(self, value):
+        from omop_core.services.mappings import get_gender_concept
+
+        assert get_gender_concept(value) is None
+
+    def test_no_concept_id_is_hardcoded_in_the_resolver(self):
+        """The guard that keeps this from regressing to an id table.
+
+        Checks numeric literals in the parsed source, so prose about 3000963 in a
+        docstring does not count — only a number the code would actually use.
+        """
+        import ast
+        from pathlib import Path
+
+        tree = ast.parse(
+            (Path(__file__).resolve().parents[1]
+             / 'omop_core/services/demographics.py').read_text()
+        )
+        offenders = [
+            node.value for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, int)
+            and not isinstance(node.value, bool)
+            and node.value >= 1000
+        ]
+        assert not offenders, f'concept ids hardcoded in the resolver: {offenders}'
