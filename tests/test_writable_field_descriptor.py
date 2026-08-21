@@ -154,7 +154,8 @@ class TestKinds:
                 assert entry.get('reason'), field
 
     def test_kind_is_one_of_the_known_values(self):
-        allowed = {'editable', 'selectable', 'computed', 'alias', None}
+        allowed = {'editable', 'selectable', 'computed', 'alias', 'profile',
+                   'unmapped'}
         for field, entry in build_writable_field_descriptor().items():
             assert entry['kind'] in allowed, (field, entry['kind'])
 
@@ -326,3 +327,69 @@ class TestAndrogenReceptorCode:
 
         assert '49457-5' in _GENOMICS_PATHOLOGY_LOINCS
         assert '82185-1' in _GENOMICS_PATHOLOGY_LOINCS
+
+
+class TestEveryFieldIsCategorised:
+    """The descriptor documents the whole record, not just the editable part.
+
+    A reader must be able to see every column and what stands between it and
+    being editable, rather than inferring it from an absence.
+    """
+
+    def test_no_field_is_left_uncategorised(self):
+        for field, entry in build_writable_field_descriptor().items():
+            assert entry['kind'] is not None, field
+
+    def test_an_unmapped_field_says_which_group_it_is_in(self):
+        d = build_writable_field_descriptor()
+        for field, entry in d.items():
+            if entry['kind'] == 'unmapped':
+                assert entry.get('group'), field
+                assert entry.get('reason'), field
+
+    def test_therapy_fields_are_grouped_as_inference_not_missing_concepts(self):
+        """They need a different design, not a code — #595 must not count them."""
+        d = build_writable_field_descriptor()
+        for field in ('first_line_outcome', 'relapse_count', 'line_of_therapy'):
+            assert d[field]['group'] == 'therapy-inference', field
+
+    def test_location_fields_are_grouped_separately(self):
+        d = build_writable_field_descriptor()
+        assert d['city']['group'] == 'location'
+
+
+class TestProfileFields:
+    def test_a_replaceable_profile_field_is_writable_at_the_persons_endpoint(self):
+        entry = build_writable_field_descriptor()['email']
+
+        assert entry['kind'] == 'profile'
+        assert entry['writable'] is True
+        assert entry['target'] == 'person'
+        assert 'persons' in entry['endpoint']
+
+    def test_a_fill_if_empty_field_is_not_reported_writable(self):
+        """The endpoint populates a blank and silently leaves a value alone, so a
+        box that looked editable would succeed and change nothing."""
+        entry = build_writable_field_descriptor()['gender']
+
+        assert entry['kind'] == 'profile'
+        assert entry['writable'] is False
+        assert entry['fill_if_empty'] is True
+        assert 'never overwrites' in entry['reason']
+
+
+class TestWearableAggregates:
+    def test_an_aggregate_is_computed_over_a_series(self):
+        entry = build_writable_field_descriptor()['median_daily_steps_30d']
+
+        assert entry['kind'] == 'computed'
+        assert entry['inputs'] == ['steps']
+        assert entry['window_days'] == 30
+
+    def test_every_wearable_metric_named_is_a_real_one(self):
+        """A metric name that does not exist would be an unresolvable instruction."""
+        from omop_core.services.mappings import WEARABLE_CONCEPT_CODE
+        from omop_core.services.write_descriptor import _WEARABLE_METRIC
+
+        unknown = set(_WEARABLE_METRIC.values()) - set(WEARABLE_CONCEPT_CODE)
+        assert not unknown, unknown

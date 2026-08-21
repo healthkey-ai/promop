@@ -89,7 +89,7 @@ class Command(BaseCommand):
 
         stranded = Measurement.objects.filter(
             measurement_concept_id=STRANDED_CONCEPT_ID
-        ).exclude(measurement_source_value__isnull=True)
+        )
 
         by_source = dict(
             stranded.values_list('measurement_source_value')
@@ -140,14 +140,22 @@ class Command(BaseCommand):
 
         updated = 0
         with transaction.atomic():
+            unresolved_sources = [s for s in by_source if s not in remapped]
             for source, target in list(remapped.items()) + [(None, None)]:
                 if source is None:
                     # Everything still on the stranded concept could not be
                     # resolved; 0 is the honest answer for those.
                     qs = Measurement.objects.filter(
                         measurement_concept_id=STRANDED_CONCEPT_ID,
-                        measurement_source_value__in=list(by_source),
+                        measurement_source_value__in=[
+                            s for s in unresolved_sources if s is not None
+                        ],
                     )
+                    if None in unresolved_sources:
+                        qs = qs | Measurement.objects.filter(
+                            measurement_concept_id=STRANDED_CONCEPT_ID,
+                            measurement_source_value__isnull=True,
+                        )
                     updated += qs.update(measurement_concept_id=NO_MATCHING_CONCEPT)
                     continue
                 qs = Measurement.objects.filter(

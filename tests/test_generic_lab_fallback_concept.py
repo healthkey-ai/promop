@@ -102,6 +102,16 @@ class TestRepairCommand:
         row.refresh_from_db()
         assert row.measurement_concept_id == 0
 
+    def test_missing_source_value_falls_back_to_zero(self):
+        """No source value is also honestly unmapped, not haemoglobin."""
+        person = PersonFactory()
+        row = _stranded_row(person, None)
+
+        call_command('remap_generic_lab_fallback', apply=True, stdout=StringIO())
+
+        row.refresh_from_db()
+        assert row.measurement_concept_id == 0
+
     def test_a_genuine_haemoglobin_row_is_left_alone(self):
         """Source value 718-7 on that concept really is haemoglobin."""
         person = PersonFactory()

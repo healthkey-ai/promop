@@ -73,8 +73,11 @@ export function useWritableFields() {
   useEffect(() => {
     let alive = true;
     if (cached) {
-      setDescriptors(cached);
-      setLoading(false);
+      Promise.resolve().then(() => {
+        if (!alive) return;
+        setDescriptors(cached ?? {});
+        setLoading(false);
+      });
       return;
     }
     fetchWritableFields()
