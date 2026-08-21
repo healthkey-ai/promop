@@ -931,8 +931,16 @@ def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         return data
 
     from omop_core.services.lot_inference_service import infer_lot_for_person
-    lots = infer_lot_for_person(person, dry_run=True)
-    _apply_inferred_lots(data, lots)
+    # The snapshot already has the rows LOT inference needs. Reuse them rather
+    # than querying DrugExposure and ProcedureOccurrence a second time.
+    lots = infer_lot_for_person(
+        person,
+        force=True,
+        dry_run=True,
+        exposures=drug_exposures,
+        procedures=snapshot.procedures,
+    )
+    _apply_inferred_lots(data, lots, drug_exposures=drug_exposures)
     return data
 
 
@@ -1156,18 +1164,26 @@ def _regimen_from_exposures(exposure_ids, de_info_by_id):
     return ' + '.join(display_names), concept_id, ('inferred' if concept_id else None)
 
 
-def _apply_inferred_lots(data: dict, lots) -> None:
+def _apply_inferred_lots(data: dict, lots, drug_exposures=None) -> None:
     """Map in-memory inferred LOTs onto first/second/later therapy fields."""
     data['therapy_lines_count'] = len(lots)
 
     # Bulk-resolve (concept_id, vocabulary_id, name) for every exposure across
     # all lots. concept.vocabulary_id is the FK's string PK — no extra join.
     exp_ids = [eid for lot in lots for eid in lot.exposure_ids]
+    exp_id_set = set(exp_ids)
     de_info_by_id = {}
     if exp_ids:
-        for de in (DrugExposure.objects
-                   .filter(drug_exposure_id__in=exp_ids)
-                   .select_related('drug_concept')):
+        exposures = drug_exposures
+        if exposures is None:
+            exposures = (
+                DrugExposure.objects
+                .filter(drug_exposure_id__in=exp_ids)
+                .select_related('drug_concept')
+            )
+        for de in exposures:
+            if de.drug_exposure_id not in exp_id_set:
+                continue
             name = _usable_concept_name(de.drug_concept)
             if name:
                 de_info_by_id[de.drug_exposure_id] = (

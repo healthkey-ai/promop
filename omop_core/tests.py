@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.core.management import call_command
@@ -4989,3 +4990,55 @@ class RefreshQueryCountTest(TestCase):
                 for i, q in enumerate(ctx.captured_queries)
             ),
         )
+
+    def test_direct_lot_assertions_keep_the_newest_value(self):
+        """Newest direct LOT assertion must win despite snapshot's sort order."""
+        from omop_core.services.patient_record_service import (
+            OmopSnapshot, _apply_treatment_assertions,
+        )
+
+        older = SimpleNamespace(
+            observation_id=1,
+            observation_date=date(2024, 1, 1),
+            observation_source_value='LOT-1-intent',
+            value_as_concept=None,
+            value_as_string='Palliative',
+            value_source_value=None,
+        )
+        newer = SimpleNamespace(
+            observation_id=2,
+            observation_date=date(2024, 2, 1),
+            observation_source_value='LOT-1-intent',
+            value_as_concept=None,
+            value_as_string='Curative',
+            value_source_value=None,
+        )
+        snapshot = OmopSnapshot(
+            measurements=[], observations=[newer, older], conditions=[],
+            drug_exposures=[], procedures=[], death=None,
+            meas_by_code={}, obs_by_code={}, meas_by_source={}, obs_by_source={},
+        )
+        episode = SimpleNamespace(
+            episode_number=1,
+            episode_start_date=date(2024, 1, 1),
+            episode_end_date=date(2024, 12, 31),
+        )
+
+        data = {}
+        _apply_treatment_assertions(data, self.person, [episode], snapshot)
+
+        self.assertEqual(data['first_line_intent'], 'Curative')
+
+    def test_lot_inference_accepts_prefetched_empty_rows(self):
+        """The no-Episode path can avoid re-querying snapshot tables entirely."""
+        from django.test.utils import CaptureQueriesContext
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+
+        with CaptureQueriesContext(connection) as ctx:
+            lots = infer_lot_for_person(
+                self.person, force=True, dry_run=True,
+                exposures=[], procedures=[],
+            )
+
+        self.assertEqual(lots, [])
+        self.assertEqual(len(ctx), 0)
