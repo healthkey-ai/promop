@@ -101,6 +101,30 @@ class PatientRecordPagination(PageNumberPagination):
     max_page_size = 100
 
 
+class ClinicalOmopPagination(PageNumberPagination):
+    """Opt-in clinical list pagination.
+
+    ``?page_size=N`` and ``?limit=N`` both return DRF's paginated envelope with
+    a default size of 100 and a hard cap of 1000. Omitting pagination params
+    preserves the legacy bare-array response while clients migrate.
+    """
+    page_size = 100
+    page_size_query_param = 'page_size'
+    max_page_size = 1000
+
+    def get_page_size(self, request):
+        limit = request.query_params.get('limit')
+        if limit is not None and self.page_size_query_param not in request.query_params:
+            try:
+                size = int(limit)
+            except (TypeError, ValueError):
+                return self.page_size
+            if size <= 0:
+                return self.page_size
+            return min(size, self.max_page_size)
+        return super().get_page_size(request)
+
+
 def _serialize_omop_row(obj, include=None):
     """Serialize a model instance to a dict.
 
@@ -4922,10 +4946,23 @@ _MODEL_PK_MAP = {
 
 class _OmopFilterMixin:
     """Filter by person_id query param and restrict to the requesting org's patients."""
-    allowed_list_query_params = frozenset({'person_id', 'include_erroneous', 'format'})
+    pagination_query_params = frozenset({'page', 'page_size', 'limit'})
+    allowed_list_query_params = (
+        frozenset({'person_id', 'include_erroneous', 'format'})
+        | pagination_query_params
+    )
+    pagination_class = ClinicalOmopPagination
 
     def get_allowed_list_query_params(self):
         return set(self.allowed_list_query_params)
+
+    def _pagination_requested(self):
+        return bool(set(self.request.query_params) & self.pagination_query_params)
+
+    def _ordered_for_pagination(self, queryset):
+        if queryset.ordered:
+            return queryset
+        return queryset.order_by(queryset.model._meta.pk.name)
 
     def _unsupported_list_query_params(self):
         allowed = self.get_allowed_list_query_params()
@@ -4946,7 +4983,16 @@ class _OmopFilterMixin:
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        return super().list(request, *args, **kwargs)
+        if self._pagination_requested():
+            queryset = self._ordered_for_pagination(
+                self.filter_queryset(self.get_queryset()))
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -5806,7 +5852,10 @@ class EpisodeViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = EpisodeSerializer
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = Episode.objects.all()
-    allowed_list_query_params = frozenset({'person_id', 'format'})
+    allowed_list_query_params = (
+        frozenset({'person_id', 'format'})
+        | _OmopFilterMixin.pagination_query_params
+    )
 
 
 @method_decorator(csrf_exempt, name='dispatch')
