@@ -145,6 +145,43 @@ The high unmapped counts in `drug_exposure` and `observation` are source data th
 
 ## 7. Loading and seeding
 
+### Athena vocabulary download is required
+
+Loading an Athena vocabulary release is a required deployment step for every
+environment that ingests or serves clinical records. The small set seeded by
+`seed_omop_concepts` exists only to support development and tests; it cannot
+provide the concepts, mappings, synonyms, hierarchies, and drug strengths that
+clinical code resolution needs. Without an Athena load, clinical records can
+silently fail to resolve to OMOP concepts.
+
+Create an Athena vocabulary download from the
+[Athena vocabulary list](https://athena.ohdsi.org/vocabulary/list). For
+convenience, a prepared download location is also available in
+[Google Drive](https://drive.google.com/drive/u/1/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7).
+
+#### Vocab scope for the Athena download
+
+Select these vocabularies in Athena. This is the scope accepted by
+`load_athena_vocabularies`:
+
+| Purpose | Select in Athena |
+|---|---|
+| Core clinical terminology and mappings | **SNOMED**, **ICD10CM**, **LOINC**, **RxNorm**, **RxNorm Extension**, **UCUM** |
+| Immunizations and visits | **CVX**, **Visit**, **Type Concept** |
+| Drug classification and oncology treatment | **ATC**, **HemOnc** |
+| Genomics and cancer registry data | **OMOP Genomic**, **ICDO3**, **NCIt**, **Cancer Modifier**, **NAACCR** |
+
+Athena may include required dependencies in the download; retain them. The
+loader ignores vocabularies outside this scope. It also deliberately narrows
+some selected data: only ATC codes beginning with `L`, selected RxNorm/RxNorm
+Extension drug classes, and LOINC concepts in the `Measurement`,
+`Observation`, `Meas Value`, `Procedure`, and `Note` domains are loaded.
+
+At minimum, deployed clinical environments must contain **LOINC**, **RxNorm**,
+**SNOMED**, and **ICD10CM**. The loader verifies those four after every normal
+load. CVX is included in the scope so immunizations can be resolved when the
+Athena bundle contains it.
+
 | Command | What it does |
 |---|---|
 | `load_athena_vocabularies` | Loads the full Athena release into `concept` and its support tables |
