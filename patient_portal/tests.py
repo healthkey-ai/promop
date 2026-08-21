@@ -4025,6 +4025,44 @@ class ProvenancePatchTest(_SmartBase):
         self.assertEqual(prov.source, 'EHR_SYNC')
         self.assertEqual(prov.source_user_id, 'ehr-omop-001')
 
+    def test_repeated_omop_edits_by_same_actor_keep_one_provenance_row(self):
+        """Create + repeated PATCH with the same actor/source must not 500."""
+        resp = self._create_omop_condition_with_provenance()
+        self.assertEqual(resp.status_code, 201, resp.data)
+        from omop_core.models import ConditionOccurrence
+        condition_id = resp.data['condition_occurrence_id']
+
+        headers = {
+            'HTTP_X_PROVENANCE_SOURCE': 'EHR_SYNC',
+            'HTTP_X_PROVENANCE_USER_ID': 'ehr-omop-001',
+        }
+        first_patch = self.write_client.patch(
+            f'/api/conditions/{condition_id}/',
+            {'condition_source_value': 'updated once'},
+            format='json',
+            **headers,
+        )
+        second_patch = self.write_client.patch(
+            f'/api/conditions/{condition_id}/',
+            {'condition_source_value': 'updated twice'},
+            format='json',
+            **headers,
+        )
+
+        self.assertEqual(first_patch.status_code, status.HTTP_200_OK, first_patch.data)
+        self.assertEqual(second_patch.status_code, status.HTTP_200_OK, second_patch.data)
+        condition = ConditionOccurrence.objects.get(condition_occurrence_id=condition_id)
+        self.assertEqual(condition.condition_source_value, 'updated twice')
+        self.assertEqual(
+            ProvenanceRecord.objects.filter(
+                content_type=ContentType.objects.get_for_model(ConditionOccurrence),
+                object_id=condition_id,
+                source='EHR_SYNC',
+                source_user_id='ehr-omop-001',
+            ).count(),
+            1,
+        )
+
 
 class ProvenanceFhirUploadTest(_SmartBase):
     """FHIR upload tags OMOP facts; PatientRecord remains a derived read model."""
