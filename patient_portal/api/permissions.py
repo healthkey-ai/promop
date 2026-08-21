@@ -159,10 +159,10 @@ _PATIENT_CRUD_METHODS = frozenset(('GET', 'HEAD', 'OPTIONS', 'POST', 'PATCH'))
 class PatientCrudPermission(ScopedTokenPermission):
     """ScopedTokenPermission that allows GET/POST/PATCH for authenticated patients.
 
-    Used by patient-facing viewsets (surveys, messages) where patients need to
-    create and update their own records. The viewset enforces per-person
-    authorization via _OmopFilterMixin and PatientSelfScopePermission, so
-    allowing POST/PATCH here is safe. Staff users retain full access.
+    Used by patient-facing viewsets and clinical row viewsets where patients
+    need to create and update their own records. The viewset must enforce
+    per-person authorization via _OmopFilterMixin/PatientSelfScopePermission or
+    a create-time can_write_patient() check. Staff users retain full access.
 
     Service tokens and OAuth2 SMART scopes are handled exactly as in the
     base class.
