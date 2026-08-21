@@ -1,8 +1,8 @@
 # Reproducing Benchmark Results
 
-This guide explains how to reproduce the benchmarks published in the PRomop
-paper against a synthetic breast-cancer cohort you generate locally. No real
-patient data — and no downloaded data bundle — is required.
+This guide explains how to reproduce the benchmarks published in the PRomop paper, either
+against the exact published cohort or against one you generate locally. Both cohorts are
+fully synthetic — no real patient data is involved either way.
 
 ---
 
@@ -64,15 +64,73 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
   python manage.py migrate --noinput
 ```
 
-### 4. Obtain the Synthea JAR
+### 4. Choose a cohort route
 
-Cohort generation runs Synthea. See [sample-patient-data.md](sample-patient-data.md) for
-obtaining `synthea-with-dependencies.jar`; pass its location with `--jar-path` if it is not
-on the default search path.
+There are two, and Step 1 covers both:
+
+| | Route A — published cohort | Route B — generate locally |
+|---|---|---|
+| Source | Zenodo [10.5281/zenodo.21430170](https://doi.org/10.5281/zenodo.21430170) | Synthea, on your machine |
+| Download | `synthea_bc_1000.json`, ~249 MB | none |
+| Needs the Synthea JAR | no | yes |
+| Reproduces published numbers | yes — same 1,000 patients | ratio yes, absolute values no |
+
+**Route A** is the one to use when checking the paper's figures: it is the exact cohort those
+numbers came from. **Route B** needs no download and no citation, and is the better choice for
+adapting the benchmark to a different disease or cohort size. For Route B, see
+[sample-patient-data.md](sample-patient-data.md) for obtaining
+`synthea-with-dependencies.jar`; pass its location with `--jar-path` if it is not on the
+default search path.
 
 ---
 
-## Step 1 — Build the synthetic cohort
+## Step 1 — Load the cohort
+
+### Route A — import the published cohort
+
+Download `synthea_bc_1000.json` from the Zenodo record above, then:
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  python manage.py import_org_patients --input synthea_bc_1000.json \
+    --org synthea-bc \
+    --create-org
+```
+
+**What happens:**
+- Creates the `synthea-bc` organization
+- Inserts one `Person` per patient, with all OMOP CDM rows (`Measurement`, `Observation`,
+  `ConditionOccurrence`, `DrugExposure`, …) under fresh sequence-backed PKs
+- Derives each `PatientRecord` from those rows via `refresh_patient_record` — the same path
+  every other write in the system uses
+- Concept FKs absent from the local `Concept` table are remapped to `concept_id=0`; the
+  `*_source_value` fields the benchmarks use as their LOINC fallback are always preserved
+
+**Options:**
+
+| Option | Effect |
+|--------|--------|
+| `--create-org` | Create the target org if it does not exist |
+| `--replace` | Delete and reimport patients whose `person_id` already exists |
+| `--dry-run` | Parse and validate without writing |
+| `--snapshot-patient-record` | Write the exported projection verbatim instead of deriving it |
+
+Use `--snapshot-patient-record` only if you need a field that derivation cannot reconstruct —
+one enriched at export time with no OMOP row behind it. Everything the two benchmarks read
+derives correctly without it.
+
+Expected summary:
+
+```
+Import complete
+  Patients in file  :     1000
+  Imported          :     1000
+  Replaced          :        0
+  Skipped (exists)  :        0
+  Errors            :        0
+```
+
+### Route B — generate the cohort locally
 
 `generate_import_enrich_synthea_bc` runs the whole pipeline as one command: generate a
 breast-cancer Synthea bundle, import it into OMOP under a target org, then run the
@@ -111,14 +169,13 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 | `--wipe-existing` | off | Delete the target org and its patients before generating |
 | `--import-batch-size N` | 1 | Patients per import batch |
 
-> **On exact reproducibility.** The published numbers were produced from a fixed cohort
-> snapshot loaded by `import_org_patients`, a command removed in #499 because it wrote
-> directly to `PatientRecord` and bypassed the OMOP-first architecture. Regenerating the
-> cohort does not reproduce that snapshot value-for-value: parts of the enrichment step are
-> probabilistic (wearable readings, best-response assignment, some behavioral fields), and
-> absolute latency is hardware- and cache-dependent in any case. **The reproducible result
-> is the relative speedup ratio between the `PatientRecord` and raw-OMOP paths**, not the
-> absolute millisecond figures.
+> **On exact reproducibility with Route B.** Regenerating does not reproduce the published
+> cohort value-for-value: parts of the enrichment step are probabilistic (wearable readings,
+> best-response assignment, some behavioral fields), and absolute latency is hardware- and
+> cache-dependent in any case. Use `--count 1000` to match the published cohort size, which
+> is what governs the ratio. **The reproducible result on Route B is the relative speedup
+> between the `PatientRecord` and raw-OMOP paths**, not the absolute millisecond figures.
+> Route A reproduces both.
 
 ---
 
@@ -190,17 +247,25 @@ The raw OMOP path issues one correlated subquery per field against the
 appropriate table. The PatientRecord path reads all 20 fields in a single
 `.values()` call on the indexed `patient_record` table.
 
-**Example output:**
+**Example output.** Verbatim from a run against the 1,000-patient reference cohort
+(PostgreSQL 14, Apple Silicon, warm cache, `--repeat 3`):
 
 ```
-Benchmarking 100 patient(s), 3 repeat pass(es) per path...
+Benchmarking 1000 patient(s), 3 repeat pass(es) per path...
 
-patient_record pull: {'n': 300, 'mean_ms': 1.4, 'median_ms': 1.2, 'p95_ms': 2.8, ...}
-OMOP pull:           {'n': 300, 'mean_ms': 9.7, 'median_ms': 8.9, 'p95_ms': 18.3, ...}
+patient_record pull: {'n': 3000, 'mean_ms': 0.313, 'median_ms': 0.294, 'p95_ms': 0.385, 'min_ms': 0.275, 'max_ms': 1.148}
+OMOP pull:           {'n': 3000, 'mean_ms': 11.239, 'median_ms': 11.031, 'p95_ms': 13.07, 'min_ms': 7.381, 'max_ms': 67.685}
 
-patient_record is ~6.9x faster than the OMOP pull (mean 1.4ms vs 9.7ms)
-Avg populated eligibility fields: patient_record=19.4/20, OMOP=17.8/20
+patient_record is ~35.9x faster than the OMOP pull (mean 0.313ms vs 11.239ms)
+Avg populated eligibility fields: patient_record=15.0/20, OMOP=15.0/20
 ```
+
+This is the measurement behind the paper's headline figure (≈0.30 ms vs ≈11.0 ms, ~37×).
+Cohort size matters here: the ratio grows with the size of the `measurement` table the raw-OMOP
+path has to search, because the `PatientRecord` path is a single indexed row read regardless.
+The 1,000-patient cohort carries ~217k measurement rows; a 100-patient cohort carries ~17k and
+produces a correspondingly smaller ratio. Use `--count 1000` in Step 1 to compare against the
+published number.
 
 The JSON output (`trial-eligibility-results.json`) has this shape:
 
