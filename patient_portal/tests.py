@@ -6721,6 +6721,63 @@ class PersonFindOrCreateTest(_SmartBase):
         self.assertEqual(r1.json()['person_id'], r2.json()['person_id'])
         self.assertFalse(r2.json()['created'])
 
+    def test_existing_patient_user_link_wins_and_backfills_actor_columns(self):
+        from omop_core.services.pk import next_pk
+        from patient_portal.models import PatientUser
+
+        actor_iss = 'https://securetoken.google.com/proj'
+        actor_sub = 'linked-uid'
+        identity = Identity.objects.create(
+            email='linked-person@example.com',
+            issuer=actor_iss,
+            sub=actor_sub,
+        )
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientUser.objects.create(identity=identity, person=person)
+
+        resp = self.client.post(
+            self.URL,
+            {'actor_iss': actor_iss, 'actor_sub': actor_sub},
+            content_type='application/json',
+            **self._auth(),
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['person_id'], person.person_id)
+        self.assertFalse(resp.json()['created'])
+        person.refresh_from_db()
+        self.assertEqual(person.actor_iss, actor_iss)
+        self.assertEqual(person.actor_sub, actor_sub)
+        self.assertEqual(
+            Person.objects.filter(actor_iss=actor_iss, actor_sub=actor_sub).count(),
+            1,
+        )
+
+    def test_existing_identity_without_patient_user_uses_actor_tuple_idempotently(self):
+        actor_iss = 'https://securetoken.google.com/proj'
+        actor_sub = 'unlinked-uid'
+        Identity.objects.create(
+            email='unlinked-person@example.com',
+            issuer=actor_iss,
+            sub=actor_sub,
+        )
+        payload = {'actor_iss': actor_iss, 'actor_sub': actor_sub}
+
+        first = self.client.post(
+            self.URL, payload, content_type='application/json', **self._auth(),
+        )
+        second = self.client.post(
+            self.URL, payload, content_type='application/json', **self._auth(),
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(first.json()['person_id'], second.json()['person_id'])
+        self.assertEqual(
+            Person.objects.filter(actor_iss=actor_iss, actor_sub=actor_sub).count(),
+            1,
+        )
+
     def test_different_subs_get_different_persons(self):
         base = {'actor_iss': 'https://securetoken.google.com/proj'}
         r1 = self.client.post(self.URL, {**base, 'actor_sub': 'uid-1'}, content_type='application/json', **self._auth())
