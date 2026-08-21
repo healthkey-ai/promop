@@ -4816,6 +4816,23 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
     so anything added there widens a frozen API. New actions belong here.
     """
 
+    @action(detail=False, methods=['get'], url_path='writable-fields')
+    def writable_fields(self, request: Request) -> Response:
+        """Which projection fields a client may edit, and the OMOP fact to write.
+
+        PatientRecord has no writable clinical columns, so an editor must write the
+        underlying fact instead. This tells it which table, concept and unit each
+        field needs. Fields with no reviewed concept set are reported as unwritable
+        with a reason rather than omitted, so a client can render them read-only and
+        explain why instead of failing on save.
+
+        Deployment metadata, not patient data: no person is involved and the result
+        is identical for every caller.
+        """
+        from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+        return Response(build_writable_field_descriptor())
+
     @action(detail=True, methods=['post'], url_path='refresh',
             permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def refresh(self, request: Request, pk: str | None = None) -> Response:
