@@ -5322,7 +5322,9 @@ class _OmopBulkCreateMixin:
 
     Semantics (summarised in CLAUDE.md, "Bulk OMOP Row Writes"):
 
-    * A single dict body is untouched and still goes through the normal DRF path.
+    * A single dict body with no client-supplied primary key uses the same
+      natural-key upsert semantics, while preserving the single-row response
+      shape. Pass ``?upsert=false`` to force the historical append-only create.
     * All-or-nothing: the whole batch shares one ``transaction.atomic()``.
     * One batch is one person. Mixed-person batches are rejected with 400.
     * Idempotent by default (issue #454): rows are upserted on the event identity
@@ -5355,8 +5357,103 @@ class _OmopBulkCreateMixin:
                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             )
         if not isinstance(request.data, list):
+            if self._should_single_upsert(request):
+                return self._single_upsert_create(request)
             return super().create(request, *args, **kwargs)
         return self._bulk_create(request)
+
+    def _should_single_upsert(self, request):
+        if not isinstance(request.data, dict):
+            return False
+        model_name = self.serializer_class.Meta.model.__name__
+        if model_name not in _UPSERT_KEYS:
+            return False
+        pk_field, _model_cls = _MODEL_PK_MAP[model_name]
+        if request.data.get(pk_field) is not None:
+            return False
+        return str(
+            request.query_params.get('upsert', 'true')
+        ).strip().lower() not in ('0', 'false', 'no')
+
+    def _authorize_single_upsert_person(self, request, person):
+        from rest_framework.exceptions import PermissionDenied
+
+        org = get_request_org(request)
+        if is_service_token(request):
+            return org
+        if org is not None:
+            existing_pi = PatientRecord.objects.filter(person=person).first()
+            if (existing_pi is not None
+                    and existing_pi.organization is not None
+                    and existing_pi.organization != org):
+                raise PermissionDenied('Person does not belong to your organization.')
+            return org
+        if not getattr(request.user, 'is_staff', False):
+            from omop_core.authorization import can_write_patient
+            if not can_write_patient(request.user, person.person_id):
+                raise PermissionDenied('Access denied.')
+        return org
+
+    def _single_upsert_create(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+
+        person = validated.get('person')
+        if person is None:
+            return Response(
+                {'detail': 'person is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        org = self._authorize_single_upsert_person(request, person)
+        source, source_user_id, reason = _extract_provenance(request)
+        skip_refresh = str(
+            request.query_params.get('skip_refresh', 'false')
+        ).strip().lower() in ('1', 'true', 'yes')
+
+        model_name = self.serializer_class.Meta.model.__name__
+        pk_field, model_cls = _MODEL_PK_MAP[model_name]
+        instance = model_cls(**dict(validated))
+
+        from omop_core.signals import suppress_patient_record_refresh
+        try:
+            with transaction.atomic():
+                with suppress_patient_record_refresh():
+                    plan = _plan_bulk_upsert(
+                        model_cls, pk_field, model_name, person, [instance])
+                    ids, new_ids = _apply_upsert_plan(
+                        plan, model_cls, pk_field, model_name)
+
+                row_id = ids[0]
+                if source and new_ids:
+                    _record_provenance(
+                        model_cls.objects.get(**{pk_field: row_id}),
+                        source,
+                        source_user_id,
+                        target_patient_id=str(person.person_id),
+                        modification_reason=reason,
+                        organization=org,
+                    )
+                if not skip_refresh:
+                    from omop_core.services.patient_record_service import refresh_patient_record
+                    refresh_patient_record(person)
+        except IntegrityError as exc:
+            logger.exception(
+                'single %s upsert for person %s failed on a database constraint',
+                model_name, person.person_id)
+            return Response(
+                {'detail': (
+                    'The row conflicted with a database constraint and was '
+                    'rolled back; retrying is safe.'
+                ), 'error': str(exc).strip().partition('\n')[0]},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        obj = model_cls.objects.get(**{pk_field: row_id})
+        response_serializer = self.get_serializer(obj)
+        http_status = status.HTTP_201_CREATED if new_ids else status.HTTP_200_OK
+        return Response(response_serializer.data, status=http_status)
 
     def _bulk_create(self, request):
         from rest_framework.exceptions import PermissionDenied
