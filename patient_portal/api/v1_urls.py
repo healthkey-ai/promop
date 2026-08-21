@@ -21,6 +21,7 @@ from .views import (
     VocabSnapshotView,
     org_disease_stats,
     InterchangeAgreementViewSet,
+    field_mapping_list, field_mapping_detail,
 )
 from .org_views import (
     OrgListCreateView, OrgDetailView,
@@ -108,4 +109,6 @@ urlpatterns = [
     path('orgs/<slug:slug>/vocabulary/', OrgVocabularyUsageView.as_view(), name='v1-org-vocabulary-usage'),
     path('orgs/<slug:slug>/public/', org_public_info, name='v1-org-public-info'),
     path('orgs/<slug:slug>/patient-signup/', OrgPatientSignupView.as_view(), name='v1-org-patient-signup'),
+    path('field-mappings/', field_mapping_list, name='v1-field-mapping-list'),
+    path('field-mappings/<int:pk>/', field_mapping_detail, name='v1-field-mapping-detail'),
 ]

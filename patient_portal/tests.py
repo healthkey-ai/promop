@@ -26,7 +26,7 @@ from rest_framework.test import APIClient
 
 from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
-    Person, PatientRecord, ProvenanceRecord,
+    Person, PatientRecord, ProvenanceRecord, FieldConceptMapping,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     Death, PatientDocument, RecordRevision,
     Relationship, ConceptRelationship, ConceptAncestor,
@@ -19359,3 +19359,151 @@ class BulkUpsertObservationIdentityTest(TestCase):
             '/api/v1/observations/?skip_refresh=true', rows, format='json')
 
         self.assertEqual(Observation.objects.filter(person=self.person).count(), 2)
+
+
+# =============================================================================
+# Field Concept Mapping API tests
+# =============================================================================
+
+class FieldConceptMappingTest(TestCase):
+    """Tests for the /api/v1/field-mappings/ endpoints."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = Identity.objects.create_user(
+            email='mapping_staff@t.com', password='x', is_staff=True,
+        )
+        cls.non_staff = Identity.objects.create_user(
+            email='mapping_user@t.com', password='x', is_staff=False,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+
+    # -- GET list --
+
+    def test_list_returns_all_fields(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        field_names = {d['field_name'] for d in resp.data}
+        # Spot-check a few known fields.
+        self.assertIn('hemoglobin_g_dl', field_names)
+        self.assertIn('disease', field_names)
+        self.assertIn('weight', field_names)
+        self.assertTrue(len(resp.data) > 100)
+
+    def test_list_requires_staff(self):
+        self.client.force_authenticate(user=self.non_staff)
+        resp = self.client.get('/api/v1/field-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_list_unauthenticated(self):
+        resp = self.client.get('/api/v1/field-mappings/')
+        self.assertIn(resp.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_category_filter(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-mappings/?category=editable')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        categories = {d['category'] for d in resp.data}
+        self.assertEqual(categories, {'editable'})
+        self.assertTrue(len(resp.data) > 10)
+
+    def test_search_filter(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-mappings/?search=smoking')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        for d in resp.data:
+            self.assertIn('smoking', d['field_name'].lower())
+
+    # -- POST create --
+
+    def test_create_mapping(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'smoking_status',
+            'vocabulary_id': 'SNOMED',
+            'concept_code': '229819007',
+            'omop_table': 'Observation',
+            'status': 'proposed',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['field_name'], 'smoking_status')
+        self.assertTrue(FieldConceptMapping.objects.filter(field_name='smoking_status').exists())
+
+    def test_create_invalid_field_name(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'totally_fake_field',
+            'vocabulary_id': 'LOINC',
+            'concept_code': '99999-9',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_duplicate_field_rejected(self):
+        FieldConceptMapping.objects.create(field_name='pack_years', vocabulary_id='SNOMED', concept_code='S1')
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'pack_years',
+            'vocabulary_id': 'SNOMED',
+            'concept_code': 'S2',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_loinc_collision_rejected(self):
+        self.client.force_authenticate(user=self.staff)
+        # 718-7 is hemoglobin in LAB_FIELD_TO_LOINC
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'alcohol_use',
+            'vocabulary_id': 'LOINC',
+            'concept_code': '718-7',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_duplicate_vocab_code_rejected(self):
+        """Two different fields cannot claim the same (vocab, code)."""
+        FieldConceptMapping.objects.create(
+            field_name='alcohol_use', vocabulary_id='LOINC', concept_code='NEW-1',
+        )
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'diet_type',
+            'vocabulary_id': 'LOINC',
+            'concept_code': 'NEW-1',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # -- PATCH update --
+
+    def test_update_status_to_approved(self):
+        mapping = FieldConceptMapping.objects.create(
+            field_name='diet_type', vocabulary_id='SNOMED', concept_code='DT-1', status='proposed',
+        )
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.patch(f'/api/v1/field-mappings/{mapping.pk}/', {
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, 'approved')
+        self.assertEqual(mapping.reviewer, self.staff)
+        self.assertIsNotNone(mapping.reviewed_at)
+
+    # -- DELETE --
+
+    def test_delete_mapping(self):
+        mapping = FieldConceptMapping.objects.create(
+            field_name='stress_level', vocabulary_id='SNOMED', concept_code='SL-1',
+        )
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.delete(f'/api/v1/field-mappings/{mapping.pk}/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(FieldConceptMapping.objects.filter(pk=mapping.pk).exists())
+
+    def test_non_staff_cannot_create(self):
+        self.client.force_authenticate(user=self.non_staff)
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'smoking_status',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)

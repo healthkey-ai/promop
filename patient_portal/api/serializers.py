@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from patient_portal.models import Identity, PatientConsent, PatientMessage
 from omop_core.models import (
-    PatientRecord, Concept,
+    PatientRecord, Concept, FieldConceptMapping,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
     Survey, PatientSurveyResponse,
@@ -960,3 +960,58 @@ class InterchangeAgreementSerializer(serializers.ModelSerializer):
 
     def get_in_effect(self, obj):
         return obj.is_in_effect()
+
+
+class FieldConceptMappingSerializer(serializers.ModelSerializer):
+    reviewer = serializers.CharField(source='reviewer.username', read_only=True, default=None)
+
+    class Meta:
+        model = FieldConceptMapping
+        fields = [
+            'id', 'field_name', 'concept', 'vocabulary_id', 'concept_code',
+            'unit', 'omop_table', 'status', 'reviewer',
+            'reviewed_at', 'notes', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'reviewer', 'reviewed_at', 'created_at', 'updated_at']
+
+    def validate_concept_code(self, value):
+        if not value:
+            return value
+        from omop_core.services.mappings import LAB_FIELD_TO_LOINC
+        vocab_id = self.initial_data.get('vocabulary_id', '')
+        # Check collision with LAB_FIELD_TO_LOINC (hardcoded LOINC mappings).
+        if vocab_id == 'LOINC':
+            for _field, (code, _unit, _display) in LAB_FIELD_TO_LOINC.items():
+                if code == value:
+                    raise serializers.ValidationError(
+                        f"LOINC code {value} is already mapped to field '{_field}' via LAB_FIELD_TO_LOINC."
+                    )
+        return value
+
+    def validate(self, attrs):
+        field_name = attrs.get('field_name', getattr(self.instance, 'field_name', None))
+        # Verify field_name is a real PatientRecord field.
+        if field_name:
+            concrete_names = {
+                f.name for f in PatientRecord._meta.get_fields()
+                if getattr(f, 'concrete', False)
+            }
+            if field_name not in concrete_names:
+                raise serializers.ValidationError({
+                    'field_name': f"'{field_name}' is not a concrete PatientRecord field."
+                })
+        return attrs
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        if validated_data.get('status') == 'approved' and request:
+            validated_data['reviewer'] = request.user
+            validated_data['reviewed_at'] = timezone.now()
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        request = self.context.get('request')
+        if validated_data.get('status') == 'approved' and instance.status != 'approved' and request:
+            validated_data['reviewer'] = request.user
+            validated_data['reviewed_at'] = timezone.now()
+        return super().update(instance, validated_data)

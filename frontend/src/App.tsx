@@ -18,6 +18,7 @@ import PatientHome from "@/components/Patient/PatientHome";
 import UploadFHIR from "@/components/Patient/UploadFHIR";
 import UploadCSV from "@/components/Patient/UploadCSV";
 import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
+import FieldMappingPage from "@/components/FieldMappings/FieldMappingPage";
 import OrgLogin from "@/components/Auth/OrgLogin";
 import OrgSignup from "@/components/Auth/OrgSignup";
 import ForgotPassword from "@/components/Auth/ForgotPassword";
@@ -101,6 +102,13 @@ function AppRoutes() {
     return element;
   };
 
+  // Staff-only routes: require a signed-in staff user.
+  const staffRoute = (element: ReactNode) => {
+    if (!currentUser) return <Navigate to="/login" replace />;
+    if (!currentUser.is_staff) return <Navigate to="/" replace />;
+    return element;
+  };
+
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
@@ -137,6 +145,7 @@ function AppRoutes() {
       <Route path="/upload-csv" element={providerRoute(<UploadCSV />)} />
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
       <Route path="/org-admin" element={providerRoute(<OrgAdminPage />)} />
+      <Route path="/field-mappings" element={staffRoute(<FieldMappingPage />)} />
       <Route
         path="/profile"
         element={

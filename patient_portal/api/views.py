@@ -7583,3 +7583,66 @@ class VocabSnapshotView(APIView):
                         yield str(row_json) + '\n'
                     count += 1
         yield _json.dumps({'__done': True, 'rows': count}) + '\n'
+
+
+# =============================================================================
+# Field Concept Mapping (staff-only concept assignment interface)
+# =============================================================================
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def field_mapping_list(request):
+    """GET: list all field descriptors.  POST: create a new mapping."""
+    if not getattr(request.user, 'is_staff', False):
+        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == 'GET':
+        from omop_core.services.field_descriptor import get_all_field_descriptors
+        descriptors = get_all_field_descriptors()
+        # Optional filters.
+        category = request.query_params.get('category')
+        if category:
+            descriptors = [d for d in descriptors if d['category'] == category]
+        search = request.query_params.get('search')
+        if search:
+            q = search.lower()
+            descriptors = [d for d in descriptors if q in d['field_name'].lower()]
+        return Response(descriptors)
+
+    # POST — create a mapping.
+    from .serializers import FieldConceptMappingSerializer
+    serializer = FieldConceptMappingSerializer(data=request.data, context={'request': request})
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def field_mapping_detail(request, pk):
+    """GET/PATCH/DELETE a single FieldConceptMapping."""
+    if not getattr(request.user, 'is_staff', False):
+        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    from omop_core.models import FieldConceptMapping
+    try:
+        mapping = FieldConceptMapping.objects.get(pk=pk)
+    except FieldConceptMapping.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        from .serializers import FieldConceptMappingSerializer
+        return Response(FieldConceptMappingSerializer(mapping).data)
+
+    if request.method == 'DELETE':
+        mapping.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # PATCH
+    from .serializers import FieldConceptMappingSerializer
+    serializer = FieldConceptMappingSerializer(
+        mapping, data=request.data, partial=True, context={'request': request},
+    )
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    return Response(serializer.data)
