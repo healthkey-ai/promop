@@ -92,10 +92,11 @@ Download `synthea_bc_1000.json` from the Zenodo record above, then:
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
-  python manage.py import_org_patients --input synthea_bc_1000.json \
-    --org synthea-bc \
-    --create-org
+  python manage.py import_org_patients --input synthea_bc_1000.json
 ```
+
+The export records the org it came from (`synthea-bc`), so that org is created and
+used by default. Pass `--org <slug> --create-org` to load it somewhere else.
 
 **What happens:**
 - Creates the `synthea-bc` organization

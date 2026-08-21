@@ -122,6 +122,29 @@ class TestRoundTrip:
 
         assert PatientRecord.objects.filter(organization__slug='dest-org').count() == 1
 
+    def test_org_defaults_to_the_slug_recorded_in_the_export(self, tmp_path):
+        """The Zenodo dataset publishes an import line with no --org; it must work."""
+        org = _build_cohort(slug='src-org', n=1)
+        path = _export(tmp_path)
+        _wipe_source(org)
+
+        call_command('import_org_patients', str(path), stdout=StringIO())
+
+        assert PatientRecord.objects.filter(organization__slug='src-org').count() == 1
+
+    def test_explicit_org_overrides_the_export_slug(self, tmp_path):
+        org = _build_cohort(slug='src-org', n=1)
+        path = _export(tmp_path)
+        _wipe_source(org)
+
+        call_command(
+            'import_org_patients', str(path),
+            org='dest-org', create_org=True, stdout=StringIO(),
+        )
+
+        assert PatientRecord.objects.filter(organization__slug='dest-org').count() == 1
+        assert not Organization.objects.filter(slug='src-org').exists()
+
     def test_missing_input_is_a_command_error(self):
         with pytest.raises(CommandError, match='positional argument or with --input'):
             call_command('import_org_patients', org='dest-org', stdout=StringIO())
