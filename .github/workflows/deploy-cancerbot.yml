@@ -74,10 +74,14 @@ jobs:
             cd ${DEPLOY_DIR}
             printf 'IMAGE_REPO=%s\nIMAGE_TAG=%s\n' "${IMAGE}" "${IMAGE_TAG}" > .env
             gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
-            docker compose pull
+            # Every compose subcommand interpolates the whole file, and the
+            # required vars (\${VAR:?}) only exist inside secret2env — so pull
+            # and ps have to run in there too, not just up/migrate.
             /bin/secret2env -backend gcp ${SECRET_RESOURCE_NAME} sh -c \
-              "docker compose run --rm migrate && docker compose up -d --remove-orphans --wait"
-            docker compose ps
+              "docker compose pull \
+                 && docker compose run --rm migrate \
+                 && docker compose up -d --remove-orphans --wait \
+                 && docker compose ps"
           EOF
         env:
           SECRET_RESOURCE_NAME: ${{ vars.CANCERBOT_SECRET_RESOURCE_NAME }}
