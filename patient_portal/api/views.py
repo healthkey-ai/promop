@@ -75,7 +75,7 @@ import json
 import logging
 import os
 import re
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from io import StringIO
 from .permissions import ScopedTokenPermission, VocabReadPermission, PatientCrudPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
@@ -4800,6 +4800,27 @@ _PERSON_PATCHABLE_FIELDS = {
     'ethnicity_source_value':('str',  _PERSON_STR_PLACEHOLDERS),
 }
 
+# PatientRecord field → (Location column, kind). These live on the OMOP Location
+# row that Person.location points at, not on Person, which is why the projection
+# name and the column name differ for two of them.
+#
+# Replaceable rather than fill-if-empty: an address is corrected far more often
+# than a birth date, and a patient who moves needs the new value to win.
+_PERSON_LOCATION_FIELDS = {
+    'city':        ('city', 'str', 50),
+    'region':      ('state', 'str', 2),
+    'postal_code': ('zip', 'str', 9),
+    'country':     ('country', 'str', 100),
+    'latitude':    ('latitude', 'decimal', None),
+    'longitude':   ('longitude', 'decimal', None),
+}
+
+# Bounds are the CDM's, checked here so an over-long value is refused with a
+# reason instead of being truncated by the database. `region` maps to `state`,
+# which the CDM caps at two characters — a full region name is a 400, not a
+# silent 'Ca'.
+_LOCATION_DECIMAL_RANGE = {'latitude': (-90, 90), 'longitude': (-180, 180)}
+
 _PERSON_REPLACEABLE_FIELDS = {
     'email': 'email',
     'phone_number': 'str',
@@ -5021,6 +5042,63 @@ class PersonViewSet(viewsets.GenericViewSet):
             if getattr(person, field) != incoming:
                 setattr(person, field, incoming)
                 changed.append(field)
+
+        # ---- Location -----------------------------------------------------
+        # Six projection fields resolve to the OMOP Location row rather than to
+        # Person. The row is created on first write, because a patient whose
+        # address arrives after registration has no location to update.
+        location_updates = {}
+        for field, (column, kind, max_len) in _PERSON_LOCATION_FIELDS.items():
+            if field not in request.data:
+                continue
+            incoming = request.data[field]
+            if incoming is not None and kind == 'str':
+                incoming = str(incoming).strip() or None
+                if incoming is not None and max_len and len(incoming) > max_len:
+                    return Response(
+                        {'detail': (
+                            f"'{field}' must be at most {max_len} characters "
+                            f'(OMOP Location.{column}).'
+                        )},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            elif incoming is not None and kind == 'decimal':
+                try:
+                    incoming = Decimal(str(incoming))
+                except (InvalidOperation, TypeError, ValueError):
+                    return Response(
+                        {'detail': f"'{field}' must be a number."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                lo, hi = _LOCATION_DECIMAL_RANGE[field]
+                if not (lo <= incoming <= hi):
+                    return Response(
+                        {'detail': f"'{field}' must be between {lo} and {hi}."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            location_updates[column] = incoming
+
+        if location_updates:
+            location = None
+            if person.location_id:
+                location = Location.objects.filter(
+                    location_id=person.location_id
+                ).first()
+            if location is None:
+                location = Location(location_id=next_pk(Location, 'location_id'))
+            location_changed = [
+                c for c, v in location_updates.items() if getattr(location, c) != v
+            ]
+            for column, value in location_updates.items():
+                setattr(location, column, value)
+            if location._state.adding:
+                location.save()
+                # Person.location_id is a plain IntegerField, not a FK — the CDM
+                # link is by id only, so assign the id rather than the instance.
+                person.location_id = location.location_id
+                changed.append('location_id')
+            elif location_changed:
+                location.save(update_fields=location_changed)
 
         if changed:
             person.save(update_fields=changed)
