@@ -50,21 +50,39 @@ Single-row writes fire `post_save`, so derivation is automatic and the UI does *
 `POST /patient-records/{id}/refresh/` — which is just as well, since that endpoint is
 admin/service-token only and a treating clinician is neither.
 
-## Coverage is partial, and that governs the whole design
+## Every field is editable, selectable, computed, or an alias
 
-| | Count |
-|---|---|
-| Read-only mapped `PatientRecord` fields | 319 |
-| Fields with a canonical LOINC write mapping (`LAB_FIELD_TO_LOINC`) | 45 |
-| **Mapped fields with no defined write target** | **274** |
+A binary writable/not left a third of the record looking broken: a unit picker is not
+"unwritable", and neither is height × weight. Each of the 319 fields resolves to one kind,
+and anything not directly typeable carries a `reason` the UI can show.
 
-`docs/omop_to_patientrecord.md` marks many of the remaining 274 as "pending a reviewed
-concept set" — they cannot be made writable without vocabulary work, and inventing a
-concept per field is exactly what the derive-only migration removed.
+Measured against a fully loaded Athena vocabulary (`load_athena_vocabularies`, 2.0M concepts
+including 277,764 LOINC):
 
-So the UI cannot be made wholly editable, now or in one step. **The client must therefore be
-driven by a server-supplied descriptor rather than by hardcoded knowledge**, so that a field
-becomes editable when its mapping lands, with no frontend change.
+| kind | count | meaning |
+|---|---|---|
+| `editable` | 45 | writes an OMOP fact; all 45 codes resolve |
+| `alias` | 19 | mirrors a canonical field — edit that one |
+| `selectable` | 12 | a unit, carried on the fact whose value it qualifies |
+| `computed` | 6 | derived from other fields (`bmi` ← height, weight) |
+| *(needs a concept set)* | 237 | **the remaining work** |
+
+The 237 are the schedule driver, and the work is vocabulary review rather than frontend:
+`docs/omop_to_patientrecord.md` marks them "pending a reviewed concept set", and inventing a
+concept per field is what the derive-only migration removed. Most should be recoverable
+mechanically rather than by judgement — the derivation extractors already carry 133 distinct
+LOINC codes and match by code 86 times against only 9 name matches, so what derivation
+*reads* into a field is what a write should emit.
+
+**The client is therefore driven by the descriptor rather than hardcoded knowledge**, so a
+field becomes editable the moment its mapping lands, with no frontend release.
+
+### Vocabulary must actually be loaded
+
+The descriptor refuses to mark a field editable when its code does not resolve, so a
+deployment without vocabulary reports everything as unwritable. `promop_dev` held 73 LOINC
+concepts before this work; a full load is ~277k. **Staging and production need the same load
+before any of this functions there.**
 
 ## Proposed pieces
 

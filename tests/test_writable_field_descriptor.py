@@ -104,6 +104,61 @@ class TestUnmappedFields:
             assert field not in descriptor
 
 
+class TestKinds:
+    """Every field is editable, selectable, computed, or an alias — or it needs a
+    concept set. Nothing is left as an unexplained 'no'."""
+
+    def test_an_alias_points_at_its_canonical_field(self):
+        entry = build_writable_field_descriptor()['estimated_glomerular_filtration_rate']
+
+        assert entry['kind'] == 'alias'
+        assert entry['writable'] is False
+        assert entry['canonical'] == 'egfr_ml_min_173m2'
+
+    def test_no_alias_is_offered_as_editable(self):
+        """Writing an alias and its canonical collides on one LOINC row (#471)."""
+        descriptor = build_writable_field_descriptor()
+        for alias in ('calcium_mg_dl', 'creatinine_mg_dl', 'blood_urea_nitrogen'):
+            assert descriptor[alias]['kind'] == 'alias'
+            assert descriptor[alias]['writable'] is False
+
+    def test_a_computed_field_names_its_inputs(self):
+        entry = build_writable_field_descriptor()['bmi']
+
+        assert entry['kind'] == 'computed'
+        assert set(entry['inputs']) == {'height', 'weight'}
+        assert 'height' in entry['reason']
+
+    def test_tnbc_status_is_computed_from_three_receptors(self):
+        entry = build_writable_field_descriptor()['tnbc_status']
+
+        assert entry['kind'] == 'computed'
+        assert set(entry['inputs']) == {
+            'estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status',
+        }
+
+    def test_a_unit_column_is_selectable_and_names_what_it_qualifies(self):
+        entry = build_writable_field_descriptor()['weight_units']
+
+        assert entry['kind'] == 'selectable'
+        assert entry['qualifies'] == 'weight'
+
+    def test_a_mapped_lab_is_editable(self):
+        _load_loinc('718-7')
+        assert build_writable_field_descriptor()['hemoglobin_g_dl']['kind'] == 'editable'
+
+    def test_every_field_carries_a_reason_when_not_writable(self):
+        """A UI must always be able to say why a box is not typeable."""
+        for field, entry in build_writable_field_descriptor().items():
+            if not entry['writable']:
+                assert entry.get('reason'), field
+
+    def test_kind_is_one_of_the_known_values(self):
+        allowed = {'editable', 'selectable', 'computed', 'alias', None}
+        for field, entry in build_writable_field_descriptor().items():
+            assert entry['kind'] in allowed, (field, entry['kind'])
+
+
 class TestCost:
     def test_query_count_is_flat_not_per_field(self):
         """One lookup per vocabulary, however many fields are mapped."""
@@ -120,3 +175,46 @@ class TestEndpoint:
     def test_requires_authentication(self, client):
         resp = client.get('/api/v1/patient-records/writable-fields/')
         assert resp.status_code in (401, 403)
+
+
+class TestAliasMapIntegrity:
+    """A duplicate key in the alias literal silently drops an alias list.
+
+    `_LAB_FIELD_ALIASES` listed 'egfr_ml_min_173m2' and 'alkaline_phosphatase_u_l'
+    twice each. Python keeps the last, so 'egfr' and 'alkaline_phosphatase' lost
+    their propagation: both are in _OMOP_DERIVED_FIELDS, so derivation cleared them
+    on every refresh and nothing ever wrote them back. They read as permanently
+    null. Nothing failed loudly, which is why it survived.
+    """
+
+    def test_no_canonical_is_listed_twice(self):
+        import ast
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parents[1]
+            / 'omop_core/services/patient_record_service.py'
+        ).read_text()
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Assign):
+                continue
+            if getattr(node.targets[0], 'id', '') != '_LAB_FIELD_ALIASES':
+                continue
+            keys = [k.value for k in node.value.keys]
+            duplicates = {k for k in keys if keys.count(k) > 1}
+            assert not duplicates, f'duplicate keys silently drop aliases: {duplicates}'
+            return
+        raise AssertionError('_LAB_FIELD_ALIASES literal not found')
+
+    def test_every_cleared_lab_field_is_repopulated(self):
+        """A field derivation clears must have a source, or it reads as null forever."""
+        from omop_core.services import patient_record_service as prs
+        from omop_core.services.mappings import LAB_FIELD_TO_LOINC
+
+        repopulated = {a for v in prs._LAB_FIELD_ALIASES.values() for a in v}
+        for field in ('egfr', 'alkaline_phosphatase',
+                      'estimated_glomerular_filtration_rate',
+                      'liver_enzyme_levels_alp'):
+            assert field in prs._OMOP_DERIVED_FIELDS, field
+            assert field not in LAB_FIELD_TO_LOINC, field
+            assert field in repopulated, f'{field} is cleared but never repopulated'

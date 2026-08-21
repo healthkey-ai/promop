@@ -360,24 +360,28 @@ _FLC_FIELDS = frozenset({'kappa_flc', 'lambda_flc'})
 # the old field names continue to work.
 #
 # canonical field           → [legacy aliases]
+#
+# Two canonicals carry more than one legacy alias. They must stay in a single
+# entry each: this literal previously listed 'egfr_ml_min_173m2' and
+# 'alkaline_phosphatase_u_l' twice, and Python kept only the last, so 'egfr' and
+# 'alkaline_phosphatase' were cleared on every refresh and never repopulated.
+# test_no_canonical_is_listed_twice guards the shape.
 _LAB_FIELD_ALIASES = {
     'serum_calcium_mg_dl':    ['calcium_mg_dl'],
     'serum_creatinine_mg_dl': ['creatinine_mg_dl'],
-    'egfr_ml_min_173m2':      ['egfr'],
+    'egfr_ml_min_173m2':      ['egfr', 'estimated_glomerular_filtration_rate'],
     'bun_mg_dl':              ['blood_urea_nitrogen'],
     'sodium_meq_l':           ['serum_sodium'],
     'potassium_meq_l':        ['serum_potassium'],
     'magnesium_mg_dl':        ['magnesium'],
-    'alkaline_phosphatase_u_l': ['alkaline_phosphatase'],
+    'alkaline_phosphatase_u_l': ['alkaline_phosphatase', 'liver_enzyme_levels_alp'],
     'ldh_u_l':                ['ldh_level', 'ldh', 'lactate_dehydrogenase_level'],
     'anc_thousand_per_ul':    ['absolute_neutrophile_count'],
     'rbc_million_per_ul':     ['red_blood_cell_count'],
-    'egfr_ml_min_173m2':      ['estimated_glomerular_filtration_rate'],
     'creatinine_clearance_ml_min': ['creatinine_clearance_rate'],
     'serum_bilirubin_level_direct': ['serum_bilirubin_level'],
     'ast_u_l': ['liver_enzyme_levels_ast'],
     'alt_u_l': ['liver_enzyme_levels_alt'],
-    'alkaline_phosphatase_u_l': ['liver_enzyme_levels_alp'],
 }
 
 # A FHIR Condition.stage summary is an asserted clinical fact, but the FHIR

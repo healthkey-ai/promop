@@ -21,12 +21,45 @@ from omop_core.models import Concept
 from omop_core.services.mappings import CONCEPT_LAB_TYPE, LAB_FIELD_TO_LOINC
 from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
+    _LAB_FIELD_ALIASES,
 )
+
+# Every field resolves to exactly one kind. A binary writable/not left a third of
+# the record looking broken — a field is not "unwritable" because it is a unit
+# picker or because it is height and weight multiplied together.
+KIND_EDITABLE = 'editable'      # write an OMOP fact; derivation follows
+KIND_SELECTABLE = 'selectable'  # choose from a bounded set, carried on the fact
+KIND_COMPUTED = 'computed'      # derived from other fields; never authored alone
+KIND_ALIAS = 'alias'            # mirrors a canonical field; edit that one instead
 
 _NO_MAPPING_REASON = (
     'No reviewed concept set for this field yet — it cannot be written as a '
     'complete OMOP fact. See docs/omop_to_patientrecord.md.'
 )
+
+# field → the field it mirrors. Writing an alias directly would collide with its
+# canonical on the same LOINC row, which is the failure #471 removed.
+_ALIAS_TO_CANONICAL = {
+    alias: canonical
+    for canonical, aliases in _LAB_FIELD_ALIASES.items()
+    for alias in aliases
+}
+
+# Values computed during derivation from other projected fields, with the inputs
+# a UI needs in order to say why the box is not typeable.
+_COMPUTED_INPUTS = {
+    'bmi': ['height', 'weight'],
+    'tnbc_status': [
+        'estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status',
+    ],
+    'tp53_disruption': ['genetic_mutations'],
+    'free_light_chain_ratio': ['kappa_flc', 'lambda_flc'],
+    'molecular_markers': ['genetic_mutations'],
+    'liver_enzyme_levels': [
+        'liver_enzyme_levels_ast', 'liver_enzyme_levels_alt',
+        'liver_enzyme_levels_alp',
+    ],
+}
 
 # Lifecycle columns are not clinical data and are never writable regardless of
 # mapping state; they are excluded rather than reported as unwritable fields.
@@ -60,9 +93,47 @@ def build_writable_field_descriptor():
 
     descriptor = {}
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
+        if field in _ALIAS_TO_CANONICAL:
+            canonical = _ALIAS_TO_CANONICAL[field]
+            descriptor[field] = {
+                'kind': KIND_ALIAS,
+                'writable': False,
+                'canonical': canonical,
+                'reason': f'Mirrors {canonical}; edit that field instead.',
+            }
+            continue
+
+        if field in _COMPUTED_INPUTS:
+            descriptor[field] = {
+                'kind': KIND_COMPUTED,
+                'writable': False,
+                'inputs': _COMPUTED_INPUTS[field],
+                'reason': (
+                    'Computed from ' + ', '.join(_COMPUTED_INPUTS[field]) + '.'
+                ),
+            }
+            continue
+
+        if field.endswith('_units'):
+            # A unit is not a fact of its own — it is the unit_concept carried on
+            # the measurement whose value it qualifies. The picker belongs beside
+            # that value, and selecting one rewrites the fact, not this column.
+            descriptor[field] = {
+                'kind': KIND_SELECTABLE,
+                'writable': False,
+                'qualifies': field[: -len('_units')],
+                'reason': (
+                    f'Unit of {field[: -len("_units")]}; selected alongside that '
+                    'value and stored on the measurement.'
+                ),
+            }
+            continue
+
         mapping = LAB_FIELD_TO_LOINC.get(field)
         if mapping is None:
-            descriptor[field] = {'writable': False, 'reason': _NO_MAPPING_REASON}
+            descriptor[field] = {
+                'kind': None, 'writable': False, 'reason': _NO_MAPPING_REASON,
+            }
             continue
 
         code, unit, display = mapping
@@ -73,6 +144,7 @@ def build_writable_field_descriptor():
             # cannot be resolved, so report it as not writable here rather than
             # letting the client discover it as a failed write.
             descriptor[field] = {
+                'kind': KIND_EDITABLE,
                 'writable': False,
                 'reason': (
                     f'LOINC {code} is not loaded in this deployment\'s vocabulary.'
@@ -83,6 +155,7 @@ def build_writable_field_descriptor():
             continue
 
         descriptor[field] = {
+            'kind': KIND_EDITABLE,
             'writable': True,
             'target': 'measurement',
             'concept_id': concept_id,
