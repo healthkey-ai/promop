@@ -9,6 +9,7 @@ from rest_framework.test import APIClient
 from patient_portal.models import Identity, PatientUser
 from omop_core.models import (
     ConditionOccurrence, DrugExposure, Measurement, Person, ProvenanceRecord,
+    PatientDocument,
 )
 
 # OMOP tables use manually-assigned integer PKs fed by Postgres sequences that
@@ -390,7 +391,7 @@ class FhirSyncTests(TestCase):
         # Current "records on file" totals returned for the connector to display.
         self.assertEqual(body['totals'],
                          {'measurements': 1, 'conditions': 1, 'medications': 1,
-                          'procedures': 0, 'observations': 0})
+                          'procedures': 0, 'observations': 0, 'documents': 0})
 
         # Demographics filled onto the resolved Person.
         from omop_core.models import Person
@@ -407,6 +408,63 @@ class FhirSyncTests(TestCase):
         self.assertEqual(second['condition_ids'], [])
         self.assertEqual(second['drug_exposure_ids'], [])
         self.assertEqual(Measurement.objects.filter(person_id=first['person_id']).count(), 1)
+
+    def test_document_reference_ingests_patient_document(self):
+        bundle = {"resourceType": "Bundle", "type": "collection", "entry": [
+            {"resource": {
+                "resourceType": "DocumentReference",
+                "id": "doc-1",
+                "status": "current",
+                "type": {"text": "Radiology report"},
+                "description": "CT chest report",
+                "date": "2026-07-15T10:30:00Z",
+                "content": [{
+                    "attachment": {
+                        "contentType": "application/pdf",
+                        "url": "https://ehr.example.test/reports/ct-chest.pdf",
+                        "title": "ct-chest.pdf",
+                    },
+                }],
+            }},
+        ]}
+
+        first = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+        second = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+
+        self.assertEqual(first.status_code, 201, first.content)
+        self.assertEqual(second.status_code, 201, second.content)
+        self.assertEqual(first.json()['document_ids'], second.json()['document_ids'])
+        self.assertEqual(first.json()['skipped'], [])
+        self.assertEqual(PatientDocument.objects.count(), 1)
+        doc = PatientDocument.objects.get()
+        self.assertEqual(doc.person_id, first.json()['person_id'])
+        self.assertEqual(doc.doc_type, 'IMAGING')
+        self.assertEqual(doc.title, 'ct-chest.pdf')
+        self.assertEqual(doc.file_url, 'https://ehr.example.test/reports/ct-chest.pdf')
+        self.assertEqual(doc.file_name, 'ct-chest.pdf')
+        self.assertEqual(doc.status, PatientDocument.STATUS_ACTIVE)
+        self.assertEqual(doc.effective_date.isoformat(), '2026-07-15')
+        self.assertEqual(first.json()['totals']['documents'], 1)
+        self.assertEqual(ProvenanceRecord.objects.filter(
+            content_type__model='patientdocument',
+            object_id=doc.id,
+            source='EHR_SYNC',
+        ).count(), 1)
+
+    def test_document_reference_without_content_is_reported_skipped(self):
+        bundle = {"resourceType": "Bundle", "type": "collection", "entry": [
+            {"resource": {"resourceType": "DocumentReference", "status": "current"}},
+        ]}
+
+        resp = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()['document_ids'], [])
+        self.assertIn(
+            {'resourceType': 'DocumentReference', 'reason': 'missing_content', 'count': 1},
+            resp.json()['skipped'],
+        )
+        self.assertEqual(PatientDocument.objects.count(), 0)
 
     def test_mapped_observation_dedup_uses_resolved_concept_not_display(self):
         from datetime import date
