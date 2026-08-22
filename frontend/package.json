@@ -12,7 +12,8 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepare": "test -f ../scripts/install-hooks.sh && cd .. && bash scripts/install-hooks.sh || true"
+    "prepare": "test -f ../scripts/install-hooks.sh && cd .. && bash scripts/install-hooks.sh || true",
+    "build:widget": "vite build --config vite.widget.config.ts"
   },
   "dependencies": {
     "@module-federation/runtime": "^2.4.0",
