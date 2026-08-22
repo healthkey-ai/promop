@@ -359,16 +359,51 @@ export default function PatientDetail({
         if (patientInfoRef.current) patientInfoRef.current[field] = info[field];
       }
 
-      // Everything the projection still owns goes the old way. Clinical keys are
-      // dropped: they are read-only there, and an unchanged echo would pass but a
-      // changed one would 405 the whole request.
+      // Everything the projection still owns goes the old way — and *only* that.
+      //
+      // This used to drop just the writable fields and echo the rest back, on the
+      // theory that an unchanged value is a no-op. It cannot work: writing the
+      // OMOP fact triggers derivation, which updates the canonical column AND its
+      // aliases, so by the time this PATCH is sent the payload captured before the
+      // write is stale. The server reads a stale value as an attempted change to a
+      // read-only field and refuses the whole request —
+      //
+      //   OMOP-mapped PatientRecord fields are read-only …
+      //   fields: [absolute_neutrophile_count, calcium_mg_dl, egfr, …]
+      //
+      // — every one of them an alias the edit itself had just moved.
+      //
+      // Any field the descriptor knows about is OMOP-mapped and never belongs in
+      // this request, whatever its kind. Lifecycle columns are dropped too: they
+      // are serializer read-only, and updated_at goes stale the moment anything
+      // is written.
+      const LIFECYCLE = new Set([
+        'id', 'person', 'organization', 'created_at', 'updated_at',
+        'derived_at', 'derivation_version', 'user_edited_fields',
+      ]);
+      //
+      // And only what actually CHANGED. Echoing back unchanged values is what
+      // created the bug in the first place: a value the client holds is only
+      // guaranteed current until the next write, and computed fields like
+      // lines_of_therapy or age go stale exactly the same way an alias does. A
+      // PATCH should carry the edit, not the record.
       const projectionInfo = Object.fromEntries(
-        Object.entries(info).filter(([f]) => !descriptors[f]?.writable),
+        Object.entries(info).filter(
+          ([f, v]) =>
+            !(f in descriptors) && !LIFECYCLE.has(f) && v !== baseline[f],
+        ),
       );
-      await api.patch(
-        `/patient-info/${personId}/`,
-        renamed ? { ...projectionInfo, patient_name: data.name } : projectionInfo,
-      );
+      // Nothing left to say is not a reason to say it: a save that only moved
+      // clinical facts has already done its work through the OMOP writes above.
+      if (renamed || Object.keys(projectionInfo).length > 0) {
+        await api.patch(
+          `/patient-info/${personId}/`,
+          renamed ? { ...projectionInfo, patient_name: data.name } : projectionInfo,
+        );
+        for (const f of Object.keys(projectionInfo)) {
+          if (patientInfoRef.current) patientInfoRef.current[f] = info[f];
+        }
+      }
       if (seq === saveSeqRef.current) {
         // Header name is state set once on load, so without this the rename
         // only shows up after a refetch.
