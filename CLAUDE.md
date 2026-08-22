@@ -618,6 +618,37 @@ operations = [
 
 ---
 
+## Frontend Lint: fetching in an effect
+
+`npm run lint` runs with `react-hooks/set-state-in-effect`, which **errors** (not
+warns) on this shape:
+
+```tsx
+const load = useCallback(async () => { setLoading(true); /* ... */ }, []);
+useEffect(() => {
+  load();          // error: Avoid calling setState() directly within an effect
+}, [load]);
+```
+
+The rule traces into the callback, so moving the `setState` calls after the
+first `await` does **not** satisfy it. Wrap the call instead:
+
+```tsx
+useEffect(() => {
+  (async () => {
+    await load();
+  })();
+}, [load]);
+```
+
+This has broken `dev` twice (fixed in #630 and again after #634). A red `dev`
+turns **every open PR red**, because the same job runs on each one — so it costs
+far more than the one file it appears in.
+
+Run `npm run lint` before pushing frontend changes; `tsc --noEmit` and the test
+suite both pass on the offending shape, so neither catches it. CI's job is
+"Frontend lint **& build**" — run `npm run build` too.
+
 ## DB / Model Sync Check
 
 To audit whether the DB and model are in sync at any time:

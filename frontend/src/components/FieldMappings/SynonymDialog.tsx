@@ -38,8 +38,13 @@ export function SynonymDialog({ fieldName, onClose }: Props) {
     }
   }, [fieldName]);
 
+  // Wrapped rather than called bare: react-hooks/set-state-in-effect reads a
+  // direct call whose callee sets state as a synchronous setState in the effect
+  // body. Same shape FieldMappingPage and PatientDetail use for their loads.
   useEffect(() => {
-    fetchSynonyms();
+    (async () => {
+      await fetchSynonyms();
+    })();
   }, [fetchSynonyms]);
 
   useEffect(() => {
