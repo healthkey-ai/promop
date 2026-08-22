@@ -40,6 +40,14 @@ export interface FieldDescriptor {
   inputs?: string[];
   /** selectable */
   qualifies?: string;
+  /** authored: what to write instead, since no single fact backs this field. */
+  authored_via?: {
+    target?: string;
+    endpoint?: string;
+    steps?: string[];
+    asserted_regimen_field?: string;
+  };
+  group?: string;
 }
 
 export type FieldDescriptors = Record<string, FieldDescriptor>;
