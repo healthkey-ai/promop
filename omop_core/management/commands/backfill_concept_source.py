@@ -75,7 +75,7 @@ RULES = [
     (
         'seed_mint',
         Q(concept_id__gte=9_000_000, concept_id__lte=9_099_999),
-        "seed_omop_concepts mints in the legacy 900xxxx range",
+        "legacy 900xxxx-range mints from the retired concept seeder",
     ),
     (
         'fhir_ingest_block',

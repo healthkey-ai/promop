@@ -360,24 +360,28 @@ _FLC_FIELDS = frozenset({'kappa_flc', 'lambda_flc'})
 # the old field names continue to work.
 #
 # canonical field           → [legacy aliases]
+#
+# Two canonicals carry more than one legacy alias. They must stay in a single
+# entry each: this literal previously listed 'egfr_ml_min_173m2' and
+# 'alkaline_phosphatase_u_l' twice, and Python kept only the last, so 'egfr' and
+# 'alkaline_phosphatase' were cleared on every refresh and never repopulated.
+# test_no_canonical_is_listed_twice guards the shape.
 _LAB_FIELD_ALIASES = {
     'serum_calcium_mg_dl':    ['calcium_mg_dl'],
     'serum_creatinine_mg_dl': ['creatinine_mg_dl'],
-    'egfr_ml_min_173m2':      ['egfr'],
+    'egfr_ml_min_173m2':      ['egfr', 'estimated_glomerular_filtration_rate'],
     'bun_mg_dl':              ['blood_urea_nitrogen'],
     'sodium_meq_l':           ['serum_sodium'],
     'potassium_meq_l':        ['serum_potassium'],
     'magnesium_mg_dl':        ['magnesium'],
-    'alkaline_phosphatase_u_l': ['alkaline_phosphatase'],
+    'alkaline_phosphatase_u_l': ['alkaline_phosphatase', 'liver_enzyme_levels_alp'],
     'ldh_u_l':                ['ldh_level', 'ldh', 'lactate_dehydrogenase_level'],
     'anc_thousand_per_ul':    ['absolute_neutrophile_count'],
     'rbc_million_per_ul':     ['red_blood_cell_count'],
-    'egfr_ml_min_173m2':      ['estimated_glomerular_filtration_rate'],
     'creatinine_clearance_ml_min': ['creatinine_clearance_rate'],
     'serum_bilirubin_level_direct': ['serum_bilirubin_level'],
     'ast_u_l': ['liver_enzyme_levels_ast'],
     'alt_u_l': ['liver_enzyme_levels_alt'],
-    'alkaline_phosphatase_u_l': ['liver_enzyme_levels_alp'],
 }
 
 # A FHIR Condition.stage summary is an asserted clinical fact, but the FHIR
@@ -1629,7 +1633,14 @@ _GENOMICS_PATHOLOGY_LOINCS = frozenset({
     '85337-4',  # genomic/test methodology (also carries numeric Oncotype score)
     '31208-2',  # specimen source
     '69548-6',  # pathology test interpretation
-    '82185-1',  # androgen receptor status
+    # Androgen receptor. 49457-5 ("Androgen receptor Ag [Presence] in Tissue by
+    # Immune stain") is the only standard LOINC concept for this analyte and is
+    # what new writes use. 82185-1 is not a LOINC code at all — it resolves
+    # against no vocabulary release, so rows carrying it exist only as
+    # source_value text. It stays readable so any deployment that already wrote
+    # one still projects; nothing new is written under it.
+    '49457-5',
+    '82185-1',
     '92837-4',  # lymph-node involvement
     '21907-1',  # distant-metastasis status (not TNM M category)
     '44648-4',  # Nottingham biopsy grade
@@ -1934,7 +1945,10 @@ def _get_genomics_pathology_data(person: Person) -> dict:
         # or an undated projection patch.
         data['test_date'] = max(row.measurement_date for row in report_facts)
 
-    androgen_receptor = latest('82185-1')
+    # Prefer the real LOINC concept; fall back to the legacy non-code so an
+    # existing row still projects. Order matters — a deployment holding both
+    # should read the standard one.
+    androgen_receptor = latest('49457-5') or latest('82185-1')
     if androgen_receptor:
         value = _coded_value(androgen_receptor)
         if value:
@@ -2113,7 +2127,7 @@ def _get_bc_clinical_data(person: Person) -> dict:
     data = {}
 
     observations = (
-        Observation.objects.filter(person=person)
+        Observation.objects.filter(person=person, is_erroneous=False)
         .select_related('observation_concept')
         .order_by('-observation_date')
     )
@@ -2142,19 +2156,19 @@ def _get_bc_clinical_data(person: Person) -> dict:
 def _get_social_data(person: Person) -> dict:
     data = {}
 
-    observations = Observation.objects.filter(person=person)
+    observations = Observation.objects.filter(person=person, is_erroneous=False)
 
     employment_obs = observations.filter(
         observation_concept__concept_code__in=['224362002', '160903007']
     )
     if employment_obs.exists():
-        data['no_pre_existing_conditions'] = employment_obs.first().value_as_string
+        data['employment_status'] = employment_obs.first().value_as_string
 
     insurance_obs = observations.filter(
         observation_concept__concept_code__in=['408729009']
     )
     if insurance_obs.exists():
-        data['concomitant_medication_details'] = insurance_obs.first().value_as_string
+        data['insurance_type'] = insurance_obs.first().value_as_string
 
     return data
 
@@ -2162,9 +2176,9 @@ def _get_social_data(person: Person) -> dict:
 def _get_behavior_data(person: Person) -> dict:
     data = {}
 
-    observations = Observation.objects.filter(person=person)
+    observations = Observation.objects.filter(person=person, is_erroneous=False)
     measurements = (
-        Measurement.objects.filter(person=person)
+        Measurement.objects.filter(person=person, is_erroneous=False)
         .select_related('measurement_concept')
         .order_by('-measurement_date')
     )
@@ -2322,7 +2336,7 @@ def _get_assertion_data(person: Person) -> dict:
 def _get_infection_data(person: Person) -> dict:
     data = {}
 
-    measurements = Measurement.objects.filter(person=person)
+    measurements = Measurement.objects.filter(person=person, is_erroneous=False)
 
     def _infection_value(m):
         """Return 'negative', 'positive', or None from a Measurement row."""
@@ -2579,6 +2593,7 @@ def _get_sct_cytogenetic_data(person: Person) -> dict:
     ]
     obs_qs = (
         Observation.objects.filter(
+            is_erroneous=False,
             person=person,
             observation_source_value__in=_SOURCE_KEYS,
         )
@@ -2624,10 +2639,12 @@ def _get_assessment_data(person: Person) -> dict:
     )
 
     tumor_stage_obs = Observation.objects.filter(
+        is_erroneous=False,
         person=person,
         observation_concept__concept_code__in=['21905-5'],
     ).order_by('-observation_date').first()
     metastasis_obs = Observation.objects.filter(
+        is_erroneous=False,
         person=person,
         observation_concept__concept_code__in=['21901-4'],
     ).order_by('-observation_date').first()
@@ -2650,7 +2667,7 @@ def _get_laboratory_data(person: Person) -> dict:
     data = {}
 
     measurements = (
-        Measurement.objects.filter(person=person)
+        Measurement.objects.filter(person=person, is_erroneous=False)
         .select_related('measurement_concept')
         .order_by('-measurement_date', '-measurement_id')
     )
@@ -2756,7 +2773,7 @@ def _performance_rows(person: Person, name_fragment: str, loinc_code: str) -> li
     vocabulary is not loaded and the code survives only in the source value.
     """
     obs = (
-        Observation.objects.filter(person=person)
+        Observation.objects.filter(person=person, is_erroneous=False)
         .filter(
             Q(observation_concept__concept_name__icontains=name_fragment)
             | Q(observation_concept__concept_code=loinc_code)
@@ -2767,7 +2784,7 @@ def _performance_rows(person: Person, name_fragment: str, loinc_code: str) -> li
         .values_list('observation_date', 'value_as_number')
     )
     meas = (
-        Measurement.objects.filter(person=person)
+        Measurement.objects.filter(person=person, is_erroneous=False)
         .filter(
             Q(measurement_concept__concept_name__icontains=name_fragment)
             | Q(measurement_concept__concept_code=loinc_code)
@@ -2815,6 +2832,7 @@ def _get_genetic_mutations(person: Person) -> dict:
     mutations = []
 
     genetic_measurements = Measurement.objects.filter(
+        is_erroneous=False,
         person=person,
     ).filter(
         models.Q(measurement_concept__concept_code__in=_GENETIC_MUTATION_LOINCS.keys())
@@ -3009,6 +3027,7 @@ def _get_cll_data(person: Person) -> dict:
     if alc_concept:
         alc_measurements = (
             Measurement.objects.filter(
+                is_erroneous=False,
                 person=person,
                 measurement_concept=alc_concept,
                 value_as_number__isnull=False,
@@ -3293,6 +3312,7 @@ def _get_wearable_data(person: Person) -> dict:
 
     def _wearable_measurements(date_filter=None):
         qs = Measurement.objects.filter(
+            is_erroneous=False,
             person=person,
             value_as_number__isnull=False,
         )
@@ -3317,6 +3337,7 @@ def _get_wearable_data(person: Person) -> dict:
         # — not just sleep — and return the code alongside the value so rows are
         # keyed identically to the Measurement rows below.
         qs = Observation.objects.filter(
+            is_erroneous=False,
             person=person,
             value_as_number__isnull=False,
         )

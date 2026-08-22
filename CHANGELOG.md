@@ -41,6 +41,48 @@ recruiting trials.
 - Audit log middleware — structured JSON log for every mutating API request
 - 640+ backend tests; CI on GitHub Actions (PostgreSQL 16)
 
+## [1.2.0] — unreleased
+
+### Upgrade requirement — load the Athena vocabularies before deploying
+
+```bash
+python manage.py load_athena_vocabularies --path /path/to/athena --concepts-only
+```
+
+Clinical foreign keys resolve against loaded vocabulary. **Without this load** the
+writable-field descriptor reports no editable fields, demographic corrections save
+as text with a null concept, and derivation silently reads nothing.
+
+`--concepts-only` skips `concept_relationship`, `concept_ancestor`,
+`concept_synonym` and `drug_strength` — the difference between an 11-second load
+and streaming ~26M rows to add a handful of concepts.
+
+Newly in `VOCAB_SCOPE`, all of which were in the Athena bundle all along and
+simply never loaded:
+
+- **`Gender`, `Race`, `Ethnicity`** — `Person.race_concept` could not previously
+  hold a real concept on any deployment.
+- **`Episode`, `CDM`** — `32531` Treatment Regimen (what line-of-therapy episodes
+  point at) and `1147094` `drug_exposure.drug_exposure_id` (referenced by
+  `EpisodeEvent`). Both were hand-seeded; Athena supplies them with identical ids,
+  names and codes.
+
+**`seed_omop_concepts` is removed.** It maintained 99 concepts by hand, 97 of
+which Athena already supplies. Offering it as an operator command made it a
+competing source of truth for concepts, which is how a locally invented concept
+ends up occupying an id the vocabulary owns — what happened with `3000963`,
+turning every unmapped lab into a haemoglobin result and leaving 19 staging
+patients with a haemoglobin of 1.0 g/dL.
+
+The data survives as `omop_core/concept_fixtures.py`, imported only by tests,
+which need concepts without a 4.6 GB Athena bundle. There is no management
+command and no deploy step.
+
+Locally-minted `HK-Wearable` concepts — the one thing Athena cannot supply —
+arrive via migration 0143, which runs on every deploy.
+
+---
+
 ## [Unreleased]
 
 ---

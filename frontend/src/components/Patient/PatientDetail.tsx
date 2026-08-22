@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, Download } from "lucide-react";
 import api from "@/api/axios";
+import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
+import { writeClinicalFact } from "@/api/clinicalFacts";
 import { getActiveBranding } from "@/config/branding";
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -233,6 +235,10 @@ export default function PatientDetail({
   const [saveErrorMsg, setSaveErrorMsg] = useState<string | null>(null);
 
   const [patientInfo, setPatientInfo] = useState<Record<string, unknown> | null>(null);
+  // Server-side baseline for change detection. A clinical edit is only written
+  // when its value actually moved: the editor holds the whole record, so without
+  // this every autosave would rewrite every lab as a fresh dated result.
+  const patientInfoRef = useRef<Record<string, unknown> | null>(null);
    
   const [editedInfo, setEditedInfo] = useState<Record<string, unknown>>({});
   const [patientName, setPatientName] = useState("");
@@ -292,6 +298,7 @@ export default function PatientDetail({
         }
 
         setPatientInfo(d);
+        patientInfoRef.current = { ...d };
         setEditedInfo(d);
 
         const user = res.data.user;
@@ -320,8 +327,94 @@ export default function PatientDetail({
     const seq = ++saveSeqRef.current;
     setSaveStatus("saving");
     try {
-      await api.patch(`/patient-info/${personId}/`, data.info);
+      // scheduleAutoSave carries the edited name alongside the field data, but
+      // only data.info was ever sent — and data.info is the whole GET response,
+      // which already carries the ORIGINAL patient_name. So a rename never
+      // reached the server, and every autosave echoed the old name back.
+      //
+      // Strip it unconditionally and re-add only on a real rename. Sending the
+      // server's own value back is never useful, and for a patient with no name
+      // it is harmful: the rendered value is the synthesised "Patient 3542".
+      const { patient_name: _echoed, ...info } = data.info as Record<string, unknown>;
+      const renamed = !!data.name && data.name !== patientNameRef.current;
+
+      // A clinical field is not a column on this record — it is the projection of
+      // an OMOP fact, and PatientRecord owns no writable clinical column. Writing
+      // one means writing the fact and letting derivation follow, so those edits
+      // leave through writeClinicalFact rather than riding along in the PATCH,
+      // which would refuse them.
+      // Fail closed, and that has to mean the whole save — not just the clinical
+      // half. An empty descriptor makes nothing look writable, which correctly
+      // stops the OMOP writes, but it also makes the projection filter below
+      // match everything: without it there is no way to tell an OMOP-mapped
+      // column from one this record owns. Degrading to "PATCH the lot" is how
+      // the read-only 405 comes back, so a descriptor we could not fetch is a
+      // failed save, reported as one.
+      let descriptors: FieldDescriptors;
+      try {
+        descriptors = await fetchWritableFields();
+      } catch {
+        throw new Error(
+          'Could not load the writable-field descriptor, so the save was not '
+          + 'attempted. Retry once the connection is back.',
+        );
+      }
+      const baseline = patientInfoRef.current ?? {};
+      const clinicalEdits = Object.keys(info).filter(
+        (f) => descriptors[f]?.writable && info[f] !== baseline[f],
+      );
+      for (const field of clinicalEdits) {
+        await writeClinicalFact(personId, field, descriptors[field], info[field]);
+        // Advance the baseline so a later keystroke elsewhere does not re-write
+        // this same value as another result.
+        if (patientInfoRef.current) patientInfoRef.current[field] = info[field];
+      }
+
+      // Everything the projection still owns goes the old way — and *only* that.
+      //
+      // This used to drop just the writable fields and echo the rest back, on the
+      // theory that an unchanged value is a no-op. It cannot work: writing the
+      // OMOP fact triggers derivation, which updates the canonical column AND its
+      // aliases, so by the time this PATCH is sent the payload captured before the
+      // write is stale. The server reads a stale value as an attempted change to a
+      // read-only field and refuses the whole request —
+      //
+      //   OMOP-mapped PatientRecord fields are read-only …
+      //   fields: [absolute_neutrophile_count, calcium_mg_dl, egfr, …]
+      //
+      // — every one of them an alias the edit itself had just moved.
+      //
+      // Any field the descriptor knows about is OMOP-mapped and never belongs in
+      // this request, whatever its kind. Lifecycle columns are dropped too: they
+      // are serializer read-only, and updated_at goes stale the moment anything
+      // is written.
+      //
+      // And only what actually CHANGED. Echoing back unchanged values is what
+      // created the bug in the first place: a value the client holds is only
+      // guaranteed current until the next write, and computed fields like
+      // lines_of_therapy or age go stale exactly the same way an alias does. A
+      // PATCH should carry the edit, not the record.
+      const projectionInfo = Object.fromEntries(
+        Object.entries(info).filter(
+          ([f, v]) =>
+            !(f in descriptors) && !LIFECYCLE.has(f) && v !== baseline[f],
+        ),
+      );
+      // Nothing left to say is not a reason to say it: a save that only moved
+      // clinical facts has already done its work through the OMOP writes above.
+      if (renamed || Object.keys(projectionInfo).length > 0) {
+        await api.patch(
+          `/patient-info/${personId}/`,
+          renamed ? { ...projectionInfo, patient_name: data.name } : projectionInfo,
+        );
+        for (const f of Object.keys(projectionInfo)) {
+          if (patientInfoRef.current) patientInfoRef.current[f] = info[f];
+        }
+      }
       if (seq === saveSeqRef.current) {
+        // Header name is state set once on load, so without this the rename
+        // only shows up after a refetch.
+        if (renamed) setPatientName(data.name);
         setSaveStatus("saved");
         setTimeout(() => setSaveStatus((s) => (s === "saved" ? "idle" : s)), 1200);
       }
@@ -334,7 +427,16 @@ export default function PatientDetail({
           const data = resp?.data;
           if (data) {
             // DRF returns {field: [errors]} for validation, or {detail: "..."} / {error: "..."}
-            if (typeof data.detail === "string") detail = data.detail;
+            if (typeof data.detail === "string") {
+              detail = data.detail;
+              // The read-only guards name the offending columns in `fields`, and
+              // that list is the whole diagnosis — which field was rejected says
+              // whether the value itself was refused or a derived column rode
+              // along. Dropping it left the on-screen error unactionable.
+              if (Array.isArray(data.fields) && data.fields.length) {
+                detail += ` (${(data.fields as unknown[]).join(", ")})`;
+              }
+            }
             else if (typeof data.error === "string") detail = data.error;
             else {
               const fieldErrors = Object.entries(data)
@@ -346,6 +448,11 @@ export default function PatientDetail({
           } else if (resp?.status) {
             detail = `Server returned ${resp.status}.`;
           }
+        } else if (err instanceof Error && err.message) {
+          // Not every failure comes back from the server. A client-side refusal
+          // to save carries its reason in the message, and "An unexpected error
+          // occurred" would throw it away.
+          detail = err.message;
         }
         setSaveErrorMsg(detail);
       }

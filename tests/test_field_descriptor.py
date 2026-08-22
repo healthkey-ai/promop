@@ -100,7 +100,7 @@ def test_tabs_are_valid():
 
 
 def test_known_field_tab_assignments():
-    """Spot-check specific field→tab assignments."""
+    """Spot-check specific field->tab assignments."""
     descriptors = get_all_field_descriptors()
     by_name = {d['field_name']: d for d in descriptors}
     checks = {

@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from django.core.management import call_command
+from omop_core.concept_fixtures import seed_test_concepts
 from django.core.management.base import CommandError
 from django.db import IntegrityError, ProgrammingError, connection, transaction
 from django.test import TestCase
@@ -79,7 +80,7 @@ class _AllowsDuplicateConceptCodes(TestCase):
             raise NotImplementedError('PERSON_ID is required')
         _allow_duplicate_concept_codes()
         from omop_core.models import Person
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         cls.person = Person.objects.create(person_id=cls.PERSON_ID, year_of_birth=1970)
 
 
@@ -1377,7 +1378,7 @@ class SeedOmopConceptsTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         from django.core.management import call_command
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
 
     def _concept(self, concept_id):
         return Concept.objects.filter(concept_id=concept_id).first()
@@ -1416,7 +1417,7 @@ class SeedOmopConceptsTest(TestCase):
 
     def test_seed_is_idempotent(self):
         from django.core.management import call_command
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         self.assertEqual(Concept.objects.filter(concept_id=8532).count(), 1,
                          'Duplicate concept created on second seed_omop_concepts run')
 
@@ -2338,7 +2339,7 @@ class WearableConceptMappingTest(TestCase):
     """
 
     def _seed_rows(self):
-        from omop_core.management.commands.seed_omop_concepts import _CONCEPTS
+        from omop_core.concept_fixtures import _CONCEPTS
         return _CONCEPTS
 
     def test_every_wearable_metric_is_seeded(self):
@@ -2444,9 +2445,10 @@ class WearableConceptMappingTest(TestCase):
     def test_locally_minted_wearable_concepts_are_installed_by_migration(self):
         """Athena can never supply a local mint, so a migration must.
 
-        start.sh runs only `migrate`; seed_omop_concepts is manual. A metric
-        whose concept is locally minted is silently discarded on any deployment
-        that never ran the seed command.
+        A migration is the only step guaranteed to run everywhere. start.sh now
+        also runs seed_omop_concepts, but that is belt and braces, not the
+        guarantee: a metric whose concept is locally minted would be silently
+        discarded on any deployment reached by some other path.
         """
         from importlib import import_module
         from omop_core.services.mappings import (
@@ -2480,7 +2482,7 @@ class WearableConceptMappingTest(TestCase):
 
     def test_local_mints_are_quarantined(self):
         """source='HealthKey' <-> HK-* vocabulary <-> concept_id >= 2e9."""
-        from omop_core.management.commands.seed_omop_concepts import (
+        from omop_core.concept_fixtures import (
             _assert_local_mint_convention, LOCAL_CONCEPT_ID_MIN,
         )
         _assert_local_mint_convention()  # raises CommandError on violation
@@ -2541,7 +2543,7 @@ class PurgeBrokenWearableRowsCommandTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         from omop_core.models import Person
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         cls.person = Person.objects.create(person_id=770001, year_of_birth=1970)
 
     def setUp(self):
@@ -2721,7 +2723,7 @@ class ConceptZeroTest(TestCase):
 
     @classmethod
     def setUpTestData(cls):
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
 
     def test_seeded_with_omop_specified_metadata(self):
         from omop_core.models import Concept
@@ -2794,7 +2796,7 @@ class BackfillConceptSourceCommandTest(TestCase):
 
     @classmethod
     def setUpTestData(cls):
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
 
     def _concept(self, concept_id, code, vocabulary_id='LOINC', source=None):
         from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
@@ -2892,7 +2894,7 @@ class RemapLocalDrugConceptsCommandTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         from omop_core.models import Person
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         cls.person = Person.objects.create(person_id=780001, year_of_birth=1970)
 
     def _concept(self, concept_id, code, name, vocabulary_id, standard=None):
@@ -3636,7 +3638,7 @@ class ConceptIdIsNotAConceptCodeTest(TestCase):
     """
 
     def test_no_seeded_concept_uses_its_code_as_its_id(self):
-        from omop_core.management.commands.seed_omop_concepts import _CONCEPTS
+        from omop_core.concept_fixtures import _CONCEPTS
 
         offenders = [
             (r['concept_id'], r['concept_code']) for r in _CONCEPTS
@@ -3691,7 +3693,7 @@ class ConceptIdIsNotAConceptCodeTest(TestCase):
         """The database constraint now blocks the shadow rows #415 cleaned up."""
         from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
 
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         vocab = Vocabulary.objects.get(vocabulary_id='SNOMED')
         domain = Domain.objects.get(domain_id='Observation')
         cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
@@ -3708,7 +3710,7 @@ class ConceptIdIsNotAConceptCodeTest(TestCase):
         """Invalid/retired duplicates cannot share the same vocabulary code."""
         from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
 
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         vocab = Vocabulary.objects.get(vocabulary_id='SNOMED')
         domain = Domain.objects.get(domain_id='Observation')
         cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
@@ -3764,7 +3766,7 @@ class RemapLocalDrugConceptsCommandTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         from omop_core.models import Person
-        call_command('seed_omop_concepts', verbosity=0)
+        seed_test_concepts()
         cls.person = Person.objects.create(person_id=780001, year_of_birth=1970)
 
     def _concept(self, concept_id, code, name, vocabulary_id, standard=None):
@@ -4865,3 +4867,56 @@ class HealthKeyConceptSurvivesReloadTest(TestCase):
         self.assertEqual(len(saved), pre_existing)
         saved_ids = {r[0] for r in saved}
         self.assertNotIn(100, saved_ids)
+
+
+# ---------------------------------------------------------------------------
+# TEST — _get_social_data field mapping (#524)
+# ---------------------------------------------------------------------------
+
+class SocialDataFieldMappingTest(TestCase):
+    """Verify _get_social_data writes to the correct PatientRecord fields."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.test_utils import ensure_test_concept_zero
+        ensure_test_concept_zero()
+        vocab, dom_cond, dom_meas, dom_drug, dom_type, dom_obs, cc = _make_vocab()
+        cls.person = Person.objects.create(person_id=88524, year_of_birth=1980)
+        # SNOMED employment concept
+        cls.employment_concept = _concept(
+            900524, 'Employed', dom_obs, vocab, cc, code='224362002',
+        )
+        # SNOMED insurance concept
+        cls.insurance_concept = _concept(
+            900525, 'Health insurance', dom_obs, vocab, cc, code='408729009',
+        )
+
+    def test_employment_maps_to_employment_status(self):
+        """Employment observations must write to employment_status, not no_pre_existing_conditions."""
+        Observation.objects.create(
+            observation_id=880001,
+            person=self.person,
+            observation_concept=self.employment_concept,
+            observation_date=date(2025, 1, 1),
+            observation_type_concept_id=0,
+            value_as_string='Full-time',
+        )
+        from omop_core.services.patient_record_service import _get_social_data
+        data = _get_social_data(self.person)
+        self.assertEqual(data.get('employment_status'), 'Full-time')
+        self.assertNotIn('no_pre_existing_conditions', data)
+
+    def test_insurance_maps_to_insurance_type(self):
+        """Insurance observations must write to insurance_type, not concomitant_medication_details."""
+        Observation.objects.create(
+            observation_id=880002,
+            person=self.person,
+            observation_concept=self.insurance_concept,
+            observation_date=date(2025, 1, 1),
+            observation_type_concept_id=0,
+            value_as_string='Private',
+        )
+        from omop_core.services.patient_record_service import _get_social_data
+        data = _get_social_data(self.person)
+        self.assertEqual(data.get('insurance_type'), 'Private')
+        self.assertNotIn('concomitant_medication_details', data)

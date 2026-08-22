@@ -31,6 +31,7 @@ Not on a Mac? See the [Linux setup guide](docs/linux-setup.md). Prefer Docker? S
 - OpenAPI schema: `GET /api/v1/schema/`
 - Full API surface reference: **[API_SURFACE.md](API_SURFACE.md)**
 - LOINC / SNOMED / HemOnc concept mapping: **[docs/concept-mapping.md](docs/concept-mapping.md)**
+- Required Athena vocabulary download and selection scope: **[docs/vocabularies.md](docs/vocabularies.md)**
 
 ---
 
@@ -81,7 +82,23 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
   .venv/bin/python manage.py setup_admin
 ```
 
-### 5. Run the backend
+### 5. Load the Athena vocabulary
+
+PRomop needs the Athena vocabulary tables before clinical code resolution is
+useful. The easiest path is the prepared zipped vocabulary in Google Drive:
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py load_athena_vocabularies --gdrive
+```
+
+`--gdrive` defaults to the shared PRomop vocabulary folder. See
+[docs/vocabularies.md](docs/vocabularies.md) for the selected vocabulary scope
+and other load options, including `--archive` for a downloaded Athena zip,
+`--path` for an extracted Athena directory, and `--bucket` for GCS-backed
+deployments.
+
+### 6. Run the backend
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
@@ -91,7 +108,7 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 
 The API is available at `http://localhost:8000/api/v1/`.
 
-### 6. Run the frontend
+### 7. Run the frontend
 
 ```bash
 cd frontend

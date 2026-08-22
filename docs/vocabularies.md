@@ -13,7 +13,95 @@ Companion documents:
 
 ---
 
-## 1. Where vocabulary data lives
+## 1. Loading vocabulary data
+
+Loading an Athena vocabulary release is required for every environment that
+ingests or serves clinical records. Without it, FHIR imports and clinical
+lookups can fail to resolve to OMOP concepts.
+
+The normal load is additive: it inserts missing rows and leaves existing rows
+alone. Do not use `--replace` for a partial-load repair; `--replace` truncates
+`concept` and cascades to clinical tables.
+
+### Option A: use the PRomop Google Drive zip
+
+This is the easiest path for local setup and staging repairs. The command
+downloads the first zip from the shared folder, extracts it under `/tmp/vocab`,
+loads the vocabulary tables, and publishes a `vocabulary_release` manifest.
+
+[Open the supplied vocabulary folder](https://drive.google.com/drive/u/0/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7).
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py load_athena_vocabularies --gdrive
+```
+
+To load a specific Google Drive file instead of the first zip in the folder,
+pass its Drive URL:
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py load_athena_vocabularies --gdrive "https://drive.google.com/file/d/<file-id>/view"
+```
+
+### Option B: download your own OHDSI Athena zip
+
+Use the [OHDSI Athena vocabulary site](https://athena.ohdsi.org/vocabulary/list)
+to create a vocabulary download. Select these vocabularies:
+
+| Purpose | Select in Athena |
+|---|---|
+| Core clinical terminology and mappings | **SNOMED**, **ICD10CM**, **LOINC**, **RxNorm**, **RxNorm Extension**, **UCUM** |
+| Immunizations and visits | **CVX**, **Visit**, **Type Concept** |
+| Drug classification and oncology treatment | **ATC**, **HemOnc** |
+| Genomics and cancer registry data | **OMOP Genomic**, **ICDO3**, **NCIt**, **Cancer Modifier**, **NAACCR** |
+| OMOP metadata and demographics | **Episode**, **CDM**, **Gender**, **Race**, **Ethnicity** |
+
+Athena may include required dependencies in the download; keep them in the zip.
+The loader ignores vocabularies outside PROMOP's scope. It also narrows some
+selected data: only ATC codes beginning with `L`, selected RxNorm/RxNorm
+Extension drug classes, and LOINC concepts in the `Measurement`, `Observation`,
+`Meas Value`, `Procedure`, and `Note` domains are loaded.
+
+Load the downloaded zip directly:
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py load_athena_vocabularies \
+    --archive ~/Downloads/vocabulary_download_v5.zip
+```
+
+If you have already extracted the zip, load the extracted directory instead:
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py load_athena_vocabularies \
+    --path ~/Downloads/vocabulary_download_v5
+```
+
+### Other loading paths
+
+For Google Cloud Storage, upload the Athena CSV files to a bucket root and load
+from the bucket:
+
+```bash
+VOCAB_BUCKET=ctomop-staging-vocab \
+  python manage.py load_athena_vocabularies --bucket "$VOCAB_BUCKET"
+```
+
+For S3, download the zip or extracted directory first, then use `--archive` or
+`--path`:
+
+```bash
+aws s3 cp s3://your-bucket/vocabulary_download_v5.zip /tmp/vocabulary_download_v5.zip
+python manage.py load_athena_vocabularies --archive /tmp/vocabulary_download_v5.zip
+```
+
+At minimum, deployed clinical environments must contain **LOINC**, **RxNorm**,
+**SNOMED**, and **ICD10CM**. The loader verifies those four after every normal
+non-dry-run load.
+
+## 2. Where vocabulary data lives
 
 Every vocabulary — external or local — lives in the **same set of OMOP tables**. There is no per-vocabulary table; `concept.vocabulary_id` is what separates them.
 
@@ -42,7 +130,7 @@ Every vocabulary — external or local — lives in the **same set of OMOP table
 
 ---
 
-## 2. External vocabularies (loaded from OHDSI Athena)
+## 3. External vocabularies (loaded from OHDSI Athena)
 
 Loaded by `load_athena_vocabularies`. `source` is `NULL` for all of these.
 
@@ -78,7 +166,7 @@ Holds OMOP's universal sentinel, **`concept_id = 0` "No matching concept"**, wri
 
 ---
 
-## 3. Local vocabularies (authored here)
+## 4. Local vocabularies (authored here)
 
 These are **not** from Athena. Rows should carry `source='HealthKey'`, live in an `HK-*` vocabulary, and use a `concept_id >= 2,000,000,000` — the range OHDSI reserves for custom concepts. `seed_omop_concepts._assert_local_mint_convention` enforces this for seeded rows.
 
@@ -100,7 +188,7 @@ These predate the convention and do **not** follow it. They are documented here 
 
 ---
 
-## 4. Which vocabulary each clinical table actually uses
+## 5. Which vocabulary each clinical table actually uses
 
 Observed on staging — the top three per table.
 
@@ -117,7 +205,7 @@ The high unmapped counts in `drug_exposure` and `observation` are source data th
 
 ---
 
-## 5. Rules worth knowing
+## 6. Rules worth knowing
 
 **Resolve by `(vocabulary_id, concept_code)`, never by `concept_code` alone.** 852 codes appear in more than one vocabulary — `1` exists in both HemOnc and UCUM, `1001` in both HemOnc and RxNorm.
 
@@ -131,7 +219,7 @@ The high unmapped counts in `drug_exposure` and `observation` are source data th
 
 ---
 
-## 6. Known defects
+## 7. Known defects
 
 | Issue | Summary |
 |---|---|
@@ -143,7 +231,11 @@ The high unmapped counts in `drug_exposure` and `observation` are source data th
 
 ---
 
-## 7. Loading and seeding
+## 8. Loading and seeding
+
+See [Loading vocabulary data](#1-loading-vocabulary-data) for the Google Drive,
+Athena zip, GCS, and S3 loading paths. These are the supporting commands used
+around the vocabulary load:
 
 | Command | What it does |
 |---|---|
@@ -163,16 +255,8 @@ non-dry-run load and fails before publishing a vocabulary release if one is
 missing. This makes a partial Athena bundle or an incomplete load visible
 immediately rather than allowing clinical lookups to silently return `null`.
 
-To repair an environment with a partial vocabulary load, obtain an Athena
-bundle that contains the missing vocabularies and rerun the normal upsert load:
-
-```bash
-python manage.py load_athena_vocabularies --bucket <athena-bucket>
-```
-
-Do **not** use `--replace` for this repair. The default path upserts vocabulary
-rows and preserves clinical data; `--replace` truncates `concept` and cascades
-to clinical tables. `--skip-clinical-vocabulary-verification` is reserved for
+For partial vocabulary repairs, rerun the normal additive load from
+[Loading vocabulary data](#1-loading-vocabulary-data). `--skip-clinical-vocabulary-verification` is reserved for
 intentionally minimal local/test bundles and must not be used for deployed
 clinical environments.
 

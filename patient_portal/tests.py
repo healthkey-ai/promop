@@ -114,10 +114,35 @@ def _make_vocab_fixtures():
     _concept(19136160, 'Drug',                    domain_drug)
     # Generic procedure concept — fallback for FHIR Procedure ingestion
     _concept(20000001, 'Procedure',               domain_procedure)
-    # Gender concepts used by get_gender_concept() in views.py
-    _concept(8532, 'FEMALE', domain_gender)
-    _concept(8507, 'MALE',   domain_gender)
-    _concept(8551, 'UNKNOWN', domain_gender)
+    # Gender concepts used by get_gender_concept() in views.py.
+    #
+    # These carry their real OMOP vocabulary and codes rather than the generic
+    # `concept_code=str(concept_id)` the helper above assigns. get_gender_concept
+    # resolves by (vocabulary_id, concept_code) — the natural key — so a concept
+    # with the right id but a code of '8507' is not a gender concept as far as the
+    # resolver is concerned, and rightly so.
+    gender_vocab, _ = Vocabulary.objects.get_or_create(
+        vocabulary_id='Gender',
+        defaults={'vocabulary_name': 'OMOP Gender', 'vocabulary_concept_id': 0},
+    )
+
+    def _gender_concept(cid, name, code):
+        Concept.objects.get_or_create(
+            concept_id=cid,
+            defaults={
+                'concept_name': name,
+                'domain': domain_gender,
+                'vocabulary': gender_vocab,
+                'concept_class': cc,
+                'concept_code': code,
+                'valid_start_date': today,
+                'valid_end_date': far_future,
+            },
+        )
+
+    _gender_concept(8532, 'FEMALE', 'F')
+    _gender_concept(8507, 'MALE', 'M')
+    _gender_concept(8551, 'UNKNOWN', 'U')
 
 
 def _make_fhir_bundle():
@@ -4210,18 +4235,28 @@ class AccountHolderDataTest(_SmartBase):
         self.assertFalse(RecordRevision.objects.filter(patient_record=self.patient_info).exists())
 
     def test_revision_not_written_when_value_unchanged(self):
-        """No revision row is created when the submitted value equals the stored value."""
+        """Submitting a mapped field's current value is a no-op, not a rejection.
+
+        Previously this asserted 405, because the guard fired on the field being
+        present at all. That made the read-only contract unenforceable in practice:
+        the patient editor PATCHes the whole record on every autosave, so ~270
+        untouched mapped fields ride along and every edit was refused. The guard
+        now fires on the value actually moving; an echo passes through and still
+        writes nothing.
+        """
         RecordRevision.objects.filter(patient_record=self.patient_info).delete()
         resp = self.write_client.patch(
             f'/api/v1/patient-records/{self.person.person_id}/',
             {'disease': self.patient_info.disease},
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED, resp.data)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.assertEqual(
             RecordRevision.objects.filter(patient_record=self.patient_info, field='disease').count(),
             0,
         )
+        self.patient_info.refresh_from_db()
+        self.assertEqual(self.patient_info.disease, 'Breast Cancer')
 
     def test_revisions_endpoint_returns_historical_entries(self):
         """Existing revision entries remain readable; PATCH no longer creates them."""
@@ -4771,6 +4806,137 @@ class AuditLogMiddlewareTest(_SmartBase):
 
         # Response must be returned regardless of logging failure
         self.assertIn(response.status_code, range(200, 600))
+
+
+class PatientNameRenameTest(_SmartBase):
+    """Renaming a patient writes Person, the OMOP row — never PatientRecord.
+
+    patient_name is a SerializerMethodField rendered from Person.given_name /
+    family_name. PatientRecord is a derived read model and owns no name column,
+    so a rename has to be applied to Person by hand on both PATCH routes.
+    """
+
+    def _patch(self, pi, payload):
+        return self.write_client.patch(
+            f'/api/patient-info/{pi.person.person_id}/',
+            payload,
+            format='json',
+        )
+
+    def _make(self, person_id, given='', family=''):
+        person = Person.objects.create(
+            person_id=person_id, given_name=given, family_name=family)
+        return person, PatientRecord.objects.create(
+            person=person, organization=self.organization)
+
+    def test_patch_patient_name_renames_the_person(self):
+        person, pi = self._make(91110, 'Alishia', 'Tawny Howell')
+
+        self._patch(pi, {'patient_name': 'Adam Blum'})
+
+        person.refresh_from_db()
+        self.assertEqual((person.given_name, person.family_name), ('Adam', 'Blum'))
+
+    def test_rename_does_not_405_the_request(self):
+        """patient_name is not projection-owned; unstripped it fails the whole PATCH."""
+        _, pi = self._make(91113, 'Alishia', 'Tawny Howell')
+
+        resp = self._patch(pi, {'patient_name': 'Adam Blum'})
+
+        self.assertEqual(resp.status_code, 200)
+
+    def test_echoing_the_whole_record_back_still_succeeds(self):
+        """The React client PATCHes the entire GET response on every autosave."""
+        person, pi = self._make(91114, 'Alishia', 'Tawny Howell')
+        # The client PATCHes res.data.patient_info back, which carries the
+        # serializer's rendered patient_name.
+        body = self.write_client.get(
+            f'/api/patient-info/{person.person_id}/').data['patient_info']
+        self.assertIn('patient_name', body)
+
+        resp = self._patch(pi, body)
+
+        self.assertEqual(resp.status_code, 200)
+        person.refresh_from_db()
+        self.assertEqual(
+            (person.given_name, person.family_name), ('Alishia', 'Tawny Howell'))
+
+    def test_echoing_the_synthesised_name_back_does_not_corrupt_the_person(self):
+        """For an unnamed person the serializer synthesises 'Patient {id}'.
+
+        Writing that echo back would set given_name='Patient', family_name='<id>'.
+        """
+        person, pi = self._make(91111)
+
+        self._patch(pi, {'patient_name': f'Patient {person.person_id}'})
+
+        person.refresh_from_db()
+        self.assertEqual(person.given_name, '')
+        self.assertEqual(person.family_name, '')
+
+    def test_echoing_an_unchanged_name_is_a_no_op(self):
+        person, pi = self._make(91112, 'Alishia', 'Tawny Howell')
+
+        self._patch(pi, {'patient_name': 'Alishia Tawny Howell', 'stage': 'II'})
+
+        person.refresh_from_db()
+        self.assertEqual(
+            (person.given_name, person.family_name), ('Alishia', 'Tawny Howell'))
+
+    def test_single_word_name_clears_the_family_name(self):
+        person, pi = self._make(91115, 'Alishia', 'Tawny Howell')
+
+        self._patch(pi, {'patient_name': 'Cher'})
+
+        person.refresh_from_db()
+        self.assertEqual((person.given_name, person.family_name), ('Cher', ''))
+
+    def test_echoing_a_mapped_field_unchanged_is_allowed(self):
+        """An untouched derived field riding along on autosave is not an edit."""
+        person, pi = self._make(91117, 'Alishia', 'Tawny Howell')
+        pi.hemoglobin_g_dl = 12.5
+        pi.save(update_fields=['hemoglobin_g_dl'])
+        rendered = self.write_client.get(
+            f'/api/patient-info/{person.person_id}/').data['patient_info']
+
+        resp = self._patch(pi, {'hemoglobin_g_dl': rendered['hemoglobin_g_dl']})
+
+        self.assertEqual(resp.status_code, 200)
+
+    def test_changing_a_mapped_field_is_still_refused(self):
+        """The derive-only contract survives: a real write to OMOP-mapped data 405s."""
+        _, pi = self._make(91118, 'Alishia', 'Tawny Howell')
+        pi.hemoglobin_g_dl = 12.5
+        pi.save(update_fields=['hemoglobin_g_dl'])
+
+        resp = self._patch(pi, {'hemoglobin_g_dl': 9.9})
+
+        self.assertEqual(resp.status_code, 405)
+        self.assertIn('hemoglobin_g_dl', resp.data['fields'])
+
+    def test_rename_rides_along_with_a_full_record_echo(self):
+        """The real client shape: whole record echoed, one name changed."""
+        person, pi = self._make(91119, 'Alishia', 'Tawny Howell')
+        body = self.write_client.get(
+            f'/api/patient-info/{person.person_id}/').data['patient_info']
+        body['patient_name'] = 'Adam Blum'
+
+        resp = self._patch(pi, body)
+
+        self.assertEqual(resp.status_code, 200)
+        person.refresh_from_db()
+        self.assertEqual((person.given_name, person.family_name), ('Adam', 'Blum'))
+
+    def test_rename_leaves_no_name_column_on_patient_record(self):
+        """Guard the contract: the projection must not gain a written name field."""
+        person, pi = self._make(91116, 'Alishia', 'Tawny Howell')
+
+        self._patch(pi, {'patient_name': 'Adam Blum'})
+
+        pi.refresh_from_db()
+        self.assertNotIn('patient_name', [f.name for f in pi._meta.get_fields()])
+        person.refresh_from_db()
+        self.assertEqual(person.given_name, 'Adam')
 
 
 @unittest.skip("Retired: PatientRecord-to-OMOP write-through was removed")
@@ -18785,20 +18951,24 @@ class OmopDeferRefreshTest(TestCase):
 
     def test_patch_without_the_flag_still_derives(self):
         # The flag must not become the default, every existing caller depends
-        # on a write deriving.
-        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+        # on a write deriving. The mixin now calls refresh directly (not via
+        # signal), so we patch the view-level reference.
+        with patch('patient_portal.api.views.refresh_patient_record') as refresh:
+            refresh.return_value = PatientRecord.objects.get(person=self.person)
             self._patch()
 
         self.assertTrue(refresh.called)
 
     def test_delete_without_the_flag_still_derives(self):
-        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+        with patch('patient_portal.api.views.refresh_patient_record') as refresh:
+            refresh.return_value = PatientRecord.objects.get(person=self.person)
             self._delete()
 
         self.assertTrue(refresh.called)
 
     def test_skip_refresh_false_still_derives(self):
-        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+        with patch('patient_portal.api.views.refresh_patient_record') as refresh:
+            refresh.return_value = PatientRecord.objects.get(person=self.person)
             self._patch('?skip_refresh=false')
 
         self.assertTrue(refresh.called)
@@ -18859,7 +19029,8 @@ class OmopDeferRefreshTest(TestCase):
         client = APIClient()
         client.force_authenticate(user=patient_identity)
 
-        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+        with patch('patient_portal.api.views.refresh_patient_record') as refresh:
+            refresh.return_value = PatientRecord.objects.get(person=self.person)
             client.patch(
                 f'/api/v1/measurements/{self.measurement.pk}/?skip_refresh=true',
                 {'value_as_number': 9}, format='json')
@@ -18896,6 +19067,46 @@ class OmopDeferRefreshTest(TestCase):
             with self.assertRaises(ValueError):
                 self.client.post(
                     f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+    # -- Issue #533: PATCH/DELETE must surface refresh failures as 502 --
+
+    def test_patch_returns_502_when_refresh_fails(self):
+        """A refresh failure after PATCH must not be swallowed — return 502."""
+        with patch('patient_portal.api.views.refresh_patient_record',
+                   side_effect=RuntimeError('boom')):
+            resp = self._patch()
+
+        self.assertEqual(resp.status_code, status.HTTP_502_BAD_GATEWAY)
+        self.assertIn('projection failed', resp.data['detail'])
+        # The OMOP row was still updated despite the refresh failure.
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.value_as_number, 9)
+
+    def test_delete_returns_502_when_refresh_fails(self):
+        """A refresh failure after DELETE must not be swallowed — return 502."""
+        with patch('patient_portal.api.views.refresh_patient_record',
+                   side_effect=RuntimeError('boom')):
+            resp = self._delete()
+
+        self.assertEqual(resp.status_code, status.HTTP_502_BAD_GATEWAY)
+        self.assertIn('projection failed', resp.data['detail'])
+        # The OMOP row was still deleted despite the refresh failure.
+        self.assertFalse(Measurement.objects.filter(pk=920001).exists())
+
+    def test_patch_returns_200_when_refresh_succeeds(self):
+        """Normal PATCH returns 200 when refresh succeeds (end-to-end)."""
+        resp = self._patch()
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.value_as_number, 9)
+
+    def test_delete_returns_204_when_refresh_succeeds(self):
+        """Normal DELETE returns 204 when refresh succeeds (end-to-end)."""
+        resp = self._delete()
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Measurement.objects.filter(pk=920001).exists())
 
 
 class BulkUpsertObservationIdentityTest(TestCase):
@@ -19071,6 +19282,38 @@ class BulkUpsertObservationIdentityTest(TestCase):
             '/api/v1/observations/?skip_refresh=true', rows, format='json')
 
         self.assertEqual(Observation.objects.filter(person=self.person).count(), 4)
+
+    def test_naive_datetime_repost_converges(self):
+        """A naive observation_datetime must match the DB's aware value.
+
+        When USE_TZ=True, PostgreSQL stores aware datetimes. If the request
+        sends a naive datetime string (no trailing Z or offset), the upsert
+        key built from the unsaved instance used to differ from the key built
+        from the DB row, causing every repost to insert a duplicate instead of
+        converging — ultimately hitting a constraint and returning 500.
+        """
+        rows = [{
+            'person': self.person.person_id,
+            'observation_concept': self.concept.concept_id,
+            'observation_date': '2024-06-15',
+            'observation_datetime': '2024-06-15T10:30:00',  # naive — no Z
+            'observation_type_concept': self.type_concept.concept_id,
+            'observation_source_value': 'NAIVE-DT-TEST',
+            'value_as_string': 'result',
+        }]
+
+        first = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.data)
+        self.assertEqual(first.data['created'], 1)
+
+        second = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED, second.data)
+        self.assertEqual(second.data['created'], 0,
+                         'naive datetime caused a duplicate instead of converging')
+        self.assertEqual(
+            Observation.objects.filter(person=self.person).count(), 1)
 
     def test_database_constraint_failure_is_a_409_not_a_500(self):
         """A 500 reads as "service is down", which changes whether to retry."""
@@ -19274,7 +19517,7 @@ class FieldConceptMappingTest(TestCase):
             self.assertIn('tab', d, f"Field {d['field_name']} missing 'tab' key")
 
     def test_tab_assignments_spot_check(self):
-        """Spot-check known field→tab assignments."""
+        """Spot-check known field->tab assignments."""
         self.client.force_authenticate(user=self.staff)
         resp = self.client.get('/api/v1/field-mappings/')
         tab_by_field = {d['field_name']: d['tab'] for d in resp.data}

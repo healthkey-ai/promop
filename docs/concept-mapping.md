@@ -106,7 +106,7 @@ The upload handler (`patient_portal/api/views.py`) resolves these in three tiers
 |---|---|---|
 | 1 | `concept_by_loinc(code)` — exact match on `(vocabulary_id='LOINC', concept_code=code)` | LOINC code present and concept loaded |
 | 2 | `concept_by_name_ilike(display_name)` — trigram match on `concept_name` | LOINC concept not in local tables; display name present |
-| 3 | Generic lab concept (concept_id `3000963`) | No match found |
+| 3 | OMOP `No matching concept` sentinel (concept_id `0`) | No match found |
 
 The resolved concept becomes `Measurement.measurement_concept_id`. The original LOINC code is
 also stored as `Measurement.measurement_source_value` so lookups still work if Athena is
@@ -334,11 +334,15 @@ print('ICD10CM:', Concept.objects.filter(vocabulary_id='ICD10CM').count())
 ### Step 3 — Deploy note
 
 On Render (or any production platform), vocabulary loading is a one-time operation run after
-the first deploy. Upload the Athena TSV files to object storage (GCS or S3) and run:
+the first deploy. The simplest path is the shared Google Drive vocabulary zip:
 
 ```bash
-python manage.py load_athena_vocabularies --bucket your-bucket-name
+python manage.py load_athena_vocabularies --gdrive
 ```
+
+If you manage the Athena files yourself, use `--archive /path/to/vocabulary.zip`
+for a downloaded zip, `--path /path/to/vocabulary_download_v5` for an extracted
+directory, or `--bucket your-bucket-name` for GCS.
 
 The command verifies LOINC, RxNorm, SNOMED, and ICD10CM after a non-dry-run
 load. `--dry-run` counts records without writing. Avoid `--replace` for a
@@ -393,9 +397,12 @@ ORDER BY m.measurement_date DESC;
 
 | Data type | Tier 1 | Tier 2 | Tier 3 | Tier 4 |
 |---|---|---|---|---|
-| Lab observation | LOINC code → Concept | Display name trigram | concept_id `3000963` (generic lab) | — |
+| Lab observation | LOINC code → Concept | Display name trigram | concept_id `0` (`No matching concept`) | — |
 | Condition | SNOMED code → Concept | Name trigram | Dropped | — |
 | Drug/therapy | HemOnc concept_id in FHIR | Drug name trigram | RxNav API lookup | First Drug concept |
 | Drug class (LOT) | ConceptRelationship → HemOnc ancestors | Drug source_value string map | `'mixed'` | — |
 
-Labs with no matching LOINC Concept still land in the `measurement` table (with `measurement_concept_id = 3000963`) and can be retrieved by `measurement_source_value`. PatientRecord fields for unmatched labs will be null until a matching Concept is loaded.
+Labs with no matching LOINC Concept still land in the `measurement` table (with
+`measurement_concept_id = 0`) and can be retrieved by
+`measurement_source_value`. PatientRecord fields for unmatched labs will be null
+until a matching Concept is loaded.
