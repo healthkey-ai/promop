@@ -3,7 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, Download } from "lucide-react";
 import api from "@/api/axios";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
-import { writeClinicalFact } from "@/api/clinicalFacts";
+import { writeFieldValue } from "@/api/clinicalFacts";
 import { getActiveBranding } from "@/config/branding";
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -364,7 +364,7 @@ export default function PatientDetail({
         (f) => descriptors[f]?.writable && info[f] !== baseline[f],
       );
       for (const field of clinicalEdits) {
-        await writeClinicalFact(personId, field, descriptors[field], info[field]);
+        await writeFieldValue(personId, field, descriptors[field], info[field]);
         // Advance the baseline so a later keystroke elsewhere does not re-write
         // this same value as another result.
         if (patientInfoRef.current) patientInfoRef.current[field] = info[field];

@@ -96,7 +96,18 @@ class TestUnmappedFields:
             'id', 'person', 'organization', 'created_at', 'updated_at',
             'derived_at', 'derivation_version', 'user_edited_fields',
         }
-        assert set(descriptor) == PATIENT_RECORD_OMOP_MAPPED_FIELDS - lifecycle
+        # The mapped columns, plus the read-only fields the serializer adds on
+        # top of them. Those have no column to walk, so they are listed
+        # explicitly rather than discovered -- and stating the sum here keeps the
+        # descriptor's contents exact instead of merely "at least".
+        from omop_core.services.write_descriptor import (
+            _SERIALIZER_ALIASES, _SERIALIZER_COMPUTED,
+        )
+        expected = (
+            (PATIENT_RECORD_OMOP_MAPPED_FIELDS - lifecycle)
+            | set(_SERIALIZER_ALIASES) | set(_SERIALIZER_COMPUTED)
+        )
+        assert set(descriptor) == expected
 
     def test_no_lifecycle_column_is_offered(self):
         descriptor = build_writable_field_descriptor()
@@ -449,3 +460,80 @@ class TestAttributionsTrackDerivation:
 
         assert DERIVED_FIELD_TO_CODE.get('insurance_type', (None,))[0] == '408729009'
         assert 'concomitant_medication_details' not in DERIVED_FIELD_TO_CODE
+
+
+_LIFECYCLE = {
+    'id', 'person', 'organization', 'created_at', 'updated_at',
+    'derived_at', 'derivation_version', 'user_edited_fields',
+}
+
+
+class TestSerializerFieldCoverage:
+    """Every read-only field the API exposes must be described.
+
+    The builder walks PATIENT_RECORD_OMOP_MAPPED_FIELDS, so it can only describe
+    model columns. SerializerMethodFields and read-only aliases were invisible to
+    it, and an editor asking "may I write this?" got no entry at all — which is
+    how the treatment tab came to offer a select over ``refractory_status``, a
+    value derived from therapy episodes that the server refuses to accept.
+    """
+
+    def test_every_read_only_serializer_field_is_described(self):
+        from patient_portal.api.serializers import PatientRecordSerializer
+
+        descriptor = build_writable_field_descriptor()
+        read_only = {
+            name for name, field in PatientRecordSerializer().get_fields().items()
+            if field.read_only
+        }
+        # patient_name is popped and applied to Person before the serializer sees
+        # it, so it is genuinely writable on that endpoint despite being read-only
+        # here. Describing it as read-only would stop renames.
+        assert read_only - set(descriptor) - _LIFECYCLE == {'patient_name'}
+
+    def test_refractory_status_is_an_alias_of_its_canonical(self):
+        entry = build_writable_field_descriptor()['refractory_status']
+        assert entry['writable'] is False
+        assert entry['canonical'] == 'treatment_refractory_status'
+
+    @pytest.mark.parametrize('field', [
+        'refractory_status', 'age', 'lines_of_therapy', 'name', 'person_id',
+        'therapy_release_id', 'first_line_therapy_display',
+    ])
+    def test_nothing_serializer_derived_claims_to_be_writable(self, field):
+        entry = build_writable_field_descriptor()[field]
+        assert entry['writable'] is False, (
+            f'{field} is read-only server-side but the descriptor offers it'
+        )
+
+
+class TestProfilePayloadField:
+    """A profile descriptor must name the key the persons endpoint accepts.
+
+    ``person_field`` is prose documenting the Person columns behind the value
+    ("gender_concept + gender_source_value", "Location.city"). A client using it
+    as a payload key sends something the endpoint ignores, so the write returns
+    200 and changes nothing.
+    """
+
+    def test_every_writable_profile_field_names_an_accepted_key(self):
+        from patient_portal.api.views import (
+            _PERSON_DEMOGRAPHIC_FIELDS, _PERSON_LOCATION_FIELDS,
+            _PERSON_PATCHABLE_FIELDS, _PERSON_REPLACEABLE_FIELDS,
+        )
+
+        accepted = (
+            set(_PERSON_DEMOGRAPHIC_FIELDS) | set(_PERSON_LOCATION_FIELDS)
+            | set(_PERSON_PATCHABLE_FIELDS) | set(_PERSON_REPLACEABLE_FIELDS)
+        )
+        profile = {
+            f: v for f, v in build_writable_field_descriptor().items()
+            if v.get('target') == 'person' and v.get('writable')
+        }
+        assert profile, 'expected writable profile fields'
+        for field, entry in profile.items():
+            assert 'payload_field' in entry, f'{field} has no payload_field'
+            assert entry['payload_field'] in accepted, (
+                f"{field} would send '{entry['payload_field']}', which the "
+                f'persons endpoint does not accept'
+            )

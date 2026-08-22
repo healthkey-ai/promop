@@ -1,8 +1,10 @@
 import { useVocabulary } from '@/hooks/useVocabulary';
+import { useWritableFields } from '@/hooks/useWritableFields';
 import Field from '../Field';
+import ClinicalField from '../ClinicalField';
 import Section from '../Section';
 import {
-  REFRACTORY_STATUS_OPTIONS, THERAPY_INTENT_OPTIONS,
+  THERAPY_INTENT_OPTIONS,
   DISCONTINUATION_REASON_OPTIONS, THERAPY_OUTCOME_OPTIONS, SUPPORTIVE_THERAPIES_OPTIONS,
   PLANNED_THERAPIES,
   BREAST_CANCER_FIRST_LINE, BREAST_CANCER_SECOND_LINE, BREAST_CANCER_LATER_LINE,
@@ -68,6 +70,7 @@ function TypeClassIds({ ids }: { ids?: number[] | null }) {
 }
 
 export default function TreatmentTab({ formData, onChange, diseaseType }: Props) {
+  const { descriptors } = useWritableFields();
   const { options: bcFirstLineOptions, source: bcFirstLineSource }   = useVocabulary('breast-cancer-first-line-therapy', 'title');
   const { options: bcSecondLineOptions, source: bcSecondLineSource } = useVocabulary('breast-cancer-second-line-therapy', 'title');
   const { options: bcLaterLineOptions, source: bcLaterLineSource }   = useVocabulary('breast-cancer-later-line-therapy', 'title');
@@ -102,8 +105,14 @@ export default function TreatmentTab({ formData, onChange, diseaseType }: Props)
           <Field label="Relapse Count" name="relapse_count" type="number"
             value={formData?.relapse_count} onChange={onChange} />
           <div className="sm:col-span-2">
-            <Field label="Refractory Status" name="refractory_status" type="select"
-              value={formData?.refractory_status} options={REFRACTORY_STATUS_OPTIONS} onChange={onChange} />
+            {/* Derived from the therapy episodes, not authored. It was a select,
+                which promised an edit the server refuses: refractory_status is a
+                read-only alias of treatment_refractory_status, itself inferred
+                across the drug exposures in a line. Rendering it from the
+                descriptor states that instead of implying otherwise. */}
+            <ClinicalField label="Refractory Status" name="refractory_status" type="text"
+              value={formData?.refractory_status}
+              descriptor={descriptors.refractory_status} onChange={onChange} />
           </div>
         </div>
       </Section>

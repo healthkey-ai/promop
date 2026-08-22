@@ -3,7 +3,7 @@
  * projection. A correction supersedes rather than overwrites.
  */
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { writeClinicalFact, today } from './clinicalFacts';
+import { writeClinicalFact, today, writeFieldValue } from './clinicalFacts';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
 
 const mockGet = vi.fn();
@@ -197,5 +197,52 @@ describe('writeClinicalFact — supersede targeting', () => {
     const res = await writeClinicalFact(258, 'hemoglobin_g_dl', HGB, 13.4, '2026-08-21');
 
     expect(res.supersededId).toBe(3);
+  });
+});
+
+describe('writeFieldValue — routing by target', () => {
+  const PROFILE = {
+    kind: 'profile', writable: true, target: 'person',
+    person_field: 'gender_concept + gender_source_value',
+    payload_field: 'gender', value_kind: 'string',
+  } as unknown as FieldDescriptor;
+
+  it('sends a profile field to the persons endpoint, not an observation', async () => {
+    // This POSTed an Observation with concept, type and source value all
+    // undefined, and never touched Person. `target: 'person'` passed the
+    // `!descriptor.target` guard and then fell through to the observation branch.
+    await writeFieldValue(261, 'gender', PROFILE, 'female');
+
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(mockPatch).toHaveBeenCalledWith('/v1/persons/261/', { gender: 'female' });
+  });
+
+  it('keys on payload_field, not on the prose in person_field', async () => {
+    const city = {
+      kind: 'profile', writable: true, target: 'person',
+      person_field: 'Location.city', payload_field: 'city', value_kind: 'string',
+    } as unknown as FieldDescriptor;
+    await writeFieldValue(261, 'city', city, 'Boston');
+
+    expect(mockPatch).toHaveBeenCalledWith('/v1/persons/261/', { city: 'Boston' });
+  });
+
+  it('clears with null rather than empty string', async () => {
+    await writeFieldValue(261, 'gender', PROFILE, '');
+    expect(mockPatch).toHaveBeenCalledWith('/v1/persons/261/', { gender: null });
+  });
+
+  it('still routes a measurement to the OMOP endpoint', async () => {
+    await writeFieldValue(261, 'hemoglobin_g_dl', HGB, 12.5, '2026-08-21');
+    expect(mockPost).toHaveBeenCalledWith('/v1/measurements/', expect.objectContaining({
+      person: 261, measurement_source_value: '718-7',
+    }));
+  });
+
+  it('refuses a target writeClinicalFact cannot write instead of mis-posting', async () => {
+    await expect(
+      writeClinicalFact(261, 'gender', PROFILE, 'female'),
+    ).rejects.toThrow(/writes to person/);
+    expect(mockPost).not.toHaveBeenCalled();
   });
 });

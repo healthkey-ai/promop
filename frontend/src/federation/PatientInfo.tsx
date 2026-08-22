@@ -5,7 +5,7 @@ import { PatientInfoProvider } from "./PatientInfoProvider";
 import { usePatientInfoMe, usePatchPatientInfo } from "./patientInfoHooks";
 import type { PatientInfoProps } from "./patientInfoTypes";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
-import { writeClinicalFact } from "@/api/clinicalFacts";
+import { writeFieldValue } from "@/api/clinicalFacts";
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
 import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
@@ -165,7 +165,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
           )
         : [];
       for (const field of clinicalEdits) {
-        await writeClinicalFact(
+        await writeFieldValue(
           personId as number,
           field,
           descriptors[field],
