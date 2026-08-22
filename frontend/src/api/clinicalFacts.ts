@@ -55,6 +55,18 @@ export async function writeClinicalFact(
   if (!descriptor?.writable || !descriptor.target) {
     throw new Error(`${field} is not writable`);
   }
+  // Refuse a target this cannot write, rather than falling through.
+  //
+  // The check used to be `!descriptor.target`, so `target: 'person'` passed it and
+  // then failed the `=== 'measurement'` test, landing in the observation branch:
+  // a profile edit POSTed an Observation whose concept, type and source value were
+  // all undefined, and never touched Person. Sixteen writable fields — gender,
+  // race, ethnicity, the six location columns — take that target.
+  if (descriptor.target !== 'measurement' && descriptor.target !== 'observation') {
+    throw new Error(
+      `${field} writes to ${descriptor.target}, not an OMOP fact — use writeFieldValue`,
+    );
+  }
   const isMeasurement = descriptor.target === 'measurement';
   const base = isMeasurement ? '/v1/measurements/' : '/v1/observations/';
   const dateField = isMeasurement ? 'measurement_date' : 'observation_date';
@@ -126,4 +138,49 @@ export async function writeClinicalFact(
       | number
       | null;
   return { supersededId, createdId };
+}
+
+/**
+ * Write a profile field to the Person record.
+ *
+ * Demographics are stored as a resolved concept plus the raw text, and the
+ * endpoint does that resolution — so the payload key is the PatientRecord field
+ * name, not either Person column. `payload_field` carries it; `person_field`
+ * beside it is prose documenting the columns behind the value ("gender_concept +
+ * gender_source_value", "Location.city") and is not a key.
+ */
+export async function writeProfileField(
+  personId: number | string,
+  field: string,
+  descriptor: FieldDescriptor,
+  value: unknown,
+): Promise<void> {
+  if (!descriptor?.writable || descriptor.target !== 'person') {
+    throw new Error(`${field} is not a writable profile field`);
+  }
+  const key = descriptor.payload_field ?? field;
+  await clinicalClient().patch(clinicalUrl(`/v1/persons/${personId}/`), {
+    [key]: value === '' ? null : value,
+  });
+}
+
+/**
+ * Write one edited field to wherever the descriptor says it lives.
+ *
+ * Editors should call this rather than picking a writer themselves: `writable`
+ * alone does not say where a value goes, and treating every writable field as an
+ * OMOP fact is what sent profile edits to the observation endpoint.
+ */
+export async function writeFieldValue(
+  personId: number | string,
+  field: string,
+  descriptor: FieldDescriptor,
+  value: unknown,
+  date?: string,
+): Promise<void> {
+  if (descriptor?.target === 'person') {
+    await writeProfileField(personId, field, descriptor, value);
+    return;
+  }
+  await writeClinicalFact(personId, field, descriptor, value, date ?? today());
 }

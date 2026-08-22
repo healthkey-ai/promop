@@ -139,6 +139,40 @@ _PROFILE_FILL_IF_EMPTY = {
 
 # Thirty-day aggregates over a stream of device readings. A clinician does not
 # type a median: the reading is the fact, and the aggregate follows from it.
+# Read-only serializer fields whose `source` is another PatientRecord column.
+# Same relationship as _ALIAS_TO_CANONICAL, one layer up: the alias exists only in
+# the API representation, so the loop over model-backed fields never sees it.
+_SERIALIZER_ALIASES = {
+    'refractory_status': 'treatment_refractory_status',
+}
+
+# SerializerMethodFields. Read-only by construction — DRF has nowhere to write a
+# method — and each is assembled at serialization time from data that lives
+# elsewhere.
+_SERIALIZER_COMPUTED = {
+    'age': 'Calculated from the date of birth on the Person record.',
+    'name': 'Assembled from the given and family names on the Person record.',
+    'person_id': 'The Person identifier this record derives from.',
+    'lines_of_therapy': (
+        'Counted from the therapy episodes. Author a line as an Episode grouping '
+        'its drug exposures and this follows.'
+    ),
+    'first_line_therapy_display': (
+        'Rendered from the first therapy episode; author the episode instead.'
+    ),
+    'second_line_therapy_display': (
+        'Rendered from the second therapy episode; author the episode instead.'
+    ),
+    'later_therapy_display': (
+        'Rendered from the third and later therapy episodes; author the episodes '
+        'instead.'
+    ),
+    'therapy_release_id': (
+        'Identifies the regimen-detection release that produced the therapy '
+        'fields; set by that process, not by hand.'
+    ),
+}
+
 _WEARABLE_METRIC = {
     'median_daily_steps_30d': 'steps',
     'activity_trend_30d': 'steps',
@@ -277,6 +311,12 @@ def build_writable_field_descriptor():
                 'target': 'person',
                 'endpoint': 'PATCH /api/v1/persons/{person_id}/',
                 'person_field': person_field,
+                # What to actually send. `person_field` documents the Person
+                # columns behind this and reads as prose ("gender_concept +
+                # gender_source_value", "Location.city"); the endpoint keys every
+                # profile field on the PatientRecord field name and resolves the
+                # rest itself. A client guessing from the prose would send neither.
+                'payload_field': field,
                 'value_kind': 'string',
                 # A curated set, not the whole vocabulary: OMOP's Race holds 1,409
                 # concepts and Ethnicity 150 nationality-style entries, which is
@@ -296,6 +336,7 @@ def build_writable_field_descriptor():
                 'target': 'person',
                 'endpoint': 'PATCH /api/v1/persons/{person_id}/',
                 'person_field': _PROFILE_LOCATION[field],
+                'payload_field': field,
                 'value_kind': _value_kind(field),
             }
             continue
@@ -307,6 +348,7 @@ def build_writable_field_descriptor():
                 'target': 'person',
                 'endpoint': 'PATCH /api/v1/persons/{person_id}/',
                 'person_field': _PROFILE_REPLACEABLE[field],
+                'payload_field': field,
                 'value_kind': _value_kind(field),
             }
             continue
@@ -323,6 +365,7 @@ def build_writable_field_descriptor():
                 'target': 'person',
                 'endpoint': 'PATCH /api/v1/persons/{person_id}/',
                 'person_field': _PROFILE_FILL_IF_EMPTY[field],
+                'payload_field': field,
                 'value_kind': _value_kind(field),
                 'reason': (
                     'Set on the Person record, and only while it is empty — this '
@@ -470,4 +513,33 @@ def build_writable_field_descriptor():
             'type_concept_id': CONCEPT_LAB_TYPE,
             'source_value': code,
         }
+
+    # Fields the serializer adds that no PatientRecord column backs.
+    #
+    # The loop above walks PATIENT_RECORD_OMOP_MAPPED_FIELDS, so it can only
+    # describe columns. These are SerializerMethodFields and read-only aliases,
+    # which means an editor asking "may I write this?" got no entry at all and
+    # had to guess — and guessing "yes" is how a select over `refractory_status`
+    # came to be offered on the treatment tab for a value derived from therapy
+    # episodes. Every one of them is read-only server-side, so describing them
+    # closes the gap for every client rather than one tab.
+    #
+    # patient_name is deliberately absent: it is popped and applied to Person
+    # before the serializer sees it, so it really is writable on that endpoint,
+    # and marking it read-only here would stop renames.
+    for alias, canonical in _SERIALIZER_ALIASES.items():
+        descriptor.setdefault(alias, {
+            'kind': KIND_ALIAS,
+            'writable': False,
+            'canonical': canonical,
+            'reason': f'Mirrors {canonical}; edit that field instead.',
+        })
+
+    for computed, reason in _SERIALIZER_COMPUTED.items():
+        descriptor.setdefault(computed, {
+            'kind': KIND_COMPUTED,
+            'writable': False,
+            'reason': reason,
+        })
+
     return descriptor

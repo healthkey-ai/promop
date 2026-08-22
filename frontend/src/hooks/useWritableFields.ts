@@ -18,7 +18,12 @@ export interface FieldDescriptor {
   writable: boolean;
   reason?: string;
   /** editable */
-  target?: 'measurement' | 'observation';
+  target?: 'measurement' | 'observation' | 'person';
+  /** profile: the key the persons endpoint expects, which is not always the
+   *  column named by `person_field`. */
+  payload_field?: string;
+  person_field?: string;
+  endpoint?: string;
   concept_id?: number;
   code?: string;
   vocabulary?: string;
