@@ -334,11 +334,15 @@ print('ICD10CM:', Concept.objects.filter(vocabulary_id='ICD10CM').count())
 ### Step 3 — Deploy note
 
 On Render (or any production platform), vocabulary loading is a one-time operation run after
-the first deploy. Upload the Athena TSV files to object storage (GCS or S3) and run:
+the first deploy. The simplest path is the shared Google Drive vocabulary zip:
 
 ```bash
-python manage.py load_athena_vocabularies --bucket your-bucket-name
+python manage.py load_athena_vocabularies --gdrive
 ```
+
+If you manage the Athena files yourself, use `--archive /path/to/vocabulary.zip`
+for a downloaded zip, `--path /path/to/vocabulary_download_v5` for an extracted
+directory, or `--bucket your-bucket-name` for GCS.
 
 The command verifies LOINC, RxNorm, SNOMED, and ICD10CM after a non-dry-run
 load. `--dry-run` counts records without writing. Avoid `--replace` for a

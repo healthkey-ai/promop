@@ -1,6 +1,8 @@
 import csv
+import shutil
 import sys
 import time
+import zipfile
 from datetime import date
 from pathlib import Path
 
@@ -59,6 +61,7 @@ LOINC_DOMAIN_SCOPE = frozenset({
 })
 BATCH = 100_000
 PROGRESS_EVERY = 500_000
+DEFAULT_GDRIVE_URL = 'https://drive.google.com/drive/u/0/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7'
 
 # Defaults for the single self-describing cdm_source row. Kept in sync with
 # migration 0112_seed_cdm_source; the command re-seeds this row because a
@@ -104,6 +107,75 @@ def _download_gcs_blob(bucket, filename, log):
     elapsed = time.monotonic() - t
     log(f'  Downloaded {filename} in {elapsed:.0f}s.')
     return open(dest, encoding='utf-8', newline='')
+
+
+def _extract_vocabulary_archive(archive, extract_dir, log):
+    archive = Path(archive)
+    if not archive.exists():
+        raise CommandError(f'Vocabulary archive not found: {archive}')
+
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    log(f'  Extracting {archive.name}...')
+    extract_root = extract_dir.resolve()
+    with zipfile.ZipFile(archive) as zf:
+        for member in zf.infolist():
+            target = (extract_dir / member.filename).resolve()
+            try:
+                target.relative_to(extract_root)
+            except ValueError:
+                raise CommandError(f'Unsafe path in vocabulary archive: {member.filename}')
+        zf.extractall(extract_dir)
+
+    required = 'CONCEPT.csv'
+    candidates = [p.parent for p in extract_dir.rglob(required)]
+    if not candidates:
+        raise CommandError(f'Extracted vocabulary archive did not contain {required}.')
+    if len(candidates) > 1:
+        log(f'  Found multiple {required} files; using {candidates[0]}.')
+    return str(candidates[0])
+
+
+def _download_gdrive_vocabulary(url, log):
+    """Download a Google Drive folder/file containing an Athena vocabulary zip."""
+    try:
+        import gdown
+    except ImportError as exc:
+        raise CommandError(
+            'Google Drive vocabulary loading requires gdown. Install dependencies '
+            'from requirements.txt, then rerun with --gdrive.'
+        ) from exc
+
+    download_dir = Path('/tmp/vocab/gdrive')
+    extract_dir = Path('/tmp/vocab/gdrive-extracted')
+    shutil.rmtree(download_dir, ignore_errors=True)
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    download_dir.mkdir(parents=True, exist_ok=True)
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    log(f'Loading Athena vocabulary archive from Google Drive: {url}')
+    if '/folders/' in url:
+        result = gdown.download_folder(url=url, output=str(download_dir), quiet=False, use_cookies=False)
+        if result is None:
+            raise CommandError(f'Google Drive folder download failed: {url}')
+    else:
+        filename = gdown.download(url=url, output=str(download_dir / 'athena-vocabulary.zip'), quiet=False)
+        if not filename:
+            raise CommandError(f'Google Drive file download failed: {url}')
+
+    zips = sorted(download_dir.rglob('*.zip'))
+    if not zips:
+        raise CommandError(
+            f'No .zip file found after downloading Google Drive vocabulary source: {url}'
+        )
+    archive = zips[0]
+    if len(zips) > 1:
+        log(
+            f'  Found {len(zips)} zip files; using first by name: {archive.name}. '
+            'Pass a direct Google Drive file URL to select a specific zip.'
+        )
+    return _extract_vocabulary_archive(archive, extract_dir, log)
 
 
 def _header_index(header_row):
@@ -153,8 +225,15 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--path',
                             help='Directory containing Athena TSV files')
+        parser.add_argument('--archive',
+                            help='Zip archive containing Athena TSV files')
         parser.add_argument('--bucket',
                             help='GCS bucket name to stream files from (alternative to --path)')
+        parser.add_argument('--gdrive', nargs='?', const=DEFAULT_GDRIVE_URL,
+                            help=(
+                                'Google Drive folder or file URL containing a zipped '
+                                f'Athena vocabulary export. Defaults to {DEFAULT_GDRIVE_URL}.'
+                            ))
         parser.add_argument('--replace', action='store_true',
                             help='Clear vocabulary rows before loading')
         parser.add_argument('--dry-run', action='store_true', dest='dry_run',
@@ -170,19 +249,28 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         base = options['path']
+        archive = options['archive']
         bucket_name = options['bucket']
+        gdrive_url = options['gdrive']
         replace = options['replace']
         dry_run = options['dry_run']
         skip_clinical_vocabulary_verification = options['skip_clinical_vocabulary_verification']
 
-        if not base and not bucket_name:
-            raise CommandError('Provide either --path or --bucket')
+        sources = [bool(base), bool(archive), bool(bucket_name), bool(gdrive_url)]
+        if sum(sources) != 1:
+            raise CommandError('Provide exactly one of --path, --archive, --bucket, or --gdrive')
 
         self._gcs_bucket = None
         if bucket_name:
             from google.cloud import storage as gcs
             self._gcs_bucket = gcs.Client().bucket(bucket_name)
             self._log(f'Loading from gs://{bucket_name}/ (download-one-process-delete)')
+        if gdrive_url:
+            base = _download_gdrive_vocabulary(gdrive_url, self._log)
+        if archive:
+            base = _extract_vocabulary_archive(
+                archive, Path('/tmp/vocab/archive-extracted'), self._log
+            )
 
         t0 = time.monotonic()
         self._build_start = time.time()  # wall-clock for VocabularyRelease

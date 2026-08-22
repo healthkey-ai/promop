@@ -3,8 +3,8 @@
 This tutorial walks you through generating synthetic FHIR patients, importing them into PRomop,
 and querying the resulting `PatientRecord` projections via the API.
 
-**Prerequisites:** local setup complete — database created, migrations applied, superuser
-created, backend running. See the [README](../README.md) if you haven't done that yet.
+**Prerequisites:** local setup complete — database created, migrations applied, and
+superuser created. See the [README](../README.md) if you haven't done that yet.
 
 ---
 
@@ -21,7 +21,23 @@ The API is now available at `http://localhost:8000/api/v1/`.
 
 ---
 
-## 2. Generate a synthetic FHIR bundle
+## 2. Load the Athena vocabulary
+
+PRomop needs the Athena vocabulary tables before FHIR imports can reliably
+resolve clinical codes. The easiest path uses the prepared vocabulary zip in
+the shared Google Drive folder:
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+  .venv/bin/python manage.py load_athena_vocabularies --gdrive
+```
+
+See [vocabularies.md](vocabularies.md) for the supplied Google Drive link,
+the OHDSI Athena download workflow, and GCS/S3 loading options.
+
+---
+
+## 3. Generate a synthetic FHIR bundle
 
 PRomop ships a generator that produces realistic FHIR R4 Bundles for multiple disease types.
 Start with 10 multiple myeloma patients:
@@ -52,7 +68,7 @@ Other supported diseases:
 
 ---
 
-## 3. Inspect the bundle (optional)
+## 4. Inspect the bundle (optional)
 
 The output is a standard FHIR R4 Bundle. Each patient contributes a `Patient` resource plus
 `Observation`, `Condition`, `MedicationStatement`, and `Procedure` resources:
@@ -80,7 +96,7 @@ Expected output for 10 patients:
 
 ---
 
-## 4. Import the bundle
+## 5. Import the bundle
 
 `import_fhir_bundle` loads the FHIR data directly into OMOP tables, bypassing HTTP timeouts.
 Specify an organization slug — it is created automatically if it does not exist:
@@ -112,7 +128,7 @@ After each batch, PRomop automatically:
 
 ---
 
-## 5. Verify in the admin UI
+## 6. Verify in the admin UI
 
 Open `http://localhost:8000/admin/` and log in with your superuser credentials.
 
@@ -122,7 +138,7 @@ staging, lab values, therapy lines, and biomarkers all in one place.
 
 ---
 
-## 6. Query via the API
+## 7. Query via the API
 
 ### Browse interactively
 
