@@ -179,6 +179,51 @@ describe('PatientDetail save — the edit, not the record', () => {
     expect(api.patch).not.toHaveBeenCalled();
   });
 
+  it('does not PATCH at all when the descriptor cannot be fetched', async () => {
+    // Failing closed has to cover the whole save. An empty descriptor stops the
+    // OMOP writes correctly, but it also makes the projection filter match
+    // everything -- there is no longer any way to tell an OMOP-mapped column
+    // from one this record owns. PATCHing the lot is how the 405 comes back.
+    (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) return Promise.reject(new Error('offline'));
+      if (url.includes('/patient-info/')) {
+        return Promise.resolve({
+          data: { patient_info: { ...PATIENT }, user: null, patient_name: PATIENT.patient_name },
+        });
+      }
+      return Promise.resolve({ data: [] });
+    });
+
+    await renderAndLoad();
+    await editAndSave('howell@example.org', 'a.howell@example.org');
+
+    expect(api.patch).not.toHaveBeenCalled();
+    expect(writeClinicalFact).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the rejected field names from a read-only refusal', async () => {
+    // `fields` is the whole diagnosis: which column was rejected says whether the
+    // edited value was refused or a derived one rode along. It was being dropped,
+    // leaving an on-screen error nobody could act on.
+    (api.patch as ReturnType<typeof vi.fn>).mockRejectedValue({
+      response: {
+        status: 405,
+        data: {
+          detail: 'OMOP-mapped PatientRecord fields are read-only.',
+          fields: ['absolute_neutrophile_count', 'egfr'],
+        },
+      },
+    });
+
+    await renderAndLoad();
+    await editAndSave('howell@example.org', 'a.howell@example.org');
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getByText(/absolute_neutrophile_count, egfr/)).toBeInTheDocument(),
+    );
+  });
+
   it('still sends a genuinely projection-owned edit', async () => {
     await renderAndLoad();
     await editAndSave('howell@example.org', 'a.howell@example.org');

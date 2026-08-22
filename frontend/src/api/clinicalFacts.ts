@@ -1,4 +1,4 @@
-import api from '@/api/axios';
+import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
 
 /**
@@ -76,7 +76,9 @@ export async function writeClinicalFact(
   // excludes entered-in-error rows; the is_erroneous check is belt and braces.
   let supersededId: number | null = null;
   try {
-    const existing = await api.get(base, { params: { person_id: personId } });
+    const existing = await clinicalClient().get(clinicalUrl(base), {
+      params: { person_id: personId },
+    });
     const rows = Array.isArray(existing.data)
       ? existing.data
       : existing.data?.results ?? [];
@@ -97,7 +99,7 @@ export async function writeClinicalFact(
   }
 
   if (supersededId != null) {
-    await api.patch(`${base}${supersededId}/`, {
+    await clinicalClient().patch(clinicalUrl(`${base}${supersededId}/`), {
       is_erroneous: true,
       erroneous_reason: 'Superseded by a corrected value entered in the patient editor',
     });
@@ -118,7 +120,7 @@ export async function writeClinicalFact(
     payload.unit_source_value = descriptor.unit;
   }
 
-  const created = await api.post(base, payload);
+  const created = await clinicalClient().post(clinicalUrl(base), payload);
   const createdId =
     (created.data?.measurement_id ?? created.data?.observation_id ?? null) as
       | number
