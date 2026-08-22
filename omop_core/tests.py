@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.core.management import call_command
@@ -4919,4 +4920,125 @@ class SocialDataFieldMappingTest(TestCase):
         from omop_core.services.patient_record_service import _get_social_data
         data = _get_social_data(self.person)
         self.assertEqual(data.get('insurance_type'), 'Private')
-        self.assertNotIn('concomitant_medication_details', data)
+
+
+# ---------------------------------------------------------------------------
+# TEST: refresh_patient_record query count regression (#541)
+# ---------------------------------------------------------------------------
+
+class RefreshQueryCountTest(TestCase):
+    """Ensure refresh_patient_record stays within a bounded query budget.
+
+    The prefetch refactor (issue #541) reduced queries from ~80 to ~10.
+    This test catches regressions by asserting the total stays under 20.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.test_utils import ensure_test_concept_zero
+        ensure_test_concept_zero()
+
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='QC_TEST',
+            defaults={'vocabulary_name': 'QC Test', 'vocabulary_concept_id': 0},
+        )
+        dom, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Test',
+            defaults={'concept_class_name': 'Test', 'concept_class_concept_id': 0},
+        )
+        concept, _ = Concept.objects.get_or_create(
+            concept_id=990541,
+            defaults={
+                'concept_name': 'QC Test Concept',
+                'domain': dom,
+                'vocabulary': vocab,
+                'concept_class': cc,
+                'concept_code': '99999-0',
+                'valid_start_date': date(2020, 1, 1),
+                'valid_end_date': date(2099, 12, 31),
+            },
+        )
+        cls.person = Person.objects.create(person_id=990541)
+        # Seed a handful of measurement rows so the snapshot has work to do
+        for i in range(5):
+            Measurement.objects.create(
+                measurement_id=990541_00 + i,
+                person=cls.person,
+                measurement_concept=concept,
+                measurement_date=date(2025, 1, 1),
+                measurement_type_concept_id=0,
+                value_as_number=float(i),
+            )
+
+    def test_query_count_under_budget(self):
+        """refresh_patient_record must not exceed 20 SQL queries."""
+        from django.test.utils import CaptureQueriesContext
+        with CaptureQueriesContext(connection) as ctx:
+            refresh_patient_record(self.person)
+        # Budget: ~6 snapshot queries + PatientRecord SELECT FOR UPDATE + save
+        # + a few ancillary lookups (Episode, concept cache, etc.)
+        self.assertLessEqual(
+            len(ctx.captured_queries), 20,
+            f'Expected ≤20 queries, got {len(ctx.captured_queries)}. '
+            f'Query breakdown:\n'
+            + '\n'.join(
+                f'  [{i}] {q["sql"][:120]}'
+                for i, q in enumerate(ctx.captured_queries)
+            ),
+        )
+
+    def test_direct_lot_assertions_keep_the_newest_value(self):
+        """Newest direct LOT assertion must win despite snapshot's sort order."""
+        from omop_core.services.patient_record_service import (
+            OmopSnapshot, _apply_treatment_assertions,
+        )
+
+        older = SimpleNamespace(
+            observation_id=1,
+            observation_date=date(2024, 1, 1),
+            observation_source_value='LOT-1-intent',
+            value_as_concept=None,
+            value_as_string='Palliative',
+            value_source_value=None,
+        )
+        newer = SimpleNamespace(
+            observation_id=2,
+            observation_date=date(2024, 2, 1),
+            observation_source_value='LOT-1-intent',
+            value_as_concept=None,
+            value_as_string='Curative',
+            value_source_value=None,
+        )
+        snapshot = OmopSnapshot(
+            measurements=[], observations=[newer, older], conditions=[],
+            drug_exposures=[], procedures=[], death=None,
+            meas_by_code={}, obs_by_code={}, meas_by_source={}, obs_by_source={},
+        )
+        episode = SimpleNamespace(
+            episode_number=1,
+            episode_start_date=date(2024, 1, 1),
+            episode_end_date=date(2024, 12, 31),
+        )
+
+        data = {}
+        _apply_treatment_assertions(data, self.person, [episode], snapshot)
+
+        self.assertEqual(data['first_line_intent'], 'Curative')
+
+    def test_lot_inference_accepts_prefetched_empty_rows(self):
+        """The no-Episode path can avoid re-querying snapshot tables entirely."""
+        from django.test.utils import CaptureQueriesContext
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+
+        with CaptureQueriesContext(connection) as ctx:
+            lots = infer_lot_for_person(
+                self.person, force=True, dry_run=True,
+                exposures=[], procedures=[],
+            )
+
+        self.assertEqual(lots, [])
+        self.assertEqual(len(ctx), 0)

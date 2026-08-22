@@ -260,13 +260,14 @@ def test_slim_still_reads_generator_display_names():
     assert _get_mm_specific_data(person)['meets_slim'] is True
 
 
-def test_mm_measurement_lookups_are_filtered_in_sql():
-    """No measurement lookup here may select on person alone.
+def test_mm_measurement_lookups_use_shared_prefetch():
+    """After the snapshot refactor (#541), _get_mm_specific_data builds its own
+    OmopSnapshot when called without one.  The snapshot fetches all non-erroneous
+    measurements for the person in a single query and filters in Python.
 
-    Resolving codes through _measurement_code invites fetching every row and
-    filtering in Python, on a refresh path where a bulk loaded patient holds
-    tens of thousands of measurements. Asserted on query shape because
-    parameter interpolation into the logged SQL is backend dependent.
+    This test verifies:
+      1. The function issues exactly one measurement SELECT (the snapshot query).
+      2. The query count stays bounded regardless of how many codes are involved.
     """
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
@@ -284,21 +285,10 @@ def test_mm_measurement_lookups_are_filtered_in_sql():
     ]
     assert measurement_queries, 'expected _get_mm_specific_data to read measurements'
 
-    unfiltered = [
-        sql for sql in measurement_queries
-        if 'measurement_source_value" IN' not in sql and 'concept_code" IN' not in sql
-    ]
-    assert not unfiltered, (
-        'measurement lookup restricted by person alone, so it walks every row '
-        f'the person owns: {unfiltered}'
+    # The snapshot prefetches all measurements in one query; no per-code queries.
+    assert len(measurement_queries) == 1, (
+        f'expected exactly 1 measurement query (snapshot), got {len(measurement_queries)}'
     )
-
-    # The SLiM lookup specifically: the only one that resolves the code through
-    # the joined concept as well as source_value.
-    assert any(
-        'INNER JOIN "concept"' in sql and 'concept_code" IN' in sql
-        for sql in measurement_queries
-    ), 'expected the SLiM lookup to match concept_code in SQL, not in Python'
 
 
 # ---------------------------------------------------------------------------

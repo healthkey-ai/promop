@@ -934,6 +934,12 @@ class ConditionOccurrence(models.Model):
 
     class Meta:
         db_table = 'condition_occurrence'
+        indexes = [
+            models.Index(
+                fields=['person', 'condition_start_date'],
+                name='ix_cond_person_start_date',
+            ),
+        ]
 
     def __str__(self):
         return f"Condition {self.condition_occurrence_id} for Person {self.person_id}"
@@ -972,6 +978,10 @@ class DrugExposure(models.Model):
         db_table = 'drug_exposure'
         indexes = [
             models.Index(fields=['route_source_value'], name='ix_de_route_src'),
+            models.Index(
+                fields=['person', 'drug_exposure_start_date'],
+                name='ix_de_person_start_date',
+            ),
         ]
 
     def __str__(self):
@@ -1002,6 +1012,12 @@ class ProcedureOccurrence(models.Model):
 
     class Meta:
         db_table = 'procedure_occurrence'
+        indexes = [
+            models.Index(
+                fields=['person', 'procedure_date'],
+                name='ix_proc_person_date',
+            ),
+        ]
 
     def __str__(self):
         return f"Procedure {self.procedure_occurrence_id} for Person {self.person_id}"
@@ -1049,6 +1065,10 @@ class Measurement(models.Model):
             models.Index(
                 fields=['person', 'measurement_source_concept', 'measurement_date'],
                 name='ix_meas_person_srcconcept_date',
+            ),
+            models.Index(
+                fields=['person', 'is_erroneous', 'measurement_date'],
+                name='ix_meas_person_err_date',
             ),
         ]
 
@@ -1105,6 +1125,10 @@ class Observation(models.Model):
         db_table = 'observation'
         indexes = [
             models.Index(fields=['qualifier_source_value'], name='ix_obs_qual_src'),
+            models.Index(
+                fields=['person', 'is_erroneous', 'observation_date'],
+                name='ix_obs_person_err_date',
+            ),
         ]
 
     def __str__(self):
