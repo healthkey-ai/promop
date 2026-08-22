@@ -22,6 +22,7 @@ from .views import (
     org_disease_stats,
     InterchangeAgreementViewSet,
     field_mapping_list, field_mapping_detail,
+    field_synonyms, field_synonym_detail,
 )
 from .org_views import (
     OrgListCreateView, OrgDetailView,
@@ -111,4 +112,6 @@ urlpatterns = [
     path('orgs/<slug:slug>/patient-signup/', OrgPatientSignupView.as_view(), name='v1-org-patient-signup'),
     path('field-mappings/', field_mapping_list, name='v1-field-mapping-list'),
     path('field-mappings/<int:pk>/', field_mapping_detail, name='v1-field-mapping-detail'),
+    path('field-mappings/<str:field_name>/synonyms/', field_synonyms, name='v1-field-synonyms'),
+    path('field-synonyms/<int:pk>/', field_synonym_detail, name='v1-field-synonym-detail'),
 ]
