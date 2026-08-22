@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from patient_portal.models import Identity, PatientConsent, PatientMessage
 from omop_core.models import (
-    PatientRecord, Concept, FieldConceptMapping,
+    PatientRecord, Concept, FieldConceptMapping, FieldSynonym,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
     Survey, PatientSurveyResponse,
@@ -1015,3 +1015,15 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
             validated_data['reviewer'] = request.user
             validated_data['reviewed_at'] = timezone.now()
         return super().update(instance, validated_data)
+
+
+
+class FieldSynonymSerializer(serializers.ModelSerializer):
+    created_by = serializers.CharField(
+        source='created_by.username', read_only=True, default=None,
+    )
+
+    class Meta:
+        model = FieldSynonym
+        fields = ['id', 'field_name', 'synonym_text', 'source', 'created_by', 'created_at']
+        read_only_fields = ['id', 'source', 'created_by', 'created_at']

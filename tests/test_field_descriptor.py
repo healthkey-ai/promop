@@ -61,7 +61,7 @@ def test_mapping_merged():
 def test_descriptors_have_required_keys():
     """Each descriptor dict contains the expected keys."""
     descriptors = get_all_field_descriptors()
-    required_keys = {'field_name', 'field_type', 'category', 'provenance', 'mapping'}
+    required_keys = {'field_name', 'field_type', 'category', 'tab', 'provenance', 'mapping'}
     for d in descriptors:
         missing = required_keys - set(d.keys())
         assert missing == set(), f"Descriptor for {d.get('field_name')} missing keys: {missing}"
@@ -78,3 +78,42 @@ def test_categories_are_valid():
     found_categories = {d['category'] for d in descriptors}
     unknown = found_categories - valid_categories
     assert unknown == set(), f"Unknown categories: {unknown}"
+
+
+def test_tab_key_present():
+    """Every descriptor has a 'tab' key."""
+    descriptors = get_all_field_descriptors()
+    for d in descriptors:
+        assert 'tab' in d, f"Descriptor for {d['field_name']} missing 'tab' key"
+
+
+def test_tabs_are_valid():
+    """All tab values are from the known set."""
+    valid_tabs = {
+        'general', 'disease', 'treatment', 'blood', 'labs',
+        'behavior', 'wearables', 'internal', 'other',
+    }
+    descriptors = get_all_field_descriptors()
+    found_tabs = {d['tab'] for d in descriptors}
+    unknown = found_tabs - valid_tabs
+    assert unknown == set(), f"Unknown tabs: {unknown}"
+
+
+def test_known_field_tab_assignments():
+    """Spot-check specific field->tab assignments."""
+    descriptors = get_all_field_descriptors()
+    by_name = {d['field_name']: d for d in descriptors}
+    checks = {
+        'hemoglobin_g_dl': 'blood',
+        'smoking_status': 'behavior',
+        'date_of_birth': 'general',
+        'serum_creatinine_level': 'labs',
+        'first_line_therapy': 'treatment',
+        'myeloma_type': 'disease',
+        'id': 'internal',
+    }
+    for field, expected_tab in checks.items():
+        assert field in by_name, f"Field '{field}' not in descriptors"
+        assert by_name[field]['tab'] == expected_tab, (
+            f"Field '{field}' should be tab '{expected_tab}' but is '{by_name[field]['tab']}'"
+        )
