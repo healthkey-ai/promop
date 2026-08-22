@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import api from '@/api/axios';
+import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 
 /**
  * What the server says a client may do with each PatientRecord field.
@@ -39,6 +39,20 @@ export interface FieldDescriptor {
 
 export type FieldDescriptors = Record<string, FieldDescriptor>;
 
+/**
+ * Columns the record keeps for itself, which no editor may send.
+ *
+ * They are serializer read-only, and `updated_at` / `derived_at` move on every
+ * write by definition — so echoing back a copy captured before a write is read as
+ * an attempted change and refuses the request. Kept here because both the
+ * provider editor and the federation view filter against it, and a copy that
+ * drifted would resurrect the bug in whichever one fell behind.
+ */
+export const LIFECYCLE: ReadonlySet<string> = new Set([
+  'id', 'person', 'organization', 'created_at', 'updated_at',
+  'derived_at', 'derivation_version', 'user_edited_fields',
+]);
+
 /** Module-level cache: the descriptor is deployment metadata, identical for every
  *  caller and every patient, so refetching it per tab mount is pure waste. */
 let cached: FieldDescriptors | null = null;
@@ -52,8 +66,8 @@ export function __resetWritableFieldsCache() {
 export function fetchWritableFields(): Promise<FieldDescriptors> {
   if (cached) return Promise.resolve(cached);
   if (!inflight) {
-    inflight = api
-      .get('/v1/patient-records/writable-fields/')
+    inflight = clinicalClient()
+      .get(clinicalUrl('/v1/patient-records/writable-fields/'))
       .then((res) => {
         cached = (res.data ?? {}) as FieldDescriptors;
         return cached;

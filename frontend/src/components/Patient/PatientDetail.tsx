@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, Download } from "lucide-react";
 import api from "@/api/axios";
-import { fetchWritableFields, type FieldDescriptors } from "@/hooks/useWritableFields";
+import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
 import { writeClinicalFact } from "@/api/clinicalFacts";
 import { getActiveBranding } from "@/config/branding";
 import type { User } from "@/hooks/useAuth";
@@ -388,10 +388,6 @@ export default function PatientDetail({
       // this request, whatever its kind. Lifecycle columns are dropped too: they
       // are serializer read-only, and updated_at goes stale the moment anything
       // is written.
-      const LIFECYCLE = new Set([
-        'id', 'person', 'organization', 'created_at', 'updated_at',
-        'derived_at', 'derivation_version', 'user_edited_fields',
-      ]);
       //
       // And only what actually CHANGED. Echoing back unchanged values is what
       // created the bug in the first place: a value the client holds is only
