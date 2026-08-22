@@ -19607,3 +19607,167 @@ class FieldSynonymTest(TestCase):
             'synonym_text': 'Hgb',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class TherapyLineAuthoringTest(TestCase):
+    """POST /api/v1/therapy-lines/ — the write behind the read-only treatment tab.
+
+    Every therapy field on PatientRecord is inferred from an Episode grouping
+    drug exposures, so none of them can be written directly. These cover the one
+    endpoint that can put a line there, and the properties that make it safe to
+    call twice.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from omop_core.services.mappings import (
+            CONCEPT_EHR_TYPE, CONCEPT_TREATMENT_REGIMEN, CONCEPT_DRUG_EXPOSURE_FIELD,
+        )
+
+        _make_vocab_fixtures()
+        vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        drug_domain = Domain.objects.get(domain_id='Drug')
+        type_domain = Domain.objects.get(domain_id='Type Concept')
+
+        ingredient_cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Ingredient',
+            defaults={'concept_class_name': 'Ingredient',
+                      'concept_class_concept_id': 0},
+        )
+
+        def _concept(cid, name, domain, code):
+            return Concept.objects.get_or_create(
+                concept_id=cid,
+                defaults={
+                    'concept_name': name, 'domain': domain, 'vocabulary': vocab,
+                    'concept_class': ingredient_cc, 'concept_code': code,
+                    'valid_start_date': date(1970, 1, 1),
+                    'valid_end_date': date(2099, 12, 31),
+                },
+            )[0]
+
+        _concept(CONCEPT_TREATMENT_REGIMEN, 'Treatment Regimen', type_domain, '32531')
+        _concept(CONCEPT_EHR_TYPE, 'EHR', type_domain, '32817')
+        _concept(CONCEPT_DRUG_EXPOSURE_FIELD, 'drug_exposure.drug_exposure_id',
+                 type_domain, '1147094')
+        self.len_concept = _concept(1301025, 'lenalidomide', drug_domain, '6360')
+        self.dex_concept = _concept(1518254, 'dexamethasone', drug_domain, '3264')
+
+        self.person = Person.objects.create(person_id=77001, year_of_birth=1960)
+        PatientRecord.objects.get_or_create(person=self.person)
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            email='therapy_author@test.com', password='pw', is_staff=True,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _post(self, **overrides):
+        body = {
+            'person': self.person.person_id,
+            'line_number': 1,
+            'start_date': '2025-01-15',
+            'end_date': '2025-06-15',
+            'drugs': [
+                {'concept_id': self.len_concept.concept_id, 'source_value': 'lenalidomide'},
+                {'concept_id': self.dex_concept.concept_id, 'source_value': 'dexamethasone'},
+            ],
+        }
+        body.update(overrides)
+        return self.client.post('/api/v1/therapy-lines/', body, format='json')
+
+    def test_authors_a_line_as_an_episode_grouping_its_drug_exposures(self):
+        from omop_oncology.models import Episode, EpisodeEvent
+
+        resp = self._post()
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+        episode = Episode.objects.get(person=self.person, episode_number=1)
+        self.assertEqual(resp.data['episode_id'], episode.episode_id)
+        self.assertEqual(DrugExposure.objects.filter(person=self.person).count(), 2)
+        # The grouping is the point: exposures alone infer nothing.
+        self.assertEqual(
+            EpisodeEvent.objects.filter(episode_id=episode.episode_id).count(), 2,
+        )
+
+    def test_the_record_is_rederived_so_therapy_fields_follow(self):
+        # The endpoint exists because these fields cannot be written directly.
+        # If they do not move, it has achieved nothing.
+        resp = self._post()
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+        record = PatientRecord.objects.get(person=self.person)
+        self.assertEqual(str(record.therapy_lines_count), '1')
+        self.assertIn('patient_info', resp.data)
+        self.assertEqual(
+            resp.data['patient_info']['therapy_lines_count'],
+            record.therapy_lines_count,
+        )
+
+    def test_posting_the_same_line_twice_converges(self):
+        from omop_oncology.models import Episode
+
+        first = self._post()
+        second = self._post()
+        self.assertEqual(second.status_code, 201, second.data)
+
+        # One episode per line per person, and the exposures key on
+        # (source_value, start_date) exactly as the bulk path does.
+        self.assertEqual(Episode.objects.filter(person=self.person).count(), 1)
+        self.assertEqual(DrugExposure.objects.filter(person=self.person).count(), 2)
+        self.assertEqual(first.data['episode_id'], second.data['episode_id'])
+        self.assertEqual(second.data['drugs_created'], 0)
+
+    def test_a_second_line_is_a_second_episode(self):
+        from omop_oncology.models import Episode
+
+        self._post()
+        resp = self._post(line_number=2, start_date='2025-07-01', end_date=None)
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+        self.assertEqual(Episode.objects.filter(person=self.person).count(), 2)
+        record = PatientRecord.objects.get(person=self.person)
+        self.assertEqual(str(record.therapy_lines_count), '2')
+
+    def test_an_unknown_drug_concept_refuses_the_whole_line(self):
+        # Dropping it silently would store a line that looks complete and infers
+        # the wrong regimen.
+        resp = self._post(drugs=[{'concept_id': 99999999, 'source_value': 'nonesuch'}])
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('99999999', str(resp.data))
+        self.assertEqual(DrugExposure.objects.filter(person=self.person).count(), 0)
+
+    def test_a_line_with_neither_drugs_nor_a_regimen_is_refused(self):
+        resp = self._post(drugs=[])
+        self.assertEqual(resp.status_code, 400)
+
+    def test_end_date_may_not_precede_start_date(self):
+        resp = self._post(start_date='2025-06-15', end_date='2025-01-15')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('end_date', str(resp.data))
+
+    def test_a_future_start_date_is_refused(self):
+        from datetime import timedelta
+        future = (date.today() + timedelta(days=30)).isoformat()
+        resp = self._post(start_date=future, end_date=None)
+        self.assertEqual(resp.status_code, 400)
+
+    def test_unauthenticated_callers_are_refused(self):
+        client = APIClient()
+        resp = client.post('/api/v1/therapy-lines/', {
+            'person': self.person.person_id, 'line_number': 1,
+            'drugs': [{'concept_id': self.len_concept.concept_id}],
+        }, format='json')
+        self.assertIn(resp.status_code, (401, 403))
+        self.assertEqual(DrugExposure.objects.filter(person=self.person).count(), 0)
+
+    def test_the_write_is_one_transaction(self):
+        # The second drug fails, so neither exposure may survive -- a half-written
+        # line infers a regimen the clinician never gave.
+        resp = self._post(drugs=[
+            {'concept_id': self.len_concept.concept_id, 'source_value': 'lenalidomide'},
+            {'concept_id': 88888888, 'source_value': 'nonesuch'},
+        ])
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(DrugExposure.objects.filter(person=self.person).count(), 0)
