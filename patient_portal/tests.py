@@ -19264,3 +19264,103 @@ class FieldConceptMappingTest(TestCase):
             'field_name': 'smoking_status',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_list_includes_tab_key(self):
+        """Every field descriptor should include a 'tab' key."""
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        for d in resp.data:
+            self.assertIn('tab', d, f"Field {d['field_name']} missing 'tab' key")
+
+    def test_tab_assignments_spot_check(self):
+        """Spot-check known field→tab assignments."""
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-mappings/')
+        tab_by_field = {d['field_name']: d['tab'] for d in resp.data}
+        self.assertEqual(tab_by_field.get('hemoglobin_g_dl'), 'blood')
+        self.assertEqual(tab_by_field.get('smoking_status'), 'behavior')
+        self.assertEqual(tab_by_field.get('date_of_birth'), 'general')
+        self.assertEqual(tab_by_field.get('serum_creatinine_level'), 'labs')
+        self.assertEqual(tab_by_field.get('first_line_therapy'), 'treatment')
+
+
+class FieldSynonymTest(TestCase):
+    """Tests for /api/v1/field-mappings/<field_name>/synonyms/ endpoints."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = Identity.objects.create_user(
+            email='syn_staff@t.com', password='x', is_staff=True,
+        )
+        cls.non_staff = Identity.objects.create_user(
+            email='syn_user@t.com', password='x', is_staff=False,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        from omop_core.models import FieldSynonym
+        FieldSynonym.objects.all().delete()
+
+    def test_get_empty_synonyms(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data, [])
+
+    def test_create_custom_synonym(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/', {
+            'synonym_text': 'Hgb',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['synonym_text'], 'Hgb')
+        self.assertEqual(resp.data['source'], 'custom')
+        self.assertEqual(resp.data['field_name'], 'hemoglobin_g_dl')
+
+    def test_get_returns_custom_synonyms(self):
+        self.client.force_authenticate(user=self.staff)
+        self.client.post('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/', {
+            'synonym_text': 'Hgb',
+        }, format='json')
+        resp = self.client.get('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        custom = [s for s in resp.data if s['source'] == 'custom']
+        self.assertEqual(len(custom), 1)
+        self.assertEqual(custom[0]['synonym_text'], 'Hgb')
+
+    def test_duplicate_synonym_rejected(self):
+        self.client.force_authenticate(user=self.staff)
+        self.client.post('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/', {
+            'synonym_text': 'Hgb',
+        }, format='json')
+        resp = self.client.post('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/', {
+            'synonym_text': 'Hgb',
+        }, format='json')
+        self.assertIn(resp.status_code, (status.HTTP_400_BAD_REQUEST, status.HTTP_409_CONFLICT))
+
+    def test_delete_custom_synonym(self):
+        self.client.force_authenticate(user=self.staff)
+        create_resp = self.client.post('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/', {
+            'synonym_text': 'Hgb',
+        }, format='json')
+        syn_id = create_resp.data['id']
+        resp = self.client.delete(f'/api/v1/field-synonyms/{syn_id}/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        # Confirm it's gone.
+        from omop_core.models import FieldSynonym
+        self.assertFalse(FieldSynonym.objects.filter(pk=syn_id).exists())
+
+    def test_delete_nonexistent_returns_404(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.delete('/api/v1/field-synonyms/99999/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_non_staff_blocked(self):
+        self.client.force_authenticate(user=self.non_staff)
+        resp = self.client.get('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        resp = self.client.post('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/', {
+            'synonym_text': 'Hgb',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)

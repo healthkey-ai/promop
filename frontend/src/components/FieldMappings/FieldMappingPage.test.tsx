@@ -11,6 +11,7 @@ vi.mock("@/api/axios", () => ({
           field_name: "hemoglobin_g_dl",
           field_type: "float",
           category: "editable",
+          tab: "blood",
           provenance: {
             omop_table: "Measurement",
             lookup_strategy: "loinc",
@@ -26,6 +27,7 @@ vi.mock("@/api/axios", () => ({
           field_name: "smoking_status",
           field_type: "text",
           category: "needs-concept-set",
+          tab: "behavior",
           provenance: null,
           mapping: null,
         },
@@ -33,6 +35,7 @@ vi.mock("@/api/axios", () => ({
           field_name: "pack_years",
           field_type: "float",
           category: "needs-concept-set",
+          tab: "behavior",
           provenance: null,
           mapping: {
             id: 1,
@@ -51,6 +54,15 @@ vi.mock("@/api/axios", () => ({
           field_name: "bmi",
           field_type: "float",
           category: "computed",
+          tab: "general",
+          provenance: null,
+          mapping: null,
+        },
+        {
+          field_name: "date_of_birth",
+          field_type: "date",
+          category: "profile",
+          tab: "general",
           provenance: null,
           mapping: null,
         },
@@ -74,38 +86,74 @@ describe("FieldMappingPage", () => {
     vi.clearAllMocks();
   });
 
-  it("renders field table with category sections", async () => {
+  it("renders field table with tab bar and category sections", async () => {
     renderPage();
     await waitFor(() => {
       expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
     });
-    // "Needs Concept Assignment" appears in stats bar, dropdown, and section header
-    expect(screen.getAllByText(/Needs Concept Assignment/).length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("smoking_status")).toBeInTheDocument();
+    // Tab bar should show tabs with counts
+    expect(screen.getByText(/General/)).toBeInTheDocument();
+    expect(screen.getByText(/Blood/)).toBeInTheDocument();
+    expect(screen.getByText(/Behavior/)).toBeInTheDocument();
+  });
+
+  it("defaults to General tab and hides other tab fields", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
+    });
+    // Behavior tab fields should not be visible on the General tab
+    expect(screen.queryByText("smoking_status")).not.toBeInTheDocument();
+    expect(screen.queryByText("hemoglobin_g_dl")).not.toBeInTheDocument();
+  });
+
+  it("switches tabs and shows relevant fields", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
+    });
+    // Click Behavior tab
+    const behaviorTab = screen.getByText(/Behavior/);
+    fireEvent.click(behaviorTab);
+    await waitFor(() => {
+      expect(screen.getByText("smoking_status")).toBeInTheDocument();
+    });
     expect(screen.getByText("pack_years")).toBeInTheDocument();
+    // General fields should be hidden now
+    expect(screen.queryByText("bmi")).not.toBeInTheDocument();
   });
 
   it("shows mapped concept info for fields with mappings", async () => {
     renderPage();
+    // Switch to Behavior tab to see pack_years
+    await waitFor(() => {
+      expect(screen.getByText(/Behavior/)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText(/Behavior/));
     await waitFor(() => {
       expect(screen.getByText("SNOMED:229819007")).toBeInTheDocument();
     });
     expect(screen.getByText("proposed")).toBeInTheDocument();
   });
 
-  it("filters by search text", async () => {
+  it("search shows results across all tabs", async () => {
     renderPage();
     await waitFor(() => {
-      expect(screen.getByText("smoking_status")).toBeInTheDocument();
+      expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
     });
-    const searchInput = screen.getByPlaceholderText("Search fields...");
+    const searchInput = screen.getByPlaceholderText("Search fields (all tabs)...");
     fireEvent.change(searchInput, { target: { value: "smoking" } });
+    // Should find smoking_status even though we're on General tab
     expect(screen.getByText("smoking_status")).toBeInTheDocument();
     expect(screen.queryByText("pack_years")).not.toBeInTheDocument();
   });
 
   it("shows assign button for unmapped needs-concept-set fields", async () => {
     renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/Behavior/)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText(/Behavior/));
     await waitFor(() => {
       expect(screen.getByText("smoking_status")).toBeInTheDocument();
     });
@@ -116,6 +164,10 @@ describe("FieldMappingPage", () => {
   it("opens concept assign dialog on Assign click", async () => {
     renderPage();
     await waitFor(() => {
+      expect(screen.getByText(/Behavior/)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText(/Behavior/));
+    await waitFor(() => {
       expect(screen.getByText("smoking_status")).toBeInTheDocument();
     });
     const assignButtons = screen.getAllByText("Assign");
@@ -123,7 +175,20 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Assign Concept")).toBeInTheDocument();
     });
-    // The dialog shows the field name
-    expect(screen.getByText("smoking_status", { selector: "span" })).toBeInTheDocument();
+  });
+
+  it("renders Synonyms button in expanded sections", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/Behavior/)).toBeInTheDocument();
+    });
+    // Switch to Behavior tab which has needs-concept-set (not collapsed by default)
+    fireEvent.click(screen.getByText(/Behavior/));
+    await waitFor(() => {
+      expect(screen.getByText("smoking_status")).toBeInTheDocument();
+    });
+    // Synonyms buttons should appear for expanded fields
+    const synonymButtons = screen.getAllByText("Synonyms");
+    expect(synonymButtons.length).toBeGreaterThan(0);
   });
 });

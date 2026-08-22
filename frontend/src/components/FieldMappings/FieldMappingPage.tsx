@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, ChevronDown, ChevronRight, Search, Plus } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, Search, Plus, BookOpen } from "lucide-react";
 import api from "@/api/axios";
 import { ConceptAssignDialog } from "./ConceptAssignDialog";
+import { SynonymDialog } from "./SynonymDialog";
 
 interface FieldDescriptor {
   field_name: string;
   field_type: string;
   category: string;
+  tab: string;
   provenance: {
     omop_table: string;
     lookup_strategy: string;
@@ -45,6 +47,20 @@ const CATEGORY_LABELS: Record<string, string> = {
   other: "Other",
 };
 
+const TAB_LABELS: Record<string, string> = {
+  general: "General",
+  disease: "Disease",
+  treatment: "Treatment",
+  blood: "Blood",
+  labs: "Labs",
+  behavior: "Behavior",
+  wearables: "Wearables",
+  other: "Other",
+  internal: "Internal",
+};
+
+const TAB_ORDER = ["general", "disease", "treatment", "blood", "labs", "behavior", "wearables", "other", "internal"];
+
 const STATUS_BADGE: Record<string, string> = {
   proposed: "bg-yellow-100 text-yellow-800",
   approved: "bg-green-100 text-green-800",
@@ -58,11 +74,13 @@ export default function FieldMappingPage() {
   const [error, setError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
+  const [activeTab, setActiveTab] = useState("general");
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(
     new Set(["editable", "alias", "unit", "profile", "location", "internal", "wearable-metadata", "other", "computed"])
   );
   const [dialogOpen, setDialogOpen] = useState(false);
   const [selectedField, setSelectedField] = useState<FieldDescriptor | null>(null);
+  const [synonymDialogField, setSynonymDialogField] = useState<string | null>(null);
 
   const fetchDescriptors = useCallback(async () => {
     setLoading(true);
@@ -81,17 +99,20 @@ export default function FieldMappingPage() {
     fetchDescriptors();
   }, [fetchDescriptors]);
 
+  // When searching, show across all tabs; otherwise filter by active tab.
   const filtered = useMemo(() => {
     let items = descriptors;
-    if (categoryFilter) {
-      items = items.filter((d) => d.category === categoryFilter);
-    }
-    if (searchQuery) {
+    if (!searchQuery) {
+      items = items.filter((d) => d.tab === activeTab);
+    } else {
       const q = searchQuery.toLowerCase();
       items = items.filter((d) => d.field_name.toLowerCase().includes(q));
     }
+    if (categoryFilter) {
+      items = items.filter((d) => d.category === categoryFilter);
+    }
     return items;
-  }, [descriptors, categoryFilter, searchQuery]);
+  }, [descriptors, categoryFilter, searchQuery, activeTab]);
 
   const grouped = useMemo(() => {
     const groups: Record<string, FieldDescriptor[]> = {};
@@ -107,6 +128,14 @@ export default function FieldMappingPage() {
     const counts: Record<string, number> = {};
     for (const d of descriptors) {
       counts[d.category] = (counts[d.category] || 0) + 1;
+    }
+    return counts;
+  }, [descriptors]);
+
+  const tabCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const d of descriptors) {
+      counts[d.tab] = (counts[d.tab] || 0) + 1;
     }
     return counts;
   }, [descriptors]);
@@ -162,7 +191,7 @@ export default function FieldMappingPage() {
     );
   }
 
-  if (error) {
+  if (error && !descriptors.length) {
     return (
       <div className="mx-auto max-w-7xl p-6">
         <div className="rounded border border-red-300 bg-red-50 p-4 text-red-700">
@@ -187,6 +216,28 @@ export default function FieldMappingPage() {
           Back
         </button>
         <h1 className="text-xl font-semibold">Field Concept Mappings</h1>
+      </div>
+
+      {/* Tab bar */}
+      <div className="mb-4 flex gap-0 overflow-x-auto border-b border-gray-200">
+        {TAB_ORDER.map((tab) => {
+          const count = tabCounts[tab] || 0;
+          if (!count) return null;
+          return (
+            <button
+              key={tab}
+              onClick={() => { setActiveTab(tab); setSearchQuery(""); }}
+              className={`whitespace-nowrap border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
+                activeTab === tab && !searchQuery
+                  ? "border-primary text-primary"
+                  : "border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700"
+              }`}
+            >
+              {TAB_LABELS[tab] || tab}
+              <span className="ml-1.5 text-xs text-gray-400">({count})</span>
+            </button>
+          );
+        })}
       </div>
 
       {/* Stats bar */}
@@ -216,7 +267,7 @@ export default function FieldMappingPage() {
           <Search size={14} className="absolute left-2.5 top-2.5 text-gray-400" />
           <input
             type="text"
-            placeholder="Search fields..."
+            placeholder="Search fields (all tabs)..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="h-9 w-64 rounded border border-gray-300 pl-8 pr-3 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
@@ -235,6 +286,20 @@ export default function FieldMappingPage() {
           ))}
         </select>
       </div>
+
+      {/* Error banner (non-fatal) */}
+      {error && (
+        <div className="mb-4 rounded border border-red-300 bg-red-50 p-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      {/* Search mode indicator */}
+      {searchQuery && (
+        <div className="mb-3 text-sm text-gray-500">
+          Showing results across all tabs for &quot;{searchQuery}&quot; ({filtered.length} fields)
+        </div>
+      )}
 
       {/* Grouped sections */}
       {categoryOrder
@@ -288,7 +353,7 @@ export default function FieldMappingPage() {
                                 {f.provenance.concept_codes.join(", ")}
                               </span>
                             ) : (
-                              <span className="text-xs text-gray-400">—</span>
+                              <span className="text-xs text-gray-400">&mdash;</span>
                             )}
                           </td>
                           <td className="px-3 py-2 text-xs text-gray-500">
@@ -297,11 +362,19 @@ export default function FieldMappingPage() {
                                 {f.provenance.lookup_strategy} / {f.provenance.omop_table}
                               </span>
                             ) : (
-                              "—"
+                              "\u2014"
                             )}
                           </td>
                           <td className="px-3 py-2 text-right">
                             <div className="flex items-center justify-end gap-1">
+                              <button
+                                onClick={() => setSynonymDialogField(f.field_name)}
+                                className="rounded px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-100"
+                                title="Manage synonyms"
+                              >
+                                <BookOpen size={12} className="inline mr-0.5" />
+                                Synonyms
+                              </button>
                               {f.mapping ? (
                                 <>
                                   {f.mapping.status === "proposed" && (
@@ -340,7 +413,14 @@ export default function FieldMappingPage() {
           );
         })}
 
-      {/* Dialog */}
+      {/* No results */}
+      {Object.keys(grouped).length === 0 && (
+        <div className="py-8 text-center text-sm text-gray-400">
+          No fields match the current filters.
+        </div>
+      )}
+
+      {/* Concept Assign Dialog */}
       {dialogOpen && selectedField && (
         <ConceptAssignDialog
           fieldName={selectedField.field_name}
@@ -350,6 +430,14 @@ export default function FieldMappingPage() {
             setSelectedField(null);
           }}
           onSaved={handleMappingSaved}
+        />
+      )}
+
+      {/* Synonym Dialog */}
+      {synonymDialogField && (
+        <SynonymDialog
+          fieldName={synonymDialogField}
+          onClose={() => setSynonymDialogField(null)}
         />
       )}
     </div>

@@ -2898,6 +2898,33 @@ class FieldConceptMapping(models.Model):
         return f"{self.field_name} → {self.vocabulary_id}:{self.concept_code} ({self.status})"
 
 
+class FieldSynonym(models.Model):
+    """Custom synonyms for PatientRecord field names.
+
+    OMOP synonyms are queried live from ConceptSynonym via the field's
+    FieldConceptMapping — they are never duplicated here.
+    """
+    field_name = models.CharField(max_length=100, db_index=True)
+    synonym_text = models.CharField(max_length=200)
+    source = models.CharField(max_length=20, default='custom')
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'field_synonym'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['field_name', 'synonym_text'],
+                name='uq_field_synonym',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.field_name}: {self.synonym_text}"
+
+
 # =============================================================================
 # Revision history (PHR-S FM TI.1.2#04)
 # =============================================================================

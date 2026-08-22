@@ -7370,3 +7370,69 @@ def field_mapping_detail(request, pk):
     serializer.is_valid(raise_exception=True)
     serializer.save()
     return Response(serializer.data)
+
+
+# =============================================================================
+# Field Synonyms (staff-only synonym management for concept mapping)
+# =============================================================================
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def field_synonyms(request, field_name):
+    """GET: merged custom + OMOP synonyms.  POST: create a custom synonym."""
+    if not getattr(request.user, 'is_staff', False):
+        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    from omop_core.models import FieldSynonym, FieldConceptMapping, ConceptSynonym
+
+    if request.method == 'GET':
+        # Custom synonyms from FieldSynonym.
+        from .serializers import FieldSynonymSerializer
+        custom_qs = FieldSynonym.objects.filter(field_name=field_name).order_by('synonym_text')
+        results = FieldSynonymSerializer(custom_qs, many=True).data
+
+        # OMOP synonyms from ConceptSynonym via FieldConceptMapping.
+        try:
+            mapping = FieldConceptMapping.objects.get(field_name=field_name)
+            if mapping.concept_id:
+                omop_synonyms = ConceptSynonym.objects.filter(
+                    concept_id=mapping.concept_id,
+                ).values_list('concept_synonym_name', flat=True)
+                for syn_name in omop_synonyms:
+                    results.append({
+                        'id': None,
+                        'field_name': field_name,
+                        'synonym_text': syn_name,
+                        'source': 'omop',
+                        'created_by': None,
+                        'created_at': None,
+                    })
+        except FieldConceptMapping.DoesNotExist:
+            pass
+
+        return Response(results)
+
+    # POST — create a custom synonym.
+    from .serializers import FieldSynonymSerializer
+    data = {**request.data, 'field_name': field_name}
+    serializer = FieldSynonymSerializer(data=data, context={'request': request})
+    serializer.is_valid(raise_exception=True)
+    serializer.save(created_by=request.user)
+    return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def field_synonym_detail(request, pk):
+    """DELETE a custom synonym."""
+    if not getattr(request.user, 'is_staff', False):
+        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    from omop_core.models import FieldSynonym
+    try:
+        synonym = FieldSynonym.objects.get(pk=pk)
+    except FieldSynonym.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    synonym.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
