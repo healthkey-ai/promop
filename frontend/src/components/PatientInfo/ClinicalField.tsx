@@ -11,6 +11,10 @@ interface Props {
   /** Event date for this edit, shared across the tab. */
   date?: string;
   onDateChange?: (date: string) => void;
+  /** Print the reason under the field. Off for a tab where every field shares
+   *  one reason — repeating the same paragraph beside 25 boxes buries it. The
+   *  tab states it once instead. */
+  showReason?: boolean;
 }
 
 /**
@@ -35,6 +39,7 @@ export default function ClinicalField({
   onChange,
   date,
   onDateChange,
+  showReason = true,
 }: Props) {
   const writable = !!descriptor?.writable;
 
@@ -52,9 +57,11 @@ export default function ClinicalField({
           onChange={onChange}
           readOnly
         />
-        <p className="mt-1 text-xs text-muted-foreground" data-testid={`reason-${name}`}>
-          {reason}
-        </p>
+        {showReason && (
+          <p className="mt-1 text-xs text-muted-foreground" data-testid={`reason-${name}`}>
+            {reason}
+          </p>
+        )}
       </div>
     );
   }
