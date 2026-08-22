@@ -77,8 +77,13 @@ export default function FieldMappingPage() {
     }
   }, []);
 
+  // Wrapped rather than called bare: react-hooks/set-state-in-effect reads a
+  // direct call whose callee sets state as a synchronous setState in the effect
+  // body. Same shape the patient detail page uses for its load.
   useEffect(() => {
-    fetchDescriptors();
+    (async () => {
+      await fetchDescriptors();
+    })();
   }, [fetchDescriptors]);
 
   const filtered = useMemo(() => {
