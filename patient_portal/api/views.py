@@ -7765,7 +7765,7 @@ def field_synonyms_batch(request):
     if not fields_param:
         return Response({})
 
-    field_names = [f.strip() for f in fields_param.split(',') if f.strip()]
+    field_names = [f.strip() for f in fields_param.split(',') if f.strip()][:100]
     if not field_names:
         return Response({})
 
@@ -7773,18 +7773,21 @@ def field_synonyms_batch(request):
     from collections import defaultdict
 
     result = defaultdict(list)
+    seen = defaultdict(set)
 
     # Custom synonyms from FieldSynonym table.
     custom_syns = FieldSynonym.objects.filter(
         field_name__in=field_names
     ).values_list('field_name', 'synonym_text')
     for field_name, text in custom_syns:
-        result[field_name].append(text)
+        if text not in seen[field_name]:
+            seen[field_name].add(text)
+            result[field_name].append(text)
 
     # OMOP synonyms via FieldConceptMapping → Concept → ConceptSynonym.
     mappings = FieldConceptMapping.objects.filter(
         field_name__in=field_names, concept__isnull=False
-    ).select_related('concept').values_list('field_name', 'concept_id')
+    ).values_list('field_name', 'concept_id')
 
     if mappings:
         from omop_core.models import ConceptSynonym
@@ -7794,11 +7797,12 @@ def field_synonyms_batch(request):
 
         omop_syns = ConceptSynonym.objects.filter(
             concept_id__in=concept_to_fields.keys()
-        ).values_list('concept_id', 'concept_synonym_name')
+        ).values_list('concept_id', 'concept_synonym_name')[:500]
 
         for concept_id, syn_name in omop_syns:
             for field_name in concept_to_fields[concept_id]:
-                if syn_name not in result[field_name]:
+                if syn_name not in seen[field_name]:
+                    seen[field_name].add(syn_name)
                     result[field_name].append(syn_name)
 
     # Limit to 5 per field.

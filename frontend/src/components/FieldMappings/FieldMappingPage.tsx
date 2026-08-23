@@ -106,22 +106,26 @@ export default function FieldMappingPage() {
     })();
   }, [fetchDescriptors]);
 
+  const fetchBatchSynonyms = useCallback(async (fieldNames?: string[]) => {
+    const names = fieldNames || descriptors
+      .filter((d) => d.tab === activeTab)
+      .map((d) => d.field_name);
+    if (!names.length) return;
+    try {
+      const resp = await api.get(`/v1/field-synonyms/batch/?fields=${names.join(",")}`);
+      setBatchSynonyms((prev) => ({ ...prev, ...resp.data }));
+    } catch {
+      // Silently fail — synonyms are non-critical.
+    }
+  }, [descriptors, activeTab]);
+
   // Load batch synonyms for current tab's fields.
   useEffect(() => {
     if (!descriptors.length) return;
-    const tabFields = descriptors
-      .filter((d) => d.tab === activeTab)
-      .map((d) => d.field_name);
-    if (!tabFields.length) return;
     (async () => {
-      try {
-        const resp = await api.get(`/v1/field-synonyms/batch/?fields=${tabFields.join(",")}`);
-        setBatchSynonyms((prev) => ({ ...prev, ...resp.data }));
-      } catch {
-        // Silently fail — synonyms are non-critical.
-      }
+      await fetchBatchSynonyms();
     })();
-  }, [descriptors, activeTab]);
+  }, [descriptors, activeTab, fetchBatchSynonyms]);
 
   // When searching, show across all tabs; otherwise filter by active tab.
   const filtered = useMemo(() => {
@@ -351,7 +355,7 @@ export default function FieldMappingPage() {
                           : "border-gray-300 hover:border-primary"
                       }`}
                       title={f.mapping?.status === "approved" ? "Confirmed" : "Confirm mapping"}
-                      disabled={f.mapping?.status === "approved"}
+                      disabled={f.mapping?.status === "approved" || (!f.mapping && !f.suggestion)}
                     >
                       {f.mapping?.status === "approved" && <Check size={10} />}
                     </button>
@@ -623,10 +627,10 @@ export default function FieldMappingPage() {
         <ConceptAssignDialog
           fieldName={selectedField.field_name}
           fieldType={selectedField.field_type}
-          initialConceptCode={selectedField.suggestion?.concept_code}
-          initialVocabularyId={selectedField.suggestion?.vocabulary_id ?? undefined}
-          initialUnit={selectedField.suggestion?.unit ?? undefined}
-          initialOmopTable={selectedField.locked_table || selectedField.suggestion?.omop_table || undefined}
+          initialConceptCode={selectedField.mapping?.concept_code || selectedField.suggestion?.concept_code}
+          initialVocabularyId={selectedField.mapping?.vocabulary_id || (selectedField.suggestion?.vocabulary_id ?? undefined)}
+          initialUnit={selectedField.mapping?.unit || (selectedField.suggestion?.unit ?? undefined)}
+          initialOmopTable={selectedField.locked_table || selectedField.mapping?.omop_table || selectedField.suggestion?.omop_table || undefined}
           onClose={() => {
             setDialogOpen(false);
             setSelectedField(null);
@@ -639,7 +643,11 @@ export default function FieldMappingPage() {
       {synonymDialogField && (
         <SynonymDialog
           fieldName={synonymDialogField}
-          onClose={() => setSynonymDialogField(null)}
+          onClose={() => {
+            const fieldName = synonymDialogField;
+            setSynonymDialogField(null);
+            fetchBatchSynonyms([fieldName]);
+          }}
         />
       )}
     </div>
