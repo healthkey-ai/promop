@@ -88,7 +88,7 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 | **BehaviorTab** | **not converted** | 27 | **1** |
 | WearableTab | not converted | 20 | 0 — all computed |
 
-**32 writable fields are unreachable today**: they sit on an unconverted tab, so
+**32 writable fields are unreachable today** (Step 1: 16, Step 2: 15, Step 3: 1): they sit on an unconverted tab, so
 editing one PATCHes the projection and returns 405. That is the headline number
 this project is closing.
 
@@ -96,7 +96,16 @@ this project is closing.
 
 ## Remaining work
 
-Steps are independent — take them in any order, one PR each.
+Steps are independent — take them in any order, one PR each. **Tick a box when
+its PR merges**, and note the PR number beside it, so anyone picking this up
+sees the real state rather than the intended one.
+
+- [ ] **Step 1** — Convert GeneralTab (16 writable)
+- [ ] **Step 2** — Convert DiseaseTab (15 writable)
+- [ ] **Step 3** — Convert BehaviorTab (1 writable)
+- [ ] **Step 4** — Convert WearableTab (0 writable, read-only)
+- [ ] **Step 5** — Surface 13 writable fields no tab shows
+- [ ] **Step 6** — Concept assignment for the 133 unmapped fields (#595, curation)
 
 ### Step 1 — Convert GeneralTab (16 writable)
 
