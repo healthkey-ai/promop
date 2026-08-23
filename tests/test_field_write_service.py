@@ -265,3 +265,254 @@ def test_non_numeric_value_for_a_number_field_fails_closed():
 
     with pytest.raises(ValueError):
         apply_field_writes(person, {'hemoglobin_g_dl': 'high'}, today=date(2026, 8, 23))
+
+
+# --- genetic_mutations: the LIST-diff write path ---------------------------------------------------
+# Unlike a scalar lab, genetic_mutations is a list — one Measurement per gene (gene LOINC concept,
+# variant→value_as_string, origin→qualifier_concept, interpretation→value_as_concept). Genes dropped
+# from a later PATCH are marked entered-in-error (a safe delete of OUR 32865-typed rows). Every test
+# anchors the write to the SAME derivation the read path uses.
+from omop_core.services.patient_record_service import _GENETIC_MUTATION_LOINCS  # noqa: E402
+
+_GENE_CODE = {g: c for c, g in _GENETIC_MUTATION_LOINCS.items()}
+_MUT_SNOMED_IDS = (255395001, 255461003, 30166007, 10828004, 42425007)  # germline/somatic + path/benign/vus
+
+
+def _seed_genetic_vocab(genes=('BRCA1', 'BRCA2', 'TP53')):
+    for g in genes:
+        ConceptFactory(concept_code=_GENE_CODE[g], concept_name=f'{g} gene mutation analysis')  # LOINC
+    _seed_patient_reported_type()
+    for cid in _MUT_SNOMED_IDS:  # the applier/derivation key origin & interpretation by concept_id
+        ConceptFactory(concept_id=cid, concept_code=str(cid), concept_name=f'SNOMED {cid}')
+
+
+def _person_with_genetic_vocab(genes=('BRCA1', 'BRCA2', 'TP53')):
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    _seed_genetic_vocab(genes)
+    return person
+
+
+def test_genetic_mutation_write_creates_measurement_and_rederives():
+    person = _person_with_genetic_vocab()
+    muts = [{'gene': 'BRCA1', 'mutation': 'c.68_69delAG', 'origin': 'germline',
+             'interpretation': 'pathogenic'}]
+
+    result = apply_field_writes(person, {'genetic_mutations': muts}, today=date(2026, 8, 23))
+
+    assert result.applied == ['genetic_mutations']
+    m = Measurement.objects.get(person=person, measurement_concept__concept_code=_GENE_CODE['BRCA1'])
+    assert m.value_as_string == 'c.68_69delAG'
+    assert m.measurement_type_concept_id == 32865
+    assert m.qualifier_concept_id == 255395001            # germline
+    assert m.value_as_concept_id == 30166007              # pathogenic
+    assert refresh_patient_record(person).genetic_mutations == [
+        {'gene': 'brca1', 'variant': 'c.68_69delAG', 'test_date': '2026-08-23',
+         'origin': 'germline', 'interpretation': 'pathogenic'}]
+
+
+def test_genetic_mutation_same_gene_upserts_not_duplicates():
+    # A correction to the SAME gene updates its one row (keyed by gene, not by date), never appends.
+    person = _person_with_genetic_vocab()
+    apply_field_writes(person, {'genetic_mutations': [
+        {'gene': 'BRCA1', 'mutation': 'c.68_69delAG', 'origin': 'germline', 'interpretation': 'pathogenic'}]},
+        today=date(2026, 8, 23))
+    apply_field_writes(person, {'genetic_mutations': [
+        {'gene': 'BRCA1', 'mutation': '185delAG', 'origin': 'somatic', 'interpretation': 'vus'}]},
+        today=date(2026, 8, 24))
+
+    active = Measurement.objects.filter(
+        person=person, measurement_concept__concept_code=_GENE_CODE['BRCA1'], is_erroneous=False)
+    assert active.count() == 1
+    assert refresh_patient_record(person).genetic_mutations == [
+        {'gene': 'brca1', 'variant': '185delAG', 'test_date': '2026-08-24',
+         'origin': 'somatic', 'interpretation': 'vus'}]
+
+
+def test_genetic_mutation_list_diff_removes_dropped_gene():
+    # A gene present before but absent from a later PATCH is marked entered-in-error (dropped from
+    # the derivation); genes still sent are kept. This is the list-diff reconcile.
+    person = _person_with_genetic_vocab()
+    apply_field_writes(person, {'genetic_mutations': [
+        {'gene': 'BRCA1', 'mutation': 'c.68_69delAG', 'origin': 'germline', 'interpretation': 'pathogenic'},
+        {'gene': 'TP53', 'mutation': 'R175H', 'origin': 'somatic', 'interpretation': 'pathogenic'}]},
+        today=date(2026, 8, 23))
+    apply_field_writes(person, {'genetic_mutations': [
+        {'gene': 'BRCA1', 'mutation': 'c.68_69delAG', 'origin': 'germline', 'interpretation': 'pathogenic'}]},
+        today=date(2026, 8, 24))
+
+    tp53 = Measurement.objects.get(person=person, measurement_concept__concept_code=_GENE_CODE['TP53'])
+    assert tp53.is_erroneous is True
+    assert {m['gene'] for m in refresh_patient_record(person).genetic_mutations} == {'brca1'}
+
+
+def test_genetic_mutation_empty_list_clears_all():
+    person = _person_with_genetic_vocab()
+    apply_field_writes(person, {'genetic_mutations': [
+        {'gene': 'BRCA1', 'mutation': 'c.68_69delAG', 'origin': 'germline', 'interpretation': 'pathogenic'}]},
+        today=date(2026, 8, 23))
+
+    result = apply_field_writes(person, {'genetic_mutations': []}, today=date(2026, 8, 24))
+
+    assert 'genetic_mutations' in result.applied
+    assert refresh_patient_record(person).genetic_mutations == []
+    assert not Measurement.objects.filter(
+        person=person, measurement_type_concept_id=32865, is_erroneous=False).exists()
+
+
+def test_genetic_mutation_reconcile_does_not_touch_imported_row():
+    # Removal only ever flags OUR patient-reported (32865) mutation rows — an imported (Lab-typed)
+    # mutation for the same gene is never marked erroneous.
+    from tests.factories import MeasurementFactory
+    from omop_core.models import Concept
+    person = _person_with_genetic_vocab()
+    lab_type = ConceptFactory(concept_id=32856, concept_code='LAB', concept_name='Lab result')
+    brca1 = Concept.objects.get(concept_code=_GENE_CODE['BRCA1'], vocabulary_id='LOINC')
+    imported = MeasurementFactory(
+        person=person, measurement_concept=brca1, measurement_type_concept=lab_type,
+        measurement_date=date(2026, 8, 23), value_as_string='IMPORTED-VARIANT')
+
+    apply_field_writes(person, {'genetic_mutations': []}, today=date(2026, 8, 24))
+
+    imported.refresh_from_db()
+    assert imported.is_erroneous is False
+    assert imported.value_as_string == 'IMPORTED-VARIANT'
+
+
+def test_genetic_mutation_optional_origin_and_interpretation_omitted():
+    # origin/interpretation are optional: a gene+variant with neither round-trips (the derivation just
+    # omits those keys), and the write does not fail.
+    person = _person_with_genetic_vocab()
+
+    apply_field_writes(person, {'genetic_mutations': [
+        {'gene': 'BRCA1', 'mutation': 'c.68_69delAG'}]}, today=date(2026, 8, 23))
+
+    assert refresh_patient_record(person).genetic_mutations == [
+        {'gene': 'brca1', 'variant': 'c.68_69delAG', 'test_date': '2026-08-23'}]
+
+
+def test_genetic_mutation_recognized_gene_without_variant_fails_closed():
+    # A gene with no variant would write value_as_string=None, which the derivation skips — the mutation
+    # would silently vanish. Reject it instead so the caller gets a 400, never a silent drop.
+    person = _person_with_genetic_vocab()
+
+    with pytest.raises(ValueError):
+        apply_field_writes(person, {'genetic_mutations': [
+            {'gene': 'BRCA1', 'mutation': '', 'origin': 'germline', 'interpretation': 'pathogenic'}]},
+            today=date(2026, 8, 23))
+
+
+def test_genetic_mutation_supported_but_unloaded_snomed_fails_closed():
+    # origin='germline' is supported, but on a stack where the SNOMED concept is not loaded the write
+    # would silently drop the origin (breaking round-trip). Fail closed instead of accepting a lossy edit.
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    ConceptFactory(concept_code=_GENE_CODE['BRCA1'], concept_name='BRCA1 gene')  # gene LOINC + type only
+    _seed_patient_reported_type()
+
+    with pytest.raises(ValueError):
+        apply_field_writes(person, {'genetic_mutations': [
+            {'gene': 'BRCA1', 'mutation': 'c.68_69delAG', 'origin': 'germline'}]}, today=date(2026, 8, 23))
+
+
+def test_genetic_mutation_all_unknown_genes_fails_closed_not_a_wipe():
+    # A non-empty list that resolves to NOTHING (all unknown genes / junk) must fail closed, not be read
+    # as "remove everything" — otherwise a malformed PATCH silently wipes the saved mutation history.
+    person = _person_with_genetic_vocab()
+    apply_field_writes(person, {'genetic_mutations': [
+        {'gene': 'BRCA1', 'mutation': 'c.68_69delAG', 'origin': 'germline', 'interpretation': 'pathogenic'}]},
+        today=date(2026, 8, 23))
+
+    with pytest.raises(ValueError):
+        apply_field_writes(
+            person, {'genetic_mutations': [{'gene': 'NOTAGENE', 'mutation': 'x'}]}, today=date(2026, 8, 24))
+
+    # The raise rolls the caller's transaction back; here (no atomic) assert the existing row survived.
+    assert Measurement.objects.filter(
+        person=person, measurement_concept__concept_code=_GENE_CODE['BRCA1'], is_erroneous=False).exists()
+
+
+def test_genetic_mutation_mixed_known_and_unknown_writes_known_and_reconciles():
+    # A list mixing a known gene with an unknown one writes the known gene, skips the unknown, and
+    # reconciles normally (written_codes is non-empty, so no fail-closed and no over-wipe).
+    person = _person_with_genetic_vocab()
+    apply_field_writes(person, {'genetic_mutations': [
+        {'gene': 'BRCA1', 'mutation': 'c.68_69delAG', 'origin': 'germline', 'interpretation': 'pathogenic'},
+        {'gene': 'TP53', 'mutation': 'R175H', 'origin': 'somatic', 'interpretation': 'pathogenic'}]},
+        today=date(2026, 8, 23))
+
+    apply_field_writes(person, {'genetic_mutations': [
+        {'gene': 'BRCA1', 'mutation': 'c.68_69delAG', 'origin': 'germline', 'interpretation': 'pathogenic'},
+        {'gene': 'NOTAGENE', 'mutation': 'x'}]},
+        today=date(2026, 8, 24))
+
+    # BRCA1 kept, TP53 (omitted) retired, NOTAGENE never written.
+    assert {m['gene'] for m in refresh_patient_record(person).genetic_mutations} == {'brca1'}
+
+
+def test_genetic_mutation_does_not_touch_imported_self_report_gene_fact():
+    # The sharpest provenance case: an IMPORTED gene fact that legitimately carries the shared
+    # 'Patient self-report' type (32865) but NOT our ownership sentinel — e.g. a FHIR patient-reported
+    # genomic result — must never be overwritten or entered-in-error'd by the widget's list-diff.
+    from tests.factories import MeasurementFactory
+    from omop_core.models import Concept
+    person = _person_with_genetic_vocab()
+    tc = Concept.objects.get(concept_id=32865)
+    brca1 = Concept.objects.get(concept_code=_GENE_CODE['BRCA1'], vocabulary_id='LOINC')
+    imported = MeasurementFactory(
+        person=person, measurement_concept=brca1, measurement_type_concept=tc,
+        measurement_date=date(2026, 8, 20), value_as_string='IMPORTED-VARIANT',
+        measurement_source_value='FHIR', is_erroneous=False)
+
+    # (a) Writing the SAME gene must not overwrite the import — it lands in our own sentinel row.
+    apply_field_writes(person, {'genetic_mutations': [
+        {'gene': 'BRCA1', 'mutation': 'c.68_69delAG', 'origin': 'germline', 'interpretation': 'pathogenic'}]},
+        today=date(2026, 8, 23))
+    imported.refresh_from_db()
+    assert imported.value_as_string == 'IMPORTED-VARIANT' and imported.is_erroneous is False
+
+    # (b) A later clear must not retire the import either.
+    apply_field_writes(person, {'genetic_mutations': []}, today=date(2026, 8, 24))
+    imported.refresh_from_db()
+    assert imported.is_erroneous is False
+
+
+def test_genetic_mutation_reconcile_ignores_same_code_in_other_vocabulary():
+    # concept_code is unique only within a vocabulary. A patient-reported fact that reuses a gene's
+    # code in a NON-LOINC vocabulary must not be retired when that gene is dropped from the list.
+    from tests.factories import MeasurementFactory
+    from omop_core.models import Concept
+    person = _person_with_genetic_vocab()
+    other_vocab = VocabularyFactory(vocabulary_id='SNOMED', vocabulary_name='SNOMED')
+    decoy = ConceptFactory(concept_code=_GENE_CODE['BRCA1'], concept_name='not a gene', vocabulary=other_vocab)
+    tc = Concept.objects.get(concept_id=32865)
+    decoy_row = MeasurementFactory(
+        person=person, measurement_concept=decoy, measurement_type_concept=tc,
+        measurement_date=date(2026, 8, 23), value_as_string='UNRELATED', is_erroneous=False)
+
+    # Submit a DIFFERENT gene only → BRCA1 code is "dropped", but the decoy is non-LOINC and must survive.
+    apply_field_writes(person, {'genetic_mutations': [
+        {'gene': 'TP53', 'mutation': 'R175H', 'origin': 'somatic', 'interpretation': 'pathogenic'}]},
+        today=date(2026, 8, 24))
+
+    decoy_row.refresh_from_db()
+    assert decoy_row.is_erroneous is False
+    assert decoy_row.value_as_string == 'UNRELATED'
+
+
+def test_genetic_mutation_non_list_is_rejected():
+    person = _person_with_genetic_vocab()
+
+    result = apply_field_writes(person, {'genetic_mutations': 'BRCA1'}, today=date(2026, 8, 23))
+
+    assert 'genetic_mutations' in result.rejected
+    assert result.applied == []
+
+
+def test_owned_writable_includes_genetic_mutations_only_when_vocab_loaded():
+    # Mirrors KIND_EDITABLE's "writable iff concept resolves": genetic_mutations is offered only when
+    # its vocab (patient-report type + a gene LOINC) is loaded, so the editor never dangles an input
+    # whose write would no-op on a partial-vocab stack.
+    assert 'genetic_mutations' not in owned_writable_fields()
+    _seed_genetic_vocab(('BRCA1',))
+    assert 'genetic_mutations' in owned_writable_fields()

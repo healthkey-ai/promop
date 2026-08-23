@@ -69,6 +69,34 @@ _VALUE_MAX = Decimal(10) ** 10
 # a patient self-report.
 PATIENT_REPORTED_TYPE_CONCEPT_ID = 32865
 
+# genetic_mutations is a LIST field, not a scalar: each mutation is one Measurement keyed by its gene
+# LOINC (patient_record_service._GENETIC_MUTATION_LOINCS), with variant→value_as_string, origin→
+# qualifier_concept, interpretation→value_as_concept (SNOMED). The widget sends {gene, mutation (=the
+# variant), origin, interpretation}. These SNOMED ids mirror the derivation's read maps.
+_MUTATION_ORIGIN_SNOMED = {'germline': 255395001, 'somatic': 255461003}
+_MUTATION_INTERPRETATION_SNOMED = {'pathogenic': 30166007, 'benign': 10828004, 'vus': 42425007}
+
+# Provenance sentinel (measurement_source_value) marking a mutation Measurement as authored by the CB
+# profile editor. The list-diff upsert & retire touch ONLY rows carrying it, so an imported genomic fact
+# that legitimately also uses the shared 'Patient self-report' type (32865) — e.g. a FHIR
+# patient-reported result — is never overwritten or entered-in-error'd. This is the explicit ownership
+# marker the shared 32865 type cannot provide (the scalar path refuses clears for exactly this reason,
+# #4833). The gene is read back from concept_code (a LOINC code), so this non-LOINC source_value does
+# not disturb the derivation's gene resolution.
+_GENETIC_MUTATION_SOURCE = 'cb-profile:genetic-mutation'
+
+
+def _patient_reported_type():
+    """The 'Patient self-report' type concept (32865, vocab 'Type Concept') all patient-authored facts
+    carry. Fail closed if absent or a look-alike lives in another vocab (see the write comment)."""
+    tc = Concept.objects.filter(
+        concept_id=PATIENT_REPORTED_TYPE_CONCEPT_ID, vocabulary_id='Type Concept').first()
+    if tc is None:
+        raise ValueError(
+            f"type concept {PATIENT_REPORTED_TYPE_CONCEPT_ID} (Patient self-report, vocab "
+            "'Type Concept') is not loaded")
+    return tc
+
 
 class FieldWriteResult:
     """Outcome of an apply_field_writes call.
@@ -115,6 +143,16 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
         list(Person.objects.select_for_update().filter(pk=person.pk))
 
     for field, value in changes.items():
+        if field == 'genetic_mutations':
+            # A LIST field (one Measurement per gene), so it takes the list-diff path rather than the
+            # scalar descriptor kinds below. An empty list is a valid "no mutations" (clears our rows),
+            # so it is handled here BEFORE the None/'' clear-guard that rejects scalar clears.
+            if isinstance(value, list):
+                _write_genetic_mutations(person, value, today)
+                result.applied.append(field)
+            else:
+                result.rejected[field] = 'genetic_mutations must be a list of mutations.'
+            continue
         d = descriptor.get(field)
         if d is None:
             result.rejected[field] = 'Unknown field; not part of the writable record.'
@@ -163,10 +201,26 @@ def owned_writable_fields(descriptor=None):
     if descriptor is None:
         descriptor = build_writable_field_descriptor()
     owned = set(_DEMOGRAPHIC_FIELDS) | set(_LOCATION_COLUMN)
-    return {
+    fields = {
         f for f, e in descriptor.items()
         if e.get('writable') and (e.get('kind') == KIND_EDITABLE or f in owned)
     }
+    # genetic_mutations is a list field written via the list-diff path (not a descriptor kind), so add
+    # it here — but only when its vocab is loaded, mirroring KIND_EDITABLE's "writable iff concept resolves".
+    if _genetic_mutations_writable():
+        fields.add('genetic_mutations')
+    return fields
+
+
+def _genetic_mutations_writable():
+    """True when genetic_mutations can round-trip: the patient-report type concept AND at least one
+    reviewed gene LOINC are loaded. Keeps editable_fields honest on a stack with a partial vocab."""
+    from omop_core.services.patient_record_service import _GENETIC_MUTATION_LOINCS
+    if not Concept.objects.filter(
+            concept_id=PATIENT_REPORTED_TYPE_CONCEPT_ID, vocabulary_id='Type Concept').exists():
+        return False
+    return Concept.objects.filter(
+        concept_code__in=list(_GENETIC_MUTATION_LOINCS), vocabulary_id='LOINC').exists()
 
 
 def _stage_profile_write(person, field, value, person_dirty, location_updates):
@@ -284,15 +338,9 @@ def _write_editable_fact(person, field, d, value, today):
     # generic Lab type) — this both records provenance and scopes the upsert below to our own rows.
     # It is NOT NULL and a real *type* concept, so require it to resolve (never fall back to the
     # LOINC concept, which would corrupt the type dimension); a miss is a vocab misconfig → fail closed.
-    # Pin the vocabulary: concept_id is unique, but a deployment that once used a shadow vocab could
-    # hold a different concept at 32865. Require the genuine OMOP 'Type Concept' row (as the wearable
-    # writer expects) so we never stamp facts with a look-alike provenance concept — fail closed instead.
-    type_concept = Concept.objects.filter(
-        concept_id=PATIENT_REPORTED_TYPE_CONCEPT_ID, vocabulary_id='Type Concept').first()
-    if type_concept is None:
-        raise ValueError(
-            f"{field}: type concept {PATIENT_REPORTED_TYPE_CONCEPT_ID} (Patient self-report, "
-            "vocabulary 'Type Concept') is not loaded")
+    # Pin the vocabulary: a deployment that once used a shadow vocab could hold a different concept at
+    # 32865, so require the genuine OMOP 'Type Concept' row and fail closed otherwise.
+    type_concept = _patient_reported_type()
     unit_concept = (
         Concept.objects.filter(concept_id=d['unit_concept_id']).first()
         if d.get('unit_concept_id') is not None else None
@@ -344,3 +392,99 @@ def _write_editable_fact(person, field, d, value, today):
     row._skip_patient_record_refresh = True
     row.save()
     del row._skip_patient_record_refresh
+
+
+def _write_genetic_mutations(person, mutations, today):
+    """Write the genetic_mutations LIST as one Measurement per gene (the first list-diff write). Each
+    sent mutation upserts its gene's Measurement (gene LOINC concept + our 'Patient self-report' type),
+    with variant→value_as_string, origin→qualifier_concept, interpretation→value_as_concept (SNOMED).
+    Our own mutation rows for a gene NO LONGER in the list are marked entered-in-error — a safe delete
+    because we only ever touch 32865-typed rows we authored (an imported mutation has a different type).
+    A mutation whose gene is not one of the reviewed genes, or whose gene LOINC is not loaded, is skipped.
+    Returns the genes written."""
+    from omop_core.services.patient_record_service import _GENETIC_MUTATION_LOINCS
+    gene_to_code = {gene.upper(): code for code, gene in _GENETIC_MUTATION_LOINCS.items()}
+    all_gene_codes = set(_GENETIC_MUTATION_LOINCS)
+    type_concept = _patient_reported_type()
+
+    def _resolve_attr(raw, mapping, kind, gene):
+        # origin/interpretation are OPTIONAL (blank → None, omitted from the record). But a NON-EMPTY
+        # value that does not resolve to a loaded SNOMED concept must fail closed, not silently drop:
+        # either it is unsupported, or the vocab is only partially loaded — either way the edit would
+        # not round-trip, so reject it rather than accept a write that reads back missing the value.
+        key = str(raw or '').strip().lower()
+        if not key:
+            return None
+        concept = Concept.objects.filter(concept_id=mapping[key]).first() if key in mapping else None
+        if concept is None:
+            raise ValueError(
+                f'genetic_mutations ({gene}): {kind} {raw!r} is not a supported/loaded value')
+        return concept
+
+    written_codes, written_genes = set(), []
+    for mut in mutations or []:
+        if not isinstance(mut, dict):
+            continue
+        gene = str(mut.get('gene') or '').strip()
+        code = gene_to_code.get(gene.upper())
+        if not code:
+            continue
+        concept = Concept.objects.filter(concept_code=code, vocabulary_id='LOINC').first()
+        if concept is None:
+            continue
+        # A recognized gene with no variant would write value_as_string=None, which the derivation skips
+        # — the mutation would vanish from the record silently. Require the variant; fail closed instead.
+        variant = str(mut.get('mutation') or '').strip()
+        if not variant:
+            raise ValueError(f'genetic_mutations ({gene}): a variant value is required')
+        # source_value is a KEY (the ownership sentinel), so the upsert & retire only ever match rows we
+        # authored — never an imported gene fact that happens to share the 32865 type.
+        keys = {'person': person, 'measurement_concept': concept,
+                'measurement_type_concept': type_concept, 'is_erroneous': False,
+                'measurement_source_value': _GENETIC_MUTATION_SOURCE}
+        fields = {
+            'measurement_date': today,
+            'value_as_string': variant[:60],
+            'qualifier_concept': _resolve_attr(mut.get('origin'), _MUTATION_ORIGIN_SNOMED, 'origin', gene),
+            'value_as_concept': _resolve_attr(
+                mut.get('interpretation'), _MUTATION_INTERPRETATION_SNOMED, 'interpretation', gene),
+        }
+        existing = Measurement.objects.filter(**keys).order_by('measurement_id').first()
+        if existing is not None:
+            for a, v in fields.items():
+                setattr(existing, a, v)
+            existing._skip_patient_record_refresh = True
+            existing.save(update_fields=list(fields.keys()))
+            del existing._skip_patient_record_refresh
+        else:
+            row = Measurement(measurement_id=next_pk(Measurement, 'measurement_id'), **keys, **fields)
+            row._skip_patient_record_refresh = True
+            row.save()
+            del row._skip_patient_record_refresh
+        written_codes.add(code)
+        written_genes.append(str(mut.get('gene')))
+
+    # Fail closed on a non-empty list that produced NO write (every entry an unknown gene / non-dict):
+    # the reconcile below would otherwise read the empty written_codes as "remove everything" and wipe
+    # the patient's existing mutations from a malformed request. An intentional clear is an empty list.
+    if mutations and not written_codes:
+        raise ValueError(
+            'genetic_mutations: no recognized gene in the submitted list; send [] to clear all mutations')
+
+    # Reconcile removals: OUR authored mutation rows (the ownership sentinel) for genes no longer sent →
+    # entered-in-error, so the derivation drops them. Scoped by source_value (never touches an import),
+    # then by the reviewed gene codes AND the LOINC vocabulary (a concept_code is unique only within a
+    # vocabulary, so without the vocab bound a same-code fact in another vocabulary could be wrongly hit).
+    stale = Measurement.objects.filter(
+        person=person, measurement_type_concept=type_concept, is_erroneous=False,
+        measurement_source_value=_GENETIC_MUTATION_SOURCE,
+        measurement_concept__vocabulary_id='LOINC',
+        measurement_concept__concept_code__in=all_gene_codes,
+    ).exclude(measurement_concept__concept_code__in=written_codes)
+    for m in stale:
+        m.is_erroneous = True
+        m.erroneous_reason = 'removed via patient profile edit'
+        m._skip_patient_record_refresh = True
+        m.save(update_fields=['is_erroneous', 'erroneous_reason'])
+        del m._skip_patient_record_refresh
+    return written_genes
