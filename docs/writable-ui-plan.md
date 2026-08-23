@@ -116,7 +116,7 @@ sees the real state rather than the intended one.
 - [x] **Step 3** — Convert BehaviorTab (1 writable, +1 mapped) — #649
 - [x] **Step 4** — Convert WearableTab (0 writable, read-only) — #651
 - [x] **Step 5** — Surface the writable fields no tab shows — #652
-- [ ] **Step 6** — Concept assignment for the unmapped fields (#595 curation, #648 extractors)
+- [~] **Step 6** — Concept assignment: suggestions seeded (#653); approval is curation (#595), extractors still needed for 67 fields (#648)
 
 ### Step 1 — Convert GeneralTab (16 writable)
 
@@ -223,6 +223,18 @@ said it "does NOT make the field writable".
 A row has to carry a concept, an `omop_table` this can write to, and a
 `source_value` for derivation to match on. Short of that it stays advisory, and
 `makes_field_writable` on the mapping API says which side of the line it is on.
+
+**Suggestions are seeded** (#653): 10 fields carry a `proposed` mapping chosen
+for meaning, each with the reasoning and — where it applies — why the top lexical
+match was rejected. Nothing is approved, so nothing became writable; a reviewer
+confirms each in `/field-mappings`.
+
+`manage.py suggest_field_concept_mappings` does the retrieval, in three modes:
+`--emit-candidates` writes a shortlist to judge, `--from-reviewed` seeds the
+judged choices, and the default seeds the top lexical match for fields nobody has
+judged. **The default is the weakest**, because trigram similarity compares
+spelling: `clonal_plasma_cells` matches "Polyclonal plasma cells" at 0.75 while
+meaning the opposite of it.
 
 **This step is now curation, not code — but only where a reader exists.**
 
