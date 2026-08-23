@@ -2879,9 +2879,19 @@ class PatientRecord(models.Model):
 # =============================================================================
 
 class FieldConceptMapping(models.Model):
-    """Records a reviewer-approved OMOP concept assignment for a PatientRecord field.
+    """A reviewer-approved OMOP concept assignment for a PatientRecord field.
 
-    This is a decision-recording tool — it does NOT make the field writable.
+    An approved row with enough detail to construct a write makes the field
+    editable: ``build_writable_field_descriptor`` reads these and emits an
+    ``editable`` entry, so curating a concept here is what turns a read-only box
+    into a typeable one. That is the point of the curation interface — recording
+    the decision and never acting on it left every curated field exactly as
+    unwritable as before.
+
+    "Enough detail" means a concept, an ``omop_table`` naming where the fact
+    lives, and a ``source_value`` to key it by. Without the last one derivation
+    cannot find the row it just wrote, so the mapping stays advisory.
+
     Each PatientRecord field can have at most one mapping.
     """
     STATUS_CHOICES = [
@@ -2898,6 +2908,42 @@ class FieldConceptMapping(models.Model):
     concept_code = models.CharField(max_length=50, blank=True, default='')
     unit = models.CharField(max_length=30, blank=True, default='')
     omop_table = models.CharField(max_length=30, blank=True, default='')
+
+    # ── What a write needs beyond the concept ────────────────────────────
+    # A concept says what the fact means. These say how to store and find it,
+    # and without them an approved mapping cannot be acted on.
+    source_value = models.CharField(
+        max_length=100, blank=True, default='',
+        help_text=(
+            'The *_source_value the fact is keyed by. Derivation matches on this, '
+            'so a mapping without one cannot make its field writable.'
+        ),
+    )
+    value_kind = models.CharField(
+        max_length=10, blank=True, default='',
+        choices=[('number', 'Number'), ('string', 'String'),
+                 ('date', 'Date'), ('boolean', 'Boolean')],
+        help_text='Which value column the fact is written to.',
+    )
+    type_concept_id = models.IntegerField(
+        null=True, blank=True,
+        help_text=(
+            'OMOP *_type_concept for the written row. Defaults to the lab type '
+            'concept; facts carried as coded text use the EHR type instead.'
+        ),
+    )
+    value_vocabulary = models.CharField(
+        max_length=60, blank=True, default='',
+        help_text=(
+            'Name of a VocabularyLookup model bounding the answers, e.g. '
+            '"SctEligibility". Offering a value outside the set promises a write '
+            'that ingest would drop.'
+        ),
+    )
+    multiple = models.BooleanField(
+        default=False,
+        help_text='Several answers at once, stored comma-joined.',
+    )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='proposed')
     reviewer = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,

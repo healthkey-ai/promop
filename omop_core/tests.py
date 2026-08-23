@@ -5042,3 +5042,79 @@ class RefreshQueryCountTest(TestCase):
 
         self.assertEqual(lots, [])
         self.assertEqual(len(ctx), 0)
+
+
+class SeededSctFieldMappingsTest(TestCase):
+    """The three SCT fields are writable, via the mappings migration 0156 seeds.
+
+    They always derived from dated Observations keyed on `mm-sct-date`,
+    `mm-sct-history` and `mm-sct-eligibility` — the FHIR upload has written them
+    that way since PR #115 — but no mapping row said so, so the editor fell back
+    to patching the projection and got a 405 on three documented fields.
+
+    This lives in the Django suite rather than the pytest one because pytest runs
+    with --no-migrations, so a data migration's rows are not there to assert on.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        """Seed the concepts, then run the migration's own seed against them.
+
+        Django builds the test database from migrations, and 0156 runs before any
+        concept exists — it guards on the EHR type concept and skips rather than
+        seeding a mapping that points at nothing. So the ordering that is right in
+        a real deployment (load vocabularies, then migrate) has to be reproduced
+        here. Calling the migration's function rather than restating its rows
+        keeps this honest if the seed changes.
+        """
+        import importlib
+
+        from django.apps import apps as global_apps
+        from omop_core.concept_fixtures import seed_test_concepts
+
+        seed_test_concepts()
+        migration = importlib.import_module(
+            'omop_core.migrations.0156_seed_sct_field_mappings',
+        )
+        migration.seed(global_apps, None)
+
+    def test_each_sct_field_is_writable_against_the_source_value_derivation_reads(self):
+        from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+        descriptor = build_writable_field_descriptor()
+        for field, source_value in [
+            ('sct_date', 'mm-sct-date'),
+            ('stem_cell_transplant_history', 'mm-sct-history'),
+            ('sct_eligibility', 'mm-sct-eligibility'),
+        ]:
+            with self.subTest(field=field):
+                entry = descriptor[field]
+                self.assertTrue(entry['writable'], f'{field} is not writable')
+                self.assertEqual(entry['target'], 'observation')
+                # Derivation matches on this exact value; a mismatch would store
+                # a row that never comes back.
+                self.assertEqual(entry['source_value'], source_value)
+
+    def test_the_list_fields_offer_their_bounded_vocabulary(self):
+        from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+        entry = build_writable_field_descriptor()['stem_cell_transplant_history']
+        self.assertTrue(entry.get('multiple'))
+        self.assertEqual(
+            {o['value'] for o in entry.get('options', [])},
+            {'autologous SCT', 'allogeneic SCT', 'tandem SCT'},
+        )
+
+    def test_the_seeded_mappings_are_approved_and_complete(self):
+        from omop_core.models import FieldConceptMapping
+
+        rows = FieldConceptMapping.objects.filter(
+            field_name__in=['sct_date', 'stem_cell_transplant_history',
+                            'sct_eligibility'],
+        )
+        self.assertEqual(rows.count(), 3)
+        for row in rows:
+            with self.subTest(field=row.field_name):
+                self.assertEqual(row.status, 'approved')
+                self.assertIsNotNone(row.concept_id)
+                self.assertTrue(row.source_value)

@@ -20,7 +20,7 @@ fields cannot tell "you may not edit this" from "I forgot to send it".
 from omop_core.models import Concept, PatientRecord
 from omop_core.services.demographics import choices as demographic_choices
 from omop_core.services.mappings import (
-    CONCEPT_LAB_TYPE, DERIVED_FIELD_TO_CODE, LAB_FIELD_TO_LOINC,
+    CONCEPT_EHR_TYPE, CONCEPT_LAB_TYPE, DERIVED_FIELD_TO_CODE, LAB_FIELD_TO_LOINC,
 )
 from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
@@ -173,6 +173,8 @@ _SERIALIZER_COMPUTED = {
     ),
 }
 
+
+
 _WEARABLE_METRIC = {
     'median_daily_steps_30d': 'steps',
     'activity_trend_30d': 'steps',
@@ -276,6 +278,78 @@ def _resolve_concepts(pairs):
     return {(c.vocabulary_id, c.concept_code): c for c in rows}
 
 
+_MAPPING_TARGETS = {
+    'measurement': 'measurement',
+    'observation': 'observation',
+}
+
+
+def _curated_writes():
+    """Editable entries built from reviewer-approved concept mappings.
+
+    The curation interface records a decision per field; this is what acts on
+    it. A row qualifies only when it carries everything a write needs — an
+    approved status, a resolved concept, an OMOP table this can write to, and a
+    source value for derivation to match on. Anything short of that stays
+    advisory rather than becoming a box that writes somewhere unfindable.
+    """
+    from omop_core.models import FieldConceptMapping
+
+    entries = {}
+    rows = list(
+        FieldConceptMapping.objects
+        .filter(status='approved')
+        .exclude(source_value='')
+        .exclude(omop_table='')
+        .select_related('concept')
+    )
+    # One read per distinct answer vocabulary, not one per field that uses it.
+    # Four eligibility fields sharing a set is one query, the same shape the
+    # LOINC and UCUM lookups already have.
+    titles = {
+        name: _lookup_titles(name)
+        for name in {r.value_vocabulary for r in rows if r.value_vocabulary}
+    }
+    for row in rows:
+        target = _MAPPING_TARGETS.get(row.omop_table.strip().lower())
+        concept_id = row.concept_id
+        if target is None or concept_id is None:
+            continue
+        entry = {
+            'kind': KIND_EDITABLE,
+            'writable': True,
+            'target': target,
+            'concept_id': concept_id,
+            'type_concept_id': row.type_concept_id or CONCEPT_LAB_TYPE,
+            'source_value': row.source_value,
+            'value_kind': row.value_kind or _value_kind(row.field_name),
+            'curated': True,
+        }
+        if row.unit:
+            entry['unit'] = row.unit
+        if row.value_vocabulary:
+            options = titles.get(row.value_vocabulary) or ()
+            if options:
+                entry['options'] = [{'value': t} for t in options]
+                entry['multiple'] = row.multiple
+        entries[row.field_name] = entry
+    return entries
+
+
+def _lookup_titles(model_name):
+    """Titles from a VocabularyLookup table, or () when it is absent.
+
+    Ingest filters incoming values against exactly these, so an option outside
+    the set would promise a write that ingest drops.
+    """
+    from omop_core import models as _m
+
+    model = getattr(_m, model_name, None)
+    if model is None:
+        return ()
+    return list(model.objects.order_by('title').values_list('title', flat=True))
+
+
 def build_writable_field_descriptor():
     """Return {field: descriptor} for every mapped PatientRecord clinical field.
 
@@ -290,6 +364,8 @@ def build_writable_field_descriptor():
     derived_concepts = _resolve_concepts(
         {(vocab, code) for code, vocab, _fn in DERIVED_FIELD_TO_CODE.values()}
     )
+
+    curated = _curated_writes()
 
     descriptor = {}
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
@@ -372,6 +448,10 @@ def build_writable_field_descriptor():
                     'endpoint never overwrites an existing value.'
                 ),
             }
+            continue
+
+        if field in curated:
+            descriptor[field] = curated[field]
             continue
 
         if field in _WEARABLE_METRIC:
