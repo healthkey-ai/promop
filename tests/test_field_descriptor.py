@@ -3,7 +3,10 @@
 import pytest
 
 from omop_core.models import PatientRecord, FieldConceptMapping
-from omop_core.services.field_descriptor import get_all_field_descriptors
+from omop_core.services.field_descriptor import (
+    get_all_field_descriptors,
+    _INTERNAL_FIELDS,
+)
 from omop_core.services.mappings import LAB_FIELD_TO_LOINC
 
 
@@ -11,15 +14,23 @@ pytestmark = pytest.mark.django_db
 
 
 def test_all_concrete_fields_covered():
-    """Every concrete PatientRecord field appears in the descriptor output."""
+    """Every non-internal concrete PatientRecord field appears in the descriptor output."""
     concrete_names = {
         f.name for f in PatientRecord._meta.get_fields()
         if getattr(f, 'concrete', False)
-    }
+    } - _INTERNAL_FIELDS
     descriptors = get_all_field_descriptors()
     descriptor_names = {d['field_name'] for d in descriptors}
     missing = concrete_names - descriptor_names
     assert missing == set(), f"Fields missing from descriptors: {missing}"
+
+
+def test_internal_fields_excluded():
+    """Internal fields (id, person, organization, etc.) are not in the output."""
+    descriptors = get_all_field_descriptors()
+    descriptor_names = {d['field_name'] for d in descriptors}
+    for field in _INTERNAL_FIELDS:
+        assert field not in descriptor_names, f"Internal field '{field}' should be excluded"
 
 
 def test_lab_fields_categorized_editable():
@@ -61,7 +72,10 @@ def test_mapping_merged():
 def test_descriptors_have_required_keys():
     """Each descriptor dict contains the expected keys."""
     descriptors = get_all_field_descriptors()
-    required_keys = {'field_name', 'field_type', 'category', 'tab', 'provenance', 'mapping'}
+    required_keys = {
+        'field_name', 'field_type', 'category', 'tab', 'provenance', 'mapping',
+        'suggestion', 'mappable', 'locked_table',
+    }
     for d in descriptors:
         missing = required_keys - set(d.keys())
         assert missing == set(), f"Descriptor for {d.get('field_name')} missing keys: {missing}"
@@ -71,8 +85,7 @@ def test_categories_are_valid():
     """All categories returned are from the known set."""
     valid_categories = {
         'editable', 'alias', 'unit', 'profile', 'location',
-        'therapy-inference', 'computed', 'wearable-metadata',
-        'needs-concept-set', 'internal', 'other',
+        'therapy-inference', 'computed', 'needs-concept-set', 'other',
     }
     descriptors = get_all_field_descriptors()
     found_categories = {d['category'] for d in descriptors}
@@ -91,12 +104,26 @@ def test_tabs_are_valid():
     """All tab values are from the known set."""
     valid_tabs = {
         'general', 'disease', 'treatment', 'blood', 'labs',
-        'behavior', 'wearables', 'internal', 'other',
+        'behavior', 'other',
     }
     descriptors = get_all_field_descriptors()
     found_tabs = {d['tab'] for d in descriptors}
     unknown = found_tabs - valid_tabs
     assert unknown == set(), f"Unknown tabs: {unknown}"
+
+
+def test_no_internal_tab():
+    """No descriptor should have tab='internal'."""
+    descriptors = get_all_field_descriptors()
+    internal_tabs = [d for d in descriptors if d['tab'] == 'internal']
+    assert internal_tabs == [], f"Fields with internal tab: {[d['field_name'] for d in internal_tabs]}"
+
+
+def test_no_wearables_tab():
+    """No descriptor should have tab='wearables'."""
+    descriptors = get_all_field_descriptors()
+    wearable_tabs = [d for d in descriptors if d['tab'] == 'wearables']
+    assert wearable_tabs == [], f"Fields with wearables tab: {[d['field_name'] for d in wearable_tabs]}"
 
 
 def test_known_field_tab_assignments():
@@ -110,10 +137,126 @@ def test_known_field_tab_assignments():
         'serum_creatinine_level': 'labs',
         'first_line_therapy': 'treatment',
         'myeloma_type': 'disease',
-        'id': 'internal',
     }
     for field, expected_tab in checks.items():
         assert field in by_name, f"Field '{field}' not in descriptors"
         assert by_name[field]['tab'] == expected_tab, (
             f"Field '{field}' should be tab '{expected_tab}' but is '{by_name[field]['tab']}'"
         )
+
+
+def test_reclassified_fields():
+    """Fields reclassified from 'other' to proper tabs."""
+    descriptors = get_all_field_descriptors()
+    by_name = {d['field_name']: d for d in descriptors}
+    checks = {
+        'diagnosis_date': 'general',
+        'death_date': 'general',
+        'tumor_size': 'disease',
+        'lymph_node_status': 'disease',
+        'metastasis_status': 'disease',
+        'toxicity_grade': 'treatment',
+        'condition_code_icd_10': 'disease',
+        'prior_procedures': 'disease',
+    }
+    for field, expected_tab in checks.items():
+        if field in by_name:
+            assert by_name[field]['tab'] == expected_tab, (
+                f"Field '{field}' should be tab '{expected_tab}' but is '{by_name[field]['tab']}'"
+            )
+
+
+# ── Suggestion tests ──────────────────────────────────────────────
+
+
+def test_suggestion_present_for_loinc_fields():
+    """Fields in LAB_FIELD_TO_LOINC have suggestion with concept_code."""
+    descriptors = get_all_field_descriptors()
+    by_name = {d['field_name']: d for d in descriptors}
+    for field_name, (code, unit, display) in LAB_FIELD_TO_LOINC.items():
+        if field_name in by_name:
+            d = by_name[field_name]
+            assert d['suggestion'] is not None, f"Field '{field_name}' should have a suggestion"
+            assert d['suggestion']['concept_code'] == code, (
+                f"Field '{field_name}' suggestion code should be '{code}'"
+            )
+            assert d['suggestion']['vocabulary_id'] == 'LOINC'
+
+
+def test_suggestion_has_unit_for_lab_fields():
+    """Lab fields have unit in suggestion."""
+    descriptors = get_all_field_descriptors()
+    by_name = {d['field_name']: d for d in descriptors}
+    for field_name, (code, unit, display) in LAB_FIELD_TO_LOINC.items():
+        if field_name in by_name and unit:
+            d = by_name[field_name]
+            assert d['suggestion']['unit'] == unit, (
+                f"Field '{field_name}' suggestion unit should be '{unit}'"
+            )
+
+
+# ── Mappable tests ────────────────────────────────────────────────
+
+
+def test_mappable_false_for_computed():
+    """Computed fields have mappable=False."""
+    descriptors = get_all_field_descriptors()
+    computed = [d for d in descriptors if d['category'] == 'computed']
+    assert len(computed) > 0, "Should have at least some computed fields"
+    for d in computed:
+        assert d['mappable'] is False, f"Computed field '{d['field_name']}' should have mappable=False"
+
+
+def test_30d_fields_are_computed():
+    """All _30d fields have category='computed' and mappable=False."""
+    descriptors = get_all_field_descriptors()
+    for d in descriptors:
+        if d['field_name'].endswith('_30d'):
+            assert d['category'] == 'computed', (
+                f"Field '{d['field_name']}' should be 'computed' but is '{d['category']}'"
+            )
+            assert d['mappable'] is False
+
+
+def test_mappable_true_for_editable():
+    """Editable (LOINC) fields have mappable=True."""
+    descriptors = get_all_field_descriptors()
+    editable = [d for d in descriptors if d['category'] == 'editable']
+    assert len(editable) > 0
+    for d in editable:
+        assert d['mappable'] is True, f"Editable field '{d['field_name']}' should have mappable=True"
+
+
+# ── Locked table tests ───────────────────────────────────────────
+
+
+def test_locked_table_for_profile():
+    """Profile fields have locked_table='Person'."""
+    descriptors = get_all_field_descriptors()
+    profile = [d for d in descriptors if d['category'] == 'profile']
+    assert len(profile) > 0
+    for d in profile:
+        assert d['locked_table'] == 'Person', (
+            f"Profile field '{d['field_name']}' should have locked_table='Person'"
+        )
+
+
+def test_locked_table_for_location():
+    """Location fields have locked_table='Location'."""
+    descriptors = get_all_field_descriptors()
+    location = [d for d in descriptors if d['category'] == 'location']
+    assert len(location) > 0
+    for d in location:
+        assert d['locked_table'] == 'Location', (
+            f"Location field '{d['field_name']}' should have locked_table='Location'"
+        )
+
+
+def test_locked_table_none_for_others():
+    """Non-profile, non-location fields have locked_table=None."""
+    descriptors = get_all_field_descriptors()
+    for d in descriptors:
+        if d['category'] not in ('profile', 'location'):
+            assert d['locked_table'] is None, (
+                f"Field '{d['field_name']}' (category={d['category']}) should have locked_table=None"
+            )

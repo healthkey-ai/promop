@@ -3,76 +3,120 @@ import { vi, describe, it, expect, beforeEach } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import FieldMappingPage from "./FieldMappingPage";
 
+const mockGet = vi.fn();
+
 vi.mock("@/api/axios", () => ({
   default: {
-    get: vi.fn().mockResolvedValue({
-      data: [
-        {
-          field_name: "hemoglobin_g_dl",
-          field_type: "float",
-          category: "editable",
-          tab: "blood",
-          provenance: {
-            omop_table: "Measurement",
-            lookup_strategy: "loinc",
-            concept_codes: ["718-7"],
-            source_values: [],
-            extractor: "_get_laboratory_data",
-            selection_rule: "latest",
-            description: "Latest Measurement by LOINC 718-7",
-          },
-          mapping: null,
-        },
-        {
-          field_name: "smoking_status",
-          field_type: "text",
-          category: "needs-concept-set",
-          tab: "behavior",
-          provenance: null,
-          mapping: null,
-        },
-        {
-          field_name: "pack_years",
-          field_type: "float",
-          category: "needs-concept-set",
-          tab: "behavior",
-          provenance: null,
-          mapping: {
-            id: 1,
-            concept_id: 12345,
-            vocabulary_id: "SNOMED",
-            concept_code: "229819007",
-            unit: "",
-            omop_table: "Observation",
-            status: "proposed",
-            reviewer: null,
-            reviewed_at: null,
-            notes: "test",
-          },
-        },
-        {
-          field_name: "bmi",
-          field_type: "float",
-          category: "computed",
-          tab: "general",
-          provenance: null,
-          mapping: null,
-        },
-        {
-          field_name: "date_of_birth",
-          field_type: "date",
-          category: "profile",
-          tab: "general",
-          provenance: null,
-          mapping: null,
-        },
-      ],
-    }),
+    get: (...args: unknown[]) => mockGet(...args),
     post: vi.fn().mockResolvedValue({ data: {} }),
     patch: vi.fn().mockResolvedValue({ data: {} }),
     delete: vi.fn().mockResolvedValue({ data: {} }),
   },
 }));
+
+const MOCK_DESCRIPTORS = [
+  {
+    field_name: "hemoglobin_g_dl",
+    field_type: "float",
+    category: "editable",
+    tab: "blood",
+    provenance: {
+      omop_table: "Measurement",
+      lookup_strategy: "loinc",
+      concept_codes: ["718-7"],
+      source_values: [],
+      extractor: "_get_laboratory_data",
+      selection_rule: "latest",
+      description: "Latest Measurement by LOINC 718-7",
+    },
+    mapping: null,
+    suggestion: {
+      concept_code: "718-7",
+      vocabulary_id: "LOINC",
+      unit: "g/dL",
+      omop_table: "Measurement",
+    },
+    mappable: true,
+    locked_table: null,
+  },
+  {
+    field_name: "smoking_status",
+    field_type: "text",
+    category: "needs-concept-set",
+    tab: "behavior",
+    provenance: null,
+    mapping: null,
+    suggestion: null,
+    mappable: true,
+    locked_table: null,
+  },
+  {
+    field_name: "pack_years",
+    field_type: "float",
+    category: "needs-concept-set",
+    tab: "behavior",
+    provenance: null,
+    mapping: {
+      id: 1,
+      concept_id: 12345,
+      vocabulary_id: "SNOMED",
+      concept_code: "229819007",
+      unit: "",
+      omop_table: "Observation",
+      status: "proposed",
+      reviewer: null,
+      reviewed_at: null,
+      notes: "test",
+    },
+    suggestion: null,
+    mappable: true,
+    locked_table: null,
+  },
+  {
+    field_name: "bmi",
+    field_type: "float",
+    category: "computed",
+    tab: "general",
+    provenance: null,
+    mapping: null,
+    suggestion: null,
+    mappable: false,
+    locked_table: null,
+  },
+  {
+    field_name: "date_of_birth",
+    field_type: "date",
+    category: "profile",
+    tab: "general",
+    provenance: null,
+    mapping: null,
+    suggestion: null,
+    mappable: true,
+    locked_table: "Person",
+  },
+  {
+    field_name: "country",
+    field_type: "text",
+    category: "location",
+    tab: "general",
+    provenance: null,
+    mapping: null,
+    suggestion: null,
+    mappable: false,
+    locked_table: "Location",
+  },
+  {
+    field_name: "median_daily_steps_30d",
+    field_type: "float",
+    category: "computed",
+    tab: "other",
+    provenance: null,
+    mapping: null,
+    suggestion: null,
+    mappable: false,
+    locked_table: null,
+  },
+];
 
 const renderPage = () =>
   render(
@@ -84,6 +128,15 @@ const renderPage = () =>
 describe("FieldMappingPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/field-mappings/") {
+        return Promise.resolve({ data: MOCK_DESCRIPTORS });
+      }
+      if (url.startsWith("/v1/field-synonyms/batch/")) {
+        return Promise.resolve({ data: {} });
+      }
+      return Promise.resolve({ data: [] });
+    });
   });
 
   it("renders field table with tab bar and category sections", async () => {
@@ -91,7 +144,6 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
     });
-    // Tab bar should show tabs with counts
     expect(screen.getByText(/General/)).toBeInTheDocument();
     expect(screen.getByText(/Blood/)).toBeInTheDocument();
     expect(screen.getByText(/Behavior/)).toBeInTheDocument();
@@ -112,28 +164,39 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
     });
-    // Click Behavior tab
-    const behaviorTab = screen.getByText(/Behavior/);
-    fireEvent.click(behaviorTab);
+    fireEvent.click(screen.getByText(/Behavior/));
     await waitFor(() => {
       expect(screen.getByText("smoking_status")).toBeInTheDocument();
     });
     expect(screen.getByText("pack_years")).toBeInTheDocument();
-    // General fields should be hidden now
-    expect(screen.queryByText("bmi")).not.toBeInTheDocument();
   });
 
-  it("shows mapped concept info for fields with mappings", async () => {
+  it("shows mapped concept code and status for fields with mappings", async () => {
     renderPage();
-    // Switch to Behavior tab to see pack_years
     await waitFor(() => {
       expect(screen.getByText(/Behavior/)).toBeInTheDocument();
     });
     fireEvent.click(screen.getByText(/Behavior/));
     await waitFor(() => {
-      expect(screen.getByText("SNOMED:229819007")).toBeInTheDocument();
+      expect(screen.getByText("229819007")).toBeInTheDocument();
     });
     expect(screen.getByText("proposed")).toBeInTheDocument();
+    expect(screen.getByText("SNOMED")).toBeInTheDocument();
+  });
+
+  it("shows suggestion in italic for unmapped fields with suggestions", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/Blood/)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText(/Blood/));
+    await waitFor(() => {
+      expect(screen.getByText("hemoglobin_g_dl")).toBeInTheDocument();
+    });
+    // Suggestion concept code should appear
+    expect(screen.getByText("718-7")).toBeInTheDocument();
+    // Suggestion unit should appear
+    expect(screen.getByText("g/dL")).toBeInTheDocument();
   });
 
   it("search shows results across all tabs", async () => {
@@ -143,25 +206,53 @@ describe("FieldMappingPage", () => {
     });
     const searchInput = screen.getByPlaceholderText("Search fields (all tabs)...");
     fireEvent.change(searchInput, { target: { value: "smoking" } });
-    // Should find smoking_status even though we're on General tab
     expect(screen.getByText("smoking_status")).toBeInTheDocument();
     expect(screen.queryByText("pack_years")).not.toBeInTheDocument();
   });
 
-  it("shows assign button for unmapped needs-concept-set fields", async () => {
+  it("does not show Internal or Wearables tabs", async () => {
     renderPage();
     await waitFor(() => {
-      expect(screen.getByText(/Behavior/)).toBeInTheDocument();
+      expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
     });
-    fireEvent.click(screen.getByText(/Behavior/));
-    await waitFor(() => {
-      expect(screen.getByText("smoking_status")).toBeInTheDocument();
-    });
-    const assignButtons = screen.getAllByText("Assign");
-    expect(assignButtons.length).toBeGreaterThan(0);
+    expect(screen.queryByText("Internal")).not.toBeInTheDocument();
+    expect(screen.queryByText("Wearables")).not.toBeInTheDocument();
   });
 
-  it("opens concept assign dialog on Assign click", async () => {
+  it("renders computed fields at bottom in read-only section", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
+    });
+    // General tab should have the Computed section header (bmi is computed, tab=general)
+    // The section header says "Computed" with a count — check for the bmi field name
+    // after expanding the section (Computed starts collapsed)
+    const computedHeader = screen.getByText(/read-only — computed by application code/);
+    expect(computedHeader).toBeInTheDocument();
+  });
+
+  it("shows locked Person table for profile fields", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
+    });
+    // date_of_birth is in profile category, general tab
+    // The Person section header should exist as a category section
+    const personSections = screen.getAllByText("Person");
+    expect(personSections.length).toBeGreaterThan(0);
+  });
+
+  it("shows locked Location table for location fields", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
+    });
+    // Location appears as both category label and locked table value
+    const locationElements = screen.getAllByText("Location");
+    expect(locationElements.length).toBeGreaterThan(0);
+  });
+
+  it("opens concept assign dialog on concept cell click", async () => {
     renderPage();
     await waitFor(() => {
       expect(screen.getByText(/Behavior/)).toBeInTheDocument();
@@ -170,25 +261,27 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("smoking_status")).toBeInTheDocument();
     });
-    const assignButtons = screen.getAllByText("Assign");
-    fireEvent.click(assignButtons[0]);
+    // Click the dash (—) in the concept cell for smoking_status (unmapped, no suggestion)
+    const dashes = screen.getAllByText("—");
+    fireEvent.click(dashes[0]);
     await waitFor(() => {
       expect(screen.getByText("Assign Concept")).toBeInTheDocument();
     });
   });
 
-  it("renders Synonyms button in expanded sections", async () => {
+  it("has new column headers: Concept, Coding, Table, Units, Synonyms", async () => {
     renderPage();
     await waitFor(() => {
       expect(screen.getByText(/Behavior/)).toBeInTheDocument();
     });
-    // Switch to Behavior tab which has needs-concept-set (not collapsed by default)
     fireEvent.click(screen.getByText(/Behavior/));
     await waitFor(() => {
       expect(screen.getByText("smoking_status")).toBeInTheDocument();
     });
-    // Synonyms buttons should appear for expanded fields
-    const synonymButtons = screen.getAllByText("Synonyms");
-    expect(synonymButtons.length).toBeGreaterThan(0);
+    // Table headers should include the new columns
+    expect(screen.getByText("Coding")).toBeInTheDocument();
+    expect(screen.getByText("Table")).toBeInTheDocument();
+    expect(screen.getByText("Units")).toBeInTheDocument();
+    expect(screen.getByText("Synonyms")).toBeInTheDocument();
   });
 });

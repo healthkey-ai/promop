@@ -12,6 +12,7 @@ from omop_core.services.mappings import (
     LAB_FIELD_ALIAS_TO_CANONICAL,
     DEMOGRAPHIC_FIELDS,
     THERAPY_LINE_FIELDS,
+    DERIVED_FIELD_TO_CODE,
 )
 from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
@@ -106,6 +107,9 @@ _TAB_GENERAL = frozenset({
     'heartrate', 'languages_skills', 'facility_name',
     'validated', 'validated_by', 'validation_date', 'patient_age',
     'suppress_demographics_for_others',
+    # Reclassified from "other"
+    'diagnosis_date', 'death_date', 'heartrate_variability',
+    'no_pre_existing_conditions',
 })
 
 _TAB_DISEASE = frozenset({
@@ -142,6 +146,13 @@ _TAB_DISEASE = frozenset({
     'btk_inhibitor_refractory', 'bcl2_inhibitor_refractory',
     # Shared disease markers
     'ldh_level', 'beta2_microglobulin', 'disease_slug',
+    # Reclassified from "other"
+    'tumor_size', 'lymph_node_status', 'metastasis_status',
+    'biopsy_grade', 'biopsy_grade_depr', 'plasma_cell_leukemia',
+    'pd_l1_assay', 'pd_l1_ic_percentage', 'pd_l1_combined_positive_score',
+    'cytogenic_markers', 'molecular_markers',
+    'condition_code_icd_10', 'condition_code_snomed_ct',
+    'condition_clinical_status', 'prior_procedures',
 })
 
 _TAB_TREATMENT = frozenset({
@@ -158,6 +169,10 @@ _TAB_TREATMENT = frozenset({
     'supportive_therapy_start_date', 'supportive_therapy_end_date',
     'supportive_therapies', 'supportive_therapy_intent',
     'planned_therapies', 'concomitant_medication',
+    # Reclassified from "other"
+    'toxicity_grade', 'concomitant_medications', 'concomitant_medication_date',
+    'concomitant_medication_details', 'washout_period_duration',
+    'remission_duration_min',
 })
 
 _TAB_BLOOD = frozenset({
@@ -195,9 +210,12 @@ _TAB_BEHAVIOR = frozenset({
 
 
 def _classify_tab(field_name: str) -> str:
-    """Return the clinical-tab label for a PatientRecord field."""
-    if field_name in _INTERNAL_FIELDS:
-        return 'internal'
+    """Return the clinical-tab label for a PatientRecord field.
+
+    Internal fields are excluded from the API entirely (no tab).
+    Wearable _30d fields are computed — they go to 'other' and render
+    in the Computed section at the bottom of each tab.
+    """
     if field_name in _TAB_GENERAL:
         return 'general'
     if field_name in _TAB_DISEASE:
@@ -210,8 +228,6 @@ def _classify_tab(field_name: str) -> str:
         return 'labs'
     if field_name in _TAB_BEHAVIOR:
         return 'behavior'
-    if field_name.endswith(_WEARABLE_30D_SUFFIX) or field_name in _WEARABLE_METADATA_FIELDS:
-        return 'wearables'
     # Therapy-related fallback.
     therapy_keywords = (
         'therapy', 'treatment', 'line_', 'component_ids', 'therapy_type_ids',
@@ -242,7 +258,7 @@ def _classify_field(field_name: str) -> str:
     if field_name in _COMPUTED_FIELDS:
         return 'computed'
     if field_name in _WEARABLE_METADATA_FIELDS:
-        return 'wearable-metadata'
+        return 'computed'
     if field_name.endswith(_WEARABLE_30D_SUFFIX):
         return 'computed'
     # Therapy-related fields not in THERAPY_LINE_FIELDS but containing therapy keywords.
@@ -257,17 +273,71 @@ def _classify_field(field_name: str) -> str:
     return 'other'
 
 
+_NON_MAPPABLE_CATEGORIES = frozenset({
+    'internal', 'computed', 'location', 'alias', 'unit',
+})
+
+
+def _is_mappable(category: str) -> bool:
+    """Return True if a field with this category can be concept-mapped."""
+    return category not in _NON_MAPPABLE_CATEGORIES
+
+
+def _get_locked_table(category: str) -> str | None:
+    """Return the fixed OMOP table for locked categories, or None."""
+    if category == 'profile':
+        return 'Person'
+    if category == 'location':
+        return 'Location'
+    return None
+
+
+def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
+    """Build auto-suggestion from LAB_FIELD_TO_LOINC, DERIVED_FIELD_TO_CODE, or provenance."""
+    if name in LAB_FIELD_TO_LOINC:
+        code, unit, display = LAB_FIELD_TO_LOINC[name]
+        return {
+            'concept_code': code,
+            'vocabulary_id': 'LOINC',
+            'unit': unit,
+            'omop_table': 'Measurement',
+        }
+
+    if name in DERIVED_FIELD_TO_CODE:
+        code, vocab, _ = DERIVED_FIELD_TO_CODE[name]
+        omop_table = prov_dict.get('omop_table', '') if prov_dict else ''
+        return {
+            'concept_code': code,
+            'vocabulary_id': vocab,
+            'unit': None,
+            'omop_table': omop_table,
+        }
+
+    if prov_dict and prov_dict.get('concept_codes'):
+        codes = prov_dict['concept_codes']
+        strategy = prov_dict.get('lookup_strategy', '')
+        return {
+            'concept_code': codes[0],
+            'vocabulary_id': strategy.upper() if strategy in ('loinc', 'snomed') else None,
+            'unit': None,
+            'omop_table': prov_dict.get('omop_table', ''),
+        }
+
+    return None
+
+
 def get_all_field_descriptors() -> list[dict]:
     """Return a descriptor dict for every concrete PatientRecord field.
 
     Each dict contains:
-      - field_name: str
-      - field_type: str (human-readable type label)
-      - category: str (editable|alias|unit|profile|location|therapy-inference|
-                       computed|wearable-metadata|needs-concept-set|
-                       internal|other)
+      - field_name, field_type, category, tab
       - provenance: dict|None (from provenance registry)
       - mapping: dict|None (from FieldConceptMapping table)
+      - suggestion: dict|None (auto-suggested concept mapping)
+      - mappable: bool (whether the field can be concept-mapped)
+      - locked_table: str|None (fixed OMOP table for profile/location)
+
+    Internal fields (id, person, organization, timestamps) are excluded.
     """
     # 1. Get all concrete fields from the model.
     concrete_fields = [
@@ -284,11 +354,15 @@ def get_all_field_descriptors() -> list[dict]:
         for m in FieldConceptMapping.objects.select_related('concept', 'reviewer').all()
     }
 
-    # 4. Build descriptors.
+    # 4. Build descriptors (excluding internal fields).
     result = []
     for f in concrete_fields:
         name = f.name
         category = _classify_field(name)
+
+        # Skip internal fields — they have no OMOP mapping relevance.
+        if category == 'internal':
+            continue
 
         # Provenance from registry.
         prov = registry.get(name)
@@ -328,6 +402,9 @@ def get_all_field_descriptors() -> list[dict]:
             'tab': _classify_tab(name),
             'provenance': prov_dict,
             'mapping': mapping_dict,
+            'suggestion': _build_suggestion(name, prov_dict),
+            'mappable': _is_mappable(category),
+            'locked_table': _get_locked_table(category),
         })
 
     # Sort: needs-concept-set first, then by field name.
@@ -340,9 +417,7 @@ def get_all_field_descriptors() -> list[dict]:
         'unit': 5,
         'profile': 6,
         'location': 7,
-        'wearable-metadata': 8,
-        'internal': 9,
-        'other': 10,
+        'other': 8,
     }
     result.sort(key=lambda d: (category_order.get(d['category'], 99), d['field_name']))
     return result

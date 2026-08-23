@@ -16,16 +16,23 @@ interface Props {
   fieldType: string;
   onClose: () => void;
   onSaved: () => void;
+  initialConceptCode?: string;
+  initialVocabularyId?: string;
+  initialUnit?: string;
+  initialOmopTable?: string;
 }
 
-export function ConceptAssignDialog({ fieldName, fieldType, onClose, onSaved }: Props) {
-  const [searchQuery, setSearchQuery] = useState("");
-  const [vocabFilter, setVocabFilter] = useState("");
+export function ConceptAssignDialog({
+  fieldName, fieldType, onClose, onSaved,
+  initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
+}: Props) {
+  const [searchQuery, setSearchQuery] = useState(initialConceptCode || "");
+  const [vocabFilter, setVocabFilter] = useState(initialVocabularyId || "");
   const [results, setResults] = useState<ConceptResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [selected, setSelected] = useState<ConceptResult | null>(null);
-  const [unit, setUnit] = useState("");
-  const [omopTable, setOmopTable] = useState("Measurement");
+  const [unit, setUnit] = useState(initialUnit || "");
+  const [omopTable, setOmopTable] = useState(initialOmopTable || "Measurement");
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
