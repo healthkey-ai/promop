@@ -551,6 +551,11 @@ def derived_fields() -> frozenset:
 
     Not provably complete -- a field could be assigned through a table this does
     not list -- so it is used to *warn*, never to block.
+
+    Reads this module's own source, which makes it a tool rather than something
+    to call from a request: it costs a file read, and it needs the source to be
+    on disk. Both are fine for a management command and neither is fine in a
+    view.
     """
     import re
     from pathlib import Path
