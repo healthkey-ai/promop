@@ -19664,6 +19664,62 @@ class FieldSynonymTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
 
+class FieldSynonymBatchTest(TestCase):
+    """Tests for GET /api/v1/field-synonyms/batch/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = Identity.objects.create_user(
+            email='batch_staff@t.com', password='x', is_staff=True,
+        )
+        cls.non_staff = Identity.objects.create_user(
+            email='batch_user@t.com', password='x', is_staff=False,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        from omop_core.models import FieldSynonym
+        FieldSynonym.objects.all().delete()
+
+    def test_batch_returns_custom_synonyms(self):
+        from omop_core.models import FieldSynonym
+        FieldSynonym.objects.create(field_name='hemoglobin_g_dl', synonym_text='Hgb')
+        FieldSynonym.objects.create(field_name='hemoglobin_g_dl', synonym_text='Hb')
+        FieldSynonym.objects.create(field_name='wbc_count_thousand_per_ul', synonym_text='WBC')
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-synonyms/batch/?fields=hemoglobin_g_dl,wbc_count_thousand_per_ul')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('hemoglobin_g_dl', resp.data)
+        self.assertEqual(len(resp.data['hemoglobin_g_dl']), 2)
+        self.assertEqual(len(resp.data['wbc_count_thousand_per_ul']), 1)
+
+    def test_batch_empty_fields_returns_empty(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-synonyms/batch/?fields=')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data, {})
+
+    def test_batch_no_fields_param_returns_empty(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-synonyms/batch/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data, {})
+
+    def test_batch_non_staff_blocked(self):
+        self.client.force_authenticate(user=self.non_staff)
+        resp = self.client.get('/api/v1/field-synonyms/batch/?fields=hemoglobin_g_dl')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_batch_limits_to_five(self):
+        from omop_core.models import FieldSynonym
+        for i in range(8):
+            FieldSynonym.objects.create(field_name='hemoglobin_g_dl', synonym_text=f'syn{i}')
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-synonyms/batch/?fields=hemoglobin_g_dl')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data['hemoglobin_g_dl']), 5)
+
+
 class TherapyLineAuthoringTest(TestCase):
     """POST /api/v1/therapy-lines/ — the write behind the read-only treatment tab.
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, ChevronDown, ChevronRight, Search, Plus, BookOpen } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, Search, BookOpen, Check, X } from "lucide-react";
 import api from "@/api/axios";
 import { ConceptAssignDialog } from "./ConceptAssignDialog";
 import { SynonymDialog } from "./SynonymDialog";
@@ -31,19 +31,25 @@ interface FieldDescriptor {
     reviewed_at: string | null;
     notes: string;
   } | null;
+  suggestion: {
+    concept_code: string;
+    vocabulary_id: string | null;
+    unit: string | null;
+    omop_table: string;
+  } | null;
+  mappable: boolean;
+  locked_table: string | null;
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
   "needs-concept-set": "Needs Concept Assignment",
-  editable: "Mapped & Editable (LOINC)",
+  editable: "Mapped",
   "therapy-inference": "Therapy Inference",
-  computed: "Computed / Wearable",
+  computed: "Computed",
   alias: "Legacy Aliases",
   unit: "Unit Fields",
-  profile: "Person / Profile",
+  profile: "Person",
   location: "Location",
-  "wearable-metadata": "Wearable Metadata",
-  internal: "Internal / Structural",
   other: "Other",
 };
 
@@ -54,12 +60,10 @@ const TAB_LABELS: Record<string, string> = {
   blood: "Blood",
   labs: "Labs",
   behavior: "Behavior",
-  wearables: "Wearables",
   other: "Other",
-  internal: "Internal",
 };
 
-const TAB_ORDER = ["general", "disease", "treatment", "blood", "labs", "behavior", "wearables", "other", "internal"];
+const TAB_ORDER = ["general", "disease", "treatment", "blood", "labs", "behavior", "other"];
 
 const STATUS_BADGE: Record<string, string> = {
   proposed: "bg-yellow-100 text-yellow-800",
@@ -76,11 +80,12 @@ export default function FieldMappingPage() {
   const [categoryFilter, setCategoryFilter] = useState("");
   const [activeTab, setActiveTab] = useState("general");
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(
-    new Set(["editable", "alias", "unit", "profile", "location", "internal", "wearable-metadata", "other", "computed"])
+    new Set(["alias", "unit", "other", "computed"])
   );
   const [dialogOpen, setDialogOpen] = useState(false);
   const [selectedField, setSelectedField] = useState<FieldDescriptor | null>(null);
   const [synonymDialogField, setSynonymDialogField] = useState<string | null>(null);
+  const [batchSynonyms, setBatchSynonyms] = useState<Record<string, string[]>>({});
 
   const fetchDescriptors = useCallback(async () => {
     setLoading(true);
@@ -95,14 +100,28 @@ export default function FieldMappingPage() {
     }
   }, []);
 
-  // Wrapped rather than called bare: react-hooks/set-state-in-effect reads a
-  // direct call whose callee sets state as a synchronous setState in the effect
-  // body. Same shape the patient detail page uses for its load.
   useEffect(() => {
     (async () => {
       await fetchDescriptors();
     })();
   }, [fetchDescriptors]);
+
+  // Load batch synonyms for current tab's fields.
+  useEffect(() => {
+    if (!descriptors.length) return;
+    const tabFields = descriptors
+      .filter((d) => d.tab === activeTab)
+      .map((d) => d.field_name);
+    if (!tabFields.length) return;
+    (async () => {
+      try {
+        const resp = await api.get(`/v1/field-synonyms/batch/?fields=${tabFields.join(",")}`);
+        setBatchSynonyms((prev) => ({ ...prev, ...resp.data }));
+      } catch {
+        // Silently fail — synonyms are non-critical.
+      }
+    })();
+  }, [descriptors, activeTab]);
 
   // When searching, show across all tabs; otherwise filter by active tab.
   const filtered = useMemo(() => {
@@ -119,14 +138,20 @@ export default function FieldMappingPage() {
     return items;
   }, [descriptors, categoryFilter, searchQuery, activeTab]);
 
-  const grouped = useMemo(() => {
-    const groups: Record<string, FieldDescriptor[]> = {};
+  // Split into mappable and computed groups.
+  const { mappableGroups, computedFields } = useMemo(() => {
+    const mappable: Record<string, FieldDescriptor[]> = {};
+    const computed: FieldDescriptor[] = [];
     for (const d of filtered) {
-      const cat = d.category;
-      if (!groups[cat]) groups[cat] = [];
-      groups[cat].push(d);
+      if (d.category === "computed") {
+        computed.push(d);
+      } else {
+        const cat = d.category;
+        if (!mappable[cat]) mappable[cat] = [];
+        mappable[cat].push(d);
+      }
     }
-    return groups;
+    return { mappableGroups: mappable, computedFields: computed };
   }, [filtered]);
 
   const stats = useMemo(() => {
@@ -154,7 +179,8 @@ export default function FieldMappingPage() {
     });
   };
 
-  const handleAssignClick = (field: FieldDescriptor) => {
+  const handleCellClick = (field: FieldDescriptor) => {
+    if (!field.mappable) return;
     setSelectedField(field);
     setDialogOpen(true);
   };
@@ -175,13 +201,259 @@ export default function FieldMappingPage() {
     }
   };
 
-  const handleApproveMapping = async (mappingId: number) => {
+  const handleConfirm = async (field: FieldDescriptor) => {
     try {
-      await api.patch(`/v1/field-mappings/${mappingId}/`, { status: "approved" });
+      if (field.mapping) {
+        // Approve existing proposed mapping.
+        if (field.mapping.status === "proposed") {
+          await api.patch(`/v1/field-mappings/${field.mapping.id}/`, { status: "approved" });
+        }
+      } else if (field.suggestion) {
+        // Create mapping from suggestion with approved status.
+        await api.post("/v1/field-mappings/", {
+          field_name: field.field_name,
+          vocabulary_id: field.suggestion.vocabulary_id || "",
+          concept_code: field.suggestion.concept_code,
+          unit: field.suggestion.unit || "",
+          omop_table: field.locked_table || field.suggestion.omop_table || "",
+          status: "approved",
+        });
+      }
       fetchDescriptors();
     } catch {
-      setError("Failed to approve mapping.");
+      setError("Failed to confirm mapping.");
     }
+  };
+
+  /** Render the concept cell content (code + status badge). */
+  const renderConceptCell = (f: FieldDescriptor) => {
+    if (f.mapping) {
+      return (
+        <span className="inline-flex items-center gap-1.5">
+          <span className="font-mono text-xs">{f.mapping.concept_code}</span>
+          <span
+            className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+              STATUS_BADGE[f.mapping.status] || "bg-gray-100"
+            }`}
+          >
+            {f.mapping.status}
+          </span>
+        </span>
+      );
+    }
+    if (f.suggestion) {
+      return (
+        <span className="font-mono text-xs italic text-gray-400">
+          {f.suggestion.concept_code}
+        </span>
+      );
+    }
+    return <span className="text-xs text-gray-400">&mdash;</span>;
+  };
+
+  /** Render coding (vocabulary_id) cell. */
+  const renderCodingCell = (f: FieldDescriptor) => {
+    if (f.mapping?.vocabulary_id) {
+      return <span className="text-xs">{f.mapping.vocabulary_id}</span>;
+    }
+    if (f.suggestion?.vocabulary_id) {
+      return <span className="text-xs italic text-gray-400">{f.suggestion.vocabulary_id}</span>;
+    }
+    return <span className="text-xs text-gray-400">&mdash;</span>;
+  };
+
+  /** Render table (omop_table) cell. */
+  const renderTableCell = (f: FieldDescriptor) => {
+    if (f.locked_table) {
+      return (
+        <span className="text-xs text-gray-400" title={
+          f.category === "location"
+            ? "Location is an independent table — no OMOP mapping needed"
+            : "Person table (locked)"
+        }>
+          {f.locked_table}
+        </span>
+      );
+    }
+    if (f.mapping?.omop_table) {
+      return <span className="text-xs">{f.mapping.omop_table}</span>;
+    }
+    if (f.suggestion?.omop_table) {
+      return <span className="text-xs italic text-gray-400">{f.suggestion.omop_table}</span>;
+    }
+    return <span className="text-xs text-gray-400">&mdash;</span>;
+  };
+
+  /** Render unit cell. */
+  const renderUnitCell = (f: FieldDescriptor) => {
+    if (f.mapping?.unit) {
+      return <span className="text-xs">{f.mapping.unit}</span>;
+    }
+    if (f.suggestion?.unit) {
+      return <span className="text-xs italic text-gray-400">{f.suggestion.unit}</span>;
+    }
+    return <span className="text-xs text-gray-400">&mdash;</span>;
+  };
+
+  /** Render inline synonyms. */
+  const renderSynonyms = (f: FieldDescriptor) => {
+    const syns = batchSynonyms[f.field_name] || [];
+    return (
+      <button
+        onClick={() => setSynonymDialogField(f.field_name)}
+        className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-gray-600 hover:bg-gray-100"
+        title="Manage synonyms"
+      >
+        <BookOpen size={12} />
+        {syns.length > 0 ? (
+          <span className="max-w-[150px] truncate text-gray-500">
+            {syns.slice(0, 3).join(", ")}
+            {syns.length > 3 && <span className="ml-1 text-gray-400">+{syns.length - 3}</span>}
+          </span>
+        ) : (
+          <span className="text-gray-400">none</span>
+        )}
+      </button>
+    );
+  };
+
+  /** Render table for a category section (mappable fields). */
+  const renderMappableTable = (fields: FieldDescriptor[]) => (
+    <div className="overflow-x-auto rounded-b-md border border-t-0 border-gray-200">
+      <table className="min-w-full text-sm">
+        <thead>
+          <tr className="bg-gray-50 text-left text-[11px] uppercase text-gray-500">
+            <th className="px-3 py-2">Field Name</th>
+            <th className="px-3 py-2">
+              <span className="inline-flex items-center gap-1">
+                Concept
+                <span className="text-[9px] normal-case text-gray-400">Confirm</span>
+              </span>
+            </th>
+            <th className="px-3 py-2">Coding</th>
+            <th className="px-3 py-2">Table</th>
+            <th className="px-3 py-2">Units</th>
+            <th className="px-3 py-2">Synonyms</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100">
+          {fields.map((f) => (
+            <tr key={f.field_name} className="hover:bg-gray-50/50">
+              <td className="px-3 py-2 font-mono text-xs">{f.field_name}</td>
+              <td className="px-3 py-2">
+                <div className="flex items-center gap-1.5">
+                  {f.mappable && (
+                    <button
+                      onClick={() => handleConfirm(f)}
+                      className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                        f.mapping?.status === "approved"
+                          ? "border-green-500 bg-green-500 text-white"
+                          : "border-gray-300 hover:border-primary"
+                      }`}
+                      title={f.mapping?.status === "approved" ? "Confirmed" : "Confirm mapping"}
+                      disabled={f.mapping?.status === "approved"}
+                    >
+                      {f.mapping?.status === "approved" && <Check size={10} />}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => f.mappable && handleCellClick(f)}
+                    className={`${f.mappable ? "cursor-pointer hover:text-primary" : ""}`}
+                    disabled={!f.mappable}
+                  >
+                    {renderConceptCell(f)}
+                  </button>
+                  {f.mapping && (
+                    <button
+                      onClick={() => handleDeleteMapping(f.mapping!.id)}
+                      className="ml-1 rounded p-0.5 text-gray-400 hover:bg-red-50 hover:text-red-500"
+                      title="Remove mapping"
+                    >
+                      <X size={10} />
+                    </button>
+                  )}
+                </div>
+              </td>
+              <td className="px-3 py-2">
+                <button
+                  onClick={() => f.mappable && handleCellClick(f)}
+                  className={`${f.mappable ? "cursor-pointer hover:text-primary" : ""}`}
+                  disabled={!f.mappable}
+                >
+                  {renderCodingCell(f)}
+                </button>
+              </td>
+              <td className="px-3 py-2">
+                {f.locked_table ? (
+                  renderTableCell(f)
+                ) : (
+                  <button
+                    onClick={() => f.mappable && handleCellClick(f)}
+                    className={`${f.mappable ? "cursor-pointer hover:text-primary" : ""}`}
+                    disabled={!f.mappable}
+                  >
+                    {renderTableCell(f)}
+                  </button>
+                )}
+              </td>
+              <td className="px-3 py-2">{renderUnitCell(f)}</td>
+              <td className="px-3 py-2">{renderSynonyms(f)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  /** Render computed fields section (read-only, at bottom). */
+  const renderComputedSection = () => {
+    if (computedFields.length === 0) return null;
+    const isCollapsed = collapsedSections.has("computed");
+    return (
+      <div className="mb-3">
+        <button
+          onClick={() => toggleSection("computed")}
+          className="flex w-full items-center gap-2 rounded bg-gray-50 px-3 py-2 text-left text-sm font-medium text-gray-500 hover:bg-gray-100"
+        >
+          {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+          Computed
+          <span className="ml-1 text-xs text-gray-400">({computedFields.length})</span>
+          <span className="ml-2 text-[10px] font-normal italic text-gray-400">
+            read-only — computed by application code
+          </span>
+        </button>
+        {!isCollapsed && (
+          <div className="overflow-x-auto rounded-b-md border border-t-0 border-gray-200">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="bg-gray-50 text-left text-[11px] uppercase text-gray-500">
+                  <th className="px-3 py-2">Field Name</th>
+                  <th className="px-3 py-2">Type</th>
+                  <th className="px-3 py-2">Provenance</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {computedFields.map((f) => (
+                  <tr key={f.field_name} className="text-gray-400 italic">
+                    <td className="px-3 py-2 font-mono text-xs">{f.field_name}</td>
+                    <td className="px-3 py-2 text-xs">{f.field_type}</td>
+                    <td className="px-3 py-2 text-xs">
+                      {f.provenance ? (
+                        <span title={f.provenance.description}>
+                          {f.provenance.lookup_strategy} / {f.provenance.omop_table}
+                        </span>
+                      ) : (
+                        "application code"
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
   };
 
   if (loading) {
@@ -207,7 +479,7 @@ export default function FieldMappingPage() {
     );
   }
 
-  const categoryOrder = Object.keys(CATEGORY_LABELS);
+  const categoryOrder = Object.keys(CATEGORY_LABELS).filter((c) => c !== "computed");
 
   return (
     <div className="mx-auto max-w-7xl p-6">
@@ -261,6 +533,11 @@ export default function FieldMappingPage() {
             </span>
           ) : null
         )}
+        {stats["computed"] ? (
+          <span className="rounded-full bg-gray-100 px-2.5 py-1 font-medium text-gray-500 italic">
+            Computed: {stats["computed"]}
+          </span>
+        ) : null}
         <span className="rounded-full bg-blue-100 px-2.5 py-1 font-medium text-blue-800">
           Total: {descriptors.length}
         </span>
@@ -284,9 +561,9 @@ export default function FieldMappingPage() {
           className="h-9 rounded border border-gray-300 px-3 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
         >
           <option value="">All categories</option>
-          {categoryOrder.map((cat) => (
+          {Object.entries(CATEGORY_LABELS).map(([cat, label]) => (
             <option key={cat} value={cat}>
-              {CATEGORY_LABELS[cat] || cat} ({stats[cat] || 0})
+              {label} ({stats[cat] || 0})
             </option>
           ))}
         </select>
@@ -306,120 +583,36 @@ export default function FieldMappingPage() {
         </div>
       )}
 
-      {/* Grouped sections */}
+      {/* Mappable category sections */}
       {categoryOrder
-        .filter((cat) => grouped[cat]?.length)
+        .filter((cat) => mappableGroups[cat]?.length)
         .map((cat) => {
           const isCollapsed = collapsedSections.has(cat);
-          const fields = grouped[cat];
+          const fields = mappableGroups[cat];
           return (
             <div key={cat} className="mb-3">
               <button
                 onClick={() => toggleSection(cat)}
-                className="flex w-full items-center gap-2 rounded bg-gray-50 px-3 py-2 text-left text-sm font-medium text-gray-700 hover:bg-gray-100"
+                className={`flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm font-medium hover:bg-gray-100 ${
+                  cat === "needs-concept-set"
+                    ? "bg-amber-50 text-amber-800"
+                    : "bg-gray-50 text-gray-700"
+                }`}
               >
                 {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                 {CATEGORY_LABELS[cat] || cat}
                 <span className="ml-1 text-xs text-gray-400">({fields.length})</span>
               </button>
-              {!isCollapsed && (
-                <div className="overflow-x-auto rounded-b-md border border-t-0 border-gray-200">
-                  <table className="min-w-full text-sm">
-                    <thead>
-                      <tr className="bg-gray-50 text-left text-[11px] uppercase text-gray-500">
-                        <th className="px-3 py-2">Field Name</th>
-                        <th className="px-3 py-2">Type</th>
-                        <th className="px-3 py-2">Concept / Status</th>
-                        <th className="px-3 py-2">Provenance</th>
-                        <th className="px-3 py-2 text-right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {fields.map((f) => (
-                        <tr key={f.field_name} className="hover:bg-gray-50/50">
-                          <td className="px-3 py-2 font-mono text-xs">{f.field_name}</td>
-                          <td className="px-3 py-2 text-gray-500">{f.field_type}</td>
-                          <td className="px-3 py-2">
-                            {f.mapping ? (
-                              <span className="inline-flex items-center gap-1.5">
-                                <span className="font-mono text-xs">
-                                  {f.mapping.vocabulary_id}:{f.mapping.concept_code}
-                                </span>
-                                <span
-                                  className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
-                                    STATUS_BADGE[f.mapping.status] || "bg-gray-100"
-                                  }`}
-                                >
-                                  {f.mapping.status}
-                                </span>
-                              </span>
-                            ) : f.provenance?.concept_codes?.length ? (
-                              <span className="font-mono text-xs text-gray-500">
-                                {f.provenance.concept_codes.join(", ")}
-                              </span>
-                            ) : (
-                              <span className="text-xs text-gray-400">&mdash;</span>
-                            )}
-                          </td>
-                          <td className="px-3 py-2 text-xs text-gray-500">
-                            {f.provenance ? (
-                              <span title={f.provenance.description}>
-                                {f.provenance.lookup_strategy} / {f.provenance.omop_table}
-                              </span>
-                            ) : (
-                              "\u2014"
-                            )}
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            <div className="flex items-center justify-end gap-1">
-                              <button
-                                onClick={() => setSynonymDialogField(f.field_name)}
-                                className="rounded px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-100"
-                                title="Manage synonyms"
-                              >
-                                <BookOpen size={12} className="inline mr-0.5" />
-                                Synonyms
-                              </button>
-                              {f.mapping ? (
-                                <>
-                                  {f.mapping.status === "proposed" && (
-                                    <button
-                                      onClick={() => handleApproveMapping(f.mapping!.id)}
-                                      className="rounded px-2 py-0.5 text-xs text-green-700 hover:bg-green-50"
-                                    >
-                                      Approve
-                                    </button>
-                                  )}
-                                  <button
-                                    onClick={() => handleDeleteMapping(f.mapping!.id)}
-                                    className="rounded px-2 py-0.5 text-xs text-red-600 hover:bg-red-50"
-                                  >
-                                    Remove
-                                  </button>
-                                </>
-                              ) : cat === "needs-concept-set" || cat === "other" ? (
-                                <button
-                                  onClick={() => handleAssignClick(f)}
-                                  className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs text-primary hover:bg-primary/10"
-                                >
-                                  <Plus size={12} />
-                                  Assign
-                                </button>
-                              ) : null}
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+              {!isCollapsed && renderMappableTable(fields)}
             </div>
           );
         })}
 
+      {/* Computed section at bottom */}
+      {renderComputedSection()}
+
       {/* No results */}
-      {Object.keys(grouped).length === 0 && (
+      {Object.keys(mappableGroups).length === 0 && computedFields.length === 0 && (
         <div className="py-8 text-center text-sm text-gray-400">
           No fields match the current filters.
         </div>
@@ -430,6 +623,10 @@ export default function FieldMappingPage() {
         <ConceptAssignDialog
           fieldName={selectedField.field_name}
           fieldType={selectedField.field_type}
+          initialConceptCode={selectedField.suggestion?.concept_code}
+          initialVocabularyId={selectedField.suggestion?.vocabulary_id ?? undefined}
+          initialUnit={selectedField.suggestion?.unit ?? undefined}
+          initialOmopTable={selectedField.locked_table || selectedField.suggestion?.omop_table || undefined}
           onClose={() => {
             setDialogOpen(false);
             setSelectedField(null);
@@ -437,7 +634,6 @@ export default function FieldMappingPage() {
           onSaved={handleMappingSaved}
         />
       )}
-
 
       {/* Synonym Dialog */}
       {synonymDialogField && (
