@@ -15,7 +15,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
     reason="cb integration branch retains omop_write_service (sync_to_omop) transitionally for "
            "CB's interim profile-write (#4878); re-enabled once CB migrates that write path onto "
            "write_descriptor and the module is dropped. dev keeps it removed.",
-    strict=False,
+    strict=True,  # when CB drops the module (Phase 4d) this XPASSes → strict fails → forces removing this marker
 )
 def test_retired_patient_record_to_omop_write_through_service_is_absent():
     """Clinical facts must not be reconstructed from a PatientRecord PATCH."""

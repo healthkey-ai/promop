@@ -10,6 +10,7 @@ from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.mappings import (
     LAB_FIELD_TO_LOINC,
+    LAB_FIELD_ALIAS_TO_CANONICAL,
     CONDITION_FIELDS,
     DEMOGRAPHIC_FIELDS,
     THERAPY_LINE_FIELDS,
@@ -49,8 +50,13 @@ def sync_to_omop(patient_info, changed_fields: set, today: date = None, changed_
         value = getattr(patient_info, field, None)
         if value is None:
             value = changed_data.get(field)
-        if field in LAB_FIELD_TO_LOINC and value is not None:
-            _sync_measurement(person, field, value, today)
+        # Normalize legacy lab field names to their canonical key. dev's #471 dedup moved the
+        # legacy aliases (ldh/egfr/creatinine_mg_dl/…) OUT of LAB_FIELD_TO_LOINC into
+        # LAB_FIELD_ALIAS_TO_CANONICAL; without this, the (cb-retained) write path would silently
+        # skip a PATCH to a legacy name after the dev back-merge. Non-aliases pass through unchanged.
+        lab_field = LAB_FIELD_ALIAS_TO_CANONICAL.get(field, field)
+        if lab_field in LAB_FIELD_TO_LOINC and value is not None:
+            _sync_measurement(person, lab_field, value, today)
     if changed_fields & CONDITION_FIELDS:
         _sync_condition(person, patient_info, today, changed_data)
     if changed_fields & DEMOGRAPHIC_FIELDS:
