@@ -213,18 +213,25 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
         const res = await fetch(`https://api.zippopotam.us/us/${zipcode}`);
         if (res.ok) {
           const zipData = await res.json();
-          if (zipData.places?.length > 0) {
+          // Drop a stale response: if the ZIP changed while this lookup was in flight, applying
+          // its city/region would pair ZIP A's place with ZIP B's postal_code.
+          const current = pendingDataRef.current ?? editedInfoRef.current;
+          if (zipData.places?.length > 0 && String(current?.postal_code ?? "") === zipcode) {
             const place = zipData.places[0];
+            // Mark the auto-filled fields dirty and reschedule — otherwise the diff-PATCH sends
+            // only postal_code and the server's derived response overwrites the local city/region.
+            dirtyFieldsRef.current.add("city");
+            dirtyFieldsRef.current.add("region");
             setEditedInfo((prev) => {
               const updated = { ...prev, city: place["place name"], region: place["state"] };
-              pendingDataRef.current = updated;
+              scheduleAutoSave(updated);
               return updated;
             });
           }
         }
       } catch { /* ignore zip lookup failures */ }
     }
-  }, [handleFieldChange]);
+  }, [handleFieldChange, scheduleAutoSave]);
 
   const getDiseaseType = (): "breast" | "lymphoma" | "myeloma" | "cll" | "other" => {
     const d = (typeof editedInfo?.disease === "string" ? editedInfo.disease : "").toLowerCase();

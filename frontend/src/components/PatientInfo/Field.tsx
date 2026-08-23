@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { usePatientInfoContext } from '@/federation/PatientInfoContext';
 import { VocabSource } from '@/hooks/useVocabulary';
 import { VocabularyTooltip } from '../UI/VocabularyTooltip';
 import SelectControl from './controls/SelectControl';
@@ -32,7 +33,12 @@ export default function Field({
   readOnly,
   vocabSource,
 }: FieldProps) {
-  const isDisabled = disabled || readOnly;
+  // A field the server has no write path for (email/computed/unmapped/…) is shown read-only
+  // rather than editable, so a user never edits a value that silently would not save. Null
+  // writableFields (descriptor unavailable) leaves everything editable — never lock the form.
+  const { writableFields } = usePatientInfoContext();
+  const notWritable = writableFields != null && !writableFields.has(name);
+  const isDisabled = disabled || readOnly || notWritable;
   const optionObjects = useMemo(() => stringsToOptions(options), [options]);
 
   const selectedValues = useMemo<string[]>(() => {
@@ -137,6 +143,7 @@ export default function Field({
         <label className="text-sm font-medium text-portal-text-primary">
           {label}
           {readOnly && <span className="ml-1 text-xs font-normal text-portal-text-secondary">(computed)</span>}
+          {!readOnly && notWritable && <span className="ml-1 text-xs font-normal text-portal-text-secondary">(read-only)</span>}
         </label>
         {vocabSource && <VocabularyTooltip name={vocabSource.name} url={vocabSource.url} />}
       </div>

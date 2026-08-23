@@ -2,6 +2,7 @@ import { useMemo, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AxiosInstance } from "axios";
 import { PatientInfoContext } from "./PatientInfoContext";
+import { useWritableFields } from "./patientInfoApi";
 import type { LabsThemeTokens } from "./types";
 import { injectStyles } from "./injectStyles";
 import { assertLabsTokens } from "./assertLabsTokens";
@@ -59,18 +60,34 @@ export function PatientInfoProvider({
   const qc = externalQC ?? internalQC;
   const cssVars = themeToVars(theme ?? {});
 
-  const content = (
-    <PatientInfoContext.Provider value={{ apiClient, apiBasePath }}>
-      {children}
-    </PatientInfoContext.Provider>
-  );
-
   return (
     <div
       className={`promop-root ${className ?? ""}`}
       style={cssVars as React.CSSProperties}
     >
-      <QueryClientProvider client={qc}>{content}</QueryClientProvider>
+      <QueryClientProvider client={qc}>
+        {/* Bridge sits INSIDE QueryClientProvider so useWritableFields (a query) has a client. */}
+        <ContextBridge apiClient={apiClient} apiBasePath={apiBasePath}>
+          {children}
+        </ContextBridge>
+      </QueryClientProvider>
     </div>
+  );
+}
+
+function ContextBridge({
+  apiClient,
+  apiBasePath,
+  children,
+}: {
+  apiClient: AxiosInstance;
+  apiBasePath: string;
+  children: ReactNode;
+}) {
+  const writableFields = useWritableFields(apiClient, apiBasePath);
+  return (
+    <PatientInfoContext.Provider value={{ apiClient, apiBasePath, writableFields }}>
+      {children}
+    </PatientInfoContext.Provider>
   );
 }

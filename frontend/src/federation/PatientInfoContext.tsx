@@ -4,6 +4,8 @@ import type { AxiosInstance } from "axios";
 export interface PatientInfoContextValue {
   apiClient: AxiosInstance;
   apiBasePath: string;
+  // Fields the server will persist. null = unknown (loading/unavailable) → do not gate editability.
+  writableFields: Set<string> | null;
 }
 
 export const PatientInfoContext = createContext<PatientInfoContextValue | null>(null);

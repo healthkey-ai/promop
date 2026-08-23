@@ -2,13 +2,14 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { AxiosInstance } from "axios";
 import type { PatientInfoData } from "./patientInfoTypes";
 
-const KEYS = {
-  me: ["patient-info", "me"] as const,
-};
+// Keys are scoped by apiBasePath so a shared QueryClient mounting widgets against different APIs
+// does not reuse the first instance's cached record/descriptor.
+const meKey = (base: string) => ["patient-info", "me", base] as const;
+const descriptorKey = (base: string) => ["patient-info", "descriptor", base] as const;
 
 export function usePatientInfoMe(apiClient?: AxiosInstance, apiBasePath = "") {
   return useQuery({
-    queryKey: KEYS.me,
+    queryKey: meKey(apiBasePath),
     queryFn: async () => {
       const resp = await apiClient!.get<PatientInfoData>(
         `${apiBasePath}/patient-info/me/`,
@@ -17,6 +18,27 @@ export function usePatientInfoMe(apiClient?: AxiosInstance, apiBasePath = "") {
     },
     enabled: !!apiClient,
   });
+}
+
+// The set of projection fields the server will actually persist (`editable_fields`), so the editor
+// can keep fields with no write path (email, computed, unmapped, …) non-editable — a user never
+// edits a field that silently would not save. This is the CB integration's OWN writable set, which
+// is narrower than the descriptor's `writable` flag (email is descriptor-writable but deferred
+// here). Null while loading or on failure → the editor does not gate (falls back to letting the
+// server 4xx), so a descriptor outage never locks the whole form.
+export function useWritableFields(apiClient?: AxiosInstance, apiBasePath = ""): Set<string> | null {
+  const { data } = useQuery({
+    queryKey: descriptorKey(apiBasePath),
+    queryFn: async () => {
+      const resp = await apiClient!.get<{ editable_fields?: string[] }>(
+        `${apiBasePath}/patient-info/descriptor/`,
+      );
+      return resp.data;
+    },
+    enabled: !!apiClient,
+    staleTime: Infinity,
+  });
+  return data?.editable_fields ? new Set(data.editable_fields) : null;
 }
 
 export function usePatchPatientInfo(apiClient?: AxiosInstance, apiBasePath = "") {
@@ -36,10 +58,18 @@ export function usePatchPatientInfo(apiClient?: AxiosInstance, apiBasePath = "")
       // the serializer.save() and the GET response (e.g. disease gets cleared by
       // refresh_patient_info and not restored correctly).  Merging the PATCH result
       // directly avoids a round-trip and keeps editedInfo in sync with the cache.
-      queryClient.setQueryData(KEYS.me, (old: PatientInfoData | undefined) => {
+      queryClient.setQueryData(meKey(apiBasePath), (old: PatientInfoData | undefined) => {
         if (!old) return old;
-        const { previous_values: _pv, ...fields } = result;
-        return { ...old, patient_info: { ...old.patient_info, ...fields } };
+        // `patient_name` is a top-level envelope field (the User's display name), not a projection
+        // field, and `write` is the save summary — pull both out of the merge so the name updates
+        // where the widget reads it and `write` doesn't pollute patient_info.
+        const { previous_values: _pv, patient_name, write: _w, ...fields } =
+          result as Record<string, unknown>;
+        return {
+          ...old,
+          patient_name: (patient_name as string | undefined) ?? old.patient_name,
+          patient_info: { ...old.patient_info, ...fields },
+        };
       });
     },
   });
