@@ -1424,15 +1424,28 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
             from omop_core.services.lot_regimens import get_regimen_name
             _drug_cnames = [normalize_drug_name(n) for de in drugs_in_episode for n in [_usable_concept_name(de.drug_concept)] if n]
             _regimen_name = get_regimen_name({n.lower().strip() for n in _drug_cnames}) if _drug_cnames else None
-            if not _regimen_name:
+            # Retry per source value only for a single-drug line. This asks about
+            # one value at a time, so on a combination every answer is about one
+            # of its drugs -- which is how a line of bortezomib and lenalidomide
+            # came to read "Lenalidomide monotherapy" (#642). The multi-drug guard
+            # inside get_regimen_name cannot see that from a one-element set.
+            if not _regimen_name and len({n.lower().strip() for n in _drug_cnames}) <= 1:
                 for sv in source_value_set:
                     _regimen_name = get_regimen_name({sv.lower()})
                     if _regimen_name:
                         break
+            # A single source value may itself be the regimen as written ("VRd"),
+            # so it is worth more than a joined list. Several of them are not:
+            # `next(iter(...))` over a set picks an arbitrary one and silently
+            # drops the rest, which relabelled the same combination as
+            # "bortezomib". Name every drug instead, in a stable order.
+            _single_source = (
+                next(iter(source_value_set)) if len(source_value_set) == 1 else None
+            )
             drug_names = (
                 _regimen_name
-                or next(iter(source_value_set), None)  # raw regimen name from drug_source_value
-                or ' + '.join(_drug_cnames)
+                or _single_source
+                or ' + '.join(sorted(source_value_set or _drug_cnames))
                 or 'Unknown'
             )
 
