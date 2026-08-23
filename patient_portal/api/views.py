@@ -5085,6 +5085,7 @@ class PersonViewSet(viewsets.GenericViewSet):
         # Person. The row is created on first write, because a patient whose
         # address arrives after registration has no location to update.
         location_updates = {}
+        touched_location = []
         for field, (column, kind, max_len) in _PERSON_LOCATION_FIELDS.items():
             if field not in request.data:
                 continue
@@ -5136,12 +5137,28 @@ class PersonViewSet(viewsets.GenericViewSet):
                 changed.append('location_id')
             elif location_changed:
                 location.save(update_fields=location_changed)
+                # Kept out of `changed`, which is a list of *Person* columns
+                # handed to person.save(update_fields=...) — a Location column
+                # there would raise. Tracked separately so the refresh below
+                # still fires.
+                touched_location = location_changed
 
+        # A Location edit changes the projection just as much as a Person edit,
+        # and it used to fall through both of these. `changed` only ever held
+        # Person columns, plus 'location_id' when the row was *created* — so the
+        # first address write refreshed (it created the row) and every later one
+        # did not. The Location row was updated and the projection was not,
+        # leaving the database saying Somerville while the record read Cambridge,
+        # under a 200 reporting no change at all.
         if changed:
             person.save(update_fields=changed)
+        if changed or touched_location:
             refresh_patient_record(person)
 
-        return Response({'person_id': person.person_id, 'updated_fields': changed})
+        return Response({
+            'person_id': person.person_id,
+            'updated_fields': changed + touched_location,
+        })
 
 
 # =============================================================================

@@ -104,6 +104,46 @@ class TestWritingLocation:
         assert pr.latitude == pytest.approx(42.3601)
         assert pr.longitude == pytest.approx(-71.0589)
 
+    def test_a_later_write_rederives_without_being_asked(self, staff_client, person):
+        """The endpoint must derive, not merely store.
+
+        The first address write creates the Location row, and creating it puts
+        'location_id' on Person — which is what used to trigger the refresh. A
+        later write only updates the Location, so nothing landed on Person and
+        the refresh never fired: the row said one city and the projection kept
+        another, under a 200 reporting no change.
+
+        The existing projection test does not catch this because it calls
+        refresh_patient_record itself, and because a single write is always the
+        creating one.
+        """
+        _patch(staff_client, person, {'city': 'Boston'})
+
+        _patch(staff_client, person, {'city': 'Cambridge'})
+
+        # No manual refresh: the point is that the endpoint did it.
+        pr = PatientRecord.objects.get(person=person)
+        assert pr.city == 'Cambridge'
+
+    def test_a_later_write_reports_what_it_changed(self, staff_client, person):
+        # `updated_fields: []` over a write that did change the database is worse
+        # than an error -- the caller has no way to know it needs to re-read.
+        _patch(staff_client, person, {'city': 'Boston'})
+
+        resp = _patch(staff_client, person, {'city': 'Cambridge', 'country': 'USA'})
+
+        assert resp.status_code == 200
+        assert set(resp.json()['updated_fields']) >= {'city', 'country'}
+
+    def test_a_write_that_changes_nothing_reports_nothing(self, staff_client, person):
+        # The converse still has to hold, or the caller learns nothing from the
+        # field list.
+        _patch(staff_client, person, {'city': 'Boston'})
+
+        resp = _patch(staff_client, person, {'city': 'Boston'})
+
+        assert resp.json()['updated_fields'] == []
+
     def test_a_field_not_sent_is_left_alone(self, staff_client, person):
         _patch(staff_client, person, {'city': 'Boston', 'country': 'USA'})
 
