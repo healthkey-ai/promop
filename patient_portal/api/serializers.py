@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from patient_portal.models import Identity, PatientConsent, PatientMessage
 from omop_core.models import (
-    PatientRecord, Concept, FieldConceptMapping, FieldSynonym,
+    PatientRecord, Concept, FieldConceptMapping, FieldSynonym, Person,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
     Survey, PatientSurveyResponse,
@@ -1027,3 +1027,58 @@ class FieldSynonymSerializer(serializers.ModelSerializer):
         model = FieldSynonym
         fields = ['id', 'field_name', 'synonym_text', 'source', 'created_by', 'created_at']
         read_only_fields = ['id', 'source', 'created_by', 'created_at']
+
+
+class TherapyLineDrugSerializer(serializers.Serializer):
+    """One drug given in a line, named by concept."""
+
+    concept_id = serializers.IntegerField()
+    source_value = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True, max_length=50,
+    )
+
+
+class TherapyLineWriteSerializer(serializers.Serializer):
+    """A line of therapy as a clinician describes it.
+
+    Deliberately not a ModelSerializer: a line of therapy is not a row. It is a
+    set of DrugExposures grouped by an Episode through EpisodeEvent, and the
+    therapy fields on ``PatientRecord`` are inferred back out of that grouping.
+    This is the vocabulary of the clinic -- which line, which drugs, which dates
+    -- and the service turns it into the CDM shape.
+    """
+
+    person = serializers.PrimaryKeyRelatedField(queryset=Person.objects.all())
+    line_number = serializers.IntegerField(min_value=1)
+    start_date = serializers.DateField(required=False, allow_null=True)
+    end_date = serializers.DateField(required=False, allow_null=True)
+    drugs = TherapyLineDrugSerializer(many=True, required=False)
+    regimen_concept_id = serializers.IntegerField(required=False, allow_null=True)
+    outcome = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True,
+    )
+    source_value = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True, max_length=50,
+    )
+
+    def validate_start_date(self, value):
+        if value and value > date.today():
+            raise serializers.ValidationError('start_date cannot be in the future.')
+        return value
+
+    def validate(self, attrs):
+        start, end = attrs.get('start_date'), attrs.get('end_date')
+        if start and end and end < start:
+            raise serializers.ValidationError(
+                {'end_date': 'end_date cannot precede start_date.'},
+            )
+        # A line with neither drugs nor a named regimen groups nothing, so
+        # inference reads it back as an empty line: the write would appear to
+        # succeed and change none of the fields the caller was trying to set.
+        if not attrs.get('drugs') and not attrs.get('regimen_concept_id'):
+            raise serializers.ValidationError(
+                'Provide at least one drug, or a regimen_concept_id naming the '
+                'regimen. A line with neither groups no drug exposures and no '
+                'therapy field would follow from it.',
+            )
+        return attrs

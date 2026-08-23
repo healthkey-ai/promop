@@ -38,7 +38,10 @@ class TherapyLineEpisodeResult:
     event_ids   — EpisodeEvent pks touched (created or pre-existing links)
     """
 
-    __slots__ = ('episode', 'created', 'event_ids')
+    __slots__ = ('episode', 'created', 'event_ids',
+                 # Attached by author_therapy_line, which also writes the
+                 # exposures the episode groups.
+                 'drug_exposure_ids', 'drugs_created')
 
     def __init__(self, episode, created, event_ids):
         self.episode = episode
@@ -209,3 +212,106 @@ def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_m
     )
     obs._skip_patient_record_refresh = True
     obs.save()
+
+
+def author_therapy_line(
+    person,
+    *,
+    line_number,
+    drugs=(),
+    start_date=None,
+    end_date=None,
+    regimen_concept_id=None,
+    outcome=None,
+    source_value=None,
+):
+    """Record a line of therapy: its drug exposures, its Episode, and the links.
+
+    A line of therapy is not one row. It is a set of DrugExposures grouped by an
+    Episode through EpisodeEvent, and every therapy field on ``PatientRecord`` --
+    ``first_line_therapy``, ``therapy_lines_count``, the intents, the outcomes,
+    ``treatment_refractory_status`` -- is read back out of that grouping by
+    regimen inference. There is no column to write.
+
+    That is three POSTs with concept ids a browser has no business knowing, and
+    ``Episode`` additionally needs a client-supplied primary key,
+    ``episode_object_concept`` and ``episode_type_concept``. Doing it here means
+    a caller sends what a clinician knows -- which line, which drugs, which dates
+    -- and the CDM tagging stays identical to every other path, because the
+    grouping still goes through ``upsert_therapy_line_episode``.
+
+    Idempotent in both halves. The Episode keys on ``(person, line_number)``, and
+    a drug exposure keys on ``(drug_source_value, drug_exposure_start_date)`` --
+    the same identity the bulk write path and FHIR ingest use, so re-sending a
+    line converges instead of stacking duplicates.
+
+    Args:
+        person: OMOP Person.
+        line_number: LOT number (1, 2, 3…).
+        drugs: iterable of ``{'concept_id': int, 'source_value': str|None}``.
+        start_date / end_date: ``date`` objects or None.
+        regimen_concept_id: resolved regimen concept, used as
+            ``episode_object_concept`` and asserted via ``episode_source_concept``.
+        outcome: optional outcome string → ``LOT-{n}-outcome`` Observation.
+        source_value: ``episode_source_value``; defaults to ``LOT-{n}``.
+
+    Returns a TherapyLineEpisodeResult with two extra attributes attached:
+    ``drug_exposure_ids`` and ``drugs_created``.
+    """
+    from omop_core.models import DrugExposure
+
+    ehr_type = _concept(CONCEPT_EHR_TYPE)
+    exposure_ids = []
+    created = 0
+
+    for drug in drugs:
+        concept_id = drug.get('concept_id') if isinstance(drug, dict) else drug
+        concept = _concept(concept_id)
+        if concept is None:
+            # A drug whose concept is not loaded cannot be written, and silently
+            # dropping it would produce a line that looks complete and infers the
+            # wrong regimen. Refuse the whole line instead.
+            raise ValueError(f'Unknown drug concept_id {concept_id}')
+
+        raw = (drug.get('source_value') if isinstance(drug, dict) else None)
+        raw = (raw or concept.concept_name or '')[:50]
+
+        existing = DrugExposure.objects.filter(
+            person=person,
+            drug_source_value=raw,
+            drug_exposure_start_date=start_date,
+        ).order_by('drug_exposure_id').first()
+        if existing is not None:
+            exposure_ids.append(existing.drug_exposure_id)
+            continue
+
+        exposure = DrugExposure(
+            drug_exposure_id=next_pk(DrugExposure, 'drug_exposure_id'),
+            person=person,
+            drug_concept=concept,
+            drug_exposure_start_date=start_date,
+            drug_exposure_end_date=end_date,
+            drug_type_concept=ehr_type,
+            drug_source_value=raw,
+        )
+        exposure.save()
+        exposure_ids.append(exposure.drug_exposure_id)
+        created += 1
+
+    regimen_concept = _concept(regimen_concept_id) if regimen_concept_id else None
+    result = upsert_therapy_line_episode(
+        person,
+        line_number=line_number,
+        regimen_concept=regimen_concept,
+        # Asserted, not inferred: the caller named this regimen, and derivation
+        # reads episode_source_concept to decide which of the two it is.
+        regimen_source_concept=regimen_concept,
+        start_date=start_date,
+        end_date=end_date,
+        drug_exposure_ids=exposure_ids,
+        outcome=outcome,
+        source_value=source_value,
+    )
+    result.drug_exposure_ids = exposure_ids
+    result.drugs_created = created
+    return result

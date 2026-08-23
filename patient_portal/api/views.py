@@ -90,6 +90,7 @@ from .serializers import (
     PatientConsentSerializer,
     PatientMessageSerializer,
     ImmunizationSerializer, AllergySerializer,
+    TherapyLineWriteSerializer,
 )
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
@@ -7717,3 +7718,108 @@ def field_synonym_detail(request, pk):
 
     synonym.delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class TherapyLineViewSet(viewsets.ViewSet):
+    """Author a line of therapy.
+
+    ``POST /api/v1/therapy-lines/``
+
+    Every therapy field on ``PatientRecord`` is derived: a line of therapy is a
+    set of DrugExposures grouped by an Episode through EpisodeEvent, and
+    ``first_line_therapy``, ``therapy_lines_count``, the intents, the outcomes
+    and ``treatment_refractory_status`` are all inferred back out of that
+    grouping. None of them is a column an editor can write, which is why the
+    treatment tab is read-only.
+
+    Writing one directly means three POSTs -- the exposures, the episode, the
+    links -- carrying ``episode_concept=32531``, an
+    ``episode_type_concept``, an ``episode_object_concept`` and a
+    client-supplied ``episode_id``. That is CDM knowledge a browser should not
+    hold, and getting any of it wrong produces a line that stores cleanly and
+    infers wrongly.
+
+    So the caller sends what a clinician knows and the server does the rest,
+    through the same ``upsert_therapy_line_episode`` every other path uses, so
+    the tagging cannot drift. One transaction; the record is re-derived once at
+    the end rather than per row.
+    """
+
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
+
+    def create(self, request):
+        from omop_core.services.episode_service import author_therapy_line
+
+        serializer = TherapyLineWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        person = data['person']
+
+        # Same create-time check the single-row clinical writes use: object-level
+        # permissions do not fire on create, so the queryset scoping that
+        # protects reads is not protecting this.
+        org = get_request_org(request)
+        if not is_service_token(request):
+            if org is not None:
+                existing = PatientRecord.objects.filter(person=person).first()
+                if existing is not None and existing.organization is not None \
+                        and existing.organization != org:
+                    return Response(
+                        {'detail': 'Person does not belong to your organization.'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+            elif not getattr(request.user, 'is_staff', False):
+                from omop_core.authorization import can_write_patient
+                if not can_write_patient(request.user, person.person_id):
+                    return Response(
+                        {'detail': 'Access denied.'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
+        try:
+            with transaction.atomic():
+                # The exposures fire post_save, and each one would re-derive the
+                # whole record. Derive once, after the episode exists -- before
+                # it, the exposures are ungrouped and inference would read a line
+                # that is half-written.
+                with suppress_patient_record_refresh():
+                    result = author_therapy_line(
+                        person,
+                        line_number=data['line_number'],
+                        drugs=data.get('drugs') or (),
+                        start_date=data.get('start_date'),
+                        end_date=data.get('end_date'),
+                        regimen_concept_id=data.get('regimen_concept_id'),
+                        outcome=data.get('outcome') or None,
+                        source_value=data.get('source_value') or None,
+                    )
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if result.episode is None:
+            # upsert_therapy_line_episode returns no episode when the Treatment
+            # Regimen concept is absent, which means the vocabulary is not
+            # loaded. Reporting 201 over a line that was not grouped would be a
+            # lie -- nothing would have been inferred from it.
+            return Response(
+                {'detail': (
+                    'Treatment Regimen concept (32531) is not loaded, so the '
+                    'therapy line could not be grouped. Load the Episode '
+                    'vocabulary and retry.'
+                )},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        person.refresh_from_db()
+        record = refresh_patient_record(person)
+        return Response(
+            {
+                'episode_id': result.episode.episode_id,
+                'line_number': data['line_number'],
+                'created': result.created,
+                'drug_exposure_ids': result.drug_exposure_ids,
+                'drugs_created': result.drugs_created,
+                'patient_info': PatientRecordSerializer(record).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )

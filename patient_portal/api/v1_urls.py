@@ -8,6 +8,7 @@ from .views import (
     PersonViewSet,
     ConditionOccurrenceViewSet, DrugExposureViewSet, MeasurementViewSet,
     ObservationViewSet, ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
+    TherapyLineViewSet,
     PatientDocumentViewSet,
     PatientTrialEnrollmentViewSet,
     ImmunizationListViewSet, AllergyListViewSet,
@@ -53,6 +54,9 @@ router.register(r'observations', ObservationViewSet, basename='v1-observations')
 router.register(r'procedures', ProcedureOccurrenceViewSet, basename='v1-procedures')
 router.register(r'episodes', EpisodeViewSet, basename='v1-episodes')
 router.register(r'episode-events', EpisodeEventViewSet, basename='v1-episode-events')
+# Authoring a line of therapy, which is an Episode grouping drug exposures rather
+# than any single row. See TherapyLineViewSet.
+router.register(r'therapy-lines', TherapyLineViewSet, basename='v1-therapy-lines')
 router.register(r'documents', PatientDocumentViewSet, basename='v1-documents')
 router.register(r'trial-enrollments', PatientTrialEnrollmentViewSet, basename='v1-trial-enrollments')
 router.register(r'surveys', SurveyViewSet, basename='v1-surveys')
