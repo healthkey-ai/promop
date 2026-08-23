@@ -40,6 +40,10 @@ export interface FieldDescriptor {
   inputs?: string[];
   /** selectable */
   qualifies?: string;
+  /** profile: the curated choices the server resolves a concept from. Not the
+   *  whole vocabulary — OMOP's Race holds 1,409 concepts, which is not the
+   *  question a clinical form asks. */
+  options?: Array<{ value: string; code?: string }>;
   /** authored: what to write instead, since no single fact backs this field. */
   authored_via?: {
     target?: string;

@@ -1,9 +1,12 @@
+import { useState } from 'react';
 import { useVocabulary } from '@/hooks/useVocabulary';
-import Field from '../Field';
+import { useWritableFields } from '@/hooks/useWritableFields';
+import ClinicalField from '../ClinicalField';
 import Section from '../Section';
 import { Input } from '@/components/shadcn/input';
+import { today } from '@/api/clinicalFacts';
 import {
-  GENDER_OPTIONS, COUNTRY_OPTIONS, US_STATES, RACE_OPTIONS, ETHNICITY_OPTIONS,
+  COUNTRY_OPTIONS, US_STATES,
   DISEASE_OPTIONS, STAGE_OPTIONS, HISTOLOGIC_TYPE_OPTIONS,
   ECOG_OPTIONS, KARNOFSKY_OPTIONS,
 } from '../patientConstants';
@@ -17,17 +20,32 @@ interface Props {
   diseaseType?: 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'other';
 }
 
-function calculateAge(dateOfBirth: string): number | null {
-  if (!dateOfBirth) return null;
-  const today = new Date();
-  const birthDate = new Date(dateOfBirth);
-  let age = today.getFullYear() - birthDate.getFullYear();
-  const m = today.getMonth() - birthDate.getMonth();
-  if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) age--;
-  return age;
-}
+/**
+ * Demographics, diagnosis summary and vitals, rendered against the descriptor.
+ *
+ * This tab is the one that spans both write targets. Gender, race, ethnicity and
+ * the address live on `Person` and are written by patching it; the vitals and
+ * the performance scores are OMOP measurements, written as facts that derivation
+ * reads back. `writeFieldValue` routes on the target, so the tab does not need
+ * to know which is which — only to stop offering boxes the server refuses.
+ *
+ * Sixteen of its thirty fields are writable. The rest divide into three honest
+ * refusals: twelve are unmapped and have no write path at all yet, `bmi` is
+ * computed from height and weight, and `date_of_birth` is fillable only while
+ * empty — the persons endpoint never overwrites one, so a box that appeared to
+ * accept a correction would lie about the outcome.
+ *
+ * Where the descriptor carries its own `options` — gender, race, ethnicity —
+ * those win over the local constant. They are the curated set the server
+ * resolves a concept from, and a longer local list would offer values the write
+ * could not code.
+ */
+export default function GeneralTab({
+  formData, onChange, editedName, onNameChange, onZipcodeChange, diseaseType,
+}: Props) {
+  const { descriptors, loading } = useWritableFields();
+  const [date, setDate] = useState(today());
 
-export default function GeneralTab({ formData, onChange, editedName, onNameChange, onZipcodeChange, diseaseType }: Props) {
   const { source: ecogSource }        = useVocabulary('ecog-status', 'code');
   const { source: karnofskySource }   = useVocabulary('karnofsky-score', 'code');
   const { source: diseaseSource }     = useVocabulary('disease', 'title');
@@ -35,43 +53,82 @@ export default function GeneralTab({ formData, onChange, editedName, onNameChang
   const { source: ethnicitySource }   = useVocabulary('ethnicity', 'title');
   const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
 
-  const age = formData?.date_of_birth ? calculateAge(formData.date_of_birth as string) : null;
-  const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
+  const histOptions = histologicOptions.length
+    ? histologicOptions.map((o: { value: string }) => o.value)
+    : HISTOLOGIC_TYPE_OPTIONS;
+
+  const age = formData?.date_of_birth
+    ? calculateAge(formData.date_of_birth as string)
+    : null;
+
+  /**
+   * A measurement is an event, so it needs a date; a Person attribute is not, so
+   * it does not. Offering a result date beside a gender picker would suggest the
+   * record keeps a history of it, which it does not.
+   */
+  const field = (
+    label: string,
+    name: string,
+    type: 'text' | 'number' | 'date' | 'boolean' | 'select' | 'email',
+    extra: { options?: string[]; vocabSource?: ReturnType<typeof useVocabulary>['source'] } = {},
+  ) => {
+    const descriptor = descriptors[name];
+    const dated = descriptor?.writable && descriptor.target === 'measurement';
+    return (
+      <ClinicalField
+        label={label}
+        name={name}
+        type={type}
+        value={formData?.[name]}
+        descriptor={descriptor}
+        options={extra.options}
+        vocabSource={extra.vocabSource}
+        onChange={onChange}
+        date={dated ? date : undefined}
+        onDateChange={dated ? setDate : undefined}
+      />
+    );
+  };
 
   return (
     <div>
+      {!loading && (
+        <p className="mb-4 text-xs text-muted-foreground">
+          Demographics are stored on the patient record; vitals and performance
+          scores are stored as OMOP measurements, so editing one records a result
+          dated below and re-derives the record. A field without an editable box
+          explains why underneath it.
+        </p>
+      )}
+
       <Section title="Patient Details" description="Basic patient information and demographics.">
-      <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium text-portal-text-primary">Patient Name</label>
-          <Input
-            value={editedName}
-            onChange={(e) => onNameChange(e.target.value)}
-          />
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-portal-text-primary">Patient Name</label>
+            <Input value={editedName} onChange={(e) => onNameChange(e.target.value)} />
+          </div>
+
+          {field('Date of Birth', 'date_of_birth', 'date')}
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-portal-text-primary">Age</label>
+            <Input value={age ?? ''} disabled readOnly />
+            <p className="text-xs text-muted-foreground">
+              Calculated from the date of birth.
+            </p>
+          </div>
+
+          {field('Gender', 'gender', 'select')}
+
+          <div className="sm:col-span-2">
+            {field('Email', 'email', 'email')}
+          </div>
         </div>
-
-        <Field label="Date of Birth" name="date_of_birth" type="date"
-          value={formData?.date_of_birth} onChange={onChange} />
-
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium text-portal-text-primary">Age</label>
-          <Input value={age ?? ''} disabled readOnly />
-        </div>
-
-        <Field label="Gender" name="gender" type="select"
-          value={formData?.gender} options={GENDER_OPTIONS} onChange={onChange} />
-
-        <div className="sm:col-span-2">
-          <Field label="Email" name="email" type="email"
-            value={formData?.email} onChange={onChange} />
-        </div>
-      </div>
       </Section>
 
       <Section title="Location" description="Patient address and region.">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Country" name="country" type="select"
-            value={formData?.country} options={COUNTRY_OPTIONS} onChange={onChange} />
+          {field('Country', 'country', 'select', { options: COUNTRY_OPTIONS })}
 
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-portal-text-primary">Postal Code / Zip Code</label>
@@ -82,108 +139,80 @@ export default function GeneralTab({ formData, onChange, editedName, onNameChang
             />
           </div>
 
-          <Field label="City" name="city" type="text"
-            value={formData?.city} onChange={onChange} />
+          {field('City', 'city', 'text')}
 
           {formData?.country === 'United States'
-            ? <Field label="State" name="region" type="select"
-                value={formData?.region} options={US_STATES} onChange={onChange} />
-            : <Field label="Region/State" name="region" type="text"
-                value={formData?.region} onChange={onChange} />
-          }
+            ? field('State', 'region', 'select', { options: US_STATES })
+            : field('Region/State', 'region', 'text')}
         </div>
       </Section>
 
       <Section title="Race &amp; Ethnicity" description="Self-reported race and ethnicity (OMB standard categories).">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Race" name="race" type="select"
-            value={formData?.race} options={RACE_OPTIONS}
-            onChange={onChange} />
-          <Field label="Ethnicity" name="ethnicity" type="select"
-            value={formData?.ethnicity} options={ETHNICITY_OPTIONS}
-            onChange={onChange} vocabSource={ethnicitySource} />
+          {field('Race', 'race', 'select')}
+          {field('Ethnicity', 'ethnicity', 'select', { vocabSource: ethnicitySource })}
         </div>
       </Section>
 
       <Section title="Clinical Summary" description="Diagnosis and eligibility-related information.">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Disease" name="disease" type="select"
-            value={formData?.disease} options={DISEASE_OPTIONS}
-            onChange={onChange} vocabSource={diseaseSource} />
-
-          <Field label="Stage" name="stage" type="select"
-            value={formData?.stage} options={STAGE_OPTIONS}
-            onChange={onChange} vocabSource={cancerStageSource} />
+          {field('Disease', 'disease', 'select', { options: DISEASE_OPTIONS, vocabSource: diseaseSource })}
+          {field('Stage', 'stage', 'select', { options: STAGE_OPTIONS, vocabSource: cancerStageSource })}
 
           {(!diseaseType || diseaseType === 'breast' || diseaseType === 'other') && (
             <div className="sm:col-span-2">
-              <Field label="Histologic Type" name="histologic_type" type="select"
-                value={formData?.histologic_type} options={histOptions}
-                onChange={onChange} vocabSource={histologicSource} />
+              {field('Histologic Type', 'histologic_type', 'select', { options: histOptions, vocabSource: histologicSource })}
             </div>
           )}
 
-          <Field label="ECOG Performance Status" name="ecog_performance_status" type="select"
-            value={formData?.ecog_performance_status} options={ECOG_OPTIONS}
-            onChange={onChange} vocabSource={ecogSource} />
-
-          <Field label="ECOG Assessment Date" name="ecog_assessment_date" type="date"
-            value={formData?.ecog_assessment_date} onChange={onChange} />
-
-          <Field label="Karnofsky Performance Score" name="karnofsky_performance_score" type="select"
-            value={formData?.karnofsky_performance_score} options={KARNOFSKY_OPTIONS}
-            onChange={onChange} vocabSource={karnofskySource} />
+          {field('ECOG Performance Status', 'ecog_performance_status', 'select', { options: ECOG_OPTIONS, vocabSource: ecogSource })}
+          {field('ECOG Assessment Date', 'ecog_assessment_date', 'date')}
+          {field('Karnofsky Performance Score', 'karnofsky_performance_score', 'select', { options: KARNOFSKY_OPTIONS, vocabSource: karnofskySource })}
         </div>
       </Section>
 
       <Section title="Medical History" description="Pre-existing conditions and clinical status.">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="sm:col-span-2">
-            <Field label="Pre-existing Conditions" name="preexisting_conditions" type="text"
-              value={formData?.preexisting_conditions} onChange={onChange} />
+            {field('Pre-existing Conditions', 'preexisting_conditions', 'text')}
           </div>
-          <Field label="Peripheral Neuropathy Grade" name="peripheral_neuropathy_grade" type="number"
-            value={formData?.peripheral_neuropathy_grade} onChange={onChange} />
-          <Field label="No Other Active Malignancies" name="no_other_active_malignancies" type="boolean"
-            value={formData?.no_other_active_malignancies} onChange={onChange} />
-          <Field label="No Active Infection" name="no_active_infection_status" type="boolean"
-            value={formData?.no_active_infection_status} onChange={onChange} />
+          {field('Peripheral Neuropathy Grade', 'peripheral_neuropathy_grade', 'number')}
+          {field('No Other Active Malignancies', 'no_other_active_malignancies', 'boolean')}
+          {field('No Active Infection', 'no_active_infection_status', 'boolean')}
         </div>
       </Section>
 
       <Section title="Infection Status" description="Viral infection history.">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="HIV Positive" name="hiv_status" type="boolean"
-            value={formData?.hiv_status} onChange={onChange} />
-          <Field label="No HIV" name="no_hiv_status" type="boolean"
-            value={formData?.no_hiv_status} onChange={onChange} />
-          <Field label="Hepatitis B Positive" name="hepatitis_b_status" type="boolean"
-            value={formData?.hepatitis_b_status} onChange={onChange} />
-          <Field label="No Hepatitis B" name="no_hepatitis_b_status" type="boolean"
-            value={formData?.no_hepatitis_b_status} onChange={onChange} />
-          <Field label="Hepatitis C Positive" name="hepatitis_c_status" type="boolean"
-            value={formData?.hepatitis_c_status} onChange={onChange} />
-          <Field label="No Hepatitis C" name="no_hepatitis_c_status" type="boolean"
-            value={formData?.no_hepatitis_c_status} onChange={onChange} />
+          {field('HIV Positive', 'hiv_status', 'boolean')}
+          {field('No HIV', 'no_hiv_status', 'boolean')}
+          {field('Hepatitis B Positive', 'hepatitis_b_status', 'boolean')}
+          {field('No Hepatitis B', 'no_hepatitis_b_status', 'boolean')}
+          {field('Hepatitis C Positive', 'hepatitis_c_status', 'boolean')}
+          {field('No Hepatitis C', 'no_hepatitis_c_status', 'boolean')}
         </div>
       </Section>
 
       <Section title="Physical Measurements" description="Body measurements and vital signs.">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Weight (kg)" name="weight" type="number"
-            value={formData?.weight} onChange={onChange} />
-          <Field label="Height (cm)" name="height" type="number"
-            value={formData?.height} onChange={onChange} />
-          <Field label="BMI" name="bmi" type="number"
-            value={formData?.bmi} onChange={onChange} />
-          <Field label="Systolic Blood Pressure (mmHg)" name="systolic_blood_pressure" type="number"
-            value={formData?.systolic_blood_pressure} onChange={onChange} />
-          <Field label="Diastolic Blood Pressure (mmHg)" name="diastolic_blood_pressure" type="number"
-            value={formData?.diastolic_blood_pressure} onChange={onChange} />
-          <Field label="Heart Rate (bpm)" name="heartrate" type="number"
-            value={formData?.heartrate} onChange={onChange} />
+          {field('Weight (kg)', 'weight', 'number')}
+          {field('Height (cm)', 'height', 'number')}
+          {field('BMI', 'bmi', 'number')}
+          {field('Systolic Blood Pressure (mmHg)', 'systolic_blood_pressure', 'number')}
+          {field('Diastolic Blood Pressure (mmHg)', 'diastolic_blood_pressure', 'number')}
+          {field('Heart Rate (bpm)', 'heartrate', 'number')}
         </div>
       </Section>
     </div>
   );
+}
+
+function calculateAge(dateOfBirth: string): number | null {
+  if (!dateOfBirth) return null;
+  const today = new Date();
+  const birthDate = new Date(dateOfBirth);
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const m = today.getMonth() - birthDate.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) age--;
+  return age;
 }
