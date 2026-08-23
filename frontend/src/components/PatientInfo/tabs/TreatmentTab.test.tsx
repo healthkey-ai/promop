@@ -10,7 +10,7 @@
  * lists, date pickers, an outcome dropdown — each returning a 405. These pin that
  * none of them are offered any more, and that the tab explains what to do instead.
  */
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import TreatmentTab from './TreatmentTab';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -242,5 +242,37 @@ describe('TreatmentTab - component concept ids', () => {
     });
     expect(screen.getByText('Line 3:')).toBeInTheDocument();
     expect(screen.getByText('Line 5:')).toBeInTheDocument();
+  });
+});
+
+/**
+ * The tab is read-only, but it is not a dead end — it offers the one write that
+ * moves the fields it displays.
+ */
+describe('TreatmentTab - authoring a line', () => {
+  it('offers the add-line action', async () => {
+    renderTab({ ...THREE_LINES, person_id: 262 });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.getByRole('button', { name: /add therapy line/i })).toBeInTheDocument();
+  });
+
+  it('opens the dialog prefilled with the next line number', async () => {
+    // Three lines on record means the next one is the fourth.
+    renderTab({ ...THREE_LINES, person_id: 262 });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole('button', { name: /add therapy line/i }));
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
+    expect(screen.getByLabelText(/line number/i)).toHaveValue(4);
+  });
+
+  it('does not offer authoring without a person to write against', async () => {
+    // Rendered outside a patient context the write has no subject, and a button
+    // that cannot work is worse than no button.
+    renderTab(THREE_LINES);
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.queryByRole('button', { name: /add therapy line/i })).not.toBeInTheDocument();
   });
 });

@@ -10,6 +10,9 @@ export interface User {
 export interface PatientInfo {
   id?: number;
   person?: number;
+  /** The Person this record derives from. Present in every API response; the
+   *  therapy-line write needs it. */
+  person_id?: number;
   email?: string;
   
   // General

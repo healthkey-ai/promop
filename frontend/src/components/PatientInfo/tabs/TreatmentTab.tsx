@@ -1,6 +1,9 @@
+import { useState } from 'react';
+import { Plus } from 'lucide-react';
 import { useWritableFields, type FieldDescriptor } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
 import Section from '../Section';
+import TherapyLineDialog from '../TherapyLineDialog';
 
 interface LaterTherapy {
   therapy: string;
@@ -13,6 +16,9 @@ interface Props {
   formData: Record<string, unknown>;
   onChange: (field: string, value: unknown) => void;
   diseaseType: 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'other';
+  /** Receives the re-derived record after a line is authored. Without it the tab
+   *  still writes correctly but shows stale values until the next refetch. */
+  onRecordRefreshed?: (patientInfo: Record<string, unknown>) => void;
 }
 
 /**
@@ -86,8 +92,13 @@ function HowToAuthor({ descriptor }: { descriptor?: FieldDescriptor }) {
   );
 }
 
-export default function TreatmentTab({ formData, onChange }: Props) {
+export default function TreatmentTab({ formData, onChange, onRecordRefreshed }: Props) {
   const { descriptors } = useWritableFields();
+  const [dialogOpen, setDialogOpen] = useState(false);
+
+  // person_id rides in the record the tab already receives, so authoring needs no
+  // extra prop threaded through both hosts.
+  const personId = Number(formData?.person_id ?? formData?.person ?? 0) || null;
 
   const field = (label: string, name: string, type: 'text' | 'number' | 'date') => (
     <ClinicalField
@@ -114,6 +125,27 @@ export default function TreatmentTab({ formData, onChange }: Props) {
   return (
     <div>
       <HowToAuthor descriptor={descriptors.first_line_therapy} />
+
+      {personId !== null && (
+        <div className="mb-5">
+          <button
+            onClick={() => setDialogOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-muted"
+          >
+            <Plus size={14} />
+            Add therapy line
+          </button>
+        </div>
+      )}
+
+      {dialogOpen && personId !== null && (
+        <TherapyLineDialog
+          personId={personId}
+          defaultLineNumber={linesCount + 1}
+          onClose={() => setDialogOpen(false)}
+          onAuthored={(info) => onRecordRefreshed?.(info)}
+        />
+      )}
 
       <Section title="Treatment History">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
