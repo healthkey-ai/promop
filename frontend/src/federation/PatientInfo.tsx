@@ -73,9 +73,13 @@ function PatientInfoSkeleton() {
   );
 }
 
-function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps, "readOnly" | "onPatientUpdated">) {
+function PatientInfoInner({ readOnly, federated, onPatientUpdated }: Pick<PatientInfoProps, "readOnly" | "federated" | "onPatientUpdated">) {
   const { data, isLoading, isError, error } = usePatientInfoMe();
   const patchMutation = usePatchPatientInfo();
+  // `federated` is threaded from the mount (opts.apiBase includes /federation). In CB's federated
+  // mount the wearable-upload endpoints (/v1/patient-records/…) are not part of the federation
+  // surface, so the Wearable tab (which calls them directly) has no backend here — hide it.
+  // PROMOP's standalone app mounts without a /federation base, so it keeps the tab.
 
   const initialInfo = useMemo(() => {
     if (!data) return {};
@@ -266,7 +270,8 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
     );
   }
 
-  const tabLabels = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Behavior", "Wearable"];
+  const tabLabels = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Behavior"]
+    .concat(federated ? [] : ["Wearable"]);
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
     1: "Disease-specific clinical information and genetic details.",
@@ -347,6 +352,7 @@ export function PatientInfo({
   className,
   theme,
   readOnly,
+  federated,
   onPatientUpdated,
 }: PatientInfoProps) {
   return (
@@ -357,7 +363,7 @@ export function PatientInfo({
       theme={theme}
       className={className}
     >
-      <PatientInfoInner readOnly={readOnly} onPatientUpdated={onPatientUpdated} />
+      <PatientInfoInner readOnly={readOnly} federated={federated} onPatientUpdated={onPatientUpdated} />
     </PatientInfoProvider>
   );
 }

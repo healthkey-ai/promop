@@ -37,13 +37,17 @@ export function mount(el: HTMLElement, opts: MountOptions = {}): () => void {
     headers: opts.token ? { Authorization: `Token ${opts.token}` } : undefined,
   });
   const queryClient = new QueryClient();
+  // CB mounts this against its in-process /federation surface, where the wearable-upload endpoints
+  // don't exist. Detect that from apiBase and hide non-federated tabs. PROMOP's standalone app
+  // mounts without /federation, so it keeps them.
+  const federated = (opts.apiBase ?? "").includes("federation");
 
   const root = createRoot(el);
   roots.set(el, root);
   root.render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>
-        <PatientInfo apiClient={apiClient} readOnly={opts.readOnly ?? true} />
+        <PatientInfo apiClient={apiClient} readOnly={opts.readOnly ?? true} federated={federated} />
       </QueryClientProvider>
     </StrictMode>,
   );

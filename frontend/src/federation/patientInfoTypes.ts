@@ -9,6 +9,8 @@ export interface PatientInfoProps {
   className?: string;
   theme?: Partial<LabsThemeTokens>;
   readOnly?: boolean;
+  /** Host is CB's in-process federation surface — hide tabs (Wearable) whose endpoints aren't federated. */
+  federated?: boolean;
   onPatientUpdated?: (data: unknown) => void;
 }
 
