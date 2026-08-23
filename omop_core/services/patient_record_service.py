@@ -523,6 +523,65 @@ _ASSERTION_FIELDS = {
 }
 
 
+# Tables whose entries name a PatientRecord field. The extractors read these and
+# assign through a variable -- ``data[field] = …`` -- so a field can be fully
+# derived without its name appearing anywhere in the source as a literal.
+_FIELD_NAMING_TABLES = (
+    '_LOINC_LAB_FIELDS', '_SOURCE_VALUE_LAB_FIELDS', '_LEGACY_LAB_CONCEPT_FIELDS',
+    '_LAB_FIELD_ALIASES', '_BEHAVIOR_MEASUREMENT_FIELDS', '_ASSERTION_FIELDS',
+    '_GENETIC_MUTATION_LOINCS', 'WEARABLE_CONCEPT_CODE', '_FLC_FIELDS',
+    '_SLIM_FIELDS',
+)
+
+
+def derived_fields() -> frozenset:
+    """Every PatientRecord field some extractor populates.
+
+    There is no registry to read: the extractors assign into a dict, and roughly
+    two in five do it through a variable taken from a lookup table rather than a
+    literal. Counting only the literals says ``smoking_status`` has no
+    extractor, when in fact ``_BEHAVIOR_MEASUREMENT_FIELDS`` maps LOINC 72166-2
+    straight to it -- and 206 patients carry a value derived that way.
+
+    Getting this wrong matters in one direction in particular. A mapping makes a
+    field writable but does not make anything read the value back, so "nothing
+    derives this" is the warning that stops a curator approving a write into a
+    void. A warning that fires on a field which *is* derived teaches people to
+    ignore it.
+
+    Not provably complete -- a field could be assigned through a table this does
+    not list -- so it is used to *warn*, never to block.
+
+    Reads this module's own source, which makes it a tool rather than something
+    to call from a request: it costs a file read, and it needs the source to be
+    on disk. Both are fine for a management command and neither is fine in a
+    view.
+    """
+    import re
+    from pathlib import Path
+
+    source = Path(__file__).read_text()
+    fields = set(re.findall(r"data\[\s*'([a-z_0-9]+)'\s*\]\s*=", source))
+
+    module = globals()
+    for name in _FIELD_NAMING_TABLES:
+        table = module.get(name)
+        if table is None:
+            continue
+        entries = table.items() if isinstance(table, dict) else [(x, None) for x in table]
+        for key, value in entries:
+            for candidate in (key, value):
+                if isinstance(candidate, str):
+                    fields.add(candidate)
+                elif isinstance(candidate, (tuple, list)):
+                    fields.update(x for x in candidate if isinstance(x, str))
+
+    # Only names that are actually columns: the tables also carry LOINC codes and
+    # units, which are not fields.
+    columns = {f.name for f in PatientRecord._meta.get_fields()}
+    return frozenset(fields & columns)
+
+
 def _clear_derived_fields(patient_info: PatientRecord) -> None:
     """Reset all OMOP-derived fields to None so deletions are reflected."""
     for field in _OMOP_DERIVED_FIELDS:
