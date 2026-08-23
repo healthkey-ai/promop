@@ -385,7 +385,20 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
               diseaseType={getDiseaseType()}
             />
           )}
-          {activeTab === 2 && <TreatmentTab formData={editedInfo} onChange={handleFieldChange} diseaseType={getDiseaseType()} />}
+          {activeTab === 2 && (
+            <TreatmentTab
+              formData={editedInfo}
+              onChange={handleFieldChange}
+              diseaseType={getDiseaseType()}
+              onRecordRefreshed={(info) => {
+                // Same reason as the provider editor: the derived values have
+                // moved, so the save baseline has to move with them or the next
+                // autosave sends them back as edits.
+                setEditedInfo(info);
+                serverInfoRef.current = { ...info };
+              }}
+            />
+          )}
           {activeTab === 3 && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === 5 && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}

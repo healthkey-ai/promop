@@ -803,7 +803,20 @@ export default function PatientDetail({
                 )}
                 {activeTab === 2 && (
                   <>
-                    <TreatmentTab formData={editedInfo} onChange={handleFieldChange} diseaseType={getDiseaseType()} />
+                    <TreatmentTab
+                      formData={editedInfo}
+                      onChange={handleFieldChange}
+                      diseaseType={getDiseaseType()}
+                      onRecordRefreshed={(info) => {
+                        // The server already re-derived and returned the record.
+                        // Advancing the baseline too stops the next autosave
+                        // reading these derived moves as edits to read-only
+                        // columns — the failure #627 fixed.
+                        setPatientInfo(info);
+                        setEditedInfo(info);
+                        patientInfoRef.current = { ...info };
+                      }}
+                    />
                     {patientMode && (
                       <div className="mt-8 border-t border-gray-200 pt-6">
                         <ImmunizationList user={user ?? null} />
