@@ -74,6 +74,7 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 | TreatmentTab converted (read-only, all 26 derived) | #637 |
 | GeneralTab converted — first tab spanning both write targets | #645 |
 | DiseaseTab converted; approved concept mappings now make fields writable | #647 |
+| BehaviorTab converted — every tab now renders from the descriptor | #648 |
 | `POST /api/v1/therapy-lines/` — author a line | #639 |
 | Therapy-line dialog with RxNorm picker | #641 |
 | Regimen naming no longer mislabels a combination | #643 |
@@ -87,13 +88,16 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 | TreatmentTab | descriptor-driven | 26 | 0 — all authored |
 | GeneralTab | descriptor-driven | 30 | 16 |
 | DiseaseTab | descriptor-driven | 82 | 18 |
-| **BehaviorTab** | **not converted** | 27 | **1** |
+| BehaviorTab | descriptor-driven | 27 | 1 |
 | WearableTab | not converted | 20 | 0 — all computed |
 
-**1 writable field is unreachable today** (Step 3: `insurance_type` on
-BehaviorTab): it sits on an unconverted tab, so editing it PATCHes the projection
-and returns 405. That is the headline number this project is closing — 32 before
-Step 1, 16 after it.
+**No writable field is unreachable any more.** Every field the server says can be
+written is now reachable from a tab that writes it correctly — 32 were stranded
+before Step 1, 16 after it, 1 after Step 2, none after Step 3.
+
+What remains is not plumbing but curation: 130 fields have no concept assigned,
+and each one that gains an approved mapping becomes editable with no further UI
+work.
 
 ---
 
@@ -105,7 +109,7 @@ sees the real state rather than the intended one.
 
 - [x] **Step 1** — Convert GeneralTab (16 writable) — #645
 - [x] **Step 2** — Convert DiseaseTab (15 writable, +3 SCT) — #647
-- [ ] **Step 3** — Convert BehaviorTab (1 writable)
+- [x] **Step 3** — Convert BehaviorTab (1 writable) — #648
 - [ ] **Step 4** — Convert WearableTab (0 writable, read-only)
 - [ ] **Step 5** — Surface 13 writable fields no tab shows
 - [ ] **Step 6** — Concept assignment for the 133 unmapped fields (#595, curation)
