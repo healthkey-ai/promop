@@ -308,8 +308,10 @@ the durable clinical contract that the aggregate `later_component_ids` cannot pr
 - Data-quality check reporting patients whose therapy text has no concept resolution.
 - Frontend regimen picker validated against the vocabulary; display coded names.
 - ARTEMIS compliance — out of scope unless a consumer needs it.
-- **Migrate EXACT/SoC off legacy `/api/patient-info/` before sunset (2026-09-01)** —
-  P1's v1 structured payload is the landing zone; both consumers are still on legacy.
+- **Migrate consumers off the legacy `/api/` prefix before sunset (2026-12-01)** —
+  P1's v1 structured payload is the landing zone. Four consumers, not two: EXACT,
+  SoC, ht-phr, and promop's own React SPA (#666), which is the largest of them and
+  the reason the original 2026-09-01 date moved.
 
 ---
 

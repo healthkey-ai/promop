@@ -11535,8 +11535,22 @@ class ApiVersioningTest(TestCase):
         self.assertEqual(resp.get('Deprecation'), 'true')
 
     def test_legacy_path_has_sunset_header(self):
+        # Assert against the module constant rather than a literal: the sunset
+        # date moves as consumers migrate (#271), and a hardcoded copy here
+        # turns every date change into a spurious test failure.
+        from patient_portal.api.middleware import _SUNSET_DATE
+
         resp = self._client().get('/api/patient-info/')
-        self.assertEqual(resp.get('Sunset'), 'Tue, 01 Sep 2026 00:00:00 GMT')
+        self.assertEqual(resp.get('Sunset'), _SUNSET_DATE)
+
+    def test_sunset_header_is_a_valid_rfc7231_date(self):
+        # The header is only useful to a consumer if it parses; a typo in the
+        # constant would otherwise ship silently.
+        from email.utils import parsedate_to_datetime
+
+        resp = self._client().get('/api/patient-info/')
+        parsed = parsedate_to_datetime(resp.get('Sunset'))
+        self.assertIsNotNone(parsed.tzinfo)
 
     def test_legacy_path_has_link_header(self):
         resp = self._client().get('/api/patient-info/')

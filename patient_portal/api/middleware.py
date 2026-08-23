@@ -8,7 +8,19 @@ from django.http import JsonResponse
 
 logger = logging.getLogger('audit')
 
-_SUNSET_DATE = 'Tue, 01 Sep 2026 00:00:00 GMT'
+# Sunset of the legacy, non-versioned /api/ prefix (#271).
+#
+# Moved 2026-09-01 -> 2026-12-01: the original date could not be honoured. Removing
+# the legacy alias (`path('api/', ...)` in ctomop/urls.py) retires all 14 legacy
+# router registrations at once, and promop's OWN React SPA is still the largest
+# consumer of them - frontend/src/api/axios.ts sets `baseURL: '/api'`, so 78 of its
+# 96 call sites resolve to the legacy prefix, including the module-federation
+# remote (frontend/src/federation/patientInfoApi.ts) that ht-phr renders. Cutting
+# on the old date would have broken promop's own UI and the federated tab with it.
+# Tracked as #666; consumer tickets soc#261 and HealthTree/ht-phr#95.
+#
+# Advertise only a date we intend to honour: consumers read this header.
+_SUNSET_DATE = 'Tue, 01 Dec 2026 00:00:00 GMT'
 _SUNSET_DT = parsedate_to_datetime(_SUNSET_DATE)
 _SUCCESSOR = '</api/v1/>; rel="successor-version"'
 
