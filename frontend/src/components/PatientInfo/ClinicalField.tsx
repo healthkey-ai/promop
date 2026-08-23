@@ -1,11 +1,17 @@
 import Field from './Field';
+import type { VocabSource } from '@/hooks/useVocabulary';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
 
 interface Props {
   label: string;
   name: string;
-  type: 'text' | 'number' | 'date' | 'boolean';
+  type: 'text' | 'number' | 'date' | 'boolean' | 'select' | 'email';
   value: unknown;
+  /** Choices for a select. The descriptor's own `options` win when it has them:
+   *  those are the curated set the server resolves a concept from, so a local
+   *  list could offer a value the write would then fail to code. */
+  options?: string[];
+  vocabSource?: VocabSource | null;
   descriptor?: FieldDescriptor;
   onChange: (name: string, value: unknown) => void;
   /** Event date for this edit, shared across the tab. */
@@ -37,11 +43,16 @@ export default function ClinicalField({
   value,
   descriptor,
   onChange,
+  options,
+  vocabSource,
   date,
   onDateChange,
   showReason = true,
 }: Props) {
   const writable = !!descriptor?.writable;
+  const curated = descriptor?.options?.map((o) => o.value);
+  const choices = curated ?? options;
+  const control = choices?.length ? 'select' : type;
 
   if (!writable) {
     const reason =
@@ -52,8 +63,9 @@ export default function ClinicalField({
         <Field
           label={label}
           name={name}
-          type={type}
+          type={control}
           value={value}
+          options={choices}
           onChange={onChange}
           readOnly
         />
@@ -68,7 +80,15 @@ export default function ClinicalField({
 
   return (
     <div>
-      <Field label={label} name={name} type={type} value={value} onChange={onChange} />
+      <Field
+        label={label}
+        name={name}
+        type={control}
+        value={value}
+        options={choices}
+        vocabSource={vocabSource}
+        onChange={onChange}
+      />
       {onDateChange && (
         <div className="mt-1 flex items-center gap-2">
           <label

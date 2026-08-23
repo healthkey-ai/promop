@@ -72,6 +72,7 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 | `clinicalTransport` so the remote uses the host's client | #632 |
 | BloodTab, LabsTab converted | #622 and earlier |
 | TreatmentTab converted (read-only, all 26 derived) | #637 |
+| GeneralTab converted — first tab spanning both write targets | #645 |
 | `POST /api/v1/therapy-lines/` — author a line | #639 |
 | Therapy-line dialog with RxNorm picker | #641 |
 | Regimen naming no longer mislabels a combination | #643 |
@@ -83,14 +84,14 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 | BloodTab | descriptor-driven | 23 | 23 |
 | LabsTab | descriptor-driven | 32 | 29 |
 | TreatmentTab | descriptor-driven | 26 | 0 — all authored |
-| **GeneralTab** | **not converted** | 30 | **16** |
+| GeneralTab | descriptor-driven | 30 | 16 |
 | **DiseaseTab** | **not converted** | 71 | **15** |
 | **BehaviorTab** | **not converted** | 27 | **1** |
 | WearableTab | not converted | 20 | 0 — all computed |
 
-**32 writable fields are unreachable today** (Step 1: 16, Step 2: 15, Step 3: 1): they sit on an unconverted tab, so
-editing one PATCHes the projection and returns 405. That is the headline number
-this project is closing.
+**16 writable fields are unreachable today** (Step 2: 15, Step 3: 1): they sit on
+an unconverted tab, so editing one PATCHes the projection and returns 405. That
+is the headline number this project is closing — it was 32 before Step 1.
 
 ---
 
@@ -100,7 +101,7 @@ Steps are independent — take them in any order, one PR each. **Tick a box when
 its PR merges**, and note the PR number beside it, so anyone picking this up
 sees the real state rather than the intended one.
 
-- [ ] **Step 1** — Convert GeneralTab (16 writable)
+- [x] **Step 1** — Convert GeneralTab (16 writable) — #645
 - [ ] **Step 2** — Convert DiseaseTab (15 writable)
 - [ ] **Step 3** — Convert BehaviorTab (1 writable)
 - [ ] **Step 4** — Convert WearableTab (0 writable, read-only)
