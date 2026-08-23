@@ -74,8 +74,8 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 | TreatmentTab converted (read-only, all 26 derived) | #637 |
 | GeneralTab converted — first tab spanning both write targets | #645 |
 | DiseaseTab converted; approved concept mappings now make fields writable | #647 |
-| BehaviorTab converted — every tab now renders from the descriptor | #648 |
-| `employment_status` made writable by seeding its mapping | #648 |
+| BehaviorTab converted — every tab now renders from the descriptor | #649 |
+| `employment_status` made writable by seeding its mapping | #649 |
 | `POST /api/v1/therapy-lines/` — author a line | #639 |
 | Therapy-line dialog with RxNorm picker | #641 |
 | Regimen naming no longer mislabels a combination | #643 |
@@ -110,7 +110,7 @@ sees the real state rather than the intended one.
 
 - [x] **Step 1** — Convert GeneralTab (16 writable) — #645
 - [x] **Step 2** — Convert DiseaseTab (15 writable, +3 SCT) — #647
-- [x] **Step 3** — Convert BehaviorTab (1 writable, +1 mapped) — #648
+- [x] **Step 3** — Convert BehaviorTab (1 writable, +1 mapped) — #649
 - [ ] **Step 4** — Convert WearableTab (0 writable, read-only)
 - [ ] **Step 5** — Surface 13 writable fields no tab shows
 - [ ] **Step 6** — Concept assignment for the 133 unmapped fields (#595, curation)
@@ -205,8 +205,8 @@ would produce writes that vanish, which is worse than a read-only box.
 So step 6 splits in two, and the split is not visible from the descriptor:
 
 - fields that **derive but are unmapped** — a mapping row is the whole fix, as it
-  was for `employment_status` (#648) and the three SCT fields (#647)
-- fields with **no extractor** — need derivation written first; see #649
+  was for `employment_status` (#649) and the three SCT fields (#647)
+- fields with **no extractor** — need derivation written first; see #648
 
 Check `data['<field>'] = ` in `patient_record_service.py` before seeding a
 mapping. If nothing assigns it, the mapping is not the missing piece.
