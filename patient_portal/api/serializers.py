@@ -964,6 +964,20 @@ class InterchangeAgreementSerializer(serializers.ModelSerializer):
 
 class FieldConceptMappingSerializer(serializers.ModelSerializer):
     reviewer = serializers.CharField(source='reviewer.username', read_only=True, default=None)
+    makes_field_writable = serializers.SerializerMethodField()
+
+    def get_makes_field_writable(self, obj) -> bool:
+        """Whether this row is complete enough to make its field editable.
+
+        A curator can otherwise approve a mapping, see it listed as approved,
+        and find the field still read-only with nothing saying why.
+        """
+        return bool(
+            obj.status == 'approved'
+            and obj.concept_id
+            and obj.omop_table.strip().lower() in {'measurement', 'observation'}
+            and obj.source_value
+        )
 
     class Meta:
         model = FieldConceptMapping
@@ -971,6 +985,11 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
             'id', 'field_name', 'concept', 'vocabulary_id', 'concept_code',
             'unit', 'omop_table', 'status', 'reviewer',
             'reviewed_at', 'notes', 'created_at', 'updated_at',
+            # What turns an approved mapping into a writable field. Without a
+            # source_value derivation cannot find the row the editor writes, so
+            # the mapping stays advisory however complete it otherwise looks.
+            'source_value', 'value_kind', 'type_concept_id',
+            'value_vocabulary', 'multiple', 'makes_field_writable',
         ]
         read_only_fields = ['id', 'reviewer', 'reviewed_at', 'created_at', 'updated_at']
 

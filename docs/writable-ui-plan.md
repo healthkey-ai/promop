@@ -28,15 +28,15 @@ silently and start writing facts against stale concepts.
 
 | `kind` | count | meaning |
 |---|---:|---|
-| `unmapped` | 133 | no write path yet, grouped by *why* |
-| `editable` | 63 | write one OMOP fact; **writable** |
+| `unmapped` | 130 | no write path yet, grouped by *why* |
+| `editable` | 66 | write one OMOP fact; **writable** |
 | `authored` | 49 | derived from a grouping; author the resource instead |
 | `computed` | 34 | calculated from other fields |
 | `alias` | 20 | mirrors a canonical column |
 | `profile` | 17 | lives on `Person`; 16 **writable** |
 | `selectable` | 12 | a unit carried on the fact it qualifies |
 
-**79 fields are writable.** Everything else renders read-only *with its reason* —
+**82 fields are writable.** Everything else renders read-only *with its reason* —
 a field that is computed, or mirrors another column, is not "broken", and saying
 so is the difference between a UI that looks unfinished and one that explains
 itself.
@@ -73,6 +73,7 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 | BloodTab, LabsTab converted | #622 and earlier |
 | TreatmentTab converted (read-only, all 26 derived) | #637 |
 | GeneralTab converted — first tab spanning both write targets | #645 |
+| DiseaseTab converted; approved concept mappings now make fields writable | #647 |
 | `POST /api/v1/therapy-lines/` — author a line | #639 |
 | Therapy-line dialog with RxNorm picker | #641 |
 | Regimen naming no longer mislabels a combination | #643 |
@@ -85,13 +86,14 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 | LabsTab | descriptor-driven | 32 | 29 |
 | TreatmentTab | descriptor-driven | 26 | 0 — all authored |
 | GeneralTab | descriptor-driven | 30 | 16 |
-| **DiseaseTab** | **not converted** | 71 | **15** |
+| DiseaseTab | descriptor-driven | 82 | 18 |
 | **BehaviorTab** | **not converted** | 27 | **1** |
 | WearableTab | not converted | 20 | 0 — all computed |
 
-**16 writable fields are unreachable today** (Step 2: 15, Step 3: 1): they sit on
-an unconverted tab, so editing one PATCHes the projection and returns 405. That
-is the headline number this project is closing — it was 32 before Step 1.
+**1 writable field is unreachable today** (Step 3: `insurance_type` on
+BehaviorTab): it sits on an unconverted tab, so editing it PATCHes the projection
+and returns 405. That is the headline number this project is closing — 32 before
+Step 1, 16 after it.
 
 ---
 
@@ -102,7 +104,7 @@ its PR merges**, and note the PR number beside it, so anyone picking this up
 sees the real state rather than the intended one.
 
 - [x] **Step 1** — Convert GeneralTab (16 writable) — #645
-- [ ] **Step 2** — Convert DiseaseTab (15 writable)
+- [x] **Step 2** — Convert DiseaseTab (15 writable, +3 SCT) — #647
 - [ ] **Step 3** — Convert BehaviorTab (1 writable)
 - [ ] **Step 4** — Convert WearableTab (0 writable, read-only)
 - [ ] **Step 5** — Surface 13 writable fields no tab shows
@@ -176,9 +178,19 @@ four measurements belong on DiseaseTab — fold them into step 2.
 | `wearable-metadata` | 2 | device provenance, not a clinical fact |
 
 This is issue **#595** — the concept-mapping interface (`/field-mappings`) that
-lets a curator assign concepts, now merged. Each field that gains an approved
-mapping becomes `editable` and needs no further UI work, because the tabs are
-descriptor-driven. **This step is curation, not code.**
+lets a curator assign concepts.
+
+**As of #647 this is wired up**: `build_writable_field_descriptor` reads approved
+`FieldConceptMapping` rows and emits an `editable` entry from each, so a field
+that gains a complete mapping becomes writable with no further UI work. Before
+that the table recorded decisions and nothing acted on them — its own docstring
+said it "does NOT make the field writable".
+
+A row has to carry a concept, an `omop_table` this can write to, and a
+`source_value` for derivation to match on. Short of that it stays advisory, and
+`makes_field_writable` on the mapping API says which side of the line it is on.
+
+**This step is now curation, not code.**
 
 ---
 

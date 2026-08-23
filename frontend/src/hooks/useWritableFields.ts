@@ -44,6 +44,8 @@ export interface FieldDescriptor {
    *  whole vocabulary — OMOP's Race holds 1,409 concepts, which is not the
    *  question a clinical form asks. */
   options?: Array<{ value: string; code?: string }>;
+  /** Several answers at once, stored comma-joined. */
+  multiple?: boolean;
   /** authored: what to write instead, since no single fact backs this field. */
   authored_via?: {
     target?: string;
