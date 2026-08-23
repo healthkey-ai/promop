@@ -103,6 +103,11 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
 
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingDataRef = useRef<Record<string, unknown> | null>(null);
+  // Only the fields the user actually touched are PATCHed — a diff, not the whole record.
+  // The CB federation write path turns each sent field into an OMOP fact/Person edit, so
+  // sending the full object would (re)write every field on every autosave and stamp
+  // unchanged labs with today's date. Cleared on a successful save.
+  const dirtyFieldsRef = useRef<Set<string>>(new Set());
   const editedInfoRef = useRef<Record<string, unknown>>({});
   const editedNameRef = useRef("");
   const [prevData, setPrevData] = useState(data);
@@ -120,14 +125,25 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
   const doSave = useCallback(() => {
     const info = pendingDataRef.current;
     if (!info || readOnly) return;
+    // Send ONLY the touched fields (see dirtyFieldsRef). Snapshot + clear now so edits made
+    // during the in-flight request accumulate for the next save rather than being lost.
+    const dirty = Array.from(dirtyFieldsRef.current);
+    if (dirty.length === 0) return;
+    dirtyFieldsRef.current = new Set();
+    const changed: Record<string, unknown> = {};
+    for (const f of dirty) changed[f] = info[f];
     setSaveStatus("saving");
-    patchMutation.mutate(info, {
+    patchMutation.mutate(changed, {
       onSuccess: (result) => {
         setSaveStatus("saved");
         onPatientUpdated?.(result);
         setTimeout(() => setSaveStatus((s) => (s === "saved" ? "idle" : s)), 1200);
       },
-      onError: () => setSaveStatus("error"),
+      onError: () => {
+        // Re-mark the fields so a retry/next edit re-sends them (the save did not land).
+        for (const f of dirty) dirtyFieldsRef.current.add(f);
+        setSaveStatus("error");
+      },
     });
   }, [patchMutation, readOnly, onPatientUpdated]);
 
@@ -145,6 +161,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
     if (readOnly) return;
     const base = pendingDataRef.current ?? editedInfoRef.current;
     const updated = { ...base, [field]: value };
+    dirtyFieldsRef.current.add(field);
 
     if (["estrogen_receptor_status", "progesterone_receptor_status", "her2_status"].includes(field)) {
       const er = String(field === "estrogen_receptor_status" ? value : updated.estrogen_receptor_status ?? "");
@@ -162,6 +179,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
   const handleNameChange = useCallback((name: string) => {
     if (readOnly) return;
     setEditedName(name);
+    dirtyFieldsRef.current.add("patient_name");
     const base = pendingDataRef.current ?? editedInfoRef.current;
     scheduleAutoSave({ ...base, patient_name: name });
   }, [scheduleAutoSave, readOnly]);
