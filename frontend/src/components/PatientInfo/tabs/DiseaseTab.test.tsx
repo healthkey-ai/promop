@@ -507,3 +507,57 @@ describe('DiseaseTab — descriptor-driven', () => {
     }
   });
 });
+
+/**
+ * Staging and biomarker fields that no tab showed (plan step 5).
+ *
+ * All four were mapped and writable, so the write path existed and nothing could
+ * reach it. They sit beside whichever disease section is on screen because they
+ * are not specific to one: nodal and metastasis status apply to any solid
+ * tumour, and PD-L1 drives checkpoint-inhibitor eligibility across several.
+ */
+describe('DiseaseTab — shared staging and biomarkers', () => {
+  const measurement = (source_value: string, value_kind = 'string') => ({
+    kind: 'editable', writable: true, target: 'measurement',
+    concept_id: 1, code: source_value, value_kind,
+    type_concept_id: 32856, source_value,
+  });
+
+  const SHARED: Record<string, unknown> = {
+    lymph_node_status: measurement('92837-4'),
+    metastasis_status: measurement('21907-1'),
+    pd_l1_combined_positive_score: measurement('83054-7', 'number'),
+    pd_l1_ic_percentage: measurement('83055-4', 'number'),
+  };
+
+  beforeEach(async () => {
+    __resetWritableFieldsCache();
+    (globalThis as Record<string, unknown>).__DESCRIPTORS__ = SHARED;
+    (useVocabulary as Mock).mockReturnValue({ options: [], source: null, loading: false });
+    await fetchWritableFields();
+  });
+
+  it.each(['breast', 'lymphoma', 'myeloma', 'cll', 'other'] as const)(
+    'shows them for %s, not only one disease',
+    (diseaseType) => {
+      render(<DiseaseTab {...baseProps} diseaseType={diseaseType} formData={{}} />);
+      expect(screen.getByText('Staging & Biomarkers')).toBeInTheDocument();
+    },
+  );
+
+  it('leaves all four editable, since all four are mapped', () => {
+    render(<DiseaseTab {...baseProps} diseaseType="breast" formData={{}} />);
+
+    for (const name of Object.keys(SHARED)) {
+      expect(screen.queryByTestId(`reason-${name}`)).not.toBeInTheDocument();
+    }
+  });
+
+  it('shows the stored values', () => {
+    render(<DiseaseTab {...baseProps} diseaseType="breast"
+      formData={{ lymph_node_status: 'N1', pd_l1_combined_positive_score: 12 }} />);
+
+    expect(screen.getByDisplayValue('N1')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('12')).toBeInTheDocument();
+  });
+});

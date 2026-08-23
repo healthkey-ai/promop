@@ -190,3 +190,61 @@ describe('GeneralTab', () => {
     }
   });
 });
+
+/**
+ * Person fields that no tab showed (plan step 5).
+ *
+ * Writable on the persons endpoint and invisible, so the write path existed and
+ * nothing could reach it. Contact details sit with the other Person attributes;
+ * the coordinates sit with the address they are derived from; and the clinician
+ * validation flags get their own block, because "has a clinician checked this"
+ * is a different question from any of the demographics around it.
+ */
+describe('GeneralTab — previously unreachable Person fields', () => {
+  const profile = (payload_field: string, value_kind = 'string') => ({
+    kind: 'profile', writable: true, target: 'person', payload_field, value_kind,
+  });
+
+  const PERSON_FIELDS: Record<string, unknown> = {
+    phone_number: profile('phone_number'),
+    facility_name: profile('facility_name'),
+    latitude: profile('latitude', 'number'),
+    longitude: profile('longitude', 'number'),
+    validated: profile('validated', 'boolean'),
+    validated_by: profile('validated_by'),
+    validation_date: profile('validation_date', 'date'),
+  };
+
+  beforeEach(() => {
+    __resetWritableFieldsCache();
+    mockGet.mockResolvedValue({ data: PERSON_FIELDS });
+  });
+
+  it('renders each of them, and none read-only', async () => {
+    renderTab({ phone_number: '617-555-0100', facility_name: 'Dana-Farber' });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    for (const name of Object.keys(PERSON_FIELDS)) {
+      expect(screen.queryByTestId(`reason-${name}`)).not.toBeInTheDocument();
+    }
+    expect(screen.getByDisplayValue('617-555-0100')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Dana-Farber')).toBeInTheDocument();
+  });
+
+  it('gives clinician validation its own section', async () => {
+    renderTab({ validated_by: 'Dr Chen' });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.getByText('Clinician Validation')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Dr Chen')).toBeInTheDocument();
+  });
+
+  it('offers no result date for a Person attribute', async () => {
+    // None of these is an event; a result date would imply a history the record
+    // does not keep.
+    renderTab({ latitude: 42.36 });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.queryAllByLabelText('Result date')).toHaveLength(0);
+  });
+});
