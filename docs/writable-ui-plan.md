@@ -74,7 +74,9 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 | TreatmentTab converted (read-only, all 26 derived) | #637 |
 | GeneralTab converted — first tab spanning both write targets | #645 |
 | DiseaseTab converted; approved concept mappings now make fields writable | #647 |
-| BehaviorTab converted — every tab now renders from the descriptor | #649 |
+| BehaviorTab converted | #649 |
+| Superseded rows no longer matched by the upsert | #649 |
+| WearableTab converted — every tab now renders from the descriptor | #650 |
 | `employment_status` made writable by seeding its mapping | #649 |
 | `POST /api/v1/therapy-lines/` — author a line | #639 |
 | Therapy-line dialog with RxNorm picker | #641 |
@@ -90,7 +92,7 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 | GeneralTab | descriptor-driven | 30 | 16 |
 | DiseaseTab | descriptor-driven | 82 | 18 |
 | BehaviorTab | descriptor-driven | 27 | 2 |
-| WearableTab | not converted | 20 | 0 — all computed |
+| WearableTab | descriptor-driven | 20 | 0 — all computed |
 
 **No writable field is unreachable any more.** Every field the server says can be
 written is now reachable from a tab that writes it correctly — 32 were stranded
@@ -111,7 +113,7 @@ sees the real state rather than the intended one.
 - [x] **Step 1** — Convert GeneralTab (16 writable) — #645
 - [x] **Step 2** — Convert DiseaseTab (15 writable, +3 SCT) — #647
 - [x] **Step 3** — Convert BehaviorTab (1 writable, +1 mapped) — #649
-- [ ] **Step 4** — Convert WearableTab (0 writable, read-only)
+- [x] **Step 4** — Convert WearableTab (0 writable, read-only) — #650
 - [ ] **Step 5** — Surface 13 writable fields no tab shows
 - [ ] **Step 6** — Concept assignment for the 133 unmapped fields (#595, curation)
 
@@ -156,11 +158,18 @@ the three receptor statuses — both hosts derive it client-side in
 `insurance_type` only. Small, but the tab currently offers 27 boxes of which 26
 cannot save.
 
-### Step 4 — Convert WearableTab (0 writable)
+### Step 4 — Convert WearableTab (0 writable) — done, #650
 
-Everything is a 30-day aggregate over device readings. Same shape as
-TreatmentTab: read-only with one explanation, since a clinician does not type a
-median. Consider what "upload device data" should link to.
+Everything is a 30-day aggregate over device readings, so read-only with one
+explanation rather than twenty near-identical ones.
+
+The open question — what "upload device data" should link to — answered itself:
+the tab already carries the upload control and its history, so the explanation
+points at what is on screen.
+
+One field is not an aggregate. `wearable_coverage_ratio_30d` is device
+provenance rather than a measurement of the patient, so it is `unmapped` in the
+`wearable-metadata` group rather than `computed`. Not writable either way.
 
 ### Step 5 — Surface 13 writable fields that no tab shows
 
