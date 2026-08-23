@@ -167,9 +167,14 @@ The open question — what "upload device data" should link to — answered itse
 the tab already carries the upload control and its history, so the explanation
 points at what is on screen.
 
-One field is not an aggregate. `wearable_coverage_ratio_30d` is device
-provenance rather than a measurement of the patient, so it is `unmapped` in the
-`wearable-metadata` group rather than `computed`. Not writable either way.
+One field is misclassified. `wearable_coverage_ratio_30d` is `unmapped` in the
+`wearable-metadata` group, but it *is* a 30-day aggregate — computed in the same
+function as its neighbours, from every wearable metric's daily readings. It falls
+into the unmapped branch on its `wearable_` name prefix, before anything asks
+whether it is an aggregate. Filed as **#650**.
+
+**Every 30-day aggregation should be `computed`.** That invariant holds for every
+other `_30d` field, and a guard asserting it would have caught this one.
 
 ### Step 5 — Surface 13 writable fields that no tab shows
 

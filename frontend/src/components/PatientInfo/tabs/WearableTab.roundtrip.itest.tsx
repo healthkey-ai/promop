@@ -27,16 +27,24 @@ describe('WearableTab against the live descriptor', () => {
     const wearable = Object.entries(d).filter(([f]) => f.endsWith('_30d'));
 
     expect(wearable.length).toBeGreaterThan(0);
-    // The invariant is that none is writable. They are not all the same kind:
-    // the clinical aggregates are `computed`, while wearable_coverage_ratio_30d
-    // is device provenance rather than a measurement of the patient, so it sits
-    // in the wearable-metadata group instead. Asserting one kind for all of them
-    // would fail on a correct distinction.
     for (const [field, entry] of wearable) {
       expect(entry.writable, `${field} is offered as writable`).toBe(false);
     }
-    const kinds = new Set(wearable.map(([, e]) => e.kind));
-    expect(kinds.has('computed')).toBe(true);
+
+    // Every 30-day aggregation should be `computed`. One is not:
+    // wearable_coverage_ratio_30d falls into the unmapped branch on its
+    // `wearable_` name prefix despite being computed in the same function as its
+    // neighbours (#650). Named here rather than tolerated by a loose assertion,
+    // so this fails the moment it is fixed and the exception can be removed.
+    const KNOWN_MISCLASSIFIED = new Set(['wearable_coverage_ratio_30d']);
+    for (const [field, entry] of wearable) {
+      if (KNOWN_MISCLASSIFIED.has(field)) continue;
+      expect(entry.kind, `${field} should be computed`).toBe('computed');
+    }
+    expect(
+      wearable.filter(([f, e]) => KNOWN_MISCLASSIFIED.has(f) && e.kind !== 'computed'),
+      '#650 is fixed — drop the exception',
+    ).toHaveLength(KNOWN_MISCLASSIFIED.size);
   });
 
   it('renders every value read-only, with the upload control that does change them', async () => {
