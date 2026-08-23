@@ -13,9 +13,12 @@ thing this catches that the top lexical match does not:
   a specific serology assay — while "HIV status" sits below it. Likewise
   ``hepatitis_b_status``, whose top match is "FH: Hepatitis", a family history
   note about somebody else.
-* **The right answer not retrieved at all.** ``temperature`` should be LOINC
-  8310-5 "Body temperature". Lexical search returns bare "Temperature" concepts,
-  which score higher against a one-word field name and mean less.
+* **The right answer not retrieved at all.** ``temperature`` looked like the
+  clearest case of this -- it should be LOINC 8310-5 "Body temperature", which
+  lexical search never offered. Checking before proposing it showed the field is
+  not a PatientRecord column at all: derivation computes ``data['temperature']``,
+  the reset list carries it and the descriptor advertises it, but nothing stores
+  it and the API never returns it. It is not suggested for that reason.
 * **The wrong domain.** Several of these fields are conditions rather than
   observations — see the notes at the bottom — and no amount of name matching
   makes an observation write correct for them.
@@ -39,16 +42,6 @@ REVIEWED_SUGGESTIONS = {
             '"White blood cell count" is the same quantity under the same name; '
             'the narrower "in blood" and "in CSF" variants name a specimen this '
             'field does not carry.'
-        ),
-    },
-    'temperature': {
-        'vocabulary_id': 'LOINC', 'concept_code': '8310-5',
-        'omop_table': 'measurement', 'value_kind': 'number',
-        'rationale': (
-            'Body temperature, which is what a vital sign called "temperature" '
-            'means. Lexical search never offered this: bare "Temperature" '
-            'concepts score higher against a one-word field name while meaning '
-            'less, and one of them is about specimen storage.'
         ),
     },
     'diagnosis_date': {
@@ -138,6 +131,13 @@ REVIEWED_SUGGESTIONS = {
 #   disease, disease_slug, disease_activity
 #       "Disease" as a bare concept says nothing, and "DAS - Disease Activity
 #       Score" is a rheumatology instrument that does not apply here.
+#
+#   temperature
+#       Not a column. `_OMOP_DERIVED_FIELDS` lists it, derivation assigns
+#       `data['temperature']`, and the descriptor reports it as awaiting a
+#       concept — but PatientRecord has no such field, so the value is computed
+#       and dropped. Mapping it would give a curator a field that cannot hold
+#       anything.
 #
 #   pregnancy_test_date
 #       Derived as the event date of the pregnancy result fact, never written on

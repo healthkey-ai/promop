@@ -79,20 +79,16 @@ def _search_text(field_name: str) -> str:
 
 
 def _derived_fields() -> set:
-    """Fields some extractor assigns, read out of the derivation source.
+    """Fields some extractor populates.
 
-    Parsed rather than imported because there is no registry of derived fields —
-    the extractors assign into a dict. A mapping for a field absent from this set
-    would produce a write nothing reads back.
+    Delegates rather than parsing here. Counting only literal ``data['x'] =``
+    assignments called 24 of BehaviorTab's 27 fields unread when they are in fact
+    derived through lookup tables -- which turned this command's "[no extractor]"
+    warning into noise on exactly the fields it was meant to protect.
     """
-    from pathlib import Path
+    from omop_core.services.patient_record_service import derived_fields
 
-    src = Path('omop_core/services/patient_record_service.py')
-    if not src.exists():          # running from another cwd
-        import omop_core.services.patient_record_service as m
-        src = Path(m.__file__)
-    text = src.read_text()
-    return set(re.findall(r"data\[\s*'([a-z_0-9]+)'\s*\]\s*=", text))
+    return set(derived_fields())
 
 
 
