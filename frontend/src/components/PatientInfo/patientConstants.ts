@@ -147,16 +147,55 @@ export const EDUCATION_LEVEL_OPTIONS = ['Less than High School', 'High School Gr
 export const MARITAL_STATUS_OPTIONS = ['Single', 'Married', 'Divorced', 'Widowed', 'Separated', 'Domestic Partnership'];
 export const INSURANCE_TYPE_OPTIONS = ['Private Insurance', 'Medicare', 'Medicaid', 'Veterans Affairs', 'Other Government', 'Self-pay', 'None'];
 
-export const GENE_OPTIONS = ['BRCA1', 'BRCA2', 'TP53', 'PIK3CA', 'ESR1'];
+// Gene / origin / interpretation options are kept in lock-step with the OMOP write & read vocabulary so
+// every value a user can pick round-trips through the FEDERATED genetic_mutations write path (CB
+// /federation/patient-info/me/ → omop_core apply_field_writes → OMOP Measurement → derivation). The
+// genes are exactly the reviewed set with a gene LOINC (omop_core patient_record_service
+// _GENETIC_MUTATION_LOINCS); origins/interpretations are the SNOMED concepts the applier stamps and
+// the derivation decodes (field_write_service _MUTATION_ORIGIN_SNOMED / _MUTATION_INTERPRETATION_SNOMED).
+// A value with no backing concept would save the gene+variant but silently lose that attribute, so it
+// is intentionally NOT offered. NOTE: the standalone PROMOP patient-info path (sync_to_omop) has no
+// mutation write yet — mutation editing is wired for the federated mount; standalone is a follow-up.
+export const GENE_OPTIONS = ['BRCA1', 'BRCA2', 'TP53', 'KRAS', 'EGFR', 'PIK3CA'];
 export const MUTATION_OPTIONS: { [key: string]: string[] } = {
   'BRCA1': ['c.68_69delAG', 'c.5266dupC', 'c.181T>G', 'c.3756_3759del', '185delAG'],
   'BRCA2': ['c.5946delT', 'c.9097dupA', 'c.7617+1G>A', '6174delT', 'c.8537_8538del'],
   'TP53': ['R175H', 'R248Q', 'R273H', 'R248W', 'R282W'],
+  'KRAS': ['G12D', 'G12C', 'G12V', 'G13D', 'Q61H'],
+  'EGFR': ['L858R', 'T790M', 'delE746_A750', 'G719S', 'L861Q'],
   'PIK3CA': ['E542K', 'E545K', 'H1047R', 'H1047L', 'E726K'],
-  'ESR1': ['D538G', 'Y537S', 'Y537C', 'Y537N', 'E380Q'],
 };
-export const ORIGIN_OPTIONS = ['Germline', 'Somatic', 'Unknown'];
-export const INTERPRETATION_OPTIONS = ['Pathogenic', 'Likely pathogenic', 'VUS', 'Likely benign', 'Benign'];
+export const ORIGIN_OPTIONS = ['Germline', 'Somatic'];
+export const INTERPRETATION_OPTIONS = ['Pathogenic', 'VUS', 'Benign'];
+
+export type UiMutation = { gene: string; mutation: string; origin: string; interpretation: string };
+
+const _canonCase = (val: unknown, options: string[]) =>
+  options.find((o) => o.toLowerCase() === String(val ?? '').toLowerCase()) ?? String(val ?? '');
+
+// Adapt genetic_mutations from the OMOP read shape to the editor/write shape, ONCE, at load. The
+// derivation returns {gene:'brca1', variant, origin:'germline', interpretation:'vus', test_date} —
+// lower-cased and with the variant under `variant`. The editor and the write path use
+// {gene:'BRCA1', mutation, origin:'Germline', interpretation:'VUS'} with canonical casing. Without this
+// the Gene/Origin/Interpretation selects can't match a loaded value (render blank) and the Mutation
+// select is empty (it reads `mutation`, not `variant`); a subsequent save would also carry both
+// incompatible keys. Unknown values pass through unchanged.
+export function normalizeGeneticMutations(raw: unknown): UiMutation[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((m) => {
+    // Preserve any extra metadata the derivation carries (test_date, assay_method, …) — a save sends
+    // the WHOLE array, so dropping them here would overwrite the stored values. Fold `variant` into the
+    // editor's `mutation` key and drop the duplicate so a saved object never carries both.
+    const { variant, mutation, gene, origin, interpretation, ...rest } = (m ?? {}) as Record<string, unknown>;
+    return {
+      ...rest,
+      gene: _canonCase(gene, GENE_OPTIONS),
+      mutation: String(mutation ?? variant ?? ''),
+      origin: _canonCase(origin, ORIGIN_OPTIONS),
+      interpretation: _canonCase(interpretation, INTERPRETATION_OPTIONS),
+    };
+  });
+}
 
 export const BINET_STAGE_OPTIONS = [
   'Binet Stage A (<3 lymphoid areas involved)',

@@ -1,4 +1,6 @@
 import { useVocabulary } from '@/hooks/useVocabulary';
+import { useContext } from 'react';
+import { PatientInfoContext } from '@/federation/PatientInfoContext';
 import { Button } from '@/components/shadcn/button';
 import Field from '../Field';
 import Section from '../Section';
@@ -16,6 +18,7 @@ import {
   BINET_STAGE_OPTIONS, TUMOR_BURDEN_OPTIONS, DISEASE_ACTIVITY_OPTIONS,
   RICHTER_TRANSFORMATION_OPTIONS, PROTEIN_EXPRESSION_OPTIONS,
   GENE_OPTIONS, MUTATION_OPTIONS, ORIGIN_OPTIONS, INTERPRETATION_OPTIONS,
+  type UiMutation,
 } from '../patientConstants';
 
 interface Props {
@@ -40,7 +43,15 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
   const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
 
   const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
-  const mutations = (formData?.genetic_mutations || []) as { gene: string; mutation: string; origin: string; interpretation: string }[];
+  // genetic_mutations are already adapted to the UI shape (variant→mutation, canonical casing) at load
+  // by normalizeGeneticMutations in PatientInfo's initialInfo, so read them directly here.
+  const mutations = (formData?.genetic_mutations || []) as UiMutation[];
+  // Mirror Field.tsx: null writableFields (no descriptor — e.g. the standalone PatientDetail view mounts
+  // this tab WITHOUT PatientInfoProvider) leaves the mutation editor interactive; an explicit set without
+  // genetic_mutations (vocab not loaded / no write path) locks it. useContext (not the throwing
+  // usePatientInfoContext) so a provider-less mount never crashes the tab.
+  const writableFields = useContext(PatientInfoContext)?.writableFields ?? null;
+  const mutationsLocked = writableFields != null && !writableFields.has('genetic_mutations');
 
   return (
     <>
@@ -103,14 +114,14 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
       <Section title="Genetic Mutations">
         <div className="flex items-center justify-between mb-4">
           <p className="text-sm text-portal-text-secondary">{mutations.length} mutation(s) identified</p>
-          <Button variant="outline" size="sm" onClick={onMutationAdd}>Add Mutation</Button>
+          <Button variant="outline" size="sm" onClick={onMutationAdd} disabled={mutationsLocked}>Add Mutation</Button>
         </div>
 
         {mutations.map((mutation: { gene: string; mutation: string; origin: string; interpretation: string }, index: number) => (
           <div key={index} className="mb-4 p-4 border border-portal-border rounded-md">
             <div className="flex items-center justify-between mb-3">
               <span className="text-sm font-medium text-portal-text-primary">Mutation {index + 1}</span>
-              <Button variant="ghost" size="sm" onClick={() => onMutationRemove(index)}
+              <Button variant="ghost" size="sm" onClick={() => onMutationRemove(index)} disabled={mutationsLocked}
                 className="text-red-600 hover:text-red-700 hover:bg-red-50">
                 Remove
               </Button>
@@ -121,6 +132,7 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
                 <SelectControl
                   value={mutation.gene || ''}
                   options={stringsToOptions(GENE_OPTIONS)}
+                  disabled={mutationsLocked}
                   treatEmptyOptionAsUnknown={false}
                   onChange={(v) => onMutationChange(index, 'gene', String(v ?? ''))}
                 />
@@ -130,7 +142,7 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
                 <SelectControl
                   value={mutation.mutation || ''}
                   options={mutation.gene ? stringsToOptions(MUTATION_OPTIONS[mutation.gene] || []) : []}
-                  disabled={!mutation.gene}
+                  disabled={mutationsLocked || !mutation.gene}
                   treatEmptyOptionAsUnknown={false}
                   onChange={(v) => onMutationChange(index, 'mutation', String(v ?? ''))}
                 />
@@ -140,6 +152,7 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
                 <SelectControl
                   value={mutation.origin || ''}
                   options={stringsToOptions(ORIGIN_OPTIONS)}
+                  disabled={mutationsLocked}
                   treatEmptyOptionAsUnknown={false}
                   onChange={(v) => onMutationChange(index, 'origin', String(v ?? ''))}
                 />
@@ -149,6 +162,7 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
                 <SelectControl
                   value={mutation.interpretation || ''}
                   options={stringsToOptions(INTERPRETATION_OPTIONS)}
+                  disabled={mutationsLocked}
                   treatEmptyOptionAsUnknown={false}
                   onChange={(v) => onMutationChange(index, 'interpretation', String(v ?? ''))}
                 />

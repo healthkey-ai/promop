@@ -11,6 +11,7 @@ import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
+import { normalizeGeneticMutations } from "@/components/PatientInfo/patientConstants";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -84,6 +85,8 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated }: Pick<Patien
   const initialInfo = useMemo(() => {
     if (!data) return {};
     const d = { ...data.patient_info };
+    if (Array.isArray(d.genetic_mutations))
+      d.genetic_mutations = normalizeGeneticMutations(d.genetic_mutations);
     if (d.ecog_performance_status != null)
       d.ecog_performance_status = String(d.ecog_performance_status);
     if (d.estrogen_receptor_status && d.progesterone_receptor_status && d.her2_status) {

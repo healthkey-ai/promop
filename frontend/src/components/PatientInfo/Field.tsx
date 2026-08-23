@@ -1,5 +1,5 @@
-import { useMemo } from 'react';
-import { usePatientInfoContext } from '@/federation/PatientInfoContext';
+import { useContext, useMemo } from 'react';
+import { PatientInfoContext } from '@/federation/PatientInfoContext';
 import { VocabSource } from '@/hooks/useVocabulary';
 import { VocabularyTooltip } from '../UI/VocabularyTooltip';
 import SelectControl from './controls/SelectControl';
@@ -35,8 +35,10 @@ export default function Field({
 }: FieldProps) {
   // A field the server has no write path for (email/computed/unmapped/…) is shown read-only
   // rather than editable, so a user never edits a value that silently would not save. Null
-  // writableFields (descriptor unavailable) leaves everything editable — never lock the form.
-  const { writableFields } = usePatientInfoContext();
+  // writableFields (descriptor unavailable) leaves everything editable — never lock the form. useContext
+  // (not the throwing usePatientInfoContext) so a provider-less mount (e.g. the standalone PatientDetail
+  // view) renders read-only-unaware rather than crashing.
+  const writableFields = useContext(PatientInfoContext)?.writableFields ?? null;
   const notWritable = writableFields != null && !writableFields.has(name);
   const isDisabled = disabled || readOnly || notWritable;
   const optionObjects = useMemo(() => stringsToOptions(options), [options]);
