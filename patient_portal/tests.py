@@ -18458,6 +18458,61 @@ class BulkOmopUpsertTest(TestCase):
             for sv in source_values
         ]
 
+    # --- entered-in-error rows are not matchable -------------------------
+
+    def test_a_superseded_row_is_not_matched_by_a_later_identical_write(self):
+        """Correcting a value and then setting it back must take.
+
+        The editor supersedes by marking the old row is_erroneous and inserting
+        the replacement. The upsert key does not include is_erroneous, so before
+        this the re-write matched the superseded row, updated it in place and
+        returned it as already-on-file — the row stayed erroneous, derivation
+        kept skipping it, and the clinician's correction was silently discarded.
+
+        Found by driving the real UI against a live backend: set employment to
+        one value, change it, change it back, and the tab still showed the middle
+        value.
+        """
+        row = self._rows(1)[0]
+
+        first = self._post([row])
+        first_id = first['ids'][0]
+
+        Measurement.objects.filter(measurement_id=first_id).update(is_erroneous=True)
+
+        second = self._post([row])
+
+        self.assertEqual(second['created'], 1,
+                         'an identical write after superseding must insert')
+        self.assertNotEqual(second['ids'][0], first_id)
+        # The superseded row is left exactly as it was: that is the audit trail.
+        self.assertTrue(
+            Measurement.objects.get(measurement_id=first_id).is_erroneous,
+        )
+        self.assertFalse(
+            Measurement.objects.get(measurement_id=second['ids'][0]).is_erroneous,
+        )
+
+    def test_a_live_row_is_still_matched_when_an_erroneous_twin_exists(self):
+        """Excluding erroneous rows must not break ordinary convergence."""
+        row = self._rows(1)[0]
+
+        first_id = self._post([row])['ids'][0]
+        Measurement.objects.filter(measurement_id=first_id).update(is_erroneous=True)
+        live_id = self._post([row])['ids'][0]
+
+        third = self._post([row])
+
+        self.assertEqual(third['created'], 0, 'a live row must still match')
+        self.assertEqual(third['ids'][0], live_id)
+        self.assertEqual(
+            Measurement.objects.filter(
+                person=self.person, measurement_source_value='LOCAL-0',
+            ).count(),
+            2,
+            'one superseded row and one live row, not three',
+        )
+
     def _post(self, rows, route='measurements', query='?skip_refresh=true'):
         resp = self.client.post(f'/api/v1/{route}/{query}', rows, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)

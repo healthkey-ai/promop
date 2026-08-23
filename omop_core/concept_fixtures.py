@@ -102,6 +102,7 @@ _CONCEPT_CLASSES = [
     dict(concept_class_id='Clinical Finding',    concept_class_name='Clinical Finding',     concept_class_concept_id=0),
     dict(concept_class_id='Context-dependent',   concept_class_name='Context-dependent',    concept_class_concept_id=0),
     dict(concept_class_id='Answer',              concept_class_name='Answer',               concept_class_concept_id=0),
+    dict(concept_class_id='Observable Entity',   concept_class_name='Observable Entity',    concept_class_concept_id=0),
 ]
 
 
@@ -225,6 +226,10 @@ _CONCEPTS = [
 
     # Categorical Positive / Negative values stored in value_as_concept_id
     _c(9191, 'Positive', 'Meas Value', 'SNOMED', 'Qualifier Value', 'S', '10828004'),
+    # Social history. _get_social_data reads employment_status back from an
+    # Observation carrying this concept, so a UI round-trip test cannot write one
+    # without it — added for exactly that (mapping seeded by migration 0157).
+    _c(4073163, 'Employment status', 'Observation', 'SNOMED', 'Observable Entity', 'S', '224362002'),
     _c(9189, 'Negative', 'Meas Value', 'SNOMED', 'Qualifier Value', 'S', '260385009'),
 
     # ------------------------------------------------------------------

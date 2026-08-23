@@ -5521,8 +5521,21 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances):
     existing_cid = {}
     if keyed:
         columns = (pk_field, cid_attr, sv_field, date_field) + tuple(extra_fields)
+        # Entered-in-error rows are excluded from the match on purpose.
+        #
+        # A row marked is_erroneous is not the current fact -- derivation already
+        # skips it. Matching one would update it in place and return it as
+        # "already on file", so the value would never become visible: a clinician
+        # who sets a value, corrects it, then sets it back the same day would see
+        # the correction silently discarded, because the editor supersedes by
+        # marking the old row erroneous and the re-write would land right back on
+        # that row.
+        #
+        # Excluding them means such a write inserts a live row beside the
+        # erroneous one, which is what the entered-in-error columns are for.
         rows = model_cls.objects.filter(**{
             'person': person,
+            'is_erroneous': False,
             f'{sv_field}__in': {k[0] for k in keyed},
             f'{date_field}__in': {k[1] for k in keyed},
         }).order_by(pk_field).values_list(*columns)
