@@ -7750,6 +7750,65 @@ def field_synonym_detail(request, pk):
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def field_synonyms_batch(request):
+    """Return synonyms for multiple fields in one request.
+
+    GET /api/v1/field-synonyms/batch/?fields=field1,field2,...
+    Returns {field_name: [synonym_text, ...]} with max 5 per field.
+    """
+    if not getattr(request.user, 'is_staff', False):
+        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    fields_param = request.query_params.get('fields', '')
+    if not fields_param:
+        return Response({})
+
+    field_names = [f.strip() for f in fields_param.split(',') if f.strip()][:100]
+    if not field_names:
+        return Response({})
+
+    from omop_core.models import FieldSynonym, FieldConceptMapping
+    from collections import defaultdict
+
+    result = defaultdict(list)
+    seen = defaultdict(set)
+
+    # Custom synonyms from FieldSynonym table.
+    custom_syns = FieldSynonym.objects.filter(
+        field_name__in=field_names
+    ).values_list('field_name', 'synonym_text')
+    for field_name, text in custom_syns:
+        if text not in seen[field_name]:
+            seen[field_name].add(text)
+            result[field_name].append(text)
+
+    # OMOP synonyms via FieldConceptMapping → Concept → ConceptSynonym.
+    mappings = FieldConceptMapping.objects.filter(
+        field_name__in=field_names, concept__isnull=False
+    ).values_list('field_name', 'concept_id')
+
+    if mappings:
+        from omop_core.models import ConceptSynonym
+        concept_to_fields = defaultdict(list)
+        for field_name, concept_id in mappings:
+            concept_to_fields[concept_id].append(field_name)
+
+        omop_syns = ConceptSynonym.objects.filter(
+            concept_id__in=concept_to_fields.keys()
+        ).values_list('concept_id', 'concept_synonym_name')[:500]
+
+        for concept_id, syn_name in omop_syns:
+            for field_name in concept_to_fields[concept_id]:
+                if syn_name not in seen[field_name]:
+                    seen[field_name].add(syn_name)
+                    result[field_name].append(syn_name)
+
+    # Limit to 5 per field.
+    return Response({k: v[:5] for k, v in result.items()})
+
+
 class TherapyLineViewSet(viewsets.ViewSet):
     """Author a line of therapy.
 
