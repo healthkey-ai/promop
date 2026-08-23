@@ -5118,3 +5118,66 @@ class SeededSctFieldMappingsTest(TestCase):
                 self.assertEqual(row.status, 'approved')
                 self.assertIsNotNone(row.concept_id)
                 self.assertTrue(row.source_value)
+
+class SeededEmploymentStatusMappingTest(TestCase):
+    """employment_status is writable, and what is written derives back.
+
+    _get_social_data has always read this field from an Observation whose concept
+    is SNOMED 224362002, taking the answer from value_as_string. The read path and
+    the write path both existed; nothing connected them, so the descriptor called
+    the field unmapped and the editor's PATCH was refused.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        import importlib
+
+        from django.apps import apps as global_apps
+        from omop_core.concept_fixtures import seed_test_concepts
+
+        seed_test_concepts()
+        importlib.import_module(
+            'omop_core.migrations.0157_seed_employment_status_mapping',
+        ).seed(global_apps, None)
+
+    def test_the_field_is_writable_against_the_concept_derivation_reads(self):
+        from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+        entry = build_writable_field_descriptor()['employment_status']
+
+        self.assertTrue(entry['writable'])
+        self.assertEqual(entry['target'], 'observation')
+        # _get_social_data matches on this concept code.
+        self.assertEqual(entry['source_value'], '224362002')
+
+    def test_writing_the_prescribed_fact_derives_back(self):
+        """The round trip, not just the recipe.
+
+        A mapping that produces a row derivation cannot read would look complete
+        and lose the value, which is the failure the mapping bar exists to catch.
+        """
+        from omop_core.models import Concept, Observation, Person
+        from omop_core.services.patient_record_service import refresh_patient_record
+        from omop_core.services.pk import next_pk
+        from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+        entry = build_writable_field_descriptor()['employment_status']
+        person = Person.objects.create(person_id=880011, year_of_birth=1970)
+        PatientRecord.objects.get_or_create(person=person)
+
+        Observation.objects.create(
+            observation_id=next_pk(Observation, 'observation_id'),
+            person=person,
+            observation_concept=Concept.objects.get(concept_id=entry['concept_id']),
+            observation_date=date(2025, 4, 1),
+            observation_type_concept=Concept.objects.get(
+                concept_id=entry['type_concept_id'],
+            ),
+            observation_source_value=entry['source_value'],
+            value_as_string='Employed full-time',
+        )
+
+        person.refresh_from_db()
+        record = refresh_patient_record(person)
+
+        self.assertEqual(record.employment_status, 'Employed full-time')

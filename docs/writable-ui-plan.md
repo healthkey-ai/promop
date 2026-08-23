@@ -75,6 +75,7 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 | GeneralTab converted — first tab spanning both write targets | #645 |
 | DiseaseTab converted; approved concept mappings now make fields writable | #647 |
 | BehaviorTab converted — every tab now renders from the descriptor | #648 |
+| `employment_status` made writable by seeding its mapping | #648 |
 | `POST /api/v1/therapy-lines/` — author a line | #639 |
 | Therapy-line dialog with RxNorm picker | #641 |
 | Regimen naming no longer mislabels a combination | #643 |
@@ -88,7 +89,7 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 | TreatmentTab | descriptor-driven | 26 | 0 — all authored |
 | GeneralTab | descriptor-driven | 30 | 16 |
 | DiseaseTab | descriptor-driven | 82 | 18 |
-| BehaviorTab | descriptor-driven | 27 | 1 |
+| BehaviorTab | descriptor-driven | 27 | 2 |
 | WearableTab | not converted | 20 | 0 — all computed |
 
 **No writable field is unreachable any more.** Every field the server says can be
@@ -109,7 +110,7 @@ sees the real state rather than the intended one.
 
 - [x] **Step 1** — Convert GeneralTab (16 writable) — #645
 - [x] **Step 2** — Convert DiseaseTab (15 writable, +3 SCT) — #647
-- [x] **Step 3** — Convert BehaviorTab (1 writable) — #648
+- [x] **Step 3** — Convert BehaviorTab (1 writable, +1 mapped) — #648
 - [ ] **Step 4** — Convert WearableTab (0 writable, read-only)
 - [ ] **Step 5** — Surface 13 writable fields no tab shows
 - [ ] **Step 6** — Concept assignment for the 133 unmapped fields (#595, curation)
@@ -194,7 +195,21 @@ A row has to carry a concept, an `omop_table` this can write to, and a
 `source_value` for derivation to match on. Short of that it stays advisory, and
 `makes_field_writable` on the mapping API says which side of the line it is on.
 
-**This step is now curation, not code.**
+**This step is now curation, not code — but only where a reader exists.**
+
+A mapping makes a field writable; it does not make anything read the value back.
+Of the 27 fields on BehaviorTab, **24 have no derivation extractor at all** —
+nothing in `patient_record_service` ever assigns them. Seeding mappings for those
+would produce writes that vanish, which is worse than a read-only box.
+
+So step 6 splits in two, and the split is not visible from the descriptor:
+
+- fields that **derive but are unmapped** — a mapping row is the whole fix, as it
+  was for `employment_status` (#648) and the three SCT fields (#647)
+- fields with **no extractor** — need derivation written first; see #649
+
+Check `data['<field>'] = ` in `patient_record_service.py` before seeding a
+mapping. If nothing assigns it, the mapping is not the missing piece.
 
 ---
 
