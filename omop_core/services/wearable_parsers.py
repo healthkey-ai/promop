@@ -30,7 +30,8 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
     Uses the ``fitparse`` library to iterate over FIT messages.  Extracts:
     - steps (from ``monitoring`` or ``session`` messages)
     - resting heart rate (from ``monitoring_hr_data`` or p10 of monitoring HR)
-    - HRV SDNN (from ``hrv_status_summary``, ``hrv_value``, or legacy ``hrv``)
+    - HRV RMSSD (from ``hrv_status_summary``, ``hrv_value``, or legacy ``hrv``);
+      Garmin's HRV Status is RMSSD-based, so it is NOT stored as SDNN (#438)
     - SpO2 (from ``spo2_data`` or ``session``)
     - respiratory rate (from ``respiration_rate`` messages or ``session``)
     - active minutes (from ``monitoring`` active_time or ``session`` duration)
@@ -229,24 +230,32 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
                     pass
 
         elif msg_type == 'hrv_status_summary':
-            # Daily/weekly HRV summary (newer devices)
-            sdnn = fields.get('weekly_average') or fields.get('last_night_average')
-            if sdnn is not None:
+            # Daily/weekly HRV summary (newer devices).
+            #
+            # This is RMSSD, not SDNN. Garmin's HRV Status is computed as the
+            # root mean square of successive differences over overnight
+            # readings, and weekly_average is the 7-day rolling mean it
+            # displays. It was previously stored as hrv_sdnn, which filed it
+            # under LOINC 80404-7 — a code that specifically means the
+            # standard-deviation form. See #438.
+            rmssd = fields.get('weekly_average') or fields.get('last_night_average')
+            if rmssd is not None:
                 try:
-                    val = float(sdnn)
+                    val = float(rmssd)
                     if val > 0:
-                        daily['hrv_sdnn'][d].append(val)
+                        daily['hrv_rmssd'][d].append(val)
                 except (TypeError, ValueError):
                     pass
 
         elif msg_type == 'hrv_value':
-            # Individual 5-minute HRV readings (ms)
+            # Individual 5-minute HRV readings (ms) from the same HRV Status
+            # feature as hrv_status_summary above, so likewise RMSSD.
             hrv_val = fields.get('value')
             if hrv_val is not None:
                 try:
                     val = float(hrv_val)
                     if val > 0:
-                        daily['hrv_sdnn'][d].append(val)
+                        daily['hrv_rmssd'][d].append(val)
                 except (TypeError, ValueError):
                     pass
 
@@ -275,15 +284,24 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
             pass
 
         elif msg_type == 'hrv':
-            # Legacy HRV message type (fallback for older devices)
-            sdnn = fields.get('weekly_average') or fields.get('sdnn')
-            if sdnn is not None:
+            # Legacy HRV message type (fallback for older devices).
+            #
+            # This message can carry either statistic, so each field is routed
+            # to the metric it actually is rather than to whichever one is
+            # checked first: 'weekly_average' is the HRV Status rolling mean
+            # (RMSSD), while a field named 'sdnn' is the standard-deviation
+            # form. Previously both were stored as hrv_sdnn (#438).
+            for field_name, metric_key in (('weekly_average', 'hrv_rmssd'),
+                                           ('sdnn', 'hrv_sdnn')):
+                raw = fields.get(field_name)
+                if raw is None:
+                    continue
                 try:
-                    val = float(sdnn)
-                    if val > 0:
-                        daily['hrv_sdnn'][d].append(val)
+                    val = float(raw)
                 except (TypeError, ValueError):
-                    pass
+                    continue
+                if val > 0:
+                    daily[metric_key][d].append(val)
 
     # Compute sleep duration from sleep_level timestamp spans.
     # Consecutive entries with level > 0 (not awake) contribute to sleep duration.
@@ -401,6 +419,14 @@ def parse_apple_health_export(zip_bytes: bytes) -> list[WearableSample]:
     general_hr: dict[date, list[float]] = defaultdict(list)
 
     with zf.open(xml_name) as xml_file:
+        # XXE protection: reject files containing DTD/ENTITY declarations.
+        # defusedxml does not expose iterparse, so we check the first 4KB
+        # for DTD markers before streaming with stdlib. Apple Health exports
+        # never contain DTDs; a crafted upload would.
+        header = xml_file.read(4096)
+        if b'<!DOCTYPE' in header or b'<!ENTITY' in header:
+            raise ValueError('XML file contains DTD/entity declarations; rejected for security.')
+        xml_file.seek(0)
         context = ET.iterparse(xml_file, events=('start', 'end'))
         root = None
         for event, elem in context:

@@ -1,7 +1,7 @@
 # PRomop API Surface
 
 > **Canonical base URL:** `https://promop.onrender.com/api/v1/` (production) | `http://localhost:8000/api/v1/` (dev)
-> Last revised: 2026-07-22
+> Last revised: 2026-08-18
 
 > **Versioning note:** All new integrations should target `/api/v1/` paths. The legacy
 > unversioned `/api/` paths still work but return `Deprecation: true` / `Sunset: Tue, 01 Sep 2026 00:00:00 GMT`
@@ -9,7 +9,7 @@
 
 ---
 
-## Architecture: OMOP-first, PatientRecord is read-only
+## Architecture: OMOP-first, mapped PatientRecord clinical fields are read-only
 
 **The authoritative clinical record lives in OMOP tables.**
 
@@ -24,26 +24,44 @@ Client writes → OMOP tables (Measurement, ConditionOccurrence, DrugExposure, �
 ```
 
 `PatientRecord` (Django model: `PatientInfo`, API path: `/api/v1/patient-records/`) is a
-**denormalized read model**. Callers must not write to it directly. It is regenerated
-automatically whenever any OMOP record for that patient is saved or deleted.
+**denormalized read model**. Its clinical fields are regenerated automatically whenever
+their OMOP source records change, and its profile/admin compatibility fields are copied
+from HealthKey extension columns on `Person`. The API rejects writes to
+**OMOP-mapped** PatientRecord fields; OMOP APIs, FHIR imports, and `Person`
+profile updates own those writes, then the projection refreshes. Unmapped
+projection-owned compatibility fields remain temporarily writable only where
+the implementation explicitly permits them; new integrations must not use that
+exception.
 
-The two sanctioned write paths are:
+The field-by-field ownership and migration plan is
+[`docs/omop_to_patientrecord.md`](docs/omop_to_patientrecord.md). It is the authoritative
+answer to which OMOP record supplies each output column; a PatientRecord field name is
+never a substitute for a clinical concept, event date, unit, or provenance.
+
+> **Legacy SQL compatibility only:** `public.patient_info` is a read-only database view
+> retained solely for existing consumers. New integrations must not query it or depend on
+> its column set; use `public.patient_record` for SQL access or `/api/v1/patient-records/`
+> for supported application access.
+
+The sanctioned write paths are:
 
 | Path | Use case |
 |---|---|
 | `POST /api/v1/patient-records/upload_fhir/` | Bulk ingest from an EHR / FHIR R4 Bundle |
 | `POST/PATCH/DELETE /api/v1/conditions/`, `/api/v1/measurements/`, etc. | Granular OMOP record writes |
+| `PATCH /api/v1/persons/{person_id}/` | Person demographic/profile extension updates |
 
-The convenience `PATCH /api/v1/patient-records/{person_id}/` endpoint exists for field-level UI
-updates. It does **not** write to PatientRecord directly — it translates each field into the
-appropriate OMOP table write, then the signal chain re-derives PatientRecord.
+Mapped PatientRecord fields are read-only. New integrations must use granular OMOP APIs or FHIR
+for clinical writes, where concept, time, unit, and provenance are explicit; use
+`PATCH /api/v1/persons/{person_id}/` for supported Person profile fields such as email,
+phone number, validation metadata, facility name, and demographic redaction preference.
 
 ---
 
 ## Table of contents
 
 1. [Authentication & authorization](#authentication--authorization)
-2. [PatientRecord endpoints](#patientrecord-endpoints) — list, detail, provenance, me, PATCH, upload_fhir, bulk_delete
+2. [PatientRecord endpoints](#patientrecord-endpoints) — list, detail, provenance, me, upload_fhir, bulk_delete
 3. [OMOP table CRUD](#omop-table-crud) — granular clinical event writes
 4. Supplementary API
    - [Person identity endpoints](#person-identity-endpoints)
@@ -83,7 +101,10 @@ Grant type: `client_credentials` via `POST /o/token/`
 
 ## PatientRecord endpoints
 
-`PatientRecord` is the 286-column denormalized projection that is the core of PRomop. It is read from directly but never written to directly — all clinical data enters through OMOP tables or FHIR ingest, and PatientRecord is re-derived automatically.
+`PatientRecord` is the 286-column denormalized projection that is the core of PRomop.
+Mapped clinical data enters through OMOP tables or FHIR ingest and is re-derived
+automatically. Profile/admin values enter through HealthKey extension columns on
+`Person` and are copied into PatientRecord for compatibility.
 
 Base path: `/api/v1/patient-records/`
 URL parameter `{person_id}` is `Person.person_id` (integer).
@@ -195,39 +216,41 @@ Returns the PatientRecord for the authenticated patient. Only available to patie
 
 ---
 
-### PATCH /api/v1/patient-records/{person_id}/ — field update
+### PatientRecord mutation policy
 
-A convenience endpoint that accepts PatientRecord field names and **translates them into OMOP table writes**. PatientRecord is **not** written to directly — the signal chain re-derives it after the OMOP write completes.
+`PATCH /api/v1/patient-records/{person_id}/` returns **405 Method Not Allowed** for every
+OMOP-mapped clinical field. It returns the rejected names so callers can migrate without
+guessing:
 
-Returns **403** if patient's org ≠ caller's org.
-
-**Request body** (all fields optional)
 ```json
 {
-  "hemoglobin_g_dl": 14.5,
-  "wbc_count_thousand_per_ul": 6.8,
-  "disease": "Diffuse Large B-Cell Lymphoma",
-  "source": "ADMIN_CORRECTION",
-  "source_user_id": "dr.jones",
-  "modification_reason": "Corrected after lab review"
+  "detail": "OMOP-mapped PatientRecord fields are read-only. Write a complete clinical fact to the appropriate OMOP resource, then rederive the record.",
+  "fields": ["hemoglobin_g_dl"]
 }
 ```
 
-`source` choices: `PATIENT_SELF` · `ADMIN_CORRECTION` · `EHR_SYNC` · `DOCUMENT_EXTRACTION`
+Clinical values must be written through their OMOP resources (or FHIR import), after
+which the signal chain refreshes `PatientRecord` from OMOP. Profile/admin values that are
+displayed on PatientRecord, such as email and validation metadata, are written to HealthKey
+extension columns on `Person` via `PATCH /api/v1/persons/{person_id}/` and then projected back.
 
-`modification_reason` is **required** when `source == ADMIN_CORRECTION` — omitting it returns **400**.
+| PatientRecord output category | Write the source fact to | Required source detail |
+|---|---|---|
+| Laboratory, vital, tumour-marker, or numeric pathology value | `/api/v1/measurements/` or FHIR `Observation` | clinical concept, known event date, value, unit, provenance |
+| Coded clinical, eligibility, disease-state, imaging, or social assertion | `/api/v1/observations/`, `/api/v1/conditions/`, or equivalent FHIR resource | standard concept, known event date, coded/value assertion, provenance |
+| Medication or line-of-therapy fact | `/api/v1/drug-exposures/`, `/api/v1/episodes/`, `/api/v1/episode-events/`, or FHIR | medication/episode concept, known dates, provenance |
+| Demographic or supported profile value | `PATCH /api/v1/persons/{person_id}/` | the Person source attribute; refresh projects it |
 
-**What actually gets written**
+The target state has no writable concrete PatientRecord clinical columns. At
+runtime, only fields outside `PATIENT_RECORD_OMOP_MAPPED_FIELDS` may still be
+accepted as projection-owned compatibility fields; this temporary exception is
+not available to new integrations. The field-level mapping and migration status
+are maintained in [`docs/omop_to_patientrecord.md`](docs/omop_to_patientrecord.md).
 
-For every field in [`_LAB_FIELD_TO_LOINC`](#_lab_field_to_loinc-mapping) present in the request body:
-
-1. `_upsert_omop_measurement(person, field_name, value, today)` writes or updates a row in the `measurement` table.
-2. `refresh_patient_record(person)` then re-derives PatientRecord from the updated Measurement rows.
-3. If `source` is present, ProvenanceRecords are created for the Measurement row(s).
-
-Fields not yet modelled in OMOP (some behavioral/socioeconomic fields) are patched directly on PatientRecord as a temporary measure until they have a proper OMOP home. This is a transitional state; those fields will move to OMOP tables over time.
-
-**Response 200** — PatientRecord as re-derived from OMOP after the write.
+New integrations should write semantically complete OMOP facts to their own resource
+endpoint—for example a dated `Measurement` with its LOINC and unit—or use FHIR ingest.
+Include source/provenance on that fact. The PatientRecord API is a read surface, not a
+write model for new consumers.
 
 ---
 
@@ -512,6 +535,15 @@ All use `_OmopFilterMixin`:
 | `/api/episode-events/` | `episode_event` | `?episode_id=` |
 
 All support: GET (list + retrieve), POST (create), PUT/PATCH (update), DELETE.
+
+### Detailed FHIR-to-OMOP CRUD sample
+
+See [`docs/examples/fhir_omop_crud.py`](docs/examples/fhir_omop_crud.py) for a
+small, runnable example that parses a minimal FHIR bundle shape and exercises
+create/retrieve/update/delete for ConditionOccurrence, DrugExposure,
+Measurement, Observation, and ProcedureOccurrence. It shows the required event
+date, concept, unit, provenance/token setup, and verifies that OMOP writes—not
+PatientRecord writes—are the source of the derived projection.
 
 ---
 
@@ -870,30 +902,23 @@ means the stream was truncated (fail closed). Note the following:
 
 ---
 
-## OMOP write internals
+## OMOP write and derivation internals
 
-### _upsert_omop_measurement
-
-```python
-# patient_portal/api/views.py
-def _upsert_omop_measurement(person, field_name, value, today):
-```
-
-Writes a single lab or vital value into the OMOP `measurement` table. This is the primary write target for numeric clinical observations — PatientRecord is updated downstream by the signal chain.
-
-1. Looks up `(loinc_code, unit, display)` from `_LAB_FIELD_TO_LOINC[field_name]`.
-2. Resolves `Concept` by `concept_code = loinc_code, vocabulary_id = 'LOINC'`. Falls back to concept_id 3000963 (generic lab result) if the LOINC Concept is not loaded.
-3. **UPDATE** if a row already exists for `(person, concept, date)`.
-4. **CREATE** otherwise; `measurement_source_value` = display name (≤ 50 chars); `unit_source_value` = unit string.
-5. Saves with `_skip_patient_record_refresh = True` — the caller is responsible for triggering `refresh_patient_record` once, rather than once per measurement row.
-
-Called from `PatientInfoViewSet.partial_update()` for every field in the PATCH body that has a LOINC entry.
+Clinical write APIs operate on OMOP resources, not on projection fields. A numeric
+observation must carry its clinical concept, event time, value, and unit; terminology
+mapping and canonical-unit policy are documented in
+[`docs/concept-mapping.md`](docs/concept-mapping.md) and
+[`docs/clinical-unit-policy.md`](docs/clinical-unit-policy.md). This prevents a
+lossy projection update from being mistaken for a source clinical fact.
 
 ---
 
-### _LAB_FIELD_TO_LOINC mapping
+### PatientRecord output mapping reference
 
-Defines which PatientRecord field names map to OMOP `measurement` rows. Any field in this mapping is written to OMOP — not to PatientRecord directly.
+Shows selected OMOP-to-PatientRecord mappings. This is a derivation/output reference, not
+an input API or permission to construct a Measurement from a PatientRecord field name.
+New integrations should use the granular OMOP/FHIR representation rather than projection
+field names.
 
 ```
 PatientInfo field                  LOINC      Unit            Display
@@ -949,6 +974,36 @@ systolic_blood_pressure            8480-6     mm[Hg]          Systolic blood pre
 diastolic_blood_pressure           8462-4     mm[Hg]          Diastolic blood pressure
 heartrate                          8867-4     /min            Heart rate
 
+# Multiple myeloma disease burden
+# Several spellings map to one field: real-world EHR extracts do not agree on a
+# single LOINC for the free light chains, and both must project.
+monoclonal_protein_serum           51435-6    g/dL            M-protein band 1 [Mass/volume] in Serum by Electrophoresis
+monoclonal_protein_serum           33358-3    g/dL            Protein.monoclonal [Mass/volume] in Serum by Electrophoresis
+monoclonal_protein_urine           32730-5    mg/24h          Protein.monoclonal [Mass/time] in 24 hour Urine
+kappa_flc                          36916-5    mg/dL           Kappa light chains.free [Mass/volume] in Serum
+kappa_flc                          80515-0    mg/dL           Kappa light chains.free [Mass/volume] in Serum by nephelometry
+lambda_flc                         33944-0    mg/dL           Lambda light chains.free [Mass/volume] in Serum
+lambda_flc                         80516-8    mg/dL           Lambda light chains.free [Mass/volume] in Serum by nephelometry
+free_light_chain_ratio             48378-4    {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
+free_light_chain_ratio             80517-6    {ratio}         Kappa/Lambda light chains.free ratio by nephelometry
+free_light_chain_ratio             104546-7   {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
+clonal_plasma_cells                11118-7    %               Plasma cells/100 cells in Bone marrow
+
+# 33944-8 (kappa) and 33945-5 (lambda) also project, but they are NOT real LOINC
+# codes — they exist only as this app's seeded demo concepts and are kept so
+# demo patients keep rendering. Note that 33944-8 (seeded kappa) and 33944-0
+# (real LOINC lambda) differ by one character and are opposite analytes.
+#
+# UNITS: kappa_flc and lambda_flc are converted to mg/L from the Measurement's
+# unit_source_value (mg/L, mg/dL, mg/100mL, ug/mL, g/L). Labs report FLC in mg/L
+# and mg/dL interchangeably — a 10x difference under one field name — so a row
+# whose unit is absent or unrecognised is projected UNCONVERTED and logged at
+# WARNING. Such a row is not a valid input to any absolute threshold: the SLiM
+# light-chain criterion (IMWG 2014: ratio >= 100 AND involved chain >= 100 mg/L)
+# treats it as unproven rather than assuming a unit. Senders should always
+# populate unit_source_value. Every other field in this table is projected in
+# the source's own unit without conversion.
+
 # Performance status
 ecog_performance_status            89247-1    {score}         ECOG Performance Status score
 karnofsky_performance_score        89243-0    {score}         Karnofsky Performance Status score
@@ -986,8 +1041,6 @@ FHIR Bundle
    └── refresh_patient_record(person)   ← explicit call after all OMOP writes complete
          PatientRecord re-derived entirely from the OMOP records written above.
          PatientRecord.organization stamped from the uploading token's org.
-         (A small set of fields not yet modelled in OMOP are patched here
-          as a transitional measure until they have a proper OMOP table.)
 ```
 
 ---
@@ -1066,7 +1119,8 @@ Row-level tenant isolation enforced across all read and write paths (HKI-SEC-04,
 |---|---|
 | `GET /api/v1/patient-records/` | Queryset filtered to `PatientRecord.organization = token.org` |
 | `GET /api/v1/patient-records/{person_id}/` | Returns **404** if patient's org ≠ caller's org |
-| `PATCH /api/v1/patient-records/{person_id}/` | Returns **403** if patient's org ≠ caller's org |
+| Mapped clinical fields on `/api/v1/patient-records/{person_id}/` | Read-only; clinical writes belong to scoped OMOP endpoints/imports |
+| Profile/admin fields displayed on PatientRecord | Read-only projection from scoped `Person` extension writes |
 | All OMOP ViewSets (list) | `_OmopFilterMixin` restricts to persons whose PatientRecord belongs to caller's org |
 | `POST /api/v1/patient-records/upload_fhir/` | Stamps `PatientRecord.organization` from uploading token's org |
 

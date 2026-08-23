@@ -41,7 +41,113 @@ recruiting trials.
 - Audit log middleware — structured JSON log for every mutating API request
 - 640+ backend tests; CI on GitHub Actions (PostgreSQL 16)
 
+## [1.2.0] — unreleased
+
+### Upgrade requirement — load the Athena vocabularies before deploying
+
+```bash
+python manage.py load_athena_vocabularies --path /path/to/athena --concepts-only
+```
+
+Clinical foreign keys resolve against loaded vocabulary. **Without this load** the
+writable-field descriptor reports no editable fields, demographic corrections save
+as text with a null concept, and derivation silently reads nothing.
+
+`--concepts-only` skips `concept_relationship`, `concept_ancestor`,
+`concept_synonym` and `drug_strength` — the difference between an 11-second load
+and streaming ~26M rows to add a handful of concepts.
+
+Newly in `VOCAB_SCOPE`, all of which were in the Athena bundle all along and
+simply never loaded:
+
+- **`Gender`, `Race`, `Ethnicity`** — `Person.race_concept` could not previously
+  hold a real concept on any deployment.
+- **`Episode`, `CDM`** — `32531` Treatment Regimen (what line-of-therapy episodes
+  point at) and `1147094` `drug_exposure.drug_exposure_id` (referenced by
+  `EpisodeEvent`). Both were hand-seeded; Athena supplies them with identical ids,
+  names and codes.
+
+**`seed_omop_concepts` is removed.** It maintained 99 concepts by hand, 97 of
+which Athena already supplies. Offering it as an operator command made it a
+competing source of truth for concepts, which is how a locally invented concept
+ends up occupying an id the vocabulary owns — what happened with `3000963`,
+turning every unmapped lab into a haemoglobin result and leaving 19 staging
+patients with a haemoglobin of 1.0 g/dL.
+
+The data survives as `omop_core/concept_fixtures.py`, imported only by tests,
+which need concepts without a 4.6 GB Athena bundle. There is no management
+command and no deploy step.
+
+Locally-minted `HK-Wearable` concepts — the one thing Athena cannot supply —
+arrive via migration 0143, which runs on every deploy.
+
+---
+
 ## [Unreleased]
+
+---
+
+## [1.1.0] — 2026-08-20
+
+485 commits since 1.0.0. The defining change is architectural: `PatientRecord` became a
+**derived read model**. Clinical data is written to OMOP CDM tables and the projection is
+rebuilt from those facts; nothing writes the projection directly any more.
+
+### Changed
+
+- **`PatientRecord` is derive-only.** FHIR upload, CSV ingestion, and the OMOP CRUD
+  endpoints all write OMOP rows and let the signal chain re-derive the projection. The
+  FHIR write-through path was removed, and the derive-only contract is enforced and
+  documented.
+- **`PatientInfo` renamed to `PatientRecord`** across the backend. The legacy
+  `/api/patient-info/` wire format (`patient_info`, `patient_info_id` keys) is unchanged.
+- Profile writes moved from `PatientRecord` to `Person`.
+- Password minimum raised to 12 characters, matching the analytics (PRism) app.
+
+### Added
+
+- **Bulk OMOP row writes** on the five clinical endpoints, accepting a JSON array with
+  one transaction per batch, per-index validation errors, and a 1,000-row cap (#454).
+  Idempotent by default: rows upsert on event identity so an ETL re-run or a retry
+  converges instead of duplicating.
+- **Deferred derivation** — `?skip_refresh=true` on bulk POST and row-level PATCH/DELETE,
+  with `POST /api/v1/patient-records/{person_id}/refresh/` to derive afterwards (#532).
+- **Patient portal**: first-class patient role, org-scoped invites, patient self-signup,
+  consent grants, surveys, messages, allergies, immunizations, and settings (#264, #284).
+- **Wearable ingestion** — Apple Watch and Garmin metrics normalized to OMOP rows, upload
+  history, 30-day averages, and auto-detection of file type.
+- **Vocabulary management** — releases, snapshots with release pinning and
+  `X-Vocab-Release-Id` (#371), scope enforcement on release/snapshot endpoints (#344),
+  concept graph endpoints (#232), and concept search by name and domain/class.
+- **Derivation versioning and per-field OMOP provenance** (#358, #360).
+- **PHR-S FM conformance controls** — persisted audit trail with review API (#295),
+  retention/archival (#298), standards-based audit format (#303), tamper-evidence,
+  hash chaining and break-glass access (#304, #318), authentication controls including
+  lockout, no-reuse and forced change (#302, #319), message confidentiality (#308),
+  entered-in-error and revision history (#307), FHIR exchange integrity and interchange
+  agreements (#306), and terminology maintenance (#305).
+- **Standard OMOP CDM 5.4 tables** for conformance, plus line-of-therapy unification with
+  per-line outcome persistence in OMOP.
+- **Follicular lymphoma pipeline** — Synthea FL generation with realistic timelines and
+  mortality (#227), and FL → DLBCL transformation tracking.
+- **mCODE FHIR import** support.
+- `bulk_import_fhir_bundle` for fast synthetic cohort loading.
+- CI now runs the pytest suite as well as the Django runner (#426).
+
+### Fixed
+
+- **Concept integrity**: clinical rows repointed off concepts that used their code as their
+  id, `drug_exposure` repointed off locally-minted drug concepts, `Concept.source`
+  backfilled, concept 0 metadata corrected, and locally-minted wearable concepts
+  quarantined. Stopped minting fake HemOnc concepts (#236).
+- CLL ALC unit mismatch in the iwCLL threshold (#544); MM disease-burden labs mapped to the
+  LOINC codes real data uses (#537); direct bilirubin LOINC mapping; tumor and lymph-node
+  size disambiguated.
+- HER2 `Equivocal` receptor results preserved through the projection (#220);
+  `valueString` persisted for lab observations (#218); `best_response` persisted (#205);
+  `death_date` exposed through the patient_info view.
+- Org cascade now deletes all person-FK tables it previously missed.
+- 19 of 21 npm security advisories resolved.
 
 ---
 

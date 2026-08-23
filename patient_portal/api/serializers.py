@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from patient_portal.models import Identity, PatientConsent, PatientMessage
 from omop_core.models import (
-    PatientRecord, Concept,
+    PatientRecord, Concept, FieldConceptMapping, FieldSynonym,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
     Survey, PatientSurveyResponse,
@@ -14,6 +14,7 @@ from datetime import date
 from django.utils.timezone import localdate
 from django.utils import timezone
 from omop_core.services.access import has_org_admin_access
+from omop_core.services.patient_record_service import PATIENT_RECORD_OMOP_MAPPED_FIELDS
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -73,7 +74,7 @@ class UserSerializer(serializers.ModelSerializer):
 class OrganizationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Organization
-        fields = ['id', 'name', 'slug', 'is_active', 'allows_public_aggregated_data', 'allows_patient_signup', 'created_at']
+        fields = ['id', 'name', 'slug', 'is_active', 'allows_public_aggregated_data', 'allows_patient_signup', 'clinical_unit_system', 'created_at']
         read_only_fields = ['id', 'created_at']
 
 
@@ -234,12 +235,42 @@ class GenderField(serializers.CharField):
         return self.DISPLAY_TO_CODE.get(title, data)
 
 
+def _derived_wearable_fields():
+    """Every wearable summary column on PatientRecord, read off the model.
+
+    These are written only by refresh_patient_record, deriving them from OMOP
+    measurement/observation rows. A client PATCH must never set one: the value
+    would survive until the next refresh recomputed it, and during that window
+    the column disagrees with the OMOP rows it claims to summarize, with no
+    indication that it does. The window is unbounded in practice — refresh
+    fires on OMOP writes for that person, so a patient who stops syncing their
+    device never triggers one.
+
+    This is computed rather than hand-listed because the hand-listed version
+    drifted: ten columns were protected, and the eleven added afterwards were
+    not (#440). Enumerating the model means a new column is protected the day
+    it is added, rather than the day someone notices.
+
+    Matching on the naming convention deliberately errs toward
+    over-protection. A future settings field that happened to match would be
+    wrongly read-only — which surfaces immediately as a rejected write. The
+    opposite failure, a derived column silently accepting client values, is
+    invisible and is exactly what this function exists to prevent.
+    """
+    return tuple(
+        field.name
+        for field in PatientRecord._meta.get_fields()
+        if getattr(field, 'concrete', False)
+        and (field.name.endswith('_30d') or field.name.startswith('wearable_'))
+    )
+
+
 class PatientRecordSerializer(serializers.ModelSerializer):
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)
     patient_name = serializers.SerializerMethodField()
     name = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
-    gender = GenderField(required=False, allow_blank=True, allow_null=True)
+    gender = GenderField(read_only=True)
     refractory_status = serializers.CharField(source='treatment_refractory_status', read_only=True)
     first_line_therapy_display = serializers.SerializerMethodField()
     second_line_therapy_display = serializers.SerializerMethodField()
@@ -259,29 +290,11 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             'first_line_therapy_display', 'second_line_therapy_display', 'later_therapy_display',
             'lines_of_therapy', 'therapy_release_id',
             'death_date',
-            # Derived therapy-id read model (issue #236): written only by the
-            # derivation pipeline (refresh_patient_record / FHIR upload) from
-            # OMOP truth.  A client PATCH must never set them directly —
-            # provenance would be lost and the values would diverge from OMOP.
-            'first_line_therapy_id', 'second_line_therapy_id', 'later_therapy_ids',
-            'first_line_component_ids', 'second_line_component_ids',
-            'later_component_ids', 'therapy_component_ids',
-            'first_line_therapy_type_ids', 'second_line_therapy_type_ids',
-            'later_therapy_type_ids', 'therapy_type_ids',
-            'therapy_ids_provenance',
-            # Per-line later-therapy structure (regimen/lineNumber/concept_id/
-            # dates) is derived from OMOP; lines_of_therapy surfaces its
-            # concept_ids as authoritative, so a client must never PATCH it.
-            'later_therapies',
-            # Wearable summaries are written by the device-sync service, never by the client API.
-            'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
-            'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
-            'resting_heart_rate_avg_30d', 'hrv_sdnn_avg_30d',
-            'oxygen_saturation_min_30d', 'respiratory_rate_avg_30d',
-            'sleep_duration_hours_avg_30d',
             # Derivation versioning — set only by refresh_patient_record, never by client.
             'derivation_version', 'derived_at',
-        )
+            # Internal migration bookkeeping; clients must not set it.
+            'user_edited_fields',
+        ) + tuple(sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS))
 
     def get_patient_name(self, obj):
         if obj.person:
@@ -947,3 +960,70 @@ class InterchangeAgreementSerializer(serializers.ModelSerializer):
 
     def get_in_effect(self, obj):
         return obj.is_in_effect()
+
+
+class FieldConceptMappingSerializer(serializers.ModelSerializer):
+    reviewer = serializers.CharField(source='reviewer.username', read_only=True, default=None)
+
+    class Meta:
+        model = FieldConceptMapping
+        fields = [
+            'id', 'field_name', 'concept', 'vocabulary_id', 'concept_code',
+            'unit', 'omop_table', 'status', 'reviewer',
+            'reviewed_at', 'notes', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'reviewer', 'reviewed_at', 'created_at', 'updated_at']
+
+    def validate_concept_code(self, value):
+        if not value:
+            return value
+        from omop_core.services.mappings import LAB_FIELD_TO_LOINC
+        vocab_id = self.initial_data.get('vocabulary_id', '')
+        # Check collision with LAB_FIELD_TO_LOINC (hardcoded LOINC mappings).
+        if vocab_id == 'LOINC':
+            for _field, (code, _unit, _display) in LAB_FIELD_TO_LOINC.items():
+                if code == value:
+                    raise serializers.ValidationError(
+                        f"LOINC code {value} is already mapped to field '{_field}' via LAB_FIELD_TO_LOINC."
+                    )
+        return value
+
+    def validate(self, attrs):
+        field_name = attrs.get('field_name', getattr(self.instance, 'field_name', None))
+        # Verify field_name is a real PatientRecord field.
+        if field_name:
+            concrete_names = {
+                f.name for f in PatientRecord._meta.get_fields()
+                if getattr(f, 'concrete', False)
+            }
+            if field_name not in concrete_names:
+                raise serializers.ValidationError({
+                    'field_name': f"'{field_name}' is not a concrete PatientRecord field."
+                })
+        return attrs
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        if validated_data.get('status') == 'approved' and request:
+            validated_data['reviewer'] = request.user
+            validated_data['reviewed_at'] = timezone.now()
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        request = self.context.get('request')
+        if validated_data.get('status') == 'approved' and instance.status != 'approved' and request:
+            validated_data['reviewer'] = request.user
+            validated_data['reviewed_at'] = timezone.now()
+        return super().update(instance, validated_data)
+
+
+
+class FieldSynonymSerializer(serializers.ModelSerializer):
+    created_by = serializers.CharField(
+        source='created_by.username', read_only=True, default=None,
+    )
+
+    class Meta:
+        model = FieldSynonym
+        fields = ['id', 'field_name', 'synonym_text', 'source', 'created_by', 'created_at']
+        read_only_fields = ['id', 'source', 'created_by', 'created_at']

@@ -1,6 +1,8 @@
 import csv
+import shutil
 import sys
 import time
+import zipfile
 from datetime import date
 from pathlib import Path
 
@@ -8,6 +10,7 @@ csv.field_size_limit(sys.maxsize)
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection
+from django.db.models import Count
 
 import logging
 
@@ -28,11 +31,37 @@ VOCAB_SCOPE = frozenset({
     # (immunizations) is mapped in the ingest but isn't in the current Athena
     # export, so it loads once a CVX-inclusive bundle is fetched.
     'SNOMED', 'ICD10CM', 'CVX',
+    # Genomic + oncology coding vocabularies (#459)
+    'OMOP Genomic', 'ICDO3', 'NCIt',
+    # Oncology staging/grading modifiers + cancer registry
+    'Cancer Modifier', 'NAACCR',
+    # OMOP-generated metadata. 'Episode' carries the Treatment Regimen concept the
+    # line-of-therapy episodes point at; 'CDM' carries the field concepts
+    # EpisodeEvent references. Both were hand-seeded until the seeder was retired —
+    # Athena has them, with the same ids, names and codes.
+    'Episode', 'CDM',
+    # Demographics. Person.gender_concept / race_concept / ethnicity_concept are
+    # standard OMOP FKs, and derivation reads the concept before falling back to
+    # the source value — so without these loaded a demographic correction cannot
+    # be recorded as anything but free text. All three are present in the Athena
+    # bundle and were simply never in scope, so no deployment has ever had them.
+    'Gender', 'Race', 'Ethnicity',
 })
+# These vocabularies underpin the clinical concepts PROMOP presents and maps.
+# Do not include CVX here: it is deliberately absent from the current Athena
+# bundle, even though the importer supports it when a CVX-inclusive bundle is
+# used.
+REQUIRED_CLINICAL_VOCABULARIES = frozenset({'LOINC', 'RxNorm', 'SNOMED', 'ICD10CM'})
 RXNORM_CLASS_SCOPE = frozenset({'Ingredient', 'Clinical Drug', 'Branded Drug', 'Clinical Drug Comp'})
-LOINC_DOMAIN_SCOPE = frozenset({'Measurement', 'Observation'})
+# A --replace reload deletes the entire vocabulary before applying this filter.
+# Keep every LOINC domain already required by our deployed vocabulary; the
+# preflight below turns any future scope drift into a safe, actionable failure.
+LOINC_DOMAIN_SCOPE = frozenset({
+    'Measurement', 'Observation', 'Meas Value', 'Procedure', 'Note',
+})
 BATCH = 100_000
 PROGRESS_EVERY = 500_000
+DEFAULT_GDRIVE_URL = 'https://drive.google.com/drive/u/0/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7'
 
 # Defaults for the single self-describing cdm_source row. Kept in sync with
 # migration 0112_seed_cdm_source; the command re-seeds this row because a
@@ -78,6 +107,75 @@ def _download_gcs_blob(bucket, filename, log):
     elapsed = time.monotonic() - t
     log(f'  Downloaded {filename} in {elapsed:.0f}s.')
     return open(dest, encoding='utf-8', newline='')
+
+
+def _extract_vocabulary_archive(archive, extract_dir, log):
+    archive = Path(archive)
+    if not archive.exists():
+        raise CommandError(f'Vocabulary archive not found: {archive}')
+
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    log(f'  Extracting {archive.name}...')
+    extract_root = extract_dir.resolve()
+    with zipfile.ZipFile(archive) as zf:
+        for member in zf.infolist():
+            target = (extract_dir / member.filename).resolve()
+            try:
+                target.relative_to(extract_root)
+            except ValueError:
+                raise CommandError(f'Unsafe path in vocabulary archive: {member.filename}')
+        zf.extractall(extract_dir)
+
+    required = 'CONCEPT.csv'
+    candidates = [p.parent for p in extract_dir.rglob(required)]
+    if not candidates:
+        raise CommandError(f'Extracted vocabulary archive did not contain {required}.')
+    if len(candidates) > 1:
+        log(f'  Found multiple {required} files; using {candidates[0]}.')
+    return str(candidates[0])
+
+
+def _download_gdrive_vocabulary(url, log):
+    """Download a Google Drive folder/file containing an Athena vocabulary zip."""
+    try:
+        import gdown
+    except ImportError as exc:
+        raise CommandError(
+            'Google Drive vocabulary loading requires gdown. Install dependencies '
+            'from requirements.txt, then rerun with --gdrive.'
+        ) from exc
+
+    download_dir = Path('/tmp/vocab/gdrive')
+    extract_dir = Path('/tmp/vocab/gdrive-extracted')
+    shutil.rmtree(download_dir, ignore_errors=True)
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    download_dir.mkdir(parents=True, exist_ok=True)
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    log(f'Loading Athena vocabulary archive from Google Drive: {url}')
+    if '/folders/' in url:
+        result = gdown.download_folder(url=url, output=str(download_dir), quiet=False, use_cookies=False)
+        if result is None:
+            raise CommandError(f'Google Drive folder download failed: {url}')
+    else:
+        filename = gdown.download(url=url, output=str(download_dir / 'athena-vocabulary.zip'), quiet=False)
+        if not filename:
+            raise CommandError(f'Google Drive file download failed: {url}')
+
+    zips = sorted(download_dir.rglob('*.zip'))
+    if not zips:
+        raise CommandError(
+            f'No .zip file found after downloading Google Drive vocabulary source: {url}'
+        )
+    archive = zips[0]
+    if len(zips) > 1:
+        log(
+            f'  Found {len(zips)} zip files; using first by name: {archive.name}. '
+            'Pass a direct Google Drive file URL to select a specific zip.'
+        )
+    return _extract_vocabulary_archive(archive, extract_dir, log)
 
 
 def _header_index(header_row):
@@ -127,27 +225,52 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--path',
                             help='Directory containing Athena TSV files')
+        parser.add_argument('--archive',
+                            help='Zip archive containing Athena TSV files')
         parser.add_argument('--bucket',
                             help='GCS bucket name to stream files from (alternative to --path)')
+        parser.add_argument('--gdrive', nargs='?', const=DEFAULT_GDRIVE_URL,
+                            help=(
+                                'Google Drive folder or file URL containing a zipped '
+                                f'Athena vocabulary export. Defaults to {DEFAULT_GDRIVE_URL}.'
+                            ))
         parser.add_argument('--replace', action='store_true',
                             help='Clear vocabulary rows before loading')
         parser.add_argument('--dry-run', action='store_true', dest='dry_run',
                             help='Count rows without writing to DB')
+        parser.add_argument('--skip-clinical-vocabulary-verification', action='store_true',
+                            help='Do not verify that required clinical vocabularies loaded')
+        parser.add_argument('--concepts-only', action='store_true',
+                            help=(
+                                'Load vocabulary/domain/concept_class/concept and stop. '
+                                'Skips concept_relationship, concept_ancestor, '
+                                'concept_synonym and drug_strength.'
+                            ))
 
     def handle(self, *args, **options):
         base = options['path']
+        archive = options['archive']
         bucket_name = options['bucket']
+        gdrive_url = options['gdrive']
         replace = options['replace']
         dry_run = options['dry_run']
+        skip_clinical_vocabulary_verification = options['skip_clinical_vocabulary_verification']
 
-        if not base and not bucket_name:
-            raise CommandError('Provide either --path or --bucket')
+        sources = [bool(base), bool(archive), bool(bucket_name), bool(gdrive_url)]
+        if sum(sources) != 1:
+            raise CommandError('Provide exactly one of --path, --archive, --bucket, or --gdrive')
 
         self._gcs_bucket = None
         if bucket_name:
             from google.cloud import storage as gcs
             self._gcs_bucket = gcs.Client().bucket(bucket_name)
             self._log(f'Loading from gs://{bucket_name}/ (download-one-process-delete)')
+        if gdrive_url:
+            base = _download_gdrive_vocabulary(gdrive_url, self._log)
+        if archive:
+            base = _extract_vocabulary_archive(
+                archive, Path('/tmp/vocab/archive-extracted'), self._log
+            )
 
         t0 = time.monotonic()
         self._build_start = time.time()  # wall-clock for VocabularyRelease
@@ -163,9 +286,14 @@ class Command(BaseCommand):
                 'condition_occurrence, etc.). The default upsert path (no flag) '
                 'is safe for databases with clinical data.'
             )
+            self._validate_replace_loinc_scope()
+            self._validate_replace_vocab_coverage()
 
         if self._direct:
+            self._hk_concepts = self._save_healthkey_concepts()
             self._clear()
+        else:
+            self._hk_concepts = []
 
         counts = {
             'relationship':         self._load_relationships(dry_run),
@@ -173,15 +301,34 @@ class Command(BaseCommand):
             'domain':               self._load_domains(dry_run),
             'concept_class':        self._load_concept_classes(dry_run),
             'concept':              self._load_concepts(dry_run),
-            'concept_relationship': self._load_concept_relationships(dry_run),
-            'concept_ancestor':     self._load_concept_ancestors(dry_run),
-            'concept_synonym':      self._load_concept_synonym(dry_run),
-            'drug_strength':        self._load_drug_strength(dry_run),
-            'source_to_concept_map': self._load_source_to_concept_map(dry_run),
         }
+        # Restore HealthKey-minted concepts after the Athena concept load
+        # but before relationship/ancestor loads that reference concept IDs.
+        if self._hk_concepts and not dry_run:
+            self._restore_healthkey_concepts()
+        if options['concepts_only']:
+            # Adding a small vocabulary to VOCAB_SCOPE means ~1.5k new concepts,
+            # but the relationship, ancestor and synonym files are ~26M rows that
+            # would be re-streamed to change almost nothing. Those tables are
+            # keyed on concept membership, so they stay valid; a later full load
+            # backfills anything the new concepts participate in.
+            self.stdout.write(self.style.WARNING(
+                '  --concepts-only: skipping concept_relationship, '
+                'concept_ancestor, concept_synonym and drug_strength.'
+            ))
+        else:
+            counts.update({
+                'concept_relationship': self._load_concept_relationships(dry_run),
+                'concept_ancestor':     self._load_concept_ancestors(dry_run),
+                'concept_synonym':      self._load_concept_synonym(dry_run),
+                'drug_strength':        self._load_drug_strength(dry_run),
+                'source_to_concept_map': self._load_source_to_concept_map(dry_run),
+            })
         if not dry_run:
             self._seed_concept_zero()
             self._sync_cdm_source_metadata()
+            if not skip_clinical_vocabulary_verification:
+                self._verify_required_clinical_vocabularies()
             self._record_version_history(replace)
             self._publish_release(counts)
         elapsed = time.monotonic() - t0
@@ -207,6 +354,28 @@ class Command(BaseCommand):
         self.stdout.write(msg)
         self.stdout.flush()
 
+    def _verify_required_clinical_vocabularies(self):
+        """Fail the load when a partial Athena bundle omits core clinical vocabularies."""
+        counts = dict(
+            Concept.objects.filter(vocabulary_id__in=REQUIRED_CLINICAL_VOCABULARIES)
+            .values('vocabulary_id')
+            .annotate(total=Count('concept_id'))
+            .values_list('vocabulary_id', 'total')
+        )
+        missing = sorted(REQUIRED_CLINICAL_VOCABULARIES - counts.keys())
+        if missing:
+            raise CommandError(
+                'Required clinical vocabularies are missing after the load: '
+                f"{', '.join(missing)}. This database cannot reliably map clinical "
+                'conditions, diagnoses, medications, and labs. Fetch an Athena bundle '
+                'that includes the missing vocabularies and rerun this command without '
+                '--replace; --replace truncates clinical data.'
+            )
+        self._log(
+            '  verified required clinical vocabularies: ' +
+            ', '.join(f'{vid} ({counts[vid]:,})' for vid in sorted(counts))
+        )
+
     def _open(self, filename):
         if self._gcs_bucket:
             return _download_gcs_blob(self._gcs_bucket, filename, self._log)
@@ -218,6 +387,65 @@ class Command(BaseCommand):
             if tmp.exists():
                 tmp.unlink()
                 self._log(f'  Cleaned up {filename}.')
+
+    # -- HealthKey concept preservation across --replace -----------------
+
+    _HK_CONCEPT_COLS = (
+        'concept_id', 'concept_name', 'domain_id', 'vocabulary_id',
+        'concept_class_id', 'standard_concept', 'concept_code',
+        'valid_start_date', 'valid_end_date', 'invalid_reason', 'source',
+    )
+
+    def _save_healthkey_concepts(self):
+        """Snapshot source='HealthKey' concept rows before TRUNCATE.
+
+        Returns a list of tuples matching ``_HK_CONCEPT_COLS`` order.
+        """
+        qs = Concept.objects.filter(source='HealthKey')
+        count = qs.count()
+        if not count:
+            self._log('  No HealthKey-minted concepts to preserve.')
+            return []
+        rows = list(qs.values_list(*self._HK_CONCEPT_COLS))
+        self._log(f'  Saved {len(rows):,} HealthKey concept(s) for restore after TRUNCATE.')
+        return rows
+
+    def _restore_healthkey_concepts(self):
+        """Re-insert saved HealthKey concepts after TRUNCATE + Athena reload.
+
+        FK references (vocabulary, domain, concept_class) that were not restored
+        by the Athena reload are created as minimal placeholder rows so the
+        INSERT does not violate FK constraints.
+        """
+        if not self._hk_concepts:
+            return
+        # Ensure FK targets exist — Athena reload may not include HK-specific
+        # vocabulary / domain / concept_class rows.
+        vocab_ids = {r[3] for r in self._hk_concepts}
+        domain_ids = {r[2] for r in self._hk_concepts}
+        class_ids = {r[4] for r in self._hk_concepts}
+
+        for vid in vocab_ids:
+            Vocabulary.objects.get_or_create(
+                vocabulary_id=vid,
+                defaults={'vocabulary_name': vid, 'vocabulary_concept_id': 0},
+            )
+        for did in domain_ids:
+            Domain.objects.get_or_create(
+                domain_id=did,
+                defaults={'domain_name': did, 'domain_concept_id': 0},
+            )
+        for cid in class_ids:
+            ConceptClass.objects.get_or_create(
+                concept_class_id=cid,
+                defaults={'concept_class_name': cid, 'concept_class_concept_id': 0},
+            )
+
+        _copy_rows(
+            'concept', self._HK_CONCEPT_COLS, self._hk_concepts,
+            self._log, direct=True,
+        )
+        self._log(f'  Restored {len(self._hk_concepts):,} HealthKey concept(s).')
 
     def _clear(self):
         self._log('Clearing existing vocabulary data (TRUNCATE)...')
@@ -232,6 +460,86 @@ class Command(BaseCommand):
                   'including cdm_source, observation_period, and clinical event tables. '
                   'cdm_source is re-seeded after load; re-run populate_observation_period '
                   'to re-derive observation periods.')
+
+    def _validate_replace_loinc_scope(self):
+        """Abort before TRUNCATE if loaded LOINC data falls outside the filter.
+
+        `--replace` first clears ``concept`` and then reloads only the configured
+        LOINC domains. Without this check, adding a new LOINC domain to a live
+        database can make a later ordinary reload silently delete its concepts.
+        """
+        excluded = Concept.objects.filter(vocabulary_id='LOINC').exclude(
+            domain_id__in=LOINC_DOMAIN_SCOPE,
+        )
+        count = excluded.count()
+        if not count:
+            return
+
+        domains = list(
+            excluded.order_by('domain_id').values_list('domain_id', flat=True).distinct()
+        )
+        raise CommandError(
+            '--replace aborted before TRUNCATE: '
+            f'{count:,} loaded LOINC concept(s) use domain(s) outside '
+            f'LOINC_DOMAIN_SCOPE: {", ".join(domains)}. '
+            'Add the required domain(s) to LOINC_DOMAIN_SCOPE, then rerun.'
+        )
+
+    def _validate_replace_vocab_coverage(self):
+        """Abort before TRUNCATE if the incoming CSV would drop entire vocabularies.
+
+        When ``--replace`` TRUNCATEs the concept table, only HealthKey-sourced
+        concepts are preserved. If the Athena CSV omits a vocabulary that has
+        existing rows in the DB, those concepts are silently deleted with no way
+        to recover them. This pre-flight check compares the vocabularies present
+        in the DB against what the incoming CONCEPT.csv will provide and aborts
+        if any vocabulary would lose all its rows.
+        """
+        # Vocabularies currently stored in the DB (within VOCAB_SCOPE).
+        db_vocabs = set(
+            Concept.objects.filter(vocabulary_id__in=VOCAB_SCOPE)
+            .exclude(source='HealthKey')
+            .values_list('vocabulary_id', flat=True)
+            .distinct()
+        )
+        if not db_vocabs:
+            return  # Nothing to lose.
+
+        # Scan the incoming CONCEPT.csv to find which vocabularies it covers.
+        csv_vocabs = set()
+        try:
+            f = self._open('CONCEPT.csv')
+        except CommandError:
+            raise CommandError(
+                '--replace aborted: CONCEPT.csv not found. Cannot verify '
+                'vocabulary coverage before TRUNCATE.'
+            )
+        with f:
+            reader = csv.reader(f, delimiter='\t')
+            idx = _header_index(next(reader))
+            i_vid = idx['vocabulary_id']
+            for cols in reader:
+                try:
+                    vid = cols[i_vid]
+                except IndexError:
+                    continue
+                if vid in VOCAB_SCOPE:
+                    csv_vocabs.add(vid)
+
+        missing = sorted(db_vocabs - csv_vocabs)
+        if missing:
+            raise CommandError(
+                '--replace aborted before TRUNCATE: the incoming CONCEPT.csv '
+                f'contains no rows for {len(missing)} vocabulary/ies that have '
+                f'existing concepts in the database: {", ".join(missing)}. '
+                'A TRUNCATE would permanently delete those concepts. Either '
+                'fetch an Athena bundle that includes the missing vocabularies, '
+                'or run without --replace to upsert.'
+            )
+        self._log(
+            f'  --replace pre-flight: all {len(db_vocabs)} in-scope DB '
+            f'vocabularies covered by incoming CSV.'
+        )
 
     def _seed_concept_zero(self):
         Vocabulary.objects.get_or_create(
@@ -536,11 +844,11 @@ class Command(BaseCommand):
     def _load_concept_ancestors(self, dry_run):
         self._log('Loading CONCEPT_ANCESTOR.csv...')
         t = time.monotonic()
-        hemonc_ids = set(
-            Concept.objects.filter(vocabulary_id='HemOnc')
+        loaded_ids = set(
+            Concept.objects.filter(vocabulary_id__in=VOCAB_SCOPE)
                            .values_list('concept_id', flat=True)
         )
-        self._log(f'  {len(hemonc_ids):,} HemOnc IDs in filter set')
+        self._log(f'  {len(loaded_ids):,} concept IDs in filter set')
         count = 0
         scanned = 0
         rows = []
@@ -560,7 +868,7 @@ class Command(BaseCommand):
                     desc = int(cols[i_desc])
                 except (ValueError, IndexError):
                     continue
-                if anc not in hemonc_ids or desc not in hemonc_ids:
+                if anc not in loaded_ids or desc not in loaded_ids:
                     continue
                 count += 1
                 if not dry_run:

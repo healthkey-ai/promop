@@ -247,12 +247,15 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
 
       <Section title="Myeloma Markers">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="M-Protein Type" name="m_protein_type" type="text" value={formData?.m_protein_type} onChange={onChange} />
-          <Field label="Serum M-Protein (g/dL)" name="serum_m_protein" type="number" value={formData?.serum_m_protein} onChange={onChange} />
-          <Field label="Urine M-Protein (mg/24h)" name="urine_m_protein" type="number" value={formData?.urine_m_protein} onChange={onChange} />
-          <Field label="Free Light Chain Ratio" name="free_light_chain_ratio" type="number" value={formData?.free_light_chain_ratio} onChange={onChange} />
-          <Field label="Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" type="number" value={formData?.beta2_microglobulin} onChange={onChange} />
-          <Field label="LDH Level (U/L)" name="ldh_level" type="number" value={formData?.ldh_level} onChange={onChange} />
+          {/* OMOP derived, so read_only on the serializer. An editable input
+              here would silently drop the edit. */}
+          <Field label="Serum M-Protein (g/dL)" name="monoclonal_protein_serum" type="number" value={formData?.monoclonal_protein_serum} onChange={onChange} readOnly />
+          <Field label="Urine M-Protein (mg/24h)" name="monoclonal_protein_urine" type="number" value={formData?.monoclonal_protein_urine} onChange={onChange} readOnly />
+          <Field label="Kappa Free Light Chains" name="kappa_flc" type="number" value={formData?.kappa_flc} onChange={onChange} readOnly />
+          <Field label="Lambda Free Light Chains" name="lambda_flc" type="number" value={formData?.lambda_flc} onChange={onChange} readOnly />
+          <Field label="Free Light Chain Ratio" name="free_light_chain_ratio" type="number" value={formData?.free_light_chain_ratio} onChange={onChange} readOnly />
+          <Field label="Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" type="number" value={formData?.beta2_microglobulin} onChange={onChange} readOnly />
+          <Field label="LDH Level (U/L)" name="ldh_level" type="number" value={formData?.ldh_level} onChange={onChange} readOnly />
         </div>
       </Section>
 
@@ -262,7 +265,7 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
           <Field label="Hypercalcemia" name="hypercalcemia" type="select" value={formData?.hypercalcemia} options={YES_NO_OPTIONS} onChange={onChange} />
           <Field label="Renal Impairment" name="renal_impairment" type="select" value={formData?.renal_impairment} options={YES_NO_OPTIONS} onChange={onChange} />
           <Field label="Anemia" name="anemia" type="select" value={formData?.anemia} options={YES_NO_OPTIONS} onChange={onChange} />
-          <Field label="Plasma Cell Percentage (%)" name="plasma_cell_percentage" type="number" value={formData?.plasma_cell_percentage} onChange={onChange} />
+          <Field label="Bone Marrow Plasma Cells (%)" name="clonal_plasma_cells" type="number" value={formData?.clonal_plasma_cells} onChange={onChange} readOnly />
         </div>
       </Section>
 

@@ -61,12 +61,17 @@ class Command(BaseCommand):
             action="store_true",
             help="Report how many records would be re-derived without modifying any.",
         )
+        parser.add_argument(
+            "--organization",
+            help="Limit the backfill to one organization slug.",
+        )
 
     def handle(self, **options):
         target = options["target_version"] if options["target_version"] is not None else DERIVATION_VERSION
         backfill_all = options["backfill_all"]
         batch_size = options["batch_size"]
         dry_run = options["dry_run"]
+        organization = options["organization"]
 
         if backfill_all:
             qs = PatientRecord.objects.select_related("person").all()
@@ -76,6 +81,10 @@ class Command(BaseCommand):
                 derivation_version__lt=target,
             )
             label = f"derivation_version < {target}"
+
+        if organization:
+            qs = qs.filter(organization__slug=organization)
+            label += f" in organization {organization}"
 
         total = qs.count()
         if total == 0:

@@ -1,20 +1,28 @@
+from typing import Any, Callable, ContextManager
+
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.throttling import ScopedRateThrottle
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, models, transaction
 from django.db.models import Q, F
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import validate_email
 from omop_core.models import (
+    Organization,
     Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
@@ -33,15 +41,21 @@ from omop_core.models import (
     FlipIScore, FollicularLymphomaGrade, PostTransformationOutcome,
     BreastCancerFirstLineTherapy, BreastCancerSecondLineTherapy, BreastCancerLaterLineTherapy,
     MyelomaType, WearableUpload,
+    PERSON_YEAR_PLACEHOLDERS,
 )
 from omop_oncology.models import Episode, EpisodeEvent
-from omop_core.services.patient_record_service import refresh_patient_record
+from omop_core.services.patient_record_service import (
+    FHIR_CONDITION_STAGE_SOURCE_VALUE,
+    PATIENT_RECORD_OMOP_MAPPED_FIELDS,
+    refresh_patient_record,
+)
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.lot_inference_service import infer_lot_for_person
-from omop_core.services.omop_write_service import sync_to_omop
 from omop_core.services.episode_service import upsert_therapy_line_episode
-from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
-from omop_core.services.pk import next_pk
+from omop_core.services.mappings import CONCEPT_GENERIC_LAB, get_gender_concept
+from omop_core.services.demographics import resolve_concept as resolve_demographic_concept
+from omop_core.services.pk import next_pk, next_pk_batch
+from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.services.regimen_resolution import (
     get_or_create_quarantine_drug,
@@ -54,14 +68,17 @@ from omop_core.services.regimen_resolution import (
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
 from omop_core.services.access import get_visible_orgs, build_trusting_map, get_admin_orgs
 from datetime import date as _date, datetime, timedelta
-from django.utils.timezone import localdate
+from django.utils.timezone import localdate, make_aware, is_naive
+import datetime as _dt
 import csv
 import hashlib
 import json
 import logging
+import os
 import re
+from decimal import Decimal, InvalidOperation
 from io import StringIO
-from .permissions import ScopedTokenPermission, PatientCrudPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
+from .permissions import ScopedTokenPermission, VocabReadPermission, PatientCrudPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
@@ -84,6 +101,165 @@ class PatientRecordPagination(PageNumberPagination):
     page_size = 25
     page_size_query_param = 'page_size'
     max_page_size = 100
+
+
+class ClinicalOmopPagination(PageNumberPagination):
+    """Opt-in clinical list pagination.
+
+    ``?page_size=N`` and ``?limit=N`` both return DRF's paginated envelope with
+    a default size of 100 and a hard cap of 1000. Omitting pagination params
+    preserves the legacy bare-array response while clients migrate.
+    """
+    page_size = 100
+    page_size_query_param = 'page_size'
+    max_page_size = 1000
+
+    def get_page_size(self, request):
+        limit = request.query_params.get('limit')
+        if limit is not None and self.page_size_query_param not in request.query_params:
+            try:
+                size = int(limit)
+            except (TypeError, ValueError):
+                return self.page_size
+            if size <= 0:
+                return self.page_size
+            return min(size, self.max_page_size)
+        return super().get_page_size(request)
+
+
+def _serialize_omop_row(obj, include=None):
+    """Serialize a model instance to a dict.
+
+    *include* restricts to the named fields when provided.  FK concept fields
+    use ``field.attname`` (e.g. ``drug_concept_id``) so the raw integer is
+    emitted instead of the related object.
+    """
+    row = {}
+    for field in obj._meta.fields:
+        name = field.name
+        if include is not None and name not in include:
+            continue
+        value = getattr(obj, field.attname)
+        if isinstance(value, Decimal):
+            value = float(value)
+        row[name] = value
+    return row
+
+
+# -- OMOP tab: per-table column include lists --------------------------------
+# Only columns that are typically populated (>10 %) are included.  ``person``
+# is excluded from every clinical table (implied by page context).
+
+_OMOP_COLUMNS = {
+    'person': [
+        'person_id', 'gender_concept', 'gender_source_value',
+        'year_of_birth', 'month_of_birth', 'day_of_birth',
+        'race_source_value', 'ethnicity_source_value',
+        'given_name', 'family_name', 'email', 'location',
+    ],
+    'condition_occurrences': [
+        'condition_occurrence_id', 'condition_concept',
+        'condition_start_date', 'condition_start_datetime',
+        'condition_type_concept', 'condition_status_concept',
+        'condition_source_value', 'condition_status_source_value',
+    ],
+    'drug_exposures': [
+        'drug_exposure_id', 'drug_concept',
+        'drug_exposure_start_date', 'drug_exposure_start_datetime',
+        'drug_exposure_end_date', 'drug_exposure_end_datetime',
+        'drug_type_concept', 'lot_number', 'drug_source_value',
+    ],
+    'measurements': [
+        'measurement_id', 'measurement_concept',
+        'measurement_datetime',
+        'measurement_type_concept',
+        'value_as_number', 'value_as_string',
+        'measurement_source_value', 'unit_source_value',
+    ],
+    'observations': [
+        'observation_id', 'observation_concept',
+        'observation_date', 'observation_datetime',
+        'observation_type_concept',
+        'value_as_number', 'value_as_string',
+        'observation_source_value',
+    ],
+    'procedure_occurrences': [
+        'procedure_occurrence_id', 'procedure_concept',
+        'procedure_date', 'procedure_datetime',
+        'procedure_type_concept',
+        'procedure_source_value', 'procedure_source_concept',
+    ],
+    'episodes': [
+        'episode_id', 'episode_concept',
+        'episode_start_date', 'episode_end_date',
+        'episode_number', 'episode_object_concept',
+        'episode_type_concept',
+        'episode_source_value', 'episode_source_concept',
+    ],
+    'episode_events': [
+        'episode_id', 'event_id', 'episode_event_field_concept',
+    ],
+    'visit_occurrences': [
+        'visit_occurrence_id', 'visit_concept',
+        'visit_start_date', 'visit_start_datetime',
+        'visit_end_date', 'visit_end_datetime',
+        'visit_type_concept', 'visit_source_value',
+    ],
+    'visit_details': [
+        'visit_detail_id', 'visit_detail_concept',
+        'visit_detail_start_date', 'visit_detail_start_datetime',
+        'visit_detail_end_date', 'visit_detail_end_datetime',
+        'visit_detail_type_concept', 'visit_detail_source_value',
+        'visit_occurrence',
+    ],
+    'death': [
+        'death_date', 'death_datetime',
+        'death_type_concept', 'cause_source_value',
+    ],
+}
+
+
+def _resolve_concept_names(tables_data):
+    """Batch-resolve concept FK IDs → concept_name across all tables.
+
+    For every column whose name ends with ``_concept`` (the Django field name
+    for a FK to Concept), inject a companion ``<col>_name`` column right after
+    the ID with the concept's human-readable name.
+    """
+    # 1. Collect every concept ID referenced in all rows.
+    concept_ids = set()
+    for _key, rows in tables_data:
+        for row in rows:
+            for col, val in row.items():
+                if col.endswith('_concept') and isinstance(val, int) and val != 0:
+                    concept_ids.add(val)
+
+    if not concept_ids:
+        return
+
+    # 2. Single batch query.
+    names = dict(
+        Concept.objects.filter(concept_id__in=concept_ids)
+        .values_list('concept_id', 'concept_name')
+    )
+
+    # 3. Inject *_name columns.
+    for _key, rows in tables_data:
+        for row in rows:
+            additions = {}
+            for col, val in list(row.items()):
+                if col.endswith('_concept') and isinstance(val, int):
+                    additions[col + '_name'] = names.get(val) if val != 0 else None
+            # Insert name columns right after their ID columns.
+            if additions:
+                new_row = {}
+                for col, val in row.items():
+                    new_row[col] = val
+                    name_col = col + '_name'
+                    if name_col in additions:
+                        new_row[name_col] = additions[name_col]
+                row.clear()
+                row.update(new_row)
 
 
 # ---------------------------------------------------------------------------
@@ -130,42 +306,165 @@ def smart_configuration(request):
 @method_decorator(csrf_exempt, name='dispatch')
 class CurrentUserViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
+
+    def _ensure_patient_identity_resolved(self, user):
+        """Auto-provision first-login patient identities for /api/v1/user/."""
+        if not (user and user.is_authenticated):
+            return
+        if getattr(user, 'is_staff', False):
+            return
+
+        from omop_core.models import GroupAccess
+        from patient_portal.models import PatientUser
+        if PatientUser.objects.filter(identity=user).exists():
+            return
+
+        has_active_clinical_grant = GroupAccess.objects.filter(
+            identity=user,
+            role__in=['org_admin', 'doctor', 'analyst'],
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+        ).exists()
+        if has_active_clinical_grant:
+            return
+
+        from patient_portal.services import resolve_or_create_person
+        resolve_or_create_person(user)
     
     def list(self, request):
         """Just return the logged-in user info - they don't need to be a patient"""
         if not request.user.is_authenticated:
             return Response({'error': 'Not authenticated'}, status=status.HTTP_401_UNAUTHORIZED)
         
+        self._ensure_patient_identity_resolved(request.user)
         user_serializer = UserSerializer(request.user)
         return Response({
             'user': user_serializer.data
         })
 
 def _extract_provenance(request):
-    """Return (source, source_user_id, modification_reason) from headers or POST body."""
+    """Return (source, source_user_id, modification_reason) from headers or POST body.
+
+    A bulk POST body is a JSON *list*, which has no top-level provenance fields and
+    no ``.get()``. For those requests the headers are the only channel — per-row
+    provenance keys are deliberately out of scope, so a list body reads headers only.
+    """
+    body = request.data if isinstance(request.data, dict) else {}
     source = (
-        request.data.get('source')
+        body.get('source')
         or request.META.get('HTTP_X_PROVENANCE_SOURCE')
     )
     source_user_id = (
-        request.data.get('source_user_id')
+        body.get('source_user_id')
         or request.META.get('HTTP_X_PROVENANCE_USER_ID', '')
     )
-    modification_reason = request.data.get('modification_reason')
+    modification_reason = body.get('modification_reason')
     return source, source_user_id, modification_reason
 
 
+def _echoed_unchanged_fields(patient_info, patch_data):
+    """Keys whose submitted value already equals what GET renders for this record.
+
+    The React patient editor holds the whole GET response as its edit buffer and
+    PATCHes all of it on every autosave, so each save carries ~270 OMOP-mapped and
+    computed fields the user never touched, each one bearing the value the server
+    itself just rendered. Judging the read-only guards on *presence* therefore
+    rejects every ordinary edit: change one writable field and the untouched
+    derived fields riding along trip a 405.
+
+    Judging on *change* keeps the contract intact — an attempt to move a derived
+    value is still refused — while letting an echo through as the no-op it is.
+    Comparison is against the serialized representation rather than the model
+    attributes, because that is the exact form the client received and is sending
+    back; comparing to model attributes would read '12.5' != Decimal('12.5') and
+    call an untouched field an edit.
+    """
+    if not patch_data:
+        return set()
+    rendered = PatientRecordSerializer(patient_info).data
+    return {k for k, v in patch_data.items() if k in rendered and rendered[k] == v}
+
+
+def _rendered_patient_name(person):
+    """The display name PatientRecordSerializer.get_patient_name would return.
+
+    Kept in step with the serializer deliberately: _apply_patient_name compares
+    against it to recognise the server's own value coming back.
+    """
+    full_name = f"{person.given_name or ''} {person.family_name or ''}".strip()
+    return full_name or f"Patient {person.person_id}"
+
+
+def _pop_patient_name(data):
+    """Split patient_name out of a PATCH body, returning (name_or_None, rest).
+
+    patient_name is a SerializerMethodField over Person.given_name/family_name —
+    an OMOP column, not a PatientRecord one — so it can only be applied by hand.
+    Left in the body it is not merely ignored: it is not projection-owned, so it
+    trips the writable-fields check and 405s the whole request.
+    """
+    if 'patient_name' not in data:
+        return None, data
+    return data['patient_name'], {k: v for k, v in data.items() if k != 'patient_name'}
+
+
+def _apply_patient_name(person, name):
+    """Write a display name onto the OMOP Person row. Returns True if it changed.
+
+    The name lives on Person, never on PatientRecord: the projection is a derived
+    read model and its patient_name is rendered from these two columns.
+
+    No-ops on the value the serializer would already render. The React client
+    PATCHes back the whole GET response, so patient_name arrives on every autosave
+    carrying the server's own value. Writing that back is pointless for a named
+    person and destructive for an unnamed one, because the rendered value is then
+    the synthesised "Patient {id}", which would split into given_name='Patient',
+    family_name='<id>'.
+    """
+    if name is None:
+        return False
+    name = str(name).strip()
+    if not name or name == _rendered_patient_name(person):
+        return False
+    parts = name.split(None, 1)
+    person.given_name = parts[0]
+    person.family_name = parts[1] if len(parts) > 1 else ''
+    person.save(update_fields=['given_name', 'family_name'])
+    return True
+
+
 def _record_provenance(record, source, source_user_id, target_patient_id=None, modification_reason=None, organization=None):
-    """Create a ProvenanceRecord pointing at any model instance."""
-    ProvenanceRecord.objects.create(
-        source=source,
-        source_user_id=source_user_id or '',
-        target_patient_id=target_patient_id,
-        modification_reason=modification_reason,
-        organization=organization,
+    """Create or update a ProvenanceRecord pointing at any model instance."""
+    ProvenanceRecord.objects.update_or_create(
         content_type=ContentType.objects.get_for_model(record),
         object_id=record.pk,
+        source_user_id=source_user_id or '',
+        source=source,
+        defaults={
+            'target_patient_id': target_patient_id,
+            'modification_reason': modification_reason,
+            'organization': organization,
+        },
     )
+
+
+def _changed_fields(patient_record, previous_values, prev_val):
+    """Fields whose stored value actually moved during this PATCH.
+
+    ``previous_values`` was captured before ``serializer.save()`` and already
+    excludes read-only fields and anything not on the model, so comparing it to
+    the saved instance yields exactly the fields the user changed.
+
+    The distinction matters because the React client autosaves by PATCHing the
+    entire record back (``{...editedInfo, [field]: value}``), so the request body
+    is not a statement of intent — every key is present whether or not it moved.
+    Callers that treat the body as the change set attribute the whole record to
+    the user on every keystroke.
+    """
+    return {
+        field for field, old in previous_values.items()
+        if prev_val(patient_record, field) != old
+    }
 
 
 def _write_record_revisions(patient_record, previous_values, request):
@@ -408,39 +707,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = PatientListSerializer(queryset[:500], many=True)
         return Response(serializer.data)
 
-    def create(self, request):
-        """Create a new patient record, creating a Person if needed"""
-        data = request.data
-
-        # Resolve or create Person
-        person_id = data.get('person_id') or data.get('person')
-        if person_id:
-            try:
-                person = Person.objects.get(person_id=int(person_id))
-            except Person.DoesNotExist:
-                person = Person.objects.create(
-                    person_id=int(person_id),
-                    year_of_birth=datetime.now().year - 50,
-                    gender_source_value='unknown',
-                    race_source_value='unknown',
-                    ethnicity_source_value='unknown',
-                )
-        else:
-            last_person = Person.objects.order_by('-person_id').first()
-            new_person_id = last_person.person_id + 1 if last_person else 1000
-            person = Person.objects.create(
-                person_id=new_person_id,
-                year_of_birth=datetime.now().year - 50,
-                gender_source_value='unknown',
-                race_source_value='unknown',
-                ethnicity_source_value='unknown',
-            )
-
-        serializer = PatientRecordSerializer(data=data, context={'request': request})
-        serializer.is_valid(raise_exception=True)
-        serializer.save(person=person)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
-
     def retrieve(self, request, pk=None):
         """Get detailed patient info for a specific person"""
         person, patient_info, err = self._resolve_patient_with_auth(request, pk)
@@ -466,7 +732,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         })
 
     def partial_update(self, request, pk=None):
-        """PATCH /api/patient-info/{person_id}/ — update PatientRecord and write through to OMOP."""
+        """Patch the PatientRecord compatibility surface.
+
+        A mapped clinical PatientRecord field is output from an OMOP fact. It
+        cannot safely supply the fact's concept, time, unit, or provenance, so
+        it returns 405 rather than recreating the retired PatientRecord-to-OMOP
+        write-through path. Write the appropriate OMOP resource (or ingest
+        FHIR) and let refresh_patient_record rebuild this read model. See
+        docs/omop_to_patientrecord.md for the field-to-source mapping.
+        """
         try:
             person = Person.objects.get(person_id=pk)
             patient_info = PatientRecord.objects.get(person=person)
@@ -489,68 +763,57 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-        prov_source, prov_user_id, prov_reason = _extract_provenance(request)
-        if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
+        # patient_name targets Person, not PatientRecord, so it is handled by hand
+        # here exactly as /patient-info/me/ handles it — through the same pair of
+        # helpers, so the two routes cannot drift apart again. This is the route
+        # the provider UI PATCHes, and leaving the key in the body would 405 the
+        # request below as a non-projection-owned field.
+        patient_name, patch_data = _pop_patient_name(request.data)
+
+        echoed = _echoed_unchanged_fields(patient_info, patch_data)
+        mapped_fields = sorted((set(patch_data) & PATIENT_RECORD_OMOP_MAPPED_FIELDS) - echoed)
+        if mapped_fields:
             return Response(
-                {'error': 'modification_reason is required when source is ADMIN_CORRECTION'},
-                status=status.HTTP_400_BAD_REQUEST,
+                {
+                    'detail': (
+                        'OMOP-mapped PatientRecord fields are read-only. Write a complete '
+                        'clinical fact to the appropriate OMOP resource, then rederive the record.'
+                    ),
+                    'fields': mapped_fields,
+                },
+                status=status.HTTP_405_METHOD_NOT_ALLOWED,
             )
 
-        # Capture previous values for fields being changed (exclude provenance meta-fields).
-        # Use {field}_id for FK fields so we get a serializable PK, not a model object.
-        _prov_meta = {'source', 'source_user_id', 'modification_reason'}
-        _read_only = set(PatientRecordSerializer.Meta.read_only_fields)
-        _ignored_ro = sorted((set(request.data) & _read_only) - _prov_meta)
-        if _ignored_ro:
-            # DRF silently drops read-only fields from the input — surface the
-            # attempt so API consumers learn the derived therapy-id fields are
-            # written only by the derivation pipeline (#236).
-            logger.warning(
-                '{"event": "read_only_patch_fields_ignored", "fields": "%s", "person_id": "%s"}',
-                ','.join(_ignored_ro), pk,
-            )
-        def _prev_val(obj, field):
-            fk_id = f'{field}_id'
-            if hasattr(obj, fk_id):
-                return getattr(obj, fk_id, None)
-            return getattr(obj, field, None)
-        previous_values = {
-            field: _prev_val(patient_info, field)
-            for field in request.data
-            if field not in _prov_meta and field not in _read_only and hasattr(patient_info, field)
-        }
-
-        serializer = PatientRecordSerializer(patient_info, data=request.data, partial=True)
+        serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
         serializer.is_valid(raise_exception=True)
 
-        changed_fields = {f for f in request.data if f not in _prov_meta}
-        try:
-            with transaction.atomic():
-                serializer.save()
-                if prov_source:
-                    _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-                sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
-                # PHR-S FM TI.1.2#04 — record field-level revision history.
-                _write_record_revisions(patient_info, previous_values, request)
-                if prov_source:
-                    for field in changed_fields:
-                        if field in LAB_FIELD_TO_LOINC:
-                            loinc_code = LAB_FIELD_TO_LOINC[field][0]
-                            m = Measurement.objects.filter(
-                                person=patient_info.person,
-                                measurement_source_value=loinc_code,
-                            ).order_by('-measurement_id').first()
-                            if m:
-                                _record_provenance(m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
-        except Exception as _sync_exc:
-            logger.error(
-                'omop_write_through_failed patient=%s error=%s',
-                patient_info.pk, type(_sync_exc).__name__,
-            )
+        # DRF intentionally discards serializer read-only fields. Surface those
+        # attempts instead of returning success for a no-op, so ownership
+        # boundaries are visible to API consumers — but only when the value is
+        # actually being moved, not when the client echoes back what it read.
+        writable_fields = {
+            name for name, field in serializer.fields.items() if not field.read_only
+        }
+        unsupported_fields = sorted(set(patch_data) - writable_fields - echoed)
+        if unsupported_fields:
             return Response(
-                {'error': 'Failed to persist changes to OMOP. Please try again.'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                {'detail': 'Only projection-owned PatientRecord fields are writable.', 'fields': unsupported_fields},
+                status=status.HTTP_405_METHOD_NOT_ALLOWED,
             )
+
+        def previous_value(obj, field):
+            fk_id = f'{field}_id'
+            return getattr(obj, fk_id, None) if hasattr(obj, fk_id) else getattr(obj, field, None)
+
+        previous_values = {
+            field: previous_value(patient_info, field)
+            for field in patch_data
+            if hasattr(patient_info, field)
+        }
+        with transaction.atomic():
+            _apply_patient_name(person, patient_name)
+            serializer.save()
+            _write_record_revisions(patient_info, previous_values, request)
 
         return Response({**serializer.data, 'previous_values': previous_values})
 
@@ -661,6 +924,64 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         results = get_fields_provenance(person, field_names)
         return Response(results)
 
+    @action(detail=True, methods=['get'], url_path='omop',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def omop(self, request, pk=None):
+        """GET /api/v1/patient-records/{person_id}/omop/ — admin-only OMOP rows."""
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+
+        actor = request.user
+        is_admin = (
+            is_service_token(request)
+            or bool(getattr(actor, 'is_staff', False))
+            or get_admin_orgs(actor).exists()
+        )
+        if not is_admin:
+            return Response(
+                {'detail': 'Only administrators can view raw OMOP rows.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        episode_ids = list(
+            Episode.objects.filter(person=person).values_list('episode_id', flat=True)
+        )
+        table_specs = [
+            ('person', 'Person', Person.objects.filter(person_id=person.person_id)),
+            ('condition_occurrences', 'Condition Occurrences', ConditionOccurrence.objects.filter(person=person)),
+            ('drug_exposures', 'Drug Exposures', DrugExposure.objects.filter(person=person)),
+            ('measurements', 'Measurements', Measurement.objects.filter(person=person)),
+            ('observations', 'Observations', Observation.objects.filter(person=person)),
+            ('procedure_occurrences', 'Procedure Occurrences', ProcedureOccurrence.objects.filter(person=person)),
+            ('episodes', 'Episodes', Episode.objects.filter(person=person)),
+            ('episode_events', 'Episode Events', EpisodeEvent.objects.filter(episode_id__in=episode_ids)),
+            ('visit_occurrences', 'Visit Occurrences', VisitOccurrence.objects.filter(person=person)),
+            ('visit_details', 'Visit Details', VisitDetail.objects.filter(person=person)),
+            ('death', 'Death', Death.objects.filter(person=person)),
+        ]
+
+        tables = []
+        tables_data = []   # (key, rows) pairs for concept name resolution
+        for key, label, qs in table_specs:
+            include = _OMOP_COLUMNS.get(key)
+            rows = [_serialize_omop_row(obj, include=include) for obj in qs]
+            tables_data.append((key, rows))
+            tables.append({
+                'key': key,
+                'label': label,
+                'count': len(rows),
+                'rows': rows,
+            })
+
+        _resolve_concept_names(tables_data)
+
+        return Response({
+            'person_id': person.person_id,
+            'patient_record_id': patient_info.pk,
+            'tables': tables,
+        })
+
     def _resolve_patient_with_auth(self, request, pk):
         """Shared lookup + auth logic for detail-level patient endpoints.
 
@@ -683,14 +1004,25 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     return None, None, Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
             elif not getattr(request.user, 'is_staff', False):
                 from omop_core.authorization import can_access_patient
-                if not can_access_patient(request.user, person.person_id):
+                admin_org_ids = set(get_admin_orgs(request.user).values_list('id', flat=True))
+                is_admin_patient = (
+                    patient_info.organization_id is not None
+                    and patient_info.organization_id in admin_org_ids
+                )
+                if not is_admin_patient and not can_access_patient(request.user, person.person_id):
                     return None, None, Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
         return person, patient_info, None
 
     @action(detail=False, methods=['get', 'patch', 'delete'], permission_classes=[PatientDeletePermission, PatientSelfScopePermission])
     def me(self, request):
-        """GET/PATCH/DELETE /api/patient-info/me/ — current user's own PatientRecord."""
+        """GET/DELETE the current user's record; PATCH name or projection-owned fields.
+
+        ``PatientRecord`` is a derived OMOP read model. This legacy endpoint
+        remains available for its read wire format. Mapped clinical fields are
+        read-only; ``patient_name`` updates ``Person`` and unmapped
+        projection-owned fields remain writable.
+        """
         if request.method == 'DELETE':
             return self._delete_patient_account(request)
 
@@ -732,51 +1064,57 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 'patient_name': full_name,
             })
 
-        # PATCH
-        patient_name = request.data.pop('patient_name', None) if hasattr(request.data, 'pop') else request.data.get('patient_name')
-        patch_data = {k: v for k, v in request.data.items() if k != 'patient_name'}
-
-        if patient_name is not None:
-            parts = str(patient_name).strip().split(None, 1)
-            person.given_name = parts[0] if parts else ''
-            person.family_name = parts[1] if len(parts) > 1 else ''
-            person.save(update_fields=['given_name', 'family_name'])
+        patient_name, patch_data = _pop_patient_name(request.data)
+        echoed = _echoed_unchanged_fields(patient_info, patch_data)
+        mapped_fields = sorted((set(patch_data) & PATIENT_RECORD_OMOP_MAPPED_FIELDS) - echoed)
+        if mapped_fields:
+            return Response(
+                {
+                    'detail': (
+                        'OMOP-mapped PatientRecord fields are read-only. Write a complete '
+                        'clinical fact to the appropriate OMOP resource, then rederive the record.'
+                    ),
+                    'fields': mapped_fields,
+                },
+                status=status.HTTP_405_METHOD_NOT_ALLOWED,
+            )
 
         serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
         serializer.is_valid(raise_exception=True)
-
-        changed_fields = set(patch_data.keys())
-        # Capture previous values before save so revision history can record
-        # old/new (PHR-S FM TI.1.2#04). FK fields compared via {field}_id.
-        _read_only = set(PatientRecordSerializer.Meta.read_only_fields)
-
-        def _prev_val(obj, field):
-            fk_id = f'{field}_id'
-            if hasattr(obj, fk_id):
-                return getattr(obj, fk_id, None)
-            return getattr(obj, field, None)
-        previous_values = {
-            field: _prev_val(patient_info, field)
-            for field in patch_data
-            if field not in _read_only and hasattr(patient_info, field)
+        writable_fields = {
+            name for name, field in serializer.fields.items() if not field.read_only
         }
-        try:
-            with transaction.atomic():
-                serializer.save()
-                sync_to_omop(patient_info, changed_fields, changed_data=dict(patch_data))
-                # PHR-S FM TI.1.2#04 — record field-level revision history.
-                _write_record_revisions(patient_info, previous_values, request)
-        except Exception as _sync_exc:
-            logger.error(
-                'omop_write_through_failed patient=%s error=%s',
-                patient_info.pk, type(_sync_exc).__name__,
-            )
+        unsupported_fields = sorted(set(patch_data) - writable_fields - echoed)
+        if unsupported_fields:
             return Response(
-                {'error': 'Failed to persist changes to OMOP. Please try again.'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                {'detail': 'Only projection-owned PatientRecord fields are writable.', 'fields': unsupported_fields},
+                status=status.HTTP_405_METHOD_NOT_ALLOWED,
             )
 
-        return Response(serializer.data)
+        if not patch_data and 'patient_name' not in request.data:
+            return Response(
+                {'detail': 'Supply patient_name or a projection-owned PatientRecord field.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        def previous_value(obj, field):
+            fk_id = f'{field}_id'
+            return getattr(obj, fk_id, None) if hasattr(obj, fk_id) else getattr(obj, field, None)
+
+        previous_values = {
+            field: previous_value(patient_info, field)
+            for field in patch_data
+            if hasattr(patient_info, field)
+        }
+        with transaction.atomic():
+            _apply_patient_name(person, patient_name)
+            serializer.save()
+            _write_record_revisions(patient_info, previous_values, request)
+
+        return Response({
+            'patient_info': PatientRecordSerializer(patient_info).data,
+            'patient_name': f"{person.given_name or ''} {person.family_name or ''}".strip(),
+        })
 
     def _delete_patient_account(self, request):
         """DELETE /api/patient-info/me/ — permanently delete the patient's account and all data."""
@@ -952,7 +1290,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def upload_csv(self, request):
-        """Upload patients from CSV file"""
+        """Upload the documented CSV shape into OMOP source tables.
+
+        CSV is intentionally limited to facts it can represent without making a
+        PatientRecord column a write interface.  ``disease`` needs a known
+        ``diagnosis_date`` (or ``disease_date``); it becomes a
+        ConditionOccurrence.  PatientRecord is created only by the final
+        refresh, never by this importer.
+        """
         if 'file' not in request.FILES:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
         
@@ -967,6 +1312,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             
             created_count = 0
             errors = []
+            source = request.META.get('HTTP_X_PROVENANCE_SOURCE', 'EHR_SYNC')
+            request_user = getattr(request, 'user', None)
+            source_user_id = request.META.get(
+                'HTTP_X_PROVENANCE_USER_ID', str(getattr(request_user, 'pk', '') or ''),
+            )
+            provenance_org = get_request_org(request) if request_user is not None else None
             
             for row_num, row in enumerate(reader, start=2):
                 try:
@@ -974,44 +1325,88 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     if person_id == 0:
                         last_person = Person.objects.all().order_by('-person_id').first()
                         person_id = last_person.person_id + 1 if last_person else 1000
-                    
-                    # Get gender concept
-                    gender_concept = get_gender_concept(row.get('gender', ''))
-                    gender_source = row.get('gender', 'unknown')
-                    
-                    person, created = Person.objects.get_or_create(
-                        person_id=person_id,
-                        defaults={
-                            'year_of_birth': int(row.get('year_of_birth', datetime.now().year - 50)),
+
+                    dob_raw = (row.get('date_of_birth') or '').strip()
+                    dob = parse_date(dob_raw) if dob_raw else None
+                    if dob_raw and dob is None:
+                        raise ValueError('date_of_birth must be ISO YYYY-MM-DD')
+
+                    disease = (row.get('disease') or '').strip()
+                    disease_date_raw = (row.get('diagnosis_date') or row.get('disease_date') or '').strip()
+                    disease_date = parse_date(disease_date_raw) if disease_date_raw else None
+                    if disease and disease_date is None:
+                        raise ValueError('disease requires diagnosis_date or disease_date (ISO YYYY-MM-DD)')
+
+                    with transaction.atomic(), suppress_patient_record_refresh():
+                        gender_source = (row.get('gender') or 'unknown').strip()
+                        gender_concept = get_gender_concept(gender_source)
+                        person_defaults = {
                             'gender_concept': gender_concept,
                             'gender_source_value': gender_source,
-                            'race_concept': None,
-                            'race_source_value': 'unknown',
-                            'ethnicity_concept': None,
-                            'ethnicity_source_value': 'unknown',
-                            'person_source_value': f"CSV-{person_id}",
+                            'race_source_value': (row.get('race') or 'unknown').strip(),
+                            'ethnicity_source_value': (row.get('ethnicity') or 'unknown').strip(),
                         }
-                    )
-                    
-                    date_of_birth = None
-                    if row.get('date_of_birth'):
-                        try:
-                            date_of_birth = datetime.strptime(row['date_of_birth'], '%Y-%m-%d').date()
-                        except ValueError:
-                            try:
-                                date_of_birth = datetime.strptime(row['date_of_birth'], '%m/%d/%Y').date()
-                            except ValueError:
-                                pass
-                    
-                    patient_info, pi_created = PatientRecord.objects.update_or_create(
-                        person=person,
-                        defaults={
-                            'date_of_birth': date_of_birth,
-                            'disease': row.get('disease', ''),
-                        }
-                    )
-                    
-                    if pi_created:
+                        if dob:
+                            person_defaults.update({
+                                'year_of_birth': dob.year,
+                                'month_of_birth': dob.month,
+                                'day_of_birth': dob.day,
+                                'birth_datetime': timezone.make_aware(datetime.combine(dob, datetime.min.time())),
+                            })
+                        elif (year_raw := (row.get('year_of_birth') or '').strip()):
+                            person_defaults['year_of_birth'] = int(year_raw)
+
+                        person, created = Person.objects.get_or_create(
+                            person_id=person_id, defaults=person_defaults,
+                        )
+                        if not created:
+                            # CSV fields belong to Person, so update only values explicitly supplied.
+                            for field in ('phone_number', 'email', 'given_name', 'family_name', 'facility_name'):
+                                if row.get(field):
+                                    setattr(person, field, row[field].strip())
+                            if dob:
+                                person.year_of_birth, person.month_of_birth, person.day_of_birth = dob.year, dob.month, dob.day
+                                person.birth_datetime = timezone.make_aware(datetime.combine(dob, datetime.min.time()))
+                            elif (year_raw := (row.get('year_of_birth') or '').strip()):
+                                person.year_of_birth = int(year_raw)
+                            person.save()
+                        else:
+                            for field in ('phone_number', 'email', 'given_name', 'family_name', 'facility_name'):
+                                if row.get(field):
+                                    setattr(person, field, row[field].strip())
+                            person.save()
+
+                        if disease:
+                            concept = Concept.objects.filter(
+                                domain_id='Condition', concept_name__iexact=disease,
+                            ).order_by('-standard_concept').first()
+                            # OMOP concept 0 preserves an unmapped source value without inventing
+                            # a clinical code. A vocabulary mapping can be supplied in a future CSV
+                            # version; the PatientRecord derivation still reads disease_source_value.
+                            concept = concept or Concept.objects.get(concept_id=0)
+                            if not ConditionOccurrence.objects.filter(
+                                person=person,
+                                condition_concept=concept,
+                                condition_start_date=disease_date,
+                                condition_source_value=disease,
+                            ).exists():
+                                condition = ConditionOccurrence.objects.create(
+                                    condition_occurrence_id=next_pk(ConditionOccurrence, 'condition_occurrence_id'),
+                                    person=person,
+                                    condition_concept=concept,
+                                    condition_start_date=disease_date,
+                                    condition_type_concept=Concept.objects.get(concept_id=32817),
+                                    condition_source_value=disease,
+                                )
+                                _record_provenance(
+                                    condition, source, source_user_id,
+                                    target_patient_id=str(person.person_id), organization=provenance_org,
+                                )
+
+                        # This is the only projection operation in CSV ingestion. It upserts the
+                        # derived read model after all Person/OMOP source facts are committed.
+                        refresh_patient_record(person)
+                    if created:
                         created_count += 1
                         
                 except Exception as e:
@@ -1024,8 +1419,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             })
             
         except Exception as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    
+            logger.exception('CSV upload failed')
+            return Response({'error': 'Upload failed. Please check the file format and try again.'}, status=status.HTTP_400_BAD_REQUEST)
+
     @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def upload_fhir(self, request):
         """Upload patients from FHIR JSON file"""
@@ -1202,7 +1598,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             _concept_drug_type     = _cc_by_id(32869)    # EHR prescription
             _concept_tx_regimen    = _cc_by_id(32531)    # Treatment Regimen
             _concept_de_field      = _cc_by_id(1147094)  # DrugExposure field
-            _concept_generic_lab   = _cc_by_id(3000963)  # Generic lab
+            # OMOP's 'No matching concept'. Never a real analyte's id — see
+            # CONCEPT_GENERIC_LAB in omop_core/services/mappings.py.
+            _concept_generic_lab   = _cc_by_id(CONCEPT_GENERIC_LAB)
 
             def _get_or_create_visit_concept(class_code: str, class_display: str):
                 concept_code = f'FHIR-VISIT-{class_code or "UNKNOWN"}'
@@ -1236,7 +1634,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     domain=domain,
                     vocabulary=vocabulary,
                     concept_class=concept_class,
-                    standard_concept='S',
+                    # Locally minted, so not Standard: only OHDSI assigns that,
+                    # and a mint claiming 'S' is unreachable from
+                    # concept_ancestor while appearing standard to tooling. The
+                    # source tag below is already correct. See #453.
+                    standard_concept=None,
                     source='HealthKey',
                     concept_code=concept_code,
                     valid_start_date=datetime(1970, 1, 1).date(),
@@ -1614,6 +2016,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     dlbcl_onset = None          # onset from DLBCL (transformation) condition
                     _any_bc_condition = False   # True if any BC condition was seen in the bundle
                     _clinical_status_source = None  # FHIR Condition.clinicalStatus code for primary BC
+                    _breast_cancer_stage = None  # condition-stage assertion, persisted to OMOP below
+                    _breast_cancer_stage_datetime = None
 
                     def _disease_from_condition_code(codeable):
                         codeable = codeable or {}
@@ -1647,6 +2051,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')[:100]
 
                     for condition in data['conditions']:
+                        _condition_stage = None
                         # Get histologic type from code
                         code = condition.get('code', {})
                         coding_list = code.get('coding', [])
@@ -1723,6 +2128,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 else:
                                     stage = stage_display or _sc.get('code', '')
 
+                        if is_breast_cancer and stage:
+                            _condition_stage = stage
+
                         # Get condition onset date (handles both 'YYYY-MM-DD' and ISO datetime)
                         if condition.get('onsetDateTime'):
                             try:
@@ -1738,6 +2146,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 condition_date = _parsed_date  # fallback: last wins
                                 if is_breast_cancer and _parsed_date and (breast_cancer_onset is None or _parsed_date < breast_cancer_onset):
                                     breast_cancer_onset = _parsed_date
+                                if is_breast_cancer and _condition_stage:
+                                    # Keep the stage tied to the condition that
+                                    # asserted it, not to an earlier/later
+                                    # breast-cancer diagnosis in the bundle.
+                                    _breast_cancer_stage = _condition_stage
+                                    _breast_cancer_stage_datetime = _parsed_date
                                 if is_fl and _parsed_date and (fl_onset is None or _parsed_date < fl_onset):
                                     fl_onset = _parsed_date
                                 if is_dlbcl and _parsed_date and (dlbcl_onset is None or _parsed_date < dlbcl_onset):
@@ -1788,6 +2202,36 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
                     if _any_bc_condition and condition_date:
                         _upsert_condition(_concept_breast_cancer, condition_date, disease, _clinical_status_source)
+
+                    if _breast_cancer_stage and _breast_cancer_stage_datetime:
+                        _stage_date = _breast_cancer_stage_datetime.date()
+                        _stage_exists = Observation.objects.filter(
+                            person=person,
+                            observation_source_value=FHIR_CONDITION_STAGE_SOURCE_VALUE,
+                            observation_date=_stage_date,
+                            value_as_string=_breast_cancer_stage,
+                        ).exists()
+                        if not _stage_exists:
+                            _stage_observation = Observation(
+                                observation_id=next_pk(Observation, 'observation_id'),
+                                person=person,
+                                observation_concept=_concept_ehr_type or _concept_tx_regimen,
+                                observation_date=_stage_date,
+                                observation_datetime=_breast_cancer_stage_datetime,
+                                observation_type_concept=_concept_ehr_type or _concept_tx_regimen,
+                                value_as_string=_breast_cancer_stage,
+                                observation_source_value=FHIR_CONDITION_STAGE_SOURCE_VALUE,
+                            )
+                            _stage_observation._skip_patient_record_refresh = True
+                            _stage_observation.save()
+                            _record_provenance(
+                                _stage_observation,
+                                prov_source or 'EHR_SYNC',
+                                prov_user_id,
+                                target_patient_id=fhir_patient_id,
+                                modification_reason=prov_reason,
+                                organization=get_request_org(request),
+                            )
 
                     # FL diagnosis and DLBCL transformation conditions (FL → DLBCL
                     # transformation is derived from the DLBCL ConditionOccurrence).
@@ -2152,11 +2596,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             if observation.get('note'):
                                 geographic_exposure_risk_details = observation['note'][0].get('text')
                         
-                        # Check for tumor size
-                        if 'tumor size' in obs_text or 'size tumor' in obs_text:
-                            if observation.get('valueQuantity'):
-                                tumor_size = observation['valueQuantity'].get('value')
-                        
                         # Check for lymph node status — exclude TNM N-stage LOINC (21906-3)
                         # which carries AJCC notation, not a binary status
                         elif ('lymph node' in obs_text or 'lymph nodes' in obs_text) and loinc_code != '21906-3':
@@ -2345,6 +2784,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         value_number = None
                         value_string = None
                         unit = None
+                        qualifier_source_value = None
                         
                         if observation.get('valueQuantity'):
                             value_qty = observation['valueQuantity']
@@ -2439,6 +2879,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             # Use LOINC code as source_value when available — it's short,
                             # unique, and avoids collisions from truncating long display names.
                             source_value = obs_loinc if obs_loinc else obs_name[:50]
+                            # LOINC 21889-1 is officially Size Tumor.  A
+                            # legacy lymph-node feed may reuse that code, but
+                            # only its explicit text/context can authorize the
+                            # separate lymph-node projection.
+                            if obs_loinc == '21889-1' and 'lymph node' in obs_name.lower():
+                                qualifier_source_value = 'lymph-node'
                             _mkey = (
                                 measurement_concept.pk if measurement_concept else None,
                                 obs_date.date(),
@@ -2452,6 +2898,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                         or existing_m.value_as_string != value_string):
                                     existing_m.value_as_number = value_number
                                     existing_m.value_as_string = value_string
+                                    existing_m.qualifier_source_value = qualifier_source_value
                                     existing_m._skip_patient_record_refresh = True
                                     existing_m.save()
                             else:
@@ -2466,6 +2913,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     value_as_string=value_string,
                                     measurement_source_value=source_value,
                                     unit_source_value=unit[:50] if unit else None,
+                                    qualifier_source_value=qualifier_source_value,
                                 )
                                 _m._skip_patient_record_refresh = True
                                 # Keep the dict current so duplicate observations
@@ -2709,12 +3157,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             try:
                                 first_line_start_date = datetime.strptime(therapy_lines[1]['start_date'][:10], '%Y-%m-%d').date()
                                 first_line_date = first_line_start_date  # Keep for backwards compatibility
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         if therapy_lines[1].get('end_date'):
                             try:
                                 first_line_end_date = datetime.strptime(therapy_lines[1]['end_date'][:10], '%Y-%m-%d').date()
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         first_line_outcome = therapy_lines[1].get('outcome')
                     
@@ -2724,12 +3172,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             try:
                                 second_line_start_date = datetime.strptime(therapy_lines[2]['start_date'][:10], '%Y-%m-%d').date()
                                 second_line_date = second_line_start_date  # Keep for backwards compatibility
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         if therapy_lines[2].get('end_date'):
                             try:
                                 second_line_end_date = datetime.strptime(therapy_lines[2]['end_date'][:10], '%Y-%m-%d').date()
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         second_line_outcome = therapy_lines[2].get('outcome')
                     
@@ -2740,12 +3188,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             try:
                                 later_start_date = datetime.strptime(therapy_lines[4]['start_date'][:10], '%Y-%m-%d').date()
                                 later_date = later_start_date  # Keep for backwards compatibility
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         if therapy_lines[4].get('end_date'):
                             try:
                                 later_end_date = datetime.strptime(therapy_lines[4]['end_date'][:10], '%Y-%m-%d').date()
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         later_outcome = therapy_lines[4].get('outcome')
                     elif 3 in therapy_lines:
@@ -2754,12 +3202,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             try:
                                 later_start_date = datetime.strptime(therapy_lines[3]['start_date'][:10], '%Y-%m-%d').date()
                                 later_date = later_start_date  # Keep for backwards compatibility
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         if therapy_lines[3].get('end_date'):
                             try:
                                 later_end_date = datetime.strptime(therapy_lines[3]['end_date'][:10], '%Y-%m-%d').date()
-                            except:
+                            except (ValueError, TypeError, IndexError):
                                 pass
                         later_outcome = therapy_lines[3].get('outcome')
                     
@@ -3267,6 +3715,81 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _timing_hash, _time.monotonic() - _pt_start, len(_pt_procedure_ids),
                     )
 
+                    # --- SCT Patient extensions -> dated OMOP Observation ---
+                    # A Patient extension is not itself an event.  The explicit
+                    # mm-sct-date is, however, a clinically asserted date for
+                    # the accompanying SCT facts, so it is safe to persist all
+                    # supplied SCT values as dated Observations and derive the
+                    # PatientRecord fields from them.  Without that date we do
+                    # not manufacture an import-time clinical event.
+                    _sct_event_date = None
+                    if sct_date_str:
+                        try:
+                            _candidate_sct_date = datetime.strptime(sct_date_str, '%Y-%m-%d').date()
+                            if _candidate_sct_date <= localdate():
+                                _sct_event_date = _candidate_sct_date
+                            else:
+                                logger.warning(
+                                    "Ignoring future mm-sct-date for patient (id_hash=%s)",
+                                    hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12],
+                                )
+                        except ValueError:
+                            logger.warning(
+                                "Ignoring invalid mm-sct-date for patient (id_hash=%s)",
+                                hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12],
+                            )
+
+                    if _sct_event_date is not None:
+                        _sct_values = [('mm-sct-date', _sct_event_date.isoformat())]
+                        if sct_history_str:
+                            _history = [
+                                token.strip() for token in sct_history_str.split(',')
+                                if token.strip() in _allowed_sct_titles
+                            ]
+                            if _history:
+                                _sct_values.append(('mm-sct-history', ','.join(_history)))
+                        if sct_eligibility_str:
+                            _eligibility = [
+                                token.strip() for token in sct_eligibility_str.split(',')
+                                if token.strip() in _allowed_elig_titles
+                            ]
+                            if _eligibility:
+                                _sct_values.append(('mm-sct-eligibility', ','.join(_eligibility)))
+
+                        for _sct_source, _sct_value in _sct_values:
+                            _sct_exists = Observation.objects.filter(
+                                person=person,
+                                observation_source_value=_sct_source,
+                                observation_date=_sct_event_date,
+                                value_as_string=_sct_value,
+                            ).exists()
+                            if _sct_exists:
+                                continue
+                            _sct_obs = Observation(
+                                observation_id=next_pk(Observation, 'observation_id'),
+                                person=person,
+                                observation_concept=_concept_ehr_type or _concept_tx_regimen,
+                                observation_date=_sct_event_date,
+                                observation_type_concept=_concept_ehr_type or _concept_tx_regimen,
+                                value_as_string=_sct_value,
+                                observation_source_value=_sct_source,
+                            )
+                            _sct_obs._skip_patient_record_refresh = True
+                            _sct_obs.save()
+                            _record_provenance(
+                                _sct_obs,
+                                prov_source or 'EHR_SYNC',
+                                prov_user_id,
+                                target_patient_id=fhir_patient_id,
+                                modification_reason=prov_reason,
+                                organization=get_request_org(request),
+                            )
+                    elif sct_history_str or sct_eligibility_str:
+                        logger.warning(
+                            "Skipping undated SCT Patient extension values (id_hash=%s)",
+                            hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12],
+                        )
+
                     # --- OMOP-first: refresh PatientRecord from OMOP tables ---
                     # Release suppression so the single intentional refresh can run.
                     # We stay inside the atomic block so that a refresh failure rolls
@@ -3325,29 +3848,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _patch['cytogenic_markers'] = cytogenetics_str
                     if measurable_disease_imwg is not None:
                         _patch['measurable_disease_imwg'] = measurable_disease_imwg
-                    if sct_date_str:
-                        try:
-                            parsed_sct_date = datetime.strptime(sct_date_str, '%Y-%m-%d').date()
-                            if parsed_sct_date <= localdate():
-                                _patch['sct_date'] = parsed_sct_date
-                        except ValueError:
-                            _id_hash = hashlib.sha256(str(fhir_patient_id).encode()).hexdigest()[:12]
-                            logger.warning(
-                                "Ignoring invalid mm-sct-date for patient (id_hash=%s)",
-                                _id_hash,
-                            )
-                    if sct_history_str:
-                        _patch['stem_cell_transplant_history'] = [
-                            t.strip() for t in sct_history_str.split(',')
-                            if t.strip() and t.strip() in _allowed_sct_titles
-                        ]
-                    if sct_eligibility_str:
-                        _patch['sct_eligibility'] = [
-                            t.strip() for t in sct_eligibility_str.split(',')
-                            if t.strip() and t.strip() in _allowed_elig_titles
-                        ]
-                    if tumor_size:
-                        _patch['tumor_size'] = tumor_size
                     if lymph_node_status:
                         _patch['lymph_node_status'] = lymph_node_status
                     if metastasis_status:
@@ -3468,12 +3968,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     if upload_org is not None and patient_info.organization_id is None:
                         _patch['organization'] = upload_org
 
-                    # Apply patch to PatientRecord (suppress signal-triggering save)
-                    for _field, _val in _patch.items():
-                        setattr(patient_info, _field, _val)
-                    patient_info.save()
-                    if prov_source:
-                        _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                    # All clinical values above were written to OMOP rows before
+                    # refresh_patient_record.  Do not copy the parser's legacy
+                    # compatibility dictionary into PatientRecord: doing so
+                    # creates a second clinical write authority.  Organization is
+                    # tenant metadata and is the sole intentional exception.
+                    if upload_org is not None and patient_info.organization_id is None:
+                        patient_info.organization = upload_org
+                        patient_info.save(update_fields=['organization', 'updated_at'])
 
                     # Commit all writes for this patient. Mark _atomic_entered=False
                     # so the finally block knows the transaction was cleanly committed.
@@ -3539,7 +4041,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             })
 
         except Exception as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            logger.exception('FHIR upload failed')
+            return Response({'error': 'Upload failed. Please check the bundle format and try again.'}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=['post'], url_path='upload-wearable',
             permission_classes=[IsAuthenticated])
@@ -3558,6 +4061,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         from omop_core.services.pk import next_pk_batch as _next_pk_batch
         from omop_core.services.mappings import (
             WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB, WEARABLE_ARTIFACT_BOUNDS,
+            WEARABLE_TYPE_CONCEPT_ID,
         )
         from omop_core.services.concept_cache import concept_by_vocab as _cc_by_vocab
 
@@ -3628,19 +4132,47 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if unresolved:
             logger.warning(
                 'wearable_concepts_unresolved person_id=%s metrics=%s — samples for these '
-                'metrics will be discarded. Run seed_omop_concepts or load_athena_vocabularies.',
+                'metrics will be discarded. Run load_athena_vocabularies.',
                 person.person_id, unresolved,
             )
 
-        # Measurement type concept (wearable device = 32883 / Patient self-report)
-        type_concept = None
-        try:
-            type_concept = Concept.objects.get(concept_id=32883)
-        except Concept.DoesNotExist:
-            try:
-                type_concept = Concept.objects.get(concept_id=32856)  # Lab fallback
-            except Concept.DoesNotExist:
-                pass
+        # Provenance type for every row written below. 32865 is
+        # 'Patient self-report' — OMOP's Type Concept vocabulary has no
+        # device or wearable type, so this is the closest faithful fit for
+        # data the patient's own device produced.
+        #
+        # This previously used 32883 with a comment claiming it was
+        # "Patient self-report"; 32883 is 'Survey'. It fell back to 32856,
+        # which is 'Lab'. Both mislabelled the provenance of every wearable
+        # row, and the fallback fired silently on any database without the
+        # full vocabulary loaded (#441).
+        #
+        # There is deliberately no fallback now: refusing to write is better
+        # than writing a row that misstates where the data came from. The
+        # Migration 0143 installs this concept, so the deploy path guarantees it
+        # rather than leaving it to whoever remembers to run a load.
+        #
+        # The vocabulary check is not redundant. lab_results.sync._ensure_concept
+        # mints concept_id 32865 into HK-Labs as a fallback when Athena is absent
+        # — a locally-authored row occupying a genuine Athena id. Accepting it
+        # here would type every wearable row with a shadow concept, which is the
+        # defect class #415 exists to eliminate, and would do so silently.
+        type_concept = Concept.objects.filter(
+            concept_id=WEARABLE_TYPE_CONCEPT_ID).first()
+        if type_concept is None or type_concept.vocabulary_id != 'Type Concept':
+            logger.error(
+                'wearable_type_concept_unusable concept_id=%s person_id=%s found=%r '
+                'vocabulary_id=%r — refusing to write rows with unknown provenance.',
+                WEARABLE_TYPE_CONCEPT_ID, person.person_id,
+                type_concept is not None,
+                getattr(type_concept, 'vocabulary_id', None),
+            )
+            return Response(
+                {'error': 'Wearable ingestion is not configured on this server '
+                          '(measurement type concept missing or invalid). '
+                          'Contact an administrator.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         # Filter out artifact values and deduplicate
         from django.db.models import Q
@@ -3651,6 +4183,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             'active_minutes': 'min',
             'resting_hr': '/min',
             'hrv_sdnn': 'ms',
+            'hrv_rmssd': 'ms',
             'spo2': '%',
             'respiratory_rate': '/min',
             'sleep_duration': 'h',
@@ -3953,7 +4486,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             })
 
         except Exception as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            logger.exception('Bulk delete failed')
+            return Response({'error': 'Delete operation failed.'}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=['delete'], permission_classes=[ScopedTokenPermission])
     def bulk_delete_filtered(self, request):
@@ -4251,7 +4785,7 @@ def auth_test(request):
 
 # Fields considered "placeholder" values that a fill-if-empty PATCH may overwrite.
 _PERSON_STR_PLACEHOLDERS = {'', 'unknown', 'Unknown'}
-_PERSON_YEAR_PLACEHOLDER = {None, 0, 1900}
+_PERSON_YEAR_PLACEHOLDER = PERSON_YEAR_PLACEHOLDERS
 _PERSON_INT_PLACEHOLDER  = {None, 0}
 
 _PERSON_PATCHABLE_FIELDS = {
@@ -4265,8 +4799,107 @@ _PERSON_PATCHABLE_FIELDS = {
     'ethnicity_source_value':('str',  _PERSON_STR_PLACEHOLDERS),
 }
 
+# PatientRecord field → (Person concept FK, Person source column). Both are
+# written together: derivation reads the concept first and falls back to the
+# source value, so writing text alone leaves a stale concept outranking it and the
+# correction silently appears not to have taken.
+_PERSON_DEMOGRAPHIC_FIELDS = {
+    'gender': ('gender_concept', 'gender_source_value'),
+    'race': ('race_concept', 'race_source_value'),
+    'ethnicity': ('ethnicity_concept', 'ethnicity_source_value'),
+}
+
+
+# PatientRecord field → (Location column, kind). These live on the OMOP Location
+# row that Person.location points at, not on Person, which is why the projection
+# name and the column name differ for two of them.
+#
+# Replaceable rather than fill-if-empty: an address is corrected far more often
+# than a birth date, and a patient who moves needs the new value to win.
+_PERSON_LOCATION_FIELDS = {
+    'city':        ('city', 'str', 50),
+    'region':      ('state', 'str', 2),
+    'postal_code': ('zip', 'str', 9),
+    'country':     ('country', 'str', 100),
+    'latitude':    ('latitude', 'decimal', None),
+    'longitude':   ('longitude', 'decimal', None),
+}
+
+# Bounds are the CDM's, checked here so an over-long value is refused with a
+# reason instead of being truncated by the database. `region` maps to `state`,
+# which the CDM caps at two characters — a full region name is a 400, not a
+# silent 'Ca'.
+_LOCATION_DECIMAL_RANGE = {'latitude': (-90, 90), 'longitude': (-180, 180)}
+
+_PERSON_REPLACEABLE_FIELDS = {
+    'email': 'email',
+    'phone_number': 'str',
+    'facility_name': 'str',
+    'validated': 'bool',
+    'validated_by': 'str',
+    'validation_date': 'date',
+    'suppress_demographics_for_others': 'bool',
+}
+
 
 @method_decorator(csrf_exempt, name='dispatch')
+class PatientRecordV1ViewSet(PatientRecordViewSet):
+    """v1-only PatientRecord surface.
+
+    The legacy /api/patient-info/ prefix registers PatientRecordViewSet itself,
+    so anything added there widens a frozen API. New actions belong here.
+    """
+
+    @action(detail=False, methods=['get'], url_path='writable-fields')
+    def writable_fields(self, request: Request) -> Response:
+        """Which projection fields a client may edit, and the OMOP fact to write.
+
+        PatientRecord has no writable clinical columns, so an editor must write the
+        underlying fact instead. This tells it which table, concept and unit each
+        field needs. Fields with no reviewed concept set are reported as unwritable
+        with a reason rather than omitted, so a client can render them read-only and
+        explain why instead of failing on save.
+
+        Deployment metadata, not patient data: no person is involved and the result
+        is identical for every caller.
+        """
+        from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+        return Response(build_writable_field_descriptor())
+
+    @action(detail=True, methods=['post'], url_path='refresh',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def refresh(self, request: Request, pk: str | None = None) -> Response:
+        """Re-derive this person's PatientRecord once, on demand."""
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+
+        if not _is_admin_actor(request):
+            return Response(
+                {'detail': 'Only administrators can trigger a derivation.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Unguarded on purpose. A 2xx over a record that did not re-derive
+        # would be a lie on an endpoint that exists only to derive.
+        # Safety net: abort any single SQL statement that exceeds 25 s so a
+        # pathologically large patient cannot hold a DB connection indefinitely.
+        # SET LOCAL scopes to the enclosing transaction and auto-reverts on commit.
+        from django.db import connection
+        with transaction.atomic():
+            with connection.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '25s'")
+            record: PatientRecord = refresh_patient_record(person)
+        return Response({
+            'person_id': person.person_id,
+            'refreshed': True,
+            'derived_at': getattr(record, 'derived_at', None),
+            'derivation_version': getattr(record, 'derivation_version', None),
+        })
+
+
+
 class PersonViewSet(viewsets.GenericViewSet):
     """
     Endpoints:
@@ -4291,6 +4924,46 @@ class PersonViewSet(viewsets.GenericViewSet):
                 {'detail': 'actor_iss and actor_sub are required.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        from patient_portal.models import Identity, PatientUser
+        identity = Identity.objects.filter(
+            issuer=actor_iss, sub=actor_sub,
+        ).first()
+        if identity is not None:
+            patient_user = (
+                PatientUser.objects
+                .select_related('person')
+                .filter(identity=identity)
+                .first()
+            )
+            if patient_user is not None:
+                person = patient_user.person
+                updates = []
+                current_iss = person.actor_iss or ''
+                current_sub = person.actor_sub or ''
+                if (
+                    current_iss in ('', actor_iss)
+                    and current_sub in ('', actor_sub)
+                ):
+                    if not current_iss:
+                        person.actor_iss = actor_iss
+                        updates.append('actor_iss')
+                    if not current_sub:
+                        person.actor_sub = actor_sub
+                        updates.append('actor_sub')
+                if updates:
+                    try:
+                        person.save(update_fields=updates)
+                    except IntegrityError:
+                        # A prior buggy find_or_create may already have minted
+                        # a duplicate with these actor columns. The account
+                        # holder link is authoritative, so return it without
+                        # clobbering either row.
+                        pass
+                return Response(
+                    {'person_id': person.person_id, 'created': False},
+                    status=status.HTTP_200_OK,
+                )
 
         try:
             _new_person_id = next_pk(Person, 'person_id')
@@ -4348,8 +5021,124 @@ class PersonViewSet(viewsets.GenericViewSet):
                 setattr(person, field, incoming)
                 changed.append(field)
 
+        for field, kind in _PERSON_REPLACEABLE_FIELDS.items():
+            if field not in request.data:
+                continue
+            incoming = request.data[field]
+            if kind in {'str', 'email'} and incoming is not None:
+                incoming = str(incoming).strip() or None
+                if kind == 'email' and incoming is not None:
+                    try:
+                        validate_email(incoming)
+                    except DjangoValidationError:
+                        return Response(
+                            {'detail': f"'{field}' must be a valid email address."},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+            elif kind == 'bool' and incoming is not None:
+                if isinstance(incoming, bool):
+                    pass
+                elif incoming in {0, 1}:
+                    incoming = bool(incoming)
+                elif isinstance(incoming, str) and incoming.lower() in {'true', '1', 'yes'}:
+                    incoming = True
+                elif isinstance(incoming, str) and incoming.lower() in {'false', '0', 'no'}:
+                    incoming = False
+                else:
+                    return Response(
+                        {'detail': f"'{field}' must be a boolean."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            elif kind == 'date' and incoming is not None:
+                incoming = parse_date(str(incoming))
+                if incoming is None:
+                    return Response(
+                        {'detail': f"'{field}' must be an ISO date."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            if getattr(person, field) != incoming:
+                setattr(person, field, incoming)
+                changed.append(field)
+
+        # ---- Demographics -------------------------------------------------
+        # Replaceable, unlike the *_source_value entries above: a wrong gender or
+        # race must be correctable, not merely fillable when blank.
+        for field, (concept_attr, source_attr) in _PERSON_DEMOGRAPHIC_FIELDS.items():
+            if field not in request.data:
+                continue
+            incoming = request.data[field]
+            incoming = str(incoming).strip() or None if incoming is not None else None
+            concept = resolve_demographic_concept(field, incoming)
+            # Clear the concept when the new value is not a curated answer. Leaving
+            # the old one would let derivation keep reporting the value that was
+            # just corrected, since it reads the concept before the source text.
+            if getattr(person, f'{concept_attr}_id') != (concept.concept_id if concept else None):
+                setattr(person, concept_attr, concept)
+                changed.append(concept_attr)
+            if getattr(person, source_attr) != incoming:
+                setattr(person, source_attr, incoming)
+                changed.append(source_attr)
+
+        # ---- Location -----------------------------------------------------
+        # Six projection fields resolve to the OMOP Location row rather than to
+        # Person. The row is created on first write, because a patient whose
+        # address arrives after registration has no location to update.
+        location_updates = {}
+        for field, (column, kind, max_len) in _PERSON_LOCATION_FIELDS.items():
+            if field not in request.data:
+                continue
+            incoming = request.data[field]
+            if incoming is not None and kind == 'str':
+                incoming = str(incoming).strip() or None
+                if incoming is not None and max_len and len(incoming) > max_len:
+                    return Response(
+                        {'detail': (
+                            f"'{field}' must be at most {max_len} characters "
+                            f'(OMOP Location.{column}).'
+                        )},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            elif incoming is not None and kind == 'decimal':
+                try:
+                    incoming = Decimal(str(incoming))
+                except (InvalidOperation, TypeError, ValueError):
+                    return Response(
+                        {'detail': f"'{field}' must be a number."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                lo, hi = _LOCATION_DECIMAL_RANGE[field]
+                if not (lo <= incoming <= hi):
+                    return Response(
+                        {'detail': f"'{field}' must be between {lo} and {hi}."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            location_updates[column] = incoming
+
+        if location_updates:
+            location = None
+            if person.location_id:
+                location = Location.objects.filter(
+                    location_id=person.location_id
+                ).first()
+            if location is None:
+                location = Location(location_id=next_pk(Location, 'location_id'))
+            location_changed = [
+                c for c, v in location_updates.items() if getattr(location, c) != v
+            ]
+            for column, value in location_updates.items():
+                setattr(location, column, value)
+            if location._state.adding:
+                location.save()
+                # Person.location_id is a plain IntegerField, not a FK — the CDM
+                # link is by id only, so assign the id rather than the instance.
+                person.location_id = location.location_id
+                changed.append('location_id')
+            elif location_changed:
+                location.save(update_fields=location_changed)
+
         if changed:
             person.save(update_fields=changed)
+            refresh_patient_record(person)
 
         return Response({'person_id': person.person_id, 'updated_fields': changed})
 
@@ -4369,6 +5158,67 @@ _MODEL_PK_MAP = {
 
 class _OmopFilterMixin:
     """Filter by person_id query param and restrict to the requesting org's patients."""
+    pagination_query_params = frozenset({'page', 'page_size', 'limit'})
+    allowed_list_query_params = (
+        frozenset({'person_id', 'include_erroneous', 'format'})
+        | pagination_query_params
+    )
+    clinical_filter_fields = None
+    pagination_class = ClinicalOmopPagination
+
+    def get_allowed_list_query_params(self):
+        allowed = set(self.allowed_list_query_params)
+        config = self.clinical_filter_fields
+        if config:
+            allowed.update({
+                config['concept_param'],
+                config['source_concept_param'],
+                'concept_code',
+                f"{config['date_field']}__gte",
+                f"{config['date_field']}__lte",
+            })
+            if config.get('visit_filter', True):
+                allowed.add('visit_occurrence_id')
+        return allowed
+
+    def _pagination_requested(self):
+        return bool(set(self.request.query_params) & self.pagination_query_params)
+
+    def _ordered_for_pagination(self, queryset):
+        if queryset.ordered:
+            return queryset
+        return queryset.order_by(queryset.model._meta.pk.name)
+
+    def _unsupported_list_query_params(self):
+        allowed = self.get_allowed_list_query_params()
+        return sorted(set(self.request.query_params) - allowed)
+
+    def list(self, request, *args, **kwargs):
+        unsupported = self._unsupported_list_query_params()
+        if unsupported:
+            supported = sorted(self.get_allowed_list_query_params())
+            return Response(
+                {
+                    'detail': (
+                        'Unsupported query parameter(s): '
+                        + ', '.join(unsupported)
+                    ),
+                    'unsupported_params': unsupported,
+                    'supported_params': supported,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if self._pagination_requested():
+            queryset = self._ordered_for_pagination(
+                self.filter_queryset(self.get_queryset()))
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
     def get_queryset(self):
         qs = super().get_queryset()
         person_id = self.request.query_params.get('person_id')
@@ -4387,7 +5237,7 @@ class _OmopFilterMixin:
         # Trusted backend (service-token): full visibility. Already
         # validated at the permission layer (ScopedTokenPermission).
         if is_service_token(self.request):
-            return qs
+            return self._apply_clinical_filters(qs)
         org = get_request_org(self.request)
         if org is not None:
             from omop_core.models import PatientRecord
@@ -4414,7 +5264,767 @@ class _OmopFilterMixin:
                     qs = qs.filter(person_id=own_pid)
                 except PatientUser.DoesNotExist:
                     return qs.none()
+        return self._apply_clinical_filters(qs)
+
+    def _apply_clinical_filters(self, qs):
+        config = self.clinical_filter_fields
+        if not config:
+            return qs
+
+        concept_id = self.request.query_params.get(config['concept_param'])
+        filter_requested = False
+        if concept_id:
+            filter_requested = True
+            qs = qs.filter(**{config['concept_field']: concept_id})
+
+        source_concept_id = self.request.query_params.get(
+            config['source_concept_param'])
+        if source_concept_id:
+            filter_requested = True
+            qs = qs.filter(**{config['source_concept_field']: source_concept_id})
+
+        concept_code = self.request.query_params.get('concept_code')
+        if concept_code:
+            filter_requested = True
+            from omop_core.models import Concept
+            cids = list(
+                Concept.objects.filter(concept_code=concept_code)
+                .values_list('concept_id', flat=True)
+            )
+            qs = qs.filter(**{f"{config['concept_field']}__in": cids})
+
+        date_gte = self.request.query_params.get(f"{config['date_field']}__gte")
+        if date_gte:
+            filter_requested = True
+            qs = qs.filter(**{f"{config['date_field']}__gte": date_gte})
+        date_lte = self.request.query_params.get(f"{config['date_field']}__lte")
+        if date_lte:
+            filter_requested = True
+            qs = qs.filter(**{f"{config['date_field']}__lte": date_lte})
+
+        visit_id = self.request.query_params.get('visit_occurrence_id')
+        if visit_id and config.get('visit_filter', True):
+            filter_requested = True
+            qs = qs.filter(visit_occurrence_id=visit_id)
+
+        ordering = config.get('ordering')
+        if filter_requested and ordering:
+            qs = qs.order_by(*ordering)
         return qs
+
+
+#: Maximum rows accepted in a single bulk POST body. Exceeding it is a 413 naming
+#: the limit rather than a timeout — callers chunk to this number.
+OMOP_BULK_MAX_ROWS = int(os.environ.get('OMOP_BULK_MAX_ROWS', 1000))
+
+#: Byte ceiling for a bulk body, checked against CONTENT_LENGTH *before* parsing.
+#: The row cap cannot serve as a memory guard: DRF's JSONParser reads the WSGI
+#: stream directly (Request._load_stream sets _stream to the raw HttpRequest),
+#: so it never touches HttpRequest.body — the only place Django enforces
+#: DATA_UPLOAD_MAX_MEMORY_SIZE. A 500 MB array would therefore be fully parsed
+#: into memory before the row count could reject it. 1,000 measurement rows is
+#: ~250 KB, so this leaves ample headroom.
+OMOP_BULK_MAX_BYTES = int(os.environ.get('OMOP_BULK_MAX_BYTES', 8 * 1024 * 1024))
+
+
+def _cached_pk_lookup(field, cache):
+    """Wrap a PrimaryKeyRelatedField's to_internal_value with a prefetched cache.
+
+    ``PrimaryKeyRelatedField.to_internal_value`` runs ``queryset.get(pk=...)`` per
+    row, so a 1,000-row batch with five FK columns costs 5,000 queries — the same
+    N+1 at the ORM layer that the endpoint exists to remove at the HTTP layer.
+    A cache miss falls through to the original implementation so that unknown or
+    malformed ids still raise DRF's own per-index validation error.
+    """
+    original = field.to_internal_value
+
+    def to_internal_value(data):
+        # bool subclasses int, so {1: obj}.get(True) is a HIT and would silently
+        # link the row to pk 1. DRF's own to_internal_value raises TypeError for
+        # bool before it reaches the queryset, yielding "Incorrect type. Expected
+        # pk value, received bool." — so deferring to it here is what produces the
+        # 400. Removing this guard turns a rejected row into a mis-linked one.
+        # Locked in by test_boolean_fk_is_rejected_not_silently_mislinked.
+        if isinstance(data, bool):
+            return original(data)
+        try:
+            hit = cache.get(data)
+        except TypeError:      # unhashable (dict/list) — let DRF report it
+            hit = None
+        return hit if hit is not None else original(data)
+
+    return to_internal_value
+
+
+def _prefetch_bulk_related(serializer, rows):
+    """Resolve every FK referenced anywhere in the batch in one query per model."""
+    from rest_framework.relations import PrimaryKeyRelatedField
+
+    for name, field in serializer.child.fields.items():
+        if not isinstance(field, PrimaryKeyRelatedField) or field.read_only:
+            continue
+        # Collect one value at a time rather than in a set comprehension: an
+        # unhashable id ({"person": {"id": 5}}) would raise TypeError out of the
+        # comprehension, escape as a 500, and lose the per-index 400 the
+        # single-row path gives for the same input. Skipping the value here
+        # leaves it out of the cache, so _cached_pk_lookup falls through to DRF
+        # and the offending row gets its normal validation error.
+        raw = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            value = row.get(name)
+            if value is None:
+                continue
+            try:
+                raw.add(value)
+            except TypeError:
+                continue
+        if not raw:
+            continue
+        try:
+            objs = {obj.pk: obj for obj in field.get_queryset().filter(pk__in=raw)}
+        except (ValueError, TypeError, DjangoValidationError):
+            # Non-integer ids in the batch — skip the optimisation and let DRF
+            # produce the per-index error for the offending rows.
+            continue
+        if objs:
+            field.to_internal_value = _cached_pk_lookup(field, objs)
+
+
+#: Identity of a clinical event for the idempotent bulk write, mirroring
+#: ``fhir/sync.py::_upsert_clinical``: ``(source_value, date)`` is "the stable
+#: identity of a clinical event, independent of how its code resolves", so the
+#: concept column stays *outside* the key and is upgraded in place when a
+#: vocabulary load resolves a code that previously fell back to 'No matching
+#: concept'.
+#:
+#: Measurement and Observation diverge on purpose. A patient legitimately has
+#: several distinct results for one analyte on one day, so keying them on
+#: (source_value, date) alone would delete real results instead of deduping.
+#:
+#: Only raw value columns may join a key. ``value_as_concept`` is re-resolved by
+#: a vocabulary load just like the concept column, so keying on it would strand
+#: a duplicate beside the row it should have upgraded. ``value_source_value`` is
+#: the raw text behind that resolution, so it separates two coded answers safely.
+#:
+#: Format: model name -> (source_value field, date field, concept field, extra key fields)
+_UPSERT_KEYS = {
+    'ConditionOccurrence': ('condition_source_value', 'condition_start_date',
+                            'condition_concept', ()),
+    'DrugExposure':        ('drug_source_value', 'drug_exposure_start_date',
+                            'drug_concept', ()),
+    'Measurement':         ('measurement_source_value', 'measurement_date',
+                            'measurement_concept',
+                            ('measurement_datetime', 'value_as_number')),
+    'Observation':         ('observation_source_value', 'observation_date',
+                            'observation_concept',
+                            ('observation_datetime', 'value_as_number',
+                             'value_as_string', 'value_source_value')),
+    'ProcedureOccurrence': ('procedure_source_value', 'procedure_date',
+                            'procedure_concept', ()),
+}
+
+
+def _upsert_key(instance, sv_field, date_field, extra_fields):
+    """Event identity of one unsaved row, or None when it has none.
+
+    A row with no source_value or no date cannot be matched against anything, so
+    it is always inserted rather than silently merged with every other keyless
+    row in the batch. The numeric part needs no normalisation *because both sides
+    are Decimal*: value_as_number is a DecimalField, so DRF hands back a Decimal
+    and the DB column returns one, and Decimal compares and hashes across
+    exponents — Decimal('5.00000') off the row and Decimal('5.0') off the request
+    body land in the same bucket. That does not generalise to float: most
+    non-integer floats compare unequal to the Decimal of the same literal
+    (Decimal('0.1') != 0.1), so a FloatField joining a key here would need
+    explicit normalisation to one type.
+    """
+    sv = getattr(instance, sv_field, None)
+    event_date = getattr(instance, date_field, None)
+    if not sv or event_date is None:
+        return None
+    extras = []
+    for f in extra_fields:
+        v = getattr(instance, f, None)
+        # Naive datetimes from the request body will never match the
+        # timezone-aware values PostgreSQL returns when USE_TZ=True.
+        # Normalise to UTC so both sides of the key comparison hash equally.
+        if isinstance(v, datetime) and is_naive(v):
+            v = make_aware(v, _dt.timezone.utc)
+        extras.append(v)
+    return (sv, event_date) + tuple(extras)
+
+
+class _UpsertPlan:
+    """What one bulk batch resolves to once matched against the person's rows.
+
+    Built with a single SELECT and executed with a constant number of statements
+    regardless of batch size — the property ``BulkOmopUpsertTest`` pins with
+    ``CaptureQueriesContext``. Per-row ``.get()``/``.save()`` here is what the
+    endpoint exists to avoid; ``fhir/sync.py::_upsert_clinical`` can afford its
+    per-key query because a FHIR compartment is small, a 1,000-row ETL chunk is
+    not.
+    """
+
+    def __init__(self, to_insert, row_slots, collapse_ids, to_update, touched_ids):
+        self.to_insert = to_insert        # unsaved rows needing a pk, in order
+        self.row_slots = row_slots        # per input row: ('new', slot) | ('old', pk)
+        self.collapse_ids = collapse_ids  # stacked duplicates to delete
+        self.to_update = to_update        # [(pk, concept_id)] — concept changed
+        self.touched_ids = touched_ids    # existing rows updated or de-stacked
+
+
+def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances):
+    """Match a batch of unsaved rows against what `person` already has.
+
+    Same three outcomes as ``_upsert_clinical``: an event already on file is left
+    in place (its concept updated when it changed, its stacked historical
+    duplicates collapsed onto the earliest row), and anything else is inserted.
+    Only the concept is rewritten on a matched row — every other column is left
+    as stored, so a re-run cannot quietly overwrite a value someone corrected.
+    Repeats of one event *within* the batch collapse to a single row, last
+    occurrence winning, so a source bundle that reports an event twice does not
+    write it twice.
+    """
+    sv_field, date_field, concept_field, extra_fields = _UPSERT_KEYS[model_name]
+    cid_attr = f'{concept_field}_id'
+
+    keys = [_upsert_key(inst, sv_field, date_field, extra_fields)
+            for inst in instances]
+    keyed = [k for k in keys if k is not None]
+
+    # One SELECT for every row of this person that could match the batch. The
+    # (source_value IN …, date IN …) pair is a superset of the real key set —
+    # narrowing it to exact tuples would need a per-key OR term, i.e. the query
+    # growth this endpoint exists to avoid. The superset is bounded by the
+    # person's own rows for those source values.
+    existing = {}   # key -> [pk, …] ascending
+    existing_cid = {}
+    if keyed:
+        columns = (pk_field, cid_attr, sv_field, date_field) + tuple(extra_fields)
+        rows = model_cls.objects.filter(**{
+            'person': person,
+            f'{sv_field}__in': {k[0] for k in keyed},
+            f'{date_field}__in': {k[1] for k in keyed},
+        }).order_by(pk_field).values_list(*columns)
+        for row in rows:
+            # Normalise DB-side datetimes the same way _upsert_key does for
+            # in-memory instances: naive → UTC-aware. In practice PostgreSQL
+            # with USE_TZ=True already returns aware values, but the explicit
+            # normalisation keeps the two sides provably symmetric.
+            tail = []
+            for v in row[4:]:
+                if isinstance(v, datetime) and is_naive(v):
+                    v = make_aware(v, _dt.timezone.utc)
+                tail.append(v)
+            key = (row[2], row[3]) + tuple(tail)
+            if key in existing:
+                existing[key].append(row[0])
+            else:
+                existing[key] = [row[0]]
+                existing_cid[key] = row[1]
+
+    # Last occurrence of a repeated key wins, matching _upsert_clinical's
+    # "desired" dict — so the batch converges on the row the producer emitted
+    # most recently rather than the first one it happened to serialise.
+    last_index = {}
+    for i, key in enumerate(keys):
+        if key is not None:
+            last_index[key] = i
+
+    to_insert, row_slots = [], [None] * len(instances)
+    insert_slot, collapse_ids, to_update, touched_ids = {}, [], [], []
+
+    for i, (inst, key) in enumerate(zip(instances, keys)):
+        if key is None:                       # no identity — always insert
+            row_slots[i] = ('new', len(to_insert))
+            to_insert.append(inst)
+            continue
+
+        if key in existing:
+            keep = existing[key][0]
+            row_slots[i] = ('old', keep)
+            if last_index[key] != i:
+                continue                      # decide the key once, on its last row
+            extras = existing[key][1:]
+            collapse_ids.extend(extras)
+            new_cid = getattr(inst, cid_attr, None)
+            if existing_cid[key] != new_cid:
+                to_update.append((keep, new_cid))
+                touched_ids.append(keep)
+            elif extras:
+                touched_ids.append(keep)
+            continue
+
+        if key in insert_slot:                # repeated within this batch
+            slot = insert_slot[key]
+            if last_index[key] == i:
+                to_insert[slot] = inst
+        else:
+            slot = insert_slot[key] = len(to_insert)
+            to_insert.append(inst)
+        row_slots[i] = ('new', slot)
+
+    return _UpsertPlan(to_insert, row_slots, collapse_ids, to_update, touched_ids)
+
+
+def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
+    """Execute a plan: collapse duplicates, update changed concepts, insert the
+    rest. Returns (ids aligned with the input rows, newly inserted ids)."""
+    concept_field = _UPSERT_KEYS[model_name][2]
+    cid_attr = f'{concept_field}_id'
+
+    if plan.collapse_ids:
+        # Provenance first: it points at rows that are about to disappear, and a
+        # GenericForeignKey has no FK cascade to clean it up.
+        ProvenanceRecord.objects.filter(
+            content_type=ContentType.objects.get_for_model(model_cls),
+            object_id__in=plan.collapse_ids,
+        ).delete()
+        model_cls.objects.filter(**{f'{pk_field}__in': plan.collapse_ids}).delete()
+
+    if plan.to_update:
+        model_cls.objects.bulk_update(
+            [model_cls(**{pk_field: pk, cid_attr: cid}) for pk, cid in plan.to_update],
+            [concept_field],
+        )
+
+    new_ids = []
+    if plan.to_insert:
+        new_ids = list(next_pk_batch(model_cls, pk_field, len(plan.to_insert)))
+        for row, pk in zip(plan.to_insert, new_ids):
+            setattr(row, pk_field, pk)
+        model_cls.objects.bulk_create(plan.to_insert)
+
+    ids = [new_ids[ref] if kind == 'new' else ref for kind, ref in plan.row_slots]
+    return ids, new_ids
+
+
+def _is_admin_actor(request: Request) -> bool:
+    """Whether this caller may act on a patient administratively."""
+    actor = request.user
+    return (
+        is_service_token(request)
+        or bool(getattr(actor, 'is_staff', False))
+        or get_admin_orgs(actor).exists()
+    )
+
+
+def _skip_refresh_requested(request: Request) -> bool:
+    """Whether the caller asked to defer, and is allowed to.
+
+    Only actors who can call the refresh action may defer. Otherwise a patient
+    could PATCH their own row with the flag and strand their PatientRecord
+    stale with no way to rebuild it.
+    """
+    asked = str(
+        request.query_params.get('skip_refresh', 'false')
+    ).strip().lower() in ('1', 'true', 'yes')
+    return asked and _is_admin_actor(request)
+
+
+class _OmopDeferRefreshMixin:
+    """Let row level writes defer the PatientRecord derivation.
+
+    Derivation cost grows with the rows a person already holds, so on a
+    bulk loaded patient one PATCH or DELETE costs 12-32s. A caller that defers
+    has to call the refresh action afterwards.
+
+    When *not* deferring, the mixin suppresses the signal-driven refresh and
+    calls ``refresh_patient_record`` explicitly so that failures propagate as
+    a 502 instead of being swallowed by the signal handler's ``try/except``.
+    """
+
+    def update(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        from omop_core.signals import suppress_patient_record_refresh
+
+        if _skip_refresh_requested(request):
+            with suppress_patient_record_refresh():
+                return super().update(request, *args, **kwargs)
+
+        # Suppress signal-driven refresh and call it explicitly so failures
+        # surface as an HTTP error instead of being silently swallowed.
+        instance = self.get_object()
+        person = instance.person
+        with suppress_patient_record_refresh():
+            response = super().update(request, *args, **kwargs)
+        try:
+            refresh_patient_record(person)
+        except Exception:
+            logger.exception(
+                'PatientRecord refresh failed after PATCH on %s pk=%s '
+                'for person_id=%s',
+                type(instance).__name__, instance.pk, person.person_id,
+            )
+            return Response(
+                {'detail': 'The clinical row was updated but the '
+                 'PatientRecord projection failed to refresh. '
+                 'Retry POST /api/v1/patient-records/'
+                 f'{person.person_id}/refresh/ to reconcile.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return response
+
+    def destroy(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        from omop_core.signals import suppress_patient_record_refresh
+
+        if _skip_refresh_requested(request):
+            with suppress_patient_record_refresh():
+                return super().destroy(request, *args, **kwargs)
+
+        # Capture person before the row is deleted.
+        instance = self.get_object()
+        person = instance.person
+        instance_type = type(instance).__name__
+        instance_pk = instance.pk
+        with suppress_patient_record_refresh():
+            response = super().destroy(request, *args, **kwargs)
+        try:
+            refresh_patient_record(person)
+        except Exception:
+            logger.exception(
+                'PatientRecord refresh failed after DELETE on %s pk=%s '
+                'for person_id=%s',
+                instance_type, instance_pk, person.person_id,
+            )
+            return Response(
+                {'detail': 'The clinical row was deleted but the '
+                 'PatientRecord projection failed to refresh. '
+                 'Retry POST /api/v1/patient-records/'
+                 f'{person.person_id}/refresh/ to reconcile.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return response
+
+
+class _OmopBulkCreateMixin:
+    """Accept a JSON *list* on POST and insert the rows in one batched transaction.
+
+    Motivation: consumers that have already parsed FHIR into OMOP-shaped rows were
+    writing one row per HTTP request (~1,900 requests for a single patient). This is
+    the batch entrance to the same fast internals ``fhir/sync.py::_bulk_insert``
+    uses — batched PK allocation plus ``bulk_create`` — without going through FHIR.
+
+    Semantics (summarised in CLAUDE.md, "Bulk OMOP Row Writes"):
+
+    * A single dict body with no client-supplied primary key uses the same
+      natural-key upsert semantics, while preserving the single-row response
+      shape. Pass ``?upsert=false`` to force the historical append-only create.
+    * All-or-nothing: the whole batch shares one ``transaction.atomic()``.
+    * One batch is one person. Mixed-person batches are rejected with 400.
+    * Idempotent by default (issue #454): rows are upserted on the event identity
+      ``_UPSERT_KEYS`` defines, the same identity ``fhir/sync.py::_upsert_clinical``
+      uses, so re-posting a batch converges instead of duplicating. The response
+      reports ``created`` vs ``updated``; ``ids`` stays positionally aligned with
+      the request rows and names the row each one resolved to. ``?upsert=false``
+      restores the append-only behaviour.
+    * Query count is bounded by a constant, not by the number of rows.
+    * ``bulk_create`` does not fire ``post_save``, so the ``omop_core.signals``
+      receivers that rebuild ``PatientRecord`` never run. The refresh is therefore
+      explicit here — once for the batch instead of once per row. ``?skip_refresh=true``
+      defers it for backfills that will run ``populate_patient_record`` afterwards.
+    """
+
+    def create(self, request, *args, **kwargs):
+        # Checked before request.data, which is what triggers parsing. Chunked
+        # uploads send no CONTENT_LENGTH; there is nothing to check pre-parse in
+        # that case, and the row cap still bounds what gets written.
+        try:
+            declared = int(request.META.get('CONTENT_LENGTH') or 0)
+        except (TypeError, ValueError):
+            declared = 0
+        if declared > OMOP_BULK_MAX_BYTES:
+            return Response(
+                {'detail': (
+                    f'Request body too large: {declared} bytes exceeds the maximum '
+                    f'of {OMOP_BULK_MAX_BYTES} bytes. Split the batch and retry.'
+                ), 'max_bytes': OMOP_BULK_MAX_BYTES},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        if not isinstance(request.data, list):
+            if self._should_single_upsert(request):
+                return self._single_upsert_create(request)
+            return super().create(request, *args, **kwargs)
+        return self._bulk_create(request)
+
+    def _should_single_upsert(self, request):
+        if not isinstance(request.data, dict):
+            return False
+        model_name = self.serializer_class.Meta.model.__name__
+        if model_name not in _UPSERT_KEYS:
+            return False
+        pk_field, _model_cls = _MODEL_PK_MAP[model_name]
+        if request.data.get(pk_field) is not None:
+            return False
+        return str(
+            request.query_params.get('upsert', 'true')
+        ).strip().lower() not in ('0', 'false', 'no')
+
+    def _authorize_single_upsert_person(self, request, person):
+        from rest_framework.exceptions import PermissionDenied
+
+        org = get_request_org(request)
+        if is_service_token(request):
+            return org
+        if org is not None:
+            existing_pi = PatientRecord.objects.filter(person=person).first()
+            if (existing_pi is not None
+                    and existing_pi.organization is not None
+                    and existing_pi.organization != org):
+                raise PermissionDenied('Person does not belong to your organization.')
+            return org
+        if not getattr(request.user, 'is_staff', False):
+            from omop_core.authorization import can_write_patient
+            if not can_write_patient(request.user, person.person_id):
+                raise PermissionDenied('Access denied.')
+        return org
+
+    def _single_upsert_create(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+
+        person = validated.get('person')
+        if person is None:
+            return Response(
+                {'detail': 'person is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        org = self._authorize_single_upsert_person(request, person)
+        source, source_user_id, reason = _extract_provenance(request)
+        skip_refresh = str(
+            request.query_params.get('skip_refresh', 'false')
+        ).strip().lower() in ('1', 'true', 'yes')
+
+        model_name = self.serializer_class.Meta.model.__name__
+        pk_field, model_cls = _MODEL_PK_MAP[model_name]
+        instance = model_cls(**dict(validated))
+
+        from omop_core.signals import suppress_patient_record_refresh
+        try:
+            with transaction.atomic():
+                with suppress_patient_record_refresh():
+                    plan = _plan_bulk_upsert(
+                        model_cls, pk_field, model_name, person, [instance])
+                    ids, new_ids = _apply_upsert_plan(
+                        plan, model_cls, pk_field, model_name)
+
+                row_id = ids[0]
+                if source and new_ids:
+                    _record_provenance(
+                        model_cls.objects.get(**{pk_field: row_id}),
+                        source,
+                        source_user_id,
+                        target_patient_id=str(person.person_id),
+                        modification_reason=reason,
+                        organization=org,
+                    )
+                if not skip_refresh:
+                    from omop_core.services.patient_record_service import refresh_patient_record
+                    refresh_patient_record(person)
+        except IntegrityError as exc:
+            logger.exception(
+                'single %s upsert for person %s failed on a database constraint',
+                model_name, person.person_id)
+            return Response(
+                {'detail': (
+                    'The row conflicted with a database constraint and was '
+                    'rolled back; retrying is safe.'
+                ), 'error': str(exc).strip().partition('\n')[0]},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        obj = model_cls.objects.get(**{pk_field: row_id})
+        response_serializer = self.get_serializer(obj)
+        http_status = status.HTTP_201_CREATED if new_ids else status.HTTP_200_OK
+        return Response(response_serializer.data, status=http_status)
+
+    def _bulk_create(self, request):
+        from rest_framework.exceptions import PermissionDenied
+
+        rows = request.data
+        if len(rows) > OMOP_BULK_MAX_ROWS:
+            return Response(
+                {'detail': (
+                    f'Batch too large: {len(rows)} rows exceeds the maximum of '
+                    f'{OMOP_BULK_MAX_ROWS} rows per request. Split the batch and retry.'
+                ), 'max_rows': OMOP_BULK_MAX_ROWS},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        model_name = self.serializer_class.Meta.model.__name__
+        pk_field, model_cls = _MODEL_PK_MAP[model_name]
+
+        # Client-supplied PKs would desynchronise the next_pk_batch accounting
+        # (some rows allocated, some not) — reject rather than half-honour them.
+        pk_errors = [
+            ({pk_field: ['Client-supplied primary keys are not allowed in a bulk '
+                         'request; ids are assigned by the server.']}
+             if isinstance(row, dict) and row.get(pk_field) is not None else {})
+            for row in rows
+        ]
+        if any(pk_errors):
+            return Response(pk_errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # many=True yields positionally-aligned per-index error dicts, so the
+        # operator can tell which of N rows to fix.
+        serializer = self.get_serializer(data=rows, many=True)
+        _prefetch_bulk_related(serializer, rows)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+
+        if not validated:
+            return Response({'created': 0, 'updated': 0, 'ids': []},
+                            status=status.HTTP_201_CREATED)
+
+        # One batch is one person, by construction on the producer side.
+        people = {attrs.get('person') for attrs in validated}
+        if len(people) > 1:
+            return Response(
+                {'detail': (
+                    'A bulk request must contain rows for exactly one person; '
+                    f'found {len(people)} distinct person values. '
+                    'Split the batch by person and retry.'
+                )},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        person = people.pop()
+        if person is None:
+            return Response(
+                {'detail': 'person is required on every row of a bulk request.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Same authorization the single-row path applies in perform_create, run
+        # once for the batch's single person.
+        org = get_request_org(request)
+        if not is_service_token(request):
+            if org is not None:
+                existing_pi = PatientRecord.objects.filter(person=person).first()
+                if (existing_pi is not None
+                        and existing_pi.organization is not None
+                        and existing_pi.organization != org):
+                    raise PermissionDenied('Person does not belong to your organization.')
+            elif not getattr(request.user, 'is_staff', False):
+                from omop_core.authorization import can_write_patient
+                if not can_write_patient(request.user, person.person_id):
+                    raise PermissionDenied('Access denied.')
+
+        source, source_user_id, reason = _extract_provenance(request)
+        skip_refresh = str(
+            request.query_params.get('skip_refresh', 'false')
+        ).strip().lower() in ('1', 'true', 'yes')
+        # Idempotent by default: the endpoint carries no idempotency key of any
+        # kind, so an ETL re-run, a retry after a read timeout, or a re-parse
+        # would otherwise duplicate every row it had already written. Callers
+        # that genuinely want append-only writes (an audit-style feed of rows
+        # with no stable identity) pass ?upsert=false.
+        upsert = str(
+            request.query_params.get('upsert', 'true')
+        ).strip().lower() not in ('0', 'false', 'no')
+
+        from omop_core.signals import suppress_patient_record_refresh
+
+        try:
+            return self._bulk_write(
+                request, person, org, model_cls, pk_field, model_name, validated,
+                source, source_user_id, reason, skip_refresh, upsert,
+                suppress_patient_record_refresh)
+        except IntegrityError as exc:
+            # A conflict over data, not a server fault. The distinction decides
+            # whether the caller retries, and a 500 reads as "service is down".
+            logger.exception(
+                'bulk %s write for person %s failed on a database constraint',
+                model_name, person.person_id)
+            return Response(
+                {'detail': (
+                    'The batch conflicted with a database constraint and was '
+                    'rolled back whole; no rows were written. Retrying is safe.'
+                ), 'error': str(exc).strip().partition('\n')[0]},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+    def _bulk_write(
+        self,
+        request: Request,
+        person: Person,
+        org: Organization | None,
+        model_cls: type[models.Model],
+        pk_field: str,
+        model_name: str,
+        validated: list[dict[str, Any]],
+        source: str | None,
+        source_user_id: str | None,
+        reason: str | None,
+        skip_refresh: bool,
+        upsert: bool,
+        suppress_patient_record_refresh: Callable[[], ContextManager[None]],
+    ) -> Response:
+        """Write one validated batch and derive the read model once."""
+        with transaction.atomic():
+            # bulk_create does not fire post_save today, so the per-row refresh
+            # receivers would not run anyway. Suppressing explicitly is the
+            # documented house idiom for bulk writes (omop_core/signals.py) and
+            # keeps "one refresh per batch, never per row" true even if a future
+            # change introduces a per-row save() in here. The upsert path *does*
+            # delete collapsed duplicates, and post_delete receivers are live —
+            # so here the suppression is load-bearing, not just defensive.
+            with suppress_patient_record_refresh():
+                instances = [model_cls(**dict(attrs)) for attrs in validated]
+                if upsert:
+                    plan = _plan_bulk_upsert(
+                        model_cls, pk_field, model_name, person, instances)
+                    ids, new_ids = _apply_upsert_plan(
+                        plan, model_cls, pk_field, model_name)
+                    updated = len(plan.touched_ids)
+                else:
+                    new_ids = list(next_pk_batch(model_cls, pk_field, len(instances)))
+                    for inst, pk in zip(instances, new_ids):
+                        setattr(inst, pk_field, pk)
+                    model_cls.objects.bulk_create(instances)
+                    ids, updated = list(new_ids), 0
+
+            # No source supplied means no ProvenanceRecord, matching the single-row
+            # path — inventing a source would make provenance unfalsifiable.
+            # Only inserted rows get one: an upsert that left a row untouched
+            # wrote nothing to attribute, matching _upsert_clinical.
+            if source and new_ids:
+                ct = ContentType.objects.get_for_model(model_cls)
+                ProvenanceRecord.objects.bulk_create([
+                    ProvenanceRecord(
+                        source=source,
+                        source_user_id=source_user_id or '',
+                        target_patient_id=str(person.person_id),
+                        modification_reason=reason,
+                        organization=org,
+                        content_type=ct,
+                        object_id=pk,
+                    )
+                    for pk in new_ids
+                ])
+
+            # Deliberately inside the transaction, and deliberately unguarded:
+            # a failing derivation rolls the rows back and 500s rather than
+            # leaving a landed batch with a stale read model, which is the
+            # silent-corruption case this endpoint exists to avoid.
+            #
+            # This is a considered divergence from the single-row path, where
+            # _refresh_for_instance swallows the same exception and logs a
+            # warning (omop_core/signals.py). There, one stale row is a small
+            # blast radius and failing the write would be disproportionate; here
+            # the caller is a pipeline that retries whole batches, so a loud
+            # rollback is both recoverable and the safer default. Callers who
+            # want the rows regardless can pass ?skip_refresh=true and derive
+            # separately.
+            if not skip_refresh:
+                refresh_patient_record(person)
+
+        return Response(
+            {'created': len(new_ids), 'updated': updated, 'ids': list(ids)},
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class _ProvenanceMixin:
@@ -4496,82 +6106,135 @@ class _ProvenanceMixin:
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ConditionOccurrenceViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class ConditionOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ConditionOccurrenceSerializer
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = ConditionOccurrence.objects.all()
+    clinical_filter_fields = {
+        'concept_param': 'condition_concept_id',
+        'concept_field': 'condition_concept_id',
+        'source_concept_param': 'condition_source_concept_id',
+        'source_concept_field': 'condition_source_concept_id',
+        'date_field': 'condition_start_date',
+        'ordering': ('-condition_start_date', '-condition_occurrence_id'),
+    }
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'omop_write'
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class DrugExposureViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class DrugExposureViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = DrugExposureSerializer
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = DrugExposure.objects.all()
+    clinical_filter_fields = {
+        'concept_param': 'drug_concept_id',
+        'concept_field': 'drug_concept_id',
+        'source_concept_param': 'drug_source_concept_id',
+        'source_concept_field': 'drug_source_concept_id',
+        'date_field': 'drug_exposure_start_date',
+        'ordering': ('-drug_exposure_start_date', '-drug_exposure_id'),
+    }
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'omop_write'
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class MeasurementViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class MeasurementViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = Measurement.objects.all()
+    clinical_filter_fields = {
+        'concept_param': 'measurement_concept_id',
+        'concept_field': 'measurement_concept_id',
+        'source_concept_param': 'measurement_source_concept_id',
+        'source_concept_field': 'measurement_source_concept_id',
+        'date_field': 'measurement_date',
+        'ordering': ('-measurement_date', '-measurement_id'),
+    }
     ordering_fields = ['measurement_date', 'measurement_id']
     ordering = ['-measurement_date']
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-        concept_id = self.request.query_params.get('measurement_concept_id')
-        if concept_id:
-            qs = qs.filter(measurement_concept_id=concept_id)
-        source_concept_id = self.request.query_params.get('measurement_source_concept_id')
-        if source_concept_id:
-            qs = qs.filter(measurement_source_concept_id=source_concept_id)
-        concept_code = self.request.query_params.get('concept_code')
-        if concept_code:
-            from omop_core.models import Concept
-            cids = list(
-                Concept.objects.filter(concept_code=concept_code)
-                .values_list('concept_id', flat=True)
-            )
-            qs = qs.filter(measurement_concept_id__in=cids)
-        date_gte = self.request.query_params.get('measurement_date__gte')
-        if date_gte:
-            qs = qs.filter(measurement_date__gte=date_gte)
-        date_lte = self.request.query_params.get('measurement_date__lte')
-        if date_lte:
-            qs = qs.filter(measurement_date__lte=date_lte)
-        visit_id = self.request.query_params.get('visit_occurrence_id')
-        if visit_id:
-            qs = qs.filter(visit_occurrence_id=visit_id)
-        return qs
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'omop_write'
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ObservationViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class ObservationViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ObservationSerializer
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = Observation.objects.all()
+    clinical_filter_fields = {
+        'concept_param': 'observation_concept_id',
+        'concept_field': 'observation_concept_id',
+        'source_concept_param': 'observation_source_concept_id',
+        'source_concept_field': 'observation_source_concept_id',
+        'date_field': 'observation_date',
+        'ordering': ('-observation_date', '-observation_id'),
+    }
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'omop_write'
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ProcedureOccurrenceViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
+class ProcedureOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ProcedureOccurrenceSerializer
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = ProcedureOccurrence.objects.all()
+    clinical_filter_fields = {
+        'concept_param': 'procedure_concept_id',
+        'concept_field': 'procedure_concept_id',
+        'source_concept_param': 'procedure_source_concept_id',
+        'source_concept_field': 'procedure_source_concept_id',
+        'date_field': 'procedure_date',
+        'ordering': ('-procedure_date', '-procedure_occurrence_id'),
+    }
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'omop_write'
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class EpisodeViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = EpisodeSerializer
-    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = Episode.objects.all()
+    allowed_list_query_params = (
+        frozenset({'person_id', 'format'})
+        | _OmopFilterMixin.pagination_query_params
+    )
+    clinical_filter_fields = {
+        'concept_param': 'episode_concept_id',
+        'concept_field': 'episode_concept_id',
+        'source_concept_param': 'episode_source_concept_id',
+        'source_concept_field': 'episode_source_concept_id',
+        'date_field': 'episode_start_date',
+        'ordering': ('-episode_start_date', '-episode_id'),
+        'visit_filter': False,
+    }
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class EpisodeEventViewSet(viewsets.ModelViewSet):
     serializer_class = EpisodeEventSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    allowed_list_query_params = frozenset({'episode_id', 'person_id', 'format'})
+
+    def _unsupported_list_query_params(self):
+        return sorted(set(self.request.query_params) - self.allowed_list_query_params)
 
     def list(self, request, *args, **kwargs):
+        unsupported = self._unsupported_list_query_params()
+        if unsupported:
+            return Response(
+                {
+                    'detail': (
+                        'Unsupported query parameter(s): '
+                        + ', '.join(unsupported)
+                    ),
+                    'unsupported_params': unsupported,
+                    'supported_params': sorted(self.allowed_list_query_params),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if not request.query_params.get('episode_id'):
             return Response(
                 {'detail': 'episode_id query parameter is required.'},
@@ -4589,13 +6252,11 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
             return qs
         # Org / per-patient scoping: EpisodeEvent.episode_id is a bare integer FK to Episode.
         # Resolve allowed episode_ids via the Episode → person → org chain.
-        # Bootstrap patients (organization=NULL) are included so that create-path
-        # and read-path are symmetric.
+        # Org-scoped tokens see only their org's patients (not unassigned).
         org = get_request_org(self.request)
         if org is not None:
-            from django.db.models import Q
             allowed_pids = PatientRecord.objects.filter(
-                Q(organization=org) | Q(organization__isnull=True)
+                organization=org
             ).values('person_id')
             allowed_episodes = Episode.objects.filter(person_id__in=allowed_pids).values('episode_id')
             qs = qs.filter(episode_id__in=allowed_episodes)
@@ -5350,6 +7011,9 @@ class PatientDocumentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = PatientDocumentSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientDocument.objects.all()
+    allowed_list_query_params = _OmopFilterMixin.allowed_list_query_params | frozenset({
+        'doc_type', 'status',
+    })
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -5492,6 +7156,9 @@ class PatientSurveyResponseViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
     queryset = PatientSurveyResponse.objects.select_related('survey').all()
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    allowed_list_query_params = _OmopFilterMixin.allowed_list_query_params | frozenset({
+        'survey',
+    })
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -5540,8 +7207,14 @@ class PatientConsentViewSet(viewsets.ModelViewSet):
         person = patient_person_for(self.request.user)
         if person is not None:
             return PatientConsent.objects.filter(patient_user__person=person)
-        # Staff / superuser — return all consents
-        return PatientConsent.objects.all()
+        # Staff sees all; providers see only their org's patients' consents.
+        if getattr(self.request.user, 'is_staff', False):
+            return PatientConsent.objects.all()
+        from omop_core.services.access import get_admin_orgs
+        admin_org_ids = get_admin_orgs(self.request.user).values_list('id', flat=True)
+        return PatientConsent.objects.filter(
+            patient_user__person__patientrecord__organization_id__in=admin_org_ids
+        )
 
     def list(self, request, *args, **kwargs):
         from patient_portal.models import PatientConsent, PatientUser
@@ -5658,6 +7331,16 @@ class PatientMessageViewSet(viewsets.ModelViewSet):
             elif not serializer.validated_data.get('patient_user'):
                 raise ValidationError({'patient_user': 'Staff must specify patient_user when starting a new thread.'})
 
+            # Verify staff has access to the target patient's org
+            resolved_pu = kwargs.get('patient_user') or serializer.validated_data.get('patient_user')
+            if resolved_pu and not getattr(user, 'is_staff', False):
+                from omop_core.services.access import get_admin_orgs
+                pr = PatientRecord.objects.filter(person=resolved_pu.person).first()
+                if pr and pr.organization_id:
+                    admin_org_ids = set(get_admin_orgs(user).values_list('id', flat=True))
+                    if pr.organization_id not in admin_org_ids:
+                        raise PermissionDenied('You do not have access to this patient.')
+
         # Validate parent belongs to the same patient thread
         parent = serializer.validated_data.get('parent')
         resolved_pu = kwargs.get('patient_user') or serializer.validated_data.get('patient_user')
@@ -5713,7 +7396,7 @@ class InterchangeAgreementViewSet(viewsets.ReadOnlyModelViewSet):
 # ---------------------------------------------------------------------------
 
 @api_view(['GET'])
-@permission_classes([ScopedTokenPermission])
+@permission_classes([VocabReadPermission])
 def vocab_release_list(request):
     """Paginated list of published vocabulary releases (newest first)."""
     from omop_core.models import VocabularyRelease
@@ -5726,7 +7409,7 @@ def vocab_release_list(request):
 
 
 @api_view(['GET'])
-@permission_classes([ScopedTokenPermission])
+@permission_classes([VocabReadPermission])
 def vocab_release_detail(request, release_id):
     """Full manifest for a specific published vocabulary release, including checksums."""
     from omop_core.models import VocabularyRelease
@@ -5739,7 +7422,7 @@ def vocab_release_detail(request, release_id):
 
 
 @api_view(['GET'])
-@permission_classes([ScopedTokenPermission])
+@permission_classes([VocabReadPermission])
 def vocab_release_latest(request):
     """Latest published vocabulary release. Supports If-None-Match → 304."""
     from omop_core.services.vocab_release import get_latest_release
@@ -5780,7 +7463,7 @@ class VocabSnapshotView(APIView):
     Uses raw SQL ``row_to_json()`` to avoid ORM overhead on large tables.
     The table name is validated against a whitelist before interpolation.
     """
-    permission_classes = [ScopedTokenPermission]
+    permission_classes = [VocabReadPermission]
 
     # SECURITY: db_table values are hardcoded; never interpolate user input.
     ALLOWED_TABLES = {
@@ -5905,3 +7588,132 @@ class VocabSnapshotView(APIView):
                         yield str(row_json) + '\n'
                     count += 1
         yield _json.dumps({'__done': True, 'rows': count}) + '\n'
+
+
+# =============================================================================
+# Field Concept Mapping (staff-only concept assignment interface)
+# =============================================================================
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def field_mapping_list(request):
+    """GET: list all field descriptors.  POST: create a new mapping."""
+    if not getattr(request.user, 'is_staff', False):
+        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == 'GET':
+        from omop_core.services.field_descriptor import get_all_field_descriptors
+        descriptors = get_all_field_descriptors()
+        # Optional filters.
+        category = request.query_params.get('category')
+        if category:
+            descriptors = [d for d in descriptors if d['category'] == category]
+        search = request.query_params.get('search')
+        if search:
+            q = search.lower()
+            descriptors = [d for d in descriptors if q in d['field_name'].lower()]
+        return Response(descriptors)
+
+    # POST — create a mapping.
+    from .serializers import FieldConceptMappingSerializer
+    serializer = FieldConceptMappingSerializer(data=request.data, context={'request': request})
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def field_mapping_detail(request, pk):
+    """GET/PATCH/DELETE a single FieldConceptMapping."""
+    if not getattr(request.user, 'is_staff', False):
+        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    from omop_core.models import FieldConceptMapping
+    try:
+        mapping = FieldConceptMapping.objects.get(pk=pk)
+    except FieldConceptMapping.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        from .serializers import FieldConceptMappingSerializer
+        return Response(FieldConceptMappingSerializer(mapping).data)
+
+    if request.method == 'DELETE':
+        mapping.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # PATCH
+    from .serializers import FieldConceptMappingSerializer
+    serializer = FieldConceptMappingSerializer(
+        mapping, data=request.data, partial=True, context={'request': request},
+    )
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    return Response(serializer.data)
+
+
+# =============================================================================
+# Field Synonyms (staff-only synonym management for concept mapping)
+# =============================================================================
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def field_synonyms(request, field_name):
+    """GET: merged custom + OMOP synonyms.  POST: create a custom synonym."""
+    if not getattr(request.user, 'is_staff', False):
+        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    from omop_core.models import FieldSynonym, FieldConceptMapping, ConceptSynonym
+
+    if request.method == 'GET':
+        # Custom synonyms from FieldSynonym.
+        from .serializers import FieldSynonymSerializer
+        custom_qs = FieldSynonym.objects.filter(field_name=field_name).order_by('synonym_text')
+        results = FieldSynonymSerializer(custom_qs, many=True).data
+
+        # OMOP synonyms from ConceptSynonym via FieldConceptMapping.
+        try:
+            mapping = FieldConceptMapping.objects.get(field_name=field_name)
+            if mapping.concept_id:
+                omop_synonyms = ConceptSynonym.objects.filter(
+                    concept_id=mapping.concept_id,
+                ).values_list('concept_synonym_name', flat=True)
+                for syn_name in omop_synonyms:
+                    results.append({
+                        'id': None,
+                        'field_name': field_name,
+                        'synonym_text': syn_name,
+                        'source': 'omop',
+                        'created_by': None,
+                        'created_at': None,
+                    })
+        except FieldConceptMapping.DoesNotExist:
+            pass
+
+        return Response(results)
+
+    # POST — create a custom synonym.
+    from .serializers import FieldSynonymSerializer
+    data = {**request.data, 'field_name': field_name}
+    serializer = FieldSynonymSerializer(data=data, context={'request': request})
+    serializer.is_valid(raise_exception=True)
+    serializer.save(created_by=request.user)
+    return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def field_synonym_detail(request, pk):
+    """DELETE a custom synonym."""
+    if not getattr(request.user, 'is_staff', False):
+        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    from omop_core.models import FieldSynonym
+    try:
+        synonym = FieldSynonym.objects.get(pk=pk)
+    except FieldSynonym.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    synonym.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)

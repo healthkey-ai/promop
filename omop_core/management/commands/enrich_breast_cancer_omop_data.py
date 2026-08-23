@@ -35,6 +35,7 @@ Usage:
     python manage.py enrich_breast_cancer_omop_data --confirm --org-slugs abc-foundation,bbc-foundation --limit 50
     python manage.py enrich_breast_cancer_omop_data --confirm --person-ids 1341,1410
 """
+import logging
 import random
 import time
 from datetime import date, timedelta
@@ -44,7 +45,7 @@ from django.db import close_old_connections, transaction
 from django.db.utils import InterfaceError, OperationalError
 
 from omop_core.models import (
-    Person, PatientRecord, Measurement, Observation, Concept, Vocabulary,
+    Person, PatientRecord, Measurement, Observation, Concept,
     Domain, ConceptClass, DrugExposure,
 )
 from omop_core.services.mappings import (
@@ -54,30 +55,75 @@ from omop_core.services.mappings import (
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.lot_regimens import REGIMEN_CONCEPT_IDS, get_regimen_name
+from omop_core.services.regimen_resolution import (
+    match_hemonc_regimen_by_name,
+    get_or_create_quarantine_regimen,
+)
 from omop_core.signals import suppress_patient_record_refresh
 
+logger = logging.getLogger(__name__)
 
-# SNOMED CT codes read by _get_behavior_data / _get_assessment_data but not
-# present in this DB's Concept table at all (no SNOMED vocabulary loaded
-# here — confirmed via direct query). Used as the concept_id too, since
-# there's no existing Athena surrogate id to reuse and these numeric SNOMED
-# codes are well outside this DB's existing concept_id range.
-_TOBACCO_CODES = {
-    '266919005': ('Never smoked tobacco', 0.7),
-    '8517006':   ('Ex-smoker', 0.2),
-    '77176002':  ('Current smoker', 0.1),
+
+# Concepts read by _get_behavior_data / _get_assessment_data, as
+# (vocabulary_id, concept_code). Resolved against the loaded vocabulary — never
+# minted, and never keyed by concept_id.
+#
+# These were originally used as the concept_id itself, on the reasoning that no
+# SNOMED vocabulary was loaded and the numeric codes sat well outside the
+# database's concept_id range. Loading Athena invalidated both halves: the
+# genuine concepts now exist, so minting at concept_id=int(code) creates a
+# duplicate that shadows them, and it poisoned MAX(concept_id), which next_pk's
+# self-heal then adopted. See #415.
+#
+# KNOWN DEFECT, deliberately not fixed here: the four response codes are
+# semantically wrong. SNOMED 182840001-182843004 mean "Drug treatment stopped -
+# medical advice / ineffective / side effect / inconvenient", not Complete /
+# Partial / Progressive / Stable response. They are left in place because six
+# consumers read them (views.py, episode_service, patient_record_service,
+# bulk_import_fhir_bundle, fill_org_analytics_gaps, OMOP2PatientInfo.md) and
+# because the correct fix is per-disease outcome value sets, not a like-for-like
+# swap: of the five diseases supported here only breast cancer uses RECIST.
+# Lymphoma uses Lugano, myeloma IMWG, CLL iwCLL — and IMWG's VGPR/sCR and
+# iwCLL's CRi/PR-L have no RECIST equivalent, so one four-value set cannot
+# express them. Tracked separately; see the hemonc roadmap's P5.
+# Tobacco smoking status — OMOP question/answer pattern (#451).
+# observation_concept_id = LOINC 72166-2 "Tobacco smoking status" (the question)
+# value_as_concept_id   = one of the three LOINC answer concepts below.
+# The old approach wrote non-standard SNOMED concepts (4144272/4310250/4298794)
+# directly into observation_concept_id; this replaces it with the conformant
+# pattern so rows are visible to concept_ancestor rollups.
+_TOBACCO_QUESTION_CODE = ('LOINC', '72166-2')
+_TOBACCO_ANSWER_CODES = {
+    # (vocabulary_id, concept_code): (display_name, weight)
+    ('LOINC', 'LA18978-9'): ('Never smoker',             0.7),
+    ('LOINC', 'LA15920-4'): ('Former smoker',             0.2),
+    ('LOINC', 'LA18976-3'): ('Current every day smoker',  0.1),
+}
+# Legacy SNOMED codes — kept only so the idempotency guard can detect
+# old-format rows that already exist and avoid duplicating them.
+_OLD_TOBACCO_SNOMED_CODES = {
+    ('SNOMED', '266919005'),
+    ('SNOMED', '8517006'),
+    ('SNOMED', '77176002'),
 }
 _RESPONSE_CODES = {
-    '182840001': 'Complete Response',
-    '182841002': 'Partial Response',
-    '182843004': 'Stable Disease',
-    '182842009': 'Progressive Disease',
+    ('SNOMED', '182840001'): 'Complete Response',
+    ('SNOMED', '182841002'): 'Partial Response',
+    ('SNOMED', '182843004'): 'Stable Disease',
+    ('SNOMED', '182842009'): 'Progressive Disease',
 }
 
 # Rough clinical-stage -> (T, M) mapping, used only to synthesize a plausible
 # tumor/metastasis Observation pair consistent with the patient's existing
 # patient_record.stage value (LOINC 21905-5 / 21901-4, read by
 # _get_assessment_data to set measurable_disease_by_recist_status).
+# LOINC observations written by _get_assessment_data for tumour/metastasis
+# staging. Preflighted alongside the behaviour and response concepts.
+_STAGING_CODES = {
+    '21905-5': 'Primary tumor.clinical [Class] Cancer',
+    '21901-4': 'Distant metastases.pathology [Class] Cancer',
+}
+
 _STAGE_TO_TM = {
     'I': ('T1', 'M0'), 'IA': ('T1', 'M0'), 'IB': ('T1', 'M0'),
     'II': ('T2', 'M0'), 'IIA': ('T2', 'M0'), 'IIB': ('T2', 'M0'),
@@ -141,18 +187,6 @@ _BC_THERAPY_PLANS = {
 }
 
 
-def _get_or_create_snomed_vocabulary():
-    vocab, _ = Vocabulary.objects.get_or_create(
-        vocabulary_id='SNOMED',
-        defaults={
-            'vocabulary_name': 'Systematic Nomenclature of Medicine - Clinical Terms',
-            'vocabulary_reference': 'http://www.snomed.org',
-            'vocabulary_version': 'SNOMED CT (synthetic, benchmark seed)',
-            'vocabulary_concept_id': 0,
-        },
-    )
-    return vocab
-
 
 def _get_or_create_domain(domain_id):
     domain, _ = Domain.objects.get_or_create(
@@ -169,75 +203,104 @@ def _get_or_create_concept_class(concept_class_id):
     return concept_class
 
 
-def _get_or_create_hemonc_vocabulary():
-    vocab, _ = Vocabulary.objects.get_or_create(
-        vocabulary_id='HemOnc',
-        defaults={
-            'vocabulary_name': 'HemOnc',
-            'vocabulary_reference': 'https://hemonc.org',
-            'vocabulary_version': 'HemOnc (synthetic, benchmark seed)',
-            'vocabulary_concept_id': 0,
-        },
-    )
-    return vocab
-
-
 def _get_or_create_regimen_concept(concept_id, regimen_key):
-    """Get or create the HemOnc regimen Concept for a known concept_id.
+    """Resolve (or quarantine-mint) the regimen Concept for a known concept_id.
 
-    Therapy backfill resolves a regimen's HemOnc concept_id from
-    REGIMEN_CONCEPT_IDS; on a DB where that Concept row was never loaded we
-    create it so the backfilled DrugExposure references a real regimen concept
-    (and derivation can surface it as first_line_therapy_id).
+    Resolution strategy (issue #450):
+      1. Look up the concept by concept_id — if the genuine HemOnc row is
+         already loaded, use it directly.
+      2. Look up by regimen name against HemOnc (case-insensitive, including
+         synonyms) via match_hemonc_regimen_by_name — catches the case where
+         the concept exists under a different concept_id than the one hardcoded
+         in REGIMEN_CONCEPT_IDS.
+      3. If neither lookup succeeds, mint under the HK-Regimen quarantine
+         vocabulary via get_or_create_quarantine_regimen — never fabricate a
+         HemOnc concept_code.
     """
+    # 1. Direct lookup by concept_id (fastest path when Athena is loaded).
     existing = Concept.objects.filter(concept_id=concept_id).first()
     if existing:
         return existing
+
     name = get_regimen_name(regimen_key) or ' + '.join(sorted(regimen_key)).title()
-    return Concept.objects.create(
-        concept_id=concept_id,
-        concept_name=name,
-        vocabulary=_get_or_create_hemonc_vocabulary(),
-        domain=_get_or_create_domain('Drug'),
-        concept_class=_get_or_create_concept_class('Regimen'),
-        standard_concept='S',
-        concept_code=str(concept_id),
-        valid_start_date='1970-01-01',
-        valid_end_date='2099-12-31',
+
+    # 2. Name-based lookup against genuine HemOnc regimens.
+    hemonc_match = match_hemonc_regimen_by_name(name)
+    if hemonc_match:
+        return hemonc_match
+
+    # 3. Quarantine-mint under HK-Regimen (never under HemOnc).
+    logger.info(
+        'enrich_breast_cancer_omop_data: regimen %r (concept_id=%s) not found '
+        'in HemOnc — minting under HK-Regimen quarantine vocabulary.',
+        name, concept_id,
     )
+    return get_or_create_quarantine_regimen(name, source_system='enrich-bc')
 
 
-def _get_or_create_concept(concept_code, concept_name):
-    """Get or create a SNOMED Concept row keyed by concept_code, using the
-    numeric code itself as concept_id (see module docstring for why).
+def _concept_ids_for(code_table):
+    """concept_ids for a {(vocabulary_id, concept_code): ...} table.
 
-    Also ensures the Vocabulary/Domain/ConceptClass rows it references exist —
-    true on the real staging DB (seeded separately), but not on a freshly
-    migrated local/test DB, where these reference tables start empty."""
-    concept_id = int(concept_code)
-    try:
-        existing = Concept.objects.get(concept_id=concept_id)
-    except Concept.DoesNotExist:
-        _get_or_create_snomed_vocabulary()
-        _get_or_create_domain('Observation')
-        _get_or_create_concept_class('Clinical Observation')
-        return Concept.objects.create(
-            concept_id=concept_id,
-            concept_name=concept_name,
-            domain_id='Observation',
-            vocabulary_id='SNOMED',
-            concept_class_id='Clinical Observation',
-            standard_concept='S',
-            concept_code=concept_code,
-            valid_start_date='1970-01-01',
-            valid_end_date='2099-12-31',
-        )
-    if existing.concept_code != concept_code:
+    Reads the vocabulary from the key rather than hardcoding it, so the query
+    cannot drift away from the table and silently return an empty guard set.
+    """
+    from django.db.models import Q
+    predicate = Q()
+    for vocabulary_id, concept_code in code_table:
+        predicate |= Q(vocabulary_id=vocabulary_id, concept_code=concept_code)
+    if not predicate:
+        return set()
+    return set(Concept.objects.filter(predicate).values_list('concept_id', flat=True))
+
+
+def _resolve_concept(vocabulary_id, concept_code, concept_name):
+    """Resolve a concept by (vocabulary_id, concept_code) — never mint one.
+
+    This previously created a Concept keyed by ``concept_id = int(concept_code)``
+    when the lookup missed. That was safe only while no real vocabulary was
+    loaded; against an Athena-loaded database it minted a duplicate that shadows
+    the genuine concept, and because concept resolution elsewhere is an unordered
+    ``.first()``, which row won became arbitrary. It also poisoned
+    ``MAX(concept_id)``, which ``next_pk``'s self-heal adopted, producing the
+    392021xxx mint block. See #415.
+
+    Resolution is by (vocabulary_id, concept_code) because that is OMOP's natural
+    key. Raising rather than minting is the point: synthetic enrichment must not
+    invent vocabulary content, and a missing concept means the vocabulary is not
+    loaded, which the operator needs to know.
+    """
+    candidates = list(
+        Concept.objects
+        .filter(vocabulary_id=vocabulary_id, concept_code=concept_code,
+                invalid_reason__isnull=True)
+        .order_by('concept_id')[:5]
+    )
+    if not candidates:
         raise CommandError(
-            f'Concept id {concept_id} already exists for a different concept_code '
-            f'({existing.concept_code!r}, expected {concept_code!r}) — refusing to overwrite.'
+            f'Concept ({vocabulary_id}, {concept_code}) — {concept_name} — not found. '
+            f'Run load_athena_vocabularies --concepts-only, or the full vocabulary with '
+            f'load_athena_vocabularies. This command no longer mints OBSERVATION '
+            f'concepts: creating one at concept_id=int(code) produced duplicates '
+            f'shadowing the genuine concepts (#415). (Regimen concepts are '
+            f'quarantine-minted under HK-Regimen — see #450.)'
         )
-    return existing
+    if len(candidates) > 1:
+        # Duplicates for one (vocabulary, code) are the #415 defect itself, and
+        # they are the current state of staging for every code this command
+        # uses. Refusing outright would make the command — and
+        # generate_import_enrich_synthea_bc, which calls it — unrunnable until
+        # that cleanup lands. Pick the lowest concept_id instead: genuine Athena
+        # concepts have lower ids than the code-as-id mints that shadow them
+        # (4144272 vs 266919005), so this deterministically prefers the real
+        # row. Deterministic-and-warned beats both arbitrary and dead.
+        chosen = candidates[0]
+        logger.warning(
+            'enrich_breast_cancer_omop_data duplicate concept vocabulary=%s code=%s '
+            'ids=%s chose=%s — clean these up, see #415',
+            vocabulary_id, concept_code,
+            ', '.join(str(c.concept_id) for c in candidates), chosen.concept_id)
+        return chosen
+    return candidates[0]
 
 
 class _IdAllocator:
@@ -413,34 +476,64 @@ class Command(BaseCommand):
         observation_ids = _IdAllocator(Observation, 'observation_id')
         drug_exposure_ids = _IdAllocator(DrugExposure, 'drug_exposure_id')
 
-        if not dry_run:
-            # Ensure the SNOMED codes _get_behavior_data/_get_assessment_data
-            # read actually exist as Concept rows before touching any person.
-            self._write_progress('Ensuring required SNOMED concepts exist...')
-            for code, (name, _weight) in _TOBACCO_CODES.items():
-                _get_or_create_concept(code, name)
-            for code, name in _RESPONSE_CODES.items():
-                _get_or_create_concept(code, name)
+        # Preflight, in dry run too — skipping it in dry run meant the preview
+        # reported success and exited 0 where --confirm fails on the same
+        # database. Skipped entirely when no person will be enriched
+        # (--refresh-only), since these concepts are then never read.
+        if person_ids:
+            self._write_progress('Checking required concepts exist...')
+            # Tobacco question concept
+            _resolve_concept(*_TOBACCO_QUESTION_CODE, 'Tobacco smoking status')
+            for (vocab, code), (name, _weight) in _TOBACCO_ANSWER_CODES.items():
+                _resolve_concept(vocab, code, name)
+            for (vocab, code), name in _RESPONSE_CODES.items():
+                _resolve_concept(vocab, code, name)
+            # _make also writes these two staging observations. Leaving them out
+            # meant --dry-run exited 0 while --confirm raised mid-loop, after
+            # earlier persons had already committed.
+            for code, name in _STAGING_CODES.items():
+                _resolve_concept('LOINC', code, name)
+
+        # Person-invariant, so resolved once here rather than per patient in
+        # _create_missing_observations — the same reasoning as the wearable
+        # prefetch below.
+        # Include both old SNOMED codes and the new LOINC question code so
+        # the idempotency guard in _create_missing_observations detects either
+        # old-format or new-format tobacco rows.
+        self._tobacco_question_concept_id = None
+        q_vocab, q_code = _TOBACCO_QUESTION_CODE
+        q_concept = Concept.objects.filter(
+            vocabulary_id=q_vocab, concept_code=q_code
+        ).order_by('concept_id').first()
+        if q_concept:
+            self._tobacco_question_concept_id = q_concept.concept_id
+        self._tobacco_answer_concept_ids = _concept_ids_for(_TOBACCO_ANSWER_CODES)
+        # For idempotency: detect old-format SNOMED rows too
+        self._old_tobacco_concept_ids = _concept_ids_for(
+            _OLD_TOBACCO_SNOMED_CODES
+        )
+        self._response_concept_ids = _concept_ids_for(_RESPONSE_CODES)
 
         # Pre-fetch all wearable LOINC concepts in one query. This avoids N+1
         # Concept.objects.get() calls inside _create_missing_wearable_measurements
         # and provides an early abort if any required concept is missing.
-        self._write_progress('Pre-fetching wearable LOINC concepts...')
         wearable_concepts = {}
-        # Scope by (vocabulary_id, concept_code): a bare concept_code is
-        # ambiguous — 852 codes are reused across vocabularies — and four
-        # wearable metrics live in HK-Wearable rather than LOINC.
-        for metric_key, concept_code in WEARABLE_CONCEPT_CODE.items():
-            concept = Concept.objects.filter(
-                vocabulary_id=WEARABLE_CONCEPT_VOCAB[metric_key],
-                concept_code=concept_code,
-            ).first()
-            if concept is None:
-                raise CommandError(
-                    f'Required wearable concept {concept_code!r} ({metric_key}) '
-                    f'not found in Concept table. Run seed_omop_concepts first.'
+        if person_ids:
+            self._write_progress('Pre-fetching wearable LOINC concepts...')
+            # Scope by (vocabulary_id, concept_code): a bare concept_code is
+            # ambiguous — 852 codes are reused across vocabularies — and four
+            # wearable metrics live in HK-Wearable rather than LOINC.
+            for metric_key, concept_code in WEARABLE_CONCEPT_CODE.items():
+                concept = Concept.objects.filter(
+                    vocabulary_id=WEARABLE_CONCEPT_VOCAB[metric_key],
+                    concept_code=concept_code,
+                ).first()
+                if concept is None:
+                    raise CommandError(
+                        f'Required wearable concept {concept_code!r} ({metric_key}) '
+                        f'not found in Concept table. Run load_athena_vocabularies --concepts-only first.'
                 )
-            wearable_concepts[metric_key] = concept
+                wearable_concepts[metric_key] = concept
 
         ehr_type_concept_id = CONCEPT_EHR_TYPE
         counts = {
@@ -656,16 +749,27 @@ class Command(BaseCommand):
         )
         obs_date = (record.diagnosis_date if record and record.diagnosis_date else date.today())
 
-        def _make(concept_code, value_as_string):
+        def _make(key, value_as_string):
+            """key is (vocabulary_id, concept_code), or a bare LOINC code."""
             nonlocal created
-            concept = Concept.objects.filter(concept_code=concept_code).first()
+            vocabulary_id, concept_code = key if isinstance(key, tuple) else ('LOINC', key)
+            # order_by is not cosmetic: with a genuine concept and a code-as-id
+            # shadow both present, an unordered .first() can write the shadow —
+            # the behaviour this change exists to prevent. Lowest id prefers the
+            # genuine Athena row.
+            concept = Concept.objects.filter(
+                vocabulary_id=vocabulary_id, concept_code=concept_code
+            ).order_by('concept_id').first()
             if concept is None:
                 if not dry_run:
                     raise CommandError(
-                        f'Concept code {concept_code!r} not found — expected it to have '
-                        f'been created up front in handle().'
+                        f'Concept ({vocabulary_id}, {concept_code}) not found. This '
+                        f'command does not create observation concepts; seed them with '
+                        f'load_athena_vocabularies --concepts-only, or the full vocabulary load.'
                     )
-                created += 1  # dry-run: concept doesn't exist yet, but would be created
+                # Dry run with the vocabulary absent. Nothing would be created —
+                # this command no longer mints — so report the observation as
+                # blocked rather than counting it as work.
                 return
             if concept.concept_id in existing_concept_ids:
                 return
@@ -682,16 +786,37 @@ class Command(BaseCommand):
             )
             existing_concept_ids.add(concept.concept_id)
 
-        # Tobacco status — weighted random pick. Guard on the whole category,
-        # not just the randomly-chosen code: a rerun that happens to pick a
-        # *different* tobacco code than a prior run would otherwise pass the
-        # per-concept check in _make() and add a second, contradictory
-        # tobacco-status observation instead of being a no-op.
-        tobacco_concept_ids = {int(code) for code in _TOBACCO_CODES}
-        if not existing_concept_ids & tobacco_concept_ids:
-            codes, weights = zip(*[(c, w) for c, (_, w) in _TOBACCO_CODES.items()])
-            tobacco_code = random.choices(codes, weights=weights, k=1)[0]
-            _make(tobacco_code, None)
+        # Tobacco status — question/answer pattern (#451).
+        # observation_concept_id = LOINC 72166-2 (the question)
+        # value_as_concept_id   = one of the LOINC answer concepts
+        #
+        # Guard on both old-format (SNOMED codes in observation_concept_id) and
+        # new-format (72166-2 in observation_concept_id) to stay idempotent
+        # across the migration boundary.
+        tobacco_question_cid = self._tobacco_question_concept_id
+        has_tobacco = bool(
+            existing_concept_ids & self._old_tobacco_concept_ids
+            or (tobacco_question_cid and tobacco_question_cid in existing_concept_ids)
+        )
+        if not has_tobacco and tobacco_question_cid is not None:
+            keys, weights = zip(*[(k, w) for k, (_, w) in _TOBACCO_ANSWER_CODES.items()])
+            answer_key = random.choices(keys, weights=weights, k=1)[0]
+            answer_vocab, answer_code = answer_key
+            answer_concept = Concept.objects.filter(
+                vocabulary_id=answer_vocab, concept_code=answer_code
+            ).order_by('concept_id').first()
+            if answer_concept is not None:
+                created += 1
+                if not dry_run:
+                    Observation.objects.create(
+                        observation_id=observation_ids.take(),
+                        person=person,
+                        observation_concept_id=tobacco_question_cid,
+                        observation_date=obs_date,
+                        observation_type_concept_id=ehr_type_concept_id,
+                        value_as_concept=answer_concept,
+                    )
+                    existing_concept_ids.add(tobacco_question_cid)
 
         # Tumor/metastasis staging, consistent with the patient's existing
         # stage. Deterministic (not random), so the per-concept check in
@@ -702,17 +827,21 @@ class Command(BaseCommand):
             _make('21901-4', m_val)
 
         # Best response — same category-guard reasoning as tobacco above.
-        response_concept_ids = {int(code) for code in _RESPONSE_CODES}
+        response_concept_ids = self._response_concept_ids
         if not existing_concept_ids & response_concept_ids:
-            response_code = random.choices(
+            response_key = random.choices(
                 list(_RESPONSE_CODES.keys()), weights=[0.3, 0.35, 0.25, 0.10], k=1,
             )[0]
-            _make(response_code, None)
+            _make(response_key, None)
 
         return created
 
     def _measurement_concept_for_code(self, loinc_code):
-        concept = Concept.objects.filter(concept_code=loinc_code).first()
+        # Scoped to LOINC: a bare concept_code lookup is ambiguous, since codes
+        # are reused across vocabularies and shadow rows may exist for the same
+        # code. This is the same defect fixed in _make.
+        concept = Concept.objects.filter(
+            vocabulary_id='LOINC', concept_code=loinc_code).order_by('concept_id').first()
         if concept:
             return concept
         return Concept.objects.filter(concept_id=CONCEPT_GENERIC_LAB).first()

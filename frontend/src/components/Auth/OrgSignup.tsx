@@ -62,9 +62,16 @@ export default function OrgSignup() {
     } catch (err: unknown) {
       let msg = "Signup failed. Please try again.";
       if (err && typeof err === "object" && "response" in err) {
-        const resp = (err as { response?: { data?: { error?: string }; status?: number } }).response;
-        const rawError = resp?.data?.error;
-        if (rawError) msg = Array.isArray(rawError) ? rawError.join(' ') : rawError;
+        const resp = (err as { response?: { data?: { error?: string | string[]; errors?: Record<string, string[]> }; status?: number } }).response;
+        // Prefer field-level errors dict — flatten into a single message
+        const fieldErrors = resp?.data?.errors;
+        if (fieldErrors && typeof fieldErrors === "object") {
+          const messages = Object.values(fieldErrors).flat();
+          if (messages.length > 0) msg = messages.join(" ");
+        } else {
+          const rawError = resp?.data?.error;
+          if (rawError) msg = Array.isArray(rawError) ? rawError.join(" ") : rawError;
+        }
       }
       setError(msg);
     } finally {

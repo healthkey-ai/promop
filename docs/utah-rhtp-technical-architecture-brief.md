@@ -38,14 +38,22 @@ PRomop is currently organized around a simple pipeline:
 
 Key implementation points:
 - The platform is OMOP-first and `PatientRecord` is a read model, not the
-  system of record. See [API_SURFACE.md](/Users/adamblum/promop/API_SURFACE.md).
+  system of record. Clinical writes use OMOP APIs or FHIR imports; profile and
+  administrative writes use HealthKey extension columns on `Person`. See
+  [API_SURFACE.md](/Users/adamblum/promop/API_SURFACE.md).
 - `PatientRecord` is a large denormalized projection that combines demographics,
   disease state, therapy lines, labs, biomarkers, behavior, geography, and
   wearable summaries. See [omop_core/models.py](/Users/adamblum/promop/omop_core/models.py#L1210).
 - The derivation logic lives in
   [omop_core/services/patient_record_service.py](/Users/adamblum/promop/omop_core/services/patient_record_service.py).
-- Write-through synchronization back to OMOP lives in
-  [omop_core/services/omop_write_service.py](/Users/adamblum/promop/omop_core/services/omop_write_service.py).
+- PatientRecord fields are read-only at the PatientRecord API. Producers write
+  complete, provenance-bearing OMOP facts (or FHIR), and the derivation pipeline
+  rebuilds those fields. Profile/admin compatibility fields are projected from
+  `Person`, so PatientRecord is never a substitute for a source row with its own
+  ownership and provenance.
+- `public.patient_info` is a legacy SQL compatibility view only. New consumers
+  must use `public.patient_record` or the versioned PatientRecord API, and must
+  not adopt `patient_info` as a new contract.
 - Concept resolution and vocabulary mapping are centralized in
   [docs/concept-mapping.md](/Users/adamblum/promop/docs/concept-mapping.md) and
   [omop_core/services/mappings.py](/Users/adamblum/promop/omop_core/services/mappings.py).

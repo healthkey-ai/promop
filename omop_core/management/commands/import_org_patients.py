@@ -18,9 +18,14 @@ The importer:
         skips if taken and --replace is not set; deletes and reimports if
         --replace is set
       * Creates all OMOP CDM rows with fresh sequence-backed PKs
-      * Writes the PatientRecord snapshot directly from the export, assigned
-        to the target org (does NOT re-derive from OMOP; preserves all
-        manually-enriched field values as they were at export time)
+      * Derives PatientRecord from those rows via refresh_patient_record,
+        the same path every other write obeys. With --snapshot-patient-record
+        the exported projection is written verbatim instead, preserving
+        enriched values that have no OMOP row behind them and therefore
+        cannot be re-derived — required to reproduce published benchmark
+        numbers exactly.
+      * Export keys that no longer exist on PatientRecord are dropped with a
+        warning rather than raising, since an export outlives schema changes.
   - Concept FK values absent from the target Concept table are silently
     remapped to concept_id=0 ("No matching concept" per OMOP CDM v5.4).
     The source_value fields that benchmark queries use as fallback are
@@ -68,6 +73,7 @@ from omop_core.models import (
     Vocabulary,
 )
 from omop_core.services.pk import next_pk_batch
+from omop_core.services.patient_record_service import refresh_patient_record
 
 
 # ---------------------------------------------------------------------------
@@ -219,16 +225,31 @@ class Command(BaseCommand):
         'from a Zenodo data bundle.'
     )
 
+    # Set once per run by _filter_patient_record_fields so the warning about
+    # retired columns prints once, not once per patient.
+    _warned_dropped_fields = False
+
     def add_arguments(self, parser):
         parser.add_argument(
             'input',
+            nargs='?',
+            default=None,
             help='Path to JSON export file (e.g. synthea-bc.json)',
+        )
+        # The published Zenodo record for the benchmark cohort documents the
+        # flag spelling, so accept both rather than invalidating that citation.
+        parser.add_argument(
+            '--input',
+            dest='input_flag',
+            default=None,
+            help='Same as the positional argument.',
         )
         parser.add_argument(
             '--org',
-            required=True,
+            default=None,
             help=(
-                'Target organization slug (e.g. synthea-bc). '
+                'Target organization slug (e.g. synthea-bc). Defaults to the slug '
+                'the export was taken from, which is recorded in the file. '
                 'Pass --create-org to create it if it does not exist.'
             ),
         )
@@ -251,9 +272,25 @@ class Command(BaseCommand):
             action='store_true',
             help='Parse and validate without writing anything to the database.',
         )
+        parser.add_argument(
+            '--snapshot-patient-record',
+            action='store_true',
+            help=(
+                'Write the exported PatientRecord projection verbatim instead of '
+                'deriving it from the imported OMOP rows. Needed to reproduce '
+                'published benchmark numbers exactly, because an export may carry '
+                'enriched values that have no OMOP row behind them and so cannot '
+                'be re-derived. Off by default: deriving is the contract every '
+                'other write path obeys.'
+            ),
+        )
 
     def handle(self, *args, **options):
-        input_path = options['input']
+        input_path = options['input'] or options['input_flag']
+        if not input_path:
+            raise CommandError(
+                'Give the export file as a positional argument or with --input.'
+            )
         org_slug = options['org']
         dry_run = options['dry_run']
         create_org = options['create_org']
@@ -288,6 +325,18 @@ class Command(BaseCommand):
                 f'  Exported at: {meta.get("exported_at")!r}'
             )
         self.stdout.write('')
+
+        # An export records the org it came from, so --org is a re-targeting
+        # option rather than a required one. Defaulting to it lets the import
+        # line published alongside a dataset stand on its own.
+        if not org_slug:
+            org_slug = (meta.get('org_slug') or '').strip()
+            if not org_slug:
+                raise CommandError(
+                    'No --org given and the export records no org_slug to fall back on.'
+                )
+            self.stdout.write(f'No --org given; using the export\'s own slug {org_slug!r}.')
+            create_org = True
 
         # ------------------------------------------------------------------
         # 2. Resolve (or create) organization
@@ -378,6 +427,7 @@ class Command(BaseCommand):
                     org=org,
                     concept_map=concept_map,
                     replace=replace,
+                    snapshot=options['snapshot_patient_record'],
                 )
                 if new_pid is None:
                     self.stdout.write(self.style.WARNING(' — skipped (person_id exists)'))
@@ -411,7 +461,7 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
 
     @transaction.atomic
-    def _import_patient(self, patient, org, concept_map, replace):
+    def _import_patient(self, patient, org, concept_map, replace, snapshot=False):
         """Import one patient.  Returns (new_person_id, was_replaced) or
         (None, False) if the patient was skipped."""
         person_data = patient.get('person') or {}
@@ -525,14 +575,53 @@ class Command(BaseCommand):
                 pass
 
         # ---- PatientRecord ----
-        pr_fields = {
-            k: v for k, v in pr_data.items()
-            if k not in _PR_SKIP_FIELDS
-        }
-        PatientRecord.objects.create(
-            person=person,
-            organization=org,
-            **pr_fields,
-        )
+        # Derived by default: the OMOP rows above are the facts, and every other
+        # write path in the system rebuilds the projection from them. Importing
+        # the exported projection verbatim is the exception, not the rule — see
+        # --snapshot-patient-record.
+        if snapshot:
+            pr_fields = self._filter_patient_record_fields(pr_data)
+            PatientRecord.objects.create(
+                person=person,
+                organization=org,
+                **pr_fields,
+            )
+        else:
+            # Create the row first so it carries the target org: refresh_patient_record
+            # builds a bare PatientRecord(person=person) when none exists, which would
+            # leave organization unset and drop the patient out of every org-scoped query.
+            PatientRecord.objects.get_or_create(person=person, organization=org)
+            refresh_patient_record(person)
 
         return new_pid, was_replaced
+
+    def _filter_patient_record_fields(self, pr_data):
+        """Drop export keys that no longer exist on PatientRecord.
+
+        An export is a point-in-time artifact; the model moves on. The published
+        benchmark cohort predates several hundred commits of schema drift, so
+        passing its keys straight into objects.create() raises TypeError on the
+        first column that has since been renamed or dropped. Unknown keys are
+        dropped with a warning — losing a retired column is recoverable, failing
+        the whole import is not.
+        """
+        valid = {
+            f.name for f in PatientRecord._meta.get_fields() if hasattr(f, 'column')
+        }
+        kept, dropped = {}, []
+        for key, value in pr_data.items():
+            if key in _PR_SKIP_FIELDS:
+                continue
+            if key in valid:
+                kept[key] = value
+            else:
+                dropped.append(key)
+        if dropped and not self._warned_dropped_fields:
+            # Once per run, not once per patient — the set is identical for every
+            # row in a single export.
+            self._warned_dropped_fields = True
+            self.stdout.write(self.style.WARNING(
+                f'  Export carries {len(dropped)} field(s) absent from the current '
+                f'PatientRecord model; dropping them: {", ".join(sorted(dropped))}'
+            ))
+        return kept

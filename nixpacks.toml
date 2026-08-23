@@ -14,4 +14,4 @@ cmds = [
 ]
 
 [start]
-cmd = 'python manage.py migrate && python manage.py create_gender_concepts && python manage.py setup_admin && gunicorn ctomop.wsgi:application --bind 0.0.0.0:$PORT --workers 4 --timeout 120'
+cmd = 'python manage.py migrate && python manage.py seed_omop_concepts && python manage.py setup_admin && gunicorn ctomop.wsgi:application --bind 0.0.0.0:$PORT --workers 4 --timeout 120'

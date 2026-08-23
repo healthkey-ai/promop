@@ -1,92 +1,44 @@
-"""
-backfill_therapy_concept_ids.py — Populate first_line_therapy_id, second_line_therapy_id,
-and later_therapy_ids on existing PatientRecord records by re-running the regimen
-concept_id lookup against the stored therapy text fields.
+"""Re-derive PatientRecord therapy concept IDs from OMOP treatment facts.
 
-Usage:
-    DATABASE_URL="..." python manage.py backfill_therapy_concept_ids
-    DATABASE_URL="..." python manage.py backfill_therapy_concept_ids --dry-run
+This command deliberately does *not* reverse-map display strings stored on
+PatientRecord.  Those strings are a derived read model and do not carry the
+drug, regimen, date, or provenance information required to reconstruct an
+OMOP source fact.  Instead, it reruns the normal OMOP -> PatientRecord
+derivation for records which need their therapy IDs refreshed.
 """
+
 from django.core.management.base import BaseCommand
-from omop_core.models import PatientRecord, Concept
-from omop_core.services.lot_regimens import MYELOMA_REGIMEN_LOOKUP, MYELOMA_REGIMEN_CONCEPT_IDS
 
-
-def _text_to_concept_id(therapy_text: str) -> int | None:
-    """
-    Attempt to reverse-map a therapy display string to a HemOnc concept_id.
-    Checks MYELOMA_REGIMEN_CONCEPT_IDS by matching the display name against
-    MYELOMA_REGIMEN_LOOKUP values.
-    """
-    if not therapy_text:
-        return None
-    # Build reverse map: display_name → concept_id
-    for key, name in MYELOMA_REGIMEN_LOOKUP.items():
-        if name == therapy_text and key in MYELOMA_REGIMEN_CONCEPT_IDS:
-            return MYELOMA_REGIMEN_CONCEPT_IDS[key]
-    return None
+from omop_core.models import PatientRecord
+from omop_core.services.patient_record_service import refresh_patient_record
 
 
 class Command(BaseCommand):
-    help = "Backfill HemOnc concept_ids on PatientRecord therapy fields"
+    help = 'Re-derive PatientRecord therapy concept IDs from OMOP treatment facts'
 
     def add_arguments(self, parser):
         parser.add_argument(
             '--dry-run',
             action='store_true',
-            help='Print stats without writing to DB',
+            help='Report the PatientRecords that would be re-derived without writing',
         )
 
     def handle(self, *args, **options):
-        dry_run = options['dry_run']
-        updated = 0
-        skipped = 0
-        no_match = 0
+        records = PatientRecord.objects.select_related('person').order_by('person_id')
+        total = records.count()
+        if options['dry_run']:
+            self.stdout.write(
+                f'[DRY RUN] Would re-derive {total} PatientRecord(s) from OMOP treatment facts.'
+            )
+            return
 
-        qs = PatientRecord.objects.filter(
-            first_line_therapy__isnull=False,
-        ) | PatientRecord.objects.filter(
-            second_line_therapy__isnull=False,
-        ) | PatientRecord.objects.filter(
-            later_therapy__isnull=False,
-        )
+        refreshed = 0
+        for record in records.iterator():
+            refresh_patient_record(record.person)
+            refreshed += 1
 
-        for pi in qs.distinct():
-            changed = False
-            updates = {}
-
-            if pi.first_line_therapy and pi.first_line_therapy_id is None:
-                cid = _text_to_concept_id(pi.first_line_therapy)
-                if cid and Concept.objects.filter(concept_id=cid).exists():
-                    updates['first_line_therapy_id'] = cid
-                    changed = True
-                else:
-                    no_match += 1
-
-            if pi.second_line_therapy and pi.second_line_therapy_id is None:
-                cid = _text_to_concept_id(pi.second_line_therapy)
-                if cid and Concept.objects.filter(concept_id=cid).exists():
-                    updates['second_line_therapy_id'] = cid
-                    changed = True
-                else:
-                    no_match += 1
-
-            if pi.later_therapy and not pi.later_therapy_ids:
-                cid = _text_to_concept_id(pi.later_therapy)
-                if cid and Concept.objects.filter(concept_id=cid).exists():
-                    updates['later_therapy_ids'] = [cid]
-                    changed = True
-                else:
-                    no_match += 1
-
-            if changed:
-                if not dry_run:
-                    PatientRecord.objects.filter(pk=pi.pk).update(**updates)
-                updated += 1
-            else:
-                skipped += 1
-
-        mode = '[DRY RUN] ' if dry_run else ''
         self.stdout.write(
-            f"{mode}Done — updated={updated}, skipped={skipped}, no_match={no_match}"
+            self.style.SUCCESS(
+                f'Done — re-derived={refreshed} PatientRecord(s) from OMOP treatment facts.'
+            )
         )

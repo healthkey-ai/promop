@@ -131,6 +131,38 @@ def django_db_setup(django_db_setup, django_db_blocker):
                 'valid_start_date': '1970-01-01', 'valid_end_date': '2099-12-31',
             },
         )
+        # Tobacco smoking status answer concepts — needed by the question/answer
+        # pattern used in enrich_breast_cancer_omop_data (#451).
+        # First ensure the LOINC vocabulary and Meas Value domain exist.
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'Logical Observation Identifiers Names and Codes',
+                      'vocabulary_reference': 'https://loinc.org',
+                      'vocabulary_version': '2.77', 'vocabulary_concept_id': 0},
+        )
+        Domain.objects.get_or_create(
+            domain_id='Meas Value',
+            defaults={'domain_name': 'Meas Value', 'domain_concept_id': 0},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Answer',
+            defaults={'concept_class_name': 'Answer', 'concept_class_concept_id': 0},
+        )
+        for cid, name, code in [
+            (45879404, 'Never smoker',             'LA18978-9'),
+            (45883458, 'Former smoker',            'LA15920-4'),
+            (45881517, 'Current every day smoker', 'LA18976-3'),
+        ]:
+            Concept.objects.get_or_create(
+                concept_id=cid,
+                defaults={
+                    'concept_name': name, 'domain_id': 'Meas Value',
+                    'vocabulary_id': 'LOINC', 'concept_class_id': 'Answer',
+                    'standard_concept': 'S', 'concept_code': code,
+                    'valid_start_date': '1970-01-01', 'valid_end_date': '2099-12-31',
+                },
+            )
+
         for code, title in [
             ('eligibleAuto', 'eligible for autologous SCT'),
             ('eligibleAllo', 'eligible for allogeneic SCT'),

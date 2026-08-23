@@ -8,6 +8,13 @@ from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db.models.functions import Upper
 
 
+# Person.year_of_birth values that mean "not known" rather than a birth year.
+# Registration seeds 1900 (patient_portal/services.py, api/patient_signup.py,
+# api/org_views.py) because the column is NOT NULL; treating that as real makes
+# every patient without a date of birth 126 years old.
+PERSON_YEAR_PLACEHOLDERS = frozenset({None, 0, 1900})
+
+
 class ProvenanceRecord(models.Model):
     """Audit trail for every clinical write — who created/modified a record and why."""
     SOURCE_CHOICES = [
@@ -44,6 +51,11 @@ class ProvenanceRecord(models.Model):
         return f"{self.source} → {self.content_type} #{self.object_id}"
 
 
+class ClinicalUnitSystem(models.TextChoices):
+    US_ONCOLOGY = 'US_ONCOLOGY', 'US oncology (mCODE/USCDI)'
+    SI = 'SI', 'SI'
+
+
 class Organization(models.Model):
     """A tenant organization (hospital, foundation, analytics service) that owns patient records."""
     name = models.CharField(max_length=200)
@@ -59,6 +71,12 @@ class Organization(models.Model):
     allows_patient_signup = models.BooleanField(
         default=False,
         help_text="When true, patients may self-register via the org's public page.",
+    )
+    clinical_unit_system = models.CharField(
+        max_length=20,
+        choices=ClinicalUnitSystem.choices,
+        default=ClinicalUnitSystem.US_ONCOLOGY,
+        help_text='Default canonical units for derived clinical compatibility fields.',
     )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
@@ -571,10 +589,6 @@ class Concept(models.Model):
     class Meta:
         db_table = 'concept'
         indexes = [
-            models.Index(
-                fields=['vocabulary_id', 'concept_code'],
-                name='ix_concept_vocab_code',
-            ),
             # Functional GIN trigram index on UPPER(concept_name): Django compiles
             # `concept_name__icontains` (concepts/search) to `UPPER(col::text) LIKE
             # UPPER(...)`, which a raw-column gin_trgm index cannot serve — the index
@@ -585,6 +599,12 @@ class Concept(models.Model):
             GinIndex(
                 OpClass(Upper('concept_name'), name='gin_trgm_ops'),
                 name='ix_concept_name_upper_trgm',
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['vocabulary_id', 'concept_code'],
+                name='uq_concept_vocabulary_code',
             ),
         ]
 
@@ -795,6 +815,16 @@ class Person(models.Model):
     given_name = models.CharField(max_length=100, null=True, blank=True, help_text="First/Given name")
     family_name = models.CharField(max_length=100, null=True, blank=True, help_text="Last/Family name")
 
+    # Patient profile/admin fields (HealthKey extension to OMOP Person).
+    # PatientRecord copies these as a read-model projection; writes belong here.
+    email = models.EmailField(max_length=255, null=True, blank=True, db_index=True)
+    phone_number = models.CharField(max_length=20, blank=True, null=True)
+    facility_name = models.CharField(max_length=255, blank=True, null=True)
+    validated = models.BooleanField(blank=True, null=True)
+    validated_by = models.CharField(max_length=100, blank=True, null=True)
+    validation_date = models.DateField(blank=True, null=True)
+    suppress_demographics_for_others = models.BooleanField(default=False)
+
     # External identity (OpenID Connect) — used by phr-etl find_or_create
     actor_iss = models.CharField(max_length=255, null=True, blank=True, help_text="OIDC issuer URL")
     actor_sub = models.CharField(max_length=255, null=True, blank=True, help_text="OIDC subject (Firebase UID)")
@@ -904,6 +934,12 @@ class ConditionOccurrence(models.Model):
 
     class Meta:
         db_table = 'condition_occurrence'
+        indexes = [
+            models.Index(
+                fields=['person', 'condition_start_date'],
+                name='ix_cond_person_start_date',
+            ),
+        ]
 
     def __str__(self):
         return f"Condition {self.condition_occurrence_id} for Person {self.person_id}"
@@ -942,6 +978,10 @@ class DrugExposure(models.Model):
         db_table = 'drug_exposure'
         indexes = [
             models.Index(fields=['route_source_value'], name='ix_de_route_src'),
+            models.Index(
+                fields=['person', 'drug_exposure_start_date'],
+                name='ix_de_person_start_date',
+            ),
         ]
 
     def __str__(self):
@@ -972,6 +1012,12 @@ class ProcedureOccurrence(models.Model):
 
     class Meta:
         db_table = 'procedure_occurrence'
+        indexes = [
+            models.Index(
+                fields=['person', 'procedure_date'],
+                name='ix_proc_person_date',
+            ),
+        ]
 
     def __str__(self):
         return f"Procedure {self.procedure_occurrence_id} for Person {self.person_id}"
@@ -1019,6 +1065,10 @@ class Measurement(models.Model):
             models.Index(
                 fields=['person', 'measurement_source_concept', 'measurement_date'],
                 name='ix_meas_person_srcconcept_date',
+            ),
+            models.Index(
+                fields=['person', 'is_erroneous', 'measurement_date'],
+                name='ix_meas_person_err_date',
             ),
         ]
 
@@ -1075,6 +1125,10 @@ class Observation(models.Model):
         db_table = 'observation'
         indexes = [
             models.Index(fields=['qualifier_source_value'], name='ix_obs_qual_src'),
+            models.Index(
+                fields=['person', 'is_erroneous', 'observation_date'],
+                name='ix_obs_person_err_date',
+            ),
         ]
 
     def __str__(self):
@@ -1670,6 +1724,14 @@ class PlateletCountUnits(models.TextChoices):
     CELLS_L = 'CELLS/L', '10^9/L'
 
 
+class WhiteBloodCellCountUnits(models.TextChoices):
+    """WBC units; US oncology is the default for new records."""
+    K_PER_UL = '10*3/uL', '10^3/μL (US oncology)'
+    G_PER_L = '10*9/L', '10^9/L (SI)'
+    LEGACY_CELLS_UL = 'CELLS/UL', 'Legacy CELLS/UL'
+    LEGACY_CELLS_L = 'CELLS/L', 'Legacy CELLS/L'
+
+
 class SerumCalciumUnits(models.TextChoices):
     """Serum calcium unit choices"""
     MG_DL = 'MG/DL', 'mg/dL'
@@ -2202,10 +2264,10 @@ class PatientRecord(models.Model):
     white_blood_cell_count = models.DecimalField(decimal_places=2, max_digits=10, blank=True, null=True)
     white_blood_cell_count_units = models.CharField(
         max_length=10,
-        choices=PlateletCountUnits.choices,
+        choices=WhiteBloodCellCountUnits.choices,
         blank=True,
         null=True,
-        default='CELLS/L'
+        default='10*3/uL'
     )
     red_blood_cell_count = models.DecimalField(decimal_places=2, max_digits=10, blank=True, null=True)
     red_blood_cell_count_units = models.CharField(
@@ -2328,8 +2390,13 @@ class PatientRecord(models.Model):
     c_reactive_protein = models.DecimalField(decimal_places=2, max_digits=6, blank=True, null=True, help_text="C-Reactive Protein (mg/L)")
     esr = models.IntegerField(blank=True, null=True, help_text="ESR (mm/hr)")
     
-    kappa_flc = models.IntegerField(blank=True, null=True)
-    lambda_flc = models.IntegerField(blank=True, null=True)
+    # Normal serum kappa is ~0.33-1.94 mg/dL, so an IntegerField truncated every
+    # result to 0 or 1. Do not turn these back into integers.
+    kappa_flc = models.DecimalField(decimal_places=2, max_digits=10, blank=True, null=True, help_text="Serum free kappa light chains")
+    lambda_flc = models.DecimalField(decimal_places=2, max_digits=10, blank=True, null=True, help_text="Serum free lambda light chains")
+    # Normal is ~0.26-1.65 and the SLiM threshold is >= 100, so both ends of the
+    # range need decimals.
+    free_light_chain_ratio = models.DecimalField(decimal_places=3, max_digits=12, blank=True, null=True, help_text="Serum free light chain ratio (kappa/lambda)")
     meets_slim = models.BooleanField(blank=True, null=True)
 
     # Legacy blood work fields
@@ -2342,16 +2409,17 @@ class PatientRecord(models.Model):
     lactate_dehydrogenase_level = models.IntegerField(blank=True, null=True)
     pulmonary_function_test_result = models.BooleanField(blank=False, null=False, default=False)
     bone_imaging_result = models.BooleanField(blank=False, null=False, default=False)
-    clonal_plasma_cells = models.IntegerField(blank=True, null=True)
+    # Values like 4.2% are routine and 60% is a decision point.
+    clonal_plasma_cells = models.DecimalField(decimal_places=2, max_digits=6, blank=True, null=True, help_text="Clonal plasma cells in bone marrow (%)")
     ejection_fraction = models.IntegerField(blank=True, null=True)
 
     # Behavioral and risk factors
-    consent_capability = models.BooleanField(help_text="Does the patient have cognitive ability to consent?", blank=False, null=False, default=True)
-    caregiver_availability_status = models.BooleanField(help_text="Is there an available caregiver for the patient?", blank=False, null=False, default=False)
-    contraceptive_use = models.BooleanField(help_text="Does the patient use contraceptives?", blank=False, null=False, default=False)
+    consent_capability = models.BooleanField(help_text="Does the patient have cognitive ability to consent?", blank=True, null=True, default=None)
+    caregiver_availability_status = models.BooleanField(help_text="Is there an available caregiver for the patient?", blank=True, null=True, default=None)
+    contraceptive_use = models.BooleanField(help_text="Does the patient use contraceptives?", blank=True, null=True, default=None)
     no_pregnancy_or_lactation_status = models.BooleanField(help_text="Does the patient self assess as not pregnant or lactating?", blank=False, null=False, default=True)
     pregnancy_test_result = models.BooleanField(help_text="Does the female patient of childbearing age have a negative test result for pregnancy?", blank=False, null=False, default=False)
-    no_mental_health_disorder_status = models.BooleanField(help_text="Does the patient have a mental health disorder?", blank=False, null=False, default=True)
+    no_mental_health_disorder_status = models.BooleanField(help_text="Does the patient have a mental health disorder?", blank=True, null=True, default=None)
     no_concomitant_medication_status = models.BooleanField(help_text="Does the patient have concomitant medication?", blank=False, null=False, default=True)
     concomitant_medication_details = models.CharField(max_length=255, help_text="Details about the patient's concomitant medications", blank=True, null=True)
     
@@ -2403,9 +2471,9 @@ class PatientRecord(models.Model):
 
     no_tobacco_use_status = models.BooleanField(help_text="Does the patient use tobacco?", blank=False, null=False, default=True)
     tobacco_use_details = models.CharField(max_length=255, help_text="Details about the patient's tobacco use", blank=True, null=True)
-    no_substance_use_status = models.BooleanField(help_text="Does the patient use substances?", blank=False, null=False, default=True)
+    no_substance_use_status = models.BooleanField(help_text="Does the patient use substances?", blank=True, null=True, default=None)
     substance_use_details = models.CharField(max_length=255, help_text="Details about the patient's substance use", blank=True, null=True)
-    no_geographic_exposure_risk = models.BooleanField(help_text="Has the patient had geographic exposure to risk?", blank=False, null=False, default=True)
+    no_geographic_exposure_risk = models.BooleanField(help_text="Has the patient had geographic exposure to risk?", blank=True, null=True, default=None)
     geographic_exposure_risk_details = models.CharField(max_length=255, help_text="Details about the patient's geographic exposure risk", blank=True, null=True)
 
     no_hiv_status = models.BooleanField(help_text="Does the patient has had HIV?", blank=False, null=False, default=True)
@@ -2423,7 +2491,8 @@ class PatientRecord(models.Model):
     active_minutes_per_day_30d = models.DecimalField(max_digits=5, decimal_places=1, blank=True, null=True, help_text="Mean daily active/exercise minutes over last 30 days")
     activity_trend_30d = models.CharField(max_length=20, blank=True, null=True, help_text="Activity trend: improving, stable, declining, or insufficient_data")
     resting_heart_rate_avg_30d = models.IntegerField(blank=True, null=True, help_text="Mean resting heart rate over last 30 days")
-    hrv_sdnn_avg_30d = models.DecimalField(max_digits=6, decimal_places=1, blank=True, null=True, help_text="Mean HRV SDNN over last 30 days (ms)")
+    hrv_sdnn_avg_30d = models.DecimalField(max_digits=6, decimal_places=1, blank=True, null=True, help_text="Mean HRV SDNN over last 30 days (ms). Apple Health only — SDNN and RMSSD are different statistics and must not be combined")
+    hrv_rmssd_avg_30d = models.DecimalField(max_digits=6, decimal_places=1, blank=True, null=True, help_text="Mean HRV RMSSD over last 30 days (ms). Garmin HRV Status is RMSSD-based; kept separate from SDNN")
     oxygen_saturation_min_30d = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True, help_text="Minimum valid SpO2 reading over last 30 days (%)")
     oxygen_saturation_avg_30d = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True, help_text="Mean SpO2 over last 30 days (%)")
     respiratory_rate_avg_30d = models.DecimalField(max_digits=5, decimal_places=1, blank=True, null=True, help_text="Mean respiratory rate over last 30 days (breaths/min)")
@@ -2581,6 +2650,14 @@ class PatientRecord(models.Model):
         null=True, blank=True,
         help_text="Timestamp when this row was last derived from OMOP tables",
     )
+    user_edited_fields = models.JSONField(
+        default=list, blank=True,
+        help_text=(
+            "Legacy compatibility metadata from the retired PatientRecord-to-OMOP "
+            "write-through. It is not written or consulted by derivation; mapped "
+            "clinical fields are rebuilt only from OMOP facts."
+        ),
+    )
 
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
@@ -2595,6 +2672,29 @@ class PatientRecord(models.Model):
             models.Index(fields=["stage"]),
             models.Index(fields=["-updated_at"], name="ix_pr_updated_at"),
             models.Index(fields=["organization", "-updated_at"], name="ix_pr_org_updated_at"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    Q(latitude__isnull=True, longitude__isnull=True)
+                    | Q(latitude__isnull=False, longitude__isnull=False)
+                ),
+                name="patientrecord_lat_lon_both_or_neither",
+            ),
+            models.CheckConstraint(
+                check=(
+                    Q(latitude__isnull=True)
+                    | Q(latitude__gte=-90, latitude__lte=90)
+                ),
+                name="patientrecord_latitude_range",
+            ),
+            models.CheckConstraint(
+                check=(
+                    Q(longitude__isnull=True)
+                    | Q(longitude__gte=-180, longitude__lte=180)
+                ),
+                name="patientrecord_longitude_range",
+            ),
         ]
 
     def __str__(self):
@@ -2632,7 +2732,7 @@ class PatientRecord(models.Model):
                 dob = None
         if dob is None and self.person_id:
             p = self.person
-            if p.year_of_birth:
+            if p.year_of_birth not in PERSON_YEAR_PLACEHOLDERS:
                 month = p.month_of_birth or 1
                 day = p.day_of_birth or 1
                 try:
@@ -2772,6 +2872,82 @@ class PatientRecord(models.Model):
         else:
             if self.relapse_count is None:
                 self.relapse_count = computed_relapse_count
+
+
+# =============================================================================
+# Concept mapping registry
+# =============================================================================
+
+class FieldConceptMapping(models.Model):
+    """Records a reviewer-approved OMOP concept assignment for a PatientRecord field.
+
+    This is a decision-recording tool — it does NOT make the field writable.
+    Each PatientRecord field can have at most one mapping.
+    """
+    STATUS_CHOICES = [
+        ('proposed', 'Proposed'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+    ]
+    field_name = models.CharField(max_length=100, unique=True, db_index=True)
+    concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='field_mappings',
+    )
+    vocabulary_id = models.CharField(max_length=20, blank=True, default='')
+    concept_code = models.CharField(max_length=50, blank=True, default='')
+    unit = models.CharField(max_length=30, blank=True, default='')
+    omop_table = models.CharField(max_length=30, blank=True, default='')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='proposed')
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'field_concept_mapping'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['vocabulary_id', 'concept_code'],
+                condition=~Q(concept_code=''),
+                name='uq_field_concept_mapping_vocab_code',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.field_name} → {self.vocabulary_id}:{self.concept_code} ({self.status})"
+
+
+class FieldSynonym(models.Model):
+    """Custom synonyms for PatientRecord field names.
+
+    OMOP synonyms are queried live from ConceptSynonym via the field's
+    FieldConceptMapping — they are never duplicated here.
+    """
+    field_name = models.CharField(max_length=100, db_index=True)
+    synonym_text = models.CharField(max_length=200)
+    source = models.CharField(max_length=20, default='custom')
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'field_synonym'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['field_name', 'synonym_text'],
+                name='uq_field_synonym',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.field_name}: {self.synonym_text}"
+
 
 
 # =============================================================================

@@ -78,7 +78,38 @@ interface OrgStatsData {
   disease_counts: DiseaseCount[];
 }
 
-type Section = 'settings' | 'trusts' | 'admins' | 'invitations' | 'stats';
+interface VocabularyUsageDetail {
+  table: string;
+  column: string;
+  role: string;
+  instance_count: number;
+}
+
+interface VocabularyConcept {
+  concept_id: number;
+  vocabulary_id: string;
+  concept_code: string;
+  concept_name: string;
+  domain_id: string;
+  standard_concept: string | null;
+  source: string | null;
+  group: 'athena' | 'healthkey' | 'nonconforming';
+  group_label: string;
+  group_order: number;
+  patient_count: number;
+  instance_count: number;
+  usage: VocabularyUsageDetail[];
+}
+
+interface OrgVocabularyData {
+  org_slug: string;
+  org_name: string;
+  concept_count: number;
+  concepts: VocabularyConcept[];
+}
+
+type Section = 'settings' | 'trusts' | 'admins' | 'invitations' | 'stats' | 'vocabulary';
+type VocabularySort = 'default' | 'patients' | 'instances' | 'name';
 
 export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   const [org, setOrg] = useState<Org | null>(null);
@@ -87,6 +118,11 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [accessGrants, setAccessGrants] = useState<AccessGrant[]>([]);
   const [orgStats, setOrgStats] = useState<OrgStatsData | null>(null);
+  const [vocabularyData, setVocabularyData] = useState<OrgVocabularyData | null>(null);
+  const [vocabularyLoading, setVocabularyLoading] = useState(false);
+  const [vocabularyError, setVocabularyError] = useState<string | null>(null);
+  const [vocabularySearch, setVocabularySearch] = useState('');
+  const [vocabularySort, setVocabularySort] = useState<VocabularySort>('default');
   const [activeSection, setActiveSection] = useState<Section>('settings');
   const [error, setError] = useState<string | null>(null);
 
@@ -158,6 +194,19 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  const fetchVocabulary = useCallback(async () => {
+    try {
+      setVocabularyLoading(true);
+      setVocabularyError(null);
+      const res = await api.get<OrgVocabularyData>(`${base}/vocabulary/`);
+      setVocabularyData(res.data);
+    } catch {
+      setVocabularyError('Failed to load vocabulary usage.');
+    } finally {
+      setVocabularyLoading(false);
+    }
+  }, [base]);
 
   const handleSaveSettings = async () => {
     try {
@@ -328,10 +377,44 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
   const sections: { key: Section; label: string }[] = [
     { key: 'settings', label: 'Settings' },
     { key: 'stats', label: 'Stats' },
+    { key: 'vocabulary', label: 'Vocabulary' },
     { key: 'trusts', label: 'Access Rules' },
     { key: 'admins', label: 'Access Grants' },
     { key: 'invitations', label: 'Invitations' },
   ];
+  const vocabularyQuery = vocabularySearch.trim().toLowerCase();
+  const vocabularyRows = [...(vocabularyData?.concepts ?? [])]
+    .filter(row => !vocabularyQuery || [
+      row.vocabulary_id,
+      row.concept_code,
+      row.concept_name,
+      row.domain_id,
+      row.source ?? '',
+    ].some(value => value.toLowerCase().includes(vocabularyQuery)))
+    .sort((a, b) => {
+      if (vocabularySort === 'patients') {
+        return b.patient_count - a.patient_count || b.instance_count - a.instance_count;
+      }
+      if (vocabularySort === 'instances') {
+        return b.instance_count - a.instance_count || b.patient_count - a.patient_count;
+      }
+      if (vocabularySort === 'name') {
+        return a.concept_name.localeCompare(b.concept_name);
+      }
+      return (
+        a.group_order - b.group_order ||
+        a.vocabulary_id.localeCompare(b.vocabulary_id) ||
+        b.patient_count - a.patient_count ||
+        b.instance_count - a.instance_count ||
+        a.concept_name.localeCompare(b.concept_name)
+      );
+    });
+  const handleSectionChange = (section: Section) => {
+    setActiveSection(section);
+    if (section === 'vocabulary' && !vocabularyData && !vocabularyLoading) {
+      fetchVocabulary();
+    }
+  };
 
   return (
     <div className="p-6 space-y-4">
@@ -350,7 +433,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
         {sections.map(s => (
           <button
             key={s.key}
-            onClick={() => setActiveSection(s.key)}
+            onClick={() => handleSectionChange(s.key)}
             className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px ${
               activeSection === s.key
                 ? 'border-blue-600 text-blue-600'
@@ -450,6 +533,113 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                 )}
               </tfoot>
             </table>
+          )}
+        </div>
+      )}
+
+      {/* Vocabulary */}
+      {activeSection === 'vocabulary' && (
+        <div className="space-y-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+            <div>
+              <h2 className="font-medium text-gray-900">Vocabulary Usage</h2>
+              <p className="text-sm text-gray-500">
+                Org-scoped clinical concepts with distinct patient counts and total OMOP row counts.
+              </p>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <input
+                type="search"
+                value={vocabularySearch}
+                onChange={e => setVocabularySearch(e.target.value)}
+                placeholder="Search vocabulary, code, name..."
+                className="w-full min-w-64 border border-gray-300 rounded px-3 py-1.5 text-sm sm:w-72"
+              />
+              <select
+                value={vocabularySort}
+                onChange={e => setVocabularySort(e.target.value as VocabularySort)}
+                className="border border-gray-300 rounded px-2 py-1.5 text-sm"
+              >
+                <option value="default">Vocabulary order</option>
+                <option value="patients">Patient count</option>
+                <option value="instances">Instance count</option>
+                <option value="name">Concept name</option>
+              </select>
+            </div>
+          </div>
+
+          {vocabularyLoading && <p className="text-sm text-gray-500">Loading vocabulary usage...</p>}
+          {vocabularyError && <p className="text-sm text-red-500">{vocabularyError}</p>}
+          {!vocabularyLoading && !vocabularyError && vocabularyRows.length === 0 && (
+            <p className="text-sm text-gray-500">No vocabulary usage found for this organization.</p>
+          )}
+          {vocabularyRows.length > 0 && (
+            <div className="overflow-x-auto border border-gray-200 rounded-lg">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">Vocabulary</th>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">Concept</th>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">Domain</th>
+                    <th className="px-4 py-2 text-right font-medium text-gray-600">Patients</th>
+                    <th className="px-4 py-2 text-right font-medium text-gray-600">Instances</th>
+                    <th className="px-4 py-2 text-left font-medium text-gray-600">Usage</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {vocabularyRows.map(row => (
+                    <tr key={row.concept_id} className="border-t border-gray-100 align-top">
+                      <td className="px-4 py-3">
+                        <div className="flex flex-col gap-1">
+                          <span className="font-medium text-gray-900">{row.vocabulary_id}</span>
+                          <span className={`w-fit rounded px-2 py-0.5 text-xs font-medium ${
+                            row.group === 'nonconforming'
+                              ? 'bg-amber-100 text-amber-800'
+                              : row.group === 'healthkey'
+                                ? 'bg-emerald-100 text-emerald-700'
+                                : 'bg-blue-100 text-blue-700'
+                          }`}>
+                            {row.group_label}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="max-w-md">
+                          <div className="font-medium text-gray-900">{row.concept_name}</div>
+                          <div className="mt-1 text-xs text-gray-500">
+                            {row.concept_code} <span className="text-gray-300">|</span> #{row.concept_id}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-gray-700">
+                        <div>{row.domain_id}</div>
+                        <div className="mt-1 text-xs text-gray-400">
+                          {row.standard_concept || 'non-standard'}{row.source ? ` / ${row.source}` : ''}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-right font-medium text-gray-900">{row.patient_count}</td>
+                      <td className="px-4 py-3 text-right font-medium text-gray-900">{row.instance_count}</td>
+                      <td className="px-4 py-3 text-xs text-gray-600">
+                        <div className="flex max-w-xs flex-wrap gap-1.5">
+                          {row.usage.slice(0, 3).map(usage => (
+                            <span
+                              key={`${row.concept_id}-${usage.table}-${usage.column}`}
+                              className="rounded bg-gray-100 px-2 py-0.5"
+                              title={`${usage.table}.${usage.column}`}
+                            >
+                              {usage.table}: {usage.instance_count}
+                            </span>
+                          ))}
+                          {row.usage.length > 3 && (
+                            <span className="rounded bg-gray-100 px-2 py-0.5">+{row.usage.length - 3}</span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}

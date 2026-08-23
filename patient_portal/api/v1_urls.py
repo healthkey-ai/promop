@@ -2,7 +2,8 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
-    CurrentUserViewSet, PatientRecordViewSet, login_view, logout_view, auth_test,
+    CurrentUserViewSet, PatientRecordViewSet,
+    PatientRecordV1ViewSet, login_view, logout_view, auth_test,
     change_password,
     PersonViewSet,
     ConditionOccurrenceViewSet, DrugExposureViewSet, MeasurementViewSet,
@@ -20,13 +21,16 @@ from .views import (
     VocabSnapshotView,
     org_disease_stats,
     InterchangeAgreementViewSet,
+    field_mapping_list, field_mapping_detail,
+    field_synonyms, field_synonym_detail,
 )
 from .org_views import (
     OrgListCreateView, OrgDetailView,
     OrgInviteView, OrgInvitationListView, OrgInvitationDetailView,
     OrgTrustListCreateView, OrgTrustDetailView,
-    OrgAccessListView, OrgAccessDetailView,
-    confirm_invitation, org_invitation_lookup, org_public_info, OrgPatientSignupView,
+    OrgAccessListView, OrgAccessDetailView, OrgVocabularyUsageView,
+    confirm_invitation, org_invitation_lookup, org_public_info, org_signup_directory,
+    OrgPatientSignupView,
 )
 from .patient_invitations import (
     PatientInviteView, accept_patient_invitation, patient_invitation_lookup,
@@ -40,7 +44,7 @@ from .break_glass import break_glass
 router = DefaultRouter()
 
 router.register(r'user', CurrentUserViewSet, basename='v1-user')
-router.register(r'patient-records', PatientRecordViewSet, basename='v1-patient-records')
+router.register(r'patient-records', PatientRecordV1ViewSet, basename='v1-patient-records')
 router.register(r'persons', PersonViewSet, basename='v1-persons')
 router.register(r'conditions', ConditionOccurrenceViewSet, basename='v1-conditions')
 router.register(r'drug-exposures', DrugExposureViewSet, basename='v1-drug-exposures')
@@ -93,6 +97,8 @@ urlpatterns = [
     path('orgs/', OrgListCreateView.as_view(), name='v1-org-list'),
     path('orgs/confirm-invitation/', confirm_invitation, name='v1-org-confirm-invitation'),
     path('orgs/invitation-lookup/', org_invitation_lookup, name='v1-org-invitation-lookup'),
+    # Must precede orgs/<slug>/ — "signup-directory" is itself a valid slug.
+    path('orgs/signup-directory/', org_signup_directory, name='v1-org-signup-directory'),
     path('orgs/<slug:slug>/', OrgDetailView.as_view(), name='v1-org-detail'),
     path('orgs/<slug:slug>/invite/', OrgInviteView.as_view(), name='v1-org-invite'),
     path('orgs/<slug:slug>/invitations/', OrgInvitationListView.as_view(), name='v1-org-invitation-list'),
@@ -101,6 +107,11 @@ urlpatterns = [
     path('orgs/<slug:slug>/trusts/<int:trust_id>/', OrgTrustDetailView.as_view(), name='v1-org-trust-detail'),
     path('orgs/<slug:slug>/access/', OrgAccessListView.as_view(), name='v1-org-access-list'),
     path('orgs/<slug:slug>/access/<int:access_id>/', OrgAccessDetailView.as_view(), name='v1-org-access-detail'),
+    path('orgs/<slug:slug>/vocabulary/', OrgVocabularyUsageView.as_view(), name='v1-org-vocabulary-usage'),
     path('orgs/<slug:slug>/public/', org_public_info, name='v1-org-public-info'),
     path('orgs/<slug:slug>/patient-signup/', OrgPatientSignupView.as_view(), name='v1-org-patient-signup'),
+    path('field-mappings/', field_mapping_list, name='v1-field-mapping-list'),
+    path('field-mappings/<int:pk>/', field_mapping_detail, name='v1-field-mapping-detail'),
+    path('field-mappings/<str:field_name>/synonyms/', field_synonyms, name='v1-field-synonyms'),
+    path('field-synonyms/<int:pk>/', field_synonym_detail, name='v1-field-synonym-detail'),
 ]

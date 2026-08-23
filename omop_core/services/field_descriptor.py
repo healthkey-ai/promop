@@ -1,0 +1,348 @@
+"""
+field_descriptor.py — Classify every PatientRecord field by its mapping status.
+
+Used by the concept-mapping admin interface to show which fields have OMOP
+concept assignments and which still need one.
+"""
+from __future__ import annotations
+
+from omop_core.models import PatientRecord, FieldConceptMapping
+from omop_core.services.mappings import (
+    LAB_FIELD_TO_LOINC,
+    LAB_FIELD_ALIAS_TO_CANONICAL,
+    DEMOGRAPHIC_FIELDS,
+    THERAPY_LINE_FIELDS,
+)
+from omop_core.services.patient_record_service import (
+    PATIENT_RECORD_OMOP_MAPPED_FIELDS,
+    _LAB_FIELD_ALIASES,
+    _LOINC_LAB_FIELDS,
+)
+from omop_core.services.provenance_registry import get_registry
+
+
+# Fields that are purely internal / structural and not clinical.
+_INTERNAL_FIELDS = frozenset({
+    'id', 'person', 'organization', 'created_at', 'updated_at',
+    'derivation_version', 'derived_at', 'user_edited_fields',
+})
+
+# Person/profile fields projected from Person model.
+_PERSON_FIELDS = frozenset({
+    'date_of_birth', 'gender', 'race', 'ethnicity', 'languages_skills',
+    'email', 'phone_number', 'facility_name', 'validated', 'validated_by',
+    'validation_date', 'suppress_demographics_for_others', 'patient_age',
+})
+
+# Location fields.
+_LOCATION_FIELDS = frozenset({
+    'country', 'region', 'city', 'postal_code', 'latitude', 'longitude',
+})
+
+# Wearable 30-day summary fields.
+_WEARABLE_30D_SUFFIX = '_30d'
+_WEARABLE_METADATA_FIELDS = frozenset({
+    'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
+})
+
+# Computed fields (derived from other fields, not directly from OMOP).
+_COMPUTED_FIELDS = frozenset({
+    'bmi', 'disease_slug', 'therapy_lines_count',
+    'meets_crab', 'meets_slim',
+})
+
+# Unit-companion fields (always paired with a measurement field).
+_UNIT_SUFFIX = '_units'
+
+# Build the set of all alias field names.
+_ALL_ALIASES = set(LAB_FIELD_ALIAS_TO_CANONICAL.keys())
+for aliases in _LAB_FIELD_ALIASES.values():
+    _ALL_ALIASES.update(aliases)
+
+# Fields that are editable via the LOINC lab write-through: either in
+# LAB_FIELD_TO_LOINC (the write map) or as a target in _LOINC_LAB_FIELDS
+# (the derivation map, which names fields the extractor can populate via a
+# known LOINC code — those 18 recovered attributions from #596/#607).
+_LOINC_EDITABLE_FIELDS = frozenset(LAB_FIELD_TO_LOINC.keys()) | frozenset(
+    field_name for field_name, _cast in _LOINC_LAB_FIELDS.values()
+)
+
+
+def _get_field_type_label(field) -> str:
+    """Return a human-readable type label for a Django model field."""
+    type_map = {
+        'CharField': 'text',
+        'TextField': 'text',
+        'IntegerField': 'integer',
+        'FloatField': 'float',
+        'DecimalField': 'decimal',
+        'BooleanField': 'boolean',
+        'NullBooleanField': 'boolean',
+        'DateField': 'date',
+        'DateTimeField': 'datetime',
+        'JSONField': 'json',
+        'ForeignKey': 'fk',
+        'BigIntegerField': 'integer',
+        'SmallIntegerField': 'integer',
+        'PositiveIntegerField': 'integer',
+    }
+    class_name = field.__class__.__name__
+    return type_map.get(class_name, class_name.lower())
+
+
+# ── Tab classification ─────────────────────────────────────────────
+# Maps each field to the clinical tab it appears on in the patient detail view.
+
+_TAB_GENERAL = frozenset({
+    'date_of_birth', 'gender', 'race', 'ethnicity', 'email', 'phone_number',
+    'country', 'region', 'city', 'postal_code', 'latitude', 'longitude',
+    'disease', 'stage', 'histologic_type',
+    'ecog_performance_status', 'ecog_assessment_date', 'karnofsky_performance_score',
+    'preexisting_conditions', 'peripheral_neuropathy_grade',
+    'no_other_active_malignancies', 'no_active_infection_status',
+    'hiv_status', 'no_hiv_status', 'hepatitis_b_status', 'no_hepatitis_b_status',
+    'hepatitis_c_status', 'no_hepatitis_c_status',
+    'weight', 'height', 'bmi', 'systolic_blood_pressure', 'diastolic_blood_pressure',
+    'heartrate', 'languages_skills', 'facility_name',
+    'validated', 'validated_by', 'validation_date', 'patient_age',
+    'suppress_demographics_for_others',
+})
+
+_TAB_DISEASE = frozenset({
+    # Breast cancer
+    'menopausal_status', 'tumor_stage', 'nodes_stage', 'staging_modalities',
+    'distant_metastasis_stage', 'bone_only_metastasis_status',
+    'measurable_disease_by_recist_status',
+    'estrogen_receptor_status', 'progesterone_receptor_status',
+    'her2_status', 'hr_status', 'hrd_status', 'androgen_receptor_status',
+    'tnbc_status', 'ki67_proliferation_index', 'pd_l1_tumor_cells',
+    'oncotype_dx_score', 'test_methodology', 'test_date', 'test_specimen_type',
+    'report_interpretation', 'genetic_mutations',
+    # Lymphoma
+    'tumor_grade', 'gelf_criteria_status', 'flipi_score', 'flipi_risk_category',
+    'flipi_score_options', 'bulky_disease', 'b_symptoms',
+    'transformed_to_dlbcl', 'dlbcl_transformation_date', 'post_transformation_outcome',
+    'bone_marrow_involvement', 'number_of_nodal_sites',
+    'clonal_bone_marrow_b_lymphocytes',
+    # Myeloma
+    'myeloma_type', 'r_iss_stage', 'durie_salmon_stage', 'progression',
+    'measurable_disease_imwg', 'mrd_status', 'meets_crab', 'meets_slim',
+    'stem_cell_transplant_history', 'sct_date', 'sct_eligibility',
+    'monoclonal_protein_serum', 'monoclonal_protein_urine',
+    'kappa_flc', 'lambda_flc', 'free_light_chain_ratio',
+    'bone_lesions', 'hypercalcemia', 'renal_impairment', 'anemia',
+    'clonal_plasma_cells', 'cytogenetic_risk', 'cytogenetic_abnormalities',
+    # CLL
+    'binet_stage', 'tumor_burden', 'disease_activity', 'richter_transformation',
+    'protein_expressions', 'absolute_lymphocyte_count', 'lymphocyte_doubling_time',
+    'serum_beta2_microglobulin_level', 'clonal_b_lymphocyte_count',
+    'qtcf_value', 'largest_lymph_node_size', 'spleen_size',
+    'tp53_disruption', 'measurable_disease_iwcll', 'splenomegaly', 'hepatomegaly',
+    'lymphadenopathy', 'autoimmune_cytopenias_refractory_to_steroids',
+    'btk_inhibitor_refractory', 'bcl2_inhibitor_refractory',
+    # Shared disease markers
+    'ldh_level', 'beta2_microglobulin', 'disease_slug',
+})
+
+_TAB_TREATMENT = frozenset({
+    'therapy_lines_count', 'relapse_count', 'refractory_status',
+    'first_line_therapy', 'first_line_start_date', 'first_line_end_date',
+    'first_line_intent', 'first_line_discontinuation_reason', 'first_line_outcome',
+    'first_line_component_ids', 'first_line_therapy_type_ids',
+    'second_line_therapy', 'second_line_start_date', 'second_line_end_date',
+    'second_line_intent', 'second_line_discontinuation_reason', 'second_line_outcome',
+    'second_line_component_ids', 'second_line_therapy_type_ids',
+    'later_therapy', 'later_start_date', 'later_end_date',
+    'later_intent', 'later_discontinuation_reason', 'later_outcome',
+    'later_therapies', 'later_component_ids', 'later_therapy_type_ids',
+    'supportive_therapy_start_date', 'supportive_therapy_end_date',
+    'supportive_therapies', 'supportive_therapy_intent',
+    'planned_therapies', 'concomitant_medication',
+})
+
+_TAB_BLOOD = frozenset({
+    'hemoglobin_g_dl', 'hematocrit_percent', 'wbc_count_thousand_per_ul',
+    'rbc_million_per_ul', 'platelet_count_thousand_per_ul',
+    'anc_thousand_per_ul', 'alc_thousand_per_ul', 'amc_thousand_per_ul',
+    'sodium_meq_l', 'potassium_meq_l', 'calcium_mg_dl', 'magnesium_mg_dl',
+    'troponin_ng_ml', 'bnp_pg_ml', 'glucose_mg_dl', 'hba1c_percent', 'ldh_u_l',
+    'inr', 'pt_seconds', 'ptt_seconds',
+    'cea_ng_ml', 'ca19_9_u_ml', 'psa_ng_ml',
+})
+
+_TAB_LABS = frozenset({
+    'serum_creatinine_level', 'creatinine_clearance_rate', 'blood_urea_nitrogen',
+    'egfr', 'serum_sodium', 'serum_potassium', 'serum_calcium_level',
+    'magnesium', 'phosphorus', 'albumin_level', 'total_protein',
+    'liver_enzyme_levels_ast', 'liver_enzyme_levels_alt', 'liver_enzyme_levels_alp',
+    'serum_bilirubin_level_total', 'serum_bilirubin_level_direct', 'albumin_g_dl',
+    'ldh', 'alkaline_phosphatase', 'c_reactive_protein', 'esr',
+    'pulmonary_function_test_result', 'bone_imaging_result',
+})
+
+_TAB_BEHAVIOR = frozenset({
+    'smoking_status', 'pack_years', 'alcohol_use', 'drinks_per_week',
+    'exercise_frequency', 'exercise_minutes_per_week', 'diet_type',
+    'sleep_hours_per_night', 'sleep_quality', 'stress_level', 'social_support',
+    'employment_status', 'education_level', 'marital_status', 'insurance_type',
+    'number_of_dependents', 'annual_household_income',
+    'pregnancy_test_date', 'pregnancy_test_result_value', 'contraceptive_use',
+    'consent_capability', 'caregiver_availability_status',
+    'no_mental_health_disorder_status', 'no_substance_use_status',
+    'substance_use_details', 'no_geographic_exposure_risk',
+    'geographic_exposure_risk_details',
+})
+
+
+def _classify_tab(field_name: str) -> str:
+    """Return the clinical-tab label for a PatientRecord field."""
+    if field_name in _INTERNAL_FIELDS:
+        return 'internal'
+    if field_name in _TAB_GENERAL:
+        return 'general'
+    if field_name in _TAB_DISEASE:
+        return 'disease'
+    if field_name in _TAB_TREATMENT:
+        return 'treatment'
+    if field_name in _TAB_BLOOD:
+        return 'blood'
+    if field_name in _TAB_LABS:
+        return 'labs'
+    if field_name in _TAB_BEHAVIOR:
+        return 'behavior'
+    if field_name.endswith(_WEARABLE_30D_SUFFIX) or field_name in _WEARABLE_METADATA_FIELDS:
+        return 'wearables'
+    # Therapy-related fallback.
+    therapy_keywords = (
+        'therapy', 'treatment', 'line_', 'component_ids', 'therapy_type_ids',
+    )
+    if any(kw in field_name for kw in therapy_keywords):
+        return 'treatment'
+    return 'other'
+
+
+def _classify_field(field_name: str) -> str:
+    """Assign a category to a PatientRecord field."""
+    if field_name in _INTERNAL_FIELDS:
+        return 'internal'
+    if field_name in _PERSON_FIELDS:
+        return 'profile'
+    if field_name in _LOCATION_FIELDS:
+        return 'location'
+    if field_name in _LOINC_EDITABLE_FIELDS:
+        return 'editable'
+    if field_name in _ALL_ALIASES:
+        return 'alias'
+    if field_name.endswith(_UNIT_SUFFIX):
+        return 'unit'
+    if field_name in DEMOGRAPHIC_FIELDS:
+        return 'profile'
+    if field_name in THERAPY_LINE_FIELDS:
+        return 'therapy-inference'
+    if field_name in _COMPUTED_FIELDS:
+        return 'computed'
+    if field_name in _WEARABLE_METADATA_FIELDS:
+        return 'wearable-metadata'
+    if field_name.endswith(_WEARABLE_30D_SUFFIX):
+        return 'computed'
+    # Therapy-related fields not in THERAPY_LINE_FIELDS but containing therapy keywords.
+    therapy_keywords = (
+        'therapy', 'treatment', 'line_', 'component_ids', 'therapy_type_ids',
+        'therapy_ids', 'concomitant_medication',
+    )
+    if any(kw in field_name for kw in therapy_keywords):
+        return 'therapy-inference'
+    if field_name in PATIENT_RECORD_OMOP_MAPPED_FIELDS:
+        return 'needs-concept-set'
+    return 'other'
+
+
+def get_all_field_descriptors() -> list[dict]:
+    """Return a descriptor dict for every concrete PatientRecord field.
+
+    Each dict contains:
+      - field_name: str
+      - field_type: str (human-readable type label)
+      - category: str (editable|alias|unit|profile|location|therapy-inference|
+                       computed|wearable-metadata|needs-concept-set|
+                       internal|other)
+      - provenance: dict|None (from provenance registry)
+      - mapping: dict|None (from FieldConceptMapping table)
+    """
+    # 1. Get all concrete fields from the model.
+    concrete_fields = [
+        f for f in PatientRecord._meta.get_fields()
+        if getattr(f, 'concrete', False)
+    ]
+
+    # 2. Load provenance registry.
+    registry = get_registry()
+
+    # 3. Load all existing FieldConceptMapping rows.
+    mappings_by_field = {
+        m.field_name: m
+        for m in FieldConceptMapping.objects.select_related('concept', 'reviewer').all()
+    }
+
+    # 4. Build descriptors.
+    result = []
+    for f in concrete_fields:
+        name = f.name
+        category = _classify_field(name)
+
+        # Provenance from registry.
+        prov = registry.get(name)
+        prov_dict = None
+        if prov:
+            prov_dict = {
+                'omop_table': prov.omop_table,
+                'lookup_strategy': prov.lookup_strategy,
+                'concept_codes': prov.concept_codes,
+                'source_values': prov.source_values,
+                'extractor': prov.extractor,
+                'selection_rule': prov.selection_rule,
+                'description': prov.description,
+            }
+
+        # FieldConceptMapping from DB.
+        mapping = mappings_by_field.get(name)
+        mapping_dict = None
+        if mapping:
+            mapping_dict = {
+                'id': mapping.id,
+                'concept_id': mapping.concept_id,
+                'vocabulary_id': mapping.vocabulary_id,
+                'concept_code': mapping.concept_code,
+                'unit': mapping.unit,
+                'omop_table': mapping.omop_table,
+                'status': mapping.status,
+                'reviewer': mapping.reviewer.username if mapping.reviewer else None,
+                'reviewed_at': mapping.reviewed_at.isoformat() if mapping.reviewed_at else None,
+                'notes': mapping.notes,
+            }
+
+        result.append({
+            'field_name': name,
+            'field_type': _get_field_type_label(f),
+            'category': category,
+            'tab': _classify_tab(name),
+            'provenance': prov_dict,
+            'mapping': mapping_dict,
+        })
+
+    # Sort: needs-concept-set first, then by field name.
+    category_order = {
+        'needs-concept-set': 0,
+        'editable': 1,
+        'therapy-inference': 2,
+        'computed': 3,
+        'alias': 4,
+        'unit': 5,
+        'profile': 6,
+        'location': 7,
+        'wearable-metadata': 8,
+        'internal': 9,
+        'other': 10,
+    }
+    result.sort(key=lambda d: (category_order.get(d['category'], 99), d['field_name']))
+    return result

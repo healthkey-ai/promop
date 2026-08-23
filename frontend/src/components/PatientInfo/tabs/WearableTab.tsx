@@ -18,6 +18,7 @@ const METRIC_LABELS: Record<string, string> = {
   active_minutes: 'Active Minutes',
   resting_hr: 'Resting Heart Rate',
   hrv_sdnn: 'HRV SDNN',
+  hrv_rmssd: 'HRV RMSSD',
   spo2: 'SpO\u2082',
   respiratory_rate: 'Respiratory Rate',
   sleep_duration: 'Sleep Duration',
@@ -65,6 +66,7 @@ function formatMetricValue(metric: string, value: number): string {
   if (metric === 'active_minutes') return `${value.toFixed(0)} min`;
   if (metric === 'resting_hr') return `${value.toFixed(0)} bpm`;
   if (metric === 'hrv_sdnn') return `${value.toFixed(1)} ms`;
+  if (metric === 'hrv_rmssd') return `${value.toFixed(1)} ms`;
   if (metric === 'spo2') return `${value.toFixed(1)}%`;
   if (metric === 'respiratory_rate') return `${value.toFixed(1)} breaths/min`;
   if (metric === 'sleep_duration') return `${value.toFixed(1)} hrs`;
@@ -495,11 +497,22 @@ export default function WearableTab({ formData, onRefresh }: Props) {
             onChange={() => {}}
             disabled
           />
+          {/* SDNN and RMSSD are distinct statistics and are shown as
+              distinct fields. A patient normally has one or the other
+              depending on their device, not both. */}
           <Field
             label="HRV SDNN (ms)"
             name="hrv_sdnn_avg_30d"
             type="number"
             value={formData?.hrv_sdnn_avg_30d}
+            onChange={() => {}}
+            disabled
+          />
+          <Field
+            label="HRV RMSSD (ms)"
+            name="hrv_rmssd_avg_30d"
+            type="number"
+            value={formData?.hrv_rmssd_avg_30d}
             onChange={() => {}}
             disabled
           />

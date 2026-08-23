@@ -13,8 +13,10 @@ Covers:
 """
 
 import pytest
+from django.contrib.contenttypes.models import ContentType
 from omop_core.management.commands.populate_patient_record import Command
-from omop_core.models import PersonLanguageSkill
+from omop_core.models import PersonLanguageSkill, ProvenanceRecord
+from omop_core.services.patient_record_service import _get_tumor_size_data, refresh_patient_record
 from tests.factories import (
     ConceptFactory, PersonFactory, PatientRecordFactory,
     MeasurementFactory, ObservationFactory,
@@ -122,12 +124,15 @@ class TestLaterTherapies:
 
 class TestCllMeasurements:
 
-    def test_absolute_lymphocyte_count(self):
+    def test_alc_not_derived_by_cll_data(self):
+        """731-0 ALC is no longer derived by _get_cll_data — the canonical
+        column alc_thousand_per_ul is populated by _get_laboratory_data
+        instead (issue #544)."""
         person = PersonFactory()
         concept = _loinc_concept('731-0', 'Lymphocytes [#/volume] in Blood')
         MeasurementFactory(person=person, measurement_concept=concept, value_as_number=12.5)
         data = _cmd().get_cll_data(person)
-        assert data['absolute_lymphocyte_count'] == pytest.approx(12.5)
+        assert 'absolute_lymphocyte_count' not in data
 
     def test_serum_beta2_microglobulin_level(self):
         person = PersonFactory()
@@ -153,14 +158,65 @@ class TestCllMeasurements:
     def test_largest_lymph_node_size(self):
         person = PersonFactory()
         concept = _loinc_concept('21889-1', 'Lymph node greatest dimension')
-        MeasurementFactory(person=person, measurement_concept=concept, value_as_number=3.2)
+        MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            value_as_number=3.2,
+            qualifier_source_value='lymph-node',
+        )
         data = _cmd().get_cll_data(person)
         assert data['largest_lymph_node_size'] == pytest.approx(3.2)
+
+    def test_code_only_21889_is_not_treated_as_lymph_node(self):
+        person = PersonFactory()
+        concept = _loinc_concept('21889-1', 'Size Tumor')
+        MeasurementFactory(person=person, measurement_concept=concept, value_as_number=4.1)
+        data = _cmd().get_cll_data(person)
+        assert 'largest_lymph_node_size' not in data
+
+    def test_tumor_and_lymph_node_contexts_derive_separately(self):
+        person = PersonFactory()
+        concept = _loinc_concept('21889-1', 'Size Tumor')
+        tumor_measurement = MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            measurement_date='2024-01-01',
+            value_as_number=4.1,
+            unit_source_value='cm',
+        )
+        ProvenanceRecord.objects.create(
+            source='EHR_SYNC',
+            source_user_id='tumor-fixture',
+            content_type=ContentType.objects.get_for_model(tumor_measurement),
+            object_id=tumor_measurement.pk,
+        )
+        MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            measurement_date='2024-01-02',
+            value_as_number=2.2,
+            unit_source_value='cm',
+            qualifier_source_value='lymph-node',
+        )
+        assert _get_tumor_size_data(person) == {'tumor_size': pytest.approx(4.1)}
+        record = refresh_patient_record(person)
+        assert record.tumor_size == pytest.approx(4.1)
+        assert record.largest_lymph_node_size == pytest.approx(2.2)
+        assert ProvenanceRecord.objects.filter(
+            source='EHR_SYNC', source_user_id='tumor-fixture',
+            object_id=tumor_measurement.pk,
+        ).exists()
+
+        # Removing the source facts must clear both projections on refresh.
+        MeasurementFactory._meta.model.objects.filter(person=person).delete()
+        record = refresh_patient_record(person)
+        assert record.tumor_size is None
+        assert record.largest_lymph_node_size is None
 
     def test_missing_measurement_not_in_data(self):
         person = PersonFactory()
         data = _cmd().get_cll_data(person)
-        for field in ('absolute_lymphocyte_count', 'serum_beta2_microglobulin_level',
+        for field in ('serum_beta2_microglobulin_level',
                       'qtcf_value', 'spleen_size', 'largest_lymph_node_size'):
             assert field not in data
 
@@ -522,6 +578,46 @@ class TestMeasurableDiseaseImwg:
                       kappa_flc=None, lambda_flc=None)
         _cmd()._compute_derived_fields(pi)
         assert pi.measurable_disease_imwg is None
+
+
+# ---------------------------------------------------------------------------
+# _compute_derived_fields — measurable_disease_iwcll (issue #544)
+# ---------------------------------------------------------------------------
+
+class TestMeasurableDiseaseIwcll:
+
+    def _pi(self, **kwargs):
+        """PatientRecord with controlled CLL fields; skip save() side effects."""
+        return PatientRecordFactory.build(**kwargs)
+
+    def test_alc_above_threshold_sets_true(self):
+        """alc_thousand_per_ul >= 5.0 (10³/µL) → iwCLL measurable."""
+        pi = self._pi(alc_thousand_per_ul=5.5)
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_iwcll is True
+
+    def test_alc_below_threshold_alone_sets_false(self):
+        """alc_thousand_per_ul < 5.0 with no other criteria → not measurable."""
+        pi = self._pi(alc_thousand_per_ul=3.0, largest_lymph_node_size=None,
+                      splenomegaly=None, hepatomegaly=None)
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_iwcll is False
+
+    def test_all_none_stays_none(self):
+        pi = self._pi(alc_thousand_per_ul=None, largest_lymph_node_size=None,
+                      splenomegaly=None, hepatomegaly=None)
+        _cmd()._compute_derived_fields(pi)
+        assert pi.measurable_disease_iwcll is None
+
+    def test_old_absolute_lymphocyte_count_ignored(self):
+        """absolute_lymphocyte_count is no longer read by the IWCLL check."""
+        pi = self._pi(absolute_lymphocyte_count=50.0, alc_thousand_per_ul=None,
+                      largest_lymph_node_size=None, splenomegaly=None,
+                      hepatomegaly=None)
+        _cmd()._compute_derived_fields(pi)
+        # absolute_lymphocyte_count is set but alc_thousand_per_ul is None
+        # and no other criteria are present → None
+        assert pi.measurable_disease_iwcll is None
 
 
 # ---------------------------------------------------------------------------

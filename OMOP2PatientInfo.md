@@ -192,7 +192,8 @@ is_immunotherapy = any(term in drug_name.lower() for term in immuno_terms)
 | `serum_beta2_microglobulin_level` | 48094-6 | Beta-2-microglobulin [Mass/volume] in Serum |
 | `qtcf_value` | 8632-1 | QT interval Fridericia corrected |
 | `spleen_size` | 44996-6 | Spleen diameter (ultrasound) |
-| `largest_lymph_node_size` | 21889-1 | Lymph node greatest dimension |
+| `tumor_size` | 21889-1 | LOINC `Size Tumor`; latest dated numeric Measurement |
+| `largest_lymph_node_size` | 21889-1 + `qualifier_source_value=lymph-node` | Legacy lymph-node context only; never inferred from a code-only row |
 | `clonal_bone_marrow_b_lymphocytes` | concept name match | Clonal bone marrow B-lymphocyte % |
 | `clonal_b_lymphocyte_count` | concept name match | Clonal B-lymphocyte count |
 | `protein_expressions` | concept name match | CD markers (CD38, CD20, CD5, ZAP70) |

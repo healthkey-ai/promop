@@ -366,7 +366,10 @@ class Command(BaseCommand):
             '10839-9', '6598-7', '42637-9', '2345-7', '4548-4', '2532-0', '14804-9',
             '6301-6', '5902-2', '3173-2', '2039-6', '25390-6', '2857-1',
             '8806-2',  # EF
-            '51435-6', '32730-5', '33944-8', '33945-5', '26098-4',  # MM disease burden
+            '51435-6', '33358-3', '32730-5', '33944-8', '33945-5',  # MM disease burden
+            '36916-5', '80515-0', '33944-0', '80516-8',  # free light chains
+            '48378-4', '80517-6', '104546-7',  # free light chain ratio
+            '11118-7',  # marrow plasma cell %
             '8480-6', '8462-4',  # BP components
             '63640-7',  # pack years
             '11286-7',  # drinks/week
@@ -403,6 +406,8 @@ class Command(BaseCommand):
         episode_events = []
         patient_records = []
         deaths = []
+        skipped_undated_observations = 0
+        skipped_undated_patient_extensions = 0
 
         # Track FHIR ID → OMOP PK for cross-references within each patient
         for group_idx, group in enumerate(patient_groups):
@@ -573,10 +578,14 @@ class Command(BaseCommand):
                 obs_code = obs_loinc or obs_snomed or ''
                 obs_text = obs.get('code', {}).get('text', '') or ''
 
-                # Parse date
-                eff_dt = obs.get('effectiveDateTime', '')
-                obs_date_val = _parse_date(eff_dt) if eff_dt else date.today()
-                obs_datetime = _parse_datetime(eff_dt) if eff_dt else datetime.now()
+                # OMOP requires measurement_date / observation_date.  Do not
+                # substitute import time when FHIR does not supply an effective
+                # date: doing so makes an unknown-vintage fact look newer than
+                # genuine clinical history in the derived PatientRecord.
+                obs_date_val, obs_datetime = _observation_effective_time(obs)
+                if obs_date_val is None:
+                    skipped_undated_observations += 1
+                    continue
 
                 # Parse value
                 val_num, val_str, unit = _extract_obs_value(obs)
@@ -931,6 +940,16 @@ class Command(BaseCommand):
                     route_source_value='VACCINE',
                 ))
 
+            # ── Patient extensions with no event time ──────────────────
+            # A Patient extension carries no clinical effective time.  Do not
+            # make it appear current by substituting the import date; the FHIR
+            # path must receive a dated Observation for a mapped clinical fact.
+            extension_values = [
+                value for value in ext_data.values()
+                if value not in (None, '', [], {})
+            ]
+            skipped_undated_patient_extensions += len(extension_values)
+
             # ── Write Patient extension vitals as Measurement rows ─────
             # These are derived by refresh_patient_record via _get_vitals_data
             _VITAL_EXT_LOINC = {
@@ -940,28 +959,11 @@ class Command(BaseCommand):
                 'diastolic_blood_pressure': ('8462-4', 'mmHg'),
                 'heartrate': ('8867-4', '/min'),
             }
-            ext_date = date.today()
-            for ext_field, (loinc, unit) in _VITAL_EXT_LOINC.items():
-                val = ext_data.get(ext_field)
-                if val is not None:
-                    m_pk = _next(_mi)
-                    if m_pk is None:
-                        continue
-                    m_concept = self._get_concept(cache, 'LOINC', loinc) or concept_0
-                    measurements.append(Measurement(
-                        measurement_id=m_pk,
-                        person_id=person_id,
-                        measurement_concept=m_concept,
-                        measurement_date=ext_date,
-                        measurement_datetime=timezone.make_aware(
-                            datetime.combine(ext_date, datetime.min.time())),
-                        measurement_type_concept=ehr_type or m_concept,
-                        value_as_number=Decimal(str(val)),
-                        measurement_source_value=loinc,
-                        unit_source_value=unit,
-                    ))
+            # No rows are created from these undated extensions.  The mapping
+            # is retained as documentation of which dated FHIR Observations are
+            # required instead.
 
-            # ── Write cytogenetics + SCT as Observation rows ──────────
+            # ── Cytogenetics + SCT extension mapping (documentation) ───
             # These are derived by refresh_patient_record via _get_sct_cytogenetic_data
             _EXT_OBS = {
                 'cytogenic_markers': 'mm-cytogenetic-markers',
@@ -969,23 +971,7 @@ class Command(BaseCommand):
                 'sct_history_str': 'mm-sct-history',
                 'sct_eligibility_str': 'mm-sct-eligibility',
             }
-            for ext_field, src_val in _EXT_OBS.items():
-                val = ext_data.get(ext_field)
-                if val is not None and str(val).strip():
-                    o_pk = _next(_oi)
-                    if o_pk is None:
-                        continue
-                    observations.append(Observation(
-                        observation_id=o_pk,
-                        person_id=person_id,
-                        observation_concept=concept_0,
-                        observation_date=ext_date,
-                        observation_datetime=timezone.make_aware(
-                            datetime.combine(ext_date, datetime.min.time())),
-                        observation_type_concept=ehr_type or concept_0,
-                        value_as_string=str(val)[:60],
-                        observation_source_value=src_val,
-                    ))
+            del _VITAL_EXT_LOINC, _EXT_OBS
 
             # ── PatientRecord stub ──────────────────────────────────────
             patient_records.append(PatientRecord(
@@ -1013,6 +999,21 @@ class Command(BaseCommand):
                                                   ignore_conflicts=True)
                 PatientRecord.objects.bulk_create(patient_records, batch_size=batch_size)
 
+        if skipped_undated_observations:
+            self._print(
+                'WARNING: skipped '
+                f'{skipped_undated_observations} FHIR Observation resource(s) '
+                'without effectiveDateTime or effectivePeriod.start; no clinical '
+                'event date was available to create an OMOP fact.',
+                err=True,
+            )
+        if skipped_undated_patient_extensions:
+            self._print(
+                'WARNING: skipped '
+                f'{skipped_undated_patient_extensions} undated Patient extension value(s); '
+                'submit dated FHIR Observation resources for mapped clinical facts.'
+            )
+
         return {
             'Person': len(persons),
             'Location': len(locations),
@@ -1027,6 +1028,8 @@ class Command(BaseCommand):
             'Episode': len(episodes),
             'EpisodeEvent': len(episode_events),
             'PatientRecord': len(patient_records),
+            'SkippedUndatedFHIRObservation': skipped_undated_observations,
+            'SkippedUndatedPatientExtension': skipped_undated_patient_extensions,
         }
 
     def _parse_patient_extensions(self, patient_res):
@@ -1139,6 +1142,38 @@ def _parse_datetime(s):
             return datetime.strptime(s[:10], '%Y-%m-%d')
         except (ValueError, TypeError):
             return datetime.now()
+
+
+def _observation_effective_time(obs):
+    """Return an Observation's known effective date and optional datetime.
+
+    A date-only FHIR value is still a valid OMOP Measurement: its
+    ``measurement_date`` is known and ``measurement_datetime`` stays null.
+    When no effective date is supplied, return ``(None, None)`` rather than
+    fabricating the import date.  Callers must quarantine/report that source
+    record instead of creating a temporally misleading clinical fact.
+    """
+    effective = (
+        obs.get('effectiveDateTime')
+        or (obs.get('effectivePeriod') or {}).get('start')
+    )
+    if not effective:
+        return None, None
+
+    try:
+        effective_date = datetime.strptime(effective[:10], '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        return None, None
+
+    # A FHIR date (rather than dateTime) establishes the clinical day, not a
+    # fictitious midnight collection time.
+    if len(effective) == 10:
+        return effective_date, None
+
+    try:
+        return effective_date, datetime.fromisoformat(effective.replace('Z', '+00:00'))
+    except (ValueError, TypeError):
+        return effective_date, None
 
 
 def _extract_obs_value(obs):

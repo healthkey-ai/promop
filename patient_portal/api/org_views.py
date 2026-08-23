@@ -19,7 +19,7 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.core.validators import URLValidator
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, F, Q
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.utils.decorators import method_decorator
@@ -88,7 +88,10 @@ def _send_invitation_email(invitation) -> None:
         )
         raise InvitationEmailError
 
-from omop_core.models import Organization, OrgTrust, OrgInvitation, GroupAccess
+from omop_core.models import (
+    ConditionOccurrence, DrugExposure, Measurement, Observation,
+    Organization, OrgTrust, OrgInvitation, GroupAccess, ProcedureOccurrence,
+)
 from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
 from omop_core.services.access import get_admin_orgs
 from omop_core.services.pk import next_pk
@@ -132,6 +135,122 @@ def _get_or_create_invitee_identity(email):
 
 
 ROLE_RANK = {'org_admin': 3, 'doctor': 2, 'analyst': 1, 'patient': 0}
+
+NONCONFORMING_VOCABULARIES = frozenset({'LOCAL', 'FHIR', 'sct'})
+
+VOCABULARY_USAGE_SOURCES = (
+    (ConditionOccurrence, 'condition_occurrence', (
+        ('condition_concept', 'concept'),
+        ('condition_source_concept', 'source_concept'),
+    )),
+    (ProcedureOccurrence, 'procedure_occurrence', (
+        ('procedure_concept', 'concept'),
+        ('procedure_source_concept', 'source_concept'),
+    )),
+    (DrugExposure, 'drug_exposure', (
+        ('drug_concept', 'concept'),
+        ('drug_source_concept', 'source_concept'),
+    )),
+    (Measurement, 'measurement', (
+        ('measurement_concept', 'concept'),
+        ('measurement_source_concept', 'source_concept'),
+    )),
+    (Observation, 'observation', (
+        ('observation_concept', 'concept'),
+        ('observation_source_concept', 'source_concept'),
+    )),
+)
+
+
+def _vocabulary_group(vocabulary_id, source):
+    if vocabulary_id in NONCONFORMING_VOCABULARIES:
+        return 'nonconforming', 2, 'Non-conforming'
+    if (vocabulary_id or '').startswith('HK-') or source == 'HealthKey':
+        return 'healthkey', 1, f'HealthKey: {vocabulary_id}'
+    return 'athena', 0, 'Athena / external'
+
+
+def _org_vocabulary_usage(org):
+    concepts = {}
+
+    def ensure_concept(row):
+        concept_id = row['concept_id']
+        if concept_id not in concepts:
+            group, group_order, group_label = _vocabulary_group(
+                row['vocabulary_id'], row['source'],
+            )
+            concepts[concept_id] = {
+                'concept_id': concept_id,
+                'vocabulary_id': row['vocabulary_id'],
+                'concept_code': row['concept_code'],
+                'concept_name': row['concept_name'],
+                'domain_id': row['domain_id'],
+                'standard_concept': row['standard_concept'],
+                'source': row['source'],
+                'group': group,
+                'group_label': group_label,
+                'group_order': group_order,
+                'patient_ids': set(),
+                'instance_count': 0,
+                'usage': [],
+            }
+        return concepts[concept_id]
+
+    for model, table_name, fields in VOCABULARY_USAGE_SOURCES:
+        base_qs = model.objects.filter(person__patient_record__organization=org)
+        pk_name = model._meta.pk.name
+        for field_name, role in fields:
+            field_filter = {f'{field_name}__isnull': False}
+            value_exprs = {
+                'concept_id': F(f'{field_name}_id'),
+                'vocabulary_id': F(f'{field_name}__vocabulary_id'),
+                'concept_code': F(f'{field_name}__concept_code'),
+                'concept_name': F(f'{field_name}__concept_name'),
+                'domain_id': F(f'{field_name}__domain_id'),
+                'standard_concept': F(f'{field_name}__standard_concept'),
+                'source': F(f'{field_name}__source'),
+            }
+            usage_rows = (
+                base_qs
+                .filter(**field_filter)
+                .values(**value_exprs)
+                .annotate(instance_count=Count(pk_name))
+            )
+            for row in usage_rows:
+                concept = ensure_concept(row)
+                count = row['instance_count']
+                concept['instance_count'] += count
+                concept['usage'].append({
+                    'table': table_name,
+                    'column': f'{field_name}_id',
+                    'role': role,
+                    'instance_count': count,
+                })
+
+            patient_rows = (
+                base_qs
+                .filter(**field_filter)
+                .values('person_id', concept_id=F(f'{field_name}_id'))
+                .distinct()
+            )
+            for row in patient_rows:
+                if row['concept_id'] in concepts:
+                    concepts[row['concept_id']]['patient_ids'].add(row['person_id'])
+
+    result = []
+    for concept in concepts.values():
+        concept['patient_count'] = len(concept.pop('patient_ids'))
+        concept['usage'].sort(key=lambda item: (-item['instance_count'], item['table'], item['column']))
+        result.append(concept)
+
+    result.sort(key=lambda row: (
+        row['group_order'],
+        row['vocabulary_id'] or '',
+        -row['patient_count'],
+        -row['instance_count'],
+        row['concept_name'] or '',
+    ))
+    return result
 
 
 def _normalize_redirect_url(role, redirect_url):
@@ -213,7 +332,16 @@ class OrgDetailView(APIView):
         # Non-staff org_admins cannot toggle is_active
         if not getattr(request.user, 'is_staff', False):
             ser.validated_data.pop('is_active', None)
+        unit_policy_changed = (
+            'clinical_unit_system' in ser.validated_data
+            and ser.validated_data['clinical_unit_system'] != org.clinical_unit_system
+        )
         ser.save()
+        if unit_policy_changed:
+            # The setting changes a derived compatibility field. Mark exactly
+            # this tenant's rows stale; operators can rederive them without
+            # putting a potentially large refresh on the admin PATCH request.
+            PatientRecord.objects.filter(organization=org).update(derivation_version=0)
         return Response(ser.data)
 
     def delete(self, request, slug):
@@ -426,12 +554,18 @@ def confirm_invitation(request):
                     gender_source_value='unknown',
                     race_source_value='unknown',
                     ethnicity_source_value='unknown',
+                    email=invitation.email,
                 )
                 PatientRecord.objects.create(
-                    person=person, email=invitation.email,
+                    person=person,
                     organization=invitation.org,
                 )
                 PatientUser.objects.create(identity=identity, person=person)
+            if person.email != invitation.email:
+                person.email = invitation.email
+                person.save(update_fields=['email'])
+            from omop_core.services.patient_record_service import refresh_patient_record
+            refresh_patient_record(person)
 
         invitation.confirmed_at = timezone.now()
         invitation.save(update_fields=['confirmed_at'])
@@ -591,9 +725,42 @@ class OrgAccessDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class OrgVocabularyUsageView(APIView):
+    permission_classes = [IsStaffOrOrgAdmin]
+
+    def get(self, request, slug):
+        org = _get_org(slug)
+        concepts = _org_vocabulary_usage(org)
+        return Response({
+            'org_slug': org.slug,
+            'org_name': org.name,
+            'concept_count': len(concepts),
+            'concepts': concepts,
+        })
+
+
 # ---------------------------------------------------------------------------
 # Public org info (unauthenticated)
 # ---------------------------------------------------------------------------
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def org_signup_directory(request):
+    """List orgs a logged-out visitor may self-register with.
+
+    The homepage Sign Up tab needs to know which orgs accept registrations, and
+    an anonymous visitor cannot read the authenticated org list. Only name and
+    slug are exposed — the same two fields `org_public_info` already publishes
+    per org, just enumerated.
+    """
+    orgs = (
+        Organization.objects
+        .filter(is_active=True, allows_patient_signup=True)
+        .order_by('name')
+        .values('name', 'slug')
+    )
+    return Response(list(orgs))
+
 
 @api_view(['GET'])
 @permission_classes([AllowAny])
@@ -630,74 +797,108 @@ class OrgPatientSignupView(APIView):
         given_name = (request.data.get('given_name') or '').strip()
         family_name = (request.data.get('family_name') or '').strip()
 
-        if not email:
-            return Response({'error': 'email is required.'}, status=status.HTTP_400_BAD_REQUEST)
-        try:
-            from django.core.validators import validate_email as _validate_email
-            _validate_email(email)
-        except ValidationError:
-            return Response({'error': 'Invalid email address.'}, status=status.HTTP_400_BAD_REQUEST)
-        if not password:
-            return Response({'error': 'password is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        # Collect field-level validation errors so the frontend can display
+        # them next to the relevant input rather than as a single blob.
+        field_errors: dict[str, list[str]] = {}
 
-        from patient_portal.services import password_validation_errors, set_new_password
-        pw_errors = password_validation_errors(password, email=email)
-        if pw_errors:
-            return Response({'error': pw_errors}, status=status.HTTP_400_BAD_REQUEST)
+        if not email:
+            field_errors.setdefault('email', []).append('Email is required.')
+        else:
+            try:
+                from django.core.validators import validate_email as _validate_email
+                _validate_email(email)
+            except ValidationError:
+                field_errors.setdefault('email', []).append(
+                    'Enter a valid email address.'
+                )
+
+        if not password:
+            field_errors.setdefault('password', []).append('Password is required.')
+        else:
+            from patient_portal.services import password_validation_errors
+            pw_errors = password_validation_errors(password, email=email)
+            if pw_errors:
+                field_errors.setdefault('password', []).extend(pw_errors)
+
+        if field_errors:
+            return Response(
+                {'errors': field_errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from patient_portal.services import set_new_password
 
         # Check for existing account with this email
         existing = _find_identity_by_email(email)
         if existing and existing.has_usable_password():
             return Response(
-                {'error': 'An account with this email already exists. Please log in instead.'},
+                {
+                    'error': 'An account with this email already exists. Please log in instead.',
+                    'errors': {
+                        'email': ['An account with this email already exists. Please log in instead.'],
+                    },
+                },
                 status=status.HTTP_409_CONFLICT,
             )
 
-        with transaction.atomic():
-            if existing:
-                # Placeholder identity from a prior invitation — set its password
-                identity = existing
-                set_new_password(identity, password)
-                if given_name:
-                    identity.name = f"{given_name} {family_name}".strip()
-                    identity.save(update_fields=['name'])
-            else:
-                identity = Identity.objects.create_user(
-                    email=email,
-                    password=password,
-                    name=f"{given_name} {family_name}".strip(),
-                )
+        try:
+            with transaction.atomic():
+                if existing:
+                    # Placeholder identity from a prior invitation — set its password
+                    identity = existing
+                    set_new_password(identity, password)
+                    if given_name:
+                        identity.name = f"{given_name} {family_name}".strip()
+                        identity.save(update_fields=['name'])
+                else:
+                    identity = Identity.objects.create_user(
+                        email=email,
+                        password=password,
+                        name=f"{given_name} {family_name}".strip(),
+                    )
 
-            # Reuse existing PatientUser link if present (e.g. from a prior invitation
-            # or signup at another org)
-            existing_pu = PatientUser.objects.filter(identity=identity).first()
-            if existing_pu:
-                person = existing_pu.person
-                # Ensure a PatientRecord exists for this person in the new org
-                PatientRecord.objects.get_or_create(
-                    person=person,
-                    organization=org,
-                    defaults={'email': email},
-                )
-            else:
-                new_id = next_pk(Person, 'person_id')
-                person = Person.objects.create(
-                    person_id=new_id,
-                    given_name=given_name or None,
-                    family_name=family_name or None,
-                    year_of_birth=1900,
-                    gender_source_value='unknown',
-                    race_source_value='unknown',
-                    ethnicity_source_value='unknown',
-                )
-                PatientRecord.objects.create(person=person, email=email, organization=org)
-                PatientUser.objects.create(identity=identity, person=person)
+                # Reuse existing PatientUser link if present (e.g. from a prior invitation
+                # or signup at another org)
+                existing_pu = PatientUser.objects.filter(identity=identity).first()
+                if existing_pu:
+                    person = existing_pu.person
+                    if person.email != email:
+                        person.email = email
+                        person.save(update_fields=['email'])
+                    # Ensure a PatientRecord exists for this person in the new org
+                    PatientRecord.objects.get_or_create(
+                        person=person,
+                        organization=org,
+                    )
+                else:
+                    new_id = next_pk(Person, 'person_id')
+                    person = Person.objects.create(
+                        person_id=new_id,
+                        given_name=given_name or None,
+                        family_name=family_name or None,
+                        year_of_birth=1900,
+                        gender_source_value='unknown',
+                        race_source_value='unknown',
+                        ethnicity_source_value='unknown',
+                        email=email,
+                    )
+                    PatientRecord.objects.create(person=person, organization=org)
+                    PatientUser.objects.create(identity=identity, person=person)
 
-            # Grant patient access to this org
-            GroupAccess.objects.get_or_create(
-                identity=identity,
-                org=org,
-                defaults={'role': 'patient'},
+                from omop_core.services.patient_record_service import refresh_patient_record
+                refresh_patient_record(person)
+
+                # Grant patient access to this org
+                GroupAccess.objects.get_or_create(
+                    identity=identity,
+                    org=org,
+                    defaults={'role': 'patient'},
+                )
+        except Exception:
+            logger.exception('Unexpected error during patient signup for %s', email)
+            return Response(
+                {'error': 'Could not create your account. Please try again or contact support.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
         # Auto-login via session

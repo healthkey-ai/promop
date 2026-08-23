@@ -11,25 +11,30 @@ Test flow:
 
 import io
 import json
+from typing import Any
 import os
 import tempfile
+import unittest
 from datetime import date, timedelta
 
 from patient_portal.models import Identity
 from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
+from django.contrib.contenttypes.models import ContentType
 from rest_framework import status
 from rest_framework.test import APIClient
 
 from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
-    Person, PatientRecord, ProvenanceRecord,
+    Person, PatientRecord, ProvenanceRecord, FieldConceptMapping,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     Death, PatientDocument, RecordRevision,
     Relationship, ConceptRelationship, ConceptAncestor,
     SctEligibility,
     FhirConnection, FhirOauthState, Institution,
     ObservationPeriod, PatientSurveyResponse, PersonLanguageSkill, Survey,
+    VisitOccurrence,
+    Organization, GroupAccess,
 )
 from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
 from omop_oncology.models import CancerModifier, Episode, EpisodeEvent, Histology, StemTable
@@ -41,6 +46,9 @@ from omop_oncology.models import CancerModifier, Episode, EpisodeEvent, Histolog
 
 def _make_vocab_fixtures():
     """Create the minimum OMOP vocabulary records required by Concept FKs."""
+    from omop_core.test_utils import ensure_test_concept_zero
+
+    ensure_test_concept_zero()
     vocab, _ = Vocabulary.objects.get_or_create(
         vocabulary_id='TEST',
         defaults={
@@ -106,10 +114,35 @@ def _make_vocab_fixtures():
     _concept(19136160, 'Drug',                    domain_drug)
     # Generic procedure concept — fallback for FHIR Procedure ingestion
     _concept(20000001, 'Procedure',               domain_procedure)
-    # Gender concepts used by get_gender_concept() in views.py
-    _concept(8532, 'FEMALE', domain_gender)
-    _concept(8507, 'MALE',   domain_gender)
-    _concept(8551, 'UNKNOWN', domain_gender)
+    # Gender concepts used by get_gender_concept() in views.py.
+    #
+    # These carry their real OMOP vocabulary and codes rather than the generic
+    # `concept_code=str(concept_id)` the helper above assigns. get_gender_concept
+    # resolves by (vocabulary_id, concept_code) — the natural key — so a concept
+    # with the right id but a code of '8507' is not a gender concept as far as the
+    # resolver is concerned, and rightly so.
+    gender_vocab, _ = Vocabulary.objects.get_or_create(
+        vocabulary_id='Gender',
+        defaults={'vocabulary_name': 'OMOP Gender', 'vocabulary_concept_id': 0},
+    )
+
+    def _gender_concept(cid, name, code):
+        Concept.objects.get_or_create(
+            concept_id=cid,
+            defaults={
+                'concept_name': name,
+                'domain': domain_gender,
+                'vocabulary': gender_vocab,
+                'concept_class': cc,
+                'concept_code': code,
+                'valid_start_date': today,
+                'valid_end_date': far_future,
+            },
+        )
+
+    _gender_concept(8532, 'FEMALE', 'F')
+    _gender_concept(8507, 'MALE', 'M')
+    _gender_concept(8551, 'UNKNOWN', 'U')
 
 
 def _make_fhir_bundle():
@@ -713,35 +746,35 @@ class TransformationFieldValidationTest(FhirUploadBase):
             f'/api/v1/patient-records/{self._pi.person_id}/', payload, format='json'
         )
 
-    def test_valid_transformation_fields_accepted(self):
+    def test_transformation_fields_are_read_only_via_patient_record_patch(self):
         response = self._patch({
             'transformed_to_dlbcl': True,
             'dlbcl_transformation_date': '2023-04-15',
             'post_transformation_outcome': 'Complete Response',
         })
-        self.assertEqual(response.status_code, status.HTTP_200_OK,
-                         msg=f'PATCH failed: {response.data}')
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED,
+                         msg=f'Mapped-field PATCH was not rejected: {response.data}')
         self._pi.refresh_from_db()
-        self.assertTrue(self._pi.transformed_to_dlbcl)
-        self.assertEqual(self._pi.post_transformation_outcome, 'Complete Response')
+        self.assertFalse(self._pi.transformed_to_dlbcl)
+        self.assertIsNone(self._pi.post_transformation_outcome)
 
     def test_future_transformation_date_rejected(self):
         response = self._patch({
             'transformed_to_dlbcl': True,
             'dlbcl_transformation_date': '2999-01-01',
         })
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
     def test_outcome_without_flag_rejected(self):
         response = self._patch({'post_transformation_outcome': 'Complete Response'})
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
     def test_unrecognized_outcome_rejected(self):
         response = self._patch({
             'transformed_to_dlbcl': True,
             'post_transformation_outcome': 'Cured Forever',
         })
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
     def test_vocabulary_endpoint_serves_outcomes(self):
         response = self.client.get('/api/vocabularies/post-transformation-outcome/')
@@ -949,7 +982,7 @@ class TherapyComponentIdsAPITest(FhirUploadBase):
             {'therapy_component_ids': [35806260, 19103793]},
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         record.refresh_from_db()
         self.assertEqual(
             record.therapy_component_ids, [111],
@@ -957,7 +990,7 @@ class TherapyComponentIdsAPITest(FhirUploadBase):
         )
 
     def test_all_derived_therapy_id_fields_read_only_via_patch(self):
-        """Every derived therapy-id field + provenance ignores client PATCHes."""
+        """Every derived therapy-id field + provenance rejects client PATCHes."""
         derived = {
             'first_line_therapy_id': 35806260,
             'second_line_therapy_id': 35806261,
@@ -978,7 +1011,7 @@ class TherapyComponentIdsAPITest(FhirUploadBase):
             derived,
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         record.refresh_from_db()
         for field in derived:
             current = getattr(record, field)
@@ -1000,7 +1033,7 @@ class TherapyComponentIdsAPITest(FhirUploadBase):
             {'later_therapies': [{'lineNumber': 9, 'therapy': 'HACK', 'concept_id': 999}]},
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         record.refresh_from_db()
         self.assertEqual(
             record.later_therapies, [],
@@ -1509,6 +1542,454 @@ class OmopEndpointAuthTest(FhirUploadBase):
     def test_documents_requires_auth(self):
         resp = self.client.get('/api/documents/')
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class OmopUnknownQueryFilterTest(TestCase):
+    """Clinical list endpoints must reject filters they do not implement."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = Identity.objects.create_superuser(
+            email='omop-filter-admin@test.com',
+            password='not-used',
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.staff)
+
+    def assertUnsupportedParam(self, url, param='definitely_not_supported'):
+        resp = self.client.get(url, {param: '1'})
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn(param, resp.data['unsupported_params'])
+        self.assertIn('supported_params', resp.data)
+
+    def test_common_omop_lists_reject_unknown_query_params(self):
+        for url in [
+            '/api/conditions/',
+            '/api/drug-exposures/',
+            '/api/observations/',
+            '/api/procedures/',
+            '/api/episodes/',
+        ]:
+            with self.subTest(url=url):
+                self.assertUnsupportedParam(url)
+
+    def test_measurements_accept_declared_filters_but_reject_unknown(self):
+        accepted = self.client.get('/api/measurements/', {
+            'person_id': '1',
+            'include_erroneous': 'true',
+            'measurement_concept_id': '0',
+            'measurement_source_concept_id': '0',
+            'concept_code': '718-7',
+            'measurement_date__gte': '2024-01-01',
+            'measurement_date__lte': '2024-12-31',
+            'visit_occurrence_id': '10',
+        })
+        self.assertNotEqual(
+            accepted.status_code,
+            status.HTTP_400_BAD_REQUEST,
+            msg=getattr(accepted, 'data', accepted.content),
+        )
+
+        self.assertUnsupportedParam('/api/measurements/', 'measurement_source_value')
+
+    def test_episode_events_reject_unknown_query_params_before_required_episode_check(self):
+        self.assertUnsupportedParam('/api/episode-events/')
+
+        missing_episode = self.client.get('/api/episode-events/')
+        self.assertEqual(missing_episode.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            missing_episode.data['detail'],
+            'episode_id query parameter is required.',
+        )
+
+    def test_episodes_reject_visit_filter_because_they_have_no_visit_fk(self):
+        self.assertUnsupportedParam('/api/episodes/', 'visit_occurrence_id')
+
+
+class OmopClinicalPaginationTest(TestCase):
+    """Clinical list endpoints expose opt-in pagination without breaking arrays."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.staff = Identity.objects.create_superuser(
+            email='omop-pagination-admin@test.com',
+            password='not-used',
+        )
+        cls.person = Person.objects.create(person_id=88901, year_of_birth=1975)
+        cls.concept = Concept.objects.get(concept_id=3000963)
+        cls.drug_concept = Concept.objects.get(concept_id=19136160)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.episode_concept = Concept.objects.get(concept_id=32531)
+        base = date(2024, 1, 1)
+        for i in range(3):
+            ConditionOccurrence.objects.create(
+                condition_occurrence_id=889010 + i,
+                person=cls.person,
+                condition_concept=cls.concept,
+                condition_start_date=base + timedelta(days=i),
+                condition_type_concept=cls.type_concept,
+                condition_source_value=f'condition-{i}',
+            )
+            DrugExposure.objects.create(
+                drug_exposure_id=889020 + i,
+                person=cls.person,
+                drug_concept=cls.drug_concept,
+                drug_exposure_start_date=base + timedelta(days=i),
+                drug_type_concept=cls.type_concept,
+                drug_source_value=f'drug-{i}',
+            )
+            Measurement.objects.create(
+                measurement_id=889030 + i,
+                person=cls.person,
+                measurement_concept=cls.concept,
+                measurement_date=base + timedelta(days=i),
+                measurement_type_concept=cls.type_concept,
+                measurement_source_value=f'measurement-{i}',
+            )
+            Observation.objects.create(
+                observation_id=889040 + i,
+                person=cls.person,
+                observation_concept=cls.concept,
+                observation_date=base + timedelta(days=i),
+                observation_type_concept=cls.type_concept,
+                observation_source_value=f'observation-{i}',
+            )
+            ProcedureOccurrence.objects.create(
+                procedure_occurrence_id=889050 + i,
+                person=cls.person,
+                procedure_concept=cls.concept,
+                procedure_date=base + timedelta(days=i),
+                procedure_type_concept=cls.type_concept,
+                procedure_source_value=f'procedure-{i}',
+            )
+            Episode.objects.create(
+                episode_id=889060 + i,
+                person=cls.person,
+                episode_concept=cls.episode_concept,
+                episode_start_date=base + timedelta(days=i),
+                episode_object_concept=cls.drug_concept,
+                episode_type_concept=cls.type_concept,
+                episode_number=i + 1,
+                episode_source_value=f'episode-{i}',
+            )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.staff)
+
+    def assertPaginated(self, route):
+        resp = self.client.get(
+            f'/api/{route}/',
+            {'person_id': self.person.person_id, 'limit': 2},
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['count'], 3)
+        self.assertEqual(len(resp.data['results']), 2)
+        self.assertIn('next', resp.data)
+        self.assertIn('previous', resp.data)
+
+    def test_limit_returns_paginated_envelope_for_clinical_lists(self):
+        for route in [
+            'conditions',
+            'drug-exposures',
+            'measurements',
+            'observations',
+            'procedures',
+            'episodes',
+        ]:
+            with self.subTest(route=route):
+                self.assertPaginated(route)
+
+    def test_page_size_alias_returns_paginated_envelope(self):
+        resp = self.client.get(
+            '/api/measurements/',
+            {'person_id': self.person.person_id, 'page_size': 2},
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['count'], 3)
+        self.assertEqual(len(resp.data['results']), 2)
+
+    def test_legacy_list_shape_is_preserved_without_pagination_params(self):
+        resp = self.client.get(
+            '/api/measurements/',
+            {'person_id': self.person.person_id},
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIsInstance(resp.data, list)
+        self.assertEqual(len(resp.data), 3)
+
+
+class OmopClinicalFilterTest(TestCase):
+    """Clinical list endpoints expose concept, code, date, and visit filters."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.staff = Identity.objects.create_superuser(
+            email='omop-clinical-filter-admin@test.com',
+            password='not-used',
+        )
+        cls.person = Person.objects.create(person_id=88911, year_of_birth=1975)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.source_concept = Concept.objects.get(concept_id=32856)
+        cls.other_source_concept = Concept.objects.get(concept_id=32869)
+        cls.condition_concept = Concept.objects.get(concept_id=4112853)
+        cls.drug_concept = Concept.objects.get(concept_id=19136160)
+        cls.measurement_concept = Concept.objects.get(concept_id=3000963)
+        cls.episode_concept = Concept.objects.get(concept_id=32531)
+        cls.procedure_concept = Concept.objects.get(concept_id=20000001)
+        cls.visit = VisitOccurrence.objects.create(
+            visit_occurrence_id=889110,
+            person=cls.person,
+            visit_concept=cls.type_concept,
+            visit_start_date=date(2024, 1, 10),
+            visit_end_date=date(2024, 1, 10),
+            visit_type_concept=cls.type_concept,
+            visit_source_value='filter-visit',
+        )
+        cls.other_visit = VisitOccurrence.objects.create(
+            visit_occurrence_id=889111,
+            person=cls.person,
+            visit_concept=cls.type_concept,
+            visit_start_date=date(2024, 1, 1),
+            visit_end_date=date(2024, 1, 1),
+            visit_type_concept=cls.type_concept,
+            visit_source_value='other-filter-visit',
+        )
+        cls._create_rows()
+
+    @classmethod
+    def _create_rows(cls):
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=8891110,
+            person=cls.person,
+            condition_concept=cls.condition_concept,
+            condition_start_date=date(2024, 1, 10),
+            condition_type_concept=cls.type_concept,
+            condition_source_concept=cls.source_concept,
+            visit_occurrence=cls.visit,
+        )
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=8891111,
+            person=cls.person,
+            condition_concept=cls.measurement_concept,
+            condition_start_date=date(2024, 1, 1),
+            condition_type_concept=cls.type_concept,
+            condition_source_concept=cls.other_source_concept,
+            visit_occurrence=cls.other_visit,
+        )
+        DrugExposure.objects.create(
+            drug_exposure_id=8891120,
+            person=cls.person,
+            drug_concept=cls.drug_concept,
+            drug_exposure_start_date=date(2024, 1, 10),
+            drug_exposure_end_date=date(2024, 1, 10),
+            drug_type_concept=cls.type_concept,
+            drug_source_concept=cls.source_concept,
+            visit_occurrence=cls.visit,
+        )
+        DrugExposure.objects.create(
+            drug_exposure_id=8891121,
+            person=cls.person,
+            drug_concept=cls.measurement_concept,
+            drug_exposure_start_date=date(2024, 1, 1),
+            drug_exposure_end_date=date(2024, 1, 1),
+            drug_type_concept=cls.type_concept,
+            drug_source_concept=cls.other_source_concept,
+            visit_occurrence=cls.other_visit,
+        )
+        Measurement.objects.create(
+            measurement_id=8891130,
+            person=cls.person,
+            measurement_concept=cls.measurement_concept,
+            measurement_date=date(2024, 1, 10),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_concept=cls.source_concept,
+            visit_occurrence=cls.visit,
+        )
+        Measurement.objects.create(
+            measurement_id=8891131,
+            person=cls.person,
+            measurement_concept=cls.condition_concept,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_concept=cls.other_source_concept,
+            visit_occurrence=cls.other_visit,
+        )
+        Observation.objects.create(
+            observation_id=8891140,
+            person=cls.person,
+            observation_concept=cls.measurement_concept,
+            observation_date=date(2024, 1, 10),
+            observation_type_concept=cls.type_concept,
+            observation_source_concept=cls.source_concept,
+            visit_occurrence=cls.visit,
+        )
+        Observation.objects.create(
+            observation_id=8891141,
+            person=cls.person,
+            observation_concept=cls.condition_concept,
+            observation_date=date(2024, 1, 1),
+            observation_type_concept=cls.type_concept,
+            observation_source_concept=cls.other_source_concept,
+            visit_occurrence=cls.other_visit,
+        )
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=8891150,
+            person=cls.person,
+            procedure_concept=cls.procedure_concept,
+            procedure_date=date(2024, 1, 10),
+            procedure_type_concept=cls.type_concept,
+            procedure_source_concept=cls.source_concept,
+            visit_occurrence=cls.visit,
+        )
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=8891151,
+            person=cls.person,
+            procedure_concept=cls.condition_concept,
+            procedure_date=date(2024, 1, 1),
+            procedure_type_concept=cls.type_concept,
+            procedure_source_concept=cls.other_source_concept,
+            visit_occurrence=cls.other_visit,
+        )
+        Episode.objects.create(
+            episode_id=8891160,
+            person=cls.person,
+            episode_concept=cls.episode_concept,
+            episode_start_date=date(2024, 1, 10),
+            episode_object_concept=cls.drug_concept,
+            episode_type_concept=cls.type_concept,
+            episode_source_concept=cls.source_concept,
+            episode_number=1,
+        )
+        Episode.objects.create(
+            episode_id=8891161,
+            person=cls.person,
+            episode_concept=cls.condition_concept,
+            episode_start_date=date(2024, 1, 1),
+            episode_object_concept=cls.drug_concept,
+            episode_type_concept=cls.type_concept,
+            episode_source_concept=cls.other_source_concept,
+            episode_number=2,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.staff)
+
+    def assertClinicalFilter(self, route, params, id_field, expected_id):
+        resp = self.client.get(
+            f'/api/{route}/',
+            {
+                'person_id': self.person.person_id,
+                'visit_occurrence_id': self.visit.visit_occurrence_id,
+                **params,
+            },
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual([row[id_field] for row in resp.data], [expected_id])
+
+    def assertEpisodeFilter(self, params, expected_id):
+        resp = self.client.get(
+            '/api/episodes/',
+            {
+                'person_id': self.person.person_id,
+                **params,
+            },
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual([row['episode_id'] for row in resp.data], [expected_id])
+
+    def test_conditions_accept_clinical_filters(self):
+        self.assertClinicalFilter(
+            'conditions',
+            {
+                'condition_concept_id': self.condition_concept.concept_id,
+                'condition_source_concept_id': self.source_concept.concept_id,
+                'concept_code': self.condition_concept.concept_code,
+                'condition_start_date__gte': '2024-01-05',
+                'condition_start_date__lte': '2024-01-20',
+            },
+            'condition_occurrence_id',
+            8891110,
+        )
+
+    def test_drug_exposures_accept_clinical_filters(self):
+        self.assertClinicalFilter(
+            'drug-exposures',
+            {
+                'drug_concept_id': self.drug_concept.concept_id,
+                'drug_source_concept_id': self.source_concept.concept_id,
+                'concept_code': self.drug_concept.concept_code,
+                'drug_exposure_start_date__gte': '2024-01-05',
+                'drug_exposure_start_date__lte': '2024-01-20',
+            },
+            'drug_exposure_id',
+            8891120,
+        )
+
+    def test_measurements_keep_existing_clinical_filters(self):
+        self.assertClinicalFilter(
+            'measurements',
+            {
+                'measurement_concept_id': self.measurement_concept.concept_id,
+                'measurement_source_concept_id': self.source_concept.concept_id,
+                'concept_code': self.measurement_concept.concept_code,
+                'measurement_date__gte': '2024-01-05',
+                'measurement_date__lte': '2024-01-20',
+            },
+            'measurement_id',
+            8891130,
+        )
+
+    def test_observations_accept_clinical_filters(self):
+        self.assertClinicalFilter(
+            'observations',
+            {
+                'observation_concept_id': self.measurement_concept.concept_id,
+                'observation_source_concept_id': self.source_concept.concept_id,
+                'concept_code': self.measurement_concept.concept_code,
+                'observation_date__gte': '2024-01-05',
+                'observation_date__lte': '2024-01-20',
+            },
+            'observation_id',
+            8891140,
+        )
+
+    def test_procedures_accept_clinical_filters(self):
+        self.assertClinicalFilter(
+            'procedures',
+            {
+                'procedure_concept_id': self.procedure_concept.concept_id,
+                'procedure_source_concept_id': self.source_concept.concept_id,
+                'concept_code': self.procedure_concept.concept_code,
+                'procedure_date__gte': '2024-01-05',
+                'procedure_date__lte': '2024-01-20',
+            },
+            'procedure_occurrence_id',
+            8891150,
+        )
+
+    def test_episodes_accept_clinical_filters(self):
+        self.assertEpisodeFilter(
+            {
+                'episode_concept_id': self.episode_concept.concept_id,
+                'episode_source_concept_id': self.source_concept.concept_id,
+                'concept_code': self.episode_concept.concept_code,
+                'episode_start_date__gte': '2024-01-05',
+                'episode_start_date__lte': '2024-01-20',
+            },
+            8891160,
+        )
 
 
 class OmopObservationsEndpointTest(FhirUploadBase):
@@ -2911,15 +3392,113 @@ class SmartPatientRecordReadOnlyTest(_SmartBase):
         )
         self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
-    def test_patient_info_patch_succeeds_with_write_token(self):
-        """PATCH is now supported — write-through to OMOP was added in HKI-PDS-01."""
+    def test_patient_info_patch_returns_405_with_write_token(self):
+        """Clinical PatientRecord fields are never written through this API."""
         PatientRecord.objects.get_or_create(person=self.person, defaults={'organization': self.organization})
         resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
             {'disease': 'Updated disease'},
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_patient_info_patch_rejects_gender_as_omop_mapped(self):
+        """Gender is OMOP-backed and must not be writable through PatientRecord."""
+        record, _ = PatientRecord.objects.get_or_create(
+            person=self.person, defaults={'organization': self.organization},
+        )
+        record.gender = 'M'
+        record.save(update_fields=['gender'])
+
+        resp = self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'gender': 'Female'},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED, resp.data)
+        self.assertEqual(resp.data['fields'], ['gender'])
+        record.refresh_from_db()
+        self.assertEqual(record.gender, 'M')
+
+    def test_serializer_marks_gender_read_only(self):
+        """Declared serializer fields must agree with the mapped-field contract."""
+        from patient_portal.api.serializers import PatientRecordSerializer
+
+        serializer = PatientRecordSerializer()
+
+        self.assertTrue(serializer.fields['gender'].read_only)
+
+    def test_profile_field_is_written_on_person_and_projected_to_patient_record(self):
+        """Profile/admin fields are Person extensions, not PatientRecord writes."""
+        record, _ = PatientRecord.objects.get_or_create(
+            person=self.person, defaults={'organization': self.organization},
+        )
+        resp = self.write_client.patch(
+            f'/api/persons/{self.person.person_id}/',
+            {
+                'email': 'profile@example.test',
+                'phone_number': '555-0100',
+                'facility_name': 'Acme Oncology',
+                'validated': True,
+                'validated_by': 'Dr Reviewer',
+                'validation_date': '2026-08-18',
+                'suppress_demographics_for_others': True,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.person.refresh_from_db()
+        record.refresh_from_db()
+        self.assertEqual(self.person.email, 'profile@example.test')
+        self.assertEqual(self.person.phone_number, '555-0100')
+        self.assertEqual(self.person.facility_name, 'Acme Oncology')
+        self.assertTrue(self.person.validated)
+        self.assertEqual(self.person.validated_by, 'Dr Reviewer')
+        self.assertEqual(str(self.person.validation_date), '2026-08-18')
+        self.assertTrue(self.person.suppress_demographics_for_others)
+        self.assertEqual(record.email, 'profile@example.test')
+        self.assertEqual(record.phone_number, '555-0100')
+        self.assertEqual(record.facility_name, 'Acme Oncology')
+        self.assertTrue(record.validated)
+        self.assertEqual(record.validated_by, 'Dr Reviewer')
+        self.assertEqual(str(record.validation_date), '2026-08-18')
+        self.assertTrue(record.suppress_demographics_for_others)
+
+    def test_patient_info_patch_rejects_profile_fields(self):
+        """PatientRecord has no writable exceptions; write profile fields to Person."""
+        record, _ = PatientRecord.objects.get_or_create(
+            person=self.person, defaults={'organization': self.organization},
+        )
+        resp = self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {
+                'email': 'patient-record-write@example.test',
+                'phone_number': '555-0100',
+                'validated': True,
+                'suppress_demographics_for_others': True,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED, resp.data)
+        self.assertEqual(
+            resp.data['fields'],
+            ['email', 'phone_number', 'suppress_demographics_for_others', 'validated'],
+        )
+        record.refresh_from_db()
+        self.assertIsNone(record.email)
+
+    def test_person_patch_rejects_invalid_profile_email(self):
+        PatientRecord.objects.get_or_create(
+            person=self.person, defaults={'organization': self.organization},
+        )
+        resp = self.write_client.patch(
+            f'/api/persons/{self.person.person_id}/',
+            {'email': 'not an email'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertEqual(resp.data['detail'], "'email' must be a valid email address.")
 
     def test_patient_info_delete_returns_405(self):
         resp = self.write_client.delete(f'/api/patient-info/{self.person.person_id}/')
@@ -3534,90 +4113,6 @@ class MultiTenantIsolationTest(_SmartBase):
 
 
 # ---------------------------------------------------------------------------
-# PatientRecord PATCH write-through tests (HKI-PDS-01 / issue #59)
-# ---------------------------------------------------------------------------
-
-class PatientRecordPatchWriteThroughTest(_SmartBase):
-    """PATCH /api/patient-info/{person_id}/ must update PatientRecord AND create a Measurement."""
-
-    @classmethod
-    def setUpTestData(cls):
-        super().setUpTestData()
-        # cls.patient_info already created by _SmartBase; just set disease.
-        PatientRecord.objects.filter(person=cls.person).update(disease='Breast Cancer')
-        cls.patient_info = PatientRecord.objects.get(person=cls.person)
-
-    def test_patch_updates_patient_info(self):
-        """PATCH updates the PatientRecord field value."""
-        resp = self.write_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'hemoglobin_g_dl': '12.5'},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, 200)
-        self.patient_info.refresh_from_db()
-        self.assertAlmostEqual(float(self.patient_info.hemoglobin_g_dl), 12.5, places=1)
-
-    def test_patch_creates_measurement_record(self):
-        """PATCH a lab field creates a Measurement row with the correct LOINC concept."""
-        resp = self.write_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'hemoglobin_g_dl': '11.0'},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, 200)
-        m = Measurement.objects.filter(
-            person=self.person,
-            measurement_source_value='718-7',
-        ).first()
-        self.assertIsNotNone(m, 'No Measurement record created for hemoglobin_g_dl patch')
-        self.assertAlmostEqual(float(m.value_as_number), 11.0, places=1)
-
-    def test_patch_upserts_existing_measurement(self):
-        """Patching the same field twice updates the existing Measurement rather than duplicating it."""
-        self.write_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'wbc_count_thousand_per_ul': '5.0'},
-            format='json',
-        )
-        self.write_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'wbc_count_thousand_per_ul': '6.2'},
-            format='json',
-        )
-        count = Measurement.objects.filter(
-            person=self.person,
-            measurement_source_value='6690-2',
-        ).count()
-        self.assertEqual(count, 1, 'Duplicate Measurement rows created on second patch')
-        m = Measurement.objects.get(
-            person=self.person,
-            measurement_source_value='6690-2',
-        )
-        self.assertAlmostEqual(float(m.value_as_number), 6.2, places=1)
-
-    def test_patch_non_lab_field_does_not_create_measurement(self):
-        """Patching a non-lab field (e.g. disease) must not create a Measurement row."""
-        before = Measurement.objects.filter(person=self.person).count()
-        self.write_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'disease': 'Lung Cancer'},
-            format='json',
-        )
-        after = Measurement.objects.filter(person=self.person).count()
-        self.assertEqual(before, after)
-
-    def test_patch_requires_write_scope(self):
-        """Read-only token must be rejected with 403."""
-        resp = self.read_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'hemoglobin_g_dl': '10.0'},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, 403)
-
-
-# ---------------------------------------------------------------------------
 # Account-holder data management (issue #307 — PHR-S FM PH.1.1/PH.1.2/PH.1.4/TI.1.2)
 # ---------------------------------------------------------------------------
 
@@ -3728,42 +4223,47 @@ class AccountHolderDataTest(_SmartBase):
 
     # --- TI.1.2#04 : revision history ------------------------------------
 
-    def test_patient_record_update_writes_revision(self):
-        """PATCHing a PatientRecord field writes a RecordRevision with old/new values."""
+    def test_mapped_patient_record_patch_is_rejected_without_revision(self):
+        """Mapped clinical changes belong in OMOP, not projection revisions."""
         RecordRevision.objects.filter(patient_record=self.patient_info).delete()
         resp = self.write_client.patch(
             f'/api/v1/patient-records/{self.person.person_id}/',
             {'disease': 'Lung Cancer'},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200, resp.data)
-        rev = RecordRevision.objects.filter(
-            patient_record=self.patient_info, field='disease',
-        ).first()
-        self.assertIsNotNone(rev)
-        self.assertEqual(rev.old_value, 'Breast Cancer')
-        self.assertEqual(rev.new_value, 'Lung Cancer')
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED, resp.data)
+        self.assertFalse(RecordRevision.objects.filter(patient_record=self.patient_info).exists())
 
     def test_revision_not_written_when_value_unchanged(self):
-        """No revision row is created when the submitted value equals the stored value."""
+        """Submitting a mapped field's current value is a no-op, not a rejection.
+
+        Previously this asserted 405, because the guard fired on the field being
+        present at all. That made the read-only contract unenforceable in practice:
+        the patient editor PATCHes the whole record on every autosave, so ~270
+        untouched mapped fields ride along and every edit was refused. The guard
+        now fires on the value actually moving; an echo passes through and still
+        writes nothing.
+        """
         RecordRevision.objects.filter(patient_record=self.patient_info).delete()
-        self.write_client.patch(
+        resp = self.write_client.patch(
             f'/api/v1/patient-records/{self.person.person_id}/',
             {'disease': self.patient_info.disease},
             format='json',
         )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.assertEqual(
             RecordRevision.objects.filter(patient_record=self.patient_info, field='disease').count(),
             0,
         )
+        self.patient_info.refresh_from_db()
+        self.assertEqual(self.patient_info.disease, 'Breast Cancer')
 
-    def test_revisions_endpoint_returns_history(self):
-        """GET .../revisions/ returns the field-level change history."""
+    def test_revisions_endpoint_returns_historical_entries(self):
+        """Existing revision entries remain readable; PATCH no longer creates them."""
         RecordRevision.objects.filter(patient_record=self.patient_info).delete()
-        self.write_client.patch(
-            f'/api/v1/patient-records/{self.person.person_id}/',
-            {'stage': 'IV'},
-            format='json',
+        RecordRevision.objects.create(
+            patient_record=self.patient_info, changed_by='system', field='stage',
+            old_value='III', new_value='IV',
         )
         resp = self.read_client.get(
             f'/api/v1/patient-records/{self.person.person_id}/revisions/'
@@ -3774,17 +4274,16 @@ class AccountHolderDataTest(_SmartBase):
         entry = next(r for r in resp.data if r['field'] == 'stage')
         self.assertEqual(entry['new_value'], 'IV')
 
-    def test_patch_write_through_still_succeeds_with_revision_logging(self):
-        """Revision logging must not break the OMOP write-through (lab PATCH still creates Measurement)."""
+    def test_mapped_lab_patch_is_rejected_without_omop_write_through(self):
         resp = self.write_client.patch(
             f'/api/v1/patient-records/{self.person.person_id}/',
             {'hemoglobin_g_dl': '12.5'},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200, resp.data)
-        self.assertTrue(
-            Measurement.objects.filter(person=self.person, measurement_source_value='718-7').exists()
-        )
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED, resp.data)
+        self.assertFalse(Measurement.objects.filter(
+            person=self.person, measurement_source_value='718-7',
+        ).exists())
 
     # --- PH.1.2#05 : consent-driven demographic redaction ----------------
 
@@ -3841,7 +4340,7 @@ class AccountHolderDataTest(_SmartBase):
 # ---------------------------------------------------------------------------
 
 class ProvenancePatchTest(_SmartBase):
-    """PATCH with provenance headers creates ProvenanceRecord entries."""
+    """Mapped PatientRecord PATCHes cannot create clinical provenance entries."""
 
     @classmethod
     def setUpTestData(cls):
@@ -3850,46 +4349,40 @@ class ProvenancePatchTest(_SmartBase):
         PatientRecord.objects.filter(person=cls.person).update(disease='Breast Cancer')
         cls.patient_info = PatientRecord.objects.get(person=cls.person)
 
-    def test_patch_with_source_creates_provenance_for_patient_info(self):
+    def test_mapped_patch_with_source_is_rejected_without_projection_provenance(self):
+        before = ProvenanceRecord.objects.count()
         resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
             {'disease': 'Lung Cancer', 'source': 'EHR_SYNC', 'source_user_id': 'svc-123'},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
-        p = ProvenanceRecord.objects.filter(
-            object_id=self.patient_info.pk,
-        ).first()
-        self.assertIsNotNone(p)
-        self.assertEqual(p.source, 'EHR_SYNC')
-        self.assertEqual(p.source_user_id, 'svc-123')
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertEqual(ProvenanceRecord.objects.count(), before)
 
-    def test_patch_with_source_creates_provenance_for_measurement(self):
-        self.write_client.patch(
+    def test_mapped_lab_patch_is_rejected_without_measurement_provenance(self):
+        before = ProvenanceRecord.objects.count()
+        resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
             {'hemoglobin_g_dl': '13.0', 'source': 'PATIENT_SELF'},
             format='json',
         )
-        m = Measurement.objects.filter(
-            person=self.person,
-            measurement_source_value='718-7',
-        ).first()
-        self.assertIsNotNone(m)
-        p = ProvenanceRecord.objects.filter(object_id=m.pk).first()
-        self.assertIsNotNone(p)
-        self.assertEqual(p.source, 'PATIENT_SELF')
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertFalse(Measurement.objects.filter(
+            person=self.person, measurement_source_value='718-7',
+        ).exists())
+        self.assertEqual(ProvenanceRecord.objects.count(), before)
 
     def test_patch_without_source_creates_no_provenance(self):
         before = ProvenanceRecord.objects.count()
-        self.write_client.patch(
+        resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
             {'disease': 'CLL'},
             format='json',
         )
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         self.assertEqual(ProvenanceRecord.objects.count(), before)
 
-    def test_patch_returns_previous_values(self):
-        """PATCH response must include previous_values snapshot of changed fields."""
+    def test_mapped_patch_has_no_previous_values_snapshot(self):
         self.patient_info.disease = 'Multiple Myeloma'
         self.patient_info.save()
         resp = self.write_client.patch(
@@ -3897,46 +4390,38 @@ class ProvenancePatchTest(_SmartBase):
             {'disease': 'CLL', 'source': 'EHR_SYNC'},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         data = resp.json()
-        self.assertIn('previous_values', data)
-        self.assertEqual(data['previous_values'].get('disease'), 'Multiple Myeloma')
+        self.assertNotIn('previous_values', data)
 
-    def test_admin_correction_requires_modification_reason(self):
+    def test_admin_correction_mapped_patch_is_rejected(self):
         resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
             {'disease': 'CLL', 'source': 'ADMIN_CORRECTION'},
             format='json',
         )
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn('modification_reason', resp.json().get('error', ''))
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
-    def test_admin_correction_with_reason_succeeds(self):
+    def test_admin_correction_with_reason_does_not_bypass_ownership_boundary(self):
         resp = self.write_client.patch(
             f'/api/patient-info/{self.person.person_id}/',
             {'disease': 'CLL', 'source': 'ADMIN_CORRECTION', 'modification_reason': 'Correcting misdiagnosis'},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
-        p = ProvenanceRecord.objects.filter(object_id=self.patient_info.pk).first()
-        self.assertIsNotNone(p)
-        self.assertEqual(p.modification_reason, 'Correcting misdiagnosis')
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertFalse(ProvenanceRecord.objects.filter(object_id=self.patient_info.pk).exists())
 
-    def test_provenance_endpoint_returns_history(self):
-        self.write_client.patch(
-            f'/api/patient-info/{self.person.person_id}/',
-            {'disease': 'Myeloma', 'source': 'EHR_SYNC', 'source_user_id': 'ehr-456'},
-            format='json',
-        )
+    def test_provenance_endpoint_returns_omop_write_history(self):
+        self._create_omop_condition_with_provenance()
         resp = self.read_client.get(f'/api/patient-info/{self.person.person_id}/provenance/')
         self.assertEqual(resp.status_code, 200)
         sources = [r['source'] for r in resp.json()]
         self.assertIn('EHR_SYNC', sources)
 
 
-    def test_omop_write_endpoint_records_provenance(self):
-        """POST to a direct OMOP endpoint with source header records provenance."""
-        resp = self.write_client.post(
+    def _create_omop_condition_with_provenance(self):
+        """Use the OMOP resource, which owns clinical facts and provenance."""
+        return self.write_client.post(
             '/api/conditions/',
             {
                 'condition_occurrence_id': 79901,
@@ -3949,6 +4434,10 @@ class ProvenancePatchTest(_SmartBase):
             HTTP_X_PROVENANCE_SOURCE='EHR_SYNC',
             HTTP_X_PROVENANCE_USER_ID='ehr-omop-001',
         )
+
+    def test_omop_write_endpoint_records_provenance(self):
+        """POST to a direct OMOP endpoint with source header records provenance."""
+        resp = self._create_omop_condition_with_provenance()
         self.assertEqual(resp.status_code, 201)
         from omop_core.models import ConditionOccurrence
         co = ConditionOccurrence.objects.filter(person=self.person).order_by('-condition_occurrence_id').first()
@@ -3958,9 +4447,47 @@ class ProvenancePatchTest(_SmartBase):
         self.assertEqual(prov.source, 'EHR_SYNC')
         self.assertEqual(prov.source_user_id, 'ehr-omop-001')
 
+    def test_repeated_omop_edits_by_same_actor_keep_one_provenance_row(self):
+        """Create + repeated PATCH with the same actor/source must not 500."""
+        resp = self._create_omop_condition_with_provenance()
+        self.assertEqual(resp.status_code, 201, resp.data)
+        from omop_core.models import ConditionOccurrence
+        condition_id = resp.data['condition_occurrence_id']
+
+        headers = {
+            'HTTP_X_PROVENANCE_SOURCE': 'EHR_SYNC',
+            'HTTP_X_PROVENANCE_USER_ID': 'ehr-omop-001',
+        }
+        first_patch = self.write_client.patch(
+            f'/api/conditions/{condition_id}/',
+            {'condition_source_value': 'updated once'},
+            format='json',
+            **headers,
+        )
+        second_patch = self.write_client.patch(
+            f'/api/conditions/{condition_id}/',
+            {'condition_source_value': 'updated twice'},
+            format='json',
+            **headers,
+        )
+
+        self.assertEqual(first_patch.status_code, status.HTTP_200_OK, first_patch.data)
+        self.assertEqual(second_patch.status_code, status.HTTP_200_OK, second_patch.data)
+        condition = ConditionOccurrence.objects.get(condition_occurrence_id=condition_id)
+        self.assertEqual(condition.condition_source_value, 'updated twice')
+        self.assertEqual(
+            ProvenanceRecord.objects.filter(
+                content_type=ContentType.objects.get_for_model(ConditionOccurrence),
+                object_id=condition_id,
+                source='EHR_SYNC',
+                source_user_id='ehr-omop-001',
+            ).count(),
+            1,
+        )
+
 
 class ProvenanceFhirUploadTest(_SmartBase):
-    """FHIR upload with provenance headers tags all created OMOP records."""
+    """FHIR upload tags OMOP facts; PatientRecord remains a derived read model."""
 
     def test_fhir_upload_with_ehr_sync_tags_records(self):
         bundle_bytes = json.dumps(_make_fhir_bundle()).encode('utf-8')
@@ -3975,9 +4502,30 @@ class ProvenanceFhirUploadTest(_SmartBase):
         person = Person.objects.filter(family_name='Smith', given_name='Jane').first()
         self.assertIsNotNone(person)
         pi = PatientRecord.objects.get(person=person)
+        # Clinical provenance belongs to the OMOP facts that were written from
+        # the bundle.  The PatientRecord projection must not receive a direct
+        # write-through provenance row or clinical values.
+        omop_models = (
+            ConditionOccurrence, Measurement, Observation,
+            DrugExposure, ProcedureOccurrence,
+        )
+        omop_types = [ContentType.objects.get_for_model(model) for model in omop_models]
         self.assertTrue(
-            ProvenanceRecord.objects.filter(object_id=pi.pk).exists(),
-            'PatientRecord was not tagged with provenance',
+            ProvenanceRecord.objects.filter(
+                source='EHR_SYNC',
+                source_user_id='ehr-001',
+                content_type__in=omop_types,
+            ).exists(),
+            'FHIR OMOP facts were not tagged with provenance',
+        )
+        self.assertFalse(
+            ProvenanceRecord.objects.filter(
+                source='EHR_SYNC',
+                source_user_id='ehr-001',
+                content_type=ContentType.objects.get_for_model(PatientRecord),
+                object_id=pi.pk,
+            ).exists(),
+            'FHIR upload wrote provenance directly to derived PatientRecord',
         )
 
     def test_fhir_upload_admin_correction_without_reason_rejected(self):
@@ -4190,6 +4738,54 @@ class AuditLogMiddlewareTest(_SmartBase):
         self.assertEqual(len(logs), 1)
         self.assertIsNone(logs[0]['client_id'])
 
+    def test_partner_token_claims_client_id_is_bounded_issuer_subject(self):
+        """TokenClaims must not be stringified into the audit client_id."""
+        from django.test import RequestFactory
+        from patient_portal.api.middleware import _get_client_id
+        from patient_portal.api.providers.base import TokenClaims
+
+        claims = TokenClaims(
+            issuer='https://securetoken.google.com/proj',
+            sub='uid-123',
+            email='pat@example.com',
+            name=None,
+            raw={'nested': 'x' * 1000},
+        )
+        request = RequestFactory().get('/api/v1/user/')
+        request.auth = claims
+
+        client_id = _get_client_id(request)
+
+        self.assertEqual(client_id, 'https://securetoken.google.com/proj|uid-123')
+        self.assertLessEqual(len(client_id), 255)
+        self.assertNotIn('nested', client_id)
+        self.assertNotIn('TokenClaims', client_id)
+
+    def test_audit_persistence_truncates_long_partner_client_id(self):
+        from django.http import HttpResponse
+        from django.test import RequestFactory
+        from patient_portal.api.middleware import AuditLogMiddleware
+        from patient_portal.api.providers.base import TokenClaims
+        from patient_portal.models import AuditEvent
+
+        claims = TokenClaims(
+            issuer='https://issuer.example/' + 'i' * 300,
+            sub='subject-' + 's' * 300,
+            email='pat@example.com',
+            name=None,
+            raw={'large': 'x' * 1000},
+        )
+        request = RequestFactory().get('/api/v1/user/')
+        request.user = self.foundation_user
+        request.auth = claims
+
+        AuditLogMiddleware(lambda _request: HttpResponse(status=200))(request)
+
+        event = AuditEvent.objects.filter(path='/api/v1/user/').latest('id')
+        self.assertLessEqual(len(event.client_id), 255)
+        self.assertTrue(event.client_id.startswith('https://issuer.example/'))
+        self.assertNotIn('large', event.client_id)
+
     # ------------------------------------------------------------------
     # Reliability: logging failure must not block the response
     # ------------------------------------------------------------------
@@ -4212,6 +4808,138 @@ class AuditLogMiddlewareTest(_SmartBase):
         self.assertIn(response.status_code, range(200, 600))
 
 
+class PatientNameRenameTest(_SmartBase):
+    """Renaming a patient writes Person, the OMOP row — never PatientRecord.
+
+    patient_name is a SerializerMethodField rendered from Person.given_name /
+    family_name. PatientRecord is a derived read model and owns no name column,
+    so a rename has to be applied to Person by hand on both PATCH routes.
+    """
+
+    def _patch(self, pi, payload):
+        return self.write_client.patch(
+            f'/api/patient-info/{pi.person.person_id}/',
+            payload,
+            format='json',
+        )
+
+    def _make(self, person_id, given='', family=''):
+        person = Person.objects.create(
+            person_id=person_id, given_name=given, family_name=family)
+        return person, PatientRecord.objects.create(
+            person=person, organization=self.organization)
+
+    def test_patch_patient_name_renames_the_person(self):
+        person, pi = self._make(91110, 'Alishia', 'Tawny Howell')
+
+        self._patch(pi, {'patient_name': 'Adam Blum'})
+
+        person.refresh_from_db()
+        self.assertEqual((person.given_name, person.family_name), ('Adam', 'Blum'))
+
+    def test_rename_does_not_405_the_request(self):
+        """patient_name is not projection-owned; unstripped it fails the whole PATCH."""
+        _, pi = self._make(91113, 'Alishia', 'Tawny Howell')
+
+        resp = self._patch(pi, {'patient_name': 'Adam Blum'})
+
+        self.assertEqual(resp.status_code, 200)
+
+    def test_echoing_the_whole_record_back_still_succeeds(self):
+        """The React client PATCHes the entire GET response on every autosave."""
+        person, pi = self._make(91114, 'Alishia', 'Tawny Howell')
+        # The client PATCHes res.data.patient_info back, which carries the
+        # serializer's rendered patient_name.
+        body = self.write_client.get(
+            f'/api/patient-info/{person.person_id}/').data['patient_info']
+        self.assertIn('patient_name', body)
+
+        resp = self._patch(pi, body)
+
+        self.assertEqual(resp.status_code, 200)
+        person.refresh_from_db()
+        self.assertEqual(
+            (person.given_name, person.family_name), ('Alishia', 'Tawny Howell'))
+
+    def test_echoing_the_synthesised_name_back_does_not_corrupt_the_person(self):
+        """For an unnamed person the serializer synthesises 'Patient {id}'.
+
+        Writing that echo back would set given_name='Patient', family_name='<id>'.
+        """
+        person, pi = self._make(91111)
+
+        self._patch(pi, {'patient_name': f'Patient {person.person_id}'})
+
+        person.refresh_from_db()
+        self.assertEqual(person.given_name, '')
+        self.assertEqual(person.family_name, '')
+
+    def test_echoing_an_unchanged_name_is_a_no_op(self):
+        person, pi = self._make(91112, 'Alishia', 'Tawny Howell')
+
+        self._patch(pi, {'patient_name': 'Alishia Tawny Howell', 'stage': 'II'})
+
+        person.refresh_from_db()
+        self.assertEqual(
+            (person.given_name, person.family_name), ('Alishia', 'Tawny Howell'))
+
+    def test_single_word_name_clears_the_family_name(self):
+        person, pi = self._make(91115, 'Alishia', 'Tawny Howell')
+
+        self._patch(pi, {'patient_name': 'Cher'})
+
+        person.refresh_from_db()
+        self.assertEqual((person.given_name, person.family_name), ('Cher', ''))
+
+    def test_echoing_a_mapped_field_unchanged_is_allowed(self):
+        """An untouched derived field riding along on autosave is not an edit."""
+        person, pi = self._make(91117, 'Alishia', 'Tawny Howell')
+        pi.hemoglobin_g_dl = 12.5
+        pi.save(update_fields=['hemoglobin_g_dl'])
+        rendered = self.write_client.get(
+            f'/api/patient-info/{person.person_id}/').data['patient_info']
+
+        resp = self._patch(pi, {'hemoglobin_g_dl': rendered['hemoglobin_g_dl']})
+
+        self.assertEqual(resp.status_code, 200)
+
+    def test_changing_a_mapped_field_is_still_refused(self):
+        """The derive-only contract survives: a real write to OMOP-mapped data 405s."""
+        _, pi = self._make(91118, 'Alishia', 'Tawny Howell')
+        pi.hemoglobin_g_dl = 12.5
+        pi.save(update_fields=['hemoglobin_g_dl'])
+
+        resp = self._patch(pi, {'hemoglobin_g_dl': 9.9})
+
+        self.assertEqual(resp.status_code, 405)
+        self.assertIn('hemoglobin_g_dl', resp.data['fields'])
+
+    def test_rename_rides_along_with_a_full_record_echo(self):
+        """The real client shape: whole record echoed, one name changed."""
+        person, pi = self._make(91119, 'Alishia', 'Tawny Howell')
+        body = self.write_client.get(
+            f'/api/patient-info/{person.person_id}/').data['patient_info']
+        body['patient_name'] = 'Adam Blum'
+
+        resp = self._patch(pi, body)
+
+        self.assertEqual(resp.status_code, 200)
+        person.refresh_from_db()
+        self.assertEqual((person.given_name, person.family_name), ('Adam', 'Blum'))
+
+    def test_rename_leaves_no_name_column_on_patient_record(self):
+        """Guard the contract: the projection must not gain a written name field."""
+        person, pi = self._make(91116, 'Alishia', 'Tawny Howell')
+
+        self._patch(pi, {'patient_name': 'Adam Blum'})
+
+        pi.refresh_from_db()
+        self.assertNotIn('patient_name', [f.name for f in pi._meta.get_fields()])
+        person.refresh_from_db()
+        self.assertEqual(person.given_name, 'Adam')
+
+
+@unittest.skip("Retired: PatientRecord-to-OMOP write-through was removed")
 class PatientRecordOmopSyncTest(_SmartBase):
     """PatientRecord PATCH → OMOP write-through via omop_write_service."""
 
@@ -4453,6 +5181,74 @@ class PatientRecordOmopSyncTest(_SmartBase):
             '_LAB_FIELD_TO_LOINC should have been removed from views.py',
         )
 
+    # --- user_edited_fields bookkeeping (#434) ---------------------------------
+
+    def test_patch_records_only_the_field_that_moved(self):
+        """The React client autosaves by PATCHing the whole record back. Only
+        the field the user actually changed may be marked hand-edited — flagging
+        the body wholesale would pin every derived field on the row and stop
+        OMOP deletions ever propagating again."""
+        person = Person.objects.create(person_id=91101)
+        pi = PatientRecord.objects.create(
+            person=person, organization=self.organization,
+            her2_status='Positive', smoking_status='never', tumor_stage='T1',
+        )
+
+        # Whole record echoed back with a single field altered, as the UI does.
+        self._patch(pi, {
+            'her2_status': 'Positive',
+            'smoking_status': 'never',
+            'tumor_stage': 'T2',
+        })
+
+        pi.refresh_from_db()
+        self.assertEqual(pi.user_edited_fields, ['tumor_stage'])
+
+    def test_patch_that_changes_nothing_records_nothing(self):
+        person = Person.objects.create(person_id=91102)
+        pi = PatientRecord.objects.create(
+            person=person, organization=self.organization, her2_status='Positive',
+        )
+
+        self._patch(pi, {'her2_status': 'Positive'})
+
+        pi.refresh_from_db()
+        self.assertEqual(pi.user_edited_fields, [])
+
+    def test_read_only_fields_are_never_recorded(self):
+        """DRF discards read-only fields from the input, so attributing them to
+        the user would pin values the client never actually set."""
+        person = Person.objects.create(person_id=91103)
+        pi = PatientRecord.objects.create(
+            person=person, organization=self.organization, tumor_stage='T1',
+        )
+
+        self._patch(pi, {'tumor_stage': 'T2', 'therapy_component_ids': [1, 2, 3]})
+
+        pi.refresh_from_db()
+        self.assertEqual(pi.user_edited_fields, ['tumor_stage'])
+
+    def test_user_edited_fields_is_not_client_writable(self):
+        person = Person.objects.create(person_id=91104)
+        pi = PatientRecord.objects.create(person=person, organization=self.organization)
+
+        self._patch(pi, {'user_edited_fields': ['disease', 'stage']})
+
+        pi.refresh_from_db()
+        self.assertEqual(pi.user_edited_fields, [])
+
+    def test_patched_stage_survives_a_later_refresh(self):
+        """End-to-end for #434: the exact sequence that lost the staging
+        patient's stage — PATCH it, then re-derive."""
+        from omop_core.services.patient_record_service import refresh_patient_record
+        person = Person.objects.create(person_id=91105)
+        pi = PatientRecord.objects.create(person=person, organization=self.organization)
+
+        self._patch(pi, {'stage': 'I'})
+        refreshed = refresh_patient_record(person)
+
+        self.assertEqual(refreshed.stage, 'I')
+
 
 class VocabularyRelationshipModelTest(TestCase):
     """Verify Relationship, ConceptRelationship, ConceptAncestor models exist and are queryable."""
@@ -4548,6 +5344,14 @@ class VocabularyRelationshipModelTest(TestCase):
 class AthenaVocabularyLoadTest(TestCase):
     """Test load_athena_vocabularies management command with minimal fixture TSV files."""
 
+    def _load_minimal_athena(self, directory, **options):
+        """Load the deliberately partial fixture without deployment verification."""
+        from django.core.management import call_command
+        call_command(
+            'load_athena_vocabularies', path=directory,
+            skip_clinical_vocabulary_verification=True, **options,
+        )
+
     def _write_tsv(self, directory, filename, headers, rows):
         path = os.path.join(directory, filename)
         with open(path, 'w', newline='') as f:
@@ -4614,19 +5418,17 @@ class AthenaVocabularyLoadTest(TestCase):
 
     def test_load_creates_relationship_rows(self):
         from omop_core.models import Relationship
-        from django.core.management import call_command
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_minimal_athena(tmpdir)
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
         self.assertTrue(Relationship.objects.filter(relationship_id='Maps to').exists())
         self.assertTrue(Relationship.objects.filter(relationship_id='Is a').exists())
 
     def test_load_filters_concepts_to_scope(self):
         from omop_core.models import Concept
-        from django.core.management import call_command
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_minimal_athena(tmpdir)
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
         self.assertTrue(Concept.objects.filter(concept_id=5000001).exists())  # HemOnc
         self.assertTrue(Concept.objects.filter(concept_id=5000003).exists())  # RxNorm Ingredient
         self.assertTrue(Concept.objects.filter(concept_id=5000004).exists())  # RxNorm Branded
@@ -4634,10 +5436,9 @@ class AthenaVocabularyLoadTest(TestCase):
 
     def test_load_filters_concept_relationships(self):
         from omop_core.models import ConceptRelationship
-        from django.core.management import call_command
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_minimal_athena(tmpdir)
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
         # Edge between two in-scope concepts should be loaded
         self.assertTrue(ConceptRelationship.objects.filter(
             concept_1_id=5000003, concept_2_id=5000002
@@ -4649,10 +5450,9 @@ class AthenaVocabularyLoadTest(TestCase):
 
     def test_load_concept_ancestors_hemonc_only(self):
         from omop_core.models import ConceptAncestor
-        from django.core.management import call_command
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_minimal_athena(tmpdir)
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
         self.assertTrue(ConceptAncestor.objects.filter(
             ancestor_concept_id=5000001, descendant_concept_id=5000002
         ).exists())
@@ -4663,23 +5463,21 @@ class AthenaVocabularyLoadTest(TestCase):
 
     def test_idempotent_reload(self):
         from omop_core.models import Concept
-        from django.core.management import call_command
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_minimal_athena(tmpdir)
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
             count_after_first = Concept.objects.filter(vocabulary_id='HemOnc').count()
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
             count_after_second = Concept.objects.filter(vocabulary_id='HemOnc').count()
         self.assertEqual(count_after_first, count_after_second)
 
     def test_dry_run_writes_nothing(self):
         from omop_core.models import Concept, Relationship
-        from django.core.management import call_command
         before_concepts = Concept.objects.count()
         before_rels = Relationship.objects.count()
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_minimal_athena(tmpdir)
-            call_command('load_athena_vocabularies', path=tmpdir, dry_run=True)
+            self._load_minimal_athena(tmpdir, dry_run=True)
         self.assertEqual(Concept.objects.count(), before_concepts)
         self.assertEqual(Relationship.objects.count(), before_rels)
 
@@ -4691,14 +5489,13 @@ class AthenaVocabularyLoadTest(TestCase):
         loads accumulate rows rather than overwriting.)
         """
         from omop_core.models import VocabularyVersionHistory
-        from django.core.management import call_command
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_minimal_athena(tmpdir)
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
             after_first = VocabularyVersionHistory.objects.filter(
                 action=VocabularyVersionHistory.ACTION_LOADED).count()
             self.assertGreater(after_first, 0)
-            call_command('load_athena_vocabularies', path=tmpdir)
+            self._load_minimal_athena(tmpdir)
             after_second = VocabularyVersionHistory.objects.filter(
                 action=VocabularyVersionHistory.ACTION_LOADED).count()
         # Second load appends more history rows rather than replacing the trail.
@@ -5316,6 +6113,7 @@ class PersonIdEnumerationTest(FhirUploadBase):
 # Disease persistence tests — issues #110 / #113
 # ---------------------------------------------------------------------------
 
+@unittest.skip("Retired: mapped clinical PatientRecord fields are read-only")
 class DiseasePersistenceTest(_SmartBase):
     """PATCH /api/patient-info/{person_id}/ must preserve PatientRecord.disease.
 
@@ -6184,7 +6982,7 @@ class SctFieldsModelTest(FhirUploadBase):
         self.assertIn('stem_cell_transplant_history', pi_data)
         self.assertEqual(pi_data['sct_date'], '2022-05-10')
 
-    def test_sct_date_future_rejected(self):
+    def test_sct_date_is_read_only_via_patient_record_patch(self):
         from datetime import date, timedelta
         future = (date.today() + timedelta(days=30)).isoformat()
         resp = self.client.patch(
@@ -6192,8 +6990,7 @@ class SctFieldsModelTest(FhirUploadBase):
             {'sct_date': future},
             format='json',
         )
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn('sct_date', resp.data)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
     def test_sct_eligibility_patch(self):
         resp = self.client.patch(
@@ -6201,9 +6998,9 @@ class SctFieldsModelTest(FhirUploadBase):
             {'sct_eligibility': ['eligible for autologous SCT', 'ineligible for allogeneic SCT']},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         self.patient.refresh_from_db()
-        self.assertIn('eligible for autologous SCT', self.patient.sct_eligibility)
+        self.assertEqual(self.patient.sct_eligibility, ['eligible for autologous SCT'])
 
 
 class SctFhirUploadTest(FhirUploadBase):
@@ -6302,6 +7099,18 @@ class SctFhirUploadTest(FhirUploadBase):
         self.assertIn('autologous SCT', pi.stem_cell_transplant_history)
         self.assertIn('tandem SCT', pi.stem_cell_transplant_history)
         self.assertIn('eligible for autologous SCT', pi.sct_eligibility)
+        sct_observations = Observation.objects.filter(person=pi.person)
+        self.assertTrue(sct_observations.filter(
+            observation_source_value='mm-sct-date', observation_date=date(2021, 3, 15),
+            value_as_string='2021-03-15',
+        ).exists())
+        self.assertTrue(sct_observations.filter(
+            observation_source_value='mm-sct-history', observation_date=date(2021, 3, 15),
+        ).exists())
+        self.assertTrue(ProvenanceRecord.objects.filter(
+            object_id=sct_observations.get(observation_source_value='mm-sct-date').observation_id,
+            content_type__model='observation', source='EHR_SYNC',
+        ).exists())
 
     def test_invalid_sct_date_string_is_ignored(self):
         """A malformed mm-sct-date value must be silently dropped; upload must still succeed."""
@@ -6330,8 +7139,8 @@ class SctFhirUploadTest(FhirUploadBase):
         self.assertEqual(pi.stem_cell_transplant_history or [], [],
                          'Comma-only valueString should produce an empty list')
 
-    def test_unknown_vocab_tokens_filtered_from_sct_history(self):
-        """Tokens not in the StemCellTransplant vocabulary are silently discarded."""
+    def test_undated_sct_history_is_not_invented_as_a_clinical_fact(self):
+        """An SCT Patient extension without an event date cannot enter OMOP."""
         resp = self._upload_bundle_with_extensions([
             {'url': 'https://healthkey.ai/fhir/StructureDefinition/mm-sct-history',
              'valueString': 'autologous SCT,unknown experimental SCT,allogeneic SCT'},
@@ -6340,10 +7149,10 @@ class SctFhirUploadTest(FhirUploadBase):
                       msg=f'Upload failed: {getattr(resp, "data", resp.content)}')
         pi = PatientRecord.objects.filter(person__family_name='TestSct005').first()
         self.assertIsNotNone(pi)
-        self.assertIn('autologous SCT', pi.stem_cell_transplant_history)
-        self.assertIn('allogeneic SCT', pi.stem_cell_transplant_history)
-        self.assertNotIn('unknown experimental SCT', pi.stem_cell_transplant_history,
-                         'Unrecognized vocab token must be filtered out')
+        self.assertEqual(pi.stem_cell_transplant_history or [], [])
+        self.assertFalse(Observation.objects.filter(
+            person=pi.person, observation_source_value='mm-sct-history',
+        ).exists())
 
 
 # ---------------------------------------------------------------------------
@@ -6550,6 +7359,63 @@ class PersonFindOrCreateTest(_SmartBase):
         self.assertEqual(r2.status_code, status.HTTP_200_OK)
         self.assertEqual(r1.json()['person_id'], r2.json()['person_id'])
         self.assertFalse(r2.json()['created'])
+
+    def test_existing_patient_user_link_wins_and_backfills_actor_columns(self):
+        from omop_core.services.pk import next_pk
+        from patient_portal.models import PatientUser
+
+        actor_iss = 'https://securetoken.google.com/proj'
+        actor_sub = 'linked-uid'
+        identity = Identity.objects.create(
+            email='linked-person@example.com',
+            issuer=actor_iss,
+            sub=actor_sub,
+        )
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientUser.objects.create(identity=identity, person=person)
+
+        resp = self.client.post(
+            self.URL,
+            {'actor_iss': actor_iss, 'actor_sub': actor_sub},
+            content_type='application/json',
+            **self._auth(),
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['person_id'], person.person_id)
+        self.assertFalse(resp.json()['created'])
+        person.refresh_from_db()
+        self.assertEqual(person.actor_iss, actor_iss)
+        self.assertEqual(person.actor_sub, actor_sub)
+        self.assertEqual(
+            Person.objects.filter(actor_iss=actor_iss, actor_sub=actor_sub).count(),
+            1,
+        )
+
+    def test_existing_identity_without_patient_user_uses_actor_tuple_idempotently(self):
+        actor_iss = 'https://securetoken.google.com/proj'
+        actor_sub = 'unlinked-uid'
+        Identity.objects.create(
+            email='unlinked-person@example.com',
+            issuer=actor_iss,
+            sub=actor_sub,
+        )
+        payload = {'actor_iss': actor_iss, 'actor_sub': actor_sub}
+
+        first = self.client.post(
+            self.URL, payload, content_type='application/json', **self._auth(),
+        )
+        second = self.client.post(
+            self.URL, payload, content_type='application/json', **self._auth(),
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(first.json()['person_id'], second.json()['person_id'])
+        self.assertEqual(
+            Person.objects.filter(actor_iss=actor_iss, actor_sub=actor_sub).count(),
+            1,
+        )
 
     def test_different_subs_get_different_persons(self):
         base = {'actor_iss': 'https://securetoken.google.com/proj'}
@@ -7628,6 +8494,64 @@ class OmopViewSetAccessTest(TestCase):
         self.assertGreater(len(results), 0)
 
 
+class PatientRecordOmopActionTest(TestCase):
+    """Admin-only consolidated OMOP rows for the patient record review tab."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.org = Organization.objects.create(name='OMOP Review Org', slug='omop-review-org')
+        cls.person = Person.objects.create(person_id=88921, family_name='Rows', given_name='Raw')
+        PatientRecord.objects.create(person=cls.person, organization=cls.org)
+        cls.measurement = Measurement.objects.create(
+            measurement_id=8892101,
+            person=cls.person,
+            measurement_concept_id=0,
+            measurement_type_concept_id=0,
+            measurement_date=date(2024, 2, 1),
+            value_as_number=12.5,
+            unit_source_value='g/dL',
+        )
+        cls.condition = ConditionOccurrence.objects.create(
+            condition_occurrence_id=8892102,
+            person=cls.person,
+            condition_concept_id=0,
+            condition_type_concept_id=0,
+            condition_start_date=date(2024, 1, 15),
+            condition_source_value='test condition',
+        )
+        cls.admin = Identity.objects.create_user(email='omop-admin@test.com', password='pw')
+        GroupAccess.objects.create(identity=cls.admin, org=cls.org, role='org_admin')
+        cls.patient = Identity.objects.create_user(email='omop-patient@test.com', password='pw')
+        from patient_portal.models import PatientUser
+        PatientUser.objects.create(identity=cls.patient, person=cls.person)
+
+    def _client_as(self, identity):
+        c = APIClient()
+        c.force_authenticate(user=identity)
+        return c
+
+    def test_org_admin_can_view_consolidated_omop_rows(self):
+        resp = self._client_as(self.admin).get(
+            f'/api/v1/patient-records/{self.person.person_id}/omop/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        tables = {table['key']: table for table in resp.data['tables']}
+        self.assertEqual(resp.data['person_id'], self.person.person_id)
+        self.assertEqual(tables['measurements']['count'], 1)
+        self.assertEqual(tables['measurements']['rows'][0]['measurement_id'], self.measurement.measurement_id)
+        self.assertEqual(tables['condition_occurrences']['count'], 1)
+        self.assertEqual(
+            tables['condition_occurrences']['rows'][0]['condition_occurrence_id'],
+            self.condition.condition_occurrence_id,
+        )
+
+    def test_patient_cannot_view_consolidated_omop_rows(self):
+        resp = self._client_as(self.patient).get(
+            f'/api/v1/patient-records/{self.person.person_id}/omop/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
 # ---------------------------------------------------------------------------
 # Mass-assignable organization field (issue #139)
 # ---------------------------------------------------------------------------
@@ -7635,7 +8559,7 @@ class OmopViewSetAccessTest(TestCase):
 class PatientRecordOrganizationReadOnlyTest(TestCase):
     """
     Verify that a client cannot PATCH organization or person onto a
-    PatientRecord record — these fields must be silently ignored (read-only).
+    PatientRecord record — these fields are rejected as read-only.
     """
 
     @classmethod
@@ -7666,7 +8590,7 @@ class PatientRecordOrganizationReadOnlyTest(TestCase):
             {'organization': self.org_b.id},
             format='json',
         )
-        self.assertIn(resp.status_code, [status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST])
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         self.patient.refresh_from_db()
         self.assertEqual(self.patient.organization_id, self.org_a.id)
 
@@ -8868,6 +9792,167 @@ class OrgViewSetStaffTest(TestCase):
         self.assertTrue(Person.objects.filter(pk=other_person.pk).exists())
 
 
+class OrgVocabularyUsageAPITest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user('vocab-staff@example.com', is_staff=True)
+        self.admin = _make_user('vocab-admin@example.com')
+        self.user = _make_user('vocab-user@example.com')
+        self.org = _make_org('Vocabulary Org', 'vocab-org')
+        self.other_org = _make_org('Other Vocabulary Org', 'other-vocab-org')
+        GroupAccess.objects.create(identity=self.admin, org=self.org, role='org_admin')
+
+        self.type_concept = self._concept(
+            9800000, 'EHR', 'OMOP4976890', 'Type Concept', 'Type Concept',
+        )
+        self.snomed = self._concept(
+            9800001, 'Breast cancer', '254837009', 'SNOMED', 'Condition',
+        )
+        self.hk = self._concept(
+            2000000101, 'HealthKey wearable stride', 'HK-WEAR-STRIDE',
+            'HK-Wearable', 'Measurement', source='HealthKey',
+        )
+        self.fhir = self._concept(
+            9800003, 'FHIR-coded legacy row', 'FHIR-LEGACY', 'FHIR', 'Observation',
+        )
+        self.generic_lab = self._concept(
+            9800004, 'Generic lab', '0', 'None', 'Measurement',
+        )
+
+        self.person_a = Person.objects.create(person_id=9801)
+        self.person_b = Person.objects.create(person_id=9802)
+        self.other_person = Person.objects.create(person_id=9803)
+        PatientRecord.objects.create(person=self.person_a, organization=self.org)
+        PatientRecord.objects.create(person=self.person_b, organization=self.org)
+        PatientRecord.objects.create(person=self.other_person, organization=self.other_org)
+
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=98001,
+            person=self.person_a,
+            condition_concept=self.snomed,
+            condition_start_date=date.today(),
+            condition_type_concept=self.type_concept,
+        )
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=98002,
+            person=self.person_b,
+            condition_concept=self.snomed,
+            condition_start_date=date.today(),
+            condition_type_concept=self.type_concept,
+        )
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=98003,
+            person=self.other_person,
+            condition_concept=self.snomed,
+            condition_start_date=date.today(),
+            condition_type_concept=self.type_concept,
+        )
+        Measurement.objects.create(
+            measurement_id=98004,
+            person=self.person_a,
+            measurement_concept=self.hk,
+            measurement_date=date.today(),
+            measurement_type_concept=self.type_concept,
+        )
+        Measurement.objects.create(
+            measurement_id=98005,
+            person=self.person_b,
+            measurement_concept=self.generic_lab,
+            measurement_source_concept=self.hk,
+            measurement_date=date.today(),
+            measurement_type_concept=self.type_concept,
+        )
+        Observation.objects.create(
+            observation_id=98006,
+            person=self.person_a,
+            observation_concept=self.fhir,
+            observation_date=date.today(),
+            observation_type_concept=self.type_concept,
+        )
+        Observation.objects.create(
+            observation_id=98007,
+            person=self.person_a,
+            observation_concept=self.fhir,
+            observation_date=date.today(),
+            observation_type_concept=self.type_concept,
+        )
+
+    def _concept(self, concept_id, name, code, vocabulary_id, domain_id,
+                 concept_class_id='Clinical Finding', standard='S', source=None):
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id=vocabulary_id,
+            defaults={'vocabulary_name': vocabulary_id, 'vocabulary_concept_id': 0},
+        )
+        domain, _ = Domain.objects.get_or_create(
+            domain_id=domain_id,
+            defaults={'domain_name': domain_id, 'domain_concept_id': 0},
+        )
+        concept_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id=concept_class_id,
+            defaults={
+                'concept_class_name': concept_class_id,
+                'concept_class_concept_id': 0,
+            },
+        )
+        return Concept.objects.create(
+            concept_id=concept_id,
+            concept_name=name,
+            concept_code=code,
+            vocabulary=vocab,
+            domain=domain,
+            concept_class=concept_class,
+            standard_concept=standard,
+            source=source,
+            valid_start_date=date.today(),
+            valid_end_date=date(2099, 12, 31),
+        )
+
+    def test_returns_org_scoped_vocabulary_usage_counts(self):
+        self.client.force_authenticate(user=self.staff)
+
+        resp = self.client.get('/api/orgs/vocab-org/vocabulary/')
+
+        self.assertEqual(resp.status_code, 200)
+        by_id = {row['concept_id']: row for row in resp.data['concepts']}
+        self.assertEqual(by_id[self.snomed.concept_id]['patient_count'], 2)
+        self.assertEqual(by_id[self.snomed.concept_id]['instance_count'], 2)
+        self.assertEqual(by_id[self.hk.concept_id]['patient_count'], 2)
+        self.assertEqual(by_id[self.hk.concept_id]['instance_count'], 2)
+        self.assertEqual(by_id[self.hk.concept_id]['group'], 'healthkey')
+        self.assertEqual(by_id[self.fhir.concept_id]['patient_count'], 1)
+        self.assertEqual(by_id[self.fhir.concept_id]['instance_count'], 2)
+        self.assertEqual(by_id[self.fhir.concept_id]['group'], 'nonconforming')
+        self.assertNotIn(self.type_concept.concept_id, by_id)
+        self.assertTrue(any(
+            usage['column'] == 'measurement_source_concept_id'
+            for usage in by_id[self.hk.concept_id]['usage']
+        ))
+
+    def test_orders_external_then_healthkey_then_nonconforming(self):
+        self.client.force_authenticate(user=self.staff)
+
+        resp = self.client.get('/api/orgs/vocab-org/vocabulary/')
+
+        self.assertEqual(resp.status_code, 200)
+        groups = [row['group'] for row in resp.data['concepts']]
+        self.assertLess(groups.index('athena'), groups.index('healthkey'))
+        self.assertLess(groups.index('healthkey'), groups.index('nonconforming'))
+
+    def test_org_admin_can_read_own_org_vocabulary(self):
+        self.client.force_authenticate(user=self.admin)
+
+        resp = self.client.get('/api/orgs/vocab-org/vocabulary/')
+
+        self.assertEqual(resp.status_code, 200)
+
+    def test_non_admin_cannot_read_org_vocabulary(self):
+        self.client.force_authenticate(user=self.user)
+
+        resp = self.client.get('/api/orgs/vocab-org/vocabulary/')
+
+        self.assertEqual(resp.status_code, 403)
+
+
 class OrganizationCleanupServiceTest(TestCase):
     """Shared org deletion helper must cascade patient data."""
 
@@ -9922,6 +11007,133 @@ class WearablePatientRecordTest(TestCase):
         self.assertIsNone(pi.median_daily_steps_30d)
         self.assertIsNone(pi.activity_trend_30d)
 
+    def test_sdnn_and_rmssd_aggregate_into_separate_columns(self):
+        """Two HRV statistics, two columns — never averaged together (#438).
+
+        Values are chosen so a naive merge is detectable: means of 40 and 80
+        would collapse to 60 in either column.
+        """
+        for days_ago in range(10):
+            self._add_measurement('hrv_sdnn', days_ago, 40)
+            self._add_measurement('hrv_rmssd', days_ago, 80)
+
+        pi = self._refresh()
+        self.assertAlmostEqual(float(pi.hrv_sdnn_avg_30d), 40.0)
+        self.assertAlmostEqual(float(pi.hrv_rmssd_avg_30d), 80.0)
+
+    def test_rmssd_absent_leaves_sdnn_alone(self):
+        """A patient on an SDNN-only device gets no RMSSD column, and vice versa."""
+        for days_ago in range(10):
+            self._add_measurement('hrv_sdnn', days_ago, 45)
+
+        pi = self._refresh()
+        self.assertAlmostEqual(float(pi.hrv_sdnn_avg_30d), 45.0)
+        self.assertIsNone(pi.hrv_rmssd_avg_30d)
+
+    @unittest.skip("Retired: user_edited_fields no longer preserves derived values")
+    def test_wearable_columns_can_never_be_flagged_user_edited(self):
+        """#440 and #434 must not cancel each other out.
+
+        candidate_user_edited_fields flags anything in _OMOP_DERIVED_FIELDS
+        that a PATCH changed, and every wearable column is in that list. Being
+        flagged would pin a client-supplied value against re-derivation
+        permanently — the exact failure #440 closed, reopened by a different
+        door. The only thing preventing it is that read-only fields never
+        reach validated_data and so can never appear in changed_fields.
+        """
+        from patient_portal.api.serializers import PatientRecordSerializer
+        from omop_core.services.omop_write_service import candidate_user_edited_fields
+
+        names = set(self._derived_wearable_field_names())
+        serializer = PatientRecordSerializer()
+
+        writable = {n for n in names
+                    if n in serializer.fields and not serializer.fields[n].read_only}
+        self.assertEqual(writable, set())
+
+        # If one ever did become writable, it would be flagged — assert the
+        # consequence directly so the reason this matters stays visible.
+        self.assertEqual(
+            candidate_user_edited_fields(names), names,
+            'wearable columns are in _OMOP_DERIVED_FIELDS, so read-only '
+            'enforcement is the only thing keeping them out of user_edited_fields')
+
+    def _derived_wearable_field_names(self):
+        """Every derived wearable column, read off the model rather than listed.
+
+        A hard-coded list here would drift exactly the way the one in
+        PatientRecordSerializer.Meta.read_only_fields did — ten columns
+        protected, eleven added later and left writable (#440). Enumerating the
+        model is what makes this test fail when the next column is added
+        without protection.
+        """
+        return [
+            field.name
+            for field in PatientRecord._meta.get_fields()
+            if getattr(field, 'concrete', False)
+            and (field.name.endswith('_30d') or field.name.startswith('wearable_'))
+        ]
+
+    def test_every_derived_wearable_column_is_read_only(self):
+        """No derived wearable column may be writable through the serializer."""
+        from patient_portal.api.serializers import PatientRecordSerializer
+
+        names = self._derived_wearable_field_names()
+        # Guard the guard: if the discovery predicate stops matching, this test
+        # would vacuously pass while protecting nothing.
+        self.assertGreaterEqual(len(names), 21, f'Expected the full wearable column set, got {names}')
+
+        serializer = PatientRecordSerializer()
+        writable = [
+            name for name in names
+            if name in serializer.fields and not serializer.fields[name].read_only
+        ]
+        self.assertEqual(
+            writable, [],
+            f'Derived wearable columns are client-writable: {writable}. '
+            f'They are computed by refresh_patient_record from OMOP rows; a client '
+            f'PATCH would leave the summary disagreeing with its source data.'
+        )
+
+        missing = [name for name in names if name not in serializer.fields]
+        self.assertEqual(missing, [], f'Wearable columns absent from the serializer: {missing}')
+
+    def test_patch_cannot_write_any_derived_wearable_column(self):
+        """A PATCH naming every wearable column must change none of them."""
+        from decimal import Decimal
+        from django.db import models as dj_models
+        from patient_portal.api.serializers import PatientRecordSerializer
+
+        pi = PatientRecord.objects.get(person=self.person)
+
+        # Build a type-appropriate payload so the request is rejected on
+        # read-only grounds rather than silently failing validation.
+        payload = {}
+        for name in self._derived_wearable_field_names():
+            field = PatientRecord._meta.get_field(name)
+            if isinstance(field, dj_models.IntegerField):
+                payload[name] = 12345
+            elif isinstance(field, dj_models.DecimalField):
+                payload[name] = Decimal('9.99')
+            elif isinstance(field, dj_models.DateTimeField):
+                payload[name] = '2020-01-01T00:00:00Z'
+            else:
+                payload[name] = 'improving'
+
+        before = {name: getattr(pi, name) for name in payload}
+
+        serializer = PatientRecordSerializer(pi, data=payload, partial=True)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
+        pi.refresh_from_db()
+        changed = {
+            name: (before[name], getattr(pi, name))
+            for name in payload
+            if getattr(pi, name) != before[name]
+        }
+        self.assertEqual(changed, {}, f'PATCH wrote derived wearable columns: {changed}')
+
     def test_wearable_endpoint_requires_authentication(self):
         """Unauthenticated requests to patient-info must be rejected."""
         from rest_framework.test import APIClient as AnonClient
@@ -10243,11 +11455,22 @@ class MeEndpointGuardTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertIn('patient_info', resp.data)
 
-    def test_confirmed_patient_patch_returns_200(self):
+    def test_confirmed_patient_clinical_patch_returns_405(self):
         resp = self._client(self.patient_user).patch(
-            '/api/patient-info/me/', {}, format='json'
+            '/api/patient-info/me/', {'disease': 'not directly writable'}, format='json'
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_confirmed_patient_can_update_own_name_without_writing_patient_record(self):
+        before = PatientRecord.objects.get(person=self.patient_person).disease
+        resp = self._client(self.patient_user).patch(
+            '/api/patient-info/me/', {'patient_name': 'Ada Lovelace'}, format='json'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.patient_person.refresh_from_db()
+        self.assertEqual(self.patient_person.given_name, 'Ada')
+        self.assertEqual(self.patient_person.family_name, 'Lovelace')
+        self.assertEqual(PatientRecord.objects.get(person=self.patient_person).disease, before)
 
     def test_staff_without_patient_record_returns_404(self):
         resp = self._client(self.staff_user).get('/api/patient-info/me/')
@@ -10426,11 +11649,11 @@ class V1MeEndpointTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertIn('patient_info', resp.data)
 
-    def test_v1_confirmed_patient_patch_returns_200(self):
+    def test_v1_confirmed_patient_clinical_patch_returns_405(self):
         resp = self._client(self.patient_user).patch(
-            '/api/v1/patient-records/me/', {}, format='json'
+            '/api/v1/patient-records/me/', {'disease': 'not directly writable'}, format='json'
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
     # --- guard: clinical users without a patient record are blocked -----------
 
@@ -10455,7 +11678,7 @@ class V1MeEndpointTest(TestCase):
 
     def test_v1_me_patch_has_no_deprecation_header(self):
         resp = self._client(self.patient_user).patch(
-            '/api/v1/patient-records/me/', {}, format='json'
+            '/api/v1/patient-records/me/', {'disease': 'not directly writable'}, format='json'
         )
         self.assertNotIn('Deprecation', resp)
 
@@ -10777,6 +12000,16 @@ class BreastCancerSnomed254837009Test(FhirUploadBase):
     def test_stage_from_breast_cancer_condition(self):
         self.assertIsNotNone(self._pi)
         self.assertIn('IIIA', self._pi.stage or '')
+        stage_observation = Observation.objects.get(
+            person=self._pi.person,
+            observation_source_value='FHIR-condition-stage',
+        )
+        self.assertEqual(stage_observation.observation_date, date(2021, 7, 15))
+        self.assertEqual(stage_observation.value_as_string, 'IIIA')
+        self.assertTrue(ProvenanceRecord.objects.filter(
+            object_id=stage_observation.observation_id,
+            content_type__model='observation', source='EHR_SYNC',
+        ).exists())
 
 
 class MCODECreatinineLoincTest(FhirUploadBase):
@@ -10893,6 +12126,13 @@ class PatientRoleUserEndpointTest(TestCase):
         cls.org = Organization.objects.create(name='Beta Onc', slug='beta-onc')
         GroupAccess.objects.create(identity=cls.provider_identity, org=cls.org, role='org_admin')
 
+        cls.first_login_identity = Identity.objects.create_user(
+            email='first-login-v1@test.com', password='pw',
+        )
+        cls.staff_identity = Identity.objects.create_user(
+            email='staff-v1@test.com', password='pw', is_staff=True,
+        )
+
     def _client_as(self, identity):
         c = APIClient()
         c.force_authenticate(user=identity)
@@ -10906,12 +12146,39 @@ class PatientRoleUserEndpointTest(TestCase):
         self.assertEqual(user['person_id'], self.person.person_id)
 
     def test_provider_user_endpoint_reports_not_patient(self):
+        from patient_portal.models import PatientUser
+
         resp = self._client_as(self.provider_identity).get('/api/v1/user/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         user = resp.data['user']
         self.assertFalse(user['is_patient'])
         self.assertIsNone(user['person_id'])
         self.assertTrue(user['is_org_admin'])
+        self.assertFalse(PatientUser.objects.filter(identity=self.provider_identity).exists())
+
+    def test_first_login_patient_user_endpoint_auto_provisions_person_id(self):
+        from patient_portal.models import PatientUser
+
+        resp = self._client_as(self.first_login_identity).get('/api/v1/user/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        user = resp.data['user']
+        self.assertTrue(user['is_patient'])
+        self.assertIsNotNone(user['person_id'])
+        patient_user = PatientUser.objects.get(identity=self.first_login_identity)
+        self.assertEqual(user['person_id'], patient_user.person_id)
+        self.assertTrue(PatientRecord.objects.filter(person=patient_user.person).exists())
+
+    def test_staff_user_endpoint_does_not_auto_provision_patient(self):
+        from patient_portal.models import PatientUser
+
+        resp = self._client_as(self.staff_identity).get('/api/v1/user/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        user = resp.data['user']
+        self.assertFalse(user['is_patient'])
+        self.assertIsNone(user['person_id'])
+        self.assertFalse(PatientUser.objects.filter(identity=self.staff_identity).exists())
 
 
 # ---------------------------------------------------------------------------
@@ -10966,7 +12233,9 @@ class PatientInvitationTest(TestCase):
         inv = PatientInvitation.objects.get(person=self.person)
         self.assertEqual(inv.status, 'pending')
         self.assertEqual(inv.email, 'rae@example.com')
+        self.person.refresh_from_db()
         self.record.refresh_from_db()
+        self.assertEqual(self.person.email, 'rae@example.com')
         self.assertEqual(self.record.email, 'rae@example.com')
         self.assertEqual(len(_django_mail.outbox), 1)
         self.assertIn(inv.token, _django_mail.outbox[0].body)
@@ -10977,8 +12246,10 @@ class PatientInvitationTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_invite_uses_stored_email_when_none_provided(self):
-        self.record.email = 'stored@example.com'
-        self.record.save(update_fields=['email'])
+        self.person.email = 'stored@example.com'
+        self.person.save(update_fields=['email'])
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(self.person)
         resp = self._client_as(self.staff).post(self._invite_url(self.person), {}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
         self.assertEqual(resp.data['email'], 'stored@example.com')
@@ -11129,15 +12400,17 @@ class PatientInvitationTest(TestCase):
         self.assertTrue(placeholder.check_password('sup3r-secret-pass'))
         self.assertEqual(PatientUser.objects.get(person=self.person).identity, placeholder)
 
-    # --- Email editable (lock-in) ---
+    # --- Email editable through Person extension ---
 
-    def test_email_is_editable_via_patch(self):
+    def test_email_is_editable_via_person_patch(self):
         resp = self._client_as(self.staff).patch(
-            f'/api/patient-info/{self.person.person_id}/',
+            f'/api/persons/{self.person.person_id}/',
             {'email': 'edited@example.com'}, format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK, getattr(resp, 'data', None))
+        self.person.refresh_from_db()
         self.record.refresh_from_db()
+        self.assertEqual(self.person.email, 'edited@example.com')
         self.assertEqual(self.record.email, 'edited@example.com')
 
 
@@ -13641,6 +14914,8 @@ class PasswordResetFlowTest(TestCase):
     """Admin-initiated password reset via emailed single-use link (#302, TI.1.1#08)."""
 
     def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
         from django.core import mail
         self.identity = Identity.objects.create_user(email='reset-me@test.com', password='Zr7-quokka-vale')
         mail.outbox = []
@@ -14495,19 +15770,56 @@ class OrgPatientSignupTest(TestCase):
         })
         self.assertEqual(resp.status_code, 409)
 
-    def test_signup_weak_password_returns_400(self):
+    def test_signup_weak_password_returns_400_with_field_errors(self):
         resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
             'email': 'weak@test.com',
             'password': '123',
         })
         self.assertEqual(resp.status_code, 400)
+        self.assertIn('errors', resp.data)
+        self.assertIn('password', resp.data['errors'])
+        # Django's validators produce specific messages for short/common/numeric passwords
+        pw_errors = resp.data['errors']['password']
+        self.assertTrue(len(pw_errors) > 0)
 
-    def test_signup_missing_email_returns_400(self):
+    def test_signup_missing_email_returns_400_with_field_errors(self):
         resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
             'email': '',
             'password': 'Str0ng!Pass99',
         })
         self.assertEqual(resp.status_code, 400)
+        self.assertIn('errors', resp.data)
+        self.assertIn('email', resp.data['errors'])
+
+    def test_signup_missing_password_returns_400_with_field_errors(self):
+        resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
+            'email': 'nopass@test.com',
+            'password': '',
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('errors', resp.data)
+        self.assertIn('password', resp.data['errors'])
+
+    def test_signup_invalid_email_returns_400_with_field_errors(self):
+        resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
+            'email': 'not-an-email',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('errors', resp.data)
+        self.assertIn('email', resp.data['errors'])
+        self.assertIn('Enter a valid email address.', resp.data['errors']['email'])
+
+    def test_signup_missing_both_fields_returns_all_errors(self):
+        """Both email and password errors are returned together."""
+        resp = APIClient().post('/api/v1/orgs/signup-org/patient-signup/', {
+            'email': '',
+            'password': '',
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('errors', resp.data)
+        self.assertIn('email', resp.data['errors'])
+        self.assertIn('password', resp.data['errors'])
 
     def test_signup_cross_org_rejects_existing_account(self):
         """A patient who already signed up at Org A gets 409 when trying to
@@ -14530,6 +15842,9 @@ class OrgPatientSignupTest(TestCase):
         })
         self.assertEqual(resp.status_code, 409)
         self.assertIn('already exists', resp.data['error'])
+        # Also includes field-level errors for frontend display
+        self.assertIn('errors', resp.data)
+        self.assertIn('email', resp.data['errors'])
 
 
 @override_settings(
@@ -14540,6 +15855,8 @@ class SelfServicePasswordResetTest(TestCase):
     """Test the public POST /api/v1/auth/request-reset/ endpoint."""
 
     def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
         from django.core import mail
         self.identity = Identity.objects.create_user(
             email='self-reset@test.com', password='Zr7-quokka-vale',
@@ -14606,6 +15923,57 @@ class OrgPublicInfoTest(TestCase):
         self.assertEqual(resp.status_code, 404)
 
 
+class OrgSignupDirectoryTest(TestCase):
+    """The homepage Sign Up tab's org list — public, and signup-enabled orgs only."""
+
+    URL = '/api/v1/orgs/signup-directory/'
+
+    def setUp(self):
+        Organization.objects.create(
+            name='Zeta Clinic', slug='zeta-clinic', allows_patient_signup=True,
+        )
+        Organization.objects.create(
+            name='Alpha Clinic', slug='alpha-clinic', allows_patient_signup=True,
+        )
+        Organization.objects.create(
+            name='Closed Clinic', slug='closed-clinic', allows_patient_signup=False,
+        )
+        Organization.objects.create(
+            name='Retired Clinic', slug='retired-clinic',
+            allows_patient_signup=True, is_active=False,
+        )
+
+    def test_reachable_unauthenticated(self):
+        resp = APIClient().get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_lists_only_active_signup_enabled_orgs(self):
+        resp = APIClient().get(self.URL)
+        slugs = [o['slug'] for o in resp.data]
+        self.assertEqual(slugs, ['alpha-clinic', 'zeta-clinic'])  # ordered by name
+        self.assertNotIn('closed-clinic', slugs)
+        self.assertNotIn('retired-clinic', slugs)
+
+    def test_exposes_name_and_slug_only(self):
+        resp = APIClient().get(self.URL)
+        self.assertEqual(set(resp.data[0].keys()), {'name', 'slug'})
+
+    def test_empty_when_no_org_allows_signup(self):
+        Organization.objects.all().update(allows_patient_signup=False)
+        resp = APIClient().get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(list(resp.data), [])
+
+    def test_does_not_shadow_org_detail_route(self):
+        """A real org slugged 'signup-directory' must not break the directory URL."""
+        Organization.objects.create(
+            name='Signup Directory', slug='signup-directory', allows_patient_signup=True,
+        )
+        resp = APIClient().get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsInstance(resp.data, list)
+
+
 class OrganizationSerializerTest(TestCase):
     """Test that allows_patient_signup is in the serializer output and writable."""
 
@@ -14628,6 +15996,31 @@ class OrganizationSerializerTest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.org.refresh_from_db()
         self.assertTrue(self.org.allows_patient_signup)
+
+    def test_clinical_unit_system_defaults_and_is_patchable(self):
+        response = self.client.get('/api/orgs/ser-org/')
+        self.assertEqual(response.data['clinical_unit_system'], 'US_ONCOLOGY')
+
+        response = self.client.patch(
+            '/api/orgs/ser-org/', {'clinical_unit_system': 'SI'}, format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.org.refresh_from_db()
+        self.assertEqual(self.org.clinical_unit_system, 'SI')
+
+    def test_changing_unit_system_marks_only_that_org_records_stale(self):
+        person = Person.objects.create(person_id=150231)
+        record = PatientRecord.objects.create(person=person, organization=self.org, derivation_version=4)
+        other_org = _make_org('Other Unit Org', 'other-unit-org')
+        other_person = Person.objects.create(person_id=150232)
+        other = PatientRecord.objects.create(person=other_person, organization=other_org, derivation_version=4)
+
+        self.client.patch('/api/orgs/ser-org/', {'clinical_unit_system': 'SI'}, format='json')
+
+        record.refresh_from_db()
+        other.refresh_from_db()
+        self.assertEqual(record.derivation_version, 0)
+        self.assertEqual(other.derivation_version, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -14819,6 +16212,160 @@ class UserlessOAuthTokenDetailTest(TestCase):
         self.assertFalse(can_access_patient(None, pid))
         self.assertFalse(can_write_patient(None, pid))
         self.assertIsNone(get_actor_role(None, pid))
+
+
+class ClinicalSessionAuthorizationTest(TestCase):
+    """Regression coverage for session-auth clinical row access.
+
+    Patient-auth writes should be accepted for the patient's own person_id, and
+    professional org grants should apply to both list filtering and create-time
+    write checks. Patient-role grants must not become org-wide access.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        _make_vocab_fixtures()
+        cls.org = Organization.objects.create(
+            name='Clinical Auth Org', slug='clinical-auth-org',
+        )
+        cls.patient_person = Person.objects.create(person_id=452001)
+        cls.other_person = Person.objects.create(person_id=452002)
+        PatientRecord.objects.create(person=cls.patient_person, organization=cls.org)
+        PatientRecord.objects.create(person=cls.other_person, organization=cls.org)
+
+        cls.patient_identity = Identity.objects.create_user(
+            email='clinical-patient@example.com', password='pw',
+        )
+        PatientUser.objects.create(
+            identity=cls.patient_identity, person=cls.patient_person,
+        )
+        cls.patient_role_identity = Identity.objects.create_user(
+            email='patient-role@example.com', password='pw',
+        )
+        GroupAccess.objects.create(
+            identity=cls.patient_role_identity, org=cls.org, role='patient',
+        )
+        cls.doctor = Identity.objects.create_user(
+            email='clinical-doctor@example.com', password='pw',
+        )
+        GroupAccess.objects.create(identity=cls.doctor, org=cls.org, role='doctor')
+        cls.analyst = Identity.objects.create_user(
+            email='clinical-analyst@example.com', password='pw',
+        )
+        GroupAccess.objects.create(identity=cls.analyst, org=cls.org, role='analyst')
+
+        cls.observation_concept = Concept.objects.get(concept_id=0)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        Observation.objects.create(
+            observation_id=452010,
+            person=cls.patient_person,
+            observation_concept=cls.observation_concept,
+            observation_date=date(2026, 1, 1),
+            observation_type_concept=cls.type_concept,
+            value_as_string='existing',
+        )
+
+    def _client(self, identity):
+        client = APIClient()
+        client.force_authenticate(user=identity)
+        return client
+
+    def _observation_payload(self, observation_id, person_id):
+        return {
+            'observation_id': observation_id,
+            'person': person_id,
+            'observation_concept': self.observation_concept.concept_id,
+            'observation_date': '2026-01-02',
+            'observation_type_concept': self.type_concept.concept_id,
+            'value_as_string': 'created',
+        }
+
+    def test_org_doctor_grant_allows_read_write_and_role_lookup(self):
+        from omop_core.authorization import (
+            can_access_patient, can_write_patient, get_actor_role,
+        )
+
+        pid = self.patient_person.person_id
+        self.assertTrue(can_access_patient(self.doctor, pid))
+        self.assertTrue(can_write_patient(self.doctor, pid))
+        self.assertEqual(get_actor_role(self.doctor, pid), 'doctor')
+
+        client = self._client(self.doctor)
+        list_resp = client.get('/api/observations/', {'person_id': pid})
+        self.assertEqual(list_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [row['observation_id'] for row in list_resp.data], [452010],
+        )
+
+        create_resp = client.post(
+            '/api/observations/',
+            self._observation_payload(452011, pid),
+            format='json',
+        )
+        self.assertEqual(create_resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Observation.objects.filter(observation_id=452011).exists())
+
+    def test_org_analyst_grant_is_read_only(self):
+        from omop_core.authorization import (
+            can_access_patient, can_write_patient, get_actor_role,
+        )
+
+        pid = self.patient_person.person_id
+        self.assertTrue(can_access_patient(self.analyst, pid))
+        self.assertFalse(can_write_patient(self.analyst, pid))
+        self.assertEqual(get_actor_role(self.analyst, pid), 'analyst')
+
+        client = self._client(self.analyst)
+        list_resp = client.get('/api/observations/', {'person_id': pid})
+        self.assertEqual(list_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [row['observation_id'] for row in list_resp.data], [452010],
+        )
+
+        create_resp = client.post(
+            '/api/observations/',
+            self._observation_payload(452012, pid),
+            format='json',
+        )
+        self.assertEqual(create_resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(Observation.objects.filter(observation_id=452012).exists())
+
+    def test_patient_role_grant_does_not_allow_org_wide_access(self):
+        from omop_core.authorization import (
+            can_access_patient, can_write_patient, get_actor_role,
+        )
+
+        pid = self.patient_person.person_id
+        self.assertFalse(can_access_patient(self.patient_role_identity, pid))
+        self.assertFalse(can_write_patient(self.patient_role_identity, pid))
+        self.assertIsNone(get_actor_role(self.patient_role_identity, pid))
+
+        resp = self._client(self.patient_role_identity).get(
+            '/api/observations/', {'person_id': pid},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(list(resp.data), [])
+
+    def test_patient_can_create_own_observation_but_not_another_patients(self):
+        client = self._client(self.patient_identity)
+
+        own_resp = client.post(
+            '/api/observations/',
+            self._observation_payload(452013, self.patient_person.person_id),
+            format='json',
+        )
+        self.assertEqual(own_resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Observation.objects.filter(observation_id=452013).exists())
+
+        other_resp = client.post(
+            '/api/observations/',
+            self._observation_payload(452014, self.other_person.person_id),
+            format='json',
+        )
+        self.assertEqual(other_resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(Observation.objects.filter(observation_id=452014).exists())
 # ---------------------------------------------------------------------------
 # Vocabulary Snapshot (streaming NDJSON) tests
 # ---------------------------------------------------------------------------
@@ -14891,6 +16438,88 @@ class VocabSnapshotStreamTransactionTest(TransactionTestCase):
             json.loads(lines[-1]).get('__done'),
             'stream must end with the __done sentinel',
         )
+
+
+class VocabSystemScopeTest(_SmartBase):
+    """#344 — vocabulary release/snapshot endpoints are reference (system) data,
+    so they accept a `system/*.read` scope in addition to patient/user read
+    scopes, while still rejecting a token that carries no read scope."""
+
+    def setUp(self):
+        super().setUp()
+        from oauth2_provider.models import AccessToken
+        from omop_core.models import VocabularyRelease
+        from django.utils import timezone as tz
+        import datetime
+        self.release = VocabularyRelease.objects.create(
+            build_timestamp=tz.now(), status='published', published_at=tz.now(),
+            scope=['TEST'], vocab_versions={'TEST': '1.0'},
+            row_counts={'vocabulary': 1}, checksums={})
+
+        def _tok(token, scope):
+            return AccessToken.objects.create(
+                user=self.foundation_user, application=self.app, token=token,
+                expires=tz.now() + datetime.timedelta(hours=1), scope=scope)
+        _tok('sys-read-tok', 'system/*.read')
+        _tok('noread-tok', 'openid')
+        _tok('writeonly-tok', 'patient/*.write')
+
+    def tearDown(self):
+        super().tearDown()
+        from patient_portal.api.views import _vocab_version_cache
+        _vocab_version_cache['release_pk'] = None
+        _vocab_version_cache['map'] = None
+
+    def _client(self, token):
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+        return c
+
+    def _urls(self):
+        rid = self.release.pk
+        return [
+            '/api/v1/vocab-releases/',
+            '/api/v1/vocab-releases/latest/',
+            f'/api/v1/vocab-releases/{rid}/',
+            f'/api/v1/vocab-releases/{rid}/snapshot/vocabulary/',
+        ]
+
+    def test_system_read_scope_allowed(self):
+        for url in self._urls():
+            resp = self._client('sys-read-tok').get(url)
+            self.assertEqual(resp.status_code, 200, f'{url}: {resp.status_code}')
+
+    def test_patient_read_scope_still_allowed(self):
+        for url in self._urls():
+            resp = self._client(self.read_token.token).get(url)
+            self.assertEqual(resp.status_code, 200, f'{url}: {resp.status_code}')
+
+    def test_token_without_read_scope_denied(self):
+        for url in self._urls():
+            resp = self._client('noread-tok').get(url)
+            self.assertEqual(resp.status_code, 403, f'{url}: {resp.status_code}')
+
+    def test_write_only_scope_denied_on_read(self):
+        for url in self._urls():
+            resp = self._client('writeonly-tok').get(url)
+            self.assertEqual(resp.status_code, 403, f'{url}: {resp.status_code}')
+
+    def test_expired_system_token_denied(self):
+        from oauth2_provider.models import AccessToken
+        from django.utils import timezone as tz
+        import datetime
+        AccessToken.objects.create(
+            user=self.foundation_user, application=self.app, token='sys-expired-tok',
+            expires=tz.now() - datetime.timedelta(seconds=1), scope='system/*.read')
+        resp = self._client('sys-expired-tok').get('/api/v1/vocab-releases/latest/')
+        self.assertIn(resp.status_code, (401, 403), resp.status_code)
+
+    def test_system_scope_denied_on_patient_data_endpoint(self):
+        # Isolation: system/*.read is a reference-data scope and must NOT grant
+        # access to patient data. Guards against a future refactor accidentally
+        # folding system/*.read into the base _READ_SCOPES.
+        resp = self._client('sys-read-tok').get('/api/v1/patient-records/')
+        self.assertEqual(resp.status_code, 403, resp.status_code)
 
 
 class VocabSnapshotTest(_SmartBase):
@@ -15150,7 +16779,7 @@ class DerivationVersionReadOnlyAPITest(TestCase):
             {'derivation_version': 999},
             format='json',
         )
-        self.assertIn(resp.status_code, [200, 400])
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         self.pr.refresh_from_db()
         self.assertNotEqual(self.pr.derivation_version, 999)
 
@@ -15509,20 +17138,143 @@ class MeetsCrabSlimFieldTest(_SmartBase):
         self.assertIn('myeloma_type', data)
         self.assertEqual(data['myeloma_type'], 'IgG Kappa')
 
-    def test_myeloma_type_patchable(self):
+    def test_myeloma_type_is_derive_only(self):
         resp = self.write_client.patch(
             f'/api/v1/patient-records/{self.mm_person.person_id}/',
             data=json.dumps({'myeloma_type': 'IgA Lambda'}),
             content_type='application/json',
         )
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 405)
         self.mm_record.refresh_from_db()
-        self.assertEqual(self.mm_record.myeloma_type, 'IgA Lambda')
+        self.assertEqual(self.mm_record.myeloma_type, 'IgG Kappa')
 
 
 # =============================================================================
 # Wearable Upload Tests
 # =============================================================================
+
+class WearableHrvStatisticTest(TestCase):
+    """SDNN and RMSSD are distinct statistics and must stay distinct (#438).
+
+    LOINC 80404-7 is specifically the standard-deviation form. Garmin's HRV
+    Status is RMSSD-based, so filing it under that code stated something the
+    data does not support — the same defect class as the pre-#413
+    walking_speed -> BMI mapping.
+    """
+
+    def test_sdnn_and_rmssd_have_different_concepts(self):
+        from omop_core.services.mappings import (
+            WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB,
+        )
+        self.assertNotEqual(WEARABLE_CONCEPT_CODE['hrv_sdnn'],
+                            WEARABLE_CONCEPT_CODE['hrv_rmssd'])
+        # SDNN keeps the genuine LOINC; RMSSD has none and is locally minted.
+        self.assertEqual(WEARABLE_CONCEPT_CODE['hrv_sdnn'], '80404-7')
+        self.assertEqual(WEARABLE_CONCEPT_VOCAB['hrv_sdnn'], 'LOINC')
+        self.assertEqual(WEARABLE_CONCEPT_VOCAB['hrv_rmssd'], 'HK-Wearable')
+
+    def test_rmssd_is_not_mapped_to_a_loinc_code(self):
+        """Guards the specific regression: aliasing RMSSD onto an SDNN code."""
+        from omop_core.services.mappings import (
+            WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB,
+        )
+        self.assertNotEqual(
+            WEARABLE_CONCEPT_VOCAB['hrv_rmssd'], 'LOINC',
+            'RMSSD has no LOINC concept — verified against a full Athena load. '
+            'Mapping it to any LOINC code misstates the statistic.')
+        self.assertTrue(WEARABLE_CONCEPT_CODE['hrv_rmssd'].startswith('HK-'))
+
+    def _parse_fit_with_messages(self, messages):
+        """Run parse_garmin_fit against synthetic FIT messages.
+
+        fitparse is an optional dependency and is not installed in CI, so the
+        module is stubbed. This is what lets the Garmin HRV routing — the code
+        #438 actually changed — be tested at all.
+        """
+        import sys
+        import types
+        from unittest import mock
+
+        class _FakeField:
+            def __init__(self, name, value):
+                self.name = name
+                self.value = value
+
+        class _FakeMessage:
+            """Mirrors the fitparse record shape: .name plus .fields of name/value."""
+
+            def __init__(self, name, values):
+                self.name = name
+                self.fields = [_FakeField(k, v) for k, v in values.items()]
+
+        class _FakeFitFile:
+            def __init__(self, _stream):
+                pass
+
+            def parse(self):
+                return None
+
+            def get_messages(self):
+                return [_FakeMessage(name, values) for name, values in messages]
+
+        fake_module = types.ModuleType('fitparse')
+        fake_module.FitFile = _FakeFitFile
+        with mock.patch.dict(sys.modules, {'fitparse': fake_module}):
+            from omop_core.services.wearable_parsers import parse_garmin_fit
+            return parse_garmin_fit(b'not-a-real-fit-file')
+
+    def test_garmin_hrv_status_is_stored_as_rmssd(self):
+        import datetime
+
+        samples = self._parse_fit_with_messages([
+            ('hrv_status_summary', {
+                'timestamp': datetime.datetime(2024, 7, 1, 6, 0, 0),
+                'weekly_average': 42.0,
+            }),
+        ])
+        by_key = {s.metric_key: s for s in samples}
+        self.assertIn('hrv_rmssd', by_key)
+        self.assertNotIn('hrv_sdnn', by_key,
+                         'Garmin HRV Status is RMSSD and must not populate the SDNN metric')
+        self.assertAlmostEqual(by_key['hrv_rmssd'].value, 42.0)
+
+    def test_legacy_hrv_message_routes_each_field_to_its_own_statistic(self):
+        """The legacy message can carry either statistic; each must land correctly."""
+        import datetime
+
+        samples = self._parse_fit_with_messages([
+            ('hrv', {
+                'timestamp': datetime.datetime(2024, 7, 2, 6, 0, 0),
+                'weekly_average': 55.0,
+                'sdnn': 71.0,
+            }),
+        ])
+        by_key = {s.metric_key: s for s in samples}
+        self.assertAlmostEqual(by_key['hrv_rmssd'].value, 55.0)
+        self.assertAlmostEqual(by_key['hrv_sdnn'].value, 71.0)
+
+    def test_apple_sdnn_still_maps_to_sdnn(self):
+        """Apple's identifier names SDNN explicitly — it must be unaffected."""
+        import io as _io
+        import zipfile
+        from omop_core.services.wearable_parsers import parse_apple_health_export
+
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierHeartRateVariabilitySDNN"
+          startDate="2024-07-01 06:00:00 -0700"
+          endDate="2024-07-01 06:00:00 -0700" value="48"/>
+</HealthData>
+"""
+        buf = _io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as zf:
+            zf.writestr('apple_health_export/export.xml', xml)
+
+        by_key = {s.metric_key: s for s in parse_apple_health_export(buf.getvalue())}
+        self.assertIn('hrv_sdnn', by_key)
+        self.assertNotIn('hrv_rmssd', by_key)
+        self.assertAlmostEqual(by_key['hrv_sdnn'].value, 48.0)
+
 
 class WearableParserUnitTest(TestCase):
     """Unit tests for the Garmin FIT and Apple Health parsers."""
@@ -15611,6 +17363,7 @@ class WearableUploadEndpointTest(TestCase):
         # fixture that flattens either would not exercise the real behaviour.
         from omop_core.services.mappings import (
             WEARABLE_CONCEPT_CODE, WEARABLE_CONCEPT_VOCAB, WEARABLE_OBSERVATION_METRICS,
+            WEARABLE_TYPE_CONCEPT_ID,
         )
         from omop_core.services.concept_cache import concept_cache_clear
         concept_cache_clear()
@@ -15639,31 +17392,44 @@ class WearableUploadEndpointTest(TestCase):
                 'Observation' if metric_key in WEARABLE_OBSERVATION_METRICS
                 else 'Measurement'
             )
-            c, _ = Concept.objects.get_or_create(
-                concept_id=concept_id_base,
-                defaults={
-                    'concept_name': f'Wearable {metric_key}',
-                    'domain': domains[domain_id],
-                    'vocabulary': vocabs[WEARABLE_CONCEPT_VOCAB[metric_key]],
-                    'concept_class': cc,
-                    'concept_code': concept_code,
-                    'valid_start_date': today,
-                    'valid_end_date': far_future,
-                },
-            )
+            c = Concept.objects.filter(
+                vocabulary_id=WEARABLE_CONCEPT_VOCAB[metric_key],
+                concept_code=concept_code,
+            ).first()
+            if c is None:
+                c = Concept.objects.create(
+                    concept_id=concept_id_base,
+                    concept_name=f'Wearable {metric_key}',
+                    domain=domains[domain_id],
+                    vocabulary=vocabs[WEARABLE_CONCEPT_VOCAB[metric_key]],
+                    concept_class=cc,
+                    concept_code=concept_code,
+                    valid_start_date=today,
+                    valid_end_date=far_future,
+                )
             cls.wearable_concepts[metric_key] = c
 
-        # Type concept for wearable measurements
+        # Provenance type concept for wearable rows. This fixture previously
+        # created 32883 under the name 'Patient self-report', mirroring the
+        # same mistake the production code made — 32883 is 'Survey'; 32865 is
+        # 'Patient self-report' (#441). Use the real id and code so the
+        # fixture cannot vouch for a mapping Athena would reject.
+        # The vocabulary must be the genuine 'Type Concept', not a TEST stub:
+        # upload_wearable rejects a 32865 row from any other vocabulary, because
+        # lab_results.sync can mint a shadow row at that id under HK-Labs.
         type_domain = Domain.objects.get(domain_id='Type Concept')
-        test_vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        type_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='Type Concept',
+            defaults={'vocabulary_name': 'OMOP Type Concept', 'vocabulary_concept_id': 0},
+        )
         Concept.objects.get_or_create(
-            concept_id=32883,
+            concept_id=WEARABLE_TYPE_CONCEPT_ID,
             defaults={
                 'concept_name': 'Patient self-report',
                 'domain': type_domain,
-                'vocabulary': test_vocab,
+                'vocabulary': type_vocab,
                 'concept_class': cc,
-                'concept_code': '32883',
+                'concept_code': 'OMOP4976938',
                 'valid_start_date': today,
                 'valid_end_date': far_future,
             },
@@ -15795,6 +17561,107 @@ class WearableUploadEndpointTest(TestCase):
         self.assertEqual(data['samples_created'], 0)
         self.assertEqual(data['unmapped_samples'], 1, data)
         self.assertIn('vo2_max', data['unmapped_metrics'])
+
+    def test_rows_are_typed_patient_self_report(self):
+        """Provenance must be 32865, not 'Survey' (32883) or 'Lab' (32856). (#441)"""
+        from omop_core.models import Measurement, Observation
+        from omop_core.services.mappings import WEARABLE_TYPE_CONCEPT_ID
+
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierRestingHeartRate"
+          startDate="2024-07-05 06:00:00 -0700"
+          endDate="2024-07-05 06:00:00 -0700" value="58"/>
+  <Record type="HKQuantityTypeIdentifierStepCount"
+          startDate="2024-07-05 09:00:00 -0700"
+          endDate="2024-07-05 09:30:00 -0700" value="3200"/>
+</HealthData>
+"""
+        data = self._upload_apple(xml)
+        self.assertGreater(data['samples_created'], 0, data)
+
+        # Cover both tables — steps is Observation-domain, resting HR is not.
+        m_types = set(Measurement.objects.filter(person=self.person)
+                      .values_list('measurement_type_concept_id', flat=True))
+        o_types = set(Observation.objects.filter(person=self.person)
+                      .values_list('observation_type_concept_id', flat=True))
+        self.assertEqual(m_types, {WEARABLE_TYPE_CONCEPT_ID})
+        self.assertEqual(o_types, {WEARABLE_TYPE_CONCEPT_ID})
+
+    def test_missing_type_concept_refuses_to_write(self):
+        """Unknown provenance must fail loudly, not fall back to 'Lab'. (#441)"""
+        from omop_core.models import Concept, Measurement
+        from omop_core.services.concept_cache import concept_cache_clear
+        from omop_core.services.mappings import WEARABLE_TYPE_CONCEPT_ID
+
+        before = Measurement.objects.filter(person=self.person).count()
+        Concept.objects.filter(concept_id=WEARABLE_TYPE_CONCEPT_ID).delete()
+        concept_cache_clear()
+        self.addCleanup(concept_cache_clear)
+
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierRestingHeartRate"
+          startDate="2024-07-06 06:00:00 -0700"
+          endDate="2024-07-06 06:00:00 -0700" value="60"/>
+</HealthData>
+"""
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        # Not _upload_apple: that helper asserts HTTP 200, and refusing the
+        # write is the behaviour under test.
+        upload = SimpleUploadedFile('export.zip', self._make_apple_zip(xml).read(),
+                                    content_type='application/zip')
+        resp = self._client_as(self.identity).post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': upload, 'device_type': 'apple'}, format='multipart')
+
+        self.assertEqual(resp.status_code, 503, getattr(resp, 'data', resp))
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(), before,
+            'Rows were written despite unknown provenance')
+
+    def test_shadow_type_concept_is_rejected(self):
+        """A locally-minted row at 32865 must not be used as provenance.
+
+        lab_results.sync._ensure_concept mints concept_id 32865 into HK-Labs
+        when Athena is absent. Accepting it would type every wearable row with
+        a HealthKey concept squatting a genuine Athena id (#415).
+        """
+        from omop_core.models import Concept, Measurement, Vocabulary
+        from omop_core.services.concept_cache import concept_cache_clear
+        from omop_core.services.mappings import WEARABLE_TYPE_CONCEPT_ID
+
+        before = Measurement.objects.filter(person=self.person).count()
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='HK-Labs',
+            defaults={'vocabulary_name': 'HK-Labs', 'vocabulary_concept_id': 0},
+        )
+        Concept.objects.filter(concept_id=WEARABLE_TYPE_CONCEPT_ID).update(
+            vocabulary_id='HK-Labs',
+            concept_code='hkl:fallback-32865',
+            source='HealthKey',
+        )
+        concept_cache_clear()
+        self.addCleanup(concept_cache_clear)
+
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierRestingHeartRate"
+          startDate="2024-07-07 06:00:00 -0700"
+          endDate="2024-07-07 06:00:00 -0700" value="61"/>
+</HealthData>
+"""
+        upload = SimpleUploadedFile('export.zip', self._make_apple_zip(xml).read(),
+                                    content_type='application/zip')
+        resp = self._client_as(self.identity).post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': upload, 'device_type': 'apple'}, format='multipart')
+
+        self.assertEqual(resp.status_code, 503, getattr(resp, 'data', resp))
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(), before,
+            'Rows were typed with a shadow concept')
 
     def test_upload_apple_health_creates_measurements(self):
         """Uploading an Apple Health zip creates Measurement rows."""
@@ -15945,3 +17812,1798 @@ class WearableUploadEndpointTest(TestCase):
             format='multipart',
         )
         self.assertIn(resp.status_code, [401, 403])
+
+
+# ---------------------------------------------------------------------------
+# Bulk OMOP row write endpoint
+# (contract summarised in CLAUDE.md, "Bulk OMOP Row Writes")
+# ---------------------------------------------------------------------------
+
+class BulkOmopWriteTest(TestCase):
+    """POST a JSON list to the five OMOP clinical CRUD endpoints.
+
+    Consumers that have already parsed FHIR into OMOP rows were writing one row
+    per HTTP request (~1,900 requests for a single patient). These cover the
+    batch entrance: one transaction, batched PK allocation, ordered ids back,
+    and — the part a naive bulk_create silently gets wrong — an explicit
+    PatientRecord refresh, since bulk_create does not fire post_save.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(person_id=31001)
+        cls.other_person = Person.objects.create(person_id=31002)
+        PatientRecord.objects.create(person=cls.person)
+        PatientRecord.objects.create(person=cls.other_person)
+
+        cls.m_concept = Concept.objects.get(concept_id=3000963)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.drug_concept = Concept.objects.get(concept_id=19136160)
+
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='bulk-write-test',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        from django.core.cache import cache
+        # DRF throttle state lives in the cache and leaks between tests.
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token"
+        )
+
+    def _rows(self, n, person=None, start_day=0):
+        person = person or self.person
+        base = date(2024, 1, 1)
+        return [
+            {
+                'person': person.person_id,
+                'measurement_concept': self.m_concept.concept_id,
+                'measurement_date': (
+                    base + timedelta(days=start_day + i)).isoformat(),
+                'measurement_type_concept': self.type_concept.concept_id,
+                'value_as_number': 5.0 + i,
+                'measurement_source_value': f'LOCAL-{i}',
+            }
+            for i in range(n)
+        ]
+
+    # --- happy path -------------------------------------------------------
+
+    def test_bulk_post_creates_all_rows_and_returns_ordered_ids(self):
+        """A JSON array creates every row and returns ids in request order."""
+        resp = self.client.post('/api/v1/measurements/', self._rows(3), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['created'], 3)
+        ids = resp.data['ids']
+        self.assertEqual(len(ids), 3)
+        self.assertEqual(len(set(ids)), 3)
+
+        # Ids are positionally aligned with the request rows.
+        for i, mid in enumerate(ids):
+            m = Measurement.objects.get(measurement_id=mid)
+            self.assertEqual(m.measurement_source_value, f'LOCAL-{i}')
+            self.assertEqual(m.person_id, self.person.person_id)
+
+    def test_single_dict_post_still_works(self):
+        """The existing single-row form is unchanged by the list support."""
+        resp = self.client.post('/api/v1/measurements/', {
+            'person': self.person.person_id,
+            'measurement_concept': self.m_concept.concept_id,
+            'measurement_date': '2024-03-01',
+            'measurement_type_concept': self.type_concept.concept_id,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        # Single-row responses still serialize the full row, not {created, ids}.
+        self.assertIn('measurement_id', resp.data)
+        self.assertNotIn('created', resp.data)
+
+    def test_bulk_post_works_on_legacy_prefix_too(self):
+        """Extending create() exposes the array form on /api/ as well as /api/v1/."""
+        resp = self.client.post('/api/measurements/', self._rows(2), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['created'], 2)
+
+    def test_all_five_resource_types_accept_a_batch(self):
+        """conditions, drug-exposures, measurements, observations, procedures."""
+        cases = [
+            ('conditions', 'condition_occurrence_id', ConditionOccurrence, {
+                'condition_concept': self.m_concept.concept_id,
+                'condition_start_date': '2024-01-01',
+                'condition_type_concept': self.type_concept.concept_id,
+            }),
+            ('drug-exposures', 'drug_exposure_id', DrugExposure, {
+                'drug_concept': self.drug_concept.concept_id,
+                'drug_exposure_start_date': '2024-01-01',
+                'drug_type_concept': self.type_concept.concept_id,
+            }),
+            ('measurements', 'measurement_id', Measurement, {
+                'measurement_concept': self.m_concept.concept_id,
+                'measurement_date': '2024-01-01',
+                'measurement_type_concept': self.type_concept.concept_id,
+            }),
+            ('observations', 'observation_id', Observation, {
+                'observation_concept': self.m_concept.concept_id,
+                'observation_date': '2024-01-01',
+                'observation_type_concept': self.type_concept.concept_id,
+            }),
+            ('procedures', 'procedure_occurrence_id', ProcedureOccurrence, {
+                'procedure_concept': self.m_concept.concept_id,
+                'procedure_date': '2024-01-01',
+                'procedure_type_concept': self.type_concept.concept_id,
+            }),
+        ]
+        for route, pk_field, model, fields in cases:
+            with self.subTest(route=route):
+                rows = [dict(fields, person=self.person.person_id) for _ in range(2)]
+                resp = self.client.post(
+                    f'/api/v1/{route}/', rows, format='json')
+                self.assertEqual(
+                    resp.status_code, status.HTTP_201_CREATED,
+                    f'{route}: {resp.data}')
+                self.assertEqual(resp.data['created'], 2)
+                self.assertEqual(
+                    model.objects.filter(
+                        **{f'{pk_field}__in': resp.data['ids']}).count(), 2)
+
+    def test_empty_list_is_a_noop(self):
+        resp = self.client.post('/api/v1/measurements/', [], format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data, {'created': 0, 'updated': 0, 'ids': []})
+
+    # --- query count ------------------------------------------------------
+
+    def _post_query_count(self, n, start_day, query=''):
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self.client.post(
+                f'/api/v1/measurements/{query}',
+                self._rows(n, start_day=start_day), format='json')
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+            self.assertEqual(resp.data['created'], n)
+        return len(ctx)
+
+    def test_bulk_write_query_count_does_not_scale_with_batch_size(self):
+        """Mirrors test_batched_ingest_does_not_scale_queries_with_bundle_size.
+
+        Measures the write path (skip_refresh=true) so the assertion is about
+        insert behaviour alone: batched PK allocation, one bulk_create, and FK
+        resolution prefetched per column instead of per row. Warmup first so
+        ContentType and other process-level caches are not counted.
+
+        The refresh is excluded deliberately — refresh_patient_record is O(the
+        person's accumulated data) by nature, so it cannot be constant, and
+        covering it here would measure the derivation pipeline rather than this
+        endpoint. test_bulk_write_is_far_cheaper_than_per_row_posts covers the
+        end-to-end cost with the refresh on.
+        """
+        self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            self._rows(1), format='json')
+
+        q_small = self._post_query_count(5, 100, '?skip_refresh=true')
+        q_large = self._post_query_count(40, 200, '?skip_refresh=true')
+        self.assertLess(
+            q_large - q_small, 10,
+            f'query count scaled with batch size: {q_small} queries for 5 rows, '
+            f'{q_large} for 40. Bulk path is falling back to per-row work.')
+
+    def test_bulk_write_is_far_cheaper_than_per_row_posts(self):
+        """End-to-end, refresh included: one batch beats N single-row POSTs.
+
+        This is the claim the endpoint is justified by, so assert it rather than
+        assuming it follows from the write-path test above.
+        """
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+
+        n = 20
+        self.client.post('/api/v1/measurements/', self._rows(1), format='json')
+
+        with CaptureQueriesContext(connection) as bulk_ctx:
+            resp = self.client.post(
+                '/api/v1/measurements/', self._rows(n, start_day=100),
+                format='json')
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+        with CaptureQueriesContext(connection) as row_ctx:
+            for row in self._rows(n, person=self.other_person, start_day=200):
+                r = self.client.post('/api/v1/measurements/', row, format='json')
+                self.assertEqual(r.status_code, status.HTTP_201_CREATED, r.data)
+
+        self.assertLess(
+            len(bulk_ctx), len(row_ctx),
+            f'bulk write ({len(bulk_ctx)} queries) was not cheaper than '
+            f'{n} single-row POSTs ({len(row_ctx)} queries)')
+
+    # --- transaction / validation ----------------------------------------
+
+    def test_invalid_row_rolls_back_whole_batch_with_per_index_errors(self):
+        """One bad row fails the batch; errors are positionally aligned."""
+        before = Measurement.objects.filter(person=self.person).count()
+        rows = self._rows(3)
+        del rows[1]['measurement_date']
+
+        resp = self.client.post('/api/v1/measurements/', rows, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(len(resp.data), 3)
+        self.assertEqual(resp.data[0], {})
+        self.assertIn('measurement_date', resp.data[1])
+        self.assertEqual(resp.data[2], {})
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(), before,
+            'a partial batch landed — the whole batch must roll back')
+
+    def test_client_supplied_pk_is_rejected(self):
+        rows = self._rows(2)
+        rows[1]['measurement_id'] = 999999
+        resp = self.client.post('/api/v1/measurements/', rows, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data[0], {})
+        self.assertIn('measurement_id', resp.data[1])
+        self.assertFalse(Measurement.objects.filter(measurement_id=999999).exists())
+
+    def test_mixed_person_batch_is_rejected(self):
+        """One batch is one person; a mixed batch is a client bug, not a merge."""
+        rows = self._rows(2) + self._rows(1, person=self.other_person, start_day=5)
+        before = Measurement.objects.count()
+        resp = self.client.post('/api/v1/measurements/', rows, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('one person', resp.data['detail'])
+        self.assertEqual(Measurement.objects.count(), before)
+
+    # --- limits -----------------------------------------------------------
+
+    def test_over_limit_batch_returns_413_naming_the_maximum(self):
+        from patient_portal.api.views import OMOP_BULK_MAX_ROWS
+        rows = [self._rows(1)[0]] * (OMOP_BULK_MAX_ROWS + 1)
+        before = Measurement.objects.count()
+        resp = self.client.post('/api/v1/measurements/', rows, format='json')
+        self.assertEqual(
+            resp.status_code, status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+        self.assertEqual(resp.data['max_rows'], OMOP_BULK_MAX_ROWS)
+        self.assertIn(str(OMOP_BULK_MAX_ROWS), resp.data['detail'])
+        self.assertEqual(Measurement.objects.count(), before)
+
+    def test_batch_at_exactly_the_limit_is_accepted(self):
+        # Distinct rows: the batch has to actually write OMOP_BULK_MAX_ROWS rows
+        # for the limit to mean anything, and since the write is idempotent
+        # (issue #454) a batch of identical rows would collapse to one.
+        from patient_portal.api.views import OMOP_BULK_MAX_ROWS
+        rows = self._rows(OMOP_BULK_MAX_ROWS)
+        resp = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true', rows, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['created'], OMOP_BULK_MAX_ROWS)
+
+    # --- provenance -------------------------------------------------------
+
+    def test_provenance_row_per_created_row_when_source_supplied(self):
+        from omop_core.models import ProvenanceRecord
+        from django.contrib.contenttypes.models import ContentType
+
+        resp = self.client.post(
+            '/api/v1/measurements/', self._rows(4), format='json',
+            HTTP_X_PROVENANCE_SOURCE='EHR_SYNC',
+            HTTP_X_PROVENANCE_USER_ID='etl-run-7',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        ct = ContentType.objects.get_for_model(Measurement)
+        prov = ProvenanceRecord.objects.filter(
+            content_type=ct, object_id__in=resp.data['ids'])
+        self.assertEqual(prov.count(), 4)
+        self.assertEqual({p.source for p in prov}, {'EHR_SYNC'})
+        self.assertEqual({p.source_user_id for p in prov}, {'etl-run-7'})
+        self.assertEqual(
+            {p.target_patient_id for p in prov}, {str(self.person.person_id)})
+
+    def test_no_source_means_no_provenance_rows(self):
+        """Matches single-row behavior — an invented source is unfalsifiable."""
+        from omop_core.models import ProvenanceRecord
+        from django.contrib.contenttypes.models import ContentType
+
+        resp = self.client.post('/api/v1/measurements/', self._rows(3), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        ct = ContentType.objects.get_for_model(Measurement)
+        self.assertEqual(
+            ProvenanceRecord.objects.filter(
+                content_type=ct, object_id__in=resp.data['ids']).count(),
+            0)
+
+    # --- PatientRecord refresh -------------------------------------------
+
+    def test_bulk_write_refreshes_patient_record_by_default(self):
+        """bulk_create skips post_save, so the refresh must be explicit.
+
+        Without it the rows land but the read model stays stale — invisible to
+        the frontend and to /api/patient-records/.
+        """
+        derived_before = PatientRecord.objects.get(
+            person=self.person).derived_at
+
+        resp = self.client.post('/api/v1/measurements/', self._rows(3), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+        pr = PatientRecord.objects.get(person=self.person)
+        self.assertIsNotNone(
+            pr.derived_at,
+            'PatientRecord was never refreshed after the bulk write')
+        self.assertNotEqual(
+            pr.derived_at, derived_before,
+            'PatientRecord.derived_at did not advance — the read model is stale')
+
+    def _count_refreshes(self, n, query='', start_day=0):
+        """Return how many times refresh_patient_record runs for one bulk POST.
+
+        views.py binds the symbol at module load; omop_core/signals.py imports it
+        lazily inside _refresh_for_instance. Patch both so signal-triggered
+        refreshes are counted too, not just the explicit end-of-batch one.
+        """
+        from unittest import mock
+        from omop_core.services import patient_record_service as prs
+
+        real = prs.refresh_patient_record
+        calls = []
+
+        def counting(person, *a, **kw):
+            calls.append(getattr(person, 'person_id', person))
+            return real(person, *a, **kw)
+
+        with mock.patch('patient_portal.api.views.refresh_patient_record', counting), \
+             mock.patch.object(prs, 'refresh_patient_record', counting):
+            resp = self.client.post(
+                f'/api/v1/measurements/{query}',
+                self._rows(n, start_day=start_day), format='json')
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        return calls
+
+    def test_refresh_runs_once_per_batch_never_per_row(self):
+        """The derivation pipeline must fire once for the batch, not per row.
+
+        refresh_patient_record rebuilds the whole PatientRecord from the person's
+        OMOP data, so a per-row call is what made the single-row path take ~65
+        minutes for one patient. Assert the count is exactly 1 and independent of
+        batch size — measured for real, since the guarantee currently rests on
+        bulk_create not emitting post_save.
+        """
+        for n in (1, 5, 40):
+            with self.subTest(rows=n):
+                calls = self._count_refreshes(n, start_day=n * 3)
+                self.assertEqual(
+                    len(calls), 1,
+                    f'{n}-row batch triggered {len(calls)} refreshes; expected '
+                    f'exactly 1. A per-row refresh has crept back in.')
+                self.assertEqual(calls, [self.person.person_id])
+
+    def test_skip_refresh_true_runs_no_refresh_at_all(self):
+        self.assertEqual(
+            self._count_refreshes(20, '?skip_refresh=true', start_day=500), [])
+
+    def test_skip_refresh_true_defers_the_refresh(self):
+        derived_before = PatientRecord.objects.get(person=self.person).derived_at
+        resp = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            self._rows(3), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(Measurement.objects.filter(person=self.person).count(), 3)
+        self.assertEqual(
+            PatientRecord.objects.get(person=self.person).derived_at,
+            derived_before,
+            'skip_refresh=true still refreshed the PatientRecord')
+
+    # --- auth -------------------------------------------------------------
+
+    def test_bulk_write_requires_authentication(self):
+        anon = APIClient()
+        resp = anon.post('/api/v1/measurements/', self._rows(2), format='json')
+        self.assertIn(resp.status_code, [401, 403])
+        self.assertEqual(Measurement.objects.filter(person=self.person).count(), 0)
+
+    def test_boolean_fk_is_rejected_not_silently_mislinked(self):
+        """A JSON boolean FK must 400, never resolve to pk=1.
+
+        bool subclasses int, so the prefetch cache built in _prefetch_bulk_related
+        would return the pk-1 object for `True` — {1: obj}.get(True) is a hit.
+        DRF's own to_internal_value guards against this (it raises TypeError for
+        bool before hitting the queryset), so _cached_pk_lookup must route bools
+        to the original implementation rather than answering from the cache.
+
+        Verified counterfactually: with the bool guard removed this POST returns
+        201 and silently attaches the measurement to person 1.
+        """
+        p1 = Person.objects.create(person_id=1)
+        PatientRecord.objects.create(person=p1)
+
+        row = self._rows(1)[0]
+        row['person'] = True
+        resp = self.client.post('/api/v1/measurements/', [row], format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('person', resp.data[0])
+        self.assertEqual(
+            Measurement.objects.filter(person_id=1).count(), 0,
+            'a boolean FK silently resolved to person_id=1')
+
+    def test_boolean_fk_bulk_matches_single_row_behavior(self):
+        """The bulk path must not be more permissive than the single-row path."""
+        p1 = Person.objects.create(person_id=1)
+        PatientRecord.objects.create(person=p1)
+
+        row = self._rows(1)[0]
+        row['person'] = True
+        single = self.client.post('/api/v1/measurements/', dict(row), format='json')
+        bulk = self.client.post('/api/v1/measurements/', [dict(row)], format='json')
+
+        self.assertEqual(single.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(bulk.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            str(single.data['person'][0]), str(bulk.data[0]['person'][0]),
+            'bulk and single-row disagree on how a boolean FK is reported')
+
+    def test_unhashable_fk_value_errors_per_index_not_500(self):
+        """A dict/list FK id must 400 like the single-row path, not blow up.
+
+        _prefetch_bulk_related builds a set of candidate ids; adding an
+        unhashable value raised TypeError straight out of the comprehension,
+        which DRF does not catch — so the batch 500'd where a single-row POST of
+        the same body returns a clean 400.
+        """
+        for bad in ({'id': 5}, [5], {'nested': {'deep': 1}}):
+            with self.subTest(value=bad):
+                row = self._rows(1)[0]
+                row['person'] = bad
+                resp = self.client.post(
+                    '/api/v1/measurements/', [row], format='json')
+                self.assertEqual(
+                    resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+                self.assertIn('person', resp.data[0])
+
+    def test_unhashable_fk_matches_single_row_status(self):
+        """Bulk must not be worse than single-row for the same malformed body."""
+        row = self._rows(1)[0]
+        row['person'] = {'id': 5}
+        single = self.client.post('/api/v1/measurements/', dict(row), format='json')
+        bulk = self.client.post('/api/v1/measurements/', [dict(row)], format='json')
+        self.assertEqual(single.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(bulk.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_one_bad_fk_does_not_stop_the_others_prefetching(self):
+        """An unhashable id is skipped for caching, not fatal to the batch.
+
+        The valid rows must still validate normally; only the bad row errors.
+        """
+        rows = self._rows(3)
+        rows[1]['person'] = {'id': 5}
+        resp = self.client.post('/api/v1/measurements/', rows, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data[0], {})
+        self.assertIn('person', resp.data[1])
+        self.assertEqual(resp.data[2], {})
+
+    def test_oversized_body_rejected_before_parsing(self):
+        """CONTENT_LENGTH over the byte ceiling returns 413 pre-parse.
+
+        The row cap alone is not a memory guard: DRF's JSONParser reads the WSGI
+        stream directly and never touches HttpRequest.body, so
+        DATA_UPLOAD_MAX_MEMORY_SIZE does not bound a JSON array. Without this
+        check a huge body is fully parsed before the row count can reject it.
+        """
+        from patient_portal.api.views import OMOP_BULK_MAX_BYTES
+
+        resp = self.client.post(
+            '/api/v1/measurements/', self._rows(1), format='json',
+            CONTENT_LENGTH=str(OMOP_BULK_MAX_BYTES + 1))
+        self.assertEqual(
+            resp.status_code, status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, resp.data)
+        self.assertEqual(resp.data['max_bytes'], OMOP_BULK_MAX_BYTES)
+
+    def test_normal_sized_body_is_unaffected_by_the_byte_ceiling(self):
+        resp = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            self._rows(50), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['created'], 50)
+
+    def test_unknown_fk_id_still_errors_per_index(self):
+        """A cache miss must fall through to DRF's own per-index error."""
+        rows = self._rows(2)
+        rows[1]['measurement_concept'] = 987654321   # no such concept
+        resp = self.client.post('/api/v1/measurements/', rows, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data[0], {})
+        self.assertIn('measurement_concept', resp.data[1])
+
+    def _org_client(self, org, label):
+        """An OAuth2 write-token client scoped to `org`."""
+        from oauth2_provider.models import AccessToken, Application
+        from omop_core.models import ApplicationOrganization
+        from django.utils import timezone as tz
+        import datetime
+
+        user = Identity.objects.create_user(email=f'svc_{label}@test.com', password='x')
+        app = Application.objects.create(
+            name=f'{label} App',
+            client_id=f'{label}-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=user,
+        )
+        ApplicationOrganization.objects.create(application=app, organization=org)
+        token = AccessToken.objects.create(
+            user=user, application=app, token=f'{label}-write-token',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='patient/*.write',
+        )
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+        return client
+
+    def test_bulk_write_rejects_cross_org_person(self):
+        """The bulk path re-implements perform_create's org check — prove it runs.
+
+        A batch is authorized once for its single person rather than per row, so
+        this is genuinely separate code from the single-row path and needs its
+        own coverage: an org token must not write to another org's patient.
+        """
+        from omop_core.models import Organization
+
+        org_a = Organization.objects.create(name='Bulk Org A', slug='bulk-org-a')
+        org_b = Organization.objects.create(name='Bulk Org B', slug='bulk-org-b')
+        pr = PatientRecord.objects.get(person=self.person)
+        pr.organization = org_b
+        pr.save()
+
+        before = Measurement.objects.filter(person=self.person).count()
+        resp = self._org_client(org_a, 'bulk-a').post(
+            '/api/v1/measurements/', self._rows(3), format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN, resp.data)
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(), before,
+            'cross-org bulk write landed rows')
+
+    def test_bulk_write_allows_same_org_person(self):
+        """The counterpart — the org check must not reject a legitimate write."""
+        from omop_core.models import Organization
+
+        org = Organization.objects.create(name='Bulk Org C', slug='bulk-org-c')
+        pr = PatientRecord.objects.get(person=self.person)
+        pr.organization = org
+        pr.save()
+
+        resp = self._org_client(org, 'bulk-c').post(
+            '/api/v1/measurements/', self._rows(3), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['created'], 3)
+
+
+class BulkOmopUpsertTest(TestCase):
+    """The bulk OMOP write endpoints are idempotent (issue #454).
+
+    The endpoint carries no idempotency key, so before this every ETL re-run,
+    every retry after a read timeout, and every re-parse duplicated rows the
+    server already held — one observed patient ended up with 8,879 measurements
+    from retries of writes that had in fact succeeded. Source bundles also repeat
+    events internally (41 conditions parsing to 30 distinct events), so even the
+    first load was not convergent.
+
+    These cover the four semantics ported from fhir/sync.py::_upsert_clinical —
+    re-post is a no-op, a changed concept updates in place, within-batch repeats
+    collapse, pre-existing stacked duplicates collapse — plus the properties that
+    had to survive: one refresh per batch, and a query count flat in batch size.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(person_id=32001)
+        cls.other_person = Person.objects.create(person_id=32002)
+        PatientRecord.objects.create(person=cls.person)
+        PatientRecord.objects.create(person=cls.other_person)
+
+        cls.m_concept = Concept.objects.get(concept_id=3000963)
+        # Stands in for the concept a later vocabulary load resolves the same
+        # source code to; any Concept row works, the FK is not domain-checked.
+        cls.upgraded_concept = Concept.objects.get(concept_id=4112853)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='bulk-upsert-test',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token")
+
+    # --- helpers ----------------------------------------------------------
+
+    def _rows(self, n, person=None, start_day=0, concept=None):
+        person = person or self.person
+        concept = concept or self.m_concept
+        base = date(2024, 1, 1)
+        return [
+            {
+                'person': person.person_id,
+                'measurement_concept': concept.concept_id,
+                'measurement_date': (base + timedelta(days=start_day + i)).isoformat(),
+                'measurement_type_concept': self.type_concept.concept_id,
+                'value_as_number': 5.0 + i,
+                'measurement_source_value': f'LOCAL-{i}',
+            }
+            for i in range(n)
+        ]
+
+    def _conditions(self, source_values, day='2024-01-01', concept=None):
+        concept = concept or self.m_concept
+        return [
+            {
+                'person': self.person.person_id,
+                'condition_concept': concept.concept_id,
+                'condition_start_date': day,
+                'condition_type_concept': self.type_concept.concept_id,
+                'condition_source_value': sv,
+            }
+            for sv in source_values
+        ]
+
+    def _post(self, rows, route='measurements', query='?skip_refresh=true'):
+        resp = self.client.post(f'/api/v1/{route}/{query}', rows, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        return resp.data
+
+    # --- acceptance criteria ---------------------------------------------
+
+    def test_reposting_the_same_batch_writes_no_new_rows(self):
+        """The headline case: an ETL re-run converges instead of doubling."""
+        rows = self._rows(4)
+        first = self._post(rows)
+        self.assertEqual(first['created'], 4)
+        self.assertEqual(first['updated'], 0)
+
+        second = self._post(rows)
+        self.assertEqual(second['created'], 0)
+        self.assertEqual(second['updated'], 0)
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(), 4,
+            're-posting an unchanged batch duplicated the rows')
+        # The second response still names a row per request row — the caller can
+        # keep using ids positionally without knowing whether it inserted.
+        self.assertEqual(second['ids'], first['ids'])
+
+    def test_reposting_single_dict_uses_same_upsert_identity(self):
+        """A single-row retry converges on the same row instead of duplicating."""
+        row = self._rows(1)[0]
+
+        first = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            row,
+            format='json',
+        )
+        second = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            row,
+            format='json',
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.data)
+        self.assertEqual(second.status_code, status.HTTP_200_OK, second.data)
+        self.assertEqual(first.data['measurement_id'], second.data['measurement_id'])
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(),
+            1,
+        )
+        self.assertNotIn('created', first.data)
+
+    def test_single_dict_and_one_element_list_resolve_to_same_row(self):
+        """Dict and one-element list POSTs share the same natural-key identity."""
+        row = self._rows(1, start_day=20)[0]
+
+        single = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            row,
+            format='json',
+        )
+        one_element_list = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            [row],
+            format='json',
+        )
+
+        self.assertEqual(single.status_code, status.HTTP_201_CREATED, single.data)
+        self.assertEqual(
+            one_element_list.status_code,
+            status.HTTP_201_CREATED,
+            one_element_list.data,
+        )
+        self.assertEqual(one_element_list.data['created'], 0)
+        self.assertEqual(one_element_list.data['ids'], [single.data['measurement_id']])
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(),
+            1,
+        )
+
+    def test_reposting_single_dict_writes_no_extra_provenance(self):
+        """Only the first inserted single row gets provenance attribution."""
+        from django.contrib.contenttypes.models import ContentType
+        from omop_core.models import ProvenanceRecord
+
+        row = self._rows(1, start_day=40)[0]
+        headers = {
+            'HTTP_X_PROVENANCE_SOURCE': 'EHR_SYNC',
+            'HTTP_X_PROVENANCE_USER_ID': 'etl-retry-1',
+        }
+        first = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            row,
+            format='json',
+            **headers,
+        )
+        second = self.client.post(
+            '/api/v1/measurements/?skip_refresh=true',
+            row,
+            format='json',
+            **headers,
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.data)
+        self.assertEqual(second.status_code, status.HTTP_200_OK, second.data)
+        ct = ContentType.objects.get_for_model(Measurement)
+        self.assertEqual(
+            ProvenanceRecord.objects.filter(
+                content_type=ct,
+                object_id=first.data['measurement_id'],
+                source='EHR_SYNC',
+                source_user_id='etl-retry-1',
+            ).count(),
+            1,
+        )
+
+    def test_changed_concept_updates_in_place_instead_of_duplicating(self):
+        """A vocabulary load upgrading 'No matching concept' must not strand a
+        duplicate — the stored row's concept is corrected in place."""
+        rows = self._conditions(['C50.9'])
+        created = self._post(rows, route='conditions')
+        self.assertEqual(created['created'], 1)
+
+        upgraded = self._conditions(['C50.9'], concept=self.upgraded_concept)
+        resp = self._post(upgraded, route='conditions')
+        self.assertEqual(resp['created'], 0)
+        self.assertEqual(resp['updated'], 1)
+
+        rows_now = ConditionOccurrence.objects.filter(person=self.person)
+        self.assertEqual(rows_now.count(), 1, 'the concept change duplicated the row')
+        self.assertEqual(
+            rows_now.first().condition_concept_id, self.upgraded_concept.concept_id)
+        self.assertEqual(resp['ids'], created['ids'], 'the row identity changed')
+
+    def test_repeats_within_one_batch_collapse_to_one_row(self):
+        """Source bundles repeat events; the first load must still converge."""
+        rows = self._conditions(['C50.9', 'C50.9', 'I10', 'C50.9'])
+        resp = self._post(rows, route='conditions')
+
+        self.assertEqual(resp['created'], 2)
+        self.assertEqual(
+            ConditionOccurrence.objects.filter(person=self.person).count(), 2)
+        # Every request row still maps to the row it resolved to, so a caller
+        # that stored ids positionally is not silently misaligned.
+        self.assertEqual(len(resp['ids']), 4)
+        self.assertEqual(resp['ids'][0], resp['ids'][1])
+        self.assertEqual(resp['ids'][0], resp['ids'][3])
+        self.assertNotEqual(resp['ids'][0], resp['ids'][2])
+
+    def test_last_occurrence_of_a_repeated_key_wins(self):
+        """Matches _upsert_clinical's last-wins `desired` dict, so the batch
+        converges on what the producer emitted most recently."""
+        rows = self._conditions(['C50.9']) + self._conditions(
+            ['C50.9'], concept=self.upgraded_concept)
+        resp = self._post(rows, route='conditions')
+
+        self.assertEqual(resp['created'], 1)
+        stored = ConditionOccurrence.objects.get(person=self.person)
+        self.assertEqual(
+            stored.condition_concept_id, self.upgraded_concept.concept_id)
+
+    def test_preexisting_stacked_duplicates_are_collapsed(self):
+        """Rows a previous non-idempotent load already doubled are cleaned up on
+        the next write, onto the earliest row."""
+        appended = self._post(
+            self._conditions(['C50.9']), route='conditions',
+            query='?skip_refresh=true&upsert=false')
+        again = self._post(
+            self._conditions(['C50.9']), route='conditions',
+            query='?skip_refresh=true&upsert=false')
+        self.assertEqual(
+            ConditionOccurrence.objects.filter(person=self.person).count(), 2)
+
+        resp = self._post(self._conditions(['C50.9']), route='conditions')
+        self.assertEqual(resp['created'], 0)
+        self.assertEqual(resp['updated'], 1)
+        remaining = list(ConditionOccurrence.objects.filter(person=self.person))
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(
+            remaining[0].condition_occurrence_id, appended['ids'][0],
+            'duplicates collapsed onto the wrong row — the earliest must survive')
+        self.assertFalse(
+            ConditionOccurrence.objects.filter(
+                condition_occurrence_id=again['ids'][0]).exists())
+
+    def test_collapsing_a_duplicate_removes_its_provenance(self):
+        """ProvenanceRecord points at rows via a GenericForeignKey, so nothing
+        cascades — a collapsed duplicate would leave a dangling record behind."""
+        from omop_core.models import ProvenanceRecord
+        from django.contrib.contenttypes.models import ContentType
+
+        headers = {'HTTP_X_PROVENANCE_SOURCE': 'EHR_SYNC',
+                   'HTTP_X_PROVENANCE_USER_ID': 'etl-run-9'}
+        first = self.client.post(
+            '/api/v1/conditions/?skip_refresh=true&upsert=false',
+            self._conditions(['C50.9']), format='json', **headers).data
+        dupe = self.client.post(
+            '/api/v1/conditions/?skip_refresh=true&upsert=false',
+            self._conditions(['C50.9']), format='json', **headers).data
+
+        ct = ContentType.objects.get_for_model(ConditionOccurrence)
+        self.assertEqual(ProvenanceRecord.objects.filter(content_type=ct).count(), 2)
+
+        self._post(self._conditions(['C50.9']), route='conditions')
+
+        self.assertEqual(
+            list(ProvenanceRecord.objects.filter(content_type=ct)
+                 .values_list('object_id', flat=True)),
+            [first['ids'][0]],
+            'provenance for the collapsed duplicate outlived the row')
+
+    def test_repost_writes_no_extra_provenance(self):
+        """An upsert that touched nothing wrote nothing to attribute."""
+        from omop_core.models import ProvenanceRecord
+        from django.contrib.contenttypes.models import ContentType
+
+        headers = {'HTTP_X_PROVENANCE_SOURCE': 'EHR_SYNC'}
+        rows = self._rows(3)
+        self.client.post('/api/v1/measurements/?skip_refresh=true', rows,
+                         format='json', **headers)
+        self.client.post('/api/v1/measurements/?skip_refresh=true', rows,
+                         format='json', **headers)
+
+        ct = ContentType.objects.get_for_model(Measurement)
+        self.assertEqual(ProvenanceRecord.objects.filter(content_type=ct).count(), 3)
+
+    # --- key shape --------------------------------------------------------
+
+    def test_same_day_measurements_with_different_values_both_survive(self):
+        """Measurement diverges from _upsert_clinical's (source_value, date) key.
+
+        A repeat draw of one analyte on one day is a real second result. Keying
+        measurements on (source_value, date) alone would make this batch write
+        one row and — worse — delete the other on the next load.
+        """
+        rows = [dict(self._rows(1)[0], value_as_number=v) for v in (5.0, 9.5)]
+        resp = self._post(rows)
+
+        self.assertEqual(resp['created'], 2)
+        self.assertEqual(
+            sorted(float(m.value_as_number) for m in
+                   Measurement.objects.filter(person=self.person)),
+            [5.0, 9.5])
+
+        # …and re-posting both still converges.
+        again = self._post(rows)
+        self.assertEqual(again['created'], 0)
+        self.assertEqual(Measurement.objects.filter(person=self.person).count(), 2)
+
+    def test_measurement_concept_still_upgrades_in_place(self):
+        """The concept stays outside the measurement key, so a vocabulary load
+        updates the row rather than stranding a duplicate next to it."""
+        rows = self._rows(1)
+        self._post(rows)
+        upgraded = [dict(rows[0],
+                         measurement_concept=self.upgraded_concept.concept_id)]
+        resp = self._post(upgraded)
+
+        self.assertEqual(resp['created'], 0)
+        self.assertEqual(resp['updated'], 1)
+        stored = Measurement.objects.get(person=self.person)
+        self.assertEqual(
+            stored.measurement_concept_id, self.upgraded_concept.concept_id)
+
+    def test_rows_without_an_identity_are_always_inserted(self):
+        """No source_value means no event identity. Such rows must not all
+        collapse into one another — insert, as the endpoint always did."""
+        rows = [
+            {
+                'person': self.person.person_id,
+                'measurement_concept': self.m_concept.concept_id,
+                'measurement_date': '2024-02-01',
+                'measurement_type_concept': self.type_concept.concept_id,
+                'value_as_number': 7.0,
+            }
+            for _ in range(3)
+        ]
+        resp = self._post(rows)
+        self.assertEqual(resp['created'], 3)
+        self.assertEqual(len(set(resp['ids'])), 3)
+
+    def test_upsert_is_scoped_to_the_batch_person(self):
+        """Another person's identical event must not be matched or collapsed."""
+        other = self._rows(2, person=self.other_person)
+        self.client.post('/api/v1/measurements/?skip_refresh=true', other,
+                         format='json')
+        resp = self._post(self._rows(2))
+
+        self.assertEqual(resp['created'], 2)
+        self.assertEqual(Measurement.objects.filter(person=self.person).count(), 2)
+        self.assertEqual(
+            Measurement.objects.filter(person=self.other_person).count(), 2)
+
+    def test_upsert_false_restores_append_only_writes(self):
+        """The escape hatch for callers that really do want every row appended."""
+        rows = self._rows(2)
+        self._post(rows, query='?skip_refresh=true&upsert=false')
+        resp = self._post(rows, query='?skip_refresh=true&upsert=false')
+
+        self.assertEqual(resp['created'], 2)
+        self.assertEqual(resp['updated'], 0)
+        self.assertEqual(Measurement.objects.filter(person=self.person).count(), 4)
+
+    def test_all_five_resource_types_are_idempotent(self):
+        cases = [
+            ('conditions', ConditionOccurrence, {
+                'condition_concept': self.m_concept.concept_id,
+                'condition_start_date': '2024-01-01',
+                'condition_type_concept': self.type_concept.concept_id,
+                'condition_source_value': 'SRC-1',
+            }),
+            ('drug-exposures', DrugExposure, {
+                'drug_concept': self.m_concept.concept_id,
+                'drug_exposure_start_date': '2024-01-01',
+                'drug_type_concept': self.type_concept.concept_id,
+                'drug_source_value': 'SRC-1',
+            }),
+            ('measurements', Measurement, {
+                'measurement_concept': self.m_concept.concept_id,
+                'measurement_date': '2024-01-01',
+                'measurement_type_concept': self.type_concept.concept_id,
+                'measurement_source_value': 'SRC-1',
+            }),
+            ('observations', Observation, {
+                'observation_concept': self.m_concept.concept_id,
+                'observation_date': '2024-01-01',
+                'observation_type_concept': self.type_concept.concept_id,
+                'observation_source_value': 'SRC-1',
+            }),
+            ('procedures', ProcedureOccurrence, {
+                'procedure_concept': self.m_concept.concept_id,
+                'procedure_date': '2024-01-01',
+                'procedure_type_concept': self.type_concept.concept_id,
+                'procedure_source_value': 'SRC-1',
+            }),
+        ]
+        for route, model, fields in cases:
+            with self.subTest(route=route):
+                rows = [dict(fields, person=self.person.person_id)] * 2
+                first = self._post(rows, route=route)
+                second = self._post(rows, route=route)
+                self.assertEqual(first['created'], 1, f'{route}: within-batch repeat')
+                self.assertEqual(second['created'], 0, f'{route}: re-post')
+                self.assertEqual(
+                    model.objects.filter(person=self.person).count(), 1,
+                    f'{route}: not idempotent')
+
+    # --- properties that had to survive ----------------------------------
+
+    def test_upsert_query_count_does_not_scale_with_batch_size(self):
+        """The matching SELECT must stay one query, not one per row.
+
+        _upsert_clinical queries per key, which a small FHIR compartment can
+        afford and a 1,000-row ETL chunk cannot — so the bulk path resolves the
+        whole batch with a single superset SELECT. Measured on the re-post, the
+        expensive case: every row matches something.
+        """
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+
+        def repost_cost(n, start_day):
+            rows = self._rows(n, start_day=start_day)
+            self._post(rows)
+            with CaptureQueriesContext(connection) as ctx:
+                self._post(rows)
+            return len(ctx)
+
+        self._post(self._rows(1, start_day=900))    # warm process-level caches
+        q_small = repost_cost(5, 100)
+        q_large = repost_cost(40, 200)
+        self.assertLess(
+            q_large - q_small, 10,
+            f'query count scaled with batch size: {q_small} queries to re-post 5 '
+            f'rows, {q_large} for 40. The upsert is doing per-row work.')
+
+    def test_refresh_still_runs_once_per_batch(self):
+        """The read model must not go stale, and must not be rebuilt per row —
+        including on the re-post path, where bulk_update and the collapse delete
+        would otherwise each fire their own signal-driven refresh."""
+        from unittest import mock
+        from omop_core.services import patient_record_service as prs
+
+        rows = self._conditions(['C50.9', 'I10'])
+        self.client.post('/api/v1/conditions/?skip_refresh=true&upsert=false',
+                         rows, format='json')
+        self.client.post('/api/v1/conditions/?skip_refresh=true&upsert=false',
+                         rows, format='json')
+
+        real = prs.refresh_patient_record
+        calls = []
+
+        def counting(person, *a, **kw):
+            calls.append(getattr(person, 'person_id', person))
+            return real(person, *a, **kw)
+
+        upgraded = self._conditions(['C50.9', 'I10'], concept=self.upgraded_concept)
+        with mock.patch('patient_portal.api.views.refresh_patient_record', counting), \
+             mock.patch.object(prs, 'refresh_patient_record', counting):
+            resp = self.client.post('/api/v1/conditions/', upgraded, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['updated'], 2)
+        self.assertEqual(
+            calls, [self.person.person_id],
+            f'an upsert batch triggered {len(calls)} refreshes; expected exactly 1')
+
+    def test_skip_refresh_still_defers_the_refresh_on_the_upsert_path(self):
+        rows = self._rows(2)
+        self._post(rows)
+        derived_before = PatientRecord.objects.get(person=self.person).derived_at
+        self._post(rows)
+        self.assertEqual(
+            PatientRecord.objects.get(person=self.person).derived_at,
+            derived_before)
+
+    def test_refresh_reflects_a_collapsed_duplicate(self):
+        """The read model is rebuilt after the collapse, not before it."""
+        rows = self._conditions(['C50.9'])
+        self.client.post('/api/v1/conditions/?upsert=false', rows, format='json')
+        self.client.post('/api/v1/conditions/?upsert=false', rows, format='json')
+        derived_before = PatientRecord.objects.get(person=self.person).derived_at
+
+        resp = self.client.post('/api/v1/conditions/', rows, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(
+            ConditionOccurrence.objects.filter(person=self.person).count(), 1)
+        self.assertNotEqual(
+            PatientRecord.objects.get(person=self.person).derived_at,
+            derived_before,
+            'the collapse landed without refreshing the read model')
+
+
+from unittest.mock import patch  # noqa: E402
+from rest_framework.response import Response  # noqa: E402
+from patient_portal.models import PatientUser  # noqa: E402
+
+
+class OmopDeferRefreshTest(TestCase):
+    """Deferring the derivation on row level writes, and triggering one."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(person_id=32201)
+        PatientRecord.objects.create(person=cls.person)
+        cls.concept = Concept.objects.get(concept_id=3000963)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='defer-refresh-test',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token")
+        self.measurement = Measurement.objects.create(
+            measurement_id=920001,
+            person=self.person,
+            measurement_concept=self.concept,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='718-7',
+            value_as_number=5,
+        )
+
+    def _patch(self, query: str = '') -> Response:
+        return self.client.patch(
+            f'/api/v1/measurements/{self.measurement.pk}/{query}',
+            {'value_as_number': 9}, format='json')
+
+    def _delete(self, query: str = '') -> Response:
+        return self.client.delete(
+            f'/api/v1/measurements/{self.measurement.pk}/{query}')
+
+    def test_patch_with_skip_refresh_does_not_derive(self):
+        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+            resp = self._patch('?skip_refresh=true')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        refresh.assert_not_called()
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.value_as_number, 9)
+
+    def test_delete_with_skip_refresh_does_not_derive(self):
+        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+            resp = self._delete('?skip_refresh=true')
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        refresh.assert_not_called()
+        self.assertFalse(Measurement.objects.filter(pk=920001).exists())
+
+    def test_patch_without_the_flag_still_derives(self):
+        # The flag must not become the default, every existing caller depends
+        # on a write deriving. The mixin now calls refresh directly (not via
+        # signal), so we patch the view-level reference.
+        with patch('patient_portal.api.views.refresh_patient_record') as refresh:
+            refresh.return_value = PatientRecord.objects.get(person=self.person)
+            self._patch()
+
+        self.assertTrue(refresh.called)
+
+    def test_delete_without_the_flag_still_derives(self):
+        with patch('patient_portal.api.views.refresh_patient_record') as refresh:
+            refresh.return_value = PatientRecord.objects.get(person=self.person)
+            self._delete()
+
+        self.assertTrue(refresh.called)
+
+    def test_skip_refresh_false_still_derives(self):
+        with patch('patient_portal.api.views.refresh_patient_record') as refresh:
+            refresh.return_value = PatientRecord.objects.get(person=self.person)
+            self._patch('?skip_refresh=false')
+
+        self.assertTrue(refresh.called)
+
+    def test_refresh_endpoint_derives_once(self):
+        with patch('patient_portal.api.views.refresh_patient_record') as refresh:
+            # The response reads attributes off the record, and a bare
+            # MagicMock makes the JSON encoder walk it forever.
+            refresh.return_value = PatientRecord.objects.get(person=self.person)
+            resp = self.client.post(
+                f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(refresh.call_count, 1)
+        self.assertEqual(resp.data['person_id'], self.person.person_id)
+        self.assertTrue(resp.data['refreshed'])
+
+    def test_refresh_endpoint_reflects_deferred_writes(self):
+        # Asserted on a field the measurement actually projects into. A
+        # timestamp proves nothing here, setUp already populated it.
+        record = PatientRecord.objects.get(person=self.person)
+        self.assertEqual(float(record.hemoglobin_g_dl), 5.0)
+
+        self.client.patch(
+            f'/api/v1/measurements/{self.measurement.pk}/?skip_refresh=true',
+            {'value_as_number': 42}, format='json')
+
+        record.refresh_from_db()
+        self.assertEqual(float(record.hemoglobin_g_dl), 5.0,
+                         'the deferred PATCH derived anyway')
+
+        resp = self.client.post(
+            f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        record.refresh_from_db()
+        self.assertEqual(float(record.hemoglobin_g_dl), 42.0,
+                         'refresh did not pick up the deferred write')
+
+    def test_refresh_endpoint_rejects_a_non_admin(self):
+        patient_identity = Identity.objects.create_user(
+            email='defer-patient@example.test', password='pw')
+        PatientUser.objects.create(identity=patient_identity, person=self.person)
+        client = APIClient()
+        client.force_authenticate(user=patient_identity)
+
+        resp = client.post(
+            f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_a_non_admin_cannot_defer(self):
+        # Otherwise a patient defers their own write and cannot rebuild, because
+        # the refresh action is admin only.
+        patient_identity = Identity.objects.create_user(
+            email='defer-nonadmin@example.test', password='pw')
+        PatientUser.objects.create(identity=patient_identity, person=self.person)
+        client = APIClient()
+        client.force_authenticate(user=patient_identity)
+
+        with patch('patient_portal.api.views.refresh_patient_record') as refresh:
+            refresh.return_value = PatientRecord.objects.get(person=self.person)
+            client.patch(
+                f'/api/v1/measurements/{self.measurement.pk}/?skip_refresh=true',
+                {'value_as_number': 9}, format='json')
+
+        self.assertTrue(refresh.called, 'a non-admin deferred and cannot recover')
+
+    def test_refresh_is_not_published_on_the_legacy_prefix(self):
+        # The legacy router registers PatientRecordViewSet itself, so an action
+        # added there would widen a frozen API. Asserted on resolution rather
+        # than status, because the unmatched path falls through to the SPA
+        # catch-all and its status is not this test's business.
+        from django.urls import resolve
+
+        legacy = resolve(f'/api/patient-info/{self.person.person_id}/refresh/')
+        v1 = resolve(f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+        self.assertEqual(getattr(v1.func, 'actions', {}).get('post'), 'refresh')
+        self.assertNotEqual(getattr(legacy.func, 'actions', {}).get('post'), 'refresh')
+
+    def test_refresh_endpoint_is_post_only(self):
+        resp = self.client.get(
+            f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_refresh_endpoint_404s_for_an_unknown_person(self):
+        resp = self.client.post('/api/v1/patient-records/99999999/refresh/')
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_a_failing_derivation_is_reported_not_swallowed(self):
+        with patch('patient_portal.api.views.refresh_patient_record',
+                   side_effect=ValueError('derivation exploded')):
+            with self.assertRaises(ValueError):
+                self.client.post(
+                    f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+    # -- Issue #533: PATCH/DELETE must surface refresh failures as 502 --
+
+    def test_patch_returns_502_when_refresh_fails(self):
+        """A refresh failure after PATCH must not be swallowed — return 502."""
+        with patch('patient_portal.api.views.refresh_patient_record',
+                   side_effect=RuntimeError('boom')):
+            resp = self._patch()
+
+        self.assertEqual(resp.status_code, status.HTTP_502_BAD_GATEWAY)
+        self.assertIn('projection failed', resp.data['detail'])
+        # The OMOP row was still updated despite the refresh failure.
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.value_as_number, 9)
+
+    def test_delete_returns_502_when_refresh_fails(self):
+        """A refresh failure after DELETE must not be swallowed — return 502."""
+        with patch('patient_portal.api.views.refresh_patient_record',
+                   side_effect=RuntimeError('boom')):
+            resp = self._delete()
+
+        self.assertEqual(resp.status_code, status.HTTP_502_BAD_GATEWAY)
+        self.assertIn('projection failed', resp.data['detail'])
+        # The OMOP row was still deleted despite the refresh failure.
+        self.assertFalse(Measurement.objects.filter(pk=920001).exists())
+
+    def test_patch_returns_200_when_refresh_succeeds(self):
+        """Normal PATCH returns 200 when refresh succeeds (end-to-end)."""
+        resp = self._patch()
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.value_as_number, 9)
+
+    def test_delete_returns_204_when_refresh_succeeds(self):
+        """Normal DELETE returns 204 when refresh succeeds (end-to-end)."""
+        resp = self._delete()
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Measurement.objects.filter(pk=920001).exists())
+
+
+class BulkUpsertObservationIdentityTest(TestCase):
+    """Observation event identity, and how a constraint failure is reported."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(person_id=32101)
+        PatientRecord.objects.create(person=cls.person)
+        cls.concept = Concept.objects.get(concept_id=3000963)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='bulk-upsert-obs-test',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token")
+
+    def _obs(self, source_value: str | None, day: str = '2024-01-01',
+             value: str | None = None) -> dict[str, Any]:
+        row = {
+            'person': self.person.person_id,
+            'observation_concept': self.concept.concept_id,
+            'observation_date': day,
+            'observation_type_concept': self.type_concept.concept_id,
+            'observation_source_value': source_value,
+        }
+        if value is not None:
+            row['value_as_string'] = value
+        return row
+
+    def _repeated_key_batch(self) -> list[dict[str, Any]]:
+        """176 rows over 116 distinct events, 20 of them repeated 4 times.
+
+        Repeats have to match in every key column, not just source_value. The
+        key includes raw values, so rows differing by value are distinct events
+        and exercise nothing.
+        """
+        rows = []
+        for i in range(20):
+            rows += [self._obs(f'OBS-{i}', value='result') for _ in range(4)]
+        rows += [self._obs(f'FILL-{i}', value='tail') for i in range(96)]
+        assert len(rows) == 176
+        return rows
+
+    def test_batch_with_repeated_new_keys_does_not_500(self):
+        rows = self._repeated_key_batch()
+
+        resp = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        # Without this the batch can stop containing repeats, which a key
+        # change already did once, and the test keeps passing regardless.
+        self.assertEqual(resp.data['created'], 116)
+        self.assertEqual(
+            Observation.objects.filter(person=self.person).count(), 116,
+            'within-batch repeats did not collapse')
+
+    def test_batch_with_repeated_new_keys_does_not_500_with_refresh(self):
+        rows = self._repeated_key_batch()
+
+        resp = self.client.post('/api/v1/observations/', rows, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+    def test_batch_with_repeated_new_keys_does_not_500_with_provenance(self):
+        rows = self._repeated_key_batch()
+
+        resp = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json',
+            HTTP_X_PROVENANCE_SOURCE='healthtree', HTTP_X_PROVENANCE_USER_ID='etl')
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+    def test_repeated_keys_repost_does_not_500(self):
+        """Second run: now the repeated keys DO already exist on file."""
+        rows = self._repeated_key_batch()
+
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+        resp = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+    def test_batch_with_repeated_new_keys_does_not_500_unprefixed_route(self):
+        rows = self._repeated_key_batch()
+
+        resp = self.client.post(
+            '/api/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+    def test_distinct_results_on_one_date_both_survive(self):
+        """Two different results on one date are two events, not one."""
+        rows = [
+            self._obs('OBS-1', value='positive'),
+            self._obs('OBS-1', value='negative'),
+        ]
+
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        stored = set(
+            Observation.objects.filter(person=self.person)
+            .values_list('value_as_string', flat=True))
+        self.assertEqual(stored, {'positive', 'negative'})
+
+    def test_distinct_results_still_converge_on_repost(self):
+        """Widening the key must not cost idempotency."""
+        rows = [
+            self._obs('OBS-1', value='positive'),
+            self._obs('OBS-1', value='negative'),
+        ]
+
+        first = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+        second = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(first.data['created'], 2)
+        self.assertEqual(second.data['created'], 0)
+        self.assertEqual(second.data['ids'], first.data['ids'])
+        self.assertEqual(Observation.objects.filter(person=self.person).count(), 2)
+
+    def test_concept_still_upgrades_in_place(self):
+        """The concept stays outside the key, so a vocabulary load corrects it."""
+        upgraded = Concept.objects.get(concept_id=4112853)
+        rows = [self._obs('OBS-1', value='positive')]
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        rows[0]['observation_concept'] = upgraded.concept_id
+        resp = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(resp.data['created'], 0)
+        self.assertEqual(resp.data['updated'], 1)
+        stored = Observation.objects.filter(person=self.person)
+        self.assertEqual(stored.count(), 1, 'the concept change duplicated the row')
+        self.assertEqual(stored.first().observation_concept_id, upgraded.concept_id)
+
+    def test_value_as_concept_stays_out_of_the_key(self):
+        """value_as_concept is vocabulary resolved, so it must update in place."""
+        resolved = Concept.objects.get(concept_id=4112853)
+        rows = [self._obs('OBS-1', value='positive')]
+        rows[0]['value_source_value'] = 'POS'
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        rows[0]['value_as_concept'] = resolved.concept_id
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(
+            Observation.objects.filter(person=self.person).count(), 1,
+            'resolving value_as_concept stranded a duplicate')
+
+    def test_rows_without_an_identity_are_still_always_inserted(self):
+        rows = [self._obs(None, value='a'), self._obs(None, value='b')]
+
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(Observation.objects.filter(person=self.person).count(), 4)
+
+    def test_naive_datetime_repost_converges(self):
+        """A naive observation_datetime must match the DB's aware value.
+
+        When USE_TZ=True, PostgreSQL stores aware datetimes. If the request
+        sends a naive datetime string (no trailing Z or offset), the upsert
+        key built from the unsaved instance used to differ from the key built
+        from the DB row, causing every repost to insert a duplicate instead of
+        converging — ultimately hitting a constraint and returning 500.
+        """
+        rows = [{
+            'person': self.person.person_id,
+            'observation_concept': self.concept.concept_id,
+            'observation_date': '2024-06-15',
+            'observation_datetime': '2024-06-15T10:30:00',  # naive — no Z
+            'observation_type_concept': self.type_concept.concept_id,
+            'observation_source_value': 'NAIVE-DT-TEST',
+            'value_as_string': 'result',
+        }]
+
+        first = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.data)
+        self.assertEqual(first.data['created'], 1)
+
+        second = self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED, second.data)
+        self.assertEqual(second.data['created'], 0,
+                         'naive datetime caused a duplicate instead of converging')
+        self.assertEqual(
+            Observation.objects.filter(person=self.person).count(), 1)
+
+    def test_database_constraint_failure_is_a_409_not_a_500(self):
+        """A 500 reads as "service is down", which changes whether to retry."""
+        from unittest.mock import patch
+        from django.db import IntegrityError
+
+        rows = [self._obs('OBS-1', value='x')]
+
+        with patch.object(Observation.objects, 'bulk_create',
+                          side_effect=IntegrityError('duplicate key value')):
+            resp = self.client.post(
+                '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT, resp.data)
+        self.assertIn('rolled back whole', resp.data['detail'])
+        self.assertEqual(resp.data['error'], 'duplicate key value')
+        self.assertEqual(Observation.objects.filter(person=self.person).count(), 0)
+
+    def test_constraint_failure_with_an_empty_message_is_still_a_409(self):
+        """Summarising the driver message must not itself raise."""
+        from unittest.mock import patch
+        from django.db import IntegrityError
+
+        rows = [self._obs('OBS-1', value='x')]
+
+        with patch.object(Observation.objects, 'bulk_create',
+                          side_effect=IntegrityError('   ')):
+            resp = self.client.post(
+                '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT, resp.data)
+        self.assertEqual(resp.data['error'], '')
+
+    def test_distinct_times_on_one_date_are_distinct_events(self):
+        rows = [
+            self._obs('OBS-1', value='x'),
+            self._obs('OBS-1', value='x'),
+        ]
+        rows[0]['observation_datetime'] = '2024-01-01T08:00:00Z'
+        rows[1]['observation_datetime'] = '2024-01-01T20:00:00Z'
+
+        self.client.post(
+            '/api/v1/observations/?skip_refresh=true', rows, format='json')
+
+        self.assertEqual(Observation.objects.filter(person=self.person).count(), 2)
+
+
+# =============================================================================
+# Field Concept Mapping API tests
+# =============================================================================
+
+class FieldConceptMappingTest(TestCase):
+    """Tests for the /api/v1/field-mappings/ endpoints."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = Identity.objects.create_user(
+            email='mapping_staff@t.com', password='x', is_staff=True,
+        )
+        cls.non_staff = Identity.objects.create_user(
+            email='mapping_user@t.com', password='x', is_staff=False,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+
+    # -- GET list --
+
+    def test_list_returns_all_fields(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        field_names = {d['field_name'] for d in resp.data}
+        # Spot-check a few known fields.
+        self.assertIn('hemoglobin_g_dl', field_names)
+        self.assertIn('disease', field_names)
+        self.assertIn('weight', field_names)
+        self.assertTrue(len(resp.data) > 100)
+
+    def test_list_requires_staff(self):
+        self.client.force_authenticate(user=self.non_staff)
+        resp = self.client.get('/api/v1/field-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_list_unauthenticated(self):
+        resp = self.client.get('/api/v1/field-mappings/')
+        self.assertIn(resp.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_category_filter(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-mappings/?category=editable')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        categories = {d['category'] for d in resp.data}
+        self.assertEqual(categories, {'editable'})
+        self.assertTrue(len(resp.data) > 10)
+
+    def test_search_filter(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-mappings/?search=smoking')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        for d in resp.data:
+            self.assertIn('smoking', d['field_name'].lower())
+
+    # -- POST create --
+
+    def test_create_mapping(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'smoking_status',
+            'vocabulary_id': 'SNOMED',
+            'concept_code': '229819007',
+            'omop_table': 'Observation',
+            'status': 'proposed',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['field_name'], 'smoking_status')
+        self.assertTrue(FieldConceptMapping.objects.filter(field_name='smoking_status').exists())
+
+    def test_create_invalid_field_name(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'totally_fake_field',
+            'vocabulary_id': 'LOINC',
+            'concept_code': '99999-9',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_duplicate_field_rejected(self):
+        FieldConceptMapping.objects.create(field_name='pack_years', vocabulary_id='SNOMED', concept_code='S1')
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'pack_years',
+            'vocabulary_id': 'SNOMED',
+            'concept_code': 'S2',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_loinc_collision_rejected(self):
+        self.client.force_authenticate(user=self.staff)
+        # 718-7 is hemoglobin in LAB_FIELD_TO_LOINC
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'alcohol_use',
+            'vocabulary_id': 'LOINC',
+            'concept_code': '718-7',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_duplicate_vocab_code_rejected(self):
+        """Two different fields cannot claim the same (vocab, code)."""
+        FieldConceptMapping.objects.create(
+            field_name='alcohol_use', vocabulary_id='LOINC', concept_code='NEW-1',
+        )
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'diet_type',
+            'vocabulary_id': 'LOINC',
+            'concept_code': 'NEW-1',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # -- PATCH update --
+
+    def test_update_status_to_approved(self):
+        mapping = FieldConceptMapping.objects.create(
+            field_name='diet_type', vocabulary_id='SNOMED', concept_code='DT-1', status='proposed',
+        )
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.patch(f'/api/v1/field-mappings/{mapping.pk}/', {
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, 'approved')
+        self.assertEqual(mapping.reviewer, self.staff)
+        self.assertIsNotNone(mapping.reviewed_at)
+
+    # -- DELETE --
+
+    def test_delete_mapping(self):
+        mapping = FieldConceptMapping.objects.create(
+            field_name='stress_level', vocabulary_id='SNOMED', concept_code='SL-1',
+        )
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.delete(f'/api/v1/field-mappings/{mapping.pk}/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(FieldConceptMapping.objects.filter(pk=mapping.pk).exists())
+
+    def test_non_staff_cannot_create(self):
+        self.client.force_authenticate(user=self.non_staff)
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'smoking_status',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_list_includes_tab_key(self):
+        """Every field descriptor should include a 'tab' key."""
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        for d in resp.data:
+            self.assertIn('tab', d, f"Field {d['field_name']} missing 'tab' key")
+
+    def test_tab_assignments_spot_check(self):
+        """Spot-check known field->tab assignments."""
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-mappings/')
+        tab_by_field = {d['field_name']: d['tab'] for d in resp.data}
+        self.assertEqual(tab_by_field.get('hemoglobin_g_dl'), 'blood')
+        self.assertEqual(tab_by_field.get('smoking_status'), 'behavior')
+        self.assertEqual(tab_by_field.get('date_of_birth'), 'general')
+        self.assertEqual(tab_by_field.get('serum_creatinine_level'), 'labs')
+        self.assertEqual(tab_by_field.get('first_line_therapy'), 'treatment')
+
+
+class FieldSynonymTest(TestCase):
+    """Tests for /api/v1/field-mappings/<field_name>/synonyms/ endpoints."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = Identity.objects.create_user(
+            email='syn_staff@t.com', password='x', is_staff=True,
+        )
+        cls.non_staff = Identity.objects.create_user(
+            email='syn_user@t.com', password='x', is_staff=False,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        from omop_core.models import FieldSynonym
+        FieldSynonym.objects.all().delete()
+
+    def test_get_empty_synonyms(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data, [])
+
+    def test_create_custom_synonym(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/', {
+            'synonym_text': 'Hgb',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['synonym_text'], 'Hgb')
+        self.assertEqual(resp.data['source'], 'custom')
+        self.assertEqual(resp.data['field_name'], 'hemoglobin_g_dl')
+
+    def test_get_returns_custom_synonyms(self):
+        self.client.force_authenticate(user=self.staff)
+        self.client.post('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/', {
+            'synonym_text': 'Hgb',
+        }, format='json')
+        resp = self.client.get('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        custom = [s for s in resp.data if s['source'] == 'custom']
+        self.assertEqual(len(custom), 1)
+        self.assertEqual(custom[0]['synonym_text'], 'Hgb')
+
+    def test_duplicate_synonym_rejected(self):
+        self.client.force_authenticate(user=self.staff)
+        self.client.post('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/', {
+            'synonym_text': 'Hgb',
+        }, format='json')
+        resp = self.client.post('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/', {
+            'synonym_text': 'Hgb',
+        }, format='json')
+        self.assertIn(resp.status_code, (status.HTTP_400_BAD_REQUEST, status.HTTP_409_CONFLICT))
+
+    def test_delete_custom_synonym(self):
+        self.client.force_authenticate(user=self.staff)
+        create_resp = self.client.post('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/', {
+            'synonym_text': 'Hgb',
+        }, format='json')
+        syn_id = create_resp.data['id']
+        resp = self.client.delete(f'/api/v1/field-synonyms/{syn_id}/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        # Confirm it's gone.
+        from omop_core.models import FieldSynonym
+        self.assertFalse(FieldSynonym.objects.filter(pk=syn_id).exists())
+
+    def test_delete_nonexistent_returns_404(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.delete('/api/v1/field-synonyms/99999/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_non_staff_blocked(self):
+        self.client.force_authenticate(user=self.non_staff)
+        resp = self.client.get('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        resp = self.client.post('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/', {
+            'synonym_text': 'Hgb',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)

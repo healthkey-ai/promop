@@ -126,7 +126,14 @@ class Command(BaseCommand):
                         'domain': domain,
                         'vocabulary': vocabulary,
                         'concept_class': concept_class,
-                        'standard_concept': 'S',
+                        # Locally invented: these ids are not in any vocabulary
+                        # release and the code is derived from the id. Only
+                        # OHDSI assigns standard_concept, and a mint claiming
+                        # 'S' is preferred over the genuine concept by any
+                        # standard_concept='S' filter while being unreachable
+                        # from concept_ancestor. See #453.
+                        'standard_concept': None,
+                        'source': 'HealthKey',
                         'concept_code': f'CS_{concept_id}',
                         'valid_start_date': '2024-01-01',
                         'valid_end_date': '2099-12-31',

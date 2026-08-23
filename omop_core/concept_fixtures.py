@@ -1,25 +1,27 @@
-"""
-Seed the minimal set of OMOP CDM concepts required for the mCODE FHIR import
-pipeline to write Measurements, ConditionOccurrences, and DrugExposures and for
-refresh_patient_record to derive PatientRecord fields from them.
+"""OMOP concept rows for tests and local development. **Not a production path.**
 
-This is a dev/test shortcut.  Production environments should load concepts via
-the full load_athena_vocabularies command instead.
+This was the ``seed_omop_concepts`` management command. It is no longer one, and
+that is the point: 97 of its 99 concepts are ones ``load_athena_vocabularies``
+already supplies, and the remaining two (``32531`` Treatment Regimen, ``1147094``
+``drug_exposure.drug_exposure_id``) are now in ``VOCAB_SCOPE``. Offering it as an
+operator command made it a competing source of truth for concepts, which is how a
+locally invented concept ends up occupying an id the vocabulary owns — the failure
+that put 19 staging patients on a haemoglobin of 1.0 g/dL (#599).
 
-Usage:
-    DATABASE_URL=... python manage.py seed_omop_concepts
+Tests still need concepts without a 4.6 GB Athena bundle, so the data stays, as a
+fixture that only test code imports. Deployments load the real vocabulary; see
+CHANGELOG 1.2.
+
+Locally-minted ``HK-Wearable`` concepts — the one thing Athena cannot supply —
+are installed by migration 0143, which runs on every deploy. They are duplicated
+here so a test database has them too.
 """
 from datetime import date
 
-from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
 
-
-# ---------------------------------------------------------------------------
-# Minimal vocabularies, domains, and concept-classes required by the rows below
-# ---------------------------------------------------------------------------
 
 _VOCABULARIES = [
     dict(vocabulary_id='Type Concept',
@@ -97,6 +99,9 @@ _CONCEPT_CLASSES = [
     dict(concept_class_id='Gender',              concept_class_name='Gender',               concept_class_concept_id=0),
     dict(concept_class_id='Regimen',             concept_class_name='Regimen',              concept_class_concept_id=0),
     dict(concept_class_id='Undefined',           concept_class_name='Undefined',            concept_class_concept_id=0),
+    dict(concept_class_id='Clinical Finding',    concept_class_name='Clinical Finding',     concept_class_concept_id=0),
+    dict(concept_class_id='Context-dependent',   concept_class_name='Context-dependent',    concept_class_concept_id=0),
+    dict(concept_class_id='Answer',              concept_class_name='Answer',               concept_class_concept_id=0),
 ]
 
 
@@ -175,6 +180,12 @@ _CONCEPTS = [
     # ------------------------------------------------------------------
     _c(32817, 'EHR',               'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976890'),
     _c(32856, 'Lab',               'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976929'),
+    # Provenance for patient-generated data (wearable uploads). OMOP's Type
+    # Concept vocabulary has no device/wearable type — all 81 rows were
+    # reviewed — so 'Patient self-report' is the closest faithful fit for data
+    # the patient's own device produced. Previously wearable rows were typed
+    # 32883, which is 'Survey' (#441).
+    _c(32865, 'Patient self-report', 'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976938'),
     _c(32869, 'Pharmacy claim',    'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976942'),
     _c(32531, 'Treatment Regimen', 'Episode',       'Episode',       'Treatment',    'S', 'OMOP4822256'),
 
@@ -182,13 +193,14 @@ _CONCEPTS = [
     _c(1147094, 'drug_exposure.drug_exposure_id', 'Metadata', 'CDM', 'Field', 'S', 'CDM150'),
 
     # ------------------------------------------------------------------
-    # Generic lab fallback — used when no specific LOINC concept is found.
-    # concept_id 3000963 is pre-hoisted in upload_fhir as _concept_generic_lab.
-    # vocabulary_id='None' and concept_code='0' are intentional non-LOINC
-    # placeholders so this concept is never matched by LOINC code lookups
-    # and cannot pollute specific lab fields (e.g. hemoglobin_g_dl).
+    # No generic-lab placeholder is seeded here any more. One used to be minted
+    # at concept_id 3000963, on the reasoning that vocabulary_id='None' and
+    # concept_code='0' kept it out of LOINC lookups. That was true and beside
+    # the point: Athena owns 3000963 as 'Hemoglobin [Mass/volume] in Blood', so
+    # loading a real vocabulary turned every unmapped lab into a haemoglobin
+    # result. The fallback is now CONCEPT_GENERIC_LAB (concept_id 0, OMOP's
+    # 'No matching concept'), which no vocabulary can repurpose.
     # ------------------------------------------------------------------
-    _c(3000963, 'Generic Lab Measurement', 'Measurement', 'None', 'Lab Test', 'S', '0'),
 
     # ------------------------------------------------------------------
     # Breast cancer condition
@@ -282,6 +294,12 @@ _CONCEPTS = [
     _c(36305384, 'ECOG Performance Status score', 'Measurement',  'LOINC', 'Clinical Observation', 'S', '89247-1'),
     _c(43054909, 'Tobacco smoking status',         'Observation',  'LOINC', 'Clinical Observation', 'S', '72166-2'),
 
+    # Standard LOINC answer concepts for tobacco smoking status (question/answer pattern).
+    # observation_concept_id = 72166-2 (question), value_as_concept_id = answer below.
+    _c(45879404, 'Never smoker',              'Meas Value', 'LOINC', 'Answer', 'S', 'LA18978-9'),
+    _c(45883458, 'Former smoker',             'Meas Value', 'LOINC', 'Answer', 'S', 'LA15920-4'),
+    _c(45881517, 'Current every day smoker',  'Meas Value', 'LOINC', 'Answer', 'S', 'LA18976-3'),
+
     # ------------------------------------------------------------------
     # CBC — hemoglobin (missing from original seeder; required for CRAB)
     # ------------------------------------------------------------------
@@ -296,7 +314,10 @@ _CONCEPTS = [
     _c(9001003, 'Protein [electrophoresis] in Urine',             'Measurement', 'LOINC', 'Lab Test', 'S', '32730-5'),  # M-spike urine
     _c(9001004, 'Kappa free light chains [Mass/volume] in Serum', 'Measurement', 'LOINC', 'Lab Test', 'S', '33944-8'),
     _c(9001005, 'Lambda free light chains [Mass/volume] in Serum','Measurement', 'LOINC', 'Lab Test', 'S', '33945-5'),
-    _c(9001006, 'Plasma cells [#/volume] in Bone marrow',         'Measurement', 'LOINC', 'Lab Test', 'S', '26098-4'),
+    # 26098-4 is 'XR Ankle - left Views' in LOINC, 11118-7 is the marrow code.
+    _c(9001006, 'Plasma cells/100 cells in Bone marrow by Manual count', 'Measurement', 'LOINC', 'Lab Test', 'S', '11118-7'),
+    # 9001019 is skipped, a test uses it to stand in for a retired mint.
+    _c(9001020, 'Kappa light chains.free/Lambda light chains.free [Mass Ratio] in Serum', 'Measurement', 'LOINC', 'Lab Test', 'S', '48378-4'),
 
     # ------------------------------------------------------------------
     # Beta-2 microglobulin and other MM markers
@@ -343,6 +364,29 @@ _CONCEPTS = [
     _c(1761351,  'Flights climbed [#] Reporting Period',                       'Observation', 'LOINC', 'Clinical Observation', 'S', '100304-5', date(2022, 8, 8)),
     _c(1001786,  'Calories burned in unspecified time --during activity',      'Measurement', 'LOINC', 'Clinical Observation', 'S', '93819-1',  date(2019, 12, 13)),
 
+    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Concepts read by enrich_breast_cancer_omop_data, seeded with their genuine
+    # Athena concept_ids so a database without a full vocabulary load can still
+    # run enrichment. The command previously minted these itself at
+    # concept_id=int(code), which produced the duplicate rows in #415.
+    #
+    # concept_name is the vocabulary's own, NOT the meaning the command assigns.
+    # The four 1828xxxx codes really do mean "drug treatment stopped"; the
+    # command uses them for treatment response, which is a known defect left in
+    # place because six consumers read them and the correct fix is per-disease
+    # outcome value sets (RECIST for breast cancer, Lugano for lymphoma, IMWG
+    # for myeloma, iwCLL for CLL). Seeding them under their real names keeps the
+    # vocabulary honest and makes the mismatch visible.
+    # ------------------------------------------------------------------
+    _c(4144272, 'Never smoked tobacco',                    'Observation', 'SNOMED', 'Clinical Finding',    None, '266919005'),
+    _c(4310250, 'Ex-smoker',                               'Observation', 'SNOMED', 'Clinical Finding',    None, '8517006'),
+    _c(4298794, 'Smoker',                                  'Observation', 'SNOMED', 'Clinical Finding',    None, '77176002'),
+    _c(4057412, 'Drug treatment stopped - medical advice', 'Observation', 'SNOMED', 'Context-dependent',   'S',  '182840001'),
+    _c(4082386, 'Doctor stopped drugs - ineffective',      'Observation', 'SNOMED', 'Context-dependent',   'S',  '182841002'),
+    _c(4056953, 'Doctor stopped drugs - side effect',      'Observation', 'SNOMED', 'Context-dependent',   'S',  '182842009'),
+    _c(4056954, 'Doctor stopped drugs - inconvenient',     'Observation', 'SNOMED', 'Context-dependent',   'S',  '182843004'),
+
     # Wearable metrics with NO LOINC equivalent — locally minted, quarantined
     # under HK-Wearable with source='HealthKey' and ids in the OHDSI custom
     # range. LOINC has no concept for step length, double-support percentage,
@@ -352,6 +396,16 @@ _CONCEPTS = [
     _hk(1, 'Walking double support time percentage', 'Measurement', 'Clinical Observation', 'HK-WEAR-DBL-SUPPORT'),
     _hk(2, 'Heart rate during walking',              'Measurement', 'Clinical Observation', 'HK-WEAR-WALK-HR'),
     _hk(3, 'Basal energy expenditure',               'Measurement', 'Clinical Observation', 'HK-WEAR-BASAL-ENERGY'),
+    # RMSSD has no LOINC concept. Verified against a full Athena load
+    # (1,979,416 concepts): searching LOINC for 'RMSSD' and for
+    # 'successive difference' returns nothing, and the complete 'R-R interval'
+    # family carries only mean, min, max, standard deviation (80404-7 /
+    # 76643-6) and coefficient of variation. SDNN is present; RMSSD is not.
+    #
+    # It must not be aliased onto 80404-7: that code is specifically the
+    # standard-deviation form, and filing RMSSD under it is the same defect
+    # class as the pre-#413 walking_speed → BMI mapping. See #438.
+    _hk(4, 'R-R interval RMSSD (heart rate variability)', 'Measurement', 'Clinical Observation', 'HK-WEAR-HRV-RMSSD'),
 
     # ------------------------------------------------------------------
     # HemOnc therapy regimen concepts — required for first_line_therapy_id
@@ -427,96 +481,51 @@ def _assert_local_mint_convention():
             + '\n  '.join(problems))
 
 
-class Command(BaseCommand):
-    help = (
-        'Seed the minimal OMOP concept rows required for mCODE FHIR import. '
-        'Use load_athena_vocabularies for a full production vocabulary load.'
-    )
+def seed_test_concepts(stdout=None):
+    """Create the fixture concepts. Idempotent; safe on a partially seeded DB.
 
-    def add_arguments(self, parser):
-        parser.add_argument(
-            '--dry-run', action='store_true',
-            help='Print what would be seeded without writing to the DB.',
-        )
+    Returns a summary dict. Skips any row whose (vocabulary_id, concept_code) is
+    already held by a *different* concept_id rather than inserting a second one:
+    get_or_create keys on concept_id alone, so without this check it would
+    manufacture the very shadow concept this data exists to avoid (#415).
+    """
+    _assert_local_mint_convention()
 
-    def handle(self, *args, **options):
-        dry_run = options['dry_run']
+    created = {'vocabularies': 0, 'domains': 0, 'concept_classes': 0,
+               'concepts': 0, 'existing': 0, 'skipped': 0}
 
-        _assert_local_mint_convention()
+    with transaction.atomic():
+        for v in _VOCABULARIES:
+            _, made = Vocabulary.objects.get_or_create(
+                vocabulary_id=v['vocabulary_id'], defaults=v)
+            created['vocabularies'] += bool(made)
 
-        if dry_run:
-            self.stdout.write(self.style.WARNING('Dry-run mode — no changes will be written.\n'))
+        for d in _DOMAINS:
+            _, made = Domain.objects.get_or_create(
+                domain_id=d['domain_id'], defaults=d)
+            created['domains'] += bool(made)
 
-        with transaction.atomic():
-            # Vocabularies
-            v_created = 0
-            for v in _VOCABULARIES:
-                if dry_run:
-                    if not Vocabulary.objects.filter(vocabulary_id=v['vocabulary_id']).exists():
-                        self.stdout.write(f"  [would create vocabulary] {v['vocabulary_id']}")
-                        v_created += 1
-                else:
-                    _, created = Vocabulary.objects.get_or_create(
-                        vocabulary_id=v['vocabulary_id'], defaults=v)
-                    if created:
-                        v_created += 1
+        for cc in _CONCEPT_CLASSES:
+            _, made = ConceptClass.objects.get_or_create(
+                concept_class_id=cc['concept_class_id'], defaults=cc)
+            created['concept_classes'] += bool(made)
 
-            # Domains
-            d_created = 0
-            for d in _DOMAINS:
-                if dry_run:
-                    if not Domain.objects.filter(domain_id=d['domain_id']).exists():
-                        self.stdout.write(f"  [would create domain] {d['domain_id']}")
-                        d_created += 1
-                else:
-                    _, created = Domain.objects.get_or_create(
-                        domain_id=d['domain_id'], defaults=d)
-                    if created:
-                        d_created += 1
+        for row in _CONCEPTS:
+            clash = (
+                Concept.objects
+                .filter(vocabulary_id=row['vocabulary_id'],
+                        concept_code=row['concept_code'])
+                .exclude(concept_id=row['concept_id'])
+                .exists()
+            )
+            if clash:
+                created['skipped'] += 1
+                continue
+            _, made = Concept.objects.get_or_create(
+                concept_id=row['concept_id'], defaults=row)
+            if made:
+                created['concepts'] += 1
+            else:
+                created['existing'] += 1
 
-            # Concept classes
-            cc_created = 0
-            for cc in _CONCEPT_CLASSES:
-                if dry_run:
-                    if not ConceptClass.objects.filter(concept_class_id=cc['concept_class_id']).exists():
-                        self.stdout.write(f"  [would create concept_class] {cc['concept_class_id']}")
-                        cc_created += 1
-                else:
-                    _, created = ConceptClass.objects.get_or_create(
-                        concept_class_id=cc['concept_class_id'], defaults=cc)
-                    if created:
-                        cc_created += 1
-
-            # Concepts
-            c_created = c_existing = 0
-            for row in _CONCEPTS:
-                if dry_run:
-                    exists = Concept.objects.filter(concept_id=row['concept_id']).exists()
-                    status = 'exists' if exists else 'would create'
-                    self.stdout.write(
-                        f"  [{status}] {row['concept_id']:>8}  {row['concept_code']:<12}  {row['concept_name']}")
-                    if not exists:
-                        c_created += 1
-                    else:
-                        c_existing += 1
-                else:
-                    _, created = Concept.objects.get_or_create(
-                        concept_id=row['concept_id'], defaults=row)
-                    if created:
-                        c_created += 1
-                    else:
-                        c_existing += 1
-
-            if dry_run:
-                transaction.set_rollback(True)
-
-        summary = (
-            f'Vocabularies: {v_created} new  |  '
-            f'Domains: {d_created} new  |  '
-            f'ConceptClasses: {cc_created} new  |  '
-            f'Concepts: {c_created} new, {c_existing} already present'
-        )
-        if dry_run:
-            self.stdout.write(self.style.WARNING(f'\nDry-run summary: {summary}'))
-        else:
-            self.stdout.write(self.style.SUCCESS(summary))
+    return created

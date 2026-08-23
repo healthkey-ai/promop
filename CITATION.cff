@@ -10,9 +10,12 @@ authors:
     affiliation: HealthKey AI
 repository-code: "https://github.com/healthkey-ai/promop"
 license: Apache-2.0
-version: "1.0.0"
-date-released: "2026-07-04"
-doi: "10.5281/zenodo.21194710"
+version: "1.1.0"
+date-released: "2026-08-20"
+# Concept DOI — always resolves to the latest archived version, so this line does
+# not need editing on every release. The version-specific DOIs are
+# 10.5281/zenodo.22030233 (1.1.0) and 10.5281/zenodo.21194710 (1.0.0).
+doi: "10.5281/zenodo.21194709"
 keywords:
   - OMOP CDM
   - FHIR

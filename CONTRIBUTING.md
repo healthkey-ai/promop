@@ -62,15 +62,21 @@ A few conventions to follow:
 ### 4. Run the test suite
 
 ```bash
-# Backend
+# Backend — Django runner (omop_core + patient_portal)
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
+
+# Backend — pytest (the tests/ package)
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
+  .venv/bin/python -m pytest -q
 
 # Frontend
 cd frontend && npm test -- --run
 ```
 
-Both suites must pass before you open a pull request.
+All three must pass before you open a pull request. The two backend runners cover different
+files — Django's runner discovers only `omop_core.tests` and `patient_portal.tests`, and cannot
+see the pytest-based `tests/` package — so running one is not running the backend.
 
 ### 5. Open a pull request
 
@@ -88,11 +94,16 @@ production deployment.
 ## Running tests
 
 ```bash
-# One-liner: backend + frontend
+# One-liner: both backend runners + frontend
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput \
+  && DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
+     .venv/bin/python -m pytest -q \
   && (cd frontend && npm test -- --run)
 ```
+
+Run the backend suites one at a time, not concurrently — they share the same
+`test_promop_test` database name, so a parallel run will drop the other's database mid-test.
 
 Local PostgreSQL setup (one-time, if you haven't done it):
 
@@ -102,6 +113,16 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U $(whoami) -d postgres \
   -c "CREATE ROLE postgres WITH SUPERUSER CREATEDB CREATEROLE LOGIN;" 2>/dev/null || true
 PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d postgres \
   -c "CREATE DATABASE promop_test OWNER postgres;" 2>/dev/null || true
+
+# Required by the pytest suite: it runs with --no-migrations, so the test DB is
+# built by reflecting model state, which recreates concept's GIN trigram index
+# during CREATE TABLE before any fixture could enable the extension. Putting
+# pg_trgm on template1 means every database cloned from it already has it.
+# Without this, every pytest test errors with:
+#   operator class "gin_trgm_ops" does not exist
+PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d template1 \
+  -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
   .venv/bin/python manage.py migrate --noinput
 ```

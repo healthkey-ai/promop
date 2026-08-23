@@ -70,7 +70,8 @@ Extracts the 22 CLL-specific fields from standard OMOP tables:
 | `serum_beta2_microglobulin_level` | Measurement | LOINC 48436-3 |
 | `qtcf_value` | Measurement | LOINC 8625-6 |
 | `spleen_size` | Measurement | LOINC 59157-8 |
-| `largest_lymph_node_size` | Measurement | LOINC 33728-7 |
+| `tumor_size` | Measurement | LOINC 21889-1 (`Size Tumor`) |
+| `largest_lymph_node_size` | Measurement | LOINC 21889-1 only with `qualifier_source_value=lymph-node` legacy context |
 | `clonal_bone_marrow_b_lymphocytes` | Measurement | LOINC 5905-5 |
 | `binet_stage` | Observation | string value (A/B/C) |
 | `tumor_burden` | Observation | string value |

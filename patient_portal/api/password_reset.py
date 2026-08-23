@@ -14,9 +14,14 @@ from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle
+
+
+class PasswordResetThrottle(AnonRateThrottle):
+    rate = '5/minute'
 
 from patient_portal.models import Identity
 
@@ -61,6 +66,7 @@ def send_password_reset_email(identity) -> None:
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([PasswordResetThrottle])
 def request_password_reset(request):
     """Public: patient requests a password reset link by email (TI.1.1#08).
 
@@ -93,6 +99,7 @@ def request_password_reset(request):
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([PasswordResetThrottle])
 def reset_password(request):
     """Public: complete a reset via the emailed link's `uid` + `token` (TI.1.1#08)."""
     from patient_portal.services import (

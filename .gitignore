@@ -102,3 +102,7 @@ trial-eligibility-results.json
 
 # Large synthea CLI jar (not tracked)
 synthea-with-dependencies.jar
+
+# Local agent/tool state
+.claude/
+.worktrees/
