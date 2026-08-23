@@ -120,8 +120,11 @@ export default function GeneralTab({
 
           {field('Gender', 'gender', 'select')}
 
+          {field('Email', 'email', 'email')}
+          {field('Phone Number', 'phone_number', 'text')}
+
           <div className="sm:col-span-2">
-            {field('Email', 'email', 'email')}
+            {field('Treating Institution', 'facility_name', 'text')}
           </div>
         </div>
       </Section>
@@ -144,6 +147,20 @@ export default function GeneralTab({
           {formData?.country === 'United States'
             ? field('State', 'region', 'select', { options: US_STATES })
             : field('Region/State', 'region', 'text')}
+
+          {/* Normally filled in by the zip lookup above, but writable: trial
+              matching measures distance to sites from these, so a wrong pair is
+              worth being able to correct by hand. */}
+          {field('Latitude', 'latitude', 'number')}
+          {field('Longitude', 'longitude', 'number')}
+        </div>
+      </Section>
+
+      <Section title="Clinician Validation" description="Whether a clinician has checked this record.">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          {field('Validated', 'validated', 'boolean')}
+          {field('Validated By', 'validated_by', 'text')}
+          {field('Validation Date', 'validation_date', 'date')}
         </div>
       </Section>
 

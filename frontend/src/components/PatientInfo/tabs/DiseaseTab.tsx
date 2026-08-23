@@ -355,17 +355,67 @@ function OtherSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange
   );
 }
 
+/**
+ * Staging and biomarker facts that are not specific to one disease.
+ *
+ * These four are mapped and writable, and no tab showed them — so the write path
+ * existed and nothing could reach it. Nodal and metastasis status apply to any
+ * solid tumour, and PD-L1 scoring drives checkpoint-inhibitor eligibility across
+ * several, so they belong beside whichever disease section is on screen rather
+ * than inside one of them.
+ *
+ * No option lists: the descriptor carries no curated set for these, and a list
+ * invented here would offer values the server cannot code.
+ */
+function StagingBiomarkersSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
+  const { descriptors } = useWritableFields();
+
+  const field = (label: string, name: string, type: 'text' | 'number') => (
+    <ClinicalField
+      label={label}
+      name={name}
+      type={type}
+      value={formData?.[name]}
+      descriptor={descriptors[name]}
+      onChange={onChange}
+    />
+  );
+
+  return (
+    <Section title="Staging & Biomarkers">
+      <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+        {field('Lymph Node Status', 'lymph_node_status', 'text')}
+        {field('Metastasis Status', 'metastasis_status', 'text')}
+        {field('PD-L1 Combined Positive Score', 'pd_l1_combined_positive_score', 'number')}
+        {field('PD-L1 IC (%)', 'pd_l1_ic_percentage', 'number')}
+      </div>
+    </Section>
+  );
+}
+
 export default function DiseaseTab({ formData, onChange, onMutationAdd, onMutationRemove, onMutationChange, diseaseType }: Props) {
-  switch (diseaseType) {
-    case 'breast':
-      return <BreastCancerSection formData={formData} onChange={onChange} onMutationAdd={onMutationAdd} onMutationRemove={onMutationRemove} onMutationChange={onMutationChange} />;
-    case 'lymphoma':
-      return <LymphomaSection formData={formData} onChange={onChange} />;
-    case 'myeloma':
-      return <MyelomaSection formData={formData} onChange={onChange} />;
-    case 'cll':
-      return <CLLSection formData={formData} onChange={onChange} />;
-    default:
-      return <OtherSection formData={formData} onChange={onChange} />;
-  }
+  const diseaseSection = (() => {
+    switch (diseaseType) {
+      case 'breast':
+        return <BreastCancerSection formData={formData} onChange={onChange} onMutationAdd={onMutationAdd} onMutationRemove={onMutationRemove} onMutationChange={onMutationChange} />;
+      case 'lymphoma':
+        return <LymphomaSection formData={formData} onChange={onChange} />;
+      case 'myeloma':
+        return <MyelomaSection formData={formData} onChange={onChange} />;
+      case 'cll':
+        return <CLLSection formData={formData} onChange={onChange} />;
+      default:
+        return <OtherSection formData={formData} onChange={onChange} />;
+    }
+  })();
+
+  return (
+    <>
+      {diseaseSection}
+      {/* Shown for every disease: nodal and metastasis status apply to any solid
+          tumour, and PD-L1 drives checkpoint-inhibitor eligibility across
+          several. */}
+      <StagingBiomarkersSection formData={formData} onChange={onChange} />
+    </>
+  );
 }

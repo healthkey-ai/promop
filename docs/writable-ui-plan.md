@@ -76,7 +76,8 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 | DiseaseTab converted; approved concept mappings now make fields writable | #647 |
 | BehaviorTab converted | #649 |
 | Superseded rows no longer matched by the upsert | #649 |
-| WearableTab converted — every tab now renders from the descriptor | #650 |
+| WearableTab converted — every tab now renders from the descriptor | #651 |
+| Every writable field is now reachable from a tab | #652 |
 | `employment_status` made writable by seeding its mapping | #649 |
 | `POST /api/v1/therapy-lines/` — author a line | #639 |
 | Therapy-line dialog with RxNorm picker | #641 |
@@ -113,9 +114,9 @@ sees the real state rather than the intended one.
 - [x] **Step 1** — Convert GeneralTab (16 writable) — #645
 - [x] **Step 2** — Convert DiseaseTab (15 writable, +3 SCT) — #647
 - [x] **Step 3** — Convert BehaviorTab (1 writable, +1 mapped) — #649
-- [x] **Step 4** — Convert WearableTab (0 writable, read-only) — #650
-- [ ] **Step 5** — Surface 13 writable fields no tab shows
-- [ ] **Step 6** — Concept assignment for the 133 unmapped fields (#595, curation)
+- [x] **Step 4** — Convert WearableTab (0 writable, read-only) — #651
+- [x] **Step 5** — Surface the writable fields no tab shows — #652
+- [ ] **Step 6** — Concept assignment for the unmapped fields (#595 curation, #648 extractors)
 
 ### Step 1 — Convert GeneralTab (16 writable)
 
@@ -158,7 +159,7 @@ the three receptor statuses — both hosts derive it client-side in
 `insurance_type` only. Small, but the tab currently offers 27 boxes of which 26
 cannot save.
 
-### Step 4 — Convert WearableTab (0 writable) — done, #650
+### Step 4 — Convert WearableTab (0 writable) — done, #651
 
 Everything is a 30-day aggregate over device readings, so read-only with one
 explanation rather than twenty near-identical ones.
@@ -176,18 +177,32 @@ whether it is an aggregate. Filed as **#650**.
 **Every 30-day aggregation should be `computed`.** That invariant holds for every
 other `_30d` field, and a guard asserting it would have caught this one.
 
-### Step 5 — Surface 13 writable fields that no tab shows
+### Step 5 — Surface the writable fields no tab shows — done, #652
 
-Writable, mapped, and invisible:
+Twelve were genuinely unreachable. (`postal_code` was already on GeneralTab
+through the zip-lookup control, which the field scan missed because it is
+referenced unquoted.)
 
-- `target: person` (9): `facility_name`, `phone_number`, `postal_code`,
-  `latitude`, `longitude`, `validated`, `validated_by`, `validation_date`,
-  `suppress_demographics_for_others`
-- `target: measurement` (4): `lymph_node_status`, `metastasis_status`,
-  `pd_l1_combined_positive_score`, `pd_l1_ic_percentage`
+- **DiseaseTab** gains a *Staging & Biomarkers* section shown for every disease:
+  `lymph_node_status`, `metastasis_status`, `pd_l1_combined_positive_score`,
+  `pd_l1_ic_percentage`. Not specific to one tumour — nodal and metastasis
+  status apply to any solid tumour, PD-L1 drives checkpoint-inhibitor
+  eligibility across several — so they sit beside whichever disease section is
+  on screen rather than inside one.
+- **GeneralTab** gains `phone_number` and `facility_name` beside the other
+  Person attributes, `latitude`/`longitude` with the address they derive from,
+  and a *Clinician Validation* block for `validated`, `validated_by`,
+  `validation_date` — "has a clinician checked this" is a different question
+  from the demographics around it.
 
-The person fields are a profile/settings surface rather than a clinical tab. The
-four measurements belong on DiseaseTab — fold them into step 2.
+**One left deliberately.** `suppress_demographics_for_others` redacts
+DOB/location/name from responses served to other readers. That is a patient's
+own privacy preference, not a clinical value, and a redaction toggle in a
+clinician's chart view would be the wrong place for it. It needs an account
+settings surface, which does not exist yet.
+
+So: **82 of 83 writable fields are reachable**, and the one that is not is a
+product decision rather than missing plumbing.
 
 ### Step 6 — The 133 unmapped fields
 
