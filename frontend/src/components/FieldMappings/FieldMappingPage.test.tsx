@@ -5,12 +5,13 @@ import FieldMappingPage from "./FieldMappingPage";
 
 const mockGet = vi.fn();
 const mockPost = vi.fn();
+const mockPatch = vi.fn();
 
 vi.mock("@/api/axios", () => ({
   default: {
     get: (...args: unknown[]) => mockGet(...args),
     post: (...args: unknown[]) => mockPost(...args),
-    patch: vi.fn().mockResolvedValue({ data: {} }),
+    patch: (...args: unknown[]) => mockPatch(...args),
     delete: vi.fn().mockResolvedValue({ data: {} }),
   },
 }));
@@ -189,6 +190,7 @@ const renderPage = () =>
 describe("FieldMappingPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockPatch.mockResolvedValue({ data: {} });
     mockGet.mockImplementation((url: string) => {
       if (url === "/v1/field-mappings/") {
         return Promise.resolve({ data: MOCK_DESCRIPTORS });
@@ -374,6 +376,25 @@ describe("FieldMappingPage", () => {
     });
     // pack_years has status=proposed, should stay in "Needs Concept Assignment"
     expect(screen.getByText("Needs Concept Assignment")).toBeInTheDocument();
+  });
+
+  it("toggles an existing mapping between proposed and approved", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText(/Behavior/)).toBeInTheDocument());
+    fireEvent.click(screen.getByText(/Behavior/));
+    await waitFor(() => expect(screen.getByText("229819007")).toBeInTheDocument());
+
+    fireEvent.click(screen.getAllByTitle("Approve mapping")[0]);
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith("/v1/field-mappings/1/", { status: "approved" });
+    });
+
+    // The approved mapping is shown in the Mapped section; clicking its check
+    // returns it to the proposed state instead of deleting the mapping.
+    fireEvent.click(screen.getByTitle("Mark mapping as proposed"));
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith("/v1/field-mappings/2/", { status: "proposed" });
+    });
   });
 
   // ── Phase 1b tests: edit mode ──
