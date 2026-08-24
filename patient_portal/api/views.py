@@ -1,3 +1,4 @@
+import functools
 from typing import Any, Callable, ContextManager
 
 from rest_framework import viewsets, status
@@ -6,7 +7,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
 from rest_framework.throttling import ScopedRateThrottle
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
@@ -6897,6 +6898,15 @@ def _paginated_concept_response(queryset, request):
     return _set_release_etag(request, response)
 
 
+@functools.lru_cache(maxsize=1)
+def _get_loinc_to_unit() -> dict[str, str]:
+    """Lazily build LOINC-code → unit mapping from LAB_FIELD_TO_LOINC."""
+    from omop_core.services.mappings import LAB_FIELD_TO_LOINC
+    return {
+        code: unit for code, unit, _display in LAB_FIELD_TO_LOINC.values() if unit
+    }
+
+
 @api_view(['GET'])
 @permission_classes([ScopedTokenPermission])
 def concept_search(request):
@@ -6927,7 +6937,12 @@ def concept_search(request):
         Concept.objects.filter(concept_name__icontains=query),
         request.query_params,
     )
-    return _paginated_concept_response(queryset, request)
+    # Annotate LOINC results with suggested units from LAB_FIELD_TO_LOINC.
+    response = _paginated_concept_response(queryset, request)
+    for item in response.data.get('results', []):
+        if item.get('vocabulary_id') == 'LOINC':
+            item['suggested_unit'] = _get_loinc_to_unit().get(item.get('concept_code'), '')
+    return response
 
 
 @api_view(['GET'])
@@ -7911,6 +7926,160 @@ def field_synonyms_batch(request):
 
     # Limit to 5 per field.
     return Response({k: v[:5] for k, v in result.items()})
+
+
+# =============================================================================
+# Field Choices (everyone may read; staff curate)
+# =============================================================================
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def field_choice_list(request):
+    """GET: list all field choices (optionally filter by ?field_name=).  POST: create."""
+
+    from omop_core.models import FieldChoice
+    from .serializers import FieldChoiceSerializer
+
+    if request.method == 'GET':
+        qs = FieldChoice.objects.prefetch_related('codes').all()
+        field_name = request.query_params.get('field_name')
+        if field_name:
+            qs = qs.filter(field_name=field_name)
+        return Response(FieldChoiceSerializer(qs, many=True).data)
+
+    if not request.user.is_staff:
+        return Response({'detail': 'Staff permission required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
+    serializer = FieldChoiceSerializer(data=request.data, context={'request': request})
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def field_choice_detail(request, pk):
+    """GET/PATCH/DELETE a single FieldChoice."""
+
+    from omop_core.models import FieldChoice
+    from .serializers import FieldChoiceSerializer
+    try:
+        choice = FieldChoice.objects.prefetch_related('codes').get(pk=pk)
+    except FieldChoice.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        return Response(FieldChoiceSerializer(choice).data)
+
+    if not request.user.is_staff:
+        return Response({'detail': 'Staff permission required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == 'DELETE':
+        choice.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    serializer = FieldChoiceSerializer(
+        choice, data=request.data, partial=True, context={'request': request},
+    )
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    return Response(serializer.data)
+
+
+@api_view(['POST', 'DELETE'])
+@permission_classes([IsAdminUser])
+def field_choice_codes(request, choice_pk):
+    """POST: add a code to a choice.  DELETE: remove all codes (use detail for single)."""
+
+    from omop_core.models import FieldChoice, FieldChoiceCode
+    from .serializers import FieldChoiceCodeSerializer
+    try:
+        choice = FieldChoice.objects.get(pk=choice_pk)
+    except FieldChoice.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'POST':
+        serializer = FieldChoiceCodeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(choice=choice)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    # DELETE — remove all codes for this choice
+    choice.codes.all().delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# =============================================================================
+# Field Formulas (staff-only formula management)
+# =============================================================================
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def field_formula_test(request):
+    """Evaluate a valid formula against one patient's current projection."""
+    from omop_core.models import PatientRecord
+    from omop_core.services.formula_evaluator import evaluate_formula, validate_formula
+    from omop_core.services.patient_record_service import _formula_values
+
+    formula = request.data.get('formula', '')
+    validation = validate_formula(formula)
+    if not validation.valid:
+        return Response({'formula': validation.errors}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        patient_info = PatientRecord.objects.get(person_id=request.data.get('person_id'))
+    except (PatientRecord.DoesNotExist, TypeError, ValueError):
+        return Response({'person_id': 'PatientRecord not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        value = evaluate_formula(formula, _formula_values(patient_info))
+    except ValueError as exc:
+        return Response({'formula': [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+    return Response({'value': value})
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAdminUser])
+def field_formula_list(request):
+    """GET: list all formulas.  POST: create."""
+
+    from omop_core.models import FieldFormula
+    from .serializers import FieldFormulaSerializer
+
+    if request.method == 'GET':
+        return Response(FieldFormulaSerializer(FieldFormula.objects.all(), many=True).data)
+
+    serializer = FieldFormulaSerializer(data=request.data, context={'request': request})
+    serializer.is_valid(raise_exception=True)
+    formula = serializer.save()
+    from omop_core.services.patient_record_service import recompute_formula_field
+    recompute_formula_field(formula)
+    return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@permission_classes([IsAdminUser])
+def field_formula_detail(request, pk):
+    """GET/PATCH/DELETE a single FieldFormula."""
+
+    from omop_core.models import FieldFormula
+    from .serializers import FieldFormulaSerializer
+    try:
+        formula = FieldFormula.objects.get(pk=pk)
+    except FieldFormula.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        return Response(FieldFormulaSerializer(formula).data)
+
+    if request.method == 'DELETE':
+        formula.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    serializer = FieldFormulaSerializer(
+        formula, data=request.data, partial=True, context={'request': request},
+    )
+    serializer.is_valid(raise_exception=True)
+    formula = serializer.save()
+    from omop_core.services.patient_record_service import recompute_formula_field
+    recompute_formula_field(formula)
+    return Response(serializer.data)
 
 
 class TherapyLineViewSet(viewsets.ViewSet):

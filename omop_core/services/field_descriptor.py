@@ -6,13 +6,15 @@ concept assignments and which still need one.
 """
 from __future__ import annotations
 
-from omop_core.models import PatientRecord, FieldConceptMapping
+from omop_core.models import PatientRecord, FieldConceptMapping, FieldChoice, FieldFormula
 from omop_core.services.mappings import (
     LAB_FIELD_TO_LOINC,
     LAB_FIELD_ALIAS_TO_CANONICAL,
     DEMOGRAPHIC_FIELDS,
     THERAPY_LINE_FIELDS,
     DERIVED_FIELD_TO_CODE,
+    FIELD_COMMON_UNITS,
+    SUGGESTED_FIELD_CODES,
 )
 from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
@@ -20,6 +22,7 @@ from omop_core.services.patient_record_service import (
     _LOINC_LAB_FIELDS,
 )
 from omop_core.services.provenance_registry import get_registry
+from omop_core.services.formula_evaluator import validate_formula
 
 
 # Fields that are purely internal / structural and not clinical.
@@ -49,7 +52,14 @@ _WEARABLE_METADATA_FIELDS = frozenset({
 # Computed fields (derived from other fields, not directly from OMOP).
 _COMPUTED_FIELDS = frozenset({
     'bmi', 'disease_slug', 'therapy_lines_count',
-    'meets_crab', 'meets_slim',
+    'meets_crab', 'meets_slim', 'involved_uninvolved_ratio',
+    'active_infection_status', 'active_malignancies',
+    'no_active_infection_status', 'no_hiv_status', 'no_hepatitis_b_status',
+    'no_hepatitis_c_status', 'no_other_active_malignancies',
+    'no_pre_existing_conditions', 'no_pregnancy_or_lactation_status',
+    'no_mental_health_disorder_status', 'no_concomitant_medication_status',
+    'no_tobacco_use_status', 'no_substance_use_status',
+    'no_geographic_exposure_risk',
 })
 
 # Unit-companion fields (always paired with a measurement field).
@@ -133,7 +143,7 @@ _TAB_DISEASE = frozenset({
     'measurable_disease_imwg', 'mrd_status', 'meets_crab', 'meets_slim',
     'stem_cell_transplant_history', 'sct_date', 'sct_eligibility',
     'monoclonal_protein_serum', 'monoclonal_protein_urine',
-    'kappa_flc', 'lambda_flc', 'free_light_chain_ratio',
+    'kappa_flc', 'lambda_flc', 'kappa_lambda_ratio', 'involved_uninvolved_ratio',
     'bone_lesions', 'hypercalcemia', 'renal_impairment', 'anemia',
     'clonal_plasma_cells', 'cytogenetic_risk', 'cytogenetic_abnormalities',
     # CLL
@@ -294,6 +304,8 @@ def _get_locked_table(category: str) -> str | None:
 
 def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
     """Build auto-suggestion from LAB_FIELD_TO_LOINC, DERIVED_FIELD_TO_CODE, or provenance."""
+    common_units = FIELD_COMMON_UNITS.get(name, [])
+
     if name in LAB_FIELD_TO_LOINC:
         code, unit, display = LAB_FIELD_TO_LOINC[name]
         return {
@@ -301,6 +313,7 @@ def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
             'vocabulary_id': 'LOINC',
             'unit': unit,
             'omop_table': 'Measurement',
+            'common_units': common_units,
         }
 
     if name in DERIVED_FIELD_TO_CODE:
@@ -311,6 +324,7 @@ def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
             'vocabulary_id': vocab,
             'unit': None,
             'omop_table': omop_table,
+            'common_units': common_units,
         }
 
     if prov_dict and prov_dict.get('concept_codes'):
@@ -321,6 +335,19 @@ def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
             'vocabulary_id': strategy.upper() if strategy in ('loinc', 'snomed') else None,
             'unit': None,
             'omop_table': prov_dict.get('omop_table', ''),
+            'common_units': common_units,
+        }
+
+    # Curator-oriented suggestions — not used by derivation/write-through.
+    if name in SUGGESTED_FIELD_CODES:
+        code, vocab = SUGGESTED_FIELD_CODES[name]
+        omop_table = prov_dict.get('omop_table', 'Observation') if prov_dict else 'Observation'
+        return {
+            'concept_code': code,
+            'vocabulary_id': vocab,
+            'unit': None,
+            'omop_table': omop_table,
+            'common_units': common_units,
         }
 
     return None
@@ -354,6 +381,23 @@ def get_all_field_descriptors() -> list[dict]:
         for m in FieldConceptMapping.objects.select_related('concept', 'reviewer').all()
     }
 
+    # 3b. Load field choices (curator-managed value sets).
+    choices_by_field: dict[str, list[dict]] = {}
+    for fc in FieldChoice.objects.prefetch_related('codes').all():
+        choices_by_field.setdefault(fc.field_name, []).append({
+            'id': fc.id,
+            'display': fc.display,
+            'sort_order': fc.sort_order,
+            'codes': [
+                {'code': c.code, 'vocabulary_id': c.vocabulary_id,
+                 'display': c.display, 'is_primary': c.is_primary}
+                for c in fc.codes.all()
+            ],
+        })
+
+    # 3c. Load field formulas.
+    formulas_by_field = {f.field_name: f for f in FieldFormula.objects.all()}
+
     # 4. Build descriptors (excluding internal fields).
     result = []
     for f in concrete_fields:
@@ -385,6 +429,7 @@ def get_all_field_descriptors() -> list[dict]:
             mapping_dict = {
                 'id': mapping.id,
                 'concept_id': mapping.concept_id,
+                'concept_name': mapping.concept.concept_name if mapping.concept else '',
                 'vocabulary_id': mapping.vocabulary_id,
                 'concept_code': mapping.concept_code,
                 'unit': mapping.unit,
@@ -394,6 +439,19 @@ def get_all_field_descriptors() -> list[dict]:
                 'reviewed_at': mapping.reviewed_at.isoformat() if mapping.reviewed_at else None,
                 'notes': mapping.notes,
             }
+
+        formula = formulas_by_field.get(name)
+        formula_dict = None
+        derivation_error = None
+        if formula:
+            formula_dict = {
+                'id': formula.id,
+                'expression': formula.formula,
+                'is_active': formula.is_active,
+            }
+            validation = validate_formula(formula.formula)
+            if not validation.valid:
+                derivation_error = f"Invalid formula: {'; '.join(validation.errors)}"
 
         result.append({
             'field_name': name,
@@ -405,6 +463,11 @@ def get_all_field_descriptors() -> list[dict]:
             'suggestion': _build_suggestion(name, prov_dict),
             'mappable': _is_mappable(category),
             'locked_table': _get_locked_table(category),
+            'choices': choices_by_field.get(name, []),
+            'formula': formula_dict,
+            # Generic derivation health surface. Other extractors can add a
+            # message here without changing the admin API contract.
+            'derivation_error': derivation_error,
         })
 
     # Sort: needs-concept-set first, then by field name.

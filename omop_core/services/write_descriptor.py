@@ -17,7 +17,7 @@ writable with a reason, rather than omitted. A client that only sees writable
 fields cannot tell "you may not edit this" from "I forgot to send it".
 """
 
-from omop_core.models import Concept, PatientRecord
+from omop_core.models import Concept, FieldChoice, PatientRecord
 from omop_core.services.demographics import choices as demographic_choices
 from omop_core.services.mappings import (
     CONCEPT_EHR_TYPE, CONCEPT_LAB_TYPE, DERIVED_FIELD_TO_CODE, LAB_FIELD_TO_LOINC,
@@ -105,6 +105,15 @@ def _unmapped_group(field):
     if field.startswith(_THERAPY_PREFIXES):
         return GROUP_THERAPY
     return GROUP_NEEDS_CONCEPT
+
+
+def _field_choice_options() -> dict[str, list[tuple[str, str | None]]]:
+    """Return curator-managed displays and their preferred code for every field."""
+    result: dict[str, list[tuple[str, str | None]]] = {}
+    for choice in FieldChoice.objects.prefetch_related('codes').all():
+        primary = next((code.code for code in choice.codes.all() if code.is_primary), None)
+        result.setdefault(choice.field_name, []).append((choice.display, primary))
+    return result
 
 # PatientRecord field → the Person field the persons endpoint accepts.
 #
@@ -215,7 +224,7 @@ _COMPUTED_INPUTS = {
         'estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status',
     ],
     'tp53_disruption': ['genetic_mutations'],
-    'free_light_chain_ratio': ['kappa_flc', 'lambda_flc'],
+    'involved_uninvolved_ratio': ['kappa_flc', 'lambda_flc'],
     'molecular_markers': ['genetic_mutations'],
     'liver_enzyme_levels': [
         'liver_enzyme_levels_ast', 'liver_enzyme_levels_alt',
@@ -411,6 +420,13 @@ def build_writable_field_descriptor():
     )
 
     curated = _curated_writes()
+    choice_options = {
+        field_name: [
+            {'value': display, 'code': primary_code}
+            for display, primary_code in choices
+        ]
+        for field_name, choices in _field_choice_options().items()
+    }
 
     descriptor = {}
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
@@ -603,6 +619,7 @@ def build_writable_field_descriptor():
                 'writable': False,
                 'group': group,
                 'reason': _UNMAPPED_GROUP_REASONS[group],
+                'options': choice_options.get(field, []),
             }
             continue
 

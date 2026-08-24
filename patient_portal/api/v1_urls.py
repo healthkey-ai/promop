@@ -24,6 +24,8 @@ from .views import (
     InterchangeAgreementViewSet,
     field_mapping_list, field_mapping_detail,
     field_synonyms, field_synonym_detail, field_synonyms_batch,
+    field_choice_list, field_choice_detail, field_choice_codes,
+    field_formula_list, field_formula_detail, field_formula_test,
 )
 from .org_views import (
     OrgListCreateView, OrgDetailView,
@@ -119,4 +121,10 @@ urlpatterns = [
     path('field-mappings/<str:field_name>/synonyms/', field_synonyms, name='v1-field-synonyms'),
     path('field-synonyms/<int:pk>/', field_synonym_detail, name='v1-field-synonym-detail'),
     path('field-synonyms/batch/', field_synonyms_batch, name='v1-field-synonyms-batch'),
+    path('field-choices/', field_choice_list, name='v1-field-choice-list'),
+    path('field-choices/<int:pk>/', field_choice_detail, name='v1-field-choice-detail'),
+    path('field-choices/<int:choice_pk>/codes/', field_choice_codes, name='v1-field-choice-codes'),
+    path('field-formulas/', field_formula_list, name='v1-field-formula-list'),
+    path('field-formulas/test/', field_formula_test, name='v1-field-formula-test'),
+    path('field-formulas/<int:pk>/', field_formula_detail, name='v1-field-formula-detail'),
 ]

@@ -2112,7 +2112,11 @@ class PatientRecord(models.Model):
     stage = models.TextField(blank=True, null=True)
     karnofsky_performance_score = models.IntegerField(blank=True, null=True, default=100)
     ecog_performance_status = models.IntegerField(blank=True, null=True)
-    no_other_active_malignancies = models.BooleanField(blank=False, null=False, default=True)
+    no_other_active_malignancies = models.BooleanField(blank=True, null=True, default=None)
+    active_malignancies = models.JSONField(
+        blank=True, null=True, default=None,
+        help_text="List of currently active malignancies",
+    )
     no_pre_existing_conditions = models.BooleanField(blank=True, null=True)
     preexisting_conditions = models.JSONField(blank=True, null=True, default=list, help_text="List of pre-existing condition categories from PreExistingConditionCategory vocabulary")
     peripheral_neuropathy_grade = models.IntegerField(blank=True, null=True)
@@ -2396,7 +2400,8 @@ class PatientRecord(models.Model):
     lambda_flc = models.DecimalField(decimal_places=2, max_digits=10, blank=True, null=True, help_text="Serum free lambda light chains")
     # Normal is ~0.26-1.65 and the SLiM threshold is >= 100, so both ends of the
     # range need decimals.
-    free_light_chain_ratio = models.DecimalField(decimal_places=3, max_digits=12, blank=True, null=True, help_text="Serum free light chain ratio (kappa/lambda)")
+    kappa_lambda_ratio = models.DecimalField(decimal_places=3, max_digits=12, blank=True, null=True, help_text="Measured serum kappa/lambda ratio")
+    involved_uninvolved_ratio = models.DecimalField(decimal_places=3, max_digits=12, blank=True, null=True, help_text="Computed involved/uninvolved free light chain ratio")
     meets_slim = models.BooleanField(blank=True, null=True)
 
     # Legacy blood work fields
@@ -2476,10 +2481,16 @@ class PatientRecord(models.Model):
     no_geographic_exposure_risk = models.BooleanField(help_text="Has the patient had geographic exposure to risk?", blank=True, null=True, default=None)
     geographic_exposure_risk_details = models.CharField(max_length=255, help_text="Details about the patient's geographic exposure risk", blank=True, null=True)
 
-    no_hiv_status = models.BooleanField(help_text="Does the patient has had HIV?", blank=False, null=False, default=True)
-    no_hepatitis_b_status = models.BooleanField(help_text="Does the patient has had Hepatitis B (HBV)?", blank=False, null=False, default=True)
-    no_hepatitis_c_status = models.BooleanField(help_text="Does the patient has had Hepatitis C (HCV)?", blank=False, null=False, default=True)
-    no_active_infection_status = models.BooleanField(help_text="Does the patient has any active infection?", blank=False, null=False, default=True)
+    # These are inverse projections of the corresponding infection results.
+    # A patient without a recorded result is unknown, not known-negative.
+    no_hiv_status = models.BooleanField(help_text="Does the patient has had HIV?", blank=True, null=True, default=None)
+    no_hepatitis_b_status = models.BooleanField(help_text="Does the patient has had Hepatitis B (HBV)?", blank=True, null=True, default=None)
+    no_hepatitis_c_status = models.BooleanField(help_text="Does the patient has had Hepatitis C (HCV)?", blank=True, null=True, default=None)
+    no_active_infection_status = models.BooleanField(
+        help_text="Does the patient have any active infection?",
+        blank=True, null=True, default=None,
+    )
+    active_infection_status = models.BooleanField(blank=True, null=True)
 
     concomitant_medications = models.TextField(blank=True, null=True)
     concomitant_medication_date = models.DateField(blank=True, null=True)
@@ -2969,6 +2980,61 @@ class FieldConceptMapping(models.Model):
 
     def __str__(self):
         return f"{self.field_name} → {self.vocabulary_id}:{self.concept_code} ({self.status})"
+
+
+class FieldChoice(models.Model):
+    """One allowed value for a PatientRecord field (curator-managed)."""
+    field_name = models.CharField(max_length=100, db_index=True)
+    display = models.CharField(max_length=200)
+    sort_order = models.IntegerField(default=0)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'field_choice'
+        unique_together = [('field_name', 'display')]
+        ordering = ['field_name', 'sort_order', 'display']
+
+    def __str__(self):
+        return f"{self.field_name}: {self.display}"
+
+
+class FieldChoiceCode(models.Model):
+    """A coded representation (SNOMED, ICD, etc.) for a field choice."""
+    choice = models.ForeignKey(FieldChoice, related_name='codes', on_delete=models.CASCADE)
+    code = models.CharField(max_length=50)
+    vocabulary_id = models.CharField(max_length=20)
+    display = models.CharField(max_length=200, blank=True, default='')
+    is_primary = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = 'field_choice_code'
+        unique_together = [('choice', 'vocabulary_id', 'code')]
+
+    def __str__(self):
+        return f"{self.choice.display} — {self.vocabulary_id}:{self.code}"
+
+
+class FieldFormula(models.Model):
+    """User-defined formula for a computed PatientRecord field."""
+    field_name = models.CharField(max_length=100, unique=True, db_index=True)
+    formula = models.TextField(
+        help_text='e.g. "@not(active_infection_status)" or "weight / (height/100)^2"'
+    )
+    is_active = models.BooleanField(default=False)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'field_formula'
+
+    def __str__(self):
+        return f"{self.field_name}: {self.formula[:50]}"
 
 
 class FieldSynonym(models.Model):

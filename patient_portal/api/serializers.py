@@ -8,6 +8,7 @@ from omop_core.models import (
     StemCellTransplant, SctEligibility, PostTransformationOutcome,
     Organization, OrgTrust, OrgInvitation, GroupAccess,
     InterchangeAgreement,
+    FieldChoice, FieldChoiceCode, FieldFormula,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from datetime import date
@@ -1175,3 +1176,103 @@ class TherapyLineWriteSerializer(serializers.Serializer):
                 'therapy field would follow from it.',
             )
         return attrs
+
+
+# =============================================================================
+# Field Choice serializers (curator-managed value sets)
+# =============================================================================
+
+class FieldChoiceCodeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FieldChoiceCode
+        fields = ['id', 'code', 'vocabulary_id', 'display', 'is_primary']
+        read_only_fields = ['id']
+
+
+class FieldChoiceSerializer(serializers.ModelSerializer):
+    codes = FieldChoiceCodeSerializer(many=True, required=False)
+    created_by = serializers.CharField(
+        source='created_by.username', read_only=True, default=None,
+    )
+
+    class Meta:
+        model = FieldChoice
+        fields = [
+            'id', 'field_name', 'display', 'sort_order',
+            'codes', 'created_by', 'created_at',
+        ]
+        read_only_fields = ['id', 'created_by', 'created_at']
+
+    def validate_field_name(self, value):
+        from omop_core.models import PatientRecord
+        concrete_names = {
+            f.name for f in PatientRecord._meta.get_fields()
+            if getattr(f, 'concrete', False)
+        }
+        if value not in concrete_names:
+            raise serializers.ValidationError(
+                f"'{value}' is not a concrete PatientRecord field."
+            )
+        return value
+
+    def create(self, validated_data):
+        codes_data = validated_data.pop('codes', [])
+        request = self.context.get('request')
+        choice = FieldChoice.objects.create(
+            **validated_data,
+            created_by=request.user if request else None,
+        )
+        for code_data in codes_data:
+            FieldChoiceCode.objects.create(choice=choice, **code_data)
+        return choice
+
+    def update(self, instance, validated_data):
+        codes_data = validated_data.pop('codes', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if codes_data is not None:
+            instance.codes.all().delete()
+            for code_data in codes_data:
+                FieldChoiceCode.objects.create(choice=instance, **code_data)
+        return instance
+
+
+# =============================================================================
+# Field Formula serializer
+# =============================================================================
+
+class FieldFormulaSerializer(serializers.ModelSerializer):
+    created_by = serializers.CharField(
+        source='created_by.username', read_only=True, default=None,
+    )
+
+    class Meta:
+        model = FieldFormula
+        fields = [
+            'id', 'field_name', 'formula', 'is_active',
+            'created_by', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_by', 'created_at', 'updated_at']
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        return FieldFormula.objects.create(
+            **validated_data,
+            created_by=request.user if request else None,
+        )
+
+    def validate_field_name(self, value):
+        from omop_core.services.field_descriptor import _COMPUTED_FIELDS
+        if value not in _COMPUTED_FIELDS:
+            raise serializers.ValidationError(
+                f"'{value}' is not an application-computed PatientRecord field."
+            )
+        return value
+
+    def validate_formula(self, value):
+        from omop_core.services.formula_evaluator import validate_formula
+        result = validate_formula(value)
+        if not result.valid:
+            raise serializers.ValidationError(result.errors)
+        return value

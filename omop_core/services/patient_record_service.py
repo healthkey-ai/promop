@@ -18,7 +18,7 @@ from django.db.models.functions import Cast, Coalesce
 from django.db import transaction
 from django.utils import timezone
 from omop_core.models import (
-    Person, PatientRecord, ConditionOccurrence, Concept,
+    Person, PatientRecord, ConditionOccurrence, Concept, ConceptAncestor,
     Measurement, Observation, DrugExposure, Location, ProcedureOccurrence,
     Death, ConceptRelationship, PERSON_YEAR_PLACEHOLDERS,
 )
@@ -77,6 +77,8 @@ _OMOP_DERIVED_FIELDS = [
     'validation_date', 'suppress_demographics_for_others',
     # Disease / condition
     'disease', 'diagnosis_date', 'death_date', 'condition_clinical_status', 'disease_slug',
+    'active_infection_status', 'no_active_infection_status',
+    'active_malignancies', 'no_other_active_malignancies',
     # Therapy lines
     'first_line_therapy', 'first_line_date', 'first_line_start_date', 'first_line_end_date',
     'first_line_therapy_id',
@@ -141,7 +143,8 @@ _OMOP_DERIVED_FIELDS = [
     'beta2_microglobulin', 'c_reactive_protein', 'esr',
     # MM disease burden (LOINC-derived)
     'monoclonal_protein_serum', 'monoclonal_protein_urine',
-    'kappa_flc', 'lambda_flc', 'clonal_plasma_cells', 'free_light_chain_ratio',
+    'kappa_flc', 'lambda_flc', 'clonal_plasma_cells', 'kappa_lambda_ratio',
+    'involved_uninvolved_ratio',
     # MM boolean/coded fields (derived by _get_mm_specific_data)
     'plasma_cell_leukemia', 'bone_lesions', 'meets_crab', 'meets_slim',
     # MM cytogenetics + SCT (derived by _get_sct_cytogenetic_data)
@@ -334,9 +337,9 @@ _LOINC_LAB_FIELDS = {
     '33945-5': ('lambda_flc',                     float),  # seeded demo concept only
     '33944-0': ('lambda_flc',                     float),  # Lambda FLC, Serum (3047169)
     '80516-8': ('lambda_flc',                     float),  # Lambda FLC by nephelometry
-    '48378-4': ('free_light_chain_ratio',         float),  # Kappa/lambda ratio (3053209)
-    '80517-6': ('free_light_chain_ratio',         float),  # ratio by nephelometry
-    '104546-7': ('free_light_chain_ratio',        float),  # ratio, newer LOINC
+    '48378-4': ('kappa_lambda_ratio',             float),  # Kappa/lambda ratio (3053209)
+    '80517-6': ('kappa_lambda_ratio',             float),  # ratio by nephelometry
+    '104546-7': ('kappa_lambda_ratio',            float),  # ratio, newer LOINC
     # '26098-4' is "XR Ankle - left Views" in LOINC, so it used to project ankle
     # radiographs into clonal_plasma_cells. '11118-7' is the real marrow code.
     '11118-7': ('clonal_plasma_cells',            float),  # Plasma cells/100 cells in marrow (3003879)
@@ -345,7 +348,7 @@ _LOINC_LAB_FIELDS = {
 # Keyed by field name not by code, so a new LOINC spelling above feeds both the
 # lab projection and the SLiM criteria.
 _SLIM_FIELDS = frozenset({
-    'clonal_plasma_cells', 'kappa_flc', 'lambda_flc', 'free_light_chain_ratio',
+    'clonal_plasma_cells', 'kappa_flc', 'lambda_flc', 'kappa_lambda_ratio',
 })
 
 # Projected in mg/L when the source unit says which unit it is in.
@@ -457,7 +460,7 @@ _SOURCE_VALUE_LAB_FIELDS = {
     'Kappa free light chains':                    'kappa_flc',
     'Lambda free light chains':                   'lambda_flc',
     'Clonal plasma cells in bone marrow (%)':     'clonal_plasma_cells',
-    'Free light chain ratio':                     'free_light_chain_ratio',
+    'Free light chain ratio':                     'kappa_lambda_ratio',
 }
 
 # Bounds the SLiM query. Without it the criteria walk every Measurement a person
@@ -735,6 +738,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             _get_demographics,
             _get_location_data,
             _get_disease_data,
+            _get_active_condition_data,
             _get_treatment_data,
             _get_vitals_data,
             _get_biomarker_data,
@@ -766,6 +770,14 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         patient_info.derived_at = timezone.now()
 
         patient_info.save()
+        # PatientRecord.save retains a few legacy calculations (notably BMI).
+        # Reapply active formulas with a direct update so an approved formula is
+        # the final derivation authority for its target field.
+        formula_fields = _apply_active_field_formulas(patient_info)
+        if formula_fields:
+            updates = {field: getattr(patient_info, field) for field in formula_fields}
+            updates['updated_at'] = timezone.now()
+            PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
         return patient_info
 
 
@@ -949,6 +961,113 @@ def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     disease_name = data.get('disease', '')
     if disease_name:
         data['disease_slug'] = _disease_name_to_slug(disease_name)
+
+    return data
+
+
+_ACTIVE_CONDITION_ROOT_CODES = {
+    'active_infection_status': '40733004',  # SNOMED CT: Infectious disease
+    'active_malignancies': '363346000',     # SNOMED CT: Malignant neoplastic disease
+}
+_INACTIVE_CONDITION_STATUS_MARKERS = (
+    'resolved', 'inactive', 'history of', 'rule out', 'ruled out',
+)
+
+
+_DESCENDANT_CACHE: dict[str, set[int] | None] = {}
+
+
+def clear_descendant_cache() -> None:
+    """Clear the SNOMED descendant cache (for tests)."""
+    _DESCENDANT_CACHE.clear()
+
+
+def _active_condition_descendant_ids(root_code: str) -> set[int] | None:
+    """Return descendants of a loaded SNOMED condition root, including itself.
+
+    Numeric OMOP concept IDs vary with the loaded vocabulary release, so the
+    stable SNOMED code is resolved at runtime.  ``None`` means the vocabulary
+    hierarchy is unavailable; callers must preserve an unknown result rather
+    than treating an incomplete vocabulary load as a negative finding.
+
+    Results are cached at module level because the SNOMED hierarchy is static
+    within a vocabulary release.
+    """
+    if root_code in _DESCENDANT_CACHE:
+        return _DESCENDANT_CACHE[root_code]
+
+    root = (
+        Concept.objects.filter(
+            vocabulary_id='SNOMED',
+            concept_code=root_code,
+            domain_id='Condition',
+            invalid_reason__isnull=True,
+        )
+        .only('concept_id')
+        .first()
+    )
+    if root is None:
+        _DESCENDANT_CACHE[root_code] = None
+        return None
+    descendants = set(
+        ConceptAncestor.objects.filter(ancestor_concept_id=root.concept_id)
+        .values_list('descendant_concept_id', flat=True)
+    )
+    descendants.add(root.concept_id)
+    _DESCENDANT_CACHE[root_code] = descendants
+    return descendants
+
+
+def _condition_is_current(condition: ConditionOccurrence, today: date) -> bool:
+    """Apply the current-condition convention used by active projections."""
+    if condition.is_erroneous or condition.condition_start_date > today:
+        return False
+    if condition.condition_end_date and condition.condition_end_date < today:
+        return False
+    status_parts = [
+        getattr(condition.condition_status_concept, 'concept_name', None),
+        condition.condition_status_source_value,
+    ]
+    status = ' '.join(part for part in status_parts if part).lower()
+    return not any(marker in status for marker in _INACTIVE_CONDITION_STATUS_MARKERS)
+
+
+def _get_active_condition_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
+    """Project current SNOMED infection and malignancy conditions onto PatientRecord.
+
+    A condition is current when it has started, is not ended, and does not carry
+    a resolved/inactive/history/rule-out status.  This is necessarily a
+    convention because OMOP condition rows do not universally carry a status.
+    """
+    snapshot = snapshot or _build_snapshot(person)
+    today = timezone.localdate()
+    current_conditions = [
+        condition for condition in snapshot.conditions
+        if _condition_is_current(condition, today)
+    ]
+    data = {}
+
+    infection_ids = _active_condition_descendant_ids(
+        _ACTIVE_CONDITION_ROOT_CODES['active_infection_status']
+    )
+    if infection_ids is not None:
+        data['active_infection_status'] = any(
+            condition.condition_concept_id in infection_ids
+            for condition in current_conditions
+        )
+
+    malignancy_ids = _active_condition_descendant_ids(
+        _ACTIVE_CONDITION_ROOT_CODES['active_malignancies']
+    )
+    if malignancy_ids is not None:
+        names = {
+            name
+            for condition in current_conditions
+            if condition.condition_concept_id in malignancy_ids
+            for name in [_usable_concept_name(condition.condition_concept)]
+            if name
+        }
+        data['active_malignancies'] = sorted(names)
 
     return data
 
@@ -2743,7 +2862,7 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
     plasma_pcts = [v for v, _unit in slim_vals.get('clonal_plasma_cells', [])]
     kappas = slim_vals.get('kappa_flc', [])
     lambdas = slim_vals.get('lambda_flc', [])
-    ratios = [v for v, _unit in slim_vals.get('free_light_chain_ratio', [])]
+    ratios = [v for v, _unit in slim_vals.get('kappa_lambda_ratio', [])]
 
     meets_slim = False
     # Sixty criterion: any plasma cells measurement ≥60%
@@ -3371,10 +3490,22 @@ def _parse_date_value(v):
 
 def _compute_derived_fields(patient_info: PatientRecord) -> None:
     """Compute fields that depend on other PatientRecord fields being set."""
+    if patient_info.active_infection_status is not None:
+        patient_info.no_active_infection_status = not patient_info.active_infection_status
+    if patient_info.active_malignancies is not None:
+        # The active-malignancies list includes the primary cancer when present;
+        # one entry therefore means there is no *other* active malignancy.
+        patient_info.no_other_active_malignancies = len(patient_info.active_malignancies) <= 1
+
     serum_mp = patient_info.monoclonal_protein_serum
     urine_mp = patient_info.monoclonal_protein_urine
     kappa = patient_info.kappa_flc
     lam = patient_info.lambda_flc
+
+    if kappa is not None and lam is not None and min(kappa, lam) > 0:
+        patient_info.involved_uninvolved_ratio = max(kappa, lam) / min(kappa, lam)
+    else:
+        patient_info.involved_uninvolved_ratio = None
 
     imwg = None
     if serum_mp is not None and float(serum_mp) >= 0.5:
@@ -3463,6 +3594,53 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
     _lt_candidates = _valid_ends or _valid_starts
     if _lt_candidates:
         patient_info.last_treatment = max(_lt_candidates)
+
+    _apply_active_field_formulas(patient_info)
+
+
+def _formula_values(patient_info: PatientRecord) -> dict[str, object]:
+    """Return scalar PatientRecord values that a validated formula may read."""
+    return {
+        field.name: getattr(patient_info, field.name)
+        for field in PatientRecord._meta.get_fields()
+        if getattr(field, 'concrete', False) and not field.is_relation
+    }
+
+
+def _apply_active_field_formulas(patient_info: PatientRecord) -> set[str]:
+    """Apply admin-approved formulas after OMOP and built-in derivations."""
+    from omop_core.models import FieldFormula
+    from omop_core.services.formula_evaluator import evaluate_formula
+
+    values = _formula_values(patient_info)
+    changed_fields = set()
+    for field_formula in FieldFormula.objects.filter(is_active=True).order_by('field_name'):
+        try:
+            value = evaluate_formula(field_formula.formula, values)
+        except ValueError:
+            # Invalid legacy rows are surfaced in the mapping UI and must not
+            # abort clinical refreshes.
+            logger.warning('Skipping invalid formula for %s', field_formula.field_name)
+            continue
+        setattr(patient_info, field_formula.field_name, value)
+        values[field_formula.field_name] = value
+        changed_fields.add(field_formula.field_name)
+    return changed_fields
+
+
+def recompute_formula_field(field_formula) -> int:
+    """Immediately recalculate active formulas after one formula is changed."""
+    if not field_formula.is_active:
+        return 0
+    updated = 0
+    for patient_info in PatientRecord.objects.iterator(chunk_size=500):
+        changed_fields = _apply_active_field_formulas(patient_info)
+        if changed_fields:
+            updates = {field: getattr(patient_info, field) for field in changed_fields}
+            updates['updated_at'] = timezone.now()
+            PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
+            updated += 1
+    return updated
 
 
 def _get_wearable_data(person: Person, snapshot: OmopSnapshot = None) -> dict:

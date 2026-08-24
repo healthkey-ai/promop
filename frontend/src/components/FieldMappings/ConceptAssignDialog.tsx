@@ -9,6 +9,7 @@ interface ConceptResult {
   vocabulary_id: string;
   domain_id: string;
   standard_concept: string | null;
+  suggested_unit?: string;
 }
 
 interface Props {
@@ -20,24 +21,46 @@ interface Props {
   initialVocabularyId?: string;
   initialUnit?: string;
   initialOmopTable?: string;
+  existingMappingId?: number;
+  initialConceptId?: number | null;
+  initialConceptName?: string;
+  initialNotes?: string;
+  commonUnits?: string[];
 }
 
 export function ConceptAssignDialog({
   fieldName, fieldType, onClose, onSaved,
   initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
+  existingMappingId, initialConceptId, initialConceptName, initialNotes, commonUnits,
 }: Props) {
-  const [searchQuery, setSearchQuery] = useState(initialConceptCode || "");
-  const [vocabFilter, setVocabFilter] = useState(initialVocabularyId || "");
+  const isEditing = !!existingMappingId;
+  const [searchQuery, setSearchQuery] = useState("");
+  const [vocabFilter, setVocabFilter] = useState("");
   const [results, setResults] = useState<ConceptResult[]>([]);
   const [searching, setSearching] = useState(false);
-  const [selected, setSelected] = useState<ConceptResult | null>(null);
+  const [selected, setSelected] = useState<ConceptResult | null>(() => (
+    initialConceptId != null
+      ? {
+          concept_id: initialConceptId,
+          concept_code: initialConceptCode || "",
+          concept_name: initialConceptName || "",
+          vocabulary_id: initialVocabularyId || "",
+          domain_id: "",
+          standard_concept: null,
+        }
+      : null
+  ));
   const [unit, setUnit] = useState(initialUnit || "");
+  const [customUnit, setCustomUnit] = useState("");
   const [omopTable, setOmopTable] = useState(initialOmopTable || "Measurement");
-  const [notes, setNotes] = useState("");
+  const [notes, setNotes] = useState(initialNotes || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
+
+  const hasCommonUnits = commonUnits && commonUnits.length > 0;
+  const isCustomUnit = hasCommonUnits && unit !== "" && !commonUnits.includes(unit);
 
   const doSearch = useCallback(async (q: string) => {
     if (q.length < 3) {
@@ -67,21 +90,28 @@ export function ConceptAssignDialog({
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [searchQuery, doSearch]);
 
+  const effectiveUnit = isCustomUnit ? customUnit || unit : unit;
+
   const handleSubmit = async () => {
     if (!selected) return;
     setSaving(true);
     setError("");
     try {
-      await api.post("/v1/field-mappings/", {
+      const payload = {
         field_name: fieldName,
         concept: selected.concept_id,
         vocabulary_id: selected.vocabulary_id,
         concept_code: selected.concept_code,
-        unit,
+        unit: effectiveUnit,
         omop_table: omopTable,
         notes,
-        status: "proposed",
-      });
+        status: "approved",
+      };
+      if (isEditing) {
+        await api.patch(`/v1/field-mappings/${existingMappingId}/`, payload);
+      } else {
+        await api.post("/v1/field-mappings/", payload);
+      }
       onSaved();
     } catch (err: unknown) {
       const msg =
@@ -94,16 +124,24 @@ export function ConceptAssignDialog({
     }
   };
 
-  // Close on Escape key
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, [onClose]);
 
-  // Close on overlay click
   const handleOverlayClick = (e: React.MouseEvent) => {
     if (e.target === overlayRef.current) onClose();
+  };
+
+  const handleUnitDropdownChange = (value: string) => {
+    if (value === "__custom__") {
+      setCustomUnit(unit);
+      setUnit(value);
+    } else {
+      setUnit(value);
+      setCustomUnit("");
+    }
   };
 
   return (
@@ -120,10 +158,41 @@ export function ConceptAssignDialog({
           <X size={16} />
         </button>
 
-        <h2 className="mb-1 text-lg font-semibold">Assign Concept</h2>
+        <h2 className="mb-1 text-lg font-semibold">
+          {isEditing ? "Edit Concept Mapping" : "Assign Concept"}
+        </h2>
         <p className="mb-4 text-sm text-gray-500">
           Field: <span className="font-mono">{fieldName}</span> ({fieldType})
         </p>
+
+        {/* Mapped concept display */}
+        <div className="mb-4">
+          <label className="mb-1 block text-xs font-medium text-gray-600">Mapped Concept</label>
+          {selected ? (
+            <div className="flex items-center gap-2 rounded border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
+              <span className="font-mono font-medium">
+                {selected.vocabulary_id}:{selected.concept_code}
+              </span>
+              {selected.concept_name && (
+                <>
+                  <span className="text-gray-400">&mdash;</span>
+                  <span>{selected.concept_name}</span>
+                </>
+              )}
+              <button
+                onClick={() => setSelected(null)}
+                className="ml-auto rounded p-0.5 text-gray-400 hover:text-gray-600"
+                title="Clear selection"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          ) : (
+            <div className="rounded border border-dashed border-gray-300 px-3 py-2 text-sm text-gray-400">
+              No concept selected &mdash; search below to assign one
+            </div>
+          )}
+        </div>
 
         {/* Concept search */}
         <div className="mb-3 flex gap-2">
@@ -173,7 +242,12 @@ export function ConceptAssignDialog({
                 {results.slice(0, 50).map((c) => (
                   <tr
                     key={c.concept_id}
-                    onClick={() => setSelected(c)}
+                    onClick={() => {
+                      setSelected(c);
+                      if (c.suggested_unit && !unit) {
+                        setUnit(c.suggested_unit);
+                      }
+                    }}
                     className={`cursor-pointer hover:bg-blue-50 ${
                       selected?.concept_id === c.concept_id ? "bg-blue-100" : ""
                     }`}
@@ -189,28 +263,47 @@ export function ConceptAssignDialog({
           )}
         </div>
 
-        {/* Selected concept */}
-        {selected && (
-          <div className="mb-4 rounded bg-blue-50 px-3 py-2 text-sm">
-            Selected:{" "}
-            <span className="font-medium">
-              {selected.vocabulary_id}:{selected.concept_code}
-            </span>{" "}
-            — {selected.concept_name}
-          </div>
-        )}
-
         {/* Additional fields */}
         <div className="mb-4 grid grid-cols-2 gap-3">
           <div>
-            <label className="mb-1 block text-xs font-medium text-gray-600">Unit</label>
-            <input
-              type="text"
-              value={unit}
-              onChange={(e) => setUnit(e.target.value)}
-              placeholder="e.g. mg/dL"
-              className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
-            />
+            <label className="mb-1 block text-xs font-medium text-gray-600">
+              Unit
+              {selected?.suggested_unit && unit === selected.suggested_unit && (
+                <span className="ml-1 text-[10px] font-normal text-gray-400">(suggested)</span>
+              )}
+            </label>
+            {hasCommonUnits ? (
+              <div className="space-y-1.5">
+                <select
+                  value={isCustomUnit ? "__custom__" : unit}
+                  onChange={(e) => handleUnitDropdownChange(e.target.value)}
+                  className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
+                >
+                  <option value="">Select unit...</option>
+                  {commonUnits.map((u) => (
+                    <option key={u} value={u}>{u}</option>
+                  ))}
+                  <option value="__custom__">Other...</option>
+                </select>
+                {isCustomUnit && (
+                  <input
+                    type="text"
+                    value={customUnit}
+                    onChange={(e) => setCustomUnit(e.target.value)}
+                    placeholder="Enter custom unit..."
+                    className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
+                  />
+                )}
+              </div>
+            ) : (
+              <input
+                type="text"
+                value={unit}
+                onChange={(e) => setUnit(e.target.value)}
+                placeholder="e.g. mg/dL"
+                className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
+              />
+            )}
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium text-gray-600">OMOP Table</label>
@@ -252,7 +345,7 @@ export function ConceptAssignDialog({
             disabled={!selected || saving}
             className="rounded bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
-            {saving ? "Saving..." : "Save Mapping"}
+            {saving ? "Saving..." : isEditing ? "Update Mapping" : "Save Mapping"}
           </button>
         </div>
       </div>

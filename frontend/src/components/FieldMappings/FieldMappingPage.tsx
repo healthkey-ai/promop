@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, ChevronDown, ChevronRight, Search, BookOpen, Check, X } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, Search, BookOpen, Check, X, Pencil } from "lucide-react";
 import api from "@/api/axios";
 import { ConceptAssignDialog } from "./ConceptAssignDialog";
 import { SynonymDialog } from "./SynonymDialog";
+import { FieldChoiceEditor } from "./FieldChoiceEditor";
+import { FormulaEditDialog } from "./FormulaEditDialog";
+import { DerivationInfoDialog } from "./DerivationInfoDialog";
 
 interface FieldDescriptor {
   field_name: string;
@@ -22,6 +25,7 @@ interface FieldDescriptor {
   mapping: {
     id: number;
     concept_id: number | null;
+    concept_name: string;
     vocabulary_id: string;
     concept_code: string;
     unit: string;
@@ -36,9 +40,22 @@ interface FieldDescriptor {
     vocabulary_id: string | null;
     unit: string | null;
     omop_table: string;
+    common_units: string[];
   } | null;
   mappable: boolean;
   locked_table: string | null;
+  choices: {
+    id: number;
+    display: string;
+    sort_order: number;
+    codes: { code: string; vocabulary_id: string; display: string; is_primary: boolean }[];
+  }[];
+  formula: {
+    id: number;
+    expression: string;
+    is_active: boolean;
+  } | null;
+  derivation_error: string | null;
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -71,6 +88,13 @@ const STATUS_BADGE: Record<string, string> = {
   rejected: "bg-red-100 text-red-800",
 };
 
+/** Display category: approved mappings move from their backend category to "editable" (Mapped). */
+const getDisplayCategory = (d: FieldDescriptor): string => {
+  if (d.category === "computed") return "computed";
+  if (d.mapping?.status === "approved" && d.category !== "editable") return "editable";
+  return d.category;
+};
+
 export default function FieldMappingPage() {
   const navigate = useNavigate();
   const [descriptors, setDescriptors] = useState<FieldDescriptor[]>([]);
@@ -86,6 +110,9 @@ export default function FieldMappingPage() {
   const [selectedField, setSelectedField] = useState<FieldDescriptor | null>(null);
   const [synonymDialogField, setSynonymDialogField] = useState<string | null>(null);
   const [batchSynonyms, setBatchSynonyms] = useState<Record<string, string[]>>({});
+  const [choiceEditorField, setChoiceEditorField] = useState<FieldDescriptor | null>(null);
+  const [formulaEditorField, setFormulaEditorField] = useState<FieldDescriptor | null>(null);
+  const [derivationInfoField, setDerivationInfoField] = useState<FieldDescriptor | null>(null);
 
   const fetchDescriptors = useCallback(async () => {
     setLoading(true);
@@ -147,12 +174,12 @@ export default function FieldMappingPage() {
     const mappable: Record<string, FieldDescriptor[]> = {};
     const computed: FieldDescriptor[] = [];
     for (const d of filtered) {
-      if (d.category === "computed") {
+      const displayCat = getDisplayCategory(d);
+      if (displayCat === "computed") {
         computed.push(d);
       } else {
-        const cat = d.category;
-        if (!mappable[cat]) mappable[cat] = [];
-        mappable[cat].push(d);
+        if (!mappable[displayCat]) mappable[displayCat] = [];
+        mappable[displayCat].push(d);
       }
     }
     return { mappableGroups: mappable, computedFields: computed };
@@ -161,7 +188,8 @@ export default function FieldMappingPage() {
   const stats = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const d of descriptors) {
-      counts[d.category] = (counts[d.category] || 0) + 1;
+      const displayCat = getDisplayCategory(d);
+      counts[displayCat] = (counts[displayCat] || 0) + 1;
     }
     return counts;
   }, [descriptors]);
@@ -208,22 +236,17 @@ export default function FieldMappingPage() {
   const handleConfirm = async (field: FieldDescriptor) => {
     try {
       if (field.mapping) {
-        // Approve existing proposed mapping.
+        // Approve existing proposed mapping (already has a resolved concept).
         if (field.mapping.status === "proposed") {
           await api.patch(`/v1/field-mappings/${field.mapping.id}/`, { status: "approved" });
+          fetchDescriptors();
         }
+        // Already approved — no-op (no refetch needed).
       } else if (field.suggestion) {
-        // Create mapping from suggestion with approved status.
-        await api.post("/v1/field-mappings/", {
-          field_name: field.field_name,
-          vocabulary_id: field.suggestion.vocabulary_id || "",
-          concept_code: field.suggestion.concept_code,
-          unit: field.suggestion.unit || "",
-          omop_table: field.locked_table || field.suggestion.omop_table || "",
-          status: "approved",
-        });
+        // Suggestion has no resolved concept FK — open the dialog so the user
+        // can search, select a concept, and create a complete mapping.
+        handleCellClick(field);
       }
-      fetchDescriptors();
     } catch {
       setError("Failed to confirm mapping.");
     }
@@ -252,7 +275,11 @@ export default function FieldMappingPage() {
         </span>
       );
     }
-    return <span className="text-xs text-gray-400">&mdash;</span>;
+    return (
+      <span className="text-xs text-gray-400 group-hover:text-gray-500">
+        click to map
+      </span>
+    );
   };
 
   /** Render coding (vocabulary_id) cell. */
@@ -337,12 +364,13 @@ export default function FieldMappingPage() {
             <th className="px-3 py-2">Coding</th>
             <th className="px-3 py-2">Table</th>
             <th className="px-3 py-2">Units</th>
+            <th className="px-3 py-2">Choices</th>
             <th className="px-3 py-2">Synonyms</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
           {fields.map((f) => (
-            <tr key={f.field_name} className="hover:bg-gray-50/50">
+            <tr key={f.field_name} className="group hover:bg-gray-50/50">
               <td className="px-3 py-2 font-mono text-xs">{f.field_name}</td>
               <td className="px-3 py-2">
                 <div className="flex items-center gap-1.5">
@@ -362,10 +390,14 @@ export default function FieldMappingPage() {
                   )}
                   <button
                     onClick={() => f.mappable && handleCellClick(f)}
-                    className={`${f.mappable ? "cursor-pointer hover:text-primary" : ""}`}
+                    className={`inline-flex items-center gap-1 ${f.mappable ? "cursor-pointer hover:text-primary hover:underline" : ""}`}
                     disabled={!f.mappable}
+                    title={f.mappable ? "Click to assign or edit concept" : undefined}
                   >
                     {renderConceptCell(f)}
+                    {f.mappable && (
+                      <Pencil size={10} className="opacity-0 group-hover:opacity-100 text-gray-400" />
+                    )}
                   </button>
                   {f.mapping && (
                     <button
@@ -401,6 +433,18 @@ export default function FieldMappingPage() {
                 )}
               </td>
               <td className="px-3 py-2">{renderUnitCell(f)}</td>
+              <td className="px-3 py-2">
+                <button
+                  onClick={() => setChoiceEditorField(f)}
+                  className="text-xs text-gray-500 hover:text-primary hover:underline"
+                >
+                  {f.choices.length > 0 ? (
+                    <span>{f.choices.length} choices</span>
+                  ) : (
+                    <span className="text-gray-400">&mdash;</span>
+                  )}
+                </button>
+              </td>
               <td className="px-3 py-2">{renderSynonyms(f)}</td>
             </tr>
           ))}
@@ -433,7 +477,9 @@ export default function FieldMappingPage() {
                 <tr className="bg-gray-50 text-left text-[11px] uppercase text-gray-500">
                   <th className="px-3 py-2">Field Name</th>
                   <th className="px-3 py-2">Type</th>
+                  <th className="px-3 py-2">Formula</th>
                   <th className="px-3 py-2">Provenance</th>
+                  <th className="px-3 py-2">Derivation status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -442,12 +488,37 @@ export default function FieldMappingPage() {
                     <td className="px-3 py-2 font-mono text-xs">{f.field_name}</td>
                     <td className="px-3 py-2 text-xs">{f.field_type}</td>
                     <td className="px-3 py-2 text-xs">
-                      {f.provenance ? (
-                        <span title={f.provenance.description}>
+                      <button
+                        onClick={() => setFormulaEditorField(f)}
+                        className="not-italic hover:text-primary hover:underline"
+                      >
+                        {f.formula ? (
+                          <span className="font-mono">{f.formula.expression}</span>
+                        ) : (
+                          <span className="text-gray-400">none</span>
+                        )}
+                      </button>
+                    </td>
+                    <td className="px-3 py-2 text-xs">
+                      <button
+                        onClick={() => setDerivationInfoField(f)}
+                        className="not-italic text-left hover:text-primary hover:underline"
+                        title="View read-only derivation details"
+                      >
+                        {f.provenance ? (
+                          <span title={f.provenance.description}>
                           {f.provenance.lookup_strategy} / {f.provenance.omop_table}
+                          </span>
+                        ) : "application code"}
+                      </button>
+                    </td>
+                    <td className="px-3 py-2 text-xs not-italic">
+                      {f.derivation_error ? (
+                        <span className="font-medium text-red-600" title={f.derivation_error}>
+                          Error in derivation
                         </span>
                       ) : (
-                        "application code"
+                        <span className="text-gray-400">OK</span>
                       )}
                     </td>
                   </tr>
@@ -631,6 +702,11 @@ export default function FieldMappingPage() {
           initialVocabularyId={selectedField.mapping?.vocabulary_id || (selectedField.suggestion?.vocabulary_id ?? undefined)}
           initialUnit={selectedField.mapping?.unit || (selectedField.suggestion?.unit ?? undefined)}
           initialOmopTable={selectedField.locked_table || selectedField.mapping?.omop_table || selectedField.suggestion?.omop_table || undefined}
+          existingMappingId={selectedField.mapping?.id}
+          initialConceptId={selectedField.mapping?.concept_id}
+          initialConceptName={selectedField.mapping?.concept_name}
+          initialNotes={selectedField.mapping?.notes}
+          commonUnits={selectedField.suggestion?.common_units}
           onClose={() => {
             setDialogOpen(false);
             setSelectedField(null);
@@ -648,6 +724,38 @@ export default function FieldMappingPage() {
             setSynonymDialogField(null);
             fetchBatchSynonyms([fieldName]);
           }}
+        />
+      )}
+
+      {/* Field Choice Editor */}
+      {choiceEditorField && (
+        <FieldChoiceEditor
+          fieldName={choiceEditorField.field_name}
+          onClose={() => {
+            setChoiceEditorField(null);
+            fetchDescriptors();
+          }}
+        />
+      )}
+
+      {/* Formula Edit Dialog */}
+      {formulaEditorField && (
+        <FormulaEditDialog
+          fieldName={formulaEditorField.field_name}
+          fieldType={formulaEditorField.field_type}
+          existingFormula={formulaEditorField.formula}
+          onClose={() => {
+            setFormulaEditorField(null);
+            fetchDescriptors();
+          }}
+        />
+      )}
+
+      {derivationInfoField && (
+        <DerivationInfoDialog
+          fieldName={derivationInfoField.field_name}
+          provenance={derivationInfoField.provenance}
+          onClose={() => setDerivationInfoField(null)}
         />
       )}
     </div>
