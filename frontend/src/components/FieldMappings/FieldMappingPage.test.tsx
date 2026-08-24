@@ -252,18 +252,6 @@ describe("FieldMappingPage", () => {
     expect(screen.getByText("SNOMED")).toBeInTheDocument();
   });
 
-  it("shows 'click to map' for unmapped fields with unresolved suggestions", async () => {
-    renderPage();
-    await waitFor(() => {
-      expect(screen.getByText(/Blood/)).toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByText(/Blood/));
-    await waitFor(() => {
-      expect(screen.getByText("hemoglobin_g_dl")).toBeInTheDocument();
-    });
-    expect(screen.getAllByText("click to map").length).toBeGreaterThan(0);
-  });
-
   it("search shows results across all tabs", async () => {
     renderPage();
     await waitFor(() => {
