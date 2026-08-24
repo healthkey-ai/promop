@@ -1,4 +1,4 @@
-"""Seed initial field choices (value sets) and formulas for computed fields."""
+"""Seed initial field choices (value sets)."""
 
 from django.db import migrations
 
@@ -47,20 +47,6 @@ INITIAL_CHOICES = {
     ],
 }
 
-# field_name → (formula, is_active)
-INITIAL_FORMULAS = {
-    'no_active_infection_status': ('@not(active_infection_status)', False),
-    'no_hiv_status': ('@not(hiv_status)', False),
-    'no_hepatitis_b_status': ('@not(hepatitis_b_status)', False),
-    'no_hepatitis_c_status': ('@not(hepatitis_c_status)', False),
-    'no_other_active_malignancies': ('@count(active_malignancies) <= 1', False),
-    'no_pre_existing_conditions': ('@count(preexisting_conditions) == 0', False),
-    'no_pregnancy_or_lactation_status': ('@not(pregnancy_test_result)', False),
-    'bmi': ('weight / (height / 100) ^ 2', False),
-    'involved_uninvolved_ratio': ('@max(kappa_flc, lambda_flc) / @min(kappa_flc, lambda_flc)', False),
-}
-
-
 def seed_choices(apps, schema_editor):
     FieldChoice = apps.get_model('omop_core', 'FieldChoice')
     FieldChoiceCode = apps.get_model('omop_core', 'FieldChoiceCode')
@@ -83,29 +69,11 @@ def seed_choices(apps, schema_editor):
                 )
 
 
-def seed_formulas(apps, schema_editor):
-    FieldFormula = apps.get_model('omop_core', 'FieldFormula')
-    # Validation skipped in migration — enforced at API/serializer level.
-    # Importing live code (validate_formula) from a migration is fragile because
-    # it introspects PatientRecord._meta which may not match the DB state yet.
-    for field_name, (formula, is_active) in INITIAL_FORMULAS.items():
-        FieldFormula.objects.get_or_create(
-            field_name=field_name,
-            defaults={'formula': formula, 'is_active': is_active},
-        )
-
-
 def reverse_choices(apps, schema_editor):
     FieldChoice = apps.get_model('omop_core', 'FieldChoice')
     for field_name, entries in INITIAL_CHOICES.items():
         displays = [display for display, _ in entries]
         FieldChoice.objects.filter(field_name=field_name, display__in=displays).delete()
-
-
-def reverse_formulas(apps, schema_editor):
-    FieldFormula = apps.get_model('omop_core', 'FieldFormula')
-    for field_name, (formula, _) in INITIAL_FORMULAS.items():
-        FieldFormula.objects.filter(field_name=field_name, formula=formula).delete()
 
 
 class Migration(migrations.Migration):
@@ -116,5 +84,4 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.RunPython(seed_choices, reverse_choices),
-        migrations.RunPython(seed_formulas, reverse_formulas),
     ]

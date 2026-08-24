@@ -20,6 +20,7 @@ from omop_core.services.patient_record_service import (
     _LOINC_LAB_FIELDS,
 )
 from omop_core.services.provenance_registry import get_registry
+from omop_core.services.formula_evaluator import validate_formula
 
 
 # Fields that are purely internal / structural and not clinical.
@@ -421,12 +422,16 @@ def get_all_field_descriptors() -> list[dict]:
 
         formula = formulas_by_field.get(name)
         formula_dict = None
+        derivation_error = None
         if formula:
             formula_dict = {
                 'id': formula.id,
                 'expression': formula.formula,
                 'is_active': formula.is_active,
             }
+            validation = validate_formula(formula.formula)
+            if not validation.valid:
+                derivation_error = f"Invalid formula: {'; '.join(validation.errors)}"
 
         result.append({
             'field_name': name,
@@ -440,6 +445,9 @@ def get_all_field_descriptors() -> list[dict]:
             'locked_table': _get_locked_table(category),
             'choices': choices_by_field.get(name, []),
             'formula': formula_dict,
+            # Generic derivation health surface. Other extractors can add a
+            # message here without changing the admin API contract.
+            'derivation_error': derivation_error,
         })
 
     # Sort: needs-concept-set first, then by field name.

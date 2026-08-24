@@ -23,14 +23,13 @@ interface Props {
   initialOmopTable?: string;
   existingMappingId?: number;
   initialConceptId?: number | null;
-  initialStatus?: string;
   initialNotes?: string;
 }
 
 export function ConceptAssignDialog({
   fieldName, fieldType, onClose, onSaved,
   initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
-  existingMappingId, initialConceptId, initialStatus, initialNotes,
+  existingMappingId, initialConceptId, initialNotes,
 }: Props) {
   const isEditing = !!existingMappingId;
   const [searchQuery, setSearchQuery] = useState(initialConceptCode || "");

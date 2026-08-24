@@ -89,7 +89,7 @@ def test_descriptors_have_required_keys():
     descriptors = get_all_field_descriptors()
     required_keys = {
         'field_name', 'field_type', 'category', 'tab', 'provenance', 'mapping',
-        'suggestion', 'mappable', 'locked_table', 'choices', 'formula',
+        'suggestion', 'mappable', 'locked_table', 'choices', 'formula', 'derivation_error',
     }
     for d in descriptors:
         missing = required_keys - set(d.keys())
@@ -324,6 +324,16 @@ def test_formula_none_for_non_computed():
     assert hb['formula'] is None
 
 
+def test_invalid_stored_formula_is_flagged_as_a_derivation_error():
+    """Legacy/direct DB formula rows remain visible but cannot look healthy."""
+    FieldFormula.objects.all().delete()
+    FieldFormula.objects.create(field_name='bmi', formula='unknown_input + 1', is_active=False)
+
+    descriptors = {d['field_name']: d for d in get_all_field_descriptors()}
+
+    assert descriptors['bmi']['derivation_error'] == 'Invalid formula: Unknown field: unknown_input'
+
+
 # ── Descriptor keys test (updated for new keys) ────────────────
 
 
@@ -333,3 +343,4 @@ def test_descriptors_have_choices_and_formula_keys():
     for d in descriptors:
         assert 'choices' in d, f"Descriptor for {d['field_name']} missing 'choices' key"
         assert 'formula' in d, f"Descriptor for {d['field_name']} missing 'formula' key"
+        assert 'derivation_error' in d, f"Descriptor for {d['field_name']} missing 'derivation_error' key"

@@ -53,6 +53,7 @@ interface FieldDescriptor {
     expression: string;
     is_active: boolean;
   } | null;
+  derivation_error: string | null;
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -475,6 +476,7 @@ export default function FieldMappingPage() {
                   <th className="px-3 py-2">Type</th>
                   <th className="px-3 py-2">Formula</th>
                   <th className="px-3 py-2">Provenance</th>
+                  <th className="px-3 py-2">Derivation status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -506,6 +508,15 @@ export default function FieldMappingPage() {
                           </span>
                         ) : "application code"}
                       </button>
+                    </td>
+                    <td className="px-3 py-2 text-xs not-italic">
+                      {f.derivation_error ? (
+                        <span className="font-medium text-red-600" title={f.derivation_error}>
+                          Error in derivation
+                        </span>
+                      ) : (
+                        <span className="text-gray-400">OK</span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -690,7 +701,6 @@ export default function FieldMappingPage() {
           initialOmopTable={selectedField.locked_table || selectedField.mapping?.omop_table || selectedField.suggestion?.omop_table || undefined}
           existingMappingId={selectedField.mapping?.id}
           initialConceptId={selectedField.mapping?.concept_id}
-          initialStatus={selectedField.mapping?.status}
           initialNotes={selectedField.mapping?.notes}
           onClose={() => {
             setDialogOpen(false);

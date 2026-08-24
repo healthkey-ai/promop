@@ -20223,10 +20223,24 @@ class FieldFormulaAPITest(TestCase):
         pk = resp.data['id']
 
         resp = self.client.patch(f'/api/v1/field-formulas/{pk}/', {
+            'formula': 'weight / (height / 100) ^ 2',
             'is_active': True,
         }, format='json')
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.data['is_active'])
+        self.assertEqual(resp.data['formula'], 'weight / (height / 100) ^ 2')
+
+    def test_patch_invalid_formula_rejected(self):
+        from omop_core.models import FieldFormula
+        formula = FieldFormula.objects.create(
+            field_name='bmi', formula='weight / (height / 100) ^ 2', is_active=False,
+        )
+
+        resp = self.client.patch(f'/api/v1/field-formulas/{formula.pk}/', {
+            'formula': '@eval(weight)',
+        }, format='json')
+
+        self.assertEqual(resp.status_code, 400)
 
     def test_delete_formula(self):
         resp = self.client.post('/api/v1/field-formulas/', {
