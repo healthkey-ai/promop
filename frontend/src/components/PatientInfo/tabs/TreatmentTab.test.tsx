@@ -79,6 +79,25 @@ const THREE_LINES = {
   refractory_status: 'Refractory to lenalidomide',
 };
 
+const STRUCTURED_LINES = [
+  {
+    line: 1,
+    episode_id: 901,
+    regimen: 'VRd',
+    start_date: '2025-01-01',
+    end_date: '2025-03-01',
+    outcome: 'Partial Response',
+    drugs: [
+      {
+        concept_id: 19026972,
+        concept_name: 'lenalidomide',
+        concept_code: '337535',
+        vocabulary_id: 'RxNorm',
+      },
+    ],
+  },
+];
+
 describe('TreatmentTab', () => {
   it('offers no editable input at all', async () => {
     // The whole point: not one field on this tab can be written directly.
@@ -265,6 +284,18 @@ describe('TreatmentTab - authoring a line', () => {
     fireEvent.click(screen.getByRole('button', { name: /add therapy line/i }));
     await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
     expect(screen.getByLabelText(/line number/i)).toHaveValue(4);
+  });
+
+  it('opens an existing line for editing', async () => {
+    renderTab({ ...THREE_LINES, person_id: 262, lines_of_therapy: STRUCTURED_LINES });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.getByText(/Line 1: VRd/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /edit/i }));
+
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /edit a line/i })).toBeInTheDocument());
+    expect(screen.getByLabelText(/line number/i)).toHaveValue(1);
+    expect(screen.getByText('lenalidomide')).toBeInTheDocument();
   });
 
   it('does not offer authoring without a person to write against', async () => {

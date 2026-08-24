@@ -74,6 +74,7 @@ def upsert_therapy_line_episode(
     outcome=None,
     source_value=None,
     today=None,
+    replace_events=False,
 ):
     """Upsert one line-of-therapy Episode and its links; return the Episode.
 
@@ -92,6 +93,8 @@ def upsert_therapy_line_episode(
             Callers that record a human name or phase-labelled regimen
             (reverse sync, inference) pass their own value.
         today: fallback for episode_start_date when start_date is None.
+        replace_events: when True, the supplied drug_exposure_ids are the full
+            membership of the episode and stale EpisodeEvent links are removed.
 
     Returns a TherapyLineEpisodeResult; result.episode is None if the required
     Treatment Regimen concept is absent.
@@ -152,6 +155,15 @@ def upsert_therapy_line_episode(
 
     field_concept = _concept(CONCEPT_DRUG_EXPOSURE_FIELD) or tx_regimen_concept
     event_ids = []
+    desired_exposure_ids = {de_id for de_id in drug_exposure_ids if de_id is not None}
+    if replace_events:
+        stale = (
+            EpisodeEvent.objects
+            .filter(episode_id=episode.episode_id)
+            .exclude(event_id__in=desired_exposure_ids)
+        )
+        stale.delete()
+
     for de_id in drug_exposure_ids:
         if de_id is None:
             continue
@@ -165,6 +177,8 @@ def upsert_therapy_line_episode(
     if outcome:
         _upsert_outcome_observation(person, line_number, outcome, ehr_type_concept, no_match_concept,
                                     obs_date=end_date or start_date or today)
+    elif replace_events:
+        _delete_outcome_observation(person, line_number)
 
     return TherapyLineEpisodeResult(episode, created, event_ids)
 
@@ -214,6 +228,13 @@ def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_m
     obs.save()
 
 
+def _delete_outcome_observation(person, line_number):
+    Observation.objects.filter(
+        person=person,
+        observation_source_value=f'LOT-{line_number}-outcome',
+    ).delete()
+
+
 def author_therapy_line(
     person,
     *,
@@ -224,6 +245,7 @@ def author_therapy_line(
     regimen_concept_id=None,
     outcome=None,
     source_value=None,
+    replace=False,
 ):
     """Record a line of therapy: its drug exposures, its Episode, and the links.
 
@@ -254,6 +276,9 @@ def author_therapy_line(
             ``episode_object_concept`` and asserted via ``episode_source_concept``.
         outcome: optional outcome string → ``LOT-{n}-outcome`` Observation.
         source_value: ``episode_source_value``; defaults to ``LOT-{n}``.
+        replace: when True, the submitted drugs and outcome are the complete
+            edited state of the line, so stale EpisodeEvent/outcome rows are
+            removed.
 
     Returns a TherapyLineEpisodeResult with two extra attributes attached:
     ``drug_exposure_ids`` and ``drugs_created``.
@@ -311,6 +336,7 @@ def author_therapy_line(
         drug_exposure_ids=exposure_ids,
         outcome=outcome,
         source_value=source_value,
+        replace_events=replace,
     )
     result.drug_exposure_ids = exposure_ids
     result.drugs_created = created

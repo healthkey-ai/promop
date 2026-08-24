@@ -12,11 +12,12 @@ import TherapyLineDialog from './TherapyLineDialog';
 
 const mockGet = vi.fn();
 const mockPost = vi.fn();
+const mockPatch = vi.fn();
 vi.mock('@/api/axios', () => ({
   default: {
     get: (...a: unknown[]) => mockGet(...a),
     post: (...a: unknown[]) => mockPost(...a),
-    patch: vi.fn(),
+    patch: (...a: unknown[]) => mockPatch(...a),
   },
 }));
 
@@ -42,6 +43,13 @@ beforeEach(() => {
       episode_id: 98, line_number: 1, created: true,
       drug_exposure_ids: [168, 169], drugs_created: 2,
       patient_info: { therapy_lines_count: 1, first_line_therapy: 'Rd' },
+    },
+  });
+  mockPatch.mockResolvedValue({
+    data: {
+      episode_id: 98, line_number: 1, created: false,
+      drug_exposure_ids: [169], drugs_created: 0,
+      patient_info: { therapy_lines_count: 1, first_line_therapy: 'Dex' },
     },
   });
 });
@@ -189,5 +197,46 @@ describe('TherapyLineDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: /record line/i }));
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
     expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  it('edits an existing line by patching its episode', async () => {
+    render(
+      <TherapyLineDialog
+        personId={262}
+        defaultLineNumber={2}
+        line={{
+          episode_id: 98,
+          line: 1,
+          start_date: '2025-01-15',
+          end_date: '2025-06-15',
+          outcome: 'Partial Response',
+          drugs: [LENALIDOMIDE],
+        }}
+        onClose={onClose}
+        onAuthored={onAuthored}
+      />,
+    );
+
+    expect(screen.getByLabelText(/line number/i)).toHaveValue(1);
+    expect(screen.getByLabelText(/line number/i)).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: /remove lenalidomide/i }));
+    await addDrug('dexamethasone', 'dexa');
+    fireEvent.click(screen.getByRole('button', { name: /update line/i }));
+
+    await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+    const [url, body] = mockPatch.mock.calls.at(-1)!;
+    expect(url).toBe('/v1/therapy-lines/98/');
+    expect(body).toEqual({
+      person: 262,
+      line_number: 1,
+      start_date: '2025-01-15',
+      end_date: '2025-06-15',
+      outcome: 'Partial Response',
+      drugs: [{ concept_id: 1518254, source_value: 'dexamethasone' }],
+    });
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(onAuthored).toHaveBeenCalledWith({
+      therapy_lines_count: 1, first_line_therapy: 'Dex',
+    });
   });
 });
