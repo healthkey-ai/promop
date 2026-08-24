@@ -374,3 +374,89 @@ DERIVED_FIELD_TO_CODE = {
     # test_every_attribution_still_matches_its_extractor.
     'insurance_type':                ('408729009', 'SNOMED', '_get_social_data'),
 }
+
+# Curator-oriented concept suggestions for fields NOT in DERIVED_FIELD_TO_CODE
+# or LAB_FIELD_TO_LOINC. These generate yellow "proposed" flags in the mapping
+# UI but are NOT used by the derivation or write-through pipelines. Codes may
+# be shared across fields (no uniqueness constraint).
+#
+# field → (concept_code, vocabulary_id)
+SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
+    # Myeloma labs / markers
+    'monoclonal_protein_serum':      ('51435-3',   'LOINC'),
+    'monoclonal_protein_urine':      ('51436-1',   'LOINC'),
+    'kappa_flc':                     ('11050-2',   'LOINC'),
+    'lambda_flc':                    ('11051-0',   'LOINC'),
+    'kappa_lambda_ratio':            ('11052-8',   'LOINC'),
+    'clonal_plasma_cells':           ('24133-4',   'LOINC'),
+    'myeloma_type':                  ('64197005',  'SNOMED'),
+    'r_iss_stage':                   ('21908-9',   'LOINC'),
+    'mrd_status':                    ('98847-0',   'LOINC'),
+    'progression':                   ('246450006', 'SNOMED'),
+    # Myeloma CRAB criteria
+    'hypercalcemia':                 ('66931009',  'SNOMED'),
+    'renal_impairment':              ('723188008', 'SNOMED'),
+    'anemia':                        ('271737000', 'SNOMED'),
+    'bone_lesions':                  ('363817008', 'SNOMED'),
+    # SCT
+    'stem_cell_transplant_history':  ('77465005',  'SNOMED'),
+    'sct_eligibility':               ('183851006', 'SNOMED'),
+    # Breast cancer
+    'tnbc_status':                   ('706886006', 'SNOMED'),
+    'hr_status':                     ('416053008', 'SNOMED'),
+    'oncotype_dx_score':             ('85337-4',   'LOINC'),
+    'menopausal_status':             ('276498001', 'SNOMED'),
+    # Lymphoma
+    'flipi_score':                   ('444723004', 'SNOMED'),
+    'gelf_criteria_status':          ('109964006', 'SNOMED'),
+    'bulky_disease':                 ('277578007', 'SNOMED'),
+    'b_symptoms':                    ('89268003',  'SNOMED'),
+    'bone_marrow_involvement':       ('24940005',  'SNOMED'),
+    'number_of_nodal_sites':         ('370130003', 'SNOMED'),
+    'tumor_grade':                   ('371469007', 'SNOMED'),
+    # CLL
+    'binet_stage':                   ('106241006', 'SNOMED'),
+    'tumor_burden':                  ('246923001', 'SNOMED'),
+    'disease_activity':              ('246456005', 'SNOMED'),
+    'richter_transformation':        ('91860004',  'SNOMED'),
+    'splenomegaly':                  ('16294009',  'SNOMED'),
+    'hepatomegaly':                  ('80515008',  'SNOMED'),
+    'lymphadenopathy':               ('30746006',  'SNOMED'),
+    'tp53_disruption':               ('405835008', 'SNOMED'),
+    # Social / behavioral
+    'smoking_status':                ('72166-2',   'LOINC'),
+    'pack_years':                    ('401201003', 'SNOMED'),
+    'alcohol_use':                   ('74013-4',   'LOINC'),
+    'exercise_frequency':            ('77592-7',   'LOINC'),
+    'employment_status':             ('364703007', 'SNOMED'),
+    'education_level':               ('105421008', 'SNOMED'),
+    'marital_status':                ('125680007', 'SNOMED'),
+    # Negation fields (map to the base clinical concept being negated)
+    'no_active_infection_status':    ('56051006',  'SNOMED'),
+    'no_hiv_status':                 ('86406008',  'SNOMED'),
+    'no_hepatitis_b_status':         ('66071002',  'SNOMED'),
+    'no_hepatitis_c_status':         ('50711007',  'SNOMED'),
+    # Conditions
+    'hiv_status':                    ('86406008',  'SNOMED'),
+    'hepatitis_b_status':            ('66071002',  'SNOMED'),
+    'hepatitis_c_status':            ('50711007',  'SNOMED'),
+    'preexisting_conditions':        ('161615003', 'SNOMED'),
+    # Treatment
+    'concomitant_medication':        ('410942007', 'SNOMED'),
+    'refractory_status':             ('182854000', 'SNOMED'),
+    'relapse_count':                 ('263855007', 'SNOMED'),
+    # Disease metadata
+    'disease':                       ('29308-4',   'LOINC'),
+    'diagnosis_date':                ('52832-8',   'LOINC'),
+    'condition_clinical_status':     ('33999-4',   'LOINC'),
+    # Staging
+    'staging_modalities':            ('399390009', 'SNOMED'),
+    'measurable_disease_by_recist_status': ('711259004', 'SNOMED'),
+    # Cytogenetics
+    'cytogenetic_risk':              ('405825005', 'SNOMED'),
+    'cytogenetic_abnormalities':     ('409709004', 'SNOMED'),
+    # Other
+    'peripheral_neuropathy_grade':   ('302226006', 'SNOMED'),
+    'concomitant_medications':       ('410942007', 'SNOMED'),
+    'toxicity_grade':                ('246112005', 'SNOMED'),
+}

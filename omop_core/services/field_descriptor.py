@@ -14,6 +14,7 @@ from omop_core.services.mappings import (
     THERAPY_LINE_FIELDS,
     DERIVED_FIELD_TO_CODE,
     FIELD_COMMON_UNITS,
+    SUGGESTED_FIELD_CODES,
 )
 from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
@@ -334,6 +335,18 @@ def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
             'vocabulary_id': strategy.upper() if strategy in ('loinc', 'snomed') else None,
             'unit': None,
             'omop_table': prov_dict.get('omop_table', ''),
+            'common_units': common_units,
+        }
+
+    # Curator-oriented suggestions — not used by derivation/write-through.
+    if name in SUGGESTED_FIELD_CODES:
+        code, vocab = SUGGESTED_FIELD_CODES[name]
+        omop_table = prov_dict.get('omop_table', 'Observation') if prov_dict else 'Observation'
+        return {
+            'concept_code': code,
+            'vocabulary_id': vocab,
+            'unit': None,
+            'omop_table': omop_table,
             'common_units': common_units,
         }
 
