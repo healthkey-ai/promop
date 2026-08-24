@@ -223,6 +223,15 @@ export default function FieldMappingPage() {
     fetchDescriptors();
   };
 
+  const handleSuggestAll = async () => {
+    try {
+      await api.post('/v1/field-mappings/propose-all/');
+      await fetchDescriptors();
+    } catch {
+      setError('Failed to generate proposed mappings.');
+    }
+  };
+
   const handleDeleteMapping = async (mappingId: number) => {
     if (!window.confirm("Remove this concept mapping? This cannot be undone.")) return;
     try {
@@ -568,6 +577,9 @@ export default function FieldMappingPage() {
           Back
         </button>
         <h1 className="text-xl font-semibold">Field Concept Mappings</h1>
+        <button onClick={handleSuggestAll} className="rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90">
+          Suggest
+        </button>
       </div>
 
       {/* Tab bar */}
