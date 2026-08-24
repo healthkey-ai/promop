@@ -168,6 +168,30 @@ describe('writeClinicalFact', () => {
     expect(res.supersededId).toBe(501);
   });
 
+  it('clears an occurrence-style field without creating a replacement row', async () => {
+    mockGet.mockResolvedValue({
+      data: [{ condition_occurrence_id: 501, person: 1, condition_source_value: 'primary-cancer',
+               condition_start_date: '2026-08-21', is_erroneous: false }],
+    });
+
+    const res = await writeClinicalFact(1, 'disease', CONDITION, '', '2026-08-21');
+
+    expect(mockPatch).toHaveBeenCalledWith('/v1/conditions/501/', {
+      is_erroneous: true,
+      erroneous_reason: expect.stringContaining('Superseded'),
+    });
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(res).toEqual({ supersededId: 501, createdId: null });
+  });
+
+  it('does not create an occurrence-style row for an empty value with nothing to clear', async () => {
+    const res = await writeClinicalFact(1, 'disease', CONDITION, null, '2026-08-21');
+
+    expect(mockPatch).not.toHaveBeenCalled();
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(res).toEqual({ supersededId: null, createdId: null });
+  });
+
   it('leaves a value on a different date alone', async () => {
     mockGet.mockResolvedValue({
       data: [{ measurement_id: 500, person: 1, measurement_source_value: '718-7',

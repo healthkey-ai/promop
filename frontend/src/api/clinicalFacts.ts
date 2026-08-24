@@ -88,6 +88,10 @@ function clinicalTarget(target: FieldDescriptor['target']): ClinicalTarget | nul
     : null;
 }
 
+function isEmptyOccurrenceValue(value: unknown): boolean {
+  return value === '' || value == null || value === false;
+}
+
 export interface WriteResult {
   supersededId: number | null;
   createdId: number | null;
@@ -168,6 +172,10 @@ export async function writeClinicalFact(
       is_erroneous: true,
       erroneous_reason: 'Superseded by a corrected value entered in the patient editor',
     });
+  }
+
+  if (!cfg.storesValue && isEmptyOccurrenceValue(value)) {
+    return { supersededId, createdId: null };
   }
 
   const payload: Record<string, unknown> = {
