@@ -770,6 +770,14 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         patient_info.derived_at = timezone.now()
 
         patient_info.save()
+        # PatientRecord.save retains a few legacy calculations (notably BMI).
+        # Reapply active formulas with a direct update so an approved formula is
+        # the final derivation authority for its target field.
+        formula_fields = _apply_active_field_formulas(patient_info)
+        if formula_fields:
+            updates = {field: getattr(patient_info, field) for field in formula_fields}
+            updates['updated_at'] = timezone.now()
+            PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
         return patient_info
 
 
@@ -966,6 +974,9 @@ _INACTIVE_CONDITION_STATUS_MARKERS = (
 )
 
 
+_DESCENDANT_CACHE: dict[str, set[int] | None] = {}
+
+
 def _active_condition_descendant_ids(root_code: str) -> set[int] | None:
     """Return descendants of a loaded SNOMED condition root, including itself.
 
@@ -973,7 +984,13 @@ def _active_condition_descendant_ids(root_code: str) -> set[int] | None:
     stable SNOMED code is resolved at runtime.  ``None`` means the vocabulary
     hierarchy is unavailable; callers must preserve an unknown result rather
     than treating an incomplete vocabulary load as a negative finding.
+
+    Results are cached at module level because the SNOMED hierarchy is static
+    within a vocabulary release.
     """
+    if root_code in _DESCENDANT_CACHE:
+        return _DESCENDANT_CACHE[root_code]
+
     root = (
         Concept.objects.filter(
             vocabulary_id='SNOMED',
@@ -985,12 +1002,14 @@ def _active_condition_descendant_ids(root_code: str) -> set[int] | None:
         .first()
     )
     if root is None:
+        _DESCENDANT_CACHE[root_code] = None
         return None
     descendants = set(
         ConceptAncestor.objects.filter(ancestor_concept_id=root.concept_id)
         .values_list('descendant_concept_id', flat=True)
     )
     descendants.add(root.concept_id)
+    _DESCENDANT_CACHE[root_code] = descendants
     return descendants
 
 
@@ -3570,6 +3589,53 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
     _lt_candidates = _valid_ends or _valid_starts
     if _lt_candidates:
         patient_info.last_treatment = max(_lt_candidates)
+
+    _apply_active_field_formulas(patient_info)
+
+
+def _formula_values(patient_info: PatientRecord) -> dict[str, object]:
+    """Return scalar PatientRecord values that a validated formula may read."""
+    return {
+        field.name: getattr(patient_info, field.name)
+        for field in PatientRecord._meta.get_fields()
+        if getattr(field, 'concrete', False) and not field.is_relation
+    }
+
+
+def _apply_active_field_formulas(patient_info: PatientRecord) -> set[str]:
+    """Apply admin-approved formulas after OMOP and built-in derivations."""
+    from omop_core.models import FieldFormula
+    from omop_core.services.formula_evaluator import evaluate_formula
+
+    values = _formula_values(patient_info)
+    changed_fields = set()
+    for field_formula in FieldFormula.objects.filter(is_active=True).order_by('field_name'):
+        try:
+            value = evaluate_formula(field_formula.formula, values)
+        except ValueError:
+            # Invalid legacy rows are surfaced in the mapping UI and must not
+            # abort clinical refreshes.
+            logger.warning('Skipping invalid formula for %s', field_formula.field_name)
+            continue
+        setattr(patient_info, field_formula.field_name, value)
+        values[field_formula.field_name] = value
+        changed_fields.add(field_formula.field_name)
+    return changed_fields
+
+
+def recompute_formula_field(field_formula) -> int:
+    """Immediately recalculate active formulas after one formula is changed."""
+    if not field_formula.is_active:
+        return 0
+    updated = 0
+    for patient_info in PatientRecord.objects.iterator(chunk_size=500):
+        changed_fields = _apply_active_field_formulas(patient_info)
+        if changed_fields:
+            updates = {field: getattr(patient_info, field) for field in changed_fields}
+            updates['updated_at'] = timezone.now()
+            PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
+            updated += 1
+    return updated
 
 
 def _get_wearable_data(person: Person, snapshot: OmopSnapshot = None) -> dict:

@@ -20088,9 +20088,13 @@ class FieldChoiceAPITest(TestCase):
         self.client = APIClient()
         self.client.force_authenticate(user=self.staff)
 
-    def test_non_staff_rejected(self):
+    def test_non_staff_can_view_choices_but_cannot_curate(self):
         self.client.force_authenticate(user=self.non_staff)
         resp = self.client.get('/api/v1/field-choices/')
+        self.assertEqual(resp.status_code, 200)
+        resp = self.client.post('/api/v1/field-choices/', {
+            'field_name': 'disease', 'display': 'Not allowed', 'sort_order': 0,
+        }, format='json')
         self.assertEqual(resp.status_code, 403)
 
     def test_unauthenticated_rejected(self):
@@ -20241,6 +20245,18 @@ class FieldFormulaAPITest(TestCase):
         }, format='json')
 
         self.assertEqual(resp.status_code, 400)
+
+    def test_formula_test_returns_value_for_patient(self):
+        from tests.factories import PatientRecordFactory
+        record = PatientRecordFactory(weight=80, height=200)
+
+        resp = self.client.post('/api/v1/field-formulas/test/', {
+            'formula': 'weight / (height / 100) ^ 2',
+            'person_id': record.person_id,
+        }, format='json')
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(float(resp.data['value']), 20)
 
     def test_delete_formula(self):
         resp = self.client.post('/api/v1/field-formulas/', {

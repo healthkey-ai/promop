@@ -98,4 +98,16 @@ describe("FormulaEditDialog", () => {
     );
     expect(screen.getByText("Supported syntax:")).toBeInTheDocument();
   });
+
+  it("tests a formula against a patient record", async () => {
+    render(<FormulaEditDialog fieldName="bmi" fieldType="float" existingFormula={null} onClose={vi.fn()} />);
+    fireEvent.change(screen.getByPlaceholderText(/e\.g\. @not/), { target: { value: "weight / 2" } });
+    fireEvent.change(screen.getByPlaceholderText("Patient ID"), { target: { value: "42" } });
+    fireEvent.click(screen.getByText("Test"));
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith("/v1/field-formulas/test/", {
+        formula: "weight / 2", person_id: 42,
+      });
+    });
+  });
 });

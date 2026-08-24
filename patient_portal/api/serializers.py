@@ -1190,7 +1190,7 @@ class FieldChoiceCodeSerializer(serializers.ModelSerializer):
 
 
 class FieldChoiceSerializer(serializers.ModelSerializer):
-    codes = FieldChoiceCodeSerializer(many=True, required=False, default=[])
+    codes = FieldChoiceCodeSerializer(many=True, required=False)
     created_by = serializers.CharField(
         source='created_by.username', read_only=True, default=None,
     )
@@ -1263,14 +1263,10 @@ class FieldFormulaSerializer(serializers.ModelSerializer):
         )
 
     def validate_field_name(self, value):
-        from omop_core.models import PatientRecord
-        concrete_names = {
-            f.name for f in PatientRecord._meta.get_fields()
-            if getattr(f, 'concrete', False)
-        }
-        if value not in concrete_names:
+        from omop_core.services.field_descriptor import _COMPUTED_FIELDS
+        if value not in _COMPUTED_FIELDS:
             raise serializers.ValidationError(
-                f"'{value}' is not a concrete PatientRecord field."
+                f"'{value}' is not an application-computed PatientRecord field."
             )
         return value
 

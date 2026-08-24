@@ -7933,11 +7933,11 @@ def field_synonyms_batch(request):
 
 
 # =============================================================================
-# Field Choices (staff-only value set management)
+# Field Choices (everyone may read; staff curate)
 # =============================================================================
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAdminUser])
+@permission_classes([IsAuthenticated])
 def field_choice_list(request):
     """GET: list all field choices (optionally filter by ?field_name=).  POST: create."""
 
@@ -7951,6 +7951,8 @@ def field_choice_list(request):
             qs = qs.filter(field_name=field_name)
         return Response(FieldChoiceSerializer(qs, many=True).data)
 
+    if not request.user.is_staff:
+        return Response({'detail': 'Staff permission required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
     serializer = FieldChoiceSerializer(data=request.data, context={'request': request})
     serializer.is_valid(raise_exception=True)
     serializer.save()
@@ -7958,7 +7960,7 @@ def field_choice_list(request):
 
 
 @api_view(['GET', 'PATCH', 'DELETE'])
-@permission_classes([IsAdminUser])
+@permission_classes([IsAuthenticated])
 def field_choice_detail(request, pk):
     """GET/PATCH/DELETE a single FieldChoice."""
 
@@ -7971,6 +7973,9 @@ def field_choice_detail(request, pk):
 
     if request.method == 'GET':
         return Response(FieldChoiceSerializer(choice).data)
+
+    if not request.user.is_staff:
+        return Response({'detail': 'Staff permission required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'DELETE':
         choice.delete()
@@ -8011,6 +8016,28 @@ def field_choice_codes(request, choice_pk):
 # Field Formulas (staff-only formula management)
 # =============================================================================
 
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def field_formula_test(request):
+    """Evaluate a valid formula against one patient's current projection."""
+    from omop_core.models import PatientRecord
+    from omop_core.services.formula_evaluator import evaluate_formula, validate_formula
+    from omop_core.services.patient_record_service import _formula_values
+
+    formula = request.data.get('formula', '')
+    validation = validate_formula(formula)
+    if not validation.valid:
+        return Response({'formula': validation.errors}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        patient_info = PatientRecord.objects.get(person_id=request.data.get('person_id'))
+    except (PatientRecord.DoesNotExist, TypeError, ValueError):
+        return Response({'person_id': 'PatientRecord not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        value = evaluate_formula(formula, _formula_values(patient_info))
+    except ValueError as exc:
+        return Response({'formula': [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+    return Response({'value': value})
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAdminUser])
 def field_formula_list(request):
@@ -8024,7 +8051,9 @@ def field_formula_list(request):
 
     serializer = FieldFormulaSerializer(data=request.data, context={'request': request})
     serializer.is_valid(raise_exception=True)
-    serializer.save()
+    formula = serializer.save()
+    from omop_core.services.patient_record_service import recompute_formula_field
+    recompute_formula_field(formula)
     return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -8051,7 +8080,9 @@ def field_formula_detail(request, pk):
         formula, data=request.data, partial=True, context={'request': request},
     )
     serializer.is_valid(raise_exception=True)
-    serializer.save()
+    formula = serializer.save()
+    from omop_core.services.patient_record_service import recompute_formula_field
+    recompute_formula_field(formula)
     return Response(serializer.data)
 
 

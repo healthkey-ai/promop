@@ -11,9 +11,12 @@ interface Props {
 
 export function FormulaEditDialog({ fieldName, fieldType, existingFormula, onClose }: Props) {
   const [expression, setExpression] = useState(existingFormula?.expression || "");
-  const [isActive, setIsActive] = useState(existingFormula?.is_active ?? false);
+  const [isActive, setIsActive] = useState(existingFormula?.is_active ?? true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [testPersonId, setTestPersonId] = useState("");
+  const [testResult, setTestResult] = useState("");
+  const [testing, setTesting] = useState(false);
 
   const isEditing = !!existingFormula;
 
@@ -51,6 +54,29 @@ export function FormulaEditDialog({ fieldName, fieldType, existingFormula, onClo
       onClose();
     } catch {
       setError("Failed to delete formula.");
+    }
+  };
+
+  const handleTest = async () => {
+    if (!expression.trim() || !testPersonId.trim()) {
+      setTestResult("Enter a Patient ID to test this formula.");
+      return;
+    }
+    setTesting(true);
+    setTestResult("");
+    try {
+      const response = await api.post("/v1/field-formulas/test/", {
+        formula: expression.trim(),
+        person_id: Number(testPersonId),
+      });
+      setTestResult(`Computed value: ${JSON.stringify(response.data.value)}`);
+    } catch (err: unknown) {
+      const data = err && typeof err === "object" && "response" in err
+        ? (err as { response: { data: unknown } }).response.data
+        : "Formula test failed.";
+      setTestResult(typeof data === "string" ? data : JSON.stringify(data));
+    } finally {
+      setTesting(false);
     }
   };
 
@@ -116,6 +142,28 @@ export function FormulaEditDialog({ fieldName, fieldType, existingFormula, onClo
           <label htmlFor="formula-active" className="text-sm text-gray-600">
             Active (formula drives derivation)
           </label>
+        </div>
+
+        <div className="mb-4 rounded bg-gray-50 p-3">
+          <label className="mb-1 block text-xs font-medium text-gray-600">Test with Patient ID</label>
+          <div className="flex gap-2">
+            <input
+              type="number"
+              min="1"
+              value={testPersonId}
+              onChange={(e) => setTestPersonId(e.target.value)}
+              placeholder="Patient ID"
+              className="h-8 flex-1 rounded border border-gray-300 px-2 text-sm"
+            />
+            <button
+              onClick={handleTest}
+              disabled={!expression.trim() || !testPersonId.trim() || testing}
+              className="rounded border border-gray-300 px-3 text-sm text-gray-700 hover:bg-white disabled:opacity-50"
+            >
+              {testing ? "Testing..." : "Test"}
+            </button>
+          </div>
+          {testResult && <p className="mt-2 text-xs text-gray-700">{testResult}</p>}
         </div>
 
         {error && <div className="mb-3 text-sm text-red-600">{error}</div>}

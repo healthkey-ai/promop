@@ -7,15 +7,15 @@ from django.db import migrations
 
 
 INITIAL_FORMULAS = {
-    'no_active_infection_status': ('@not(active_infection_status)', False),
-    'no_hiv_status': ('@not(hiv_status)', False),
-    'no_hepatitis_b_status': ('@not(hepatitis_b_status)', False),
-    'no_hepatitis_c_status': ('@not(hepatitis_c_status)', False),
-    'no_other_active_malignancies': ('@count(active_malignancies) <= 1', False),
-    'no_pre_existing_conditions': ('@count(preexisting_conditions) == 0', False),
-    'no_pregnancy_or_lactation_status': ('@not(pregnancy_test_result)', False),
-    'bmi': ('weight / (height / 100) ^ 2', False),
-    'involved_uninvolved_ratio': ('@max(kappa_flc, lambda_flc) / @min(kappa_flc, lambda_flc)', False),
+    'no_active_infection_status': ('@not(active_infection_status)', True),
+    'no_hiv_status': ('@not(hiv_status)', True),
+    'no_hepatitis_b_status': ('@not(hepatitis_b_status)', True),
+    'no_hepatitis_c_status': ('@not(hepatitis_c_status)', True),
+    'no_other_active_malignancies': ('@count(active_malignancies) <= 1', True),
+    'no_pre_existing_conditions': ('@count(preexisting_conditions) == 0', True),
+    'no_pregnancy_or_lactation_status': ('@not(pregnancy_test_result)', True),
+    'bmi': ('weight / (height / 100) ^ 2', True),
+    'involved_uninvolved_ratio': ('@max(kappa_flc, lambda_flc) / @min(kappa_flc, lambda_flc)', True),
 }
 
 _ALLOWED_FUNCTIONS = frozenset({'not', 'count', 'abs', 'min', 'max'})

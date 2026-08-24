@@ -2,7 +2,7 @@
 
 import pytest
 
-from omop_core.services.formula_evaluator import validate_formula, ALLOWED_FUNCTIONS
+from omop_core.services.formula_evaluator import evaluate_formula, validate_formula, ALLOWED_FUNCTIONS
 
 
 pytestmark = pytest.mark.django_db
@@ -79,3 +79,11 @@ def test_comparison_expression():
     """Comparison with field is valid."""
     result = validate_formula('weight > 50')
     assert result.valid, f"Expected valid but got errors: {result.errors}"
+
+
+def test_evaluate_formula_uses_patient_values():
+    assert evaluate_formula('weight / (height / 100) ^ 2', {'weight': 80, 'height': 200}) == 20
+
+
+def test_evaluate_formula_propagates_unknown_inputs():
+    assert evaluate_formula('@not(active_infection_status)', {'active_infection_status': None}) is None

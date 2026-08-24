@@ -1,8 +1,7 @@
 """
 formula_evaluator.py — Safe expression validator for field formulas.
 
-Validates formula expressions against a whitelist of allowed AST nodes.
-Does NOT evaluate formulas — validation only in this phase.
+Validates and safely evaluates formula expressions against a whitelist of AST nodes.
 """
 from __future__ import annotations
 
@@ -118,3 +117,39 @@ def validate_formula(formula: str) -> ValidationResult:
                 )
 
     return ValidationResult(valid=len(errors) == 0, errors=errors)
+
+
+def evaluate_formula(formula: str, values: dict[str, object]) -> object | None:
+    """Evaluate a valid formula against PatientRecord values without builtins.
+
+    A missing input propagates as ``None`` rather than turning an unknown
+    clinical fact into a negative finding (for example, ``@not(None)``).
+    """
+    result = validate_formula(formula)
+    if not result.valid:
+        raise ValueError('; '.join(result.errors))
+
+    processed = _replace_caret_with_pow(_preprocess_formula(formula.strip()))
+    tree = ast.parse(processed, mode='eval')
+    referenced_fields = {
+        node.id for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and not node.id.startswith('__fn_')
+    }
+    if any(values.get(field) is None for field in referenced_fields):
+        return None
+
+    functions = {
+        '__fn_not': lambda value: not value,
+        '__fn_count': lambda value: len(value),
+        '__fn_abs': abs,
+        '__fn_min': min,
+        '__fn_max': max,
+    }
+    try:
+        return eval(  # noqa: S307 - AST is validated above and builtins are removed.
+            compile(tree, '<field-formula>', 'eval'),
+            {'__builtins__': {}},
+            {**functions, **values},
+        )
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        raise ValueError(str(exc)) from exc
