@@ -7803,6 +7803,78 @@ def field_mapping_detail(request, pk):
     return Response(serializer.data)
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def propose_all_mappings(request):
+    """Auto-create FieldConceptMapping records with status='proposed' for every
+    mappable field that has a suggestion but no existing mapping.
+
+    Resolves concept_code + vocabulary_id to a Concept FK. Fields whose
+    suggestion code cannot be resolved (concept not in DB) are silently skipped.
+    Returns the count of newly created mappings.
+    """
+    if not getattr(request.user, 'is_staff', False):
+        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    from omop_core.models import FieldConceptMapping, Concept
+    from omop_core.services.field_descriptor import get_all_field_descriptors
+
+    descriptors = get_all_field_descriptors()
+
+    # Collect fields that need a proposed mapping.
+    to_propose: list[dict] = []
+    for d in descriptors:
+        if not d['mappable']:
+            continue
+        if d['mapping']:
+            continue  # already has a mapping
+        suggestion = d.get('suggestion')
+        if not suggestion or not suggestion.get('concept_code'):
+            continue
+        to_propose.append({
+            'field_name': d['field_name'],
+            'concept_code': suggestion['concept_code'],
+            'vocabulary_id': suggestion.get('vocabulary_id') or '',
+            'unit': suggestion.get('unit') or '',
+            'omop_table': suggestion.get('omop_table') or '',
+        })
+
+    if not to_propose:
+        return Response({'created': 0, 'fields': []})
+
+    # Batch-resolve concept codes to Concept FKs.
+    code_vocab_pairs = {(p['concept_code'], p['vocabulary_id']) for p in to_propose}
+    concepts_by_code: dict[tuple[str, str], Concept] = {}
+    for concept in Concept.objects.filter(
+        concept_code__in=[cv[0] for cv in code_vocab_pairs],
+        vocabulary_id__in=[cv[1] for cv in code_vocab_pairs if cv[1]],
+    ):
+        key = (concept.concept_code, concept.vocabulary_id)
+        if key not in concepts_by_code:
+            concepts_by_code[key] = concept
+
+    created_fields = []
+    for p in to_propose:
+        concept = concepts_by_code.get((p['concept_code'], p['vocabulary_id']))
+        if not concept:
+            continue  # concept not in vocabulary DB — skip
+
+        FieldConceptMapping.objects.create(
+            field_name=p['field_name'],
+            concept=concept,
+            vocabulary_id=p['vocabulary_id'],
+            concept_code=p['concept_code'],
+            unit=p['unit'],
+            omop_table=p['omop_table'],
+            status='proposed',
+            notes='Auto-proposed from field suggestion.',
+        )
+        created_fields.append(p['field_name'])
+
+    return Response({'created': len(created_fields), 'fields': created_fields},
+                    status=status.HTTP_201_CREATED if created_fields else status.HTTP_200_OK)
+
+
 # =============================================================================
 # Field Synonyms (staff-only synonym management for concept mapping)
 # =============================================================================
