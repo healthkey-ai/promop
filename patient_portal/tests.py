@@ -19761,6 +19761,10 @@ class TherapyLineAuthoringTest(TestCase):
         _concept(CONCEPT_EHR_TYPE, 'EHR', type_domain, '32817')
         _concept(CONCEPT_DRUG_EXPOSURE_FIELD, 'drug_exposure.drug_exposure_id',
                  type_domain, '1147094')
+        self.procedure_event_field = _concept(
+            1147084, 'procedure_occurrence.procedure_occurrence_id',
+            type_domain, 'procedure_occurrence_id',
+        )
         self.len_concept = _concept(1301025, 'lenalidomide', drug_domain, '6360')
         self.dex_concept = _concept(1518254, 'dexamethasone', drug_domain, '3264')
 
@@ -19927,6 +19931,32 @@ class TherapyLineAuthoringTest(TestCase):
             ).exists(),
         )
         self.assertEqual(resp.data['patient_info']['lines_of_therapy'][0]['episode_id'], episode_id)
+
+    def test_patch_preserves_non_drug_episode_events(self):
+        from omop_oncology.models import EpisodeEvent
+
+        created = self._post()
+        self.assertEqual(created.status_code, 201, created.data)
+        episode_id = created.data['episode_id']
+        EpisodeEvent.objects.create(
+            episode_id=episode_id,
+            event_id=90901,
+            episode_event_field_concept=self.procedure_event_field,
+        )
+
+        resp = self.client.patch(f'/api/v1/therapy-lines/{episode_id}/', {
+            'drugs': [
+                {'concept_id': self.dex_concept.concept_id, 'source_value': 'dexamethasone'},
+            ],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(
+            EpisodeEvent.objects.filter(
+                episode_id=episode_id,
+                event_id=90901,
+                episode_event_field_concept=self.procedure_event_field,
+            ).exists(),
+        )
 
     def test_patch_cannot_move_a_line_to_another_number(self):
         created = self._post()

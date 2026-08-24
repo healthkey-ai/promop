@@ -159,7 +159,10 @@ def upsert_therapy_line_episode(
     if replace_events:
         stale = (
             EpisodeEvent.objects
-            .filter(episode_id=episode.episode_id)
+            .filter(
+                episode_id=episode.episode_id,
+                episode_event_field_concept=field_concept,
+            )
             .exclude(event_id__in=desired_exposure_ids)
         )
         stale.delete()
