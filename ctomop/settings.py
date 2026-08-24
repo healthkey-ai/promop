@@ -45,7 +45,7 @@ if not DEBUG:
     _running_mgmt = len(_sys.argv) > 1 and _sys.argv[1] in _management_commands
     # A Celery worker serves no HTTP, so the host and origin checks below would
     # only stop it from booting. Its secret and database still have to be real.
-    _running_worker = os.path.basename(_sys.argv[0]) == 'celery'
+    _running_worker = os.path.basename(_sys.argv[0] if _sys.argv else '') == 'celery'
     if not _running_mgmt:
         from django.core.exceptions import ImproperlyConfigured
         _config_errors = []
