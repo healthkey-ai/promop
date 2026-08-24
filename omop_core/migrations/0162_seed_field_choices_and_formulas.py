@@ -99,18 +99,21 @@ def seed_formulas(apps, schema_editor):
 
 def reverse_choices(apps, schema_editor):
     FieldChoice = apps.get_model('omop_core', 'FieldChoice')
-    FieldChoice.objects.filter(field_name__in=INITIAL_CHOICES.keys()).delete()
+    for field_name, entries in INITIAL_CHOICES.items():
+        displays = [display for display, _ in entries]
+        FieldChoice.objects.filter(field_name=field_name, display__in=displays).delete()
 
 
 def reverse_formulas(apps, schema_editor):
     FieldFormula = apps.get_model('omop_core', 'FieldFormula')
-    FieldFormula.objects.filter(field_name__in=INITIAL_FORMULAS.keys()).delete()
+    for field_name, (formula, _) in INITIAL_FORMULAS.items():
+        FieldFormula.objects.filter(field_name=field_name, formula=formula).delete()
 
 
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('omop_core', '0159_fieldchoice_fieldchoicecode_fieldformula'),
+        ('omop_core', '0161_fieldchoice_fieldchoicecode_fieldformula'),
     ]
 
     operations = [

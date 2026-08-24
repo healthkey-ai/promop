@@ -9,7 +9,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
-        ('omop_core', '0158_seed_suggested_field_mappings'),
+        ('omop_core', '0160_seed_behavior_field_mappings'),
     ]
 
     operations = [

@@ -3000,7 +3000,7 @@ class FieldChoiceCode(models.Model):
 
     class Meta:
         db_table = 'field_choice_code'
-        unique_together = [('choice', 'vocabulary_id')]
+        unique_together = [('choice', 'vocabulary_id', 'code')]
 
     def __str__(self):
         return f"{self.choice.display} — {self.vocabulary_id}:{self.code}"
