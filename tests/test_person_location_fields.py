@@ -200,6 +200,17 @@ class TestValidation:
         person.refresh_from_db()
         assert _loc(person).latitude == Decimal('90')
 
+    def test_cannot_clear_only_one_coordinate(self, staff_client, person):
+        _patch(staff_client, person, {'latitude': 42.36, 'longitude': -71.06})
+
+        resp = _patch(staff_client, person, {'latitude': None})
+
+        assert resp.status_code == 400
+        assert 'requires both coordinates or neither' in resp.data['detail']
+        person.refresh_from_db()
+        assert _loc(person).latitude == Decimal('42.36')
+        assert _loc(person).longitude == Decimal('-71.06')
+
     def test_a_rejected_write_leaves_person_fields_untouched(self, staff_client, person):
         """Validation runs before anything is saved."""
         resp = _patch(staff_client, person, {'email': 'a@b.com', 'region': 'Massachusetts'})

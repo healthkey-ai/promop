@@ -5199,6 +5199,7 @@ class PersonViewSet(viewsets.GenericViewSet):
             pair = {'latitude', 'longitude'}
             supplied = pair & set(location_updates)
             if supplied and len(supplied) == 1:
+                supplied_column = next(iter(supplied))
                 missing = (pair - supplied).pop()
                 current = None
                 if person.location_id:
@@ -5206,14 +5207,13 @@ class PersonViewSet(viewsets.GenericViewSet):
                         location_id=person.location_id,
                     ).first()
                     current = getattr(existing_location, missing, None)
-                # Fine when the other half is already on file — this is a
-                # correction to one coordinate of a complete pair.
-                if current is None and location_updates[
-                    next(iter(supplied))
-                ] is not None:
+                # Fine when the other half is already on file and the submitted
+                # half stays set, or when both are absent. Refuse any transition
+                # that would leave exactly one coordinate set.
+                if (location_updates[supplied_column] is None) != (current is None):
                     return Response(
                         {'detail': (
-                            f"'{next(iter(supplied))}' cannot be set without "
+                            f"'{supplied_column}' cannot be set without "
                             f"'{missing}': the record requires both coordinates "
                             f'or neither.'
                         )},
