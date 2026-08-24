@@ -1,18 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Search, X, Plus, Trash2 } from 'lucide-react';
 import {
-  searchDrugConcepts, authorTherapyLine, THERAPY_OUTCOME_CHOICES,
-  type DrugConcept,
+  searchDrugConcepts, authorTherapyLine, updateTherapyLine, THERAPY_OUTCOME_CHOICES,
+  type DrugConcept, type EditableTherapyLine,
 } from '@/api/therapyLines';
 
 interface Props {
   personId: number;
   /** Next line number, prefilled. The clinician can correct it. */
   defaultLineNumber: number;
+  /** Existing line to edit. When present, the dialog PATCHes the line episode. */
+  line?: EditableTherapyLine;
   onClose: () => void;
   /** Receives the re-derived record so the tab updates without a refetch. */
   onAuthored: (patientInfo: Record<string, unknown>) => void;
 }
+
+type SelectedDrug = DrugConcept & { source_value?: string | null };
 
 /**
  * Record a line of therapy.
@@ -30,14 +34,17 @@ interface Props {
 export default function TherapyLineDialog({
   personId,
   defaultLineNumber,
+  line,
   onClose,
   onAuthored,
 }: Props) {
-  const [lineNumber, setLineNumber] = useState(String(defaultLineNumber));
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
-  const [outcome, setOutcome] = useState('');
-  const [drugs, setDrugs] = useState<DrugConcept[]>([]);
+  const episodeId = typeof line?.episode_id === 'number' ? line.episode_id : null;
+  const editing = episodeId !== null;
+  const [lineNumber, setLineNumber] = useState(String(line?.line ?? defaultLineNumber));
+  const [startDate, setStartDate] = useState(line?.start_date ?? '');
+  const [endDate, setEndDate] = useState(line?.end_date ?? '');
+  const [outcome, setOutcome] = useState(line?.outcome ?? '');
+  const [drugs, setDrugs] = useState<SelectedDrug[]>(line?.drugs ?? []);
 
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<DrugConcept[]>([]);
@@ -92,7 +99,7 @@ export default function TherapyLineDialog({
     }
     setSaving(true);
     try {
-      const result = await authorTherapyLine({
+      const payload = {
         person: personId,
         line_number: Number(lineNumber),
         start_date: startDate || null,
@@ -100,16 +107,21 @@ export default function TherapyLineDialog({
         outcome: outcome || null,
         drugs: drugs.map((d) => ({
           concept_id: d.concept_id,
-          source_value: d.concept_name.slice(0, 50),
+          source_value: (d.source_value || d.concept_name).slice(0, 50),
         })),
-      });
+      };
+      const result = episodeId !== null
+        ? await updateTherapyLine(episodeId, payload)
+        : await authorTherapyLine(payload);
       onAuthored(result.patient_info);
       onClose();
     } catch (err: unknown) {
       // The server's refusals are specific — an unknown drug concept, a line
       // with nothing in it, a missing Treatment Regimen concept — and each says
       // what to do. Replacing them with "save failed" would throw that away.
-      let detail = 'Could not record the therapy line.';
+      let detail = editing
+        ? 'Could not update the therapy line.'
+        : 'Could not record the therapy line.';
       if (err && typeof err === 'object' && 'response' in err) {
         const data = (err as { response?: { data?: Record<string, unknown> } })
           .response?.data;
@@ -132,11 +144,13 @@ export default function TherapyLineDialog({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
       role="dialog"
       aria-modal="true"
-      aria-label="Record a line of therapy"
+      aria-label={editing ? 'Edit a line of therapy' : 'Record a line of therapy'}
     >
       <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-lg border border-border bg-background p-5 shadow-xl">
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-base font-semibold">Record a line of therapy</h2>
+          <h2 className="text-base font-semibold">
+            {editing ? 'Edit line of therapy' : 'Record a line of therapy'}
+          </h2>
           <button onClick={onClose} aria-label="Close" className="text-muted-foreground hover:text-foreground">
             <X size={18} />
           </button>
@@ -144,8 +158,9 @@ export default function TherapyLineDialog({
 
         <p className="mb-4 text-xs text-muted-foreground">
           The therapy fields on this tab are derived from the lines on record.
-          Adding one here writes the drug exposures and the episode that groups
-          them, then re-derives the record.
+          {editing
+            ? 'Changing one here updates the drug exposures and episode grouping, then re-derives the record.'
+            : 'Adding one here writes the drug exposures and the episode that groups them, then re-derives the record.'}
         </p>
 
         <div className="grid grid-cols-2 gap-4">
@@ -154,6 +169,7 @@ export default function TherapyLineDialog({
             <input
               type="number" min={1} value={lineNumber}
               onChange={(e) => setLineNumber(e.target.value)}
+              disabled={editing}
               className="w-full rounded-md border border-input px-2 py-1.5 text-sm"
             />
           </label>
@@ -256,7 +272,9 @@ export default function TherapyLineDialog({
             disabled={saving}
             className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
           >
-            {saving ? 'Recording…' : 'Record line'}
+            {saving
+              ? (editing ? 'Updating…' : 'Recording…')
+              : (editing ? 'Update line' : 'Record line')}
           </button>
         </div>
       </div>

@@ -20,7 +20,7 @@ export interface DrugConcept {
 
 export interface TherapyLineDrug {
   concept_id: number;
-  source_value?: string;
+  source_value?: string | null;
 }
 
 export interface TherapyLinePayload {
@@ -40,6 +40,16 @@ export interface TherapyLineResult {
   drug_exposure_ids: number[];
   drugs_created: number;
   patient_info: Record<string, unknown>;
+}
+
+export interface EditableTherapyLine {
+  line: number;
+  episode_id?: number | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  outcome?: string | null;
+  regimen?: string | null;
+  drugs?: Array<DrugConcept & { source_value?: string | null }>;
 }
 
 /**
@@ -79,6 +89,17 @@ export async function authorTherapyLine(
 ): Promise<TherapyLineResult> {
   const resp = await clinicalClient().post(
     clinicalUrl('/v1/therapy-lines/'),
+    payload,
+  );
+  return resp.data as TherapyLineResult;
+}
+
+export async function updateTherapyLine(
+  episodeId: number,
+  payload: TherapyLinePayload,
+): Promise<TherapyLineResult> {
+  const resp = await clinicalClient().patch(
+    clinicalUrl(`/v1/therapy-lines/${episodeId}/`),
     payload,
   );
   return resp.data as TherapyLineResult;

@@ -19761,6 +19761,10 @@ class TherapyLineAuthoringTest(TestCase):
         _concept(CONCEPT_EHR_TYPE, 'EHR', type_domain, '32817')
         _concept(CONCEPT_DRUG_EXPOSURE_FIELD, 'drug_exposure.drug_exposure_id',
                  type_domain, '1147094')
+        self.procedure_event_field = _concept(
+            1147084, 'procedure_occurrence.procedure_occurrence_id',
+            type_domain, 'procedure_occurrence_id',
+        )
         self.len_concept = _concept(1301025, 'lenalidomide', drug_domain, '6360')
         self.dex_concept = _concept(1518254, 'dexamethasone', drug_domain, '3264')
 
@@ -19814,6 +19818,12 @@ class TherapyLineAuthoringTest(TestCase):
         self.assertEqual(
             resp.data['patient_info']['therapy_lines_count'],
             record.therapy_lines_count,
+        )
+        line = resp.data['patient_info']['lines_of_therapy'][0]
+        self.assertEqual(line['episode_id'], resp.data['episode_id'])
+        self.assertEqual(
+            [d['concept_id'] for d in line['drugs']],
+            [self.len_concept.concept_id, self.dex_concept.concept_id],
         )
 
     def test_posting_the_same_line_twice_converges(self):
@@ -19882,3 +19892,79 @@ class TherapyLineAuthoringTest(TestCase):
         ])
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(DrugExposure.objects.filter(person=self.person).count(), 0)
+
+    def test_patch_replaces_an_existing_line_of_therapy(self):
+        from omop_core.models import Observation
+        from omop_oncology.models import Episode, EpisodeEvent
+
+        created = self._post(outcome='Partial Response')
+        self.assertEqual(created.status_code, 201, created.data)
+        episode_id = created.data['episode_id']
+
+        resp = self.client.patch(f'/api/v1/therapy-lines/{episode_id}/', {
+            'start_date': '2025-02-01',
+            'end_date': None,
+            'outcome': None,
+            'drugs': [
+                {'concept_id': self.dex_concept.concept_id, 'source_value': 'dexamethasone'},
+            ],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        episode = Episode.objects.get(episode_id=episode_id)
+        self.assertEqual(episode.episode_number, 1)
+        self.assertEqual(str(episode.episode_start_date), '2025-02-01')
+        self.assertEqual(Episode.objects.filter(person=self.person).count(), 1)
+
+        event_ids = list(
+            EpisodeEvent.objects
+            .filter(episode_id=episode_id)
+            .values_list('event_id', flat=True)
+        )
+        self.assertEqual(len(event_ids), 1)
+        linked = DrugExposure.objects.get(drug_exposure_id=event_ids[0])
+        self.assertEqual(linked.drug_concept_id, self.dex_concept.concept_id)
+        self.assertFalse(
+            Observation.objects.filter(
+                person=self.person,
+                observation_source_value='LOT-1-outcome',
+            ).exists(),
+        )
+        self.assertEqual(resp.data['patient_info']['lines_of_therapy'][0]['episode_id'], episode_id)
+
+    def test_patch_preserves_non_drug_episode_events(self):
+        from omop_oncology.models import EpisodeEvent
+
+        created = self._post()
+        self.assertEqual(created.status_code, 201, created.data)
+        episode_id = created.data['episode_id']
+        EpisodeEvent.objects.create(
+            episode_id=episode_id,
+            event_id=90901,
+            episode_event_field_concept=self.procedure_event_field,
+        )
+
+        resp = self.client.patch(f'/api/v1/therapy-lines/{episode_id}/', {
+            'drugs': [
+                {'concept_id': self.dex_concept.concept_id, 'source_value': 'dexamethasone'},
+            ],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(
+            EpisodeEvent.objects.filter(
+                episode_id=episode_id,
+                event_id=90901,
+                episode_event_field_concept=self.procedure_event_field,
+            ).exists(),
+        )
+
+    def test_patch_cannot_move_a_line_to_another_number(self):
+        created = self._post()
+        self.assertEqual(created.status_code, 201, created.data)
+
+        resp = self.client.patch(f"/api/v1/therapy-lines/{created.data['episode_id']}/", {
+            'line_number': 2,
+            'drugs': [{'concept_id': self.len_concept.concept_id}],
+        }, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('line_number', str(resp.data))
