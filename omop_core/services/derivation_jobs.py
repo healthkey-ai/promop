@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 
 from omop_core.models import Person
 
@@ -90,10 +90,19 @@ class InlineDispatcher:
     # ever.
     _PREFIX = 'inline-'
 
+    # The derivation holds the request and a database connection for as long
+    # as it runs, so it needs the bound the queued path gets from
+    # CELERY_TASK_TIME_LIMIT. SET LOCAL reverts on commit.
+    _STATEMENT_TIMEOUT = '25s'
+
     def dispatch(self, person: Person) -> str:
         from omop_core.services.patient_record_service import refresh_patient_record
 
-        refresh_patient_record(person)
+        with transaction.atomic():
+            if connection.vendor == 'postgresql':
+                with connection.cursor() as cur:
+                    cur.execute(f"SET LOCAL statement_timeout = '{self._STATEMENT_TIMEOUT}'")
+            refresh_patient_record(person)
         return f'{self._PREFIX}{uuid.uuid4()}'
 
     def status(self, task_id: str) -> DerivationStatus:

@@ -67,6 +67,21 @@ jobs:
           gcloud run jobs execute ${SERVICE_NAME}-migrate \
             --region ${GCP_REGION} --wait --quiet
 
+      # The worker pool runs the same image but is a separate resource, so
+      # without this it keeps whatever it was created with. Guarded because it
+      # is created by Terraform in the infra repo, which may not have been
+      # applied yet.
+      - name: Deploy worker revision
+        run: |
+          if gcloud run worker-pools describe ${SERVICE_NAME}-worker \
+              --region ${GCP_REGION} >/dev/null 2>&1; then
+            gcloud run worker-pools update ${SERVICE_NAME}-worker \
+              --image ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG} \
+              --region ${GCP_REGION} --quiet
+          else
+            echo "No ${SERVICE_NAME}-worker pool yet — skipping."
+          fi
+
       - name: Shift traffic to new revision
         run: |
           gcloud run services update-traffic ${SERVICE_NAME} \

@@ -788,6 +788,9 @@ holding the request, so an id is only ever issued for a derivation that
 already succeeded. That is why the id itself (`inline-<uuid>`) is the
 completion record: a registry would be process-local, and under several
 gunicorn workers the poll would land on a process that never saw the POST.
+Because it holds the request, it caps the derivation with a 25s
+`statement_timeout` — the queued path gets that bound from
+`CELERY_TASK_TIME_LIMIT` instead.
 
 Tests swap in `FakeDispatcher` through `use_dispatcher(...)`; nothing needs to
 patch Celery or run it eager.

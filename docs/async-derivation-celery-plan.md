@@ -21,7 +21,8 @@ Only `refresh/` changes. The signal path and `_bulk_write` keep deriving inline.
 
 ## DI seam
 
-`.delay()` appears only in `omop_core/tasks.py`. The view depends on:
+Celery is reached from one place, `CeleryDispatcher` in
+`omop_core/services/derivation_jobs.py`. The view depends on:
 
 ```python
 class DerivationDispatcher(Protocol):
@@ -35,7 +36,7 @@ class DerivationDispatcher(Protocol):
 `status` is on the seam too, otherwise the status view reaches into Celery
 directly and its tests are back to patching Celery internals.
 
-- `CeleryDispatcher` — `.delay()` on commit. Enqueueing inside the transaction
+- `CeleryDispatcher` — `apply_async()` on commit. Enqueueing inside the transaction
   lets the worker read uncommitted data.
 - `InlineDispatcher` — derives synchronously. Local dev and CI, where there is
   no broker.
@@ -77,28 +78,20 @@ healthkey-etl migrates, then production. Update `CLAUDE.md` and `API_SURFACE.md`
 
 - **Render**: `type: redis` + `type: worker`, both in `render.yaml`. Fully
   specified, nothing left to decide.
-- **Cloud Run**: unsettled, and the real work. None of it is declared in this
-  repo — the staging service and its jobs are Terraform in the separate infra
-  repo, and this repo only bumps their image tags. Three things have to be
-  added there, and none exists yet:
-  - a VPC and egress config. There is no network in that Terraform at all, so
-    a private Memorystore is currently unreachable from any service in the
-    family. A sibling service already hit this and fell back to running its
-    async work inline.
-  - the Redis instance itself.
-  - a worker runtime. The worker cannot be a Cloud Run *service*: a revision
-    only becomes ready once the container listens on `$PORT`, and Celery opens
-    no socket. It needs a worker pool or another background runtime, with
-    `--no-cpu-throttling` either way, since a throttled instance gets no CPU
-    between polls and never consumes.
+- **Cloud Run**: none of it is declared in this repo — the staging service and
+  its jobs are Terraform in the separate infra repo, and this repo only bumps
+  image tags. That side needed a VPC (there was no network at all, so no
+  private IP was reachable), a Memorystore instance, and a worker runtime;
+  those are written and waiting to be applied.
 
-  `deploy-staging.yml` has no step for the worker — add one once the runtime is
-  chosen, or it keeps running the image it was created with.
+  The worker is a **worker pool**, not a service. A service revision only goes
+  ready once the container answers on `$PORT`, and a queue consumer opens no
+  socket; a worker pool also keeps CPU allocated between polls, which a
+  request-billed service does not, and an instance with no CPU never picks a
+  job up. `deploy-staging.yml` bumps its image alongside the service's.
 
-  Worth weighing before committing to any of that: the family's existing answer
-  to async-on-Cloud-Run is Cloud Tasks, which needs no VPC and no broker. The
-  dispatcher is a Protocol, so a Cloud Tasks implementation is a third class
-  beside the Celery and inline ones rather than a rewrite.
+  Order matters: the image has to contain celery before the worker pool is
+  created, or it crash-loops while the service queues work nothing consumes.
 
 ## Testing
 

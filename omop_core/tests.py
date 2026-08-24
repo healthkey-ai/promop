@@ -5226,6 +5226,25 @@ class DerivationDispatcherTest(TestCase):
         refresh.assert_called_once_with(self.person)
         self.assertEqual(dispatcher.status(task_id).state, SUCCESS)
 
+    def test_inline_dispatcher_bounds_the_derivation(self):
+        """It runs in the request, so it needs the bound the worker gets from Celery."""
+        from django.db import connection
+
+        from omop_core.services.derivation_jobs import InlineDispatcher
+
+        seen = []
+
+        def record(person):
+            with connection.cursor() as cur:
+                cur.execute('SHOW statement_timeout')
+                seen.append(cur.fetchone()[0])
+
+        with patch('omop_core.services.patient_record_service.refresh_patient_record',
+                   side_effect=record):
+            InlineDispatcher().dispatch(self.person)
+
+        self.assertEqual(seen, ['25s'])
+
     def test_inline_dispatcher_reports_a_foreign_id_as_pending(self):
         from omop_core.services.derivation_jobs import PENDING, InlineDispatcher
 
