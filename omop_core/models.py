@@ -2971,6 +2971,61 @@ class FieldConceptMapping(models.Model):
         return f"{self.field_name} → {self.vocabulary_id}:{self.concept_code} ({self.status})"
 
 
+class FieldChoice(models.Model):
+    """One allowed value for a PatientRecord field (curator-managed)."""
+    field_name = models.CharField(max_length=100, db_index=True)
+    display = models.CharField(max_length=200)
+    sort_order = models.IntegerField(default=0)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'field_choice'
+        unique_together = [('field_name', 'display')]
+        ordering = ['field_name', 'sort_order', 'display']
+
+    def __str__(self):
+        return f"{self.field_name}: {self.display}"
+
+
+class FieldChoiceCode(models.Model):
+    """A coded representation (SNOMED, ICD, etc.) for a field choice."""
+    choice = models.ForeignKey(FieldChoice, related_name='codes', on_delete=models.CASCADE)
+    code = models.CharField(max_length=50)
+    vocabulary_id = models.CharField(max_length=20)
+    display = models.CharField(max_length=200, blank=True, default='')
+    is_primary = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = 'field_choice_code'
+        unique_together = [('choice', 'vocabulary_id')]
+
+    def __str__(self):
+        return f"{self.choice.display} — {self.vocabulary_id}:{self.code}"
+
+
+class FieldFormula(models.Model):
+    """User-defined formula for a computed PatientRecord field."""
+    field_name = models.CharField(max_length=100, unique=True, db_index=True)
+    formula = models.TextField(
+        help_text='e.g. "@not(active_infection_status)" or "weight / (height/100)^2"'
+    )
+    is_active = models.BooleanField(default=False)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'field_formula'
+
+    def __str__(self):
+        return f"{self.field_name}: {self.formula[:50]}"
+
+
 class FieldSynonym(models.Model):
     """Custom synonyms for PatientRecord field names.
 

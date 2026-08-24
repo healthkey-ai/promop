@@ -6,7 +6,7 @@ concept assignments and which still need one.
 """
 from __future__ import annotations
 
-from omop_core.models import PatientRecord, FieldConceptMapping
+from omop_core.models import PatientRecord, FieldConceptMapping, FieldChoice, FieldFormula
 from omop_core.services.mappings import (
     LAB_FIELD_TO_LOINC,
     LAB_FIELD_ALIAS_TO_CANONICAL,
@@ -354,6 +354,23 @@ def get_all_field_descriptors() -> list[dict]:
         for m in FieldConceptMapping.objects.select_related('concept', 'reviewer').all()
     }
 
+    # 3b. Load field choices (curator-managed value sets).
+    choices_by_field: dict[str, list[dict]] = {}
+    for fc in FieldChoice.objects.prefetch_related('codes').all():
+        choices_by_field.setdefault(fc.field_name, []).append({
+            'id': fc.id,
+            'display': fc.display,
+            'sort_order': fc.sort_order,
+            'codes': [
+                {'code': c.code, 'vocabulary_id': c.vocabulary_id,
+                 'display': c.display, 'is_primary': c.is_primary}
+                for c in fc.codes.all()
+            ],
+        })
+
+    # 3c. Load field formulas.
+    formulas_by_field = {f.field_name: f for f in FieldFormula.objects.all()}
+
     # 4. Build descriptors (excluding internal fields).
     result = []
     for f in concrete_fields:
@@ -395,6 +412,15 @@ def get_all_field_descriptors() -> list[dict]:
                 'notes': mapping.notes,
             }
 
+        formula = formulas_by_field.get(name)
+        formula_dict = None
+        if formula:
+            formula_dict = {
+                'id': formula.id,
+                'expression': formula.formula,
+                'is_active': formula.is_active,
+            }
+
         result.append({
             'field_name': name,
             'field_type': _get_field_type_label(f),
@@ -405,6 +431,8 @@ def get_all_field_descriptors() -> list[dict]:
             'suggestion': _build_suggestion(name, prov_dict),
             'mappable': _is_mappable(category),
             'locked_table': _get_locked_table(category),
+            'choices': choices_by_field.get(name, []),
+            'formula': formula_dict,
         })
 
     # Sort: needs-concept-set first, then by field name.

@@ -9,6 +9,7 @@ interface ConceptResult {
   vocabulary_id: string;
   domain_id: string;
   standard_concept: string | null;
+  suggested_unit?: string;
 }
 
 interface Props {
@@ -20,12 +21,16 @@ interface Props {
   initialVocabularyId?: string;
   initialUnit?: string;
   initialOmopTable?: string;
+  existingMappingId?: number;
+  initialNotes?: string;
 }
 
 export function ConceptAssignDialog({
   fieldName, fieldType, onClose, onSaved,
   initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
+  existingMappingId, initialNotes,
 }: Props) {
+  const isEditing = !!existingMappingId;
   const [searchQuery, setSearchQuery] = useState(initialConceptCode || "");
   const [vocabFilter, setVocabFilter] = useState(initialVocabularyId || "");
   const [results, setResults] = useState<ConceptResult[]>([]);
@@ -33,7 +38,7 @@ export function ConceptAssignDialog({
   const [selected, setSelected] = useState<ConceptResult | null>(null);
   const [unit, setUnit] = useState(initialUnit || "");
   const [omopTable, setOmopTable] = useState(initialOmopTable || "Measurement");
-  const [notes, setNotes] = useState("");
+  const [notes, setNotes] = useState(initialNotes || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -72,7 +77,7 @@ export function ConceptAssignDialog({
     setSaving(true);
     setError("");
     try {
-      await api.post("/v1/field-mappings/", {
+      const payload = {
         field_name: fieldName,
         concept: selected.concept_id,
         vocabulary_id: selected.vocabulary_id,
@@ -81,7 +86,12 @@ export function ConceptAssignDialog({
         omop_table: omopTable,
         notes,
         status: "proposed",
-      });
+      };
+      if (isEditing) {
+        await api.patch(`/v1/field-mappings/${existingMappingId}/`, payload);
+      } else {
+        await api.post("/v1/field-mappings/", payload);
+      }
       onSaved();
     } catch (err: unknown) {
       const msg =
@@ -120,7 +130,9 @@ export function ConceptAssignDialog({
           <X size={16} />
         </button>
 
-        <h2 className="mb-1 text-lg font-semibold">Assign Concept</h2>
+        <h2 className="mb-1 text-lg font-semibold">
+          {isEditing ? "Edit Concept Mapping" : "Assign Concept"}
+        </h2>
         <p className="mb-4 text-sm text-gray-500">
           Field: <span className="font-mono">{fieldName}</span> ({fieldType})
         </p>
@@ -173,7 +185,12 @@ export function ConceptAssignDialog({
                 {results.slice(0, 50).map((c) => (
                   <tr
                     key={c.concept_id}
-                    onClick={() => setSelected(c)}
+                    onClick={() => {
+                      setSelected(c);
+                      if (c.suggested_unit && !unit) {
+                        setUnit(c.suggested_unit);
+                      }
+                    }}
                     className={`cursor-pointer hover:bg-blue-50 ${
                       selected?.concept_id === c.concept_id ? "bg-blue-100" : ""
                     }`}
@@ -203,7 +220,12 @@ export function ConceptAssignDialog({
         {/* Additional fields */}
         <div className="mb-4 grid grid-cols-2 gap-3">
           <div>
-            <label className="mb-1 block text-xs font-medium text-gray-600">Unit</label>
+            <label className="mb-1 block text-xs font-medium text-gray-600">
+              Unit
+              {selected?.suggested_unit && unit === selected.suggested_unit && (
+                <span className="ml-1 text-[10px] font-normal text-gray-400">(suggested)</span>
+              )}
+            </label>
             <input
               type="text"
               value={unit}
@@ -252,7 +274,7 @@ export function ConceptAssignDialog({
             disabled={!selected || saving}
             className="rounded bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
-            {saving ? "Saving..." : "Save Mapping"}
+            {saving ? "Saving..." : isEditing ? "Update Mapping" : "Save Mapping"}
           </button>
         </div>
       </div>

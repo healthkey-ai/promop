@@ -2,12 +2,12 @@
 
 import pytest
 
-from omop_core.models import PatientRecord, FieldConceptMapping
+from omop_core.models import PatientRecord, FieldConceptMapping, FieldChoice, FieldChoiceCode, FieldFormula
 from omop_core.services.field_descriptor import (
     get_all_field_descriptors,
     _INTERNAL_FIELDS,
 )
-from omop_core.services.mappings import LAB_FIELD_TO_LOINC
+from omop_core.services.mappings import LAB_FIELD_TO_LOINC, DERIVED_FIELD_TO_CODE
 
 
 pytestmark = pytest.mark.django_db
@@ -74,7 +74,7 @@ def test_descriptors_have_required_keys():
     descriptors = get_all_field_descriptors()
     required_keys = {
         'field_name', 'field_type', 'category', 'tab', 'provenance', 'mapping',
-        'suggestion', 'mappable', 'locked_table',
+        'suggestion', 'mappable', 'locked_table', 'choices', 'formula',
     }
     for d in descriptors:
         missing = required_keys - set(d.keys())
@@ -260,3 +260,86 @@ def test_locked_table_none_for_others():
             assert d['locked_table'] is None, (
                 f"Field '{d['field_name']}' (category={d['category']}) should have locked_table=None"
             )
+
+
+# ── New suggestion tests (Phase 2) ──────────────────────────────
+
+
+def test_new_suggestions_present():
+    """Verify each new DERIVED_FIELD_TO_CODE entry produces a suggestion."""
+    new_fields = [
+        'disease', 'menopausal_status', 'smoking_status', 'pack_years',
+        'alcohol_use', 'exercise_frequency',
+        'no_active_infection_status', 'no_hiv_status',
+        'no_hepatitis_b_status', 'no_hepatitis_c_status',
+    ]
+    descriptors = get_all_field_descriptors()
+    by_name = {d['field_name']: d for d in descriptors}
+    for field in new_fields:
+        if field in by_name:
+            d = by_name[field]
+            assert d['suggestion'] is not None, (
+                f"Field '{field}' should have a suggestion from DERIVED_FIELD_TO_CODE"
+            )
+            expected_code = DERIVED_FIELD_TO_CODE[field][0]
+            assert d['suggestion']['concept_code'] == expected_code, (
+                f"Field '{field}' suggestion code should be '{expected_code}'"
+            )
+
+
+# ── Choices tests (Phase 3) ─────────────────────────────────────
+
+
+def test_choices_included_in_descriptors():
+    """Field choices appear in descriptor output when seeded."""
+    FieldChoice.objects.all().delete()
+    choice = FieldChoice.objects.create(field_name='disease', display='Test Disease', sort_order=0)
+    FieldChoiceCode.objects.create(choice=choice, code='12345', vocabulary_id='SNOMED', is_primary=True)
+
+    descriptors = get_all_field_descriptors()
+    disease = next(d for d in descriptors if d['field_name'] == 'disease')
+    assert len(disease['choices']) == 1
+    assert disease['choices'][0]['display'] == 'Test Disease'
+    assert disease['choices'][0]['codes'][0]['code'] == '12345'
+
+
+def test_choices_empty_for_fields_without():
+    """Non-choice fields have empty choices list."""
+    FieldChoice.objects.all().delete()
+    descriptors = get_all_field_descriptors()
+    hb = next(d for d in descriptors if d['field_name'] == 'hemoglobin_g_dl')
+    assert hb['choices'] == []
+
+
+# ── Formula tests (Phase 5) ─────────────────────────────────────
+
+
+def test_formula_included_in_descriptors():
+    """Formula data appears in descriptors for computed fields with formulas."""
+    FieldFormula.objects.all().delete()
+    FieldFormula.objects.create(field_name='bmi', formula='weight / (height / 100) ^ 2', is_active=False)
+
+    descriptors = get_all_field_descriptors()
+    bmi = next(d for d in descriptors if d['field_name'] == 'bmi')
+    assert bmi['formula'] is not None
+    assert bmi['formula']['expression'] == 'weight / (height / 100) ^ 2'
+    assert bmi['formula']['is_active'] is False
+
+
+def test_formula_none_for_non_computed():
+    """Non-computed fields without formulas have formula=None."""
+    FieldFormula.objects.all().delete()
+    descriptors = get_all_field_descriptors()
+    hb = next(d for d in descriptors if d['field_name'] == 'hemoglobin_g_dl')
+    assert hb['formula'] is None
+
+
+# ── Descriptor keys test (updated for new keys) ────────────────
+
+
+def test_descriptors_have_choices_and_formula_keys():
+    """Each descriptor dict contains choices and formula keys."""
+    descriptors = get_all_field_descriptors()
+    for d in descriptors:
+        assert 'choices' in d, f"Descriptor for {d['field_name']} missing 'choices' key"
+        assert 'formula' in d, f"Descriptor for {d['field_name']} missing 'formula' key"

@@ -14,6 +14,24 @@ vi.mock("@/api/axios", () => ({
   },
 }));
 
+vi.mock("./FieldChoiceEditor", () => ({
+  FieldChoiceEditor: ({ fieldName, onClose }: { fieldName: string; onClose: () => void }) => (
+    <div data-testid="choice-editor">
+      FieldChoiceEditor: {fieldName}
+      <button onClick={onClose}>Close</button>
+    </div>
+  ),
+}));
+
+vi.mock("./FormulaEditDialog", () => ({
+  FormulaEditDialog: ({ fieldName, onClose }: { fieldName: string; onClose: () => void }) => (
+    <div data-testid="formula-editor">
+      FormulaEditDialog: {fieldName}
+      <button onClick={onClose}>Close</button>
+    </div>
+  ),
+}));
+
 const MOCK_DESCRIPTORS = [
   {
     field_name: "hemoglobin_g_dl",
@@ -38,6 +56,8 @@ const MOCK_DESCRIPTORS = [
     },
     mappable: true,
     locked_table: null,
+    choices: [],
+    formula: null,
   },
   {
     field_name: "smoking_status",
@@ -49,6 +69,11 @@ const MOCK_DESCRIPTORS = [
     suggestion: null,
     mappable: true,
     locked_table: null,
+    choices: [
+      { id: 1, display: "Current smoker", sort_order: 0, codes: [{ code: "77176002", vocabulary_id: "SNOMED", display: "Smoker", is_primary: true }] },
+      { id: 2, display: "Never smoker", sort_order: 1, codes: [] },
+    ],
+    formula: null,
   },
   {
     field_name: "pack_years",
@@ -71,6 +96,33 @@ const MOCK_DESCRIPTORS = [
     suggestion: null,
     mappable: true,
     locked_table: null,
+    choices: [],
+    formula: null,
+  },
+  {
+    // Approved mapping — should reclassify to "editable" (Mapped) section
+    field_name: "alcohol_use",
+    field_type: "text",
+    category: "needs-concept-set",
+    tab: "behavior",
+    provenance: null,
+    mapping: {
+      id: 2,
+      concept_id: 99999,
+      vocabulary_id: "LOINC",
+      concept_code: "74013-4",
+      unit: "",
+      omop_table: "Observation",
+      status: "approved",
+      reviewer: "admin",
+      reviewed_at: "2024-01-01T00:00:00Z",
+      notes: "approved",
+    },
+    suggestion: null,
+    mappable: true,
+    locked_table: null,
+    choices: [],
+    formula: null,
   },
   {
     field_name: "bmi",
@@ -82,6 +134,8 @@ const MOCK_DESCRIPTORS = [
     suggestion: null,
     mappable: false,
     locked_table: null,
+    choices: [],
+    formula: { id: 1, expression: "weight / (height / 100) ^ 2", is_active: false },
   },
   {
     field_name: "date_of_birth",
@@ -93,6 +147,8 @@ const MOCK_DESCRIPTORS = [
     suggestion: null,
     mappable: true,
     locked_table: "Person",
+    choices: [],
+    formula: null,
   },
   {
     field_name: "country",
@@ -104,6 +160,8 @@ const MOCK_DESCRIPTORS = [
     suggestion: null,
     mappable: false,
     locked_table: "Location",
+    choices: [],
+    formula: null,
   },
   {
     field_name: "median_daily_steps_30d",
@@ -115,6 +173,8 @@ const MOCK_DESCRIPTORS = [
     suggestion: null,
     mappable: false,
     locked_table: null,
+    choices: [],
+    formula: null,
   },
 ];
 
@@ -154,7 +214,6 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
     });
-    // Behavior tab fields should not be visible on the General tab
     expect(screen.queryByText("smoking_status")).not.toBeInTheDocument();
     expect(screen.queryByText("hemoglobin_g_dl")).not.toBeInTheDocument();
   });
@@ -193,9 +252,7 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("hemoglobin_g_dl")).toBeInTheDocument();
     });
-    // Suggestion concept code should appear
     expect(screen.getByText("718-7")).toBeInTheDocument();
-    // Suggestion unit should appear
     expect(screen.getByText("g/dL")).toBeInTheDocument();
   });
 
@@ -224,9 +281,6 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
     });
-    // General tab should have the Computed section header (bmi is computed, tab=general)
-    // The section header says "Computed" with a count — check for the bmi field name
-    // after expanding the section (Computed starts collapsed)
     const computedHeader = screen.getByText(/read-only — computed by application code/);
     expect(computedHeader).toBeInTheDocument();
   });
@@ -236,8 +290,6 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
     });
-    // date_of_birth is in profile category, general tab
-    // The Person section header should exist as a category section
     const personSections = screen.getAllByText("Person");
     expect(personSections.length).toBeGreaterThan(0);
   });
@@ -247,7 +299,6 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
     });
-    // Location appears as both category label and locked table value
     const locationElements = screen.getAllByText("Location");
     expect(locationElements.length).toBeGreaterThan(0);
   });
@@ -261,15 +312,15 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("smoking_status")).toBeInTheDocument();
     });
-    // Click the dash (—) in the concept cell for smoking_status (unmapped, no suggestion)
-    const dashes = screen.getAllByText("—");
-    fireEvent.click(dashes[0]);
+    // Click "click to map" text for unmapped field
+    const clickToMap = screen.getAllByText("click to map");
+    fireEvent.click(clickToMap[0]);
     await waitFor(() => {
       expect(screen.getByText("Assign Concept")).toBeInTheDocument();
     });
   });
 
-  it("has new column headers: Concept, Coding, Table, Units, Synonyms", async () => {
+  it("has column headers including Choices", async () => {
     renderPage();
     await waitFor(() => {
       expect(screen.getByText(/Behavior/)).toBeInTheDocument();
@@ -278,10 +329,90 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("smoking_status")).toBeInTheDocument();
     });
-    // Table headers should include the new columns
-    expect(screen.getByText("Coding")).toBeInTheDocument();
-    expect(screen.getByText("Table")).toBeInTheDocument();
-    expect(screen.getByText("Units")).toBeInTheDocument();
-    expect(screen.getByText("Synonyms")).toBeInTheDocument();
+    expect(screen.getAllByText("Coding").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("Table").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("Units").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("Choices").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("Synonyms").length).toBeGreaterThanOrEqual(1);
+  });
+
+  // ── Phase 1a tests: dynamic reclassification ──
+
+  it("reclassifies approved mappings to Mapped section", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/Behavior/)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText(/Behavior/));
+    await waitFor(() => {
+      expect(screen.getByText("alcohol_use")).toBeInTheDocument();
+    });
+    // alcohol_use has status=approved, so it should appear in "Mapped" section
+    // and NOT in "Needs Concept Assignment" section
+    // The "Mapped" section header should contain the field
+    const mappedHeaders = screen.getAllByText("Mapped");
+    expect(mappedHeaders.length).toBeGreaterThan(0);
+  });
+
+  it("keeps proposed mappings in original section", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/Behavior/)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText(/Behavior/));
+    await waitFor(() => {
+      expect(screen.getByText("pack_years")).toBeInTheDocument();
+    });
+    // pack_years has status=proposed, should stay in "Needs Concept Assignment"
+    expect(screen.getByText("Needs Concept Assignment")).toBeInTheDocument();
+  });
+
+  // ── Phase 1b tests: edit mode ──
+
+  it("opens dialog in edit mode for mapped field", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/Behavior/)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText(/Behavior/));
+    await waitFor(() => {
+      expect(screen.getByText("229819007")).toBeInTheDocument();
+    });
+    // Click the concept code to open edit dialog
+    fireEvent.click(screen.getByText("229819007"));
+    await waitFor(() => {
+      expect(screen.getByText("Edit Concept Mapping")).toBeInTheDocument();
+    });
+  });
+
+  // ── Phase 1c tests: click-to-map UX ──
+
+  it("shows 'click to map' for unmapped fields without suggestion", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/Behavior/)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText(/Behavior/));
+    await waitFor(() => {
+      expect(screen.getByText("smoking_status")).toBeInTheDocument();
+    });
+    // smoking_status has no mapping and no suggestion — should show "click to map"
+    const clickToMap = screen.getAllByText("click to map");
+    expect(clickToMap.length).toBeGreaterThan(0);
+  });
+
+  // ── Phase 3 tests: choices ──
+
+  it("shows choice count badge for fields with choices", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/Behavior/)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText(/Behavior/));
+    await waitFor(() => {
+      expect(screen.getByText("smoking_status")).toBeInTheDocument();
+    });
+    // smoking_status has 2 choices
+    expect(screen.getByText("2 choices")).toBeInTheDocument();
   });
 });
