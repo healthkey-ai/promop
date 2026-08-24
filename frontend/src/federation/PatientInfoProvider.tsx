@@ -2,7 +2,7 @@ import { useMemo, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AxiosInstance } from "axios";
 import { PatientInfoContext } from "./PatientInfoContext";
-import { useWritableFields } from "./patientInfoApi";
+import { useWritableFields, usePatientDescriptor } from "./patientInfoApi";
 import type { LabsThemeTokens } from "./types";
 import { injectStyles } from "./injectStyles";
 import { assertLabsTokens } from "./assertLabsTokens";
@@ -85,8 +85,9 @@ function ContextBridge({
   children: ReactNode;
 }) {
   const writableFields = useWritableFields(apiClient, apiBasePath);
+  const descriptor = usePatientDescriptor(apiClient, apiBasePath);
   return (
-    <PatientInfoContext.Provider value={{ apiClient, apiBasePath, writableFields }}>
+    <PatientInfoContext.Provider value={{ apiClient, apiBasePath, writableFields, descriptor }}>
       {children}
     </PatientInfoContext.Provider>
   );

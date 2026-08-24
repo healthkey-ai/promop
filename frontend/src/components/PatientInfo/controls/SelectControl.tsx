@@ -60,8 +60,15 @@ export default function SelectControl({
   const currentKey = useMemo(() => {
     const k = keyOf(value);
     if (!k && treatEmptyOptionAsUnknown) return UNKNOWN;
+    // Case-insensitive fallback: the OMOP derivation can return a value in different casing than the
+    // option (e.g. 'multiple myeloma' vs the 'Multiple Myeloma' option), which would otherwise render
+    // as an empty Select. Match on lowercased key and use the option's canonical key so it displays.
+    if (k && !keyToValue.has(k)) {
+      const ci = normalized.find((o) => o.__key && o.__key.toLowerCase() === k.toLowerCase());
+      if (ci) return ci.__key;
+    }
     return k;
-  }, [value, treatEmptyOptionAsUnknown]);
+  }, [value, treatEmptyOptionAsUnknown, keyToValue, normalized]);
 
   return (
     <Select

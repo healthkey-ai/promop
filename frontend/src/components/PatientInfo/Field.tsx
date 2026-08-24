@@ -38,10 +38,19 @@ export default function Field({
   // writableFields (descriptor unavailable) leaves everything editable — never lock the form. useContext
   // (not the throwing usePatientInfoContext) so a provider-less mount (e.g. the standalone PatientDetail
   // view) renders read-only-unaware rather than crashing.
-  const writableFields = useContext(PatientInfoContext)?.writableFields ?? null;
+  const ctx = useContext(PatientInfoContext);
+  const writableFields = ctx?.writableFields ?? null;
   const notWritable = writableFields != null && !writableFields.has(name);
   const isDisabled = disabled || readOnly || notWritable;
   const optionObjects = useMemo(() => stringsToOptions(options), [options]);
+
+  // Non-editable-here fields: prefer the descriptor's "(computed)" + reason display (matches the
+  // standalone PROMOP UI) over a bare "(read-only)". A field is "computed" when the descriptor
+  // describes it as non-writable (computed / unmapped / set-on-Person / deferred); its `reason`
+  // explains why. Falls back to "(read-only)" only when there is no descriptor entry.
+  const descriptorEntry = ctx?.descriptor?.[name];
+  const showAsComputed = readOnly || (notWritable && !!descriptorEntry);
+  const reasonHint = (readOnly || notWritable) ? descriptorEntry?.reason : undefined;
 
   const selectedValues = useMemo<string[]>(() => {
     const v = value;
@@ -144,12 +153,13 @@ export default function Field({
       <div className="flex items-center gap-1.5">
         <label className="text-sm font-medium text-portal-text-primary">
           {label}
-          {readOnly && <span className="ml-1 text-xs font-normal text-portal-text-secondary">(computed)</span>}
-          {!readOnly && notWritable && <span className="ml-1 text-xs font-normal text-portal-text-secondary">(read-only)</span>}
+          {showAsComputed && <span className="ml-1 text-xs font-normal text-portal-text-secondary">(computed)</span>}
+          {!showAsComputed && notWritable && <span className="ml-1 text-xs font-normal text-portal-text-secondary">(read-only)</span>}
         </label>
         {vocabSource && <VocabularyTooltip name={vocabSource.name} url={vocabSource.url} />}
       </div>
       {control}
+      {reasonHint && <p className="text-xs text-portal-text-secondary">{reasonHint}</p>}
     </div>
   );
 }

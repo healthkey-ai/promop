@@ -20,17 +20,29 @@ export function usePatientInfoMe(apiClient?: AxiosInstance, apiBasePath = "") {
   });
 }
 
-// The set of projection fields the server will actually persist (`editable_fields`), so the editor
-// can keep fields with no write path (email, computed, unmapped, …) non-editable — a user never
-// edits a field that silently would not save. This is the CB integration's OWN writable set, which
-// is narrower than the descriptor's `writable` flag (email is descriptor-writable but deferred
-// here). Null while loading or on failure → the editor does not gate (falls back to letting the
-// server 4xx), so a descriptor outage never locks the whole form.
-export function useWritableFields(apiClient?: AxiosInstance, apiBasePath = ""): Set<string> | null {
-  const { data } = useQuery({
+// One per-field descriptor entry from /patient-info/descriptor/. `reason` explains why a
+// non-editable field cannot be written here (computed / unmapped / set-on-Person / deferred), so the
+// editor can show it inline as "(computed) + reason" instead of a bare read-only box.
+export interface FieldDescriptorEntry {
+  kind?: string;
+  writable?: boolean;
+  reason?: string;
+  value_kind?: string;
+}
+export type FieldDescriptorMap = Record<string, FieldDescriptorEntry>;
+
+interface DescriptorResponse {
+  editable_fields?: string[];
+  descriptor?: FieldDescriptorMap;
+  write_enabled?: boolean;
+}
+
+// Single cached fetch of the descriptor; useWritableFields and usePatientDescriptor both read it.
+function useDescriptorData(apiClient?: AxiosInstance, apiBasePath = "") {
+  return useQuery({
     queryKey: descriptorKey(apiBasePath),
     queryFn: async () => {
-      const resp = await apiClient!.get<{ editable_fields?: string[] }>(
+      const resp = await apiClient!.get<DescriptorResponse>(
         `${apiBasePath}/patient-info/descriptor/`,
       );
       return resp.data;
@@ -38,7 +50,24 @@ export function useWritableFields(apiClient?: AxiosInstance, apiBasePath = ""): 
     enabled: !!apiClient,
     staleTime: Infinity,
   });
+}
+
+// The set of projection fields the server will actually persist (`editable_fields`), so the editor
+// can keep fields with no write path (email, computed, unmapped, …) non-editable — a user never
+// edits a field that silently would not save. This is the CB integration's OWN writable set, which
+// is narrower than the descriptor's `writable` flag (email is descriptor-writable but deferred
+// here). Null while loading or on failure → the editor does not gate (falls back to letting the
+// server 4xx), so a descriptor outage never locks the whole form.
+export function useWritableFields(apiClient?: AxiosInstance, apiBasePath = ""): Set<string> | null {
+  const { data } = useDescriptorData(apiClient, apiBasePath);
   return data?.editable_fields ? new Set(data.editable_fields) : null;
+}
+
+// The full per-field descriptor (kind / writable / reason), for the "(computed) + reason" display of
+// non-editable fields. Null while loading / on failure → the editor renders without the reason hints.
+export function usePatientDescriptor(apiClient?: AxiosInstance, apiBasePath = ""): FieldDescriptorMap | null {
+  const { data } = useDescriptorData(apiClient, apiBasePath);
+  return data?.descriptor ?? null;
 }
 
 export function usePatchPatientInfo(apiClient?: AxiosInstance, apiBasePath = "") {
