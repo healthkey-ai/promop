@@ -7772,6 +7772,44 @@ def field_mapping_list(request):
     return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def propose_all_mappings(request):
+    """Create proposed mappings for currently unmapped fields with a resolvable suggestion.
+
+    Re-running is deliberately safe: a curator's proposed, approved, or rejected
+    mapping is never replaced.  Only the empty state is eligible.
+    """
+    if not getattr(request.user, 'is_staff', False):
+        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    from omop_core.models import Concept, FieldConceptMapping
+    from omop_core.services.field_descriptor import get_all_field_descriptors
+
+    created = []
+    unavailable = []
+    for descriptor in get_all_field_descriptors():
+        if not descriptor['mappable'] or descriptor['mapping'] or not descriptor['suggestion']:
+            continue
+        suggestion = descriptor['suggestion']
+        vocabulary_id = suggestion.get('vocabulary_id')
+        concept_code = suggestion.get('concept_code')
+        concept = Concept.objects.filter(
+            vocabulary_id=vocabulary_id, concept_code=concept_code,
+        ).first()
+        if concept is None:
+            unavailable.append(descriptor['field_name'])
+            continue
+        FieldConceptMapping.objects.create(
+            field_name=descriptor['field_name'], concept=concept,
+            vocabulary_id=vocabulary_id or '', concept_code=concept_code or '',
+            unit=suggestion.get('unit') or '', omop_table=suggestion.get('omop_table') or '',
+            status='proposed', notes='Suggested automatically.',
+        )
+        created.append(descriptor['field_name'])
+    return Response({'created': created, 'unavailable': unavailable})
+
+
 @api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def field_mapping_detail(request, pk):
