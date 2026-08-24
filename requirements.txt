@@ -30,6 +30,8 @@ urllib3==2.2.3
 whitenoise==6.7.0
 django-anymail[mailgun]==12.0
 drf-spectacular==0.28.0
+celery[redis]==5.5.3
+redis==5.2.1
 
 python-fitparse>=2.0.0
 

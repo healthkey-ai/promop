@@ -751,11 +751,63 @@ A client that defers must derive afterwards:
 
 ```
 POST /api/v1/patient-records/{person_id}/refresh/
+  202 {"person_id": 123, "task_id": "..."}
+
+GET /api/v1/derivation-status/{task_id}/
+  200 {"task_id": "...", "state": "PENDING|STARTED|SUCCESS|FAILURE", "error": null}
 ```
 
-Admin or service-token only. It does not swallow a failing derivation, unlike
-the signal path in `omop_core/signals.py`, because a 2xx over a record that did
-not re-derive would be a lie on an endpoint that exists only to derive.
+Both are admin or service-token only.
+
+`202`, not `200`: the derivation is queued on Celery and the record is not
+rebuilt yet when the POST returns. Poll the status endpoint for the outcome.
+`state` is Celery's own, and a derivation that fails reports `FAILURE` with the
+error rather than a success over a stale record — the signal path in
+`omop_core/signals.py` swallows failures, this does not.
+
+Result state lives in the Redis result backend and expires after
+`CELERY_RESULT_EXPIRES` (default 24h). An id past that, or one that was never
+issued, reads as `PENDING`, which is also what Celery reports for an id it has
+never seen.
+
+### Running the derivation
+
+`omop_core/services/derivation_jobs.py` picks how:
+
+| `CELERY_BROKER_URL` | Dispatcher | Behaviour |
+|---|---|---|
+| set | `CeleryDispatcher` | enqueues on transaction commit, worker derives |
+| empty | `InlineDispatcher` | derives in the request, before the `202` |
+
+There is deliberately no separate setting for the choice: a dispatcher that can
+disagree with the broker leaves every job queued with nothing consuming it.
+Inline is what a developer machine with no Redis gets — the wire contract is
+the same, so a client needs one path either way. Inline lets a failing
+derivation propagate instead of recording it, because the caller is still
+holding the request, so an id is only ever issued for a derivation that
+already succeeded. That is why the id itself (`inline-<uuid>`) is the
+completion record: a registry would be process-local, and under several
+gunicorn workers the poll would land on a process that never saw the POST.
+
+Tests swap in `FakeDispatcher` through `use_dispatcher(...)`; nothing needs to
+patch Celery or run it eager.
+
+Run a worker with:
+
+```bash
+celery -A ctomop worker --loglevel=info
+```
+
+The task is idempotent — derivation clears and rebuilds every field — so a
+duplicate call is extra load, not a correctness problem. That is why nothing
+deduplicates, and why `CELERY_TASK_ACKS_LATE` is safe.
+
+`CELERY_BROKER_VISIBILITY_TIMEOUT` (default 1800) must stay above
+`CELERY_TASK_TIME_LIMIT` (default 900) or Redis decides a still-running task
+was lost and hands the same job to a second worker.
+
+Only `refresh/` is async. The signal path and the bulk write still derive
+inline.
 
 ---
 

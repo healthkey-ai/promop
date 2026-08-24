@@ -19029,17 +19029,16 @@ class OmopDeferRefreshTest(TestCase):
         self.assertTrue(refresh.called)
 
     def test_refresh_endpoint_derives_once(self):
-        with patch('patient_portal.api.views.refresh_patient_record') as refresh:
-            # The response reads attributes off the record, and a bare
-            # MagicMock makes the JSON encoder walk it forever.
+        # Patched on the service, which is where the inline dispatcher reads it.
+        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
             refresh.return_value = PatientRecord.objects.get(person=self.person)
             resp = self.client.post(
                 f'/api/v1/patient-records/{self.person.person_id}/refresh/')
 
-        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED, resp.data)
         self.assertEqual(refresh.call_count, 1)
         self.assertEqual(resp.data['person_id'], self.person.person_id)
-        self.assertTrue(resp.data['refreshed'])
+        self.assertTrue(resp.data['task_id'])
 
     def test_refresh_endpoint_reflects_deferred_writes(self):
         # Asserted on a field the measurement actually projects into. A
@@ -19058,7 +19057,7 @@ class OmopDeferRefreshTest(TestCase):
         resp = self.client.post(
             f'/api/v1/patient-records/{self.person.person_id}/refresh/')
 
-        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED, resp.data)
         record.refresh_from_db()
         self.assertEqual(float(record.hemoglobin_g_dl), 42.0,
                          'refresh did not pick up the deferred write')
@@ -19117,7 +19116,9 @@ class OmopDeferRefreshTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_a_failing_derivation_is_reported_not_swallowed(self):
-        with patch('patient_portal.api.views.refresh_patient_record',
+        # Inline only. On the queue the failure surfaces through the status
+        # endpoint instead — see AsyncDerivationTest.
+        with patch('omop_core.services.patient_record_service.refresh_patient_record',
                    side_effect=ValueError('derivation exploded')):
             with self.assertRaises(ValueError):
                 self.client.post(
@@ -19990,3 +19991,128 @@ class TherapyLineAuthoringTest(TestCase):
         }, format='json')
         self.assertEqual(resp.status_code, 400)
         self.assertIn('line_number', str(resp.data))
+
+
+# ---------------------------------------------------------------------------
+# Async derivation — the 202 contract and the status endpoint
+# ---------------------------------------------------------------------------
+
+class AsyncDerivationTest(TestCase):
+    """refresh/ queues, derivation-status/ reports. No broker involved."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.person = Person.objects.create(person_id=32301, year_of_birth=1970)
+        PatientRecord.objects.create(person=cls.person)
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='async-derivation-test',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token='service-token')
+
+    def _status_url(self, task_id: str) -> str:
+        return f'/api/v1/derivation-status/{task_id}/'
+
+    def _patient_client(self) -> APIClient:
+        from patient_portal.models import PatientUser
+
+        identity = Identity.objects.create_user(
+            email=f'async-derivation-{self.id()}@example.test', password='pw')
+        PatientUser.objects.create(identity=identity, person=self.person)
+        client = APIClient()
+        client.force_authenticate(user=identity)
+        return client
+
+    def test_refresh_queues_instead_of_deriving_in_the_request(self):
+        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+
+        fake = FakeDispatcher()
+        with use_dispatcher(fake):
+            resp = self.client.post(
+                f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED, resp.data)
+        self.assertEqual(fake.calls, [self.person.person_id])
+        self.assertEqual(resp.data['task_id'], 'fake-task-1')
+
+    def test_refresh_still_refuses_a_non_admin_before_queueing(self):
+        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+
+        fake = FakeDispatcher()
+        with use_dispatcher(fake):
+            resp = self._patient_client().post(
+                f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(fake.calls, [])
+
+    def test_refresh_404s_for_an_unknown_person_before_queueing(self):
+        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+
+        fake = FakeDispatcher()
+        with use_dispatcher(fake):
+            resp = self.client.post('/api/v1/patient-records/99999999/refresh/')
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(fake.calls, [])
+
+    def test_status_reports_a_finished_derivation(self):
+        from omop_core.services.derivation_jobs import SUCCESS, FakeDispatcher, use_dispatcher
+
+        with use_dispatcher(FakeDispatcher(state=SUCCESS)):
+            resp = self.client.get(self._status_url('some-task'))
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['state'], SUCCESS)
+        self.assertEqual(resp.data['task_id'], 'some-task')
+        self.assertIsNone(resp.data['error'])
+
+    def test_status_reports_a_failure_with_its_error(self):
+        """A failed derivation must not read as a success over a stale record."""
+        from omop_core.services.derivation_jobs import FAILURE, FakeDispatcher, use_dispatcher
+
+        with use_dispatcher(FakeDispatcher(state=FAILURE, error='derivation exploded')):
+            resp = self.client.get(self._status_url('some-task'))
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['state'], FAILURE)
+        self.assertEqual(resp.data['error'], 'derivation exploded')
+
+    def test_status_is_admin_only(self):
+        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+
+        with use_dispatcher(FakeDispatcher()):
+            resp = self._patient_client().get(self._status_url('some-task'))
+
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_status_rejects_an_unauthenticated_caller(self):
+        resp = APIClient().get(self._status_url('some-task'))
+
+        self.assertIn(resp.status_code,
+                      (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_status_is_get_only(self):
+        resp = self.client.post(self._status_url('some-task'))
+
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_a_queued_derivation_is_pollable_end_to_end_inline(self):
+        """The default no-broker path still satisfies the poll-for-outcome contract."""
+        from omop_core.services.derivation_jobs import SUCCESS
+
+        resp = self.client.post(
+            f'/api/v1/patient-records/{self.person.person_id}/refresh/')
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED, resp.data)
+
+        polled = self.client.get(self._status_url(resp.data['task_id']))
+
+        self.assertEqual(polled.status_code, status.HTTP_200_OK, polled.data)
+        self.assertEqual(polled.data['state'], SUCCESS)

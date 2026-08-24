@@ -18,6 +18,49 @@ services:
         fromDatabase:
           name: promop-db
           property: connectionString
+      # Unset, the refresh endpoint derives inline in the request again.
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: promop-redis
+          type: redis
+          property: connectionString
+
+  - type: worker
+    name: promop-worker
+    runtime: python
+    repo: https://github.com/healthkey-ai/promop
+    branch: main
+    autoDeploy: true
+    # No frontend build: the worker serves nothing.
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "celery -A ctomop worker --loglevel=info"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      # Taken from the web service rather than generated: two different keys
+      # would be two different signing secrets for the same data.
+      - key: SECRET_KEY
+        fromService:
+          name: promop
+          type: web
+          envVarKey: SECRET_KEY
+      - key: DEBUG
+        value: False
+      - key: DATABASE_URL
+        fromDatabase:
+          name: promop-db
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: promop-redis
+          type: redis
+          property: connectionString
+
+  - type: redis
+    name: promop-redis
+    plan: starter
+    # Reachable from the other services in this blueprint only.
+    ipAllowList: []
 
 databases:
   - name: promop-db

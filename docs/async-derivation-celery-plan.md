@@ -1,0 +1,131 @@
+# Async PatientRecord Derivation with Celery
+
+## Problem
+
+`POST /api/v1/patient-records/{person_id}/refresh/` derives inline. Cost is
+O(rows the person holds) — 15-25 s on a bulk-loaded patient, and the endpoint's
+25 s `statement_timeout` turns the slowest ones into a 500. A gunicorn worker is
+blocked throughout.
+
+## Design
+
+`refresh/` queues a Celery task and returns `202 {task_id}`. The caller polls
+`GET /api/v1/derivation-status/{task_id}/`, which reports Celery's own task
+state (`PENDING`/`STARTED`/`SUCCESS`/`FAILURE`) and, on failure, the error.
+
+Redis is both broker and result backend. No job table: the task is idempotent —
+derivation clears and rebuilds every field — so a duplicate call is extra load,
+not a correctness problem, and nothing needs deduplicating.
+
+Only `refresh/` changes. The signal path and `_bulk_write` keep deriving inline.
+
+## DI seam
+
+`.delay()` appears only in `omop_core/tasks.py`. The view depends on:
+
+```python
+class DerivationDispatcher(Protocol):
+    def dispatch(self, person: Person) -> str:
+        """Arrange for the derivation to run, return the task id."""
+
+    def status(self, task_id: str) -> DerivationStatus:
+        """Where that derivation got to."""
+```
+
+`status` is on the seam too, otherwise the status view reaches into Celery
+directly and its tests are back to patching Celery internals.
+
+- `CeleryDispatcher` — `.delay()` on commit. Enqueueing inside the transaction
+  lets the worker read uncommitted data.
+- `InlineDispatcher` — derives synchronously. Local dev and CI, where there is
+  no broker.
+- `FakeDispatcher` — records calls, derives nothing. For tests.
+
+`get_dispatcher()` returns Celery when `CELERY_BROKER_URL` is set, Inline
+otherwise. Tests swap it with the `use_dispatcher(fake)` context manager from
+the same module.
+
+## Code changes
+
+| File | Change |
+|---|---|
+| `ctomop/celery.py`, `ctomop/__init__.py` | Celery app + export |
+| `omop_core/tasks.py` | `refresh_patient_record_task(person_id)` |
+| `omop_core/services/derivation_jobs.py` | Protocol, three dispatchers, `get_dispatcher()` |
+| `patient_portal/api/views.py` | `refresh/` → `202 {task_id}` |
+| `patient_portal/api/v1_urls.py` | `GET /derivation-status/{task_id}/` — same auth rule as `refresh/` |
+| `ctomop/settings.py` | Celery block, and the production guard stops demanding `ALLOWED_HOSTS`/`CORS_ALLOWED_ORIGINS` of a worker, which serves no HTTP and otherwise cannot boot |
+
+`202` instead of `200` + `derived_at` is a wire break: staging first,
+healthkey-etl migrates, then production. Update `CLAUDE.md` and `API_SURFACE.md`.
+
+## Config
+
+`celery[redis]` and `redis` in `requirements.txt`.
+
+| Env var | Default | Note |
+|---|---|---|
+| `CELERY_BROKER_URL` | `''` | The switch: empty → inline. Holds Redis auth — Secret Manager, never committed |
+| `CELERY_RESULT_BACKEND` | same Redis | Result TTL bounds how long a caller can poll |
+| `CELERY_WORKER_CONCURRENCY` | `4` | ×instances adds DB connections |
+| `CELERY_WORKER_PREFETCH_MULTIPLIER` | `1` | Default 4 makes one worker hoard slow patients |
+| `CELERY_TASK_TIME_LIMIT` | `900` | |
+| `CELERY_BROKER_VISIBILITY_TIMEOUT` | `1800` | Feeds `broker_transport_options`. Must exceed the time limit or Redis redelivers a running task |
+| `CELERY_RESULT_EXPIRES` | `86400` | After this an id reads `PENDING` again |
+
+## Infrastructure
+
+- **Render**: `type: redis` + `type: worker`, both in `render.yaml`. Fully
+  specified, nothing left to decide.
+- **Cloud Run**: unsettled, and the real work. Memorystore Redis is VPC-only,
+  so web and worker both need Direct VPC egress. The worker cannot be a Cloud
+  Run *service*: a revision only becomes ready once the container listens on
+  `$PORT`, and Celery opens no socket. It needs a worker pool or another
+  background runtime, and `--no-cpu-throttling` either way, since a throttled
+  instance gets no CPU between polls and never consumes. `deploy-staging.yml`
+  has no step for it — add one once the runtime is chosen, or the worker keeps
+  running the image it was created with.
+
+## Testing
+
+- **Task** — call `refresh_patient_record_task` directly, no broker. Patch
+  `omop_core.services.patient_record_service.refresh_patient_record` (callers
+  import it lazily) returning a real `PatientRecord` — a `MagicMock` makes DRF's
+  encoder walk an infinite tree.
+- **API** (fake dispatcher) — `refresh/` returns `202` + a task id and dispatches
+  once; status endpoint reports success and failure; auth matches `refresh/`.
+- **E2E** (`@pytest.mark.e2e`, own CI job with `redis:7-alpine` — the two
+  existing suites already collide on `test_promop_test`) — real worker, POST,
+  poll to `SUCCESS`, `derived_at` advanced.
+
+## Rollout
+
+Deploy Redis and the worker with `CELERY_BROKER_URL` unset on the web service →
+set it on staging → healthkey-etl migrates to polling → production. Rollback is
+unsetting it.
+
+## Follow-ups
+
+Async hides the latency, it doesn't remove it.
+
+- Incremental derivation — one new `Measurement` rebuilds all ~20 sections from
+  full history.
+- Bound `_build_snapshot` — it pulls every measurement and observation the
+  person holds.
+- The signal path and `_bulk_write` still derive inline; move them once this is
+  proven.
+
+## Definition of Done
+
+- [ ] `refresh/` on the heaviest known patient answers in well under a second
+      and never 500s on a slow derivation.
+- [ ] Polling the returned task id reaches `SUCCESS`, and
+      `PatientRecord.derived_at` advanced.
+- [ ] A derivation that fails is reported as `FAILURE` with a readable error,
+      not as a success over a stale record.
+- [ ] healthkey-etl can refresh its whole patient set through the queue with DB
+      connections within cap.
+- [ ] A developer with no Redis running still gets a working refresh.
+- [ ] Both existing backend suites still green.
+- [ ] `CLAUDE.md` and `API_SURFACE.md` describe the `202` contract well enough
+      to write a client against.

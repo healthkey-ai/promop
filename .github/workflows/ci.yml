@@ -71,6 +71,62 @@ jobs:
       - name: Run tests (pytest)
         run: pytest -q
 
+  e2e:
+    name: Async derivation e2e
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: promop_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/promop_test
+      CELERY_BROKER_URL: redis://localhost:6379/0
+      SECRET_KEY: ci-secret-key
+      DEBUG: 'True'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Enable pg_trgm on template1 (required by the pytest suite)
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+
+      # Its own job rather than a step in `backend`: both suites there build a
+      # database called test_promop_test, so a third suite sharing the runner
+      # would collide with whichever is running.
+      - name: Run e2e tests (real broker, real worker)
+        run: pytest -m e2e -q
+
   frontend:
     name: Frontend lint & build
     runs-on: ubuntu-latest
