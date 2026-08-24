@@ -6,7 +6,10 @@ import pytest
 from django.utils import timezone
 
 from omop_core.models import ConceptAncestor
-from omop_core.services.patient_record_service import refresh_patient_record
+from omop_core.services.patient_record_service import (
+    clear_descendant_cache,
+    refresh_patient_record,
+)
 from tests.factories import (
     ConceptFactory,
     ConditionOccurrenceFactory,
@@ -17,6 +20,13 @@ from tests.factories import (
 
 
 pytestmark = pytest.mark.django_db
+
+
+@pytest.fixture(autouse=True)
+def _clear_caches():
+    """Clear the SNOMED descendant cache before each test so factory-created
+    concepts are resolved fresh."""
+    clear_descendant_cache()
 
 
 def _snomed_condition(code: str, name: str, concept_id: int):

@@ -977,6 +977,11 @@ _INACTIVE_CONDITION_STATUS_MARKERS = (
 _DESCENDANT_CACHE: dict[str, set[int] | None] = {}
 
 
+def clear_descendant_cache() -> None:
+    """Clear the SNOMED descendant cache (for tests)."""
+    _DESCENDANT_CACHE.clear()
+
+
 def _active_condition_descendant_ids(root_code: str) -> set[int] | None:
     """Return descendants of a loaded SNOMED condition root, including itself.
 
