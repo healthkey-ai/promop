@@ -9,7 +9,9 @@ from omop_core.management.commands.load_athena_vocabularies import (
     DEFAULT_GDRIVE_URL,
     REQUIRED_CLINICAL_VOCABULARIES,
 )
-from tests.factories import ConceptFactory, VocabularyFactory
+from tests.factories import (
+    ConceptFactory, MeasurementFactory, PersonFactory, VocabularyFactory,
+)
 
 
 pytestmark = pytest.mark.django_db
@@ -72,3 +74,27 @@ def test_required_clinical_vocabulary_verification_fails_for_partial_load():
 
     with pytest.raises(CommandError, match='ICD10CM.*RxNorm.*SNOMED'):
         Command(stdout=StringIO())._verify_required_clinical_vocabularies()
+
+
+def test_replace_removes_stale_concepts_without_removing_patients():
+    """A replacement detaches stale concept links but retains patient rows."""
+    stale = ConceptFactory(concept_id=998_001, concept_code='STALE-998001')
+    person = PersonFactory(gender_concept=stale)
+    measurement = MeasurementFactory(person=person, measurement_concept=stale)
+    cmd = Command(stdout=StringIO())
+    cmd._replace_tracking = True
+    cmd._create_incoming_concept_table()
+    cmd._record_incoming_concept_ids([999_001])
+    cmd._seed_concept_zero()
+
+    cmd._remove_stale_concepts()
+
+    person.refresh_from_db()
+    measurement.refresh_from_db()
+    assert person.gender_concept_id is None
+    assert type(person).objects.filter(person_id=person.person_id).exists()
+    assert measurement.measurement_concept_id == 0
+    assert type(measurement).objects.filter(
+        measurement_id=measurement.measurement_id
+    ).exists()
+    assert not type(stale).objects.filter(concept_id=stale.concept_id).exists()

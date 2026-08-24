@@ -20,8 +20,12 @@ ingests or serves clinical records. Without it, FHIR imports and clinical
 lookups can fail to resolve to OMOP concepts.
 
 The normal load is additive: it inserts missing rows and leaves existing rows
-alone. Do not use `--replace` for a partial-load repair; `--replace` truncates
-`concept` and cascades to clinical tables.
+alone. `--replace` first loads the incoming release, then removes only scoped
+Athena concepts that are absent from that release. Before a stale concept is
+deleted, the loader removes vocabulary graph/support rows that use it and
+clears patient-facing references to it (using `NULL`, or concept `0` for a
+required OMOP field). It retains patients and clinical events, including their
+source values; it never uses `TRUNCATE ... CASCADE`.
 
 ### Option A: use the PRomop Google Drive zip
 
