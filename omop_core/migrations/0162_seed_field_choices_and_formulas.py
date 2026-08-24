@@ -56,13 +56,8 @@ INITIAL_FORMULAS = {
     'no_other_active_malignancies': ('@count(active_malignancies) <= 1', False),
     'no_pre_existing_conditions': ('@count(preexisting_conditions) == 0', False),
     'no_pregnancy_or_lactation_status': ('@not(pregnancy_test_result)', False),
-    'no_mental_health_disorder_status': ('@not(mental_health_disorder_status)', False),
-    'no_concomitant_medication_status': ('@not(concomitant_medication)', False),
-    'no_tobacco_use_status': ('@not(tobacco_use_status)', False),
-    'no_substance_use_status': ('@not(substance_use_status)', False),
-    'no_geographic_exposure_risk': ('@not(geographic_exposure_risk)', False),
     'bmi': ('weight / (height / 100) ^ 2', False),
-    'free_light_chain_ratio': ('kappa_flc / lambda_flc', False),
+    'involved_uninvolved_ratio': ('@max(kappa_flc, lambda_flc) / @min(kappa_flc, lambda_flc)', False),
 }
 
 
@@ -90,7 +85,13 @@ def seed_choices(apps, schema_editor):
 
 def seed_formulas(apps, schema_editor):
     FieldFormula = apps.get_model('omop_core', 'FieldFormula')
+    from omop_core.services.formula_evaluator import validate_formula
     for field_name, (formula, is_active) in INITIAL_FORMULAS.items():
+        result = validate_formula(formula)
+        if not result.valid:
+            raise RuntimeError(
+                f"Refusing to seed invalid formula for {field_name}: {', '.join(result.errors)}"
+            )
         FieldFormula.objects.get_or_create(
             field_name=field_name,
             defaults={'formula': formula, 'is_active': is_active},

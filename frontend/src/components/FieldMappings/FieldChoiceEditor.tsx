@@ -28,12 +28,13 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
   const [loading, setLoading] = useState(true);
   const [newDisplay, setNewDisplay] = useState("");
   const [saving, setSaving] = useState(false);
+  const [reordering, setReordering] = useState(false);
   const [error, setError] = useState("");
 
   const fetchChoices = useCallback(async () => {
     setLoading(true);
     try {
-      const resp = await api.get(`/v1/field-choices/?field_name=${fieldName}`);
+      const resp = await api.get(`/v1/field-choices/?field_name=${encodeURIComponent(fieldName)}`);
       setChoices(resp.data);
     } catch {
       setError("Failed to load choices.");
@@ -78,11 +79,13 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
   };
 
   const handleMoveChoice = async (index: number, direction: "up" | "down") => {
+    if (reordering) return;
     const newIndex = direction === "up" ? index - 1 : index + 1;
     if (newIndex < 0 || newIndex >= choices.length) return;
     const updated = [...choices];
     [updated[index], updated[newIndex]] = [updated[newIndex], updated[index]];
     // Update sort_order for both
+    setReordering(true);
     try {
       await Promise.all([
         api.patch(`/v1/field-choices/${updated[index].id}/`, { sort_order: index }),
@@ -91,6 +94,8 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
       await fetchChoices();
     } catch {
       setError("Failed to reorder.");
+    } finally {
+      setReordering(false);
     }
   };
 

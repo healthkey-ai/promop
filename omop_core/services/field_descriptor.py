@@ -49,7 +49,13 @@ _WEARABLE_METADATA_FIELDS = frozenset({
 # Computed fields (derived from other fields, not directly from OMOP).
 _COMPUTED_FIELDS = frozenset({
     'bmi', 'disease_slug', 'therapy_lines_count',
-    'meets_crab', 'meets_slim',
+    'meets_crab', 'meets_slim', 'involved_uninvolved_ratio',
+    'no_active_infection_status', 'no_hiv_status', 'no_hepatitis_b_status',
+    'no_hepatitis_c_status', 'no_other_active_malignancies',
+    'no_pre_existing_conditions', 'no_pregnancy_or_lactation_status',
+    'no_mental_health_disorder_status', 'no_concomitant_medication_status',
+    'no_tobacco_use_status', 'no_substance_use_status',
+    'no_geographic_exposure_risk',
 })
 
 # Unit-companion fields (always paired with a measurement field).
@@ -133,7 +139,7 @@ _TAB_DISEASE = frozenset({
     'measurable_disease_imwg', 'mrd_status', 'meets_crab', 'meets_slim',
     'stem_cell_transplant_history', 'sct_date', 'sct_eligibility',
     'monoclonal_protein_serum', 'monoclonal_protein_urine',
-    'kappa_flc', 'lambda_flc', 'free_light_chain_ratio',
+    'kappa_flc', 'lambda_flc', 'kappa_lambda_ratio', 'involved_uninvolved_ratio',
     'bone_lesions', 'hypercalcemia', 'renal_impairment', 'anemia',
     'clonal_plasma_cells', 'cytogenetic_risk', 'cytogenetic_abnormalities',
     # CLL

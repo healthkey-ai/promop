@@ -1203,6 +1203,18 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_by', 'created_at']
 
+    def validate_field_name(self, value):
+        from omop_core.models import PatientRecord
+        concrete_names = {
+            f.name for f in PatientRecord._meta.get_fields()
+            if getattr(f, 'concrete', False)
+        }
+        if value not in concrete_names:
+            raise serializers.ValidationError(
+                f"'{value}' is not a concrete PatientRecord field."
+            )
+        return value
+
     def create(self, validated_data):
         codes_data = validated_data.pop('codes', [])
         request = self.context.get('request')
@@ -1260,4 +1272,11 @@ class FieldFormulaSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 f"'{value}' is not a concrete PatientRecord field."
             )
+        return value
+
+    def validate_formula(self, value):
+        from omop_core.services.formula_evaluator import validate_formula
+        result = validate_formula(value)
+        if not result.valid:
+            raise serializers.ValidationError(result.errors)
         return value

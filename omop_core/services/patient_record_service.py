@@ -141,7 +141,8 @@ _OMOP_DERIVED_FIELDS = [
     'beta2_microglobulin', 'c_reactive_protein', 'esr',
     # MM disease burden (LOINC-derived)
     'monoclonal_protein_serum', 'monoclonal_protein_urine',
-    'kappa_flc', 'lambda_flc', 'clonal_plasma_cells', 'free_light_chain_ratio',
+    'kappa_flc', 'lambda_flc', 'clonal_plasma_cells', 'kappa_lambda_ratio',
+    'involved_uninvolved_ratio',
     # MM boolean/coded fields (derived by _get_mm_specific_data)
     'plasma_cell_leukemia', 'bone_lesions', 'meets_crab', 'meets_slim',
     # MM cytogenetics + SCT (derived by _get_sct_cytogenetic_data)
@@ -334,9 +335,9 @@ _LOINC_LAB_FIELDS = {
     '33945-5': ('lambda_flc',                     float),  # seeded demo concept only
     '33944-0': ('lambda_flc',                     float),  # Lambda FLC, Serum (3047169)
     '80516-8': ('lambda_flc',                     float),  # Lambda FLC by nephelometry
-    '48378-4': ('free_light_chain_ratio',         float),  # Kappa/lambda ratio (3053209)
-    '80517-6': ('free_light_chain_ratio',         float),  # ratio by nephelometry
-    '104546-7': ('free_light_chain_ratio',        float),  # ratio, newer LOINC
+    '48378-4': ('kappa_lambda_ratio',             float),  # Kappa/lambda ratio (3053209)
+    '80517-6': ('kappa_lambda_ratio',             float),  # ratio by nephelometry
+    '104546-7': ('kappa_lambda_ratio',            float),  # ratio, newer LOINC
     # '26098-4' is "XR Ankle - left Views" in LOINC, so it used to project ankle
     # radiographs into clonal_plasma_cells. '11118-7' is the real marrow code.
     '11118-7': ('clonal_plasma_cells',            float),  # Plasma cells/100 cells in marrow (3003879)
@@ -345,7 +346,7 @@ _LOINC_LAB_FIELDS = {
 # Keyed by field name not by code, so a new LOINC spelling above feeds both the
 # lab projection and the SLiM criteria.
 _SLIM_FIELDS = frozenset({
-    'clonal_plasma_cells', 'kappa_flc', 'lambda_flc', 'free_light_chain_ratio',
+    'clonal_plasma_cells', 'kappa_flc', 'lambda_flc', 'kappa_lambda_ratio',
 })
 
 # Projected in mg/L when the source unit says which unit it is in.
@@ -457,7 +458,7 @@ _SOURCE_VALUE_LAB_FIELDS = {
     'Kappa free light chains':                    'kappa_flc',
     'Lambda free light chains':                   'lambda_flc',
     'Clonal plasma cells in bone marrow (%)':     'clonal_plasma_cells',
-    'Free light chain ratio':                     'free_light_chain_ratio',
+    'Free light chain ratio':                     'kappa_lambda_ratio',
 }
 
 # Bounds the SLiM query. Without it the criteria walk every Measurement a person
@@ -2743,7 +2744,7 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
     plasma_pcts = [v for v, _unit in slim_vals.get('clonal_plasma_cells', [])]
     kappas = slim_vals.get('kappa_flc', [])
     lambdas = slim_vals.get('lambda_flc', [])
-    ratios = [v for v, _unit in slim_vals.get('free_light_chain_ratio', [])]
+    ratios = [v for v, _unit in slim_vals.get('kappa_lambda_ratio', [])]
 
     meets_slim = False
     # Sixty criterion: any plasma cells measurement ≥60%
@@ -3375,6 +3376,11 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
     urine_mp = patient_info.monoclonal_protein_urine
     kappa = patient_info.kappa_flc
     lam = patient_info.lambda_flc
+
+    if kappa is not None and lam is not None and min(kappa, lam) > 0:
+        patient_info.involved_uninvolved_ratio = max(kappa, lam) / min(kappa, lam)
+    else:
+        patient_info.involved_uninvolved_ratio = None
 
     imwg = None
     if serum_mp is not None and float(serum_mp) >= 0.5:

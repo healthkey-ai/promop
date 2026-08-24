@@ -984,9 +984,9 @@ kappa_flc                          36916-5    mg/dL           Kappa light chains
 kappa_flc                          80515-0    mg/dL           Kappa light chains.free [Mass/volume] in Serum by nephelometry
 lambda_flc                         33944-0    mg/dL           Lambda light chains.free [Mass/volume] in Serum
 lambda_flc                         80516-8    mg/dL           Lambda light chains.free [Mass/volume] in Serum by nephelometry
-free_light_chain_ratio             48378-4    {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
-free_light_chain_ratio             80517-6    {ratio}         Kappa/Lambda light chains.free ratio by nephelometry
-free_light_chain_ratio             104546-7   {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
+kappa_lambda_ratio                 48378-4    {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
+kappa_lambda_ratio                 80517-6    {ratio}         Kappa/Lambda light chains.free ratio by nephelometry
+kappa_lambda_ratio                 104546-7   {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
 clonal_plasma_cells                11118-7    %               Plasma cells/100 cells in Bone marrow
 
 # 33944-8 (kappa) and 33945-5 (lambda) also project, but they are NOT real LOINC

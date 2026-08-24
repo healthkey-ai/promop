@@ -215,7 +215,7 @@ _COMPUTED_INPUTS = {
         'estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status',
     ],
     'tp53_disruption': ['genetic_mutations'],
-    'free_light_chain_ratio': ['kappa_flc', 'lambda_flc'],
+    'involved_uninvolved_ratio': ['kappa_flc', 'lambda_flc'],
     'molecular_markers': ['genetic_mutations'],
     'liver_enzyme_levels': [
         'liver_enzyme_levels_ast', 'liver_enzyme_levels_alt',

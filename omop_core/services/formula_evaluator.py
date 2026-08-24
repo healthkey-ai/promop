@@ -112,5 +112,9 @@ def validate_formula(formula: str) -> ValidationResult:
                     pass  # Already validated above.
                 else:
                     errors.append(f'Direct function calls not allowed: {func_name}()')
+            else:
+                errors.append(
+                    f'Only @-function calls are allowed, not {type(node.func).__name__}'
+                )
 
     return ValidationResult(valid=len(errors) == 0, errors=errors)

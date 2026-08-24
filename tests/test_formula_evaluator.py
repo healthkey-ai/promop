@@ -27,8 +27,8 @@ def test_valid_arithmetic_formula():
 
 
 def test_valid_division_formula():
-    """Division of two fields is valid."""
-    result = validate_formula('kappa_flc / lambda_flc')
+    """The involved/uninvolved formula is valid."""
+    result = validate_formula('@max(kappa_flc, lambda_flc) / @min(kappa_flc, lambda_flc)')
     assert result.valid, f"Expected valid but got errors: {result.errors}"
 
 

@@ -2113,6 +2113,10 @@ class PatientRecord(models.Model):
     karnofsky_performance_score = models.IntegerField(blank=True, null=True, default=100)
     ecog_performance_status = models.IntegerField(blank=True, null=True)
     no_other_active_malignancies = models.BooleanField(blank=False, null=False, default=True)
+    active_malignancies = models.JSONField(
+        blank=True, null=True, default=list,
+        help_text="List of currently active malignancies",
+    )
     no_pre_existing_conditions = models.BooleanField(blank=True, null=True)
     preexisting_conditions = models.JSONField(blank=True, null=True, default=list, help_text="List of pre-existing condition categories from PreExistingConditionCategory vocabulary")
     peripheral_neuropathy_grade = models.IntegerField(blank=True, null=True)
@@ -2396,7 +2400,8 @@ class PatientRecord(models.Model):
     lambda_flc = models.DecimalField(decimal_places=2, max_digits=10, blank=True, null=True, help_text="Serum free lambda light chains")
     # Normal is ~0.26-1.65 and the SLiM threshold is >= 100, so both ends of the
     # range need decimals.
-    free_light_chain_ratio = models.DecimalField(decimal_places=3, max_digits=12, blank=True, null=True, help_text="Serum free light chain ratio (kappa/lambda)")
+    kappa_lambda_ratio = models.DecimalField(decimal_places=3, max_digits=12, blank=True, null=True, help_text="Measured serum kappa/lambda ratio")
+    involved_uninvolved_ratio = models.DecimalField(decimal_places=3, max_digits=12, blank=True, null=True, help_text="Computed involved/uninvolved free light chain ratio")
     meets_slim = models.BooleanField(blank=True, null=True)
 
     # Legacy blood work fields
@@ -2480,6 +2485,7 @@ class PatientRecord(models.Model):
     no_hepatitis_b_status = models.BooleanField(help_text="Does the patient has had Hepatitis B (HBV)?", blank=False, null=False, default=True)
     no_hepatitis_c_status = models.BooleanField(help_text="Does the patient has had Hepatitis C (HCV)?", blank=False, null=False, default=True)
     no_active_infection_status = models.BooleanField(help_text="Does the patient has any active infection?", blank=False, null=False, default=True)
+    active_infection_status = models.BooleanField(blank=True, null=True)
 
     concomitant_medications = models.TextField(blank=True, null=True)
     concomitant_medication_date = models.DateField(blank=True, null=True)

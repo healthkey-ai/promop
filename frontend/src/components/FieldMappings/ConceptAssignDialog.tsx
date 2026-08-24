@@ -22,20 +22,33 @@ interface Props {
   initialUnit?: string;
   initialOmopTable?: string;
   existingMappingId?: number;
+  initialConceptId?: number | null;
+  initialStatus?: string;
   initialNotes?: string;
 }
 
 export function ConceptAssignDialog({
   fieldName, fieldType, onClose, onSaved,
   initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
-  existingMappingId, initialNotes,
+  existingMappingId, initialConceptId, initialStatus, initialNotes,
 }: Props) {
   const isEditing = !!existingMappingId;
   const [searchQuery, setSearchQuery] = useState(initialConceptCode || "");
   const [vocabFilter, setVocabFilter] = useState(initialVocabularyId || "");
   const [results, setResults] = useState<ConceptResult[]>([]);
   const [searching, setSearching] = useState(false);
-  const [selected, setSelected] = useState<ConceptResult | null>(null);
+  const [selected, setSelected] = useState<ConceptResult | null>(() => (
+    initialConceptId != null
+      ? {
+          concept_id: initialConceptId,
+          concept_code: initialConceptCode || "",
+          concept_name: "",
+          vocabulary_id: initialVocabularyId || "",
+          domain_id: "",
+          standard_concept: null,
+        }
+      : null
+  ));
   const [unit, setUnit] = useState(initialUnit || "");
   const [omopTable, setOmopTable] = useState(initialOmopTable || "Measurement");
   const [notes, setNotes] = useState(initialNotes || "");
@@ -85,7 +98,7 @@ export function ConceptAssignDialog({
         unit,
         omop_table: omopTable,
         notes,
-        status: "proposed",
+        status: isEditing ? (initialStatus || "proposed") : "proposed",
       };
       if (isEditing) {
         await api.patch(`/v1/field-mappings/${existingMappingId}/`, payload);

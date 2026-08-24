@@ -383,6 +383,7 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Edit Concept Mapping")).toBeInTheDocument();
     });
+    expect(screen.getByRole("button", { name: "Update Mapping" })).toBeEnabled();
   });
 
   // ── Phase 1c tests: click-to-map UX ──

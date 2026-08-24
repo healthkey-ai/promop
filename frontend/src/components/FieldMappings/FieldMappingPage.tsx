@@ -689,6 +689,8 @@ export default function FieldMappingPage() {
           initialUnit={selectedField.mapping?.unit || (selectedField.suggestion?.unit ?? undefined)}
           initialOmopTable={selectedField.locked_table || selectedField.mapping?.omop_table || selectedField.suggestion?.omop_table || undefined}
           existingMappingId={selectedField.mapping?.id}
+          initialConceptId={selectedField.mapping?.concept_id}
+          initialStatus={selectedField.mapping?.status}
           initialNotes={selectedField.mapping?.notes}
           onClose={() => {
             setDialogOpen(false);

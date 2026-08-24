@@ -6,7 +6,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
 from rest_framework.throttling import ScopedRateThrottle
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
@@ -6897,6 +6897,20 @@ def _paginated_concept_response(queryset, request):
     return _set_release_etag(request, response)
 
 
+_LOINC_TO_UNIT: dict[str, str] | None = None
+
+
+def _get_loinc_to_unit() -> dict[str, str]:
+    """Lazily build LOINC-code → unit mapping from LAB_FIELD_TO_LOINC."""
+    global _LOINC_TO_UNIT
+    if _LOINC_TO_UNIT is None:
+        from omop_core.services.mappings import LAB_FIELD_TO_LOINC
+        _LOINC_TO_UNIT = {
+            code: unit for code, unit, _display in LAB_FIELD_TO_LOINC.values() if unit
+        }
+    return _LOINC_TO_UNIT
+
+
 @api_view(['GET'])
 @permission_classes([ScopedTokenPermission])
 def concept_search(request):
@@ -6929,11 +6943,9 @@ def concept_search(request):
     )
     # Annotate LOINC results with suggested units from LAB_FIELD_TO_LOINC.
     response = _paginated_concept_response(queryset, request)
-    from omop_core.services.mappings import LAB_FIELD_TO_LOINC
-    loinc_to_unit = {code: unit for code, unit, _display in LAB_FIELD_TO_LOINC.values() if unit}
     for item in response.data.get('results', []):
         if item.get('vocabulary_id') == 'LOINC':
-            item['suggested_unit'] = loinc_to_unit.get(item.get('concept_code'), '')
+            item['suggested_unit'] = _get_loinc_to_unit().get(item.get('concept_code'), '')
     return response
 
 
@@ -7925,11 +7937,9 @@ def field_synonyms_batch(request):
 # =============================================================================
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminUser])
 def field_choice_list(request):
     """GET: list all field choices (optionally filter by ?field_name=).  POST: create."""
-    if not getattr(request.user, 'is_staff', False):
-        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldChoice
     from .serializers import FieldChoiceSerializer
@@ -7948,11 +7958,9 @@ def field_choice_list(request):
 
 
 @api_view(['GET', 'PATCH', 'DELETE'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminUser])
 def field_choice_detail(request, pk):
     """GET/PATCH/DELETE a single FieldChoice."""
-    if not getattr(request.user, 'is_staff', False):
-        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldChoice
     from .serializers import FieldChoiceSerializer
@@ -7977,11 +7985,9 @@ def field_choice_detail(request, pk):
 
 
 @api_view(['POST', 'DELETE'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminUser])
 def field_choice_codes(request, choice_pk):
     """POST: add a code to a choice.  DELETE: remove all codes (use detail for single)."""
-    if not getattr(request.user, 'is_staff', False):
-        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldChoice, FieldChoiceCode
     from .serializers import FieldChoiceCodeSerializer
@@ -8006,11 +8012,9 @@ def field_choice_codes(request, choice_pk):
 # =============================================================================
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminUser])
 def field_formula_list(request):
     """GET: list all formulas.  POST: create."""
-    if not getattr(request.user, 'is_staff', False):
-        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldFormula
     from .serializers import FieldFormulaSerializer
@@ -8025,11 +8029,9 @@ def field_formula_list(request):
 
 
 @api_view(['GET', 'PATCH', 'DELETE'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminUser])
 def field_formula_detail(request, pk):
     """GET/PATCH/DELETE a single FieldFormula."""
-    if not getattr(request.user, 'is_staff', False):
-        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldFormula
     from .serializers import FieldFormulaSerializer

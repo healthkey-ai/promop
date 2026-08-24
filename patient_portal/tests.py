@@ -20068,3 +20068,174 @@ class WritableFieldsPerCallerTest(TestCase):
         client.force_authenticate(user=self.staff)
         resp = client.get('/api/v1/patient-records/writable-fields/?person_id=abc')
         self.assertEqual(resp.status_code, 400)
+# =============================================================================
+# Field Choices API tests
+# =============================================================================
+
+class FieldChoiceAPITest(TestCase):
+    """CRUD tests for the /v1/field-choices/ endpoints."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = Identity.objects.create_user(
+            email='fc_staff@test.com', password='pw', is_staff=True,
+        )
+        cls.non_staff = Identity.objects.create_user(
+            email='fc_user@test.com', password='pw',
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.staff)
+
+    def test_non_staff_rejected(self):
+        self.client.force_authenticate(user=self.non_staff)
+        resp = self.client.get('/api/v1/field-choices/')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_unauthenticated_rejected(self):
+        self.client.force_authenticate(user=None)
+        resp = self.client.get('/api/v1/field-choices/')
+        self.assertIn(resp.status_code, (401, 403))
+
+    def test_create_and_list(self):
+        resp = self.client.post('/api/v1/field-choices/', {
+            'field_name': 'disease',
+            'display': 'Test Disease',
+            'sort_order': 0,
+            'codes': [{'code': '12345', 'vocabulary_id': 'SNOMED', 'is_primary': True}],
+        }, format='json')
+        self.assertEqual(resp.status_code, 201)
+        choice_id = resp.data['id']
+
+        resp = self.client.get('/api/v1/field-choices/?field_name=disease')
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(any(c['id'] == choice_id for c in resp.data))
+
+    def test_patch_choice(self):
+        resp = self.client.post('/api/v1/field-choices/', {
+            'field_name': 'disease',
+            'display': 'Original',
+            'sort_order': 0,
+        }, format='json')
+        pk = resp.data['id']
+
+        resp = self.client.patch(f'/api/v1/field-choices/{pk}/', {
+            'display': 'Updated',
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['display'], 'Updated')
+
+    def test_delete_choice(self):
+        resp = self.client.post('/api/v1/field-choices/', {
+            'field_name': 'disease',
+            'display': 'To Delete',
+            'sort_order': 0,
+        }, format='json')
+        pk = resp.data['id']
+
+        resp = self.client.delete(f'/api/v1/field-choices/{pk}/')
+        self.assertEqual(resp.status_code, 204)
+
+    def test_invalid_field_name_rejected(self):
+        resp = self.client.post('/api/v1/field-choices/', {
+            'field_name': 'nonexistent_field_xyz',
+            'display': 'Bad',
+            'sort_order': 0,
+        }, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_add_code_to_choice(self):
+        resp = self.client.post('/api/v1/field-choices/', {
+            'field_name': 'disease',
+            'display': 'With Code',
+            'sort_order': 0,
+        }, format='json')
+        pk = resp.data['id']
+
+        resp = self.client.post(f'/api/v1/field-choices/{pk}/codes/', {
+            'code': '99999',
+            'vocabulary_id': 'SNOMED',
+            'is_primary': True,
+        }, format='json')
+        self.assertEqual(resp.status_code, 201)
+
+
+# =============================================================================
+# Field Formula API tests
+# =============================================================================
+
+class FieldFormulaAPITest(TestCase):
+    """CRUD tests for the /v1/field-formulas/ endpoints."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = Identity.objects.create_user(
+            email='ff_staff@test.com', password='pw', is_staff=True,
+        )
+        cls.non_staff = Identity.objects.create_user(
+            email='ff_user@test.com', password='pw',
+        )
+
+    def setUp(self):
+        from omop_core.models import FieldFormula
+        FieldFormula.objects.all().delete()
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.staff)
+
+    def test_non_staff_rejected(self):
+        self.client.force_authenticate(user=self.non_staff)
+        resp = self.client.get('/api/v1/field-formulas/')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_create_valid_formula(self):
+        resp = self.client.post('/api/v1/field-formulas/', {
+            'field_name': 'bmi',
+            'formula': 'weight / (height / 100) ** 2',
+            'is_active': False,
+        }, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['field_name'], 'bmi')
+
+    def test_invalid_formula_rejected(self):
+        resp = self.client.post('/api/v1/field-formulas/', {
+            'field_name': 'bmi',
+            'formula': '@eval(something_bad)',
+            'is_active': False,
+        }, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_invalid_field_name_rejected(self):
+        resp = self.client.post('/api/v1/field-formulas/', {
+            'field_name': 'totally_fake_field',
+            'formula': '42',
+            'is_active': False,
+        }, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_patch_formula(self):
+        resp = self.client.post('/api/v1/field-formulas/', {
+            'field_name': 'involved_uninvolved_ratio',
+            'formula': '@max(kappa_flc, lambda_flc) / @min(kappa_flc, lambda_flc)',
+            'is_active': False,
+        }, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        pk = resp.data['id']
+
+        resp = self.client.patch(f'/api/v1/field-formulas/{pk}/', {
+            'is_active': True,
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data['is_active'])
+
+    def test_delete_formula(self):
+        resp = self.client.post('/api/v1/field-formulas/', {
+            'field_name': 'no_hiv_status',
+            'formula': '@not(hiv_status)',
+            'is_active': False,
+        }, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        pk = resp.data['id']
+
+        resp = self.client.delete(f'/api/v1/field-formulas/{pk}/')
+        self.assertEqual(resp.status_code, 204)

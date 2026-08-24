@@ -11,7 +11,7 @@ interface Props {
 
 export function FormulaEditDialog({ fieldName, fieldType, existingFormula, onClose }: Props) {
   const [expression, setExpression] = useState(existingFormula?.expression || "");
-  const [isActive, setIsActive] = useState(existingFormula?.is_active || false);
+  const [isActive, setIsActive] = useState(existingFormula?.is_active ?? false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
