@@ -18,12 +18,12 @@ services:
         fromDatabase:
           name: promop-db
           property: connectionString
-      # Unset, the refresh endpoint derives inline in the request again.
+      # Deliberately dashboard-managed, not wired from the blueprint. Setting
+      # it here would make production the first place the queued path ever
+      # runs. Paste the redis connection string in once the path has been
+      # exercised somewhere else; clearing it is the rollback.
       - key: CELERY_BROKER_URL
-        fromService:
-          name: promop-redis
-          type: redis
-          property: connectionString
+        sync: false
 
   - type: worker
     name: promop-worker

@@ -100,9 +100,22 @@ healthkey-etl migrates, then production. Update `CLAUDE.md` and `API_SURFACE.md`
 
 ## Rollout
 
-Deploy Redis and the worker with `CELERY_BROKER_URL` unset on the web service →
-set it on staging → healthkey-etl migrates to polling → production. Rollback is
-unsetting it.
+The queued path has to run somewhere before it runs in production, and staging
+is Cloud Run, which has no worker runtime yet. So the order is:
+
+1. Merge. Nothing changes anywhere: no broker is set, so every deployment keeps
+   deriving inline.
+2. Settle the Cloud Run worker runtime (see Infrastructure), deploy Memorystore
+   and a worker there, set `CELERY_BROKER_URL` on staging's web service.
+3. Exercise it on staging: refresh the heaviest patient, poll to `SUCCESS`,
+   force a failure and confirm it reports `FAILURE`.
+4. healthkey-etl migrates from the `200` to polling the `202`.
+5. Production: the Render blueprint already provisions Redis and the worker,
+   but leaves `CELERY_BROKER_URL` unset on the web service on purpose — setting
+   it in the dashboard is the flip, and clearing it is the rollback.
+
+Until step 5 the web service still derives inline, so a rollback costs one
+environment variable and no deploy.
 
 ## Follow-ups
 
