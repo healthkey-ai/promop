@@ -693,6 +693,7 @@ export default function FieldMappingPage() {
           existingMappingId={selectedField.mapping?.id}
           initialConceptId={selectedField.mapping?.concept_id}
           initialConceptName={selectedField.mapping?.concept_name}
+          initialStatus={selectedField.mapping?.status as "proposed" | "approved" | "rejected" | undefined}
           initialNotes={selectedField.mapping?.notes}
           commonUnits={selectedField.suggestion?.common_units}
           choices={selectedField.choices}
