@@ -2114,7 +2114,7 @@ class PatientRecord(models.Model):
     ecog_performance_status = models.IntegerField(blank=True, null=True)
     no_other_active_malignancies = models.BooleanField(blank=True, null=True, default=None)
     active_malignancies = models.JSONField(
-        blank=True, null=True, default=list,
+        blank=True, null=True, default=None,
         help_text="List of currently active malignancies",
     )
     no_pre_existing_conditions = models.BooleanField(blank=True, null=True)

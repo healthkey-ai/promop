@@ -90,6 +90,68 @@ LAB_FIELD_ALIAS_TO_CANONICAL = {
     'ldh':                  'ldh_u_l',
 }
 
+# Common unit options for fields where multiple units are used in US clinical
+# practice. The first entry is the US default. Used by the mapping UI to
+# render a unit dropdown.
+FIELD_COMMON_UNITS: dict[str, list[str]] = {
+    # Blood counts
+    'hemoglobin_g_dl':                ['g/dL', 'g/L', 'mmol/L'],
+    'hematocrit_percent':             ['%'],
+    'wbc_count_thousand_per_ul':      ['10*3/uL', '10*9/L'],
+    'rbc_million_per_ul':             ['10*6/uL', '10*12/L'],
+    'platelet_count_thousand_per_ul': ['10*3/uL', '10*9/L'],
+    'anc_thousand_per_ul':            ['10*3/uL', '10*9/L'],
+    'alc_thousand_per_ul':            ['10*3/uL', '10*9/L'],
+    'amc_thousand_per_ul':            ['10*3/uL', '10*9/L'],
+    # Kidney / electrolytes
+    'serum_creatinine_mg_dl':         ['mg/dL', 'umol/L'],
+    'serum_calcium_mg_dl':            ['mg/dL', 'mmol/L'],
+    'egfr_ml_min_173m2':              ['mL/min/1.73m2'],
+    'bun_mg_dl':                      ['mg/dL', 'mmol/L'],
+    'sodium_meq_l':                   ['mEq/L', 'mmol/L'],
+    'potassium_meq_l':                ['mEq/L', 'mmol/L'],
+    'magnesium_mg_dl':                ['mg/dL', 'mmol/L', 'mEq/L'],
+    'phosphorus':                     ['mg/dL', 'mmol/L'],
+    # Liver function
+    'bilirubin_total_mg_dl':          ['mg/dL', 'umol/L'],
+    'serum_bilirubin_level_direct':   ['mg/dL', 'umol/L'],
+    'alt_u_l':                        ['U/L'],
+    'ast_u_l':                        ['U/L'],
+    'alkaline_phosphatase_u_l':       ['U/L'],
+    'albumin_g_dl':                   ['g/dL', 'g/L'],
+    'total_protein':                  ['g/dL', 'g/L'],
+    'troponin_ng_ml':                 ['ng/mL', 'ng/L', 'pg/mL'],
+    'bnp_pg_ml':                      ['pg/mL', 'ng/L'],
+    'glucose_mg_dl':                  ['mg/dL', 'mmol/L'],
+    'hba1c_percent':                  ['%', 'mmol/mol'],
+    'inr':                            ['{INR}'],
+    'pt_seconds':                     ['s'],
+    'ptt_seconds':                    ['s'],
+    'cea_ng_ml':                      ['ng/mL', 'ug/L'],
+    'ca19_9_u_ml':                    ['U/mL', 'kU/L'],
+    'psa_ng_ml':                      ['ng/mL', 'ug/L'],
+    # Oncology markers
+    'ldh_u_l':                        ['U/L'],
+    'beta2_microglobulin':            ['mg/L', 'nmol/L'],
+    'c_reactive_protein':             ['mg/L', 'mg/dL'],
+    'esr':                            ['mm/h'],
+    'ki67_proliferation_index':       ['%'],
+    # Myeloma markers
+    'monoclonal_protein_serum':       ['g/dL', 'g/L'],
+    'monoclonal_protein_urine':      ['mg/24h', 'mg/day'],
+    'kappa_flc':                      ['mg/L', 'mg/dL'],
+    'lambda_flc':                     ['mg/L', 'mg/dL'],
+    # Vital signs
+    'weight':                         ['kg', 'lbs'],
+    'height':                         ['cm', 'in'],
+    'systolic_blood_pressure':        ['mm[Hg]'],
+    'diastolic_blood_pressure':       ['mm[Hg]'],
+    'heartrate':                      ['/min'],
+    # Performance status
+    'ecog_performance_status':        ['{score}'],
+    'karnofsky_performance_score':    ['{score}'],
+}
+
 CONDITION_FIELDS = frozenset({'disease', 'stage', 'condition_code_icd_10', 'condition_code_snomed_ct'})
 
 # Fields that trigger _sync_demographics. Note that it only writes gender and

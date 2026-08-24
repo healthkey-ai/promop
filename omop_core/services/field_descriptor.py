@@ -13,6 +13,7 @@ from omop_core.services.mappings import (
     DEMOGRAPHIC_FIELDS,
     THERAPY_LINE_FIELDS,
     DERIVED_FIELD_TO_CODE,
+    FIELD_COMMON_UNITS,
 )
 from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
@@ -302,6 +303,8 @@ def _get_locked_table(category: str) -> str | None:
 
 def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
     """Build auto-suggestion from LAB_FIELD_TO_LOINC, DERIVED_FIELD_TO_CODE, or provenance."""
+    common_units = FIELD_COMMON_UNITS.get(name, [])
+
     if name in LAB_FIELD_TO_LOINC:
         code, unit, display = LAB_FIELD_TO_LOINC[name]
         return {
@@ -309,6 +312,7 @@ def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
             'vocabulary_id': 'LOINC',
             'unit': unit,
             'omop_table': 'Measurement',
+            'common_units': common_units,
         }
 
     if name in DERIVED_FIELD_TO_CODE:
@@ -319,6 +323,7 @@ def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
             'vocabulary_id': vocab,
             'unit': None,
             'omop_table': omop_table,
+            'common_units': common_units,
         }
 
     if prov_dict and prov_dict.get('concept_codes'):
@@ -329,6 +334,7 @@ def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
             'vocabulary_id': strategy.upper() if strategy in ('loinc', 'snomed') else None,
             'unit': None,
             'omop_table': prov_dict.get('omop_table', ''),
+            'common_units': common_units,
         }
 
     return None

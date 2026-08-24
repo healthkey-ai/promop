@@ -44,6 +44,8 @@ export function DerivationInfoDialog({ fieldName, provenance, onClose }: Props) 
               <dd>{provenance.omop_table}</dd>
               <dt className="text-gray-500">Concept hierarchy</dt>
               <dd>{provenance.concept_codes?.length ? provenance.concept_codes.join(", ") : "None"}</dd>
+              <dt className="text-gray-500">Source values</dt>
+              <dd>{provenance.source_values?.length ? provenance.source_values.join(", ") : "None"}</dd>
               <dt className="text-gray-500">Lookup</dt>
               <dd>{provenance.lookup_strategy}</dd>
               <dt className="text-gray-500">Selection rule</dt>

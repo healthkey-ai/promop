@@ -1,3 +1,4 @@
+import functools
 from typing import Any, Callable, ContextManager
 
 from rest_framework import viewsets, status
@@ -6897,18 +6898,13 @@ def _paginated_concept_response(queryset, request):
     return _set_release_etag(request, response)
 
 
-_LOINC_TO_UNIT: dict[str, str] | None = None
-
-
+@functools.lru_cache(maxsize=1)
 def _get_loinc_to_unit() -> dict[str, str]:
     """Lazily build LOINC-code → unit mapping from LAB_FIELD_TO_LOINC."""
-    global _LOINC_TO_UNIT
-    if _LOINC_TO_UNIT is None:
-        from omop_core.services.mappings import LAB_FIELD_TO_LOINC
-        _LOINC_TO_UNIT = {
-            code: unit for code, unit, _display in LAB_FIELD_TO_LOINC.values() if unit
-        }
-    return _LOINC_TO_UNIT
+    from omop_core.services.mappings import LAB_FIELD_TO_LOINC
+    return {
+        code: unit for code, unit, _display in LAB_FIELD_TO_LOINC.values() if unit
+    }
 
 
 @api_view(['GET'])

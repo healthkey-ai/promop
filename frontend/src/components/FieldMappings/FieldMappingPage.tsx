@@ -39,6 +39,7 @@ interface FieldDescriptor {
     vocabulary_id: string | null;
     unit: string | null;
     omop_table: string;
+    common_units: string[];
   } | null;
   mappable: boolean;
   locked_table: string | null;
@@ -237,8 +238,9 @@ export default function FieldMappingPage() {
         // Approve existing proposed mapping (already has a resolved concept).
         if (field.mapping.status === "proposed") {
           await api.patch(`/v1/field-mappings/${field.mapping.id}/`, { status: "approved" });
+          fetchDescriptors();
         }
-        fetchDescriptors();
+        // Already approved — no-op (no refetch needed).
       } else if (field.suggestion) {
         // Suggestion has no resolved concept FK — open the dialog so the user
         // can search, select a concept, and create a complete mapping.
@@ -702,6 +704,7 @@ export default function FieldMappingPage() {
           existingMappingId={selectedField.mapping?.id}
           initialConceptId={selectedField.mapping?.concept_id}
           initialNotes={selectedField.mapping?.notes}
+          commonUnits={selectedField.suggestion?.common_units}
           onClose={() => {
             setDialogOpen(false);
             setSelectedField(null);

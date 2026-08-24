@@ -24,12 +24,13 @@ interface Props {
   existingMappingId?: number;
   initialConceptId?: number | null;
   initialNotes?: string;
+  commonUnits?: string[];
 }
 
 export function ConceptAssignDialog({
   fieldName, fieldType, onClose, onSaved,
   initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
-  existingMappingId, initialConceptId, initialNotes,
+  existingMappingId, initialConceptId, initialNotes, commonUnits,
 }: Props) {
   const isEditing = !!existingMappingId;
   const [searchQuery, setSearchQuery] = useState(initialConceptCode || "");
@@ -49,12 +50,17 @@ export function ConceptAssignDialog({
       : null
   ));
   const [unit, setUnit] = useState(initialUnit || "");
+  const [customUnit, setCustomUnit] = useState("");
   const [omopTable, setOmopTable] = useState(initialOmopTable || "Measurement");
   const [notes, setNotes] = useState(initialNotes || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
+
+  const hasCommonUnits = commonUnits && commonUnits.length > 0;
+  // Track whether user selected "other" in the dropdown
+  const isCustomUnit = hasCommonUnits && unit !== "" && !commonUnits.includes(unit);
 
   const doSearch = useCallback(async (q: string) => {
     if (q.length < 3) {
@@ -84,6 +90,8 @@ export function ConceptAssignDialog({
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [searchQuery, doSearch]);
 
+  const effectiveUnit = isCustomUnit ? customUnit || unit : unit;
+
   const handleSubmit = async () => {
     if (!selected) return;
     setSaving(true);
@@ -94,7 +102,7 @@ export function ConceptAssignDialog({
         concept: selected.concept_id,
         vocabulary_id: selected.vocabulary_id,
         concept_code: selected.concept_code,
-        unit,
+        unit: effectiveUnit,
         omop_table: omopTable,
         notes,
         status: "approved",
@@ -126,6 +134,16 @@ export function ConceptAssignDialog({
   // Close on overlay click
   const handleOverlayClick = (e: React.MouseEvent) => {
     if (e.target === overlayRef.current) onClose();
+  };
+
+  const handleUnitDropdownChange = (value: string) => {
+    if (value === "__custom__") {
+      setCustomUnit(unit);
+      setUnit(value);
+    } else {
+      setUnit(value);
+      setCustomUnit("");
+    }
   };
 
   return (
@@ -238,13 +256,38 @@ export function ConceptAssignDialog({
                 <span className="ml-1 text-[10px] font-normal text-gray-400">(suggested)</span>
               )}
             </label>
-            <input
-              type="text"
-              value={unit}
-              onChange={(e) => setUnit(e.target.value)}
-              placeholder="e.g. mg/dL"
-              className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
-            />
+            {hasCommonUnits ? (
+              <div className="space-y-1.5">
+                <select
+                  value={isCustomUnit ? "__custom__" : unit}
+                  onChange={(e) => handleUnitDropdownChange(e.target.value)}
+                  className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
+                >
+                  <option value="">Select unit...</option>
+                  {commonUnits.map((u) => (
+                    <option key={u} value={u}>{u}</option>
+                  ))}
+                  <option value="__custom__">Other...</option>
+                </select>
+                {isCustomUnit && (
+                  <input
+                    type="text"
+                    value={customUnit}
+                    onChange={(e) => setCustomUnit(e.target.value)}
+                    placeholder="Enter custom unit..."
+                    className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
+                  />
+                )}
+              </div>
+            ) : (
+              <input
+                type="text"
+                value={unit}
+                onChange={(e) => setUnit(e.target.value)}
+                placeholder="e.g. mg/dL"
+                className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
+              />
+            )}
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium text-gray-600">OMOP Table</label>
