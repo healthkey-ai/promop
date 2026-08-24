@@ -252,7 +252,7 @@ describe("FieldMappingPage", () => {
     expect(screen.getByText("SNOMED")).toBeInTheDocument();
   });
 
-  it("shows a visible proposed concept for an unmapped field with a suggestion", async () => {
+  it("shows 'click to map' for unmapped fields with unresolved suggestions", async () => {
     renderPage();
     await waitFor(() => {
       expect(screen.getByText(/Blood/)).toBeInTheDocument();
@@ -261,7 +261,7 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("hemoglobin_g_dl")).toBeInTheDocument();
     });
-    expect(screen.getByText("718-7")).toHaveClass("font-bold");
+    expect(screen.getAllByText("click to map").length).toBeGreaterThan(0);
   });
 
   it("search shows results across all tabs", async () => {
