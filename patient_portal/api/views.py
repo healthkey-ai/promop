@@ -4845,6 +4845,33 @@ _PERSON_REPLACEABLE_FIELDS = {
 
 
 @method_decorator(csrf_exempt, name='dispatch')
+def _caller_may_write_patient(request, person_id: int) -> bool:
+    """Whether this caller may edit this patient, by the rules the writes enforce.
+
+    Deliberately the same checks the single-row clinical write applies, rather
+    than a second opinion: a descriptor that disagreed with the endpoint would
+    either hide a field the caller could edit or offer one they could not.
+    """
+    if is_service_token(request):
+        return True
+
+    org = get_request_org(request)
+    if org is not None:
+        record = PatientRecord.objects.filter(person_id=person_id).first()
+        return not (
+            record is not None
+            and record.organization is not None
+            and record.organization != org
+        )
+
+    if getattr(request.user, 'is_staff', False):
+        return True
+
+    from omop_core.authorization import can_write_patient
+
+    return can_write_patient(request.user, person_id)
+
+
 class PatientRecordV1ViewSet(PatientRecordViewSet):
     """v1-only PatientRecord surface.
 
@@ -4862,12 +4889,52 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         with a reason rather than omitted, so a client can render them read-only and
         explain why instead of failing on save.
 
-        Deployment metadata, not patient data: no person is involved and the result
-        is identical for every caller.
+        Pass ``?person_id=N`` to get the answer *for this caller and this
+        patient*. Without it the response describes the deployment: which fields
+        could be written by someone permitted to write them.
+
+        That distinction matters because a field being mapped is not the same as
+        the reader being allowed to edit it. Analysts have read-only access to
+        every patient, and a caller may have no access to a given person at all —
+        so a descriptor that reported those fields writable would put a typeable
+        box in front of someone whose every save is refused. The point of asking
+        before rendering is to be told the truth for the person doing the
+        editing.
         """
         from omop_core.services.write_descriptor import build_writable_field_descriptor
 
-        return Response(build_writable_field_descriptor())
+        descriptor = build_writable_field_descriptor()
+
+        raw_person = request.query_params.get('person_id')
+        if raw_person is None:
+            return Response(descriptor)
+
+        try:
+            person_id = int(raw_person)
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': "'person_id' must be an integer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if _caller_may_write_patient(request, person_id):
+            return Response(descriptor)
+
+        # Read-only for this caller: keep every entry, so the client still knows
+        # what each field is and can say why it cannot be edited, but let nothing
+        # claim to be writable.
+        reason = (
+            'You have read-only access to this patient record. Editing is '
+            'available to the patient and to clinicians with write access.'
+        )
+        return Response({
+            field: (
+                entry if not entry.get('writable')
+                else {**entry, 'writable': False, 'read_only_for_caller': True,
+                      'reason': reason}
+            )
+            for field, entry in descriptor.items()
+        })
 
     @action(detail=True, methods=['post'], url_path='refresh',
             permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
@@ -5134,6 +5201,43 @@ class PersonViewSet(viewsets.GenericViewSet):
                         status=status.HTTP_400_BAD_REQUEST,
                     )
             location_updates[column] = incoming
+
+        # Coordinates are a pair or nothing.
+        #
+        # PatientRecord carries a check constraint requiring latitude and
+        # longitude to be both set or both null, and derivation copies whatever
+        # the Location row holds. So accepting one without the other stores a
+        # Location that no later derivation can project: the write itself blew up
+        # with an unhandled IntegrityError, and every subsequent clinical write
+        # for that patient failed too, because each one re-derives. One mistyped
+        # coordinate made a patient unwritable.
+        #
+        # The tab offers the two as separate boxes, which is exactly how someone
+        # arrives here — fill one, move on.
+        if location_updates:
+            pair = {'latitude', 'longitude'}
+            supplied = pair & set(location_updates)
+            if supplied and len(supplied) == 1:
+                supplied_column = next(iter(supplied))
+                missing = (pair - supplied).pop()
+                current = None
+                if person.location_id:
+                    existing_location = Location.objects.filter(
+                        location_id=person.location_id,
+                    ).first()
+                    current = getattr(existing_location, missing, None)
+                # Fine when the other half is already on file and the submitted
+                # half stays set, or when both are absent. Refuse any transition
+                # that would leave exactly one coordinate set.
+                if (location_updates[supplied_column] is None) != (current is None):
+                    return Response(
+                        {'detail': (
+                            f"'{supplied_column}' cannot be set without "
+                            f"'{missing}': the record requires both coordinates "
+                            f'or neither.'
+                        )},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
         if location_updates:
             location = None

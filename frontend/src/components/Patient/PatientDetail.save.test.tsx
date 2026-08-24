@@ -38,11 +38,11 @@ vi.mock('@/api/clinicalFacts', async () => {
   const actual = await vi.importActual<typeof import('@/api/clinicalFacts')>(
     '@/api/clinicalFacts',
   );
-  return { ...actual, writeFieldValue: vi.fn().mockResolvedValue({}) };
+  return { ...actual, writeFieldValues: vi.fn().mockResolvedValue({}) };
 });
 
 import api from '@/api/axios';
-import { writeFieldValue } from '@/api/clinicalFacts';
+import { writeFieldValues } from '@/api/clinicalFacts';
 
 const DESCRIPTORS = {
   anc_thousand_per_ul: {
@@ -123,9 +123,11 @@ describe('PatientDetail save — the edit, not the record', () => {
     await openBloodTab();
     await editAndSave('3.1', '5.5');
 
-    await waitFor(() => expect(writeFieldValue).toHaveBeenCalled());
-    const [, field] = (writeFieldValue as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
-    expect(field).toBe('anc_thousand_per_ul');
+    await waitFor(() => expect(writeFieldValues).toHaveBeenCalled());
+    const [, edits] = (writeFieldValues as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+    expect(edits).toEqual([
+      expect.objectContaining({ field: 'anc_thousand_per_ul', value: 5.5 }),
+    ]);
   });
 
   it('never sends an OMOP-mapped field in the PATCH', async () => {
@@ -133,7 +135,7 @@ describe('PatientDetail save — the edit, not the record', () => {
     await openBloodTab();
     await editAndSave('3.1', '5.5');
 
-    await waitFor(() => expect(writeFieldValue).toHaveBeenCalled());
+    await waitFor(() => expect(writeFieldValues).toHaveBeenCalled());
     const body = patchBody();
     if (body) {
       for (const mapped of Object.keys(DESCRIPTORS)) {
@@ -148,7 +150,7 @@ describe('PatientDetail save — the edit, not the record', () => {
     await openBloodTab();
     await editAndSave('3.1', '5.5');
 
-    await waitFor(() => expect(writeFieldValue).toHaveBeenCalled());
+    await waitFor(() => expect(writeFieldValues).toHaveBeenCalled());
     const body = patchBody();
     if (body) expect(body).not.toHaveProperty('absolute_neutrophile_count');
   });
@@ -158,7 +160,7 @@ describe('PatientDetail save — the edit, not the record', () => {
     await openBloodTab();
     await editAndSave('3.1', '5.5');
 
-    await waitFor(() => expect(writeFieldValue).toHaveBeenCalled());
+    await waitFor(() => expect(writeFieldValues).toHaveBeenCalled());
     const body = patchBody();
     if (body) {
       for (const f of ['id', 'created_at', 'updated_at', 'derivation_version',
@@ -175,7 +177,7 @@ describe('PatientDetail save — the edit, not the record', () => {
     await openBloodTab();
     await editAndSave('3.1', '5.5');
 
-    await waitFor(() => expect(writeFieldValue).toHaveBeenCalled());
+    await waitFor(() => expect(writeFieldValues).toHaveBeenCalled());
     expect(api.patch).not.toHaveBeenCalled();
   });
 
@@ -198,7 +200,7 @@ describe('PatientDetail save — the edit, not the record', () => {
     await editAndSave('howell@example.org', 'a.howell@example.org');
 
     expect(api.patch).not.toHaveBeenCalled();
-    expect(writeFieldValue).not.toHaveBeenCalled();
+    expect(writeFieldValues).not.toHaveBeenCalled();
   });
 
   it('surfaces the rejected field names from a read-only refusal', async () => {

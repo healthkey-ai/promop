@@ -126,6 +126,7 @@ describe('federated PatientInfo save', () => {
     await waitFor(() =>
       expect(client.get).toHaveBeenCalledWith(
         '/api/v1/patient-records/writable-fields/',
+        expect.anything(),
       ),
     );
   });

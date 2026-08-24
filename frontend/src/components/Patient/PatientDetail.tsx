@@ -3,7 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, Download } from "lucide-react";
 import api from "@/api/axios";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
-import { writeFieldValue } from "@/api/clinicalFacts";
+import { writeFieldValues } from "@/api/clinicalFacts";
 import { getActiveBranding } from "@/config/branding";
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -363,11 +363,21 @@ export default function PatientDetail({
       const clinicalEdits = Object.keys(info).filter(
         (f) => descriptors[f]?.writable && info[f] !== baseline[f],
       );
-      for (const field of clinicalEdits) {
-        await writeFieldValue(personId, field, descriptors[field], info[field]);
-        // Advance the baseline so a later keystroke elsewhere does not re-write
-        // this same value as another result.
-        if (patientInfoRef.current) patientInfoRef.current[field] = info[field];
+      // Sent as a set, not one at a time: the Person fields go in a single
+      // request because some are only valid together — latitude and longitude
+      // must be both set or both null, so sending one alone is refused.
+      if (clinicalEdits.length) {
+        await writeFieldValues(
+          personId,
+          clinicalEdits.map((field) => ({
+            field, descriptor: descriptors[field], value: info[field],
+          })),
+        );
+        for (const field of clinicalEdits) {
+          // Advance the baseline so a later keystroke elsewhere does not
+          // re-write this same value as another result.
+          if (patientInfoRef.current) patientInfoRef.current[field] = info[field];
+        }
       }
 
       // Everything the projection still owns goes the old way — and *only* that.

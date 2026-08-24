@@ -389,7 +389,10 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '60/minute',
-        'user': '300/minute',
+        # Env-tunable like the sync buckets below. The default protects the
+        # deployment; a local sweep that exercises every writable field fires
+        # several hundred requests in a minute and is not what the limit is for.
+        'user': os.environ.get('USER_THROTTLE_RATE', '300/minute'),
         # Wearable sync re-uploads daily rollups and fires on each HealthKit
         # change; 10/min was too tight. Env-tunable (set higher in dev).
         'sync': os.environ.get('SYNC_THROTTLE_RATE', '60/minute'),

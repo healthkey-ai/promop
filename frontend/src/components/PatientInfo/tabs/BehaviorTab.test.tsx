@@ -54,7 +54,10 @@ describe('BehaviorTab', () => {
   it('fetches the descriptor', async () => {
     renderTab();
     await waitFor(() =>
-      expect(mockGet).toHaveBeenCalledWith('/v1/patient-records/writable-fields/'),
+      expect(mockGet).toHaveBeenCalledWith(
+        '/v1/patient-records/writable-fields/',
+        expect.anything(),
+      ),
     );
   });
 
