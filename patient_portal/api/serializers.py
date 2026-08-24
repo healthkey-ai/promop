@@ -972,10 +972,12 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
         A curator can otherwise approve a mapping, see it listed as approved,
         and find the field still read-only with nothing saying why.
         """
+        from omop_core.services.write_descriptor import mapping_table_is_writable
+
         return bool(
             obj.status == 'approved'
             and obj.concept_id
-            and obj.omop_table.strip().lower() in {'measurement', 'observation'}
+            and mapping_table_is_writable(obj.omop_table)
             and obj.source_value
         )
 

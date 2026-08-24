@@ -5,7 +5,7 @@ import type { FieldDescriptor } from '@/hooks/useWritableFields';
  * Write a clinical value as an OMOP fact.
  *
  * PatientRecord is derived and has no writable clinical columns, so an edit is a
- * write to `measurement` or `observation` followed by derivation, which fires from
+ * write to an OMOP clinical endpoint followed by derivation, which fires from
  * the row's post_save signal. Nothing here touches PatientRecord.
  */
 
@@ -25,6 +25,67 @@ function valueFields(descriptor: FieldDescriptor, value: unknown) {
   // descriptor does not carry an answer set yet — writing an unresolved concept
   // would be worse than keeping the raw text, which derivation already reads.
   return { value_as_string: value == null ? null : String(value) };
+}
+
+const CLINICAL_TARGETS = {
+  measurement: {
+    base: '/v1/measurements/',
+    idField: 'measurement_id',
+    conceptField: 'measurement_concept',
+    dateField: 'measurement_date',
+    typeField: 'measurement_type_concept',
+    sourceField: 'measurement_source_value',
+    storesValue: true,
+    storesUnit: true,
+  },
+  observation: {
+    base: '/v1/observations/',
+    idField: 'observation_id',
+    conceptField: 'observation_concept',
+    dateField: 'observation_date',
+    typeField: 'observation_type_concept',
+    sourceField: 'observation_source_value',
+    storesValue: true,
+    storesUnit: true,
+  },
+  condition: {
+    base: '/v1/conditions/',
+    idField: 'condition_occurrence_id',
+    conceptField: 'condition_concept',
+    dateField: 'condition_start_date',
+    typeField: 'condition_type_concept',
+    sourceField: 'condition_source_value',
+    storesValue: false,
+    storesUnit: false,
+  },
+  drug_exposure: {
+    base: '/v1/drug-exposures/',
+    idField: 'drug_exposure_id',
+    conceptField: 'drug_concept',
+    dateField: 'drug_exposure_start_date',
+    typeField: 'drug_type_concept',
+    sourceField: 'drug_source_value',
+    storesValue: false,
+    storesUnit: false,
+  },
+  procedure: {
+    base: '/v1/procedures/',
+    idField: 'procedure_occurrence_id',
+    conceptField: 'procedure_concept',
+    dateField: 'procedure_date',
+    typeField: 'procedure_type_concept',
+    sourceField: 'procedure_source_value',
+    storesValue: false,
+    storesUnit: false,
+  },
+} as const;
+
+type ClinicalTarget = keyof typeof CLINICAL_TARGETS;
+
+function clinicalTarget(target: FieldDescriptor['target']): ClinicalTarget | null {
+  return target && target in CLINICAL_TARGETS
+    ? target as ClinicalTarget
+    : null;
 }
 
 export interface WriteResult {
@@ -62,21 +123,13 @@ export async function writeClinicalFact(
   // a profile edit POSTed an Observation whose concept, type and source value were
   // all undefined, and never touched Person. Sixteen writable fields — gender,
   // race, ethnicity, the six location columns — take that target.
-  if (descriptor.target !== 'measurement' && descriptor.target !== 'observation') {
+  const target = clinicalTarget(descriptor.target);
+  if (target === null) {
     throw new Error(
       `${field} writes to ${descriptor.target}, not an OMOP fact — use writeFieldValue`,
     );
   }
-  const isMeasurement = descriptor.target === 'measurement';
-  const base = isMeasurement ? '/v1/measurements/' : '/v1/observations/';
-  const dateField = isMeasurement ? 'measurement_date' : 'observation_date';
-  const sourceField = isMeasurement
-    ? 'measurement_source_value'
-    : 'observation_source_value';
-  const conceptField = isMeasurement ? 'measurement_concept' : 'observation_concept';
-  const typeField = isMeasurement
-    ? 'measurement_type_concept'
-    : 'observation_type_concept';
+  const cfg = CLINICAL_TARGETS[target];
 
   // Find a fact already recorded for this analyte on this date.
   //
@@ -88,7 +141,7 @@ export async function writeClinicalFact(
   // excludes entered-in-error rows; the is_erroneous check is belt and braces.
   let supersededId: number | null = null;
   try {
-    const existing = await clinicalClient().get(clinicalUrl(base), {
+    const existing = await clinicalClient().get(clinicalUrl(cfg.base), {
       params: { person_id: personId },
     });
     const rows = Array.isArray(existing.data)
@@ -97,12 +150,12 @@ export async function writeClinicalFact(
     const sameDay = rows.find(
       (r: Record<string, unknown>) =>
         String(r.person) === String(personId) &&
-        r[sourceField] === descriptor.source_value &&
-        r[dateField] === date &&
+        r[cfg.sourceField] === descriptor.source_value &&
+        r[cfg.dateField] === date &&
         !r.is_erroneous,
     );
     if (sameDay) {
-      supersededId = (sameDay.measurement_id ?? sameDay.observation_id) as number;
+      supersededId = sameDay[cfg.idField] as number;
     }
   } catch {
     // A failed lookup must not block the write. Worst case we insert a second
@@ -111,7 +164,7 @@ export async function writeClinicalFact(
   }
 
   if (supersededId != null) {
-    await clinicalClient().patch(clinicalUrl(`${base}${supersededId}/`), {
+    await clinicalClient().patch(clinicalUrl(`${cfg.base}${supersededId}/`), {
       is_erroneous: true,
       erroneous_reason: 'Superseded by a corrected value entered in the patient editor',
     });
@@ -119,24 +172,23 @@ export async function writeClinicalFact(
 
   const payload: Record<string, unknown> = {
     person: personId,
-    [conceptField]: descriptor.concept_id,
-    [dateField]: date,
-    [typeField]: descriptor.type_concept_id,
-    [sourceField]: descriptor.source_value,
-    ...valueFields(descriptor, value),
+    [cfg.conceptField]: descriptor.concept_id,
+    [cfg.dateField]: date,
+    [cfg.typeField]: descriptor.type_concept_id,
+    [cfg.sourceField]: descriptor.source_value,
   };
-  if (isMeasurement && descriptor.unit_concept_id) {
+  if (cfg.storesValue) {
+    Object.assign(payload, valueFields(descriptor, value));
+  }
+  if (cfg.storesUnit && descriptor.unit_concept_id) {
     payload.unit_concept = descriptor.unit_concept_id;
   }
-  if (isMeasurement && descriptor.unit) {
+  if (cfg.storesUnit && descriptor.unit) {
     payload.unit_source_value = descriptor.unit;
   }
 
-  const created = await clinicalClient().post(clinicalUrl(base), payload);
-  const createdId =
-    (created.data?.measurement_id ?? created.data?.observation_id ?? null) as
-      | number
-      | null;
+  const created = await clinicalClient().post(clinicalUrl(cfg.base), payload);
+  const createdId = (created.data?.[cfg.idField] ?? null) as number | null;
   return { supersededId, createdId };
 }
 

@@ -30,6 +30,24 @@ const OBS: FieldDescriptor = {
   type_concept_id: 32856, source_value: '408729009',
 };
 
+const CONDITION: FieldDescriptor = {
+  kind: 'editable', writable: true, target: 'condition',
+  concept_id: 201826, code: 'C50', value_kind: 'string',
+  type_concept_id: 32817, source_value: 'primary-cancer',
+};
+
+const DRUG: FieldDescriptor = {
+  kind: 'editable', writable: true, target: 'drug_exposure',
+  concept_id: 19026972, code: '337535', value_kind: 'string',
+  type_concept_id: 32817, source_value: 'maintenance-drug',
+};
+
+const PROCEDURE: FieldDescriptor = {
+  kind: 'editable', writable: true, target: 'procedure',
+  concept_id: 4273629, code: 'SCT', value_kind: 'string',
+  type_concept_id: 32817, source_value: 'stem-cell-transplant',
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockGet.mockResolvedValue({ data: [] });
@@ -69,6 +87,49 @@ describe('writeClinicalFact', () => {
     );
   });
 
+  it('routes a condition-domain mapping to condition_occurrence', async () => {
+    mockPost.mockResolvedValue({ data: { condition_occurrence_id: 33 } });
+
+    const res = await writeClinicalFact(1, 'disease', CONDITION, 'Breast Cancer', '2026-08-21');
+
+    expect(mockPost).toHaveBeenCalledWith('/v1/conditions/', {
+      person: 1,
+      condition_concept: 201826,
+      condition_start_date: '2026-08-21',
+      condition_type_concept: 32817,
+      condition_source_value: 'primary-cancer',
+    });
+    expect(res.createdId).toBe(33);
+  });
+
+  it('routes a drug-domain mapping to drug_exposure', async () => {
+    mockPost.mockResolvedValue({ data: { drug_exposure_id: 44 } });
+
+    await writeClinicalFact(1, 'maintenance_therapy', DRUG, 'lenalidomide', '2026-08-21');
+
+    expect(mockPost).toHaveBeenCalledWith('/v1/drug-exposures/', {
+      person: 1,
+      drug_concept: 19026972,
+      drug_exposure_start_date: '2026-08-21',
+      drug_type_concept: 32817,
+      drug_source_value: 'maintenance-drug',
+    });
+  });
+
+  it('routes a procedure-domain mapping to procedure_occurrence', async () => {
+    mockPost.mockResolvedValue({ data: { procedure_occurrence_id: 55 } });
+
+    await writeClinicalFact(1, 'stem_cell_transplant', PROCEDURE, 'Yes', '2026-08-21');
+
+    expect(mockPost).toHaveBeenCalledWith('/v1/procedures/', {
+      person: 1,
+      procedure_concept: 4273629,
+      procedure_date: '2026-08-21',
+      procedure_type_concept: 32817,
+      procedure_source_value: 'stem-cell-transplant',
+    });
+  });
+
   it('defaults the event date to today', async () => {
     await writeClinicalFact(1, 'hemoglobin_g_dl', HGB, 9);
 
@@ -90,6 +151,21 @@ describe('writeClinicalFact', () => {
     });
     expect(mockPost).toHaveBeenCalled();      // replacement still inserted
     expect(res.supersededId).toBe(500);
+  });
+
+  it('supersedes an existing same-day condition occurrence', async () => {
+    mockGet.mockResolvedValue({
+      data: [{ condition_occurrence_id: 501, person: 1, condition_source_value: 'primary-cancer',
+               condition_start_date: '2026-08-21', is_erroneous: false }],
+    });
+
+    const res = await writeClinicalFact(1, 'disease', CONDITION, 'Breast Cancer', '2026-08-21');
+
+    expect(mockPatch).toHaveBeenCalledWith('/v1/conditions/501/', {
+      is_erroneous: true,
+      erroneous_reason: expect.stringContaining('Superseded'),
+    });
+    expect(res.supersededId).toBe(501);
   });
 
   it('leaves a value on a different date alone', async () => {
