@@ -96,10 +96,27 @@ class TestAnIncompleteMappingIsStillAdvisory:
         assert build_writable_field_descriptor()[FIELD]['writable'] is False
 
     def test_a_mapping_to_a_table_this_cannot_write_does_not_count(self):
-        # Conditions and procedures are real OMOP tables, but the editor has no
-        # write path for them yet. Claiming otherwise would 400 on save.
-        _mapping(omop_table='condition_occurrence')
+        _mapping(omop_table='visit_occurrence')
         assert build_writable_field_descriptor()[FIELD]['writable'] is False
+
+    @pytest.mark.parametrize(('omop_table', 'target'), [
+        ('measurement', 'measurement'),
+        ('observation', 'observation'),
+        ('condition_occurrence', 'condition'),
+        ('condition', 'condition'),
+        ('drug_exposure', 'drug_exposure'),
+        ('drug', 'drug_exposure'),
+        ('procedure_occurrence', 'procedure'),
+        ('procedure', 'procedure'),
+    ])
+    def test_supported_omop_tables_make_curated_fields_writable(self, omop_table, target):
+        _mapping(omop_table=omop_table)
+
+        entry = build_writable_field_descriptor()[FIELD]
+
+        assert entry['writable'] is True
+        assert entry['target'] == target
+        assert entry['endpoint'].startswith('POST /api/v1/')
 
 
 class TestBoundedAnswers:

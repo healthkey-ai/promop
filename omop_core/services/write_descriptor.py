@@ -281,7 +281,29 @@ def _resolve_concepts(pairs):
 _MAPPING_TARGETS = {
     'measurement': 'measurement',
     'observation': 'observation',
+    'condition': 'condition',
+    'condition_occurrence': 'condition',
+    'drug': 'drug_exposure',
+    'drug_exposure': 'drug_exposure',
+    'procedure': 'procedure',
+    'procedure_occurrence': 'procedure',
 }
+
+_MAPPING_ENDPOINTS = {
+    'measurement': 'POST /api/v1/measurements/',
+    'observation': 'POST /api/v1/observations/',
+    'condition': 'POST /api/v1/conditions/',
+    'drug_exposure': 'POST /api/v1/drug-exposures/',
+    'procedure': 'POST /api/v1/procedures/',
+}
+
+
+def mapping_target_for(omop_table):
+    return _MAPPING_TARGETS.get((omop_table or '').strip().lower())
+
+
+def mapping_table_is_writable(omop_table):
+    return mapping_target_for(omop_table) is not None
 
 
 def _curated_writes():
@@ -311,7 +333,7 @@ def _curated_writes():
         for name in {r.value_vocabulary for r in rows if r.value_vocabulary}
     }
     for row in rows:
-        target = _MAPPING_TARGETS.get(row.omop_table.strip().lower())
+        target = mapping_target_for(row.omop_table)
         concept_id = row.concept_id
         if target is None or concept_id is None:
             continue
@@ -319,6 +341,7 @@ def _curated_writes():
             'kind': KIND_EDITABLE,
             'writable': True,
             'target': target,
+            'endpoint': _MAPPING_ENDPOINTS[target],
             'concept_id': concept_id,
             'type_concept_id': row.type_concept_id or CONCEPT_LAB_TYPE,
             'source_value': row.source_value,
