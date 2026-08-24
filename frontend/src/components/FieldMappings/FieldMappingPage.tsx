@@ -233,22 +233,16 @@ export default function FieldMappingPage() {
   const handleConfirm = async (field: FieldDescriptor) => {
     try {
       if (field.mapping) {
-        // Approve existing proposed mapping.
+        // Approve existing proposed mapping (already has a resolved concept).
         if (field.mapping.status === "proposed") {
           await api.patch(`/v1/field-mappings/${field.mapping.id}/`, { status: "approved" });
         }
+        fetchDescriptors();
       } else if (field.suggestion) {
-        // Create mapping from suggestion with approved status.
-        await api.post("/v1/field-mappings/", {
-          field_name: field.field_name,
-          vocabulary_id: field.suggestion.vocabulary_id || "",
-          concept_code: field.suggestion.concept_code,
-          unit: field.suggestion.unit || "",
-          omop_table: field.locked_table || field.suggestion.omop_table || "",
-          status: "approved",
-        });
+        // Suggestion has no resolved concept FK — open the dialog so the user
+        // can search, select a concept, and create a complete mapping.
+        handleCellClick(field);
       }
-      fetchDescriptors();
     } catch {
       setError("Failed to confirm mapping.");
     }

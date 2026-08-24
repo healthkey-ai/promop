@@ -98,7 +98,7 @@ export function ConceptAssignDialog({
         unit,
         omop_table: omopTable,
         notes,
-        status: isEditing ? (initialStatus || "proposed") : "proposed",
+        status: "approved",
       };
       if (isEditing) {
         await api.patch(`/v1/field-mappings/${existingMappingId}/`, payload);

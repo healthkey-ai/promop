@@ -34,7 +34,7 @@ INITIAL_CHOICES = {
         ('Moderate exercise', [('228454008', 'SNOMED', 'Moderate exercise', True)]),
         ('Vigorous exercise', [('228455009', 'SNOMED', 'Vigorous exercise', True)]),
     ],
-    'insurance_status': [
+    'insurance_type': [
         ('Insured', [('160701007', 'SNOMED', 'Health insurance', True)]),
         ('Uninsured', [('160702000', 'SNOMED', 'No health insurance', True)]),
         ('Underinsured', []),
@@ -85,13 +85,10 @@ def seed_choices(apps, schema_editor):
 
 def seed_formulas(apps, schema_editor):
     FieldFormula = apps.get_model('omop_core', 'FieldFormula')
-    from omop_core.services.formula_evaluator import validate_formula
+    # Validation skipped in migration — enforced at API/serializer level.
+    # Importing live code (validate_formula) from a migration is fragile because
+    # it introspects PatientRecord._meta which may not match the DB state yet.
     for field_name, (formula, is_active) in INITIAL_FORMULAS.items():
-        result = validate_formula(formula)
-        if not result.valid:
-            raise RuntimeError(
-                f"Refusing to seed invalid formula for {field_name}: {', '.join(result.errors)}"
-            )
         FieldFormula.objects.get_or_create(
             field_name=field_name,
             defaults={'formula': formula, 'is_active': is_active},
