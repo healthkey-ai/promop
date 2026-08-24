@@ -5,7 +5,7 @@ import { PatientInfoProvider } from "./PatientInfoProvider";
 import { usePatientInfoMe, usePatchPatientInfo } from "./patientInfoHooks";
 import type { PatientInfoProps } from "./patientInfoTypes";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
-import { writeFieldValue } from "@/api/clinicalFacts";
+import { writeFieldValues } from "@/api/clinicalFacts";
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
 import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
@@ -164,14 +164,18 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
             (f) => descriptors[f]?.writable && info[f] !== baseline[f],
           )
         : [];
-      for (const field of clinicalEdits) {
-        await writeFieldValue(
+      // As a set: the Person fields travel in one request, because some are
+      // only valid together (latitude and longitude are a pair).
+      if (clinicalEdits.length) {
+        await writeFieldValues(
           personId as number,
-          field,
-          descriptors[field],
-          info[field],
+          clinicalEdits.map((field) => ({
+            field, descriptor: descriptors[field], value: info[field],
+          })),
         );
-        serverInfoRef.current[field] = info[field];
+        for (const field of clinicalEdits) {
+          serverInfoRef.current[field] = info[field];
+        }
       }
 
       // patient_name is handled by the server against Person, so it stays. Every

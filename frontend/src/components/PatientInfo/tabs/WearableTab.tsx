@@ -85,7 +85,10 @@ function formatMetricValue(metric: string, value: number): string {
 }
 
 export default function WearableTab({ formData, onRefresh }: Props) {
-  const { descriptors } = useWritableFields();
+  // Ask about *this* patient: whether a field may be edited depends on who is
+  // asking and whose record it is, not only on whether the field is mapped.
+  const personId = (formData?.person_id ?? formData?.person) as number | undefined;
+  const { descriptors } = useWritableFields(personId);
   const noData = !formData?.wearable_last_sync_at;
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState<string | null>(null);

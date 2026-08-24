@@ -24,8 +24,11 @@ class TestTableDrivenFieldsCount:
         'alcohol_use',
         'education_level',
         'marital_status',
+        'sleep_hours_per_night',
         'contraceptive_use',       # _ASSERTION_FIELDS
         'consent_capability',
+        'substance_use_details',   # _ASSERTION_DETAIL_FIELDS
+        'geographic_exposure_risk_details',
     ])
     def test_a_field_named_only_by_a_lookup_table_counts_as_derived(self, field):
         """The case the literal-only count got wrong.
@@ -41,7 +44,7 @@ class TestTableDrivenFieldsCount:
     def test_a_field_nothing_populates_is_excluded(self):
         # Left out on purpose: these are the genuine gaps, and the warning is
         # worth something only if it stays true for them.
-        for field in ('sleep_hours_per_night', 'substance_use_details'):
+        for field in ('pregnancy_test_result', 'no_active_infection_status'):
             assert field not in derived_fields()
 
 

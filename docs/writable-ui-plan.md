@@ -79,6 +79,7 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 | WearableTab converted — every tab now renders from the descriptor | #651 |
 | Every writable field is now reachable from a tab | #652 |
 | `employment_status` made writable by seeding its mapping | #649 |
+| BehaviorTab one-fact fields made writable by seeding exact extractor mappings | pending |
 | `POST /api/v1/therapy-lines/` — author a line | #639 |
 | Therapy-line dialog with RxNorm picker | #641 |
 | Regimen naming no longer mislabels a combination | #643 |
@@ -92,7 +93,7 @@ field as an OMOP fact is what sent profile edits to the observation endpoint
 | TreatmentTab | descriptor-driven | 26 | 0 — all authored |
 | GeneralTab | descriptor-driven | 30 | 16 |
 | DiseaseTab | descriptor-driven | 82 | 18 |
-| BehaviorTab | descriptor-driven | 27 | 2 |
+| BehaviorTab | descriptor-driven | 27 | 24 |
 | WearableTab | descriptor-driven | 20 | 0 — all computed |
 
 **No writable field is unreachable any more.** Every field the server says can be
@@ -116,7 +117,7 @@ sees the real state rather than the intended one.
 - [x] **Step 3** — Convert BehaviorTab (1 writable, +1 mapped) — #649
 - [x] **Step 4** — Convert WearableTab (0 writable, read-only) — #651
 - [x] **Step 5** — Surface the writable fields no tab shows — #652
-- [~] **Step 6** — Concept assignment: suggestions seeded (#653); approval is curation (#595), extractors still needed for 67 fields (#648)
+- [~] **Step 6** — Concept assignment: BehaviorTab mappings seeded; suggestions seeded (#653); approval is curation (#595), extractors still needed for 64 fields (#648)
 
 ### Step 1 — Convert GeneralTab (16 writable)
 
@@ -224,6 +225,14 @@ A row has to carry a concept, an `omop_table` this can write to, and a
 `source_value` for derivation to match on. Short of that it stays advisory, and
 `makes_field_writable` on the mapping API says which side of the line it is on.
 
+**BehaviorTab mappings are seeded**: 22 additional one-fact fields carry
+approved mappings for the exact LOINC codes their extractors already read. With
+`employment_status` and `insurance_type`, that makes 24 of 27 BehaviorTab fields
+writable when the vocabulary is loaded. The three left read-only are companion
+fields, not missing concept rows: `pregnancy_test_date` is the event date of the
+pregnancy result fact, and `substance_use_details` /
+`geographic_exposure_risk_details` qualify their boolean assertion row.
+
 **Suggestions are seeded** (#653): 10 fields carry a `proposed` mapping chosen
 for meaning, each with the reasoning and — where it applies — why the top lexical
 match was rejected. Nothing is approved, so nothing became writable; a reviewer
@@ -239,9 +248,10 @@ meaning the opposite of it.
 **This step is now curation, not code — but only where a reader exists.**
 
 A mapping makes a field writable; it does not make anything read the value back.
-Of the 27 fields on BehaviorTab, **24 have no derivation extractor at all** —
-nothing in `patient_record_service` ever assigns them. Seeding mappings for those
-would produce writes that vanish, which is worse than a read-only box.
+BehaviorTab no longer has extractor gaps: all 27 fields now have a reader in
+`patient_record_service`, including the table-driven assertion/detail fields.
+Seeding mappings for fields that still lack readers elsewhere would produce
+writes that vanish, which is worse than a read-only box.
 
 So step 6 splits in two, and the split is not visible from the descriptor:
 
@@ -249,8 +259,16 @@ So step 6 splits in two, and the split is not visible from the descriptor:
   was for `employment_status` (#649) and the three SCT fields (#647)
 - fields with **no extractor** — need derivation written first; see #648
 
-Check `data['<field>'] = ` in `patient_record_service.py` before seeding a
-mapping. If nothing assigns it, the mapping is not the missing piece.
+Check `derived_fields()` before seeding a mapping. Do not grep only for
+`data['<field>'] = ` — several readers assign through lookup tables, and that
+literal check now undercounts the fields derivation can populate.
+
+Three extractor gaps have been closed. `sleep_hours_per_night` now derives from
+LOINC `93832-4` (`Sleep duration`) measurements, matching the FHIR import and
+sample bundle. `substance_use_details` and
+`geographic_exposure_risk_details` now derive from detail text carried on the
+same dated assertion fact as their boolean companion. The sleep LOINC is now
+seeded as an approved BehaviorTab mapping.
 
 ---
 
