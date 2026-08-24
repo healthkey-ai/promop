@@ -311,17 +311,4 @@ DERIVED_FIELD_TO_CODE = {
     # about the field the moment the bug was fixed — see
     # test_every_attribution_still_matches_its_extractor.
     'insurance_type':                ('408729009', 'SNOMED', '_get_social_data'),
-    # Disease / staging — added for concept-mapping suggestions
-    'disease':                       ('29308-4',   'LOINC',  'manual'),
-    'menopausal_status':             ('11369-6',   'LOINC',  'manual'),
-    # Behavioral / social — manual suggestions
-    'smoking_status':                ('72166-2',   'LOINC',  'manual'),
-    'pack_years':                    ('401201003', 'SNOMED', 'manual'),
-    'alcohol_use':                   ('74013-4',   'LOINC',  'manual'),
-    'exercise_frequency':            ('77592-7',   'LOINC',  'manual'),
-    # Negation fields — map to the base clinical concept being negated
-    'no_active_infection_status':    ('56051006',  'SNOMED', 'manual'),
-    'no_hiv_status':                 ('86406008',  'SNOMED', 'manual'),
-    'no_hepatitis_b_status':         ('66071002',  'SNOMED', 'manual'),
-    'no_hepatitis_c_status':         ('50711007',  'SNOMED', 'manual'),
 }

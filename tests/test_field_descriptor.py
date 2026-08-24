@@ -7,7 +7,7 @@ from omop_core.services.field_descriptor import (
     get_all_field_descriptors,
     _INTERNAL_FIELDS,
 )
-from omop_core.services.mappings import LAB_FIELD_TO_LOINC, DERIVED_FIELD_TO_CODE
+from omop_core.services.mappings import LAB_FIELD_TO_LOINC
 
 
 pytestmark = pytest.mark.django_db
@@ -259,31 +259,6 @@ def test_locked_table_none_for_others():
         if d['category'] not in ('profile', 'location'):
             assert d['locked_table'] is None, (
                 f"Field '{d['field_name']}' (category={d['category']}) should have locked_table=None"
-            )
-
-
-# ── New suggestion tests (Phase 2) ──────────────────────────────
-
-
-def test_new_suggestions_present():
-    """Verify each new DERIVED_FIELD_TO_CODE entry produces a suggestion."""
-    new_fields = [
-        'disease', 'menopausal_status', 'smoking_status', 'pack_years',
-        'alcohol_use', 'exercise_frequency',
-        'no_active_infection_status', 'no_hiv_status',
-        'no_hepatitis_b_status', 'no_hepatitis_c_status',
-    ]
-    descriptors = get_all_field_descriptors()
-    by_name = {d['field_name']: d for d in descriptors}
-    for field in new_fields:
-        if field in by_name:
-            d = by_name[field]
-            assert d['suggestion'] is not None, (
-                f"Field '{field}' should have a suggestion from DERIVED_FIELD_TO_CODE"
-            )
-            expected_code = DERIVED_FIELD_TO_CODE[field][0]
-            assert d['suggestion']['concept_code'] == expected_code, (
-                f"Field '{field}' suggestion code should be '{expected_code}'"
             )
 
 
