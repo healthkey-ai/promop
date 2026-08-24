@@ -44,6 +44,7 @@ interface FieldDescriptor {
   } | null;
   mappable: boolean;
   locked_table: string | null;
+  unit_options: string[];
   choices: {
     id: number;
     display: string;
@@ -325,6 +326,9 @@ export default function FieldMappingPage() {
     }
     if (f.mapping?.omop_table) {
       return <span className="text-xs">{f.mapping.omop_table}</span>;
+    }
+    if (f.suggestion?.omop_table) {
+      return <span className="text-xs italic text-gray-400">{f.suggestion.omop_table}</span>;
     }
     return <span className="text-xs text-gray-400">&mdash;</span>;
   };

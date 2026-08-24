@@ -316,7 +316,7 @@ describe("FieldMappingPage", () => {
     });
   });
 
-  it("has column headers for Coding, Table, and Synonyms", async () => {
+  it("keeps units out of the field list while retaining mapping columns", async () => {
     renderPage();
     await waitFor(() => {
       expect(screen.getByText(/Behavior/)).toBeInTheDocument();
