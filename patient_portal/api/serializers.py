@@ -1019,6 +1019,26 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'field_name': f"'{field_name}' is not a concrete PatientRecord field."
                 })
+        status_value = attrs.get('status', getattr(self.instance, 'status', None))
+        omop_table = attrs.get('omop_table', getattr(self.instance, 'omop_table', ''))
+        source_value = attrs.get('source_value', getattr(self.instance, 'source_value', ''))
+        if status_value == 'approved' and omop_table and source_value:
+            normalized_table = omop_table.strip().lower()
+            conflicts = FieldConceptMapping.objects.filter(
+                status='approved',
+                omop_table__iexact=normalized_table,
+                source_value=source_value,
+            )
+            if self.instance is not None:
+                conflicts = conflicts.exclude(pk=self.instance.pk)
+            if conflicts.exists():
+                other = conflicts.order_by('field_name').first()
+                raise serializers.ValidationError({
+                    'source_value': (
+                        'Approved writable mappings must not share the same '
+                        f'omop_table/source_value key; already used by {other.field_name}.'
+                    )
+                })
         return attrs
 
     def create(self, validated_data):

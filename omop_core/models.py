@@ -2892,7 +2892,10 @@ class FieldConceptMapping(models.Model):
     lives, and a ``source_value`` to key it by. Without the last one derivation
     cannot find the row it just wrote, so the mapping stays advisory.
 
-    Each PatientRecord field can have at most one mapping.
+    Each PatientRecord field can have at most one mapping. Several fields may
+    intentionally share one OMOP concept, as long as each writable field has its
+    own source_value key; otherwise the editor would supersede one field's fact
+    while saving the other.
     """
     STATUS_CHOICES = [
         ('proposed', 'Proposed'),
@@ -2958,9 +2961,9 @@ class FieldConceptMapping(models.Model):
         db_table = 'field_concept_mapping'
         constraints = [
             models.UniqueConstraint(
-                fields=['vocabulary_id', 'concept_code'],
-                condition=~Q(concept_code=''),
-                name='uq_field_concept_mapping_vocab_code',
+                fields=['omop_table', 'source_value'],
+                condition=Q(status='approved') & ~Q(omop_table='') & ~Q(source_value=''),
+                name='uq_field_concept_mapping_approved_source',
             ),
         ]
 
