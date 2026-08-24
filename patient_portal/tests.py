@@ -19516,18 +19516,40 @@ class FieldConceptMappingTest(TestCase):
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_duplicate_vocab_code_rejected(self):
-        """Two different fields cannot claim the same (vocab, code)."""
+    def test_duplicate_vocab_code_allowed_when_write_key_differs(self):
+        """Two fields may share a concept as long as they write distinct facts."""
         FieldConceptMapping.objects.create(
             field_name='alcohol_use', vocabulary_id='LOINC', concept_code='NEW-1',
+            omop_table='observation', source_value='alcohol-use',
         )
         self.client.force_authenticate(user=self.staff)
         resp = self.client.post('/api/v1/field-mappings/', {
             'field_name': 'diet_type',
             'vocabulary_id': 'LOINC',
             'concept_code': 'NEW-1',
+            'omop_table': 'observation',
+            'source_value': 'diet-type',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_approved_write_key_collision_rejected(self):
+        """The router supersedes by table/source/date, so that key is exclusive."""
+        FieldConceptMapping.objects.create(
+            field_name='alcohol_use', vocabulary_id='LOINC', concept_code='NEW-1',
+            omop_table='observation', source_value='shared-source',
+            status='approved',
+        )
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'diet_type',
+            'vocabulary_id': 'SNOMED',
+            'concept_code': 'NEW-2',
+            'omop_table': 'Observation',
+            'source_value': 'shared-source',
+            'status': 'approved',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('source_value', str(resp.data))
 
     # -- PATCH update --
 
