@@ -93,12 +93,14 @@ function HowToAuthor({ descriptor }: { descriptor?: FieldDescriptor }) {
 }
 
 export default function TreatmentTab({ formData, onChange, onRecordRefreshed }: Props) {
-  const { descriptors } = useWritableFields();
-  const [dialogOpen, setDialogOpen] = useState(false);
-
-  // person_id rides in the record the tab already receives, so authoring needs no
-  // extra prop threaded through both hosts.
+  // person_id rides in the record the tab already receives, so neither the
+  // descriptor nor authoring needs an extra prop threaded through both hosts.
   const personId = Number(formData?.person_id ?? formData?.person ?? 0) || null;
+
+  // Ask about *this* patient: whether a field may be edited depends on who is
+  // asking and whose record it is, not only on whether the field is mapped.
+  const { descriptors } = useWritableFields(personId ?? undefined);
+  const [dialogOpen, setDialogOpen] = useState(false);
 
   const field = (label: string, name: string, type: 'text' | 'number' | 'date') => (
     <ClinicalField

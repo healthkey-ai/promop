@@ -29,7 +29,10 @@ interface Props {
 }
 
 function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemove, onMutationChange }: Omit<Props, 'diseaseType'>) {
-  const { descriptors } = useWritableFields();
+  // Ask about *this* patient: whether a field may be edited depends on who is
+  // asking and whose record it is, not only on whether the field is mapped.
+  const personId = (formData?.person_id ?? formData?.person) as number | undefined;
+  const { descriptors } = useWritableFields(personId);
   const { source: erSource }            = useVocabulary('estrogen-receptor-status', 'title');
   const { source: prSource }            = useVocabulary('progesterone-receptor-status', 'title');
   const { source: her2Source }          = useVocabulary('her2-status', 'title');
@@ -170,7 +173,10 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
 }
 
 function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
-  const { descriptors } = useWritableFields();
+  // Ask about *this* patient: whether a field may be edited depends on who is
+  // asking and whose record it is, not only on whether the field is mapped.
+  const personId = (formData?.person_id ?? formData?.person) as number | undefined;
+  const { descriptors } = useWritableFields(personId);
   const { source: gelfSource }    = useVocabulary('gelf-criteria', 'title');
   const { source: flipiSource }   = useVocabulary('flipi-score', 'code');
   const { source: flGradeSource } = useVocabulary('follicular-lymphoma-grade', 'title');
@@ -220,7 +226,10 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
 }
 
 function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
-  const { descriptors } = useWritableFields();
+  // Ask about *this* patient: whether a field may be edited depends on who is
+  // asking and whose record it is, not only on whether the field is mapped.
+  const personId = (formData?.person_id ?? formData?.person) as number | undefined;
+  const { descriptors } = useWritableFields(personId);
   const { source: progressionSource } = useVocabulary('disease-progression', 'title');
   const { options: sctTypeOptions, source: sctTypeSource } = useVocabulary('stem-cell-transplant', 'title');
   const { options: sctEligibilityOptions, source: sctEligibilitySource } = useVocabulary('sct-eligibility', 'title');
@@ -289,7 +298,10 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
 }
 
 function CLLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
-  const { descriptors } = useWritableFields();
+  // Ask about *this* patient: whether a field may be edited depends on who is
+  // asking and whose record it is, not only on whether the field is mapped.
+  const personId = (formData?.person_id ?? formData?.person) as number | undefined;
+  const { descriptors } = useWritableFields(personId);
   return (
     <>
       <Section title="CLL Disease Characteristics">
@@ -335,7 +347,10 @@ function CLLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>
 }
 
 function OtherSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
-  const { descriptors } = useWritableFields();
+  // Ask about *this* patient: whether a field may be edited depends on who is
+  // asking and whose record it is, not only on whether the field is mapped.
+  const personId = (formData?.person_id ?? formData?.person) as number | undefined;
+  const { descriptors } = useWritableFields(personId);
   const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
   const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
 
@@ -368,7 +383,10 @@ function OtherSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange
  * invented here would offer values the server cannot code.
  */
 function StagingBiomarkersSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
-  const { descriptors } = useWritableFields();
+  // Ask about *this* patient: whether a field may be edited depends on who is
+  // asking and whose record it is, not only on whether the field is mapped.
+  const personId = (formData?.person_id ?? formData?.person) as number | undefined;
+  const { descriptors } = useWritableFields(personId);
 
   const field = (label: string, name: string, type: 'text' | 'number') => (
     <ClinicalField

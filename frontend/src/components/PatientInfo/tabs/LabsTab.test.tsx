@@ -60,7 +60,10 @@ describe('LabsTab', () => {
   it('fetches the descriptor once', async () => {
     renderTab();
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
-    expect(mockGet).toHaveBeenCalledWith('/v1/patient-records/writable-fields/');
+    expect(mockGet).toHaveBeenCalledWith(
+        '/v1/patient-records/writable-fields/',
+        expect.anything(),
+      );
   });
 
   it('shows canonical field names, not the legacy aliases', async () => {

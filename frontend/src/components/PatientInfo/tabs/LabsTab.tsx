@@ -71,7 +71,10 @@ const DIAGNOSTIC: Array<[string, string]> = [
 ];
 
 export default function LabsTab({ formData, onChange }: Props) {
-  const { descriptors, loading } = useWritableFields();
+  // Ask about *this* patient: whether a field may be edited depends on who is
+  // asking and whose record it is, not only on whether the field is mapped.
+  const personId = (formData?.person_id ?? formData?.person) as number | undefined;
+  const { descriptors, loading } = useWritableFields(personId);
   const [date, setDate] = useState(today());
 
   const section = (

@@ -284,6 +284,28 @@ _MAPPING_TARGETS = {
 }
 
 
+# Fields whose write recipe this cannot express, so they are reported read-only
+# rather than offered.
+#
+# Found by writing every writable field and reading it back (#666). A descriptor
+# entry is a claim that a value written to its recipe comes back; where the
+# recipe is incomplete the claim is false, and a box that accepts input and
+# silently drops it is worse than one that says why it is disabled.
+_WRITE_RECIPE_INCOMPLETE = {
+    'largest_lymph_node_size': (
+        'Derivation also requires qualifier_source_value="lymph-node" — LOINC '
+        '21889-1 "Size Tumor" is shared with tumor_size, and the qualifier is '
+        'what tells them apart. The descriptor cannot carry a qualifier yet, so '
+        'a write against the code alone is not read back.'
+    ),
+    'bone_only_metastasis_status': (
+        'Derivation looks for an Observation whose concept name contains "bone '
+        'only metastas", while the mapping here names a Measurement with a '
+        'different concept. A write against it lands in the wrong table under '
+        'the wrong concept and is not read back.'
+    ),
+}
+
 def _curated_writes():
     """Editable entries built from reviewer-approved concept mappings.
 
@@ -614,6 +636,16 @@ def build_writable_field_descriptor():
             'canonical': canonical,
             'reason': f'Mirrors {canonical}; edit that field instead.',
         })
+
+    # Applied last, so it overrides whichever branch offered the field.
+    for field, reason in _WRITE_RECIPE_INCOMPLETE.items():
+        if field in descriptor:
+            descriptor[field] = {
+                'kind': KIND_UNMAPPED,
+                'writable': False,
+                'group': GROUP_NEEDS_CONCEPT,
+                'reason': reason,
+            }
 
     for computed, reason in _SERIALIZER_COMPUTED.items():
         descriptor.setdefault(computed, {

@@ -19882,3 +19882,81 @@ class TherapyLineAuthoringTest(TestCase):
         ])
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(DrugExposure.objects.filter(person=self.person).count(), 0)
+
+
+class WritableFieldsPerCallerTest(TestCase):
+    """A field is writable *for someone*, and the client is told before it renders.
+
+    A mapped field is not the same as a permitted edit. Analysts have read-only
+    access to every record, so a descriptor that answered the same for everyone
+    would put a typeable box in front of a reader whose every save is refused —
+    and the point of asking before rendering is to be told the truth for the
+    person doing the editing.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        _make_vocab_fixtures()
+        self.person = Person.objects.create(person_id=770101, year_of_birth=1970)
+        PatientRecord.objects.get_or_create(person=self.person)
+
+        User = get_user_model()
+        self.staff = User.objects.create_user(
+            email='writer@test.com', password='pw', is_staff=True,
+        )
+        self.reader = User.objects.create_user(
+            email='reader@test.com', password='pw', is_staff=False,
+        )
+
+    def _descriptor(self, user, query=''):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get(
+            f'/api/v1/patient-records/writable-fields/{query}',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.data
+
+    def test_a_permitted_caller_sees_the_writable_fields(self):
+        data = self._descriptor(self.staff, '?person_id=770101')
+        self.assertTrue(
+            any(entry['writable'] for entry in data.values()),
+            'a caller who may write should be offered something to write',
+        )
+
+    def test_a_caller_without_write_access_is_offered_nothing(self):
+        """The case this exists for.
+
+        Every save this reader attempts would be refused, so every box the UI
+        renders for them would be a lie.
+        """
+        data = self._descriptor(self.reader, '?person_id=770101')
+
+        offered = [f for f, e in data.items() if e['writable']]
+        self.assertEqual(offered, [], f'offered to a read-only caller: {offered[:5]}')
+
+    def test_the_fields_are_still_described_so_the_ui_can_explain_itself(self):
+        # Not omitted: a client still needs to render the value and say why it
+        # cannot be edited.
+        writer_view = self._descriptor(self.staff, '?person_id=770101')
+        reader_view = self._descriptor(self.reader, '?person_id=770101')
+
+        self.assertEqual(set(reader_view), set(writer_view))
+        blocked = next(
+            f for f, e in writer_view.items() if e['writable']
+        )
+        self.assertTrue(reader_view[blocked]['read_only_for_caller'])
+        self.assertIn('read-only access', reader_view[blocked]['reason'])
+
+    def test_without_a_person_the_answer_describes_the_deployment(self):
+        # The old behaviour, kept: "which fields could be written by someone
+        # permitted to write them" is a real question, asked by tooling.
+        data = self._descriptor(self.reader)
+        self.assertTrue(any(entry['writable'] for entry in data.values()))
+
+    def test_a_non_numeric_person_id_is_refused(self):
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        resp = client.get('/api/v1/patient-records/writable-fields/?person_id=abc')
+        self.assertEqual(resp.status_code, 400)

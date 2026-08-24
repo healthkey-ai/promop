@@ -491,6 +491,7 @@ _BEHAVIOR_MEASUREMENT_FIELDS = {
     '68516-4': ('exercise_frequency', str),
     '89555-7': ('exercise_minutes_per_week', int),
     '88365-2': ('diet_type', str),
+    '93832-4': ('sleep_hours_per_night', float),
     '93831-6': ('sleep_quality', str),
     '73985-4': ('stress_level', str),
     '93033-9': ('social_support', str),
@@ -522,6 +523,11 @@ _ASSERTION_FIELDS = {
     '82593-5': ('no_geographic_exposure_risk', 'inverse_boolean'),
 }
 
+_ASSERTION_DETAIL_FIELDS = {
+    '74204-0': 'substance_use_details',
+    '82593-5': 'geographic_exposure_risk_details',
+}
+
 
 # Tables whose entries name a PatientRecord field. The extractors read these and
 # assign through a variable -- ``data[field] = …`` -- so a field can be fully
@@ -529,8 +535,8 @@ _ASSERTION_FIELDS = {
 _FIELD_NAMING_TABLES = (
     '_LOINC_LAB_FIELDS', '_SOURCE_VALUE_LAB_FIELDS', '_LEGACY_LAB_CONCEPT_FIELDS',
     '_LAB_FIELD_ALIASES', '_BEHAVIOR_MEASUREMENT_FIELDS', '_ASSERTION_FIELDS',
-    '_GENETIC_MUTATION_LOINCS', 'WEARABLE_CONCEPT_CODE', '_FLC_FIELDS',
-    '_SLIM_FIELDS',
+    '_ASSERTION_DETAIL_FIELDS', '_GENETIC_MUTATION_LOINCS',
+    'WEARABLE_CONCEPT_CODE', '_FLC_FIELDS', '_SLIM_FIELDS',
 )
 
 
@@ -2473,6 +2479,15 @@ def _assertion_value(row, value_kind):
     return not parsed if value_kind == 'inverse_boolean' else parsed
 
 
+def _assertion_detail(row):
+    """Return optional detail text carried beside an assertion answer."""
+    for attr in ('value_source_value', 'qualifier_source_value'):
+        value = getattr(row, attr, None)
+        if value not in (None, ''):
+            return str(value)
+    return None
+
+
 def _get_assertion_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Project latest dated, typed OMOP eligibility/social assertions.
 
@@ -2511,6 +2526,11 @@ def _get_assertion_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if value is None:
             continue
         data[field] = value
+        detail_field = _ASSERTION_DETAIL_FIELDS.get(code)
+        if detail_field:
+            detail = _assertion_detail(row)
+            if detail:
+                data[detail_field] = detail
         if field == 'pregnancy_test_result_value':
             # The event date comes from the same fact; it is never copied from
             # a separately patched PatientRecord column.

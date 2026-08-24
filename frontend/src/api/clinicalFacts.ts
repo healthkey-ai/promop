@@ -158,10 +158,41 @@ export async function writeProfileField(
   if (!descriptor?.writable || descriptor.target !== 'person') {
     throw new Error(`${field} is not a writable profile field`);
   }
-  const key = descriptor.payload_field ?? field;
-  await clinicalClient().patch(clinicalUrl(`/v1/persons/${personId}/`), {
-    [key]: value === '' ? null : value,
-  });
+  await writeProfileFields(personId, [{ field, descriptor, value }]);
+}
+
+export interface ProfileEdit {
+  field: string;
+  descriptor: FieldDescriptor;
+  value: unknown;
+}
+
+/**
+ * Write several Person fields in one request.
+ *
+ * One request rather than one per field, because some of them are only valid
+ * together. Latitude and longitude must be both set or both null — the record
+ * carries a check constraint saying so — and sending them separately means the
+ * first arrives alone and is refused, so a patient with no coordinates could
+ * never be given any.
+ *
+ * Batching is the fix rather than special-casing that pair: the endpoint already
+ * accepts every profile field at once, and a form submits what the user changed,
+ * not one field at a time.
+ */
+export async function writeProfileFields(
+  personId: number | string,
+  edits: ProfileEdit[],
+): Promise<void> {
+  const payload: Record<string, unknown> = {};
+  for (const { field, descriptor, value } of edits) {
+    if (!descriptor?.writable || descriptor.target !== 'person') {
+      throw new Error(`${field} is not a writable profile field`);
+    }
+    payload[descriptor.payload_field ?? field] = value === '' ? null : value;
+  }
+  if (Object.keys(payload).length === 0) return;
+  await clinicalClient().patch(clinicalUrl(`/v1/persons/${personId}/`), payload);
 }
 
 /**
@@ -170,6 +201,9 @@ export async function writeProfileField(
  * Editors should call this rather than picking a writer themselves: `writable`
  * alone does not say where a value goes, and treating every writable field as an
  * OMOP fact is what sent profile edits to the observation endpoint.
+ *
+ * For several edits at once prefer `writeFieldValues`, which sends the Person
+ * fields together — some of them are only valid in company.
  */
 export async function writeFieldValue(
   personId: number | string,
@@ -183,4 +217,26 @@ export async function writeFieldValue(
     return;
   }
   await writeClinicalFact(personId, field, descriptor, value, date ?? today());
+}
+
+
+/**
+ * Write a set of edits, sending the Person fields together.
+ *
+ * The clinical facts stay one write each: each is its own event, dated and
+ * superseded on its own terms. The Person fields do not work that way — some are
+ * only valid alongside another, so they go in one request.
+ */
+export async function writeFieldValues(
+  personId: number | string,
+  edits: ProfileEdit[],
+  date?: string,
+): Promise<void> {
+  const profile = edits.filter((e) => e.descriptor?.target === 'person');
+  const clinical = edits.filter((e) => e.descriptor?.target !== 'person');
+
+  for (const { field, descriptor, value } of clinical) {
+    await writeClinicalFact(personId, field, descriptor, value, date ?? today());
+  }
+  await writeProfileFields(personId, profile);
 }

@@ -46,6 +46,9 @@ export interface FieldDescriptor {
   options?: Array<{ value: string; code?: string }>;
   /** Several answers at once, stored comma-joined. */
   multiple?: boolean;
+  /** Set when the field is mapped but this caller may not edit this patient —
+   *  read-only for who is asking, rather than read-only in principle. */
+  read_only_for_caller?: boolean;
   /** authored: what to write instead, since no single fact backs this field. */
   authored_via?: {
     target?: string;
@@ -72,48 +75,73 @@ export const LIFECYCLE: ReadonlySet<string> = new Set([
   'derived_at', 'derivation_version', 'user_edited_fields',
 ]);
 
-/** Module-level cache: the descriptor is deployment metadata, identical for every
- *  caller and every patient, so refetching it per tab mount is pure waste. */
-let cached: FieldDescriptors | null = null;
-let inflight: Promise<FieldDescriptors> | null = null;
+/** Cached per patient, because the answer is per patient.
+ *
+ *  The descriptor used to be deployment metadata — the same for everyone — which
+ *  is true of *which fields are mapped* and false of *who may edit them*. An
+ *  analyst has read-only access to every record, so a shared cache would show
+ *  them typeable boxes whose every save is refused. Keyed by person so one
+ *  patient's answer is never served for another's. */
+const cached = new Map<string, FieldDescriptors>();
+const inflight = new Map<string, Promise<FieldDescriptors>>();
+
+const keyFor = (personId?: number | string) =>
+  personId === undefined || personId === null ? '' : String(personId);
 
 export function __resetWritableFieldsCache() {
-  cached = null;
-  inflight = null;
+  cached.clear();
+  inflight.clear();
 }
 
-export function fetchWritableFields(): Promise<FieldDescriptors> {
-  if (cached) return Promise.resolve(cached);
-  if (!inflight) {
-    inflight = clinicalClient()
-      .get(clinicalUrl('/v1/patient-records/writable-fields/'))
+export function fetchWritableFields(
+  personId?: number | string,
+): Promise<FieldDescriptors> {
+  const key = keyFor(personId);
+  const hit = cached.get(key);
+  if (hit) return Promise.resolve(hit);
+
+  let pending = inflight.get(key);
+  if (!pending) {
+    pending = clinicalClient()
+      .get(clinicalUrl('/v1/patient-records/writable-fields/'), {
+        // Without a person the server answers for the deployment. With one it
+        // answers for this caller and this patient, which is what a tab needs
+        // before it decides whether to render a box.
+        params: key ? { person_id: key } : undefined,
+      })
       .then((res) => {
-        cached = (res.data ?? {}) as FieldDescriptors;
-        return cached;
+        const data = (res.data ?? {}) as FieldDescriptors;
+        cached.set(key, data);
+        return data;
       })
       .finally(() => {
-        inflight = null;
+        inflight.delete(key);
       });
+    inflight.set(key, pending);
   }
-  return inflight;
+  return pending;
 }
 
-export function useWritableFields() {
-  const [descriptors, setDescriptors] = useState<FieldDescriptors>(cached ?? {});
-  const [loading, setLoading] = useState(!cached);
+export function useWritableFields(personId?: number | string) {
+  const key = keyFor(personId);
+  const [descriptors, setDescriptors] = useState<FieldDescriptors>(
+    () => cached.get(key) ?? {},
+  );
+  const [loading, setLoading] = useState(!cached.has(key));
   const [error, setError] = useState(false);
 
   useEffect(() => {
     let alive = true;
-    if (cached) {
+    const ready = cached.get(key);
+    if (ready) {
       Promise.resolve().then(() => {
         if (!alive) return;
-        setDescriptors(cached ?? {});
+        setDescriptors(ready);
         setLoading(false);
       });
       return;
     }
-    fetchWritableFields()
+    fetchWritableFields(personId)
       .then((d) => {
         if (alive) setDescriptors(d);
       })
@@ -130,7 +158,7 @@ export function useWritableFields() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [key, personId]);
 
   return { descriptors, loading, error };
 }
