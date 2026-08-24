@@ -43,3 +43,16 @@ def test_active_formula_is_final_authority_after_patient_record_save():
     refreshed = refresh_patient_record(record.person)
 
     assert float(refreshed.bmi) == 42
+
+
+def test_unknown_viral_status_keeps_inverse_projection_unknown():
+    """An absent viral result must not turn into a known-negative assertion."""
+    record = PatientRecordFactory(hiv_status=None, no_hiv_status=None)
+    formula, _ = FieldFormula.objects.update_or_create(
+        field_name='no_hiv_status',
+        defaults={'formula': '@not(hiv_status)', 'is_active': True},
+    )
+
+    assert recompute_formula_field(formula) >= 1
+    record.refresh_from_db()
+    assert record.no_hiv_status is None

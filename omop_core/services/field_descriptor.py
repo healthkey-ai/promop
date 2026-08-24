@@ -416,6 +416,7 @@ def get_all_field_descriptors() -> list[dict]:
             mapping_dict = {
                 'id': mapping.id,
                 'concept_id': mapping.concept_id,
+                'concept_name': mapping.concept.concept_name if mapping.concept else '',
                 'vocabulary_id': mapping.vocabulary_id,
                 'concept_code': mapping.concept_code,
                 'unit': mapping.unit,

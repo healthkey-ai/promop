@@ -25,6 +25,7 @@ interface FieldDescriptor {
   mapping: {
     id: number;
     concept_id: number | null;
+    concept_name: string;
     vocabulary_id: string;
     concept_code: string;
     unit: string;
@@ -703,6 +704,7 @@ export default function FieldMappingPage() {
           initialOmopTable={selectedField.locked_table || selectedField.mapping?.omop_table || selectedField.suggestion?.omop_table || undefined}
           existingMappingId={selectedField.mapping?.id}
           initialConceptId={selectedField.mapping?.concept_id}
+          initialConceptName={selectedField.mapping?.concept_name}
           initialNotes={selectedField.mapping?.notes}
           commonUnits={selectedField.suggestion?.common_units}
           onClose={() => {

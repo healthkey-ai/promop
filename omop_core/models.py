@@ -2481,9 +2481,11 @@ class PatientRecord(models.Model):
     no_geographic_exposure_risk = models.BooleanField(help_text="Has the patient had geographic exposure to risk?", blank=True, null=True, default=None)
     geographic_exposure_risk_details = models.CharField(max_length=255, help_text="Details about the patient's geographic exposure risk", blank=True, null=True)
 
-    no_hiv_status = models.BooleanField(help_text="Does the patient has had HIV?", blank=False, null=False, default=True)
-    no_hepatitis_b_status = models.BooleanField(help_text="Does the patient has had Hepatitis B (HBV)?", blank=False, null=False, default=True)
-    no_hepatitis_c_status = models.BooleanField(help_text="Does the patient has had Hepatitis C (HCV)?", blank=False, null=False, default=True)
+    # These are inverse projections of the corresponding infection results.
+    # A patient without a recorded result is unknown, not known-negative.
+    no_hiv_status = models.BooleanField(help_text="Does the patient has had HIV?", blank=True, null=True, default=None)
+    no_hepatitis_b_status = models.BooleanField(help_text="Does the patient has had Hepatitis B (HBV)?", blank=True, null=True, default=None)
+    no_hepatitis_c_status = models.BooleanField(help_text="Does the patient has had Hepatitis C (HCV)?", blank=True, null=True, default=None)
     no_active_infection_status = models.BooleanField(
         help_text="Does the patient have any active infection?",
         blank=True, null=True, default=None,

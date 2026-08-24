@@ -23,6 +23,7 @@ interface Props {
   initialOmopTable?: string;
   existingMappingId?: number;
   initialConceptId?: number | null;
+  initialConceptName?: string;
   initialNotes?: string;
   commonUnits?: string[];
 }
@@ -30,11 +31,11 @@ interface Props {
 export function ConceptAssignDialog({
   fieldName, fieldType, onClose, onSaved,
   initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
-  existingMappingId, initialConceptId, initialNotes, commonUnits,
+  existingMappingId, initialConceptId, initialConceptName, initialNotes, commonUnits,
 }: Props) {
   const isEditing = !!existingMappingId;
-  const [searchQuery, setSearchQuery] = useState(initialConceptCode || "");
-  const [vocabFilter, setVocabFilter] = useState(initialVocabularyId || "");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [vocabFilter, setVocabFilter] = useState("");
   const [results, setResults] = useState<ConceptResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [selected, setSelected] = useState<ConceptResult | null>(() => (
@@ -42,7 +43,7 @@ export function ConceptAssignDialog({
       ? {
           concept_id: initialConceptId,
           concept_code: initialConceptCode || "",
-          concept_name: "",
+          concept_name: initialConceptName || "",
           vocabulary_id: initialVocabularyId || "",
           domain_id: "",
           standard_concept: null,
@@ -59,7 +60,6 @@ export function ConceptAssignDialog({
   const overlayRef = useRef<HTMLDivElement>(null);
 
   const hasCommonUnits = commonUnits && commonUnits.length > 0;
-  // Track whether user selected "other" in the dropdown
   const isCustomUnit = hasCommonUnits && unit !== "" && !commonUnits.includes(unit);
 
   const doSearch = useCallback(async (q: string) => {
@@ -124,14 +124,12 @@ export function ConceptAssignDialog({
     }
   };
 
-  // Close on Escape key
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, [onClose]);
 
-  // Close on overlay click
   const handleOverlayClick = (e: React.MouseEvent) => {
     if (e.target === overlayRef.current) onClose();
   };
@@ -166,6 +164,35 @@ export function ConceptAssignDialog({
         <p className="mb-4 text-sm text-gray-500">
           Field: <span className="font-mono">{fieldName}</span> ({fieldType})
         </p>
+
+        {/* Mapped concept display */}
+        <div className="mb-4">
+          <label className="mb-1 block text-xs font-medium text-gray-600">Mapped Concept</label>
+          {selected ? (
+            <div className="flex items-center gap-2 rounded border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
+              <span className="font-mono font-medium">
+                {selected.vocabulary_id}:{selected.concept_code}
+              </span>
+              {selected.concept_name && (
+                <>
+                  <span className="text-gray-400">&mdash;</span>
+                  <span>{selected.concept_name}</span>
+                </>
+              )}
+              <button
+                onClick={() => setSelected(null)}
+                className="ml-auto rounded p-0.5 text-gray-400 hover:text-gray-600"
+                title="Clear selection"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          ) : (
+            <div className="rounded border border-dashed border-gray-300 px-3 py-2 text-sm text-gray-400">
+              No concept selected &mdash; search below to assign one
+            </div>
+          )}
+        </div>
 
         {/* Concept search */}
         <div className="mb-3 flex gap-2">
@@ -235,17 +262,6 @@ export function ConceptAssignDialog({
             </table>
           )}
         </div>
-
-        {/* Selected concept */}
-        {selected && (
-          <div className="mb-4 rounded bg-blue-50 px-3 py-2 text-sm">
-            Selected:{" "}
-            <span className="font-medium">
-              {selected.vocabulary_id}:{selected.concept_code}
-            </span>{" "}
-            — {selected.concept_name}
-          </div>
-        )}
 
         {/* Additional fields */}
         <div className="mb-4 grid grid-cols-2 gap-3">
