@@ -114,27 +114,29 @@ export default function FieldMappingPage() {
   const [formulaEditorField, setFormulaEditorField] = useState<FieldDescriptor | null>(null);
   const [derivationInfoField, setDerivationInfoField] = useState<FieldDescriptor | null>(null);
 
-  const fetchDescriptors = useCallback(async () => {
+  const fetchDescriptors = useCallback(async (autoPropose = false) => {
     setLoading(true);
     setError("");
     try {
       const resp = await api.get("/v1/field-mappings/");
       setDescriptors(resp.data);
 
-      // Auto-propose mappings for fields with suggestions but no mapping.
-      const hasUnmapped = resp.data.some(
-        (d: FieldDescriptor) => d.mappable && !d.mapping && d.suggestion
-      );
-      if (hasUnmapped) {
-        try {
-          const proposeResp = await api.post("/v1/field-mappings/propose-all/");
-          if (proposeResp.data.created > 0) {
-            // Re-fetch to pick up newly created proposed mappings.
-            const refreshed = await api.get("/v1/field-mappings/");
-            setDescriptors(refreshed.data);
+      // Auto-propose mappings only on initial mount, not on every refetch.
+      if (autoPropose) {
+        const hasUnmapped = resp.data.some(
+          (d: FieldDescriptor) => d.mappable && !d.mapping && d.suggestion
+        );
+        if (hasUnmapped) {
+          try {
+            const proposeResp = await api.post("/v1/field-mappings/propose-all/");
+            if (proposeResp.data.created > 0) {
+              // Re-fetch to pick up newly created proposed mappings.
+              const refreshed = await api.get("/v1/field-mappings/");
+              setDescriptors(refreshed.data);
+            }
+          } catch {
+            // Non-critical — proposed mappings are a convenience, not required.
           }
-        } catch {
-          // Non-critical — proposed mappings are a convenience, not required.
         }
       }
     } catch {
@@ -146,7 +148,7 @@ export default function FieldMappingPage() {
 
   useEffect(() => {
     (async () => {
-      await fetchDescriptors();
+      await fetchDescriptors(true);
     })();
   }, [fetchDescriptors]);
 
@@ -687,9 +689,10 @@ export default function FieldMappingPage() {
           commonUnits={selectedField.suggestion?.common_units}
           choices={selectedField.choices}
           onEditChoices={() => {
+            const fieldToEdit = selectedField;
             setDialogOpen(false);
             setSelectedField(null);
-            setChoiceEditorField(selectedField);
+            setChoiceEditorField(fieldToEdit);
           }}
           onClose={() => {
             setDialogOpen(false);

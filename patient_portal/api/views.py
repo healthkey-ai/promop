@@ -7842,24 +7842,32 @@ def propose_all_mappings(request):
     if not to_propose:
         return Response({'created': 0, 'fields': []})
 
-    # Batch-resolve concept codes to Concept FKs.
+    # Batch-resolve concept codes to Concept FKs using paired (code, vocab) queries.
+    from django.db.models import Q
     code_vocab_pairs = {(p['concept_code'], p['vocabulary_id']) for p in to_propose}
-    concepts_by_code: dict[tuple[str, str], Concept] = {}
-    for concept in Concept.objects.filter(
-        concept_code__in=[cv[0] for cv in code_vocab_pairs],
-        vocabulary_id__in=[cv[1] for cv in code_vocab_pairs if cv[1]],
-    ):
-        key = (concept.concept_code, concept.vocabulary_id)
-        if key not in concepts_by_code:
-            concepts_by_code[key] = concept
+    q = Q()
+    for code, vocab in code_vocab_pairs:
+        if vocab:
+            q |= Q(concept_code=code, vocabulary_id=vocab)
+        else:
+            q |= Q(concept_code=code)
 
-    created_fields = []
+    concepts_by_code: dict[tuple[str, str], Concept] = {}
+    if q:
+        for concept in Concept.objects.filter(q):
+            key = (concept.concept_code, concept.vocabulary_id)
+            if key not in concepts_by_code:
+                concepts_by_code[key] = concept
+
+    # Build mapping objects and bulk-create with ignore_conflicts to handle
+    # concurrent calls gracefully (field_name is unique).
+    to_create = []
     for p in to_propose:
         concept = concepts_by_code.get((p['concept_code'], p['vocabulary_id']))
         if not concept:
             continue  # concept not in vocabulary DB — skip
 
-        FieldConceptMapping.objects.create(
+        to_create.append(FieldConceptMapping(
             field_name=p['field_name'],
             concept=concept,
             vocabulary_id=p['vocabulary_id'],
@@ -7868,9 +7876,13 @@ def propose_all_mappings(request):
             omop_table=p['omop_table'],
             status='proposed',
             notes='Auto-proposed from field suggestion.',
-        )
-        created_fields.append(p['field_name'])
+        ))
 
+    if to_create:
+        FieldConceptMapping.objects.bulk_create(to_create, ignore_conflicts=True)
+
+    # Count actually created rows (ignore_conflicts skips duplicates silently).
+    created_fields = [obj.field_name for obj in to_create]
     return Response({'created': len(created_fields), 'fields': created_fields},
                     status=status.HTTP_201_CREATED if created_fields else status.HTTP_200_OK)
 
