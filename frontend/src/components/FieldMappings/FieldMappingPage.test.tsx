@@ -252,7 +252,7 @@ describe("FieldMappingPage", () => {
     expect(screen.getByText("SNOMED")).toBeInTheDocument();
   });
 
-  it("shows 'click to map' for unmapped fields with unresolved suggestions", async () => {
+  it("shows a visible proposed concept for an unmapped field with a suggestion", async () => {
     renderPage();
     await waitFor(() => {
       expect(screen.getByText(/Blood/)).toBeInTheDocument();
@@ -261,10 +261,7 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("hemoglobin_g_dl")).toBeInTheDocument();
     });
-    // hemoglobin_g_dl has a suggestion but no mapping in mock data;
-    // propose-all returned 0 created, so it still shows "click to map"
-    const clickToMap = screen.getAllByText("click to map");
-    expect(clickToMap.length).toBeGreaterThan(0);
+    expect(screen.getByText("718-7")).toHaveClass("font-bold");
   });
 
   it("search shows results across all tabs", async () => {
@@ -384,7 +381,8 @@ describe("FieldMappingPage", () => {
     fireEvent.click(screen.getByText(/Behavior/));
     await waitFor(() => expect(screen.getByText("229819007")).toBeInTheDocument());
 
-    fireEvent.click(screen.getAllByTitle("Approve mapping")[0]);
+    const proposedRow = screen.getByText("229819007").closest("tr");
+    fireEvent.click(proposedRow!.querySelector('[title="Approve mapping"]')!);
     await waitFor(() => {
       expect(mockPatch).toHaveBeenCalledWith("/v1/field-mappings/1/", { status: "approved" });
     });
