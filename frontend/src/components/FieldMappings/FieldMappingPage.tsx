@@ -114,12 +114,31 @@ export default function FieldMappingPage() {
   const [formulaEditorField, setFormulaEditorField] = useState<FieldDescriptor | null>(null);
   const [derivationInfoField, setDerivationInfoField] = useState<FieldDescriptor | null>(null);
 
-  const fetchDescriptors = useCallback(async () => {
+  const fetchDescriptors = useCallback(async (autoPropose = false) => {
     setLoading(true);
     setError("");
     try {
       const resp = await api.get("/v1/field-mappings/");
       setDescriptors(resp.data);
+
+      // Auto-propose mappings only on initial mount, not on every refetch.
+      if (autoPropose) {
+        const hasUnmapped = resp.data.some(
+          (d: FieldDescriptor) => d.mappable && !d.mapping && d.suggestion
+        );
+        if (hasUnmapped) {
+          try {
+            const proposeResp = await api.post("/v1/field-mappings/propose-all/");
+            if (proposeResp.data.created > 0) {
+              // Re-fetch to pick up newly created proposed mappings.
+              const refreshed = await api.get("/v1/field-mappings/");
+              setDescriptors(refreshed.data);
+            }
+          } catch {
+            // Non-critical — proposed mappings are a convenience, not required.
+          }
+        }
+      }
     } catch {
       setError("Failed to load field mappings.");
     } finally {
@@ -129,7 +148,7 @@ export default function FieldMappingPage() {
 
   useEffect(() => {
     (async () => {
-      await fetchDescriptors();
+      await fetchDescriptors(true);
     })();
   }, [fetchDescriptors]);
 
@@ -268,13 +287,6 @@ export default function FieldMappingPage() {
         </span>
       );
     }
-    if (f.suggestion) {
-      return (
-        <span className="font-mono text-xs italic text-gray-400">
-          {f.suggestion.concept_code}
-        </span>
-      );
-    }
     return (
       <span className="text-xs text-gray-400 group-hover:text-gray-500">
         click to map
@@ -286,9 +298,6 @@ export default function FieldMappingPage() {
   const renderCodingCell = (f: FieldDescriptor) => {
     if (f.mapping?.vocabulary_id) {
       return <span className="text-xs">{f.mapping.vocabulary_id}</span>;
-    }
-    if (f.suggestion?.vocabulary_id) {
-      return <span className="text-xs italic text-gray-400">{f.suggestion.vocabulary_id}</span>;
     }
     return <span className="text-xs text-gray-400">&mdash;</span>;
   };
@@ -308,20 +317,6 @@ export default function FieldMappingPage() {
     }
     if (f.mapping?.omop_table) {
       return <span className="text-xs">{f.mapping.omop_table}</span>;
-    }
-    if (f.suggestion?.omop_table) {
-      return <span className="text-xs italic text-gray-400">{f.suggestion.omop_table}</span>;
-    }
-    return <span className="text-xs text-gray-400">&mdash;</span>;
-  };
-
-  /** Render unit cell. */
-  const renderUnitCell = (f: FieldDescriptor) => {
-    if (f.mapping?.unit) {
-      return <span className="text-xs">{f.mapping.unit}</span>;
-    }
-    if (f.suggestion?.unit) {
-      return <span className="text-xs italic text-gray-400">{f.suggestion.unit}</span>;
     }
     return <span className="text-xs text-gray-400">&mdash;</span>;
   };
@@ -363,8 +358,6 @@ export default function FieldMappingPage() {
             </th>
             <th className="px-3 py-2">Coding</th>
             <th className="px-3 py-2">Table</th>
-            <th className="px-3 py-2">Units</th>
-            <th className="px-3 py-2">Choices</th>
             <th className="px-3 py-2">Synonyms</th>
           </tr>
         </thead>
@@ -431,19 +424,6 @@ export default function FieldMappingPage() {
                     {renderTableCell(f)}
                   </button>
                 )}
-              </td>
-              <td className="px-3 py-2">{renderUnitCell(f)}</td>
-              <td className="px-3 py-2">
-                <button
-                  onClick={() => setChoiceEditorField(f)}
-                  className="text-xs text-gray-500 hover:text-primary hover:underline"
-                >
-                  {f.choices.length > 0 ? (
-                    <span>{f.choices.length} choices</span>
-                  ) : (
-                    <span className="text-gray-400">&mdash;</span>
-                  )}
-                </button>
               </td>
               <td className="px-3 py-2">{renderSynonyms(f)}</td>
             </tr>
@@ -707,6 +687,13 @@ export default function FieldMappingPage() {
           initialConceptName={selectedField.mapping?.concept_name}
           initialNotes={selectedField.mapping?.notes}
           commonUnits={selectedField.suggestion?.common_units}
+          choices={selectedField.choices}
+          onEditChoices={() => {
+            const fieldToEdit = selectedField;
+            setDialogOpen(false);
+            setSelectedField(null);
+            setChoiceEditorField(fieldToEdit);
+          }}
           onClose={() => {
             setDialogOpen(false);
             setSelectedField(null);

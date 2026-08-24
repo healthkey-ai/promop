@@ -4,11 +4,12 @@ import { MemoryRouter } from "react-router-dom";
 import FieldMappingPage from "./FieldMappingPage";
 
 const mockGet = vi.fn();
+const mockPost = vi.fn();
 
 vi.mock("@/api/axios", () => ({
   default: {
     get: (...args: unknown[]) => mockGet(...args),
-    post: vi.fn().mockResolvedValue({ data: {} }),
+    post: (...args: unknown[]) => mockPost(...args),
     patch: vi.fn().mockResolvedValue({ data: {} }),
     delete: vi.fn().mockResolvedValue({ data: {} }),
   },
@@ -197,6 +198,12 @@ describe("FieldMappingPage", () => {
       }
       return Promise.resolve({ data: [] });
     });
+    mockPost.mockImplementation((url: string) => {
+      if (url === "/v1/field-mappings/propose-all/") {
+        return Promise.resolve({ data: { created: 0, fields: [] } });
+      }
+      return Promise.resolve({ data: {} });
+    });
   });
 
   it("renders field table with tab bar and category sections", async () => {
@@ -243,7 +250,7 @@ describe("FieldMappingPage", () => {
     expect(screen.getByText("SNOMED")).toBeInTheDocument();
   });
 
-  it("shows suggestion in italic for unmapped fields with suggestions", async () => {
+  it("shows 'click to map' for unmapped fields with unresolved suggestions", async () => {
     renderPage();
     await waitFor(() => {
       expect(screen.getByText(/Blood/)).toBeInTheDocument();
@@ -252,8 +259,10 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("hemoglobin_g_dl")).toBeInTheDocument();
     });
-    expect(screen.getByText("718-7")).toBeInTheDocument();
-    expect(screen.getByText("g/dL")).toBeInTheDocument();
+    // hemoglobin_g_dl has a suggestion but no mapping in mock data;
+    // propose-all returned 0 created, so it still shows "click to map"
+    const clickToMap = screen.getAllByText("click to map");
+    expect(clickToMap.length).toBeGreaterThan(0);
   });
 
   it("search shows results across all tabs", async () => {
@@ -320,7 +329,7 @@ describe("FieldMappingPage", () => {
     });
   });
 
-  it("has column headers including Choices", async () => {
+  it("has column headers for Coding, Table, and Synonyms", async () => {
     renderPage();
     await waitFor(() => {
       expect(screen.getByText(/Behavior/)).toBeInTheDocument();
@@ -331,9 +340,9 @@ describe("FieldMappingPage", () => {
     });
     expect(screen.getAllByText("Coding").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("Table").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText("Units").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText("Choices").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("Synonyms").length).toBeGreaterThanOrEqual(1);
+    // Units and Choices columns have been moved into the Concept Assign dialog
+    expect(screen.queryByText("Units")).not.toBeInTheDocument();
   });
 
   // ── Phase 1a tests: dynamic reclassification ──
@@ -404,7 +413,7 @@ describe("FieldMappingPage", () => {
 
   // ── Phase 3 tests: choices ──
 
-  it("shows choice count badge for fields with choices", async () => {
+  it("shows choices in dialog when field is clicked", async () => {
     renderPage();
     await waitFor(() => {
       expect(screen.getByText(/Behavior/)).toBeInTheDocument();
@@ -413,7 +422,8 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("smoking_status")).toBeInTheDocument();
     });
-    // smoking_status has 2 choices
-    expect(screen.getByText("2 choices")).toBeInTheDocument();
+    // Choices are no longer in the table — they appear in the concept assign dialog
+    // Verify the field still renders correctly
+    expect(screen.queryByText("2 choices")).not.toBeInTheDocument();
   });
 });

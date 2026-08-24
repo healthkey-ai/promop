@@ -12,6 +12,13 @@ interface ConceptResult {
   suggested_unit?: string;
 }
 
+interface FieldChoiceInfo {
+  id: number;
+  display: string;
+  sort_order: number;
+  codes: { code: string; vocabulary_id: string; display: string; is_primary: boolean }[];
+}
+
 interface Props {
   fieldName: string;
   fieldType: string;
@@ -26,12 +33,15 @@ interface Props {
   initialConceptName?: string;
   initialNotes?: string;
   commonUnits?: string[];
+  choices?: FieldChoiceInfo[];
+  onEditChoices?: () => void;
 }
 
 export function ConceptAssignDialog({
   fieldName, fieldType, onClose, onSaved,
   initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
   existingMappingId, initialConceptId, initialConceptName, initialNotes, commonUnits,
+  choices, onEditChoices,
 }: Props) {
   const isEditing = !!existingMappingId;
   const [searchQuery, setSearchQuery] = useState("");
@@ -329,6 +339,50 @@ export function ConceptAssignDialog({
             placeholder="Rationale for this mapping..."
           />
         </div>
+
+        {/* Field Choices */}
+        {choices !== undefined && (
+          <div className="mb-4">
+            <div className="mb-1 flex items-center gap-2">
+              <label className="text-xs font-medium text-gray-600">
+                Field Choices (Value Set)
+              </label>
+              {onEditChoices && (
+                <button
+                  onClick={onEditChoices}
+                  className="text-[10px] text-primary hover:underline"
+                >
+                  Edit choices
+                </button>
+              )}
+            </div>
+            {choices.length > 0 ? (
+              <div className="max-h-28 overflow-y-auto rounded border border-gray-200 text-xs">
+                <table className="w-full">
+                  <tbody className="divide-y divide-gray-100">
+                    {choices.map((ch) => (
+                      <tr key={ch.id} className="hover:bg-gray-50">
+                        <td className="px-2 py-1">{ch.display}</td>
+                        <td className="px-2 py-1 text-gray-400">
+                          {ch.codes.map((c) => `${c.vocabulary_id}:${c.code}`).join(", ") || "no codes"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="rounded border border-dashed border-gray-300 px-3 py-1.5 text-xs text-gray-400">
+                No choices defined
+                {onEditChoices && (
+                  <button onClick={onEditChoices} className="ml-1 text-primary hover:underline">
+                    — add some
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {error && <div className="mb-3 text-sm text-red-600">{error}</div>}
 
