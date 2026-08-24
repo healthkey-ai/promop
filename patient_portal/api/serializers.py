@@ -423,6 +423,55 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             # on attribute assignment). Emit ISO either way, never crash.
             return v.isoformat() if hasattr(v, 'isoformat') else (v or None)
 
+        episodes_by_line = {
+            e.episode_number: e
+            for e in Episode.objects.filter(
+                person=obj.person,
+                episode_number__isnull=False,
+            )
+        }
+        episode_ids = [e.episode_id for e in episodes_by_line.values()]
+        event_ids_by_episode = {}
+        if episode_ids:
+            for ee in EpisodeEvent.objects.filter(episode_id__in=episode_ids):
+                event_ids_by_episode.setdefault(ee.episode_id, []).append(ee.event_id)
+        all_event_ids = [
+            event_id
+            for event_ids in event_ids_by_episode.values()
+            for event_id in event_ids
+        ]
+        drugs_by_id = {
+            de.drug_exposure_id: de
+            for de in DrugExposure.objects.filter(
+                drug_exposure_id__in=all_event_ids,
+            ).select_related(
+                'drug_concept',
+                'drug_concept__vocabulary',
+                'drug_concept__concept_class',
+            )
+        } if all_event_ids else {}
+
+        def _editable_drugs(line_number):
+            episode = episodes_by_line.get(line_number)
+            if episode is None:
+                return None, []
+            drugs = []
+            for event_id in event_ids_by_episode.get(episode.episode_id, []):
+                de = drugs_by_id.get(event_id)
+                if de is None or de.drug_concept is None:
+                    continue
+                concept = de.drug_concept
+                drugs.append({
+                    'concept_id': concept.concept_id,
+                    'concept_name': concept.concept_name,
+                    'concept_code': concept.concept_code,
+                    'vocabulary_id': concept.vocabulary_id,
+                    'concept_class_id': concept.concept_class_id,
+                    'standard_concept': concept.standard_concept,
+                    'source_value': de.drug_source_value,
+                })
+            return episode.episode_id, drugs
+
         def _line(n, regimen, cid, prov_field, comp, start, end,
                   outcome, intent, disc, later_aggregate=False,
                   origin_override=None, comp_class=None):
@@ -441,12 +490,15 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 origin = None
             elif origin is None:
                 origin = 'inferred'
+            episode_id, editable_drugs = _editable_drugs(n)
             entry = {
                 'line': n,
+                'episode_id': episode_id,
                 'regimen': regimen,
                 'regimen_concept_id': cid,
                 'regimen_source': origin,
                 'release_id': _prov(prov_field, 'release_id'),
+                'drugs': editable_drugs,
                 'component_ids': comp or [],
                 # Therapy-class ("type") concept_ids for the line (ADR 0002),
                 # derived from component_ids; parity with the flat
@@ -972,10 +1024,12 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
         A curator can otherwise approve a mapping, see it listed as approved,
         and find the field still read-only with nothing saying why.
         """
+        from omop_core.services.write_descriptor import mapping_table_is_writable
+
         return bool(
             obj.status == 'approved'
             and obj.concept_id
-            and obj.omop_table.strip().lower() in {'measurement', 'observation'}
+            and mapping_table_is_writable(obj.omop_table)
             and obj.source_value
         )
 
@@ -1018,6 +1072,26 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
             if field_name not in concrete_names:
                 raise serializers.ValidationError({
                     'field_name': f"'{field_name}' is not a concrete PatientRecord field."
+                })
+        status_value = attrs.get('status', getattr(self.instance, 'status', None))
+        omop_table = attrs.get('omop_table', getattr(self.instance, 'omop_table', ''))
+        source_value = attrs.get('source_value', getattr(self.instance, 'source_value', ''))
+        if status_value == 'approved' and omop_table and source_value:
+            normalized_table = omop_table.strip().lower()
+            conflicts = FieldConceptMapping.objects.filter(
+                status='approved',
+                omop_table__iexact=normalized_table,
+                source_value=source_value,
+            )
+            if self.instance is not None:
+                conflicts = conflicts.exclude(pk=self.instance.pk)
+            if conflicts.exists():
+                other = conflicts.order_by('field_name').first()
+                raise serializers.ValidationError({
+                    'source_value': (
+                        'Approved writable mappings must not share the same '
+                        f'omop_table/source_value key; already used by {other.field_name}.'
+                    )
                 })
         return attrs
 

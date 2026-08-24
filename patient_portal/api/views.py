@@ -7940,14 +7940,7 @@ class TherapyLineViewSet(viewsets.ViewSet):
 
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
 
-    def create(self, request):
-        from omop_core.services.episode_service import author_therapy_line
-
-        serializer = TherapyLineWriteSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-        person = data['person']
-
+    def _check_person_write_permission(self, request, person):
         # Same create-time check the single-row clinical writes use: object-level
         # permissions do not fire on create, so the queryset scoping that
         # protects reads is not protecting this.
@@ -7968,6 +7961,19 @@ class TherapyLineViewSet(viewsets.ViewSet):
                         {'detail': 'Access denied.'},
                         status=status.HTTP_403_FORBIDDEN,
                     )
+        return None
+
+    def create(self, request):
+        from omop_core.services.episode_service import author_therapy_line
+
+        serializer = TherapyLineWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        person = data['person']
+
+        denied = self._check_person_write_permission(request, person)
+        if denied is not None:
+            return denied
 
         try:
             with transaction.atomic():
@@ -8015,4 +8021,104 @@ class TherapyLineViewSet(viewsets.ViewSet):
                 'patient_info': PatientRecordSerializer(record).data,
             },
             status=status.HTTP_201_CREATED,
+        )
+
+    def partial_update(self, request, pk=None):
+        from omop_core.services.episode_service import author_therapy_line
+
+        try:
+            episode_id = int(pk)
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': 'Invalid therapy line episode_id.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        episode = Episode.objects.filter(episode_id=episode_id).select_related('person').first()
+        if episode is None:
+            return Response(
+                {'detail': 'Therapy line not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if episode.episode_number is None:
+            return Response(
+                {'detail': 'Therapy line has no episode_number to edit.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        requested_line = request.data.get('line_number')
+        if requested_line is not None:
+            try:
+                requested_line = int(requested_line)
+            except (TypeError, ValueError):
+                return Response(
+                    {'detail': 'line_number must be an integer.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if requested_line != episode.episode_number:
+                return Response(
+                    {'detail': 'Editing a therapy line cannot change its line_number.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        payload = dict(request.data)
+        payload['person'] = episode.person_id
+        payload['line_number'] = episode.episode_number
+        payload.setdefault(
+            'start_date',
+            episode.episode_start_date.isoformat() if episode.episode_start_date else None,
+        )
+        payload.setdefault(
+            'end_date',
+            episode.episode_end_date.isoformat() if episode.episode_end_date else None,
+        )
+
+        serializer = TherapyLineWriteSerializer(data=payload)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        person = episode.person
+
+        denied = self._check_person_write_permission(request, person)
+        if denied is not None:
+            return denied
+
+        try:
+            with transaction.atomic():
+                with suppress_patient_record_refresh():
+                    result = author_therapy_line(
+                        person,
+                        line_number=episode.episode_number,
+                        drugs=data.get('drugs') or (),
+                        start_date=data.get('start_date'),
+                        end_date=data.get('end_date'),
+                        regimen_concept_id=data.get('regimen_concept_id'),
+                        outcome=data.get('outcome') or None,
+                        source_value=data.get('source_value') or None,
+                        replace=True,
+                    )
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if result.episode is None:
+            return Response(
+                {'detail': (
+                    'Treatment Regimen concept (32531) is not loaded, so the '
+                    'therapy line could not be grouped. Load the Episode '
+                    'vocabulary and retry.'
+                )},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        person.refresh_from_db()
+        record = refresh_patient_record(person)
+        return Response(
+            {
+                'episode_id': result.episode.episode_id,
+                'line_number': episode.episode_number,
+                'created': result.created,
+                'drug_exposure_ids': result.drug_exposure_ids,
+                'drugs_created': result.drugs_created,
+                'patient_info': PatientRecordSerializer(record).data,
+            },
+            status=status.HTTP_200_OK,
         )
