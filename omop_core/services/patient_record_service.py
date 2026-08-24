@@ -18,7 +18,7 @@ from django.db.models.functions import Cast, Coalesce
 from django.db import transaction
 from django.utils import timezone
 from omop_core.models import (
-    Person, PatientRecord, ConditionOccurrence, Concept,
+    Person, PatientRecord, ConditionOccurrence, Concept, ConceptAncestor,
     Measurement, Observation, DrugExposure, Location, ProcedureOccurrence,
     Death, ConceptRelationship, PERSON_YEAR_PLACEHOLDERS,
 )
@@ -77,6 +77,8 @@ _OMOP_DERIVED_FIELDS = [
     'validation_date', 'suppress_demographics_for_others',
     # Disease / condition
     'disease', 'diagnosis_date', 'death_date', 'condition_clinical_status', 'disease_slug',
+    'active_infection_status', 'no_active_infection_status',
+    'active_malignancies', 'no_other_active_malignancies',
     # Therapy lines
     'first_line_therapy', 'first_line_date', 'first_line_start_date', 'first_line_end_date',
     'first_line_therapy_id',
@@ -736,6 +738,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             _get_demographics,
             _get_location_data,
             _get_disease_data,
+            _get_active_condition_data,
             _get_treatment_data,
             _get_vitals_data,
             _get_biomarker_data,
@@ -950,6 +953,97 @@ def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     disease_name = data.get('disease', '')
     if disease_name:
         data['disease_slug'] = _disease_name_to_slug(disease_name)
+
+    return data
+
+
+_ACTIVE_CONDITION_ROOT_CODES = {
+    'active_infection_status': '40733004',  # SNOMED CT: Infectious disease
+    'active_malignancies': '363346000',     # SNOMED CT: Malignant neoplastic disease
+}
+_INACTIVE_CONDITION_STATUS_MARKERS = (
+    'resolved', 'inactive', 'history of', 'rule out', 'ruled out',
+)
+
+
+def _active_condition_descendant_ids(root_code: str) -> set[int] | None:
+    """Return descendants of a loaded SNOMED condition root, including itself.
+
+    Numeric OMOP concept IDs vary with the loaded vocabulary release, so the
+    stable SNOMED code is resolved at runtime.  ``None`` means the vocabulary
+    hierarchy is unavailable; callers must preserve an unknown result rather
+    than treating an incomplete vocabulary load as a negative finding.
+    """
+    root = (
+        Concept.objects.filter(
+            vocabulary_id='SNOMED',
+            concept_code=root_code,
+            domain_id='Condition',
+            invalid_reason__isnull=True,
+        )
+        .only('concept_id')
+        .first()
+    )
+    if root is None:
+        return None
+    descendants = set(
+        ConceptAncestor.objects.filter(ancestor_concept_id=root.concept_id)
+        .values_list('descendant_concept_id', flat=True)
+    )
+    descendants.add(root.concept_id)
+    return descendants
+
+
+def _condition_is_current(condition: ConditionOccurrence, today: date) -> bool:
+    """Apply the current-condition convention used by active projections."""
+    if condition.is_erroneous or condition.condition_start_date > today:
+        return False
+    if condition.condition_end_date and condition.condition_end_date < today:
+        return False
+    status_parts = [
+        getattr(condition.condition_status_concept, 'concept_name', None),
+        condition.condition_status_source_value,
+    ]
+    status = ' '.join(part for part in status_parts if part).lower()
+    return not any(marker in status for marker in _INACTIVE_CONDITION_STATUS_MARKERS)
+
+
+def _get_active_condition_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
+    """Project current SNOMED infection and malignancy conditions onto PatientRecord.
+
+    A condition is current when it has started, is not ended, and does not carry
+    a resolved/inactive/history/rule-out status.  This is necessarily a
+    convention because OMOP condition rows do not universally carry a status.
+    """
+    snapshot = snapshot or _build_snapshot(person)
+    today = timezone.localdate()
+    current_conditions = [
+        condition for condition in snapshot.conditions
+        if _condition_is_current(condition, today)
+    ]
+    data = {}
+
+    infection_ids = _active_condition_descendant_ids(
+        _ACTIVE_CONDITION_ROOT_CODES['active_infection_status']
+    )
+    if infection_ids is not None:
+        data['active_infection_status'] = any(
+            condition.condition_concept_id in infection_ids
+            for condition in current_conditions
+        )
+
+    malignancy_ids = _active_condition_descendant_ids(
+        _ACTIVE_CONDITION_ROOT_CODES['active_malignancies']
+    )
+    if malignancy_ids is not None:
+        names = {
+            name
+            for condition in current_conditions
+            if condition.condition_concept_id in malignancy_ids
+            for name in [_usable_concept_name(condition.condition_concept)]
+            if name
+        }
+        data['active_malignancies'] = sorted(names)
 
     return data
 
@@ -3372,6 +3466,13 @@ def _parse_date_value(v):
 
 def _compute_derived_fields(patient_info: PatientRecord) -> None:
     """Compute fields that depend on other PatientRecord fields being set."""
+    if patient_info.active_infection_status is not None:
+        patient_info.no_active_infection_status = not patient_info.active_infection_status
+    if patient_info.active_malignancies is not None:
+        # The active-malignancies list includes the primary cancer when present;
+        # one entry therefore means there is no *other* active malignancy.
+        patient_info.no_other_active_malignancies = len(patient_info.active_malignancies) <= 1
+
     serum_mp = patient_info.monoclonal_protein_serum
     urine_mp = patient_info.monoclonal_protein_urine
     kappa = patient_info.kappa_flc

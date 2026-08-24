@@ -50,6 +50,7 @@ _WEARABLE_METADATA_FIELDS = frozenset({
 _COMPUTED_FIELDS = frozenset({
     'bmi', 'disease_slug', 'therapy_lines_count',
     'meets_crab', 'meets_slim', 'involved_uninvolved_ratio',
+    'active_infection_status', 'active_malignancies',
     'no_active_infection_status', 'no_hiv_status', 'no_hepatitis_b_status',
     'no_hepatitis_c_status', 'no_other_active_malignancies',
     'no_pre_existing_conditions', 'no_pregnancy_or_lactation_status',

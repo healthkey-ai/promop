@@ -2112,7 +2112,7 @@ class PatientRecord(models.Model):
     stage = models.TextField(blank=True, null=True)
     karnofsky_performance_score = models.IntegerField(blank=True, null=True, default=100)
     ecog_performance_status = models.IntegerField(blank=True, null=True)
-    no_other_active_malignancies = models.BooleanField(blank=False, null=False, default=True)
+    no_other_active_malignancies = models.BooleanField(blank=True, null=True, default=None)
     active_malignancies = models.JSONField(
         blank=True, null=True, default=list,
         help_text="List of currently active malignancies",
@@ -2484,7 +2484,10 @@ class PatientRecord(models.Model):
     no_hiv_status = models.BooleanField(help_text="Does the patient has had HIV?", blank=False, null=False, default=True)
     no_hepatitis_b_status = models.BooleanField(help_text="Does the patient has had Hepatitis B (HBV)?", blank=False, null=False, default=True)
     no_hepatitis_c_status = models.BooleanField(help_text="Does the patient has had Hepatitis C (HCV)?", blank=False, null=False, default=True)
-    no_active_infection_status = models.BooleanField(help_text="Does the patient has any active infection?", blank=False, null=False, default=True)
+    no_active_infection_status = models.BooleanField(
+        help_text="Does the patient have any active infection?",
+        blank=True, null=True, default=None,
+    )
     active_infection_status = models.BooleanField(blank=True, null=True)
 
     concomitant_medications = models.TextField(blank=True, null=True)

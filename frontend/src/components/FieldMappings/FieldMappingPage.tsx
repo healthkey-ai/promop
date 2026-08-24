@@ -6,6 +6,7 @@ import { ConceptAssignDialog } from "./ConceptAssignDialog";
 import { SynonymDialog } from "./SynonymDialog";
 import { FieldChoiceEditor } from "./FieldChoiceEditor";
 import { FormulaEditDialog } from "./FormulaEditDialog";
+import { DerivationInfoDialog } from "./DerivationInfoDialog";
 
 interface FieldDescriptor {
   field_name: string;
@@ -108,6 +109,7 @@ export default function FieldMappingPage() {
   const [batchSynonyms, setBatchSynonyms] = useState<Record<string, string[]>>({});
   const [choiceEditorField, setChoiceEditorField] = useState<FieldDescriptor | null>(null);
   const [formulaEditorField, setFormulaEditorField] = useState<FieldDescriptor | null>(null);
+  const [derivationInfoField, setDerivationInfoField] = useState<FieldDescriptor | null>(null);
 
   const fetchDescriptors = useCallback(async () => {
     setLoading(true);
@@ -499,13 +501,17 @@ export default function FieldMappingPage() {
                       </button>
                     </td>
                     <td className="px-3 py-2 text-xs">
-                      {f.provenance ? (
-                        <span title={f.provenance.description}>
+                      <button
+                        onClick={() => setDerivationInfoField(f)}
+                        className="not-italic text-left hover:text-primary hover:underline"
+                        title="View read-only derivation details"
+                      >
+                        {f.provenance ? (
+                          <span title={f.provenance.description}>
                           {f.provenance.lookup_strategy} / {f.provenance.omop_table}
-                        </span>
-                      ) : (
-                        "application code"
-                      )}
+                          </span>
+                        ) : "application code"}
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -733,6 +739,14 @@ export default function FieldMappingPage() {
             setFormulaEditorField(null);
             fetchDescriptors();
           }}
+        />
+      )}
+
+      {derivationInfoField && (
+        <DerivationInfoDialog
+          fieldName={derivationInfoField.field_name}
+          provenance={derivationInfoField.provenance}
+          onClose={() => setDerivationInfoField(null)}
         />
       )}
     </div>

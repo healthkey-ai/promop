@@ -53,6 +53,21 @@ def test_provenance_merged():
     assert '718-7' in hb['provenance']['concept_codes']
 
 
+def test_active_condition_derivations_are_read_only_computed_descriptors():
+    descriptors = {d['field_name']: d for d in get_all_field_descriptors()}
+
+    infection = descriptors['active_infection_status']
+    malignancies = descriptors['active_malignancies']
+
+    assert infection['category'] == 'computed'
+    assert infection['mappable'] is False
+    assert infection['provenance']['concept_codes'] == ['40733004']
+    assert infection['provenance']['extractor'] == '_get_active_condition_data'
+    assert malignancies['category'] == 'computed'
+    assert malignancies['mappable'] is False
+    assert malignancies['provenance']['concept_codes'] == ['363346000']
+
+
 def test_mapping_merged():
     """FieldConceptMapping rows appear in descriptor output."""
     FieldConceptMapping.objects.create(
