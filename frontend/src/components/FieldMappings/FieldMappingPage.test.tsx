@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import FieldMappingPage from "./FieldMappingPage";
@@ -398,6 +398,9 @@ describe("FieldMappingPage", () => {
     await waitFor(() => expect(screen.getByText(/Behavior/)).toBeInTheDocument());
     fireEvent.click(screen.getByText(/Behavior/));
     expect(screen.getByText("Needs Concept Assignment")).toBeInTheDocument();
+    const mappedSection = screen.getByText("Mapped").closest("div.mb-3");
+    expect(mappedSection).not.toBeNull();
+    expect(within(mappedSection!).queryByText("editable_proposal")).not.toBeInTheDocument();
   });
 
   it("toggles an existing mapping between proposed and approved", async () => {

@@ -173,6 +173,12 @@ def test_reclassified_fields():
         'toxicity_grade': 'treatment',
         'condition_code_icd_10': 'disease',
         'prior_procedures': 'disease',
+        'metastatic_status': 'disease',
+        'reason_for_discontinuation': 'treatment',
+        'serum_creatinine_mg_dl': 'labs',
+        'renal_adequacy_status': 'labs',
+        'pregnancy_test_result': 'behavior',
+        'median_daily_steps_30d': 'behavior',
     }
     for field, expected_tab in checks.items():
         if field in by_name:
