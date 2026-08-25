@@ -98,10 +98,11 @@ const isSupportedMapperField = (descriptor: FieldDescriptor) =>
 /** Display category: approved mappings move from their backend category to "editable" (Mapped). */
 const getDisplayCategory = (d: FieldDescriptor): string => {
   if (d.category === "computed") return "computed";
-  // A proposed or rejected row is review work, even when its underlying field
-  // is otherwise writable.  Only an approved concept belongs in Mapped.
-  if (d.mapping && d.mapping.status !== "approved") return "needs-concept-set";
+  // Mapped is an approval ledger, not a list of fields that could be mapped:
+  // proposed, rejected, and currently unmapped writable fields remain review
+  // work under Needs Concept Assignment.
   if (d.mapping?.status === "approved") return "editable";
+  if (d.mapping || d.category === "editable") return "needs-concept-set";
   return d.category;
 };
 

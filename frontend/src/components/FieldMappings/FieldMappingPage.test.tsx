@@ -403,6 +403,15 @@ describe("FieldMappingPage", () => {
     expect(within(mappedSection!).queryByText("editable_proposal")).not.toBeInTheDocument();
   });
 
+  it("keeps an unmapped editable field out of Mapped", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText(/Blood/)).toBeInTheDocument());
+    fireEvent.click(screen.getByText(/Blood/));
+    expect(screen.getByText("Needs Concept Assignment")).toBeInTheDocument();
+    expect(screen.getByText("hemoglobin_g_dl")).toBeInTheDocument();
+    expect(screen.queryByText("Mapped")).not.toBeInTheDocument();
+  });
+
   it("toggles an existing mapping between proposed and approved", async () => {
     renderPage();
     await waitFor(() => expect(screen.getByText(/Behavior/)).toBeInTheDocument());
