@@ -152,6 +152,15 @@ FIELD_COMMON_UNITS: dict[str, list[str]] = {
     'karnofsky_performance_score':    ['{score}'],
 }
 
+# Reusable UCUM-oriented choices for a curator when a field has no narrower
+# clinical unit set.  FIELD_COMMON_UNITS always takes precedence and is ordered
+# with the usual US reporting unit first.
+STANDARD_UNIT_CHOICES = [
+    '%', 'kg', 'cm', 'mm[Hg]', 'mg/dL', 'g/dL', 'g/L', 'mg/L', 'ng/mL',
+    'pg/mL', 'U/L', 'U/mL', 'mEq/L', 'mmol/L', 'umol/L', '10*3/uL',
+    '10*6/uL', 'mL/min/1.73m2', 'mm/h', 's', '/min', '{score}', '{INR}',
+]
+
 CONDITION_FIELDS = frozenset({'disease', 'stage', 'condition_code_icd_10', 'condition_code_snomed_ct'})
 
 # Fields that trigger _sync_demographics. Note that it only writes gender and

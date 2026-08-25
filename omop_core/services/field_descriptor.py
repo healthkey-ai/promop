@@ -14,6 +14,7 @@ from omop_core.services.mappings import (
     THERAPY_LINE_FIELDS,
     DERIVED_FIELD_TO_CODE,
     FIELD_COMMON_UNITS,
+    STANDARD_UNIT_CHOICES,
     SUGGESTED_FIELD_CODES,
 )
 from omop_core.services.patient_record_service import (
@@ -461,6 +462,7 @@ def get_all_field_descriptors() -> list[dict]:
             'provenance': prov_dict,
             'mapping': mapping_dict,
             'suggestion': _build_suggestion(name, prov_dict),
+            'unit_options': FIELD_COMMON_UNITS.get(name, STANDARD_UNIT_CHOICES),
             'mappable': _is_mappable(category),
             'locked_table': _get_locked_table(category),
             'choices': choices_by_field.get(name, []),

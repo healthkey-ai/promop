@@ -70,8 +70,9 @@ export function ConceptAssignDialog({
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
 
-  const hasCommonUnits = commonUnits && commonUnits.length > 0;
-  const isCustomUnit = hasCommonUnits && unit !== "" && !commonUnits.includes(unit);
+  const unitChoices = commonUnits || [];
+  const hasCommonUnits = unitChoices.length > 0;
+  const isCustomUnit = hasCommonUnits && unit !== "" && !unitChoices.includes(unit);
   const mappingState = initialStatus || (selected ? "proposed" : "unmapped");
 
   // These are the OMOP CDM clinical and reference tables implemented by this
@@ -306,7 +307,7 @@ export function ConceptAssignDialog({
                   className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
                 >
                   <option value="">Select unit...</option>
-                  {commonUnits.map((u) => (
+                  {unitChoices.map((u) => (
                     <option key={u} value={u}>{u}</option>
                   ))}
                   <option value="__custom__">Other...</option>
