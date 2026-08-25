@@ -92,7 +92,10 @@ const STATUS_BADGE: Record<string, string> = {
 /** Display category: approved mappings move from their backend category to "editable" (Mapped). */
 const getDisplayCategory = (d: FieldDescriptor): string => {
   if (d.category === "computed") return "computed";
-  if (d.mapping?.status === "approved" && d.category !== "editable") return "editable";
+  // A proposed or rejected row is review work, even when its underlying field
+  // is otherwise writable.  Only an approved concept belongs in Mapped.
+  if (d.mapping && d.mapping.status !== "approved") return "needs-concept-set";
+  if (d.mapping?.status === "approved") return "editable";
   return d.category;
 };
 
