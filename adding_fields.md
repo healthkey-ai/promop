@@ -23,13 +23,13 @@ Issue: #721
   `PatientRecord.custom_fields`.
 - [ ] Include dynamic field values in Patient Record API responses and make
   them read-only through the existing clinical-write policy.
-- [ ] Add an Add field control to every Patient Info tab for mapping admins,
+- [x] Add an Add field control to every Patient Info tab for mapping admins,
   with explicit PatientRecord confirmation, field name/label/type input, and
   an explicit mode selector: **editable** (an OMOP write mapping is required)
   or **computed** (a validated formula is required and the field remains
   read-only). The dialog then uses the same vocabulary concept search and OMOP
   table picker used by the Concept Mapping dialog.
-- [ ] Render configured custom fields at the bottom of their selected Patient
+- [x] Render configured custom fields at the bottom of their selected Patient
   Info tab for all users.
 - [ ] Add backend derivation/API and frontend workflow/display tests.
 - [ ] Run targeted checks, full CI, review the PR, and merge.
