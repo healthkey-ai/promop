@@ -42,6 +42,7 @@ from omop_core.models import (
     FlipIScore, FollicularLymphomaGrade, PostTransformationOutcome,
     BreastCancerFirstLineTherapy, BreastCancerSecondLineTherapy, BreastCancerLaterLineTherapy,
     MyelomaType, WearableUpload,
+    CustomPatientField,
     PERSON_YEAR_PLACEHOLDERS,
 )
 from omop_oncology.models import Episode, EpisodeEvent
@@ -7747,6 +7748,33 @@ class VocabSnapshotView(APIView):
 def _can_manage_field_mappings(user):
     """Whether a user may curate the shared field mapping configuration."""
     return bool(getattr(user, 'is_staff', False) or has_org_admin_access(user))
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def custom_patient_field_list(request):
+    """List runtime PatientRecord fields or atomically add one with its mapping.
+
+    Definitions are visible to every signed-in user because Patient Info needs
+    them to render values.  Creation remains limited to mapping administrators.
+    """
+    from .serializers import CustomPatientFieldCreateSerializer, CustomPatientFieldSerializer
+
+    if request.method == 'GET':
+        fields = CustomPatientField.objects.select_related('mapping__concept').filter(
+            mapping__status='approved',
+        )
+        return Response(CustomPatientFieldSerializer(fields, many=True).data)
+
+    if not _can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    serializer = CustomPatientFieldCreateSerializer(
+        data=request.data, context={'request': request},
+    )
+    serializer.is_valid(raise_exception=True)
+    custom_field = serializer.save()
+    return Response(CustomPatientFieldSerializer(custom_field).data, status=status.HTTP_201_CREATED)
 
 
 @api_view(['GET', 'POST'])

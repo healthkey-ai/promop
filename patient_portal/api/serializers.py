@@ -8,10 +8,11 @@ from omop_core.models import (
     StemCellTransplant, SctEligibility, PostTransformationOutcome,
     Organization, OrgTrust, OrgInvitation, GroupAccess,
     InterchangeAgreement,
-    FieldChoice, FieldChoiceCode, FieldFormula,
+    FieldChoice, FieldChoiceCode, FieldFormula, CustomPatientField,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from datetime import date
+import re
 from django.utils.timezone import localdate
 from django.utils import timezone
 from omop_core.services.access import has_org_admin_access
@@ -294,7 +295,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             # Derivation versioning — set only by refresh_patient_record, never by client.
             'derivation_version', 'derived_at',
             # Internal migration bookkeeping; clients must not set it.
-            'user_edited_fields',
+            'user_edited_fields', 'custom_fields',
         ) + tuple(sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS))
 
     def get_patient_name(self, obj):
@@ -1109,6 +1110,96 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
             validated_data['reviewer'] = request.user
             validated_data['reviewed_at'] = timezone.now()
         return super().update(instance, validated_data)
+
+
+class CustomPatientFieldSerializer(serializers.ModelSerializer):
+    """Public definition returned to every signed-in Patient Info reader."""
+    mapping_status = serializers.CharField(source='mapping.status', read_only=True)
+    concept_id = serializers.IntegerField(source='mapping.concept_id', read_only=True)
+    concept_name = serializers.CharField(source='mapping.concept.concept_name', read_only=True, default='')
+    vocabulary_id = serializers.CharField(source='mapping.vocabulary_id', read_only=True)
+    concept_code = serializers.CharField(source='mapping.concept_code', read_only=True)
+    omop_table = serializers.CharField(source='mapping.omop_table', read_only=True)
+    unit = serializers.CharField(source='mapping.unit', read_only=True)
+
+    class Meta:
+        model = CustomPatientField
+        fields = [
+            'id', 'field_name', 'display_name', 'tab', 'field_type',
+            'mapping_status', 'concept_id', 'concept_name', 'vocabulary_id',
+            'concept_code', 'omop_table', 'unit', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class CustomPatientFieldCreateSerializer(serializers.Serializer):
+    """Create a runtime PatientRecord field and its approved mapping together."""
+    confirm_patient_record = serializers.BooleanField()
+    field_name = serializers.CharField(max_length=100)
+    display_name = serializers.CharField(max_length=200)
+    tab = serializers.ChoiceField(choices=CustomPatientField.TAB_CHOICES)
+    field_type = serializers.ChoiceField(choices=CustomPatientField.FIELD_TYPE_CHOICES)
+    concept = serializers.PrimaryKeyRelatedField(queryset=Concept.objects.all())
+    omop_table = serializers.CharField(max_length=30)
+    unit = serializers.CharField(max_length=30, required=False, allow_blank=True, default='')
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate_confirm_patient_record(self, value):
+        if not value:
+            raise serializers.ValidationError(
+                'Explicit confirmation is required before adding a field to PatientRecord.'
+            )
+        return value
+
+    def validate_field_name(self, value):
+        candidate = value.strip()
+        if not candidate or not re.fullmatch(r'[a-z][a-z0-9_]*', candidate):
+            raise serializers.ValidationError('Use lower_snake_case starting with a letter.')
+        concrete_names = {
+            field.name for field in PatientRecord._meta.get_fields()
+            if getattr(field, 'concrete', False)
+        }
+        if candidate in concrete_names:
+            raise serializers.ValidationError('This name is already a PatientRecord field.')
+        if CustomPatientField.objects.filter(field_name=candidate).exists():
+            raise serializers.ValidationError('A custom PatientRecord field already uses this name.')
+        if FieldConceptMapping.objects.filter(field_name=candidate).exists():
+            raise serializers.ValidationError('A field mapping already uses this name.')
+        return candidate
+
+    def validate_omop_table(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError('Select the OMOP table where this fact is stored.')
+        return value
+
+    def create(self, validated_data):
+        from django.db import transaction
+
+        request = self.context['request']
+        concept = validated_data.pop('concept')
+        validated_data.pop('confirm_patient_record')
+        with transaction.atomic():
+            mapping = FieldConceptMapping.objects.create(
+                field_name=validated_data['field_name'],
+                concept=concept,
+                vocabulary_id=concept.vocabulary_id,
+                concept_code=concept.concept_code,
+                omop_table=validated_data.pop('omop_table'),
+                unit=validated_data.pop('unit'),
+                notes=validated_data.pop('notes'),
+                status='approved',
+                reviewer=request.user,
+                reviewed_at=timezone.now(),
+            )
+            custom_field = CustomPatientField(
+                mapping=mapping,
+                created_by=request.user,
+                **validated_data,
+            )
+            custom_field.full_clean()
+            custom_field.save()
+        return custom_field
 
 
 

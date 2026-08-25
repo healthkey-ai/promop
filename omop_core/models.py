@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import F, Q
@@ -6,6 +7,7 @@ from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db.models.functions import Upper
+import re
 
 
 # Person.year_of_birth values that mean "not known" rather than a birth year.
@@ -2669,6 +2671,10 @@ class PatientRecord(models.Model):
             "clinical fields are rebuilt only from OMOP facts."
         ),
     )
+    # Values for administrator-defined fields.  Runtime definitions cannot be
+    # Django columns (that would require a schema migration for every field), so
+    # the durable projection is a keyed JSON object instead.
+    custom_fields = models.JSONField(default=dict, blank=True)
 
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
@@ -2980,6 +2986,63 @@ class FieldConceptMapping(models.Model):
 
     def __str__(self):
         return f"{self.field_name} → {self.vocabulary_id}:{self.concept_code} ({self.status})"
+
+
+class CustomPatientField(models.Model):
+    """Administrator-defined PatientRecord field backed by ``custom_fields``.
+
+    The one-to-one mapping is deliberately required: a field cannot be added to
+    PatientRecord unless its OMOP meaning has been reviewed and approved.
+    """
+    TAB_CHOICES = [
+        ('general', 'General'),
+        ('disease', 'Disease'),
+        ('treatment', 'Treatment'),
+        ('blood', 'Blood'),
+        ('labs', 'Labs'),
+        ('behavior', 'Behavior'),
+        ('wearable', 'Wearable'),
+    ]
+    FIELD_TYPE_CHOICES = [
+        ('text', 'Text'),
+        ('number', 'Number'),
+        ('date', 'Date'),
+        ('boolean', 'Boolean'),
+    ]
+
+    field_name = models.CharField(max_length=100, unique=True, db_index=True)
+    display_name = models.CharField(max_length=200)
+    tab = models.CharField(max_length=20, choices=TAB_CHOICES)
+    field_type = models.CharField(max_length=20, choices=FIELD_TYPE_CHOICES)
+    mapping = models.OneToOneField(
+        FieldConceptMapping, on_delete=models.PROTECT, related_name='custom_patient_field',
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'custom_patient_field'
+        ordering = ['tab', 'display_name', 'field_name']
+
+    def clean(self):
+        super().clean()
+        if not re.fullmatch(r'[a-z][a-z0-9_]*', self.field_name or ''):
+            raise ValidationError({'field_name': 'Use lower_snake_case starting with a letter.'})
+        concrete_names = {
+            field.name for field in PatientRecord._meta.get_fields()
+            if getattr(field, 'concrete', False)
+        }
+        if self.field_name in concrete_names:
+            raise ValidationError({'field_name': 'This name is already a PatientRecord field.'})
+        if self.mapping_id and self.mapping.status != 'approved':
+            raise ValidationError({'mapping': 'A custom PatientRecord field requires an approved mapping.'})
+
+    def __str__(self):
+        return self.display_name
 
 
 class FieldChoice(models.Model):

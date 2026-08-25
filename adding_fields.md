@@ -8,11 +8,11 @@ Issue: #721
   `PatientRecord.custom_fields` JSON payload. A user-created field is therefore
   a persisted PatientRecord field without attempting to mutate the Django
   schema at runtime.
-- [ ] Add schema migration, model validation, and an approved-mapping-only
+- [x] Add schema migration, model validation, and an approved-mapping-only
   creation service. `CustomPatientField` owns `field_name`, display label,
   selected tab, value type, and its `FieldConceptMapping`; `custom_fields` is
   the PatientRecord JSON object keyed by field name.
-- [ ] Add an admin-only API that requires explicit confirmation that the field
+- [x] Add an admin-only API that requires explicit confirmation that the field
   will be added to PatientRecord, creates the field definition and approved
   OMOP mapping atomically, and rejects duplicate/invalid names.
 - [ ] Extend descriptor/mapping APIs so custom fields are visible and retain
