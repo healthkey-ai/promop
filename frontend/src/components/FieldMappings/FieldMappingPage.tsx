@@ -64,7 +64,6 @@ const CATEGORY_LABELS: Record<string, string> = {
   editable: "Mapped",
   "therapy-inference": "Therapy Inference",
   computed: "Computed",
-  alias: "Legacy Aliases",
   unit: "Unit Fields",
   profile: "Person",
   other: "Other",
@@ -89,11 +88,12 @@ const STATUS_BADGE: Record<string, string> = {
 };
 
 /**
- * Location is not yet a supported field-concept mapping target.  Do not show
- * its fields in this mapper: presenting a disabled "click to map" control is
- * misleading until Location mappings can be persisted end-to-end.
+ * Omit descriptors that cannot be administered here. Location persistence is
+ * not supported end-to-end, while aliases only preserve older import names
+ * and are not active PatientRecord fields with their own mappings.
  */
-const isSupportedMapperField = (descriptor: FieldDescriptor) => descriptor.category !== "location";
+const isSupportedMapperField = (descriptor: FieldDescriptor) =>
+  !["location", "alias"].includes(descriptor.category);
 
 /** Display category: approved mappings move from their backend category to "editable" (Mapped). */
 const getDisplayCategory = (d: FieldDescriptor): string => {
@@ -114,7 +114,7 @@ export default function FieldMappingPage() {
   const [categoryFilter, setCategoryFilter] = useState("");
   const [activeTab, setActiveTab] = useState("general");
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(
-    new Set(["alias", "unit", "other", "computed"])
+    new Set(["unit", "other", "computed"])
   );
   const [dialogOpen, setDialogOpen] = useState(false);
   const [selectedField, setSelectedField] = useState<FieldDescriptor | null>(null);

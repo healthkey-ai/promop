@@ -166,6 +166,19 @@ const MOCK_DESCRIPTORS = [
     formula: null,
   },
   {
+    field_name: "hemoglobin",
+    field_type: "float",
+    category: "alias",
+    tab: "blood",
+    provenance: null,
+    mapping: null,
+    suggestion: null,
+    mappable: false,
+    locked_table: null,
+    choices: [],
+    formula: null,
+  },
+  {
     field_name: "median_daily_steps_30d",
     field_type: "float",
     category: "computed",
@@ -297,6 +310,15 @@ describe("FieldMappingPage", () => {
     });
     expect(screen.queryByText("country")).not.toBeInTheDocument();
     expect(screen.queryByText("Location")).not.toBeInTheDocument();
+  });
+
+  it("excludes legacy aliases from the mapper", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("hemoglobin")).not.toBeInTheDocument();
+    expect(screen.queryByText("Legacy Aliases")).not.toBeInTheDocument();
   });
 
   it("opens concept assign dialog on concept cell click", async () => {
