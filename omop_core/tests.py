@@ -786,9 +786,9 @@ class AthenaVocabularyReplaceScopeTest(_OmopBase):
         from io import StringIO
         from omop_core.management.commands.load_athena_vocabularies import Command
 
-        self._loinc_concept(902814, 'Specimen')
+        self._loinc_concept(902814, 'Geography')
 
-        with self.assertRaisesRegex(CommandError, 'Specimen'):
+        with self.assertRaisesRegex(CommandError, 'Geography'):
             Command(stdout=StringIO())._validate_replace_loinc_scope()
 
 

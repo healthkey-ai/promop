@@ -55,10 +55,19 @@ VOCAB_SCOPE = frozenset({
 REQUIRED_CLINICAL_VOCABULARIES = frozenset({'LOINC', 'RxNorm', 'SNOMED', 'ICD10CM'})
 RXNORM_CLASS_SCOPE = frozenset({'Ingredient', 'Clinical Drug', 'Branded Drug', 'Clinical Drug Comp'})
 # A --replace reload deletes the entire vocabulary before applying this filter.
-# Keep every LOINC domain already required by our deployed vocabulary; the
-# preflight below turns any future scope drift into a safe, actionable failure.
+# Keep every LOINC domain relevant to patient-clinical data; the preflight below
+# turns any future scope drift into a safe, actionable failure.
 LOINC_DOMAIN_SCOPE = frozenset({
+    # Core clinical domains (original scope)
     'Measurement', 'Observation', 'Meas Value', 'Procedure', 'Note',
+    # Patient demographics — LOINC codes for sex, race, ethnicity, birth date,
+    # age, language, phone, email, etc. land in these domains
+    'Gender', 'Race', 'Ethnicity', 'Provider',
+    # Additional clinical domains — some LOINC codes map to conditions,
+    # devices, specimens, or drugs
+    'Condition', 'Drug', 'Device', 'Specimen',
+    # Metadata and type concepts
+    'Metadata', 'Type Concept',
 })
 BATCH = 100_000
 PROGRESS_EVERY = 500_000
