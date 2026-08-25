@@ -56,13 +56,13 @@ interface FieldDescriptor {
     expression: string;
     is_active: boolean;
   } | null;
+  explanation: string | null;
   derivation_error: string | null;
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
   "needs-concept-set": "Needs Concept Assignment",
   editable: "Mapped",
-  "therapy-inference": "Therapy Inference",
   computed: "Computed",
   unit: "Unit Fields",
   profile: "Person",
@@ -476,7 +476,7 @@ export default function FieldMappingPage() {
                 <tr className="bg-gray-50 text-left text-[11px] uppercase text-gray-500">
                   <th className="px-3 py-2">Field Name</th>
                   <th className="px-3 py-2">Type</th>
-                  <th className="px-3 py-2">Formula</th>
+                  <th className="px-3 py-2">Formula / Explanation</th>
                   <th className="px-3 py-2">Provenance</th>
                   <th className="px-3 py-2">Derivation status</th>
                 </tr>
@@ -487,16 +487,23 @@ export default function FieldMappingPage() {
                     <td className="px-3 py-2 font-mono text-xs">{f.field_name}</td>
                     <td className="px-3 py-2 text-xs">{f.field_type}</td>
                     <td className="px-3 py-2 text-xs">
-                      <button
-                        onClick={() => setFormulaEditorField(f)}
-                        className="not-italic hover:text-primary hover:underline"
-                      >
-                        {f.formula ? (
+                      {f.formula ? (
+                        <button
+                          onClick={() => setFormulaEditorField(f)}
+                          className="not-italic hover:text-primary hover:underline"
+                        >
                           <span className="font-mono">{f.formula.expression}</span>
-                        ) : (
+                        </button>
+                      ) : f.explanation ? (
+                        <span className="not-italic text-gray-500">{f.explanation}</span>
+                      ) : (
+                        <button
+                          onClick={() => setFormulaEditorField(f)}
+                          className="not-italic hover:text-primary hover:underline"
+                        >
                           <span className="text-gray-400">none</span>
-                        )}
-                      </button>
+                        </button>
+                      )}
                     </td>
                     <td className="px-3 py-2 text-xs">
                       <button

@@ -480,7 +480,6 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'hepatitis_c_status':            ('50711007',  'SNOMED'),
     'preexisting_conditions':        ('161615003', 'SNOMED'),
     # Treatment
-    'concomitant_medication':        ('410942007', 'SNOMED'),
     'refractory_status':             ('182854000', 'SNOMED'),
     'relapse_count':                 ('263855007', 'SNOMED'),
     # Disease metadata
@@ -495,7 +494,6 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'cytogenetic_abnormalities':     ('409709004', 'SNOMED'),
     # Other
     'peripheral_neuropathy_grade':   ('302226006', 'SNOMED'),
-    'concomitant_medications':       ('410942007', 'SNOMED'),
     'toxicity_grade':                ('246112005', 'SNOMED'),
 
     # ── Additional fields to cover all PatientRecord mappable fields ──
@@ -584,70 +582,15 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'substance_use_details':         ('66214007',  'SNOMED'),  # Substance abuse
     'tobacco_use_details':           ('365981007', 'SNOMED'),  # Tobacco use finding
 
-    # Treatment / therapy line fields
-    'line_of_therapy':               ('52832-8',   'LOINC'),   # Diagnosis to treatment interval
-    'prior_therapy':                 ('410942007', 'SNOMED'),  # Drug or medication
-    'last_treatment':                ('410942007', 'SNOMED'),  # Drug or medication
-    'planned_therapies':             ('410942007', 'SNOMED'),  # Drug or medication
-    'supportive_therapies':          ('410942007', 'SNOMED'),  # Drug or medication
-    'washout_period_duration':       ('260992001', 'SNOMED'),  # Washout period
-    'remission_duration_min':        ('277022003', 'SNOMED'),  # Remission
-    'prior_procedures':              ('71388002',  'SNOMED'),  # Procedure
-    'treatment_refractory_status':   ('182854000', 'SNOMED'),  # Treatment refractory
-    'reason_for_discontinuation':    ('182856003', 'SNOMED'),  # Therapy discontinued
-    'therapy_intent':                ('363589002', 'SNOMED'),  # Intent
-
-    # Therapy line 1
-    'first_line_therapy':            ('410942007', 'SNOMED'),  # Drug or medication
-    'first_line_date':               ('439771001', 'SNOMED'),  # Date of onset
-    'first_line_start_date':         ('439771001', 'SNOMED'),  # Date of onset
-    'first_line_end_date':           ('439771001', 'SNOMED'),  # Date
-    'first_line_outcome':            ('371533000', 'SNOMED'),  # Treatment outcome
-    'first_line_intent':             ('363589002', 'SNOMED'),  # Intent
-    'first_line_discontinuation_reason': ('182856003', 'SNOMED'),  # Therapy discontinued
-    'first_line_therapy_id':         ('410942007', 'SNOMED'),  # Drug or medication
-    'first_line_component_ids':      ('410942007', 'SNOMED'),  # Drug or medication
-    'first_line_therapy_type_ids':   ('410942007', 'SNOMED'),  # Drug or medication
-
-    # Therapy line 2
-    'second_line_therapy':           ('410942007', 'SNOMED'),  # Drug or medication
-    'second_line_date':              ('439771001', 'SNOMED'),  # Date of onset
-    'second_line_start_date':        ('439771001', 'SNOMED'),  # Date of onset
-    'second_line_end_date':          ('439771001', 'SNOMED'),  # Date
-    'second_line_outcome':           ('371533000', 'SNOMED'),  # Treatment outcome
-    'second_line_intent':            ('363589002', 'SNOMED'),  # Intent
-    'second_line_discontinuation_reason': ('182856003', 'SNOMED'),  # Therapy discontinued
-    'second_line_therapy_id':        ('410942007', 'SNOMED'),  # Drug or medication
-    'second_line_component_ids':     ('410942007', 'SNOMED'),  # Drug or medication
-    'second_line_therapy_type_ids':  ('410942007', 'SNOMED'),  # Drug or medication
-
-    # Therapy line 3+
-    'later_therapy':                 ('410942007', 'SNOMED'),  # Drug or medication
-    'later_therapies':               ('410942007', 'SNOMED'),  # Drug or medication
-    'later_date':                    ('439771001', 'SNOMED'),  # Date of onset
-    'later_start_date':              ('439771001', 'SNOMED'),  # Date of onset
-    'later_end_date':                ('439771001', 'SNOMED'),  # Date
-    'later_outcome':                 ('371533000', 'SNOMED'),  # Treatment outcome
-    'later_intent':                  ('363589002', 'SNOMED'),  # Intent
-    'later_discontinuation_reason':  ('182856003', 'SNOMED'),  # Therapy discontinued
-    'later_therapy_ids':             ('410942007', 'SNOMED'),  # Drug or medication
-    'later_component_ids':           ('410942007', 'SNOMED'),  # Drug or medication
-    'later_therapy_type_ids':        ('410942007', 'SNOMED'),  # Drug or medication
-
-    # Supportive therapy
-    'supportive_therapy_date':       ('439771001', 'SNOMED'),  # Date
-    'supportive_therapy_start_date': ('439771001', 'SNOMED'),  # Date
-    'supportive_therapy_end_date':   ('439771001', 'SNOMED'),  # Date
-    'supportive_therapy_intent':     ('363589002', 'SNOMED'),  # Intent
-
-    # Concomitant medication
-    'concomitant_medication_date':   ('439771001', 'SNOMED'),  # Date
-    'concomitant_medication_details': ('410942007', 'SNOMED'), # Drug or medication
-
-    # Therapy provenance / IDs (internal but mappable)
-    'therapy_component_ids':         ('410942007', 'SNOMED'),  # Drug or medication
-    'therapy_ids_provenance':        ('410942007', 'SNOMED'),  # Drug or medication
-    'therapy_type_ids':              ('410942007', 'SNOMED'),  # Drug or medication
+    # Treatment / therapy line fields -- REMOVED in #707.
+    # These fields are computed (derived from Episode + DrugExposure records),
+    # not concept-mapped. Entries were: line_of_therapy, prior_therapy,
+    # last_treatment, planned_therapies, supportive_therapies,
+    # washout_period_duration, remission_duration_min, prior_procedures,
+    # treatment_refractory_status, reason_for_discontinuation, therapy_intent,
+    # first_line_*, second_line_*, later_*, supportive_therapy_*,
+    # concomitant_medication_*, therapy_component_ids, therapy_ids_provenance,
+    # therapy_type_ids.
 
     # Condition codes
     'condition_code_icd_10':         ('29308-4',   'LOINC'),   # Diagnosis

@@ -66,6 +66,37 @@ _COMPUTED_FIELDS = frozenset({
 # Unit-companion fields (always paired with a measurement field).
 _UNIT_SUFFIX = '_units'
 
+# Explanations for computed fields that lack a FieldFormula.
+# Therapy-line fields are derived programmatically from Episode + DrugExposure.
+_THERAPY_KEYWORDS_FOR_EXPLANATION = (
+    'therapy', 'treatment', 'line_', 'component_ids', 'therapy_type_ids',
+    'therapy_ids', 'concomitant_medication',
+)
+
+
+def _get_explanation(field_name: str, category: str) -> str | None:
+    """Return a human-readable explanation for a computed field without a formula."""
+    if category != 'computed':
+        return None
+    if field_name in THERAPY_LINE_FIELDS:
+        return 'Derived from Episode and DrugExposure records'
+    if any(kw in field_name for kw in _THERAPY_KEYWORDS_FOR_EXPLANATION):
+        return 'Derived from Episode and DrugExposure records'
+    if field_name in _COMPUTED_FIELDS:
+        explanations = {
+            'bmi': 'Calculated from weight and height',
+            'disease_slug': 'URL-safe slug derived from disease name',
+            'therapy_lines_count': 'Count of therapy line Episodes',
+            'meets_crab': 'Derived from CRAB criteria fields',
+            'meets_slim': 'Derived from SLiM criteria fields',
+            'involved_uninvolved_ratio': 'Calculated from kappa and lambda FLC values',
+        }
+        return explanations.get(field_name)
+    if field_name.endswith(_WEARABLE_30D_SUFFIX) or field_name in _WEARABLE_METADATA_FIELDS:
+        return 'Aggregated from wearable device data (30-day window)'
+    return None
+
+
 # Build the set of all alias field names.
 _ALL_ALIASES = set(LAB_FIELD_ALIAS_TO_CANONICAL.keys())
 for aliases in _LAB_FIELD_ALIASES.values():
@@ -287,7 +318,7 @@ def _classify_field(field_name: str) -> str:
     if field_name in DEMOGRAPHIC_FIELDS:
         return 'profile'
     if field_name in THERAPY_LINE_FIELDS:
-        return 'therapy-inference'
+        return 'computed'
     if field_name in _COMPUTED_FIELDS:
         return 'computed'
     if field_name in _WEARABLE_METADATA_FIELDS:
@@ -300,14 +331,14 @@ def _classify_field(field_name: str) -> str:
         'therapy_ids', 'concomitant_medication',
     )
     if any(kw in field_name for kw in therapy_keywords):
-        return 'therapy-inference'
+        return 'computed'
     if field_name in PATIENT_RECORD_OMOP_MAPPED_FIELDS:
         return 'needs-concept-set'
     return 'other'
 
 
 _NON_MAPPABLE_CATEGORIES = frozenset({
-    'internal', 'computed', 'location', 'alias', 'unit',
+    'internal', 'computed', 'location', 'alias', 'unit', 'therapy-inference',
 })
 
 
@@ -489,6 +520,7 @@ def get_all_field_descriptors() -> list[dict]:
             'locked_table': _get_locked_table(category),
             'choices': choices_by_field.get(name, []),
             'formula': formula_dict,
+            'explanation': _get_explanation(name, category),
             # Generic derivation health surface. Other extractors can add a
             # message here without changing the admin API contract.
             'derivation_error': derivation_error,
