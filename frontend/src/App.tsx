@@ -102,10 +102,10 @@ function AppRoutes() {
     return element;
   };
 
-  // Staff-only routes: require a signed-in staff user.
-  const staffRoute = (element: ReactNode) => {
+  // Staff or org-admin routes: require a signed-in staff user or org admin.
+  const staffOrAdminRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
-    if (!currentUser.is_staff) return <Navigate to="/" replace />;
+    if (!currentUser.is_staff && !currentUser.is_org_admin) return <Navigate to="/" replace />;
     return element;
   };
 
@@ -145,7 +145,7 @@ function AppRoutes() {
       <Route path="/upload-csv" element={providerRoute(<UploadCSV />)} />
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
       <Route path="/org-admin" element={providerRoute(<OrgAdminPage />)} />
-      <Route path="/field-mappings" element={staffRoute(<FieldMappingPage />)} />
+      <Route path="/field-mappings" element={staffOrAdminRoute(<FieldMappingPage />)} />
       <Route
         path="/profile"
         element={

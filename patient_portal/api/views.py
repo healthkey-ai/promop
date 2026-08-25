@@ -7,7 +7,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.throttling import ScopedRateThrottle
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
@@ -79,7 +79,7 @@ import os
 import re
 from decimal import Decimal, InvalidOperation
 from io import StringIO
-from .permissions import ScopedTokenPermission, VocabReadPermission, PatientCrudPermission, PatientSelfScopePermission, PatientDeletePermission, get_request_org, is_service_token
+from .permissions import ScopedTokenPermission, VocabReadPermission, PatientCrudPermission, PatientSelfScopePermission, PatientDeletePermission, IsStaffOrAnyOrgAdmin, get_request_org, is_service_token
 from .providers.base import TokenClaims
 from .serializers import (
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
@@ -7741,15 +7741,13 @@ class VocabSnapshotView(APIView):
 
 
 # =============================================================================
-# Field Concept Mapping (staff-only concept assignment interface)
+# Field Concept Mapping (staff or org-admin concept assignment interface)
 # =============================================================================
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsStaffOrAnyOrgAdmin])
 def field_mapping_list(request):
     """GET: list all field descriptors.  POST: create a new mapping."""
-    if not getattr(request.user, 'is_staff', False):
-        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
         from omop_core.services.field_descriptor import get_all_field_descriptors
@@ -7773,11 +7771,9 @@ def field_mapping_list(request):
 
 
 @api_view(['GET', 'PATCH', 'DELETE'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsStaffOrAnyOrgAdmin])
 def field_mapping_detail(request, pk):
     """GET/PATCH/DELETE a single FieldConceptMapping."""
-    if not getattr(request.user, 'is_staff', False):
-        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping
     try:
@@ -7804,7 +7800,7 @@ def field_mapping_detail(request, pk):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsStaffOrAnyOrgAdmin])
 def propose_all_mappings(request):
     """Auto-create FieldConceptMapping records with status='proposed' for every
     mappable field that has a suggestion but no existing mapping.
@@ -7813,8 +7809,6 @@ def propose_all_mappings(request):
     suggestion code cannot be resolved (concept not in DB) are silently skipped.
     Returns the count of newly created mappings.
     """
-    if not getattr(request.user, 'is_staff', False):
-        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping, Concept
     from omop_core.services.field_descriptor import get_all_field_descriptors
@@ -7892,11 +7886,9 @@ def propose_all_mappings(request):
 # =============================================================================
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsStaffOrAnyOrgAdmin])
 def field_synonyms(request, field_name):
     """GET: merged custom + OMOP synonyms.  POST: create a custom synonym."""
-    if not getattr(request.user, 'is_staff', False):
-        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldSynonym, FieldConceptMapping, ConceptSynonym
 
@@ -7937,11 +7929,9 @@ def field_synonyms(request, field_name):
 
 
 @api_view(['DELETE'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsStaffOrAnyOrgAdmin])
 def field_synonym_detail(request, pk):
     """DELETE a custom synonym."""
-    if not getattr(request.user, 'is_staff', False):
-        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldSynonym
     try:
@@ -7954,16 +7944,13 @@ def field_synonym_detail(request, pk):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsStaffOrAnyOrgAdmin])
 def field_synonyms_batch(request):
     """Return synonyms for multiple fields in one request.
 
     GET /api/v1/field-synonyms/batch/?fields=field1,field2,...
     Returns {field_name: [synonym_text, ...]} with max 5 per field.
     """
-    if not getattr(request.user, 'is_staff', False):
-        return Response({'detail': 'Staff access required.'}, status=status.HTTP_403_FORBIDDEN)
-
     fields_param = request.query_params.get('fields', '')
     if not fields_param:
         return Response({})
@@ -8031,8 +8018,9 @@ def field_choice_list(request):
             qs = qs.filter(field_name=field_name)
         return Response(FieldChoiceSerializer(qs, many=True).data)
 
-    if not request.user.is_staff:
-        return Response({'detail': 'Staff permission required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
+    from omop_core.services.access import has_org_admin_access
+    if not (request.user.is_staff or has_org_admin_access(request.user)):
+        return Response({'detail': 'Staff or org-admin permission required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
     serializer = FieldChoiceSerializer(data=request.data, context={'request': request})
     serializer.is_valid(raise_exception=True)
     serializer.save()
@@ -8054,8 +8042,9 @@ def field_choice_detail(request, pk):
     if request.method == 'GET':
         return Response(FieldChoiceSerializer(choice).data)
 
-    if not request.user.is_staff:
-        return Response({'detail': 'Staff permission required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
+    from omop_core.services.access import has_org_admin_access
+    if not (request.user.is_staff or has_org_admin_access(request.user)):
+        return Response({'detail': 'Staff or org-admin permission required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'DELETE':
         choice.delete()
@@ -8070,7 +8059,7 @@ def field_choice_detail(request, pk):
 
 
 @api_view(['POST', 'DELETE'])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrAnyOrgAdmin])
 def field_choice_codes(request, choice_pk):
     """POST: add a code to a choice.  DELETE: remove all codes (use detail for single)."""
 
@@ -8097,7 +8086,7 @@ def field_choice_codes(request, choice_pk):
 # =============================================================================
 
 @api_view(['POST'])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrAnyOrgAdmin])
 def field_formula_test(request):
     """Evaluate a valid formula against one patient's current projection."""
     from omop_core.models import PatientRecord
@@ -8119,7 +8108,7 @@ def field_formula_test(request):
     return Response({'value': value})
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrAnyOrgAdmin])
 def field_formula_list(request):
     """GET: list all formulas.  POST: create."""
 
@@ -8138,7 +8127,7 @@ def field_formula_list(request):
 
 
 @api_view(['GET', 'PATCH', 'DELETE'])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrAnyOrgAdmin])
 def field_formula_detail(request, pk):
     """GET/PATCH/DELETE a single FieldFormula."""
 

@@ -295,3 +295,16 @@ class IsStaffOrOrgAdmin(BasePermission):
 
         slug = view.kwargs.get('slug')
         return has_org_admin_access(request.user, slug)
+
+
+class IsStaffOrAnyOrgAdmin(BasePermission):
+    """Allow staff users or any org admin (including via trust expansion)."""
+
+    def has_permission(self, request, view):
+        if not (request.user and request.user.is_authenticated):
+            return False
+
+        if getattr(request.user, 'is_staff', False):
+            return True
+
+        return has_org_admin_access(request.user)

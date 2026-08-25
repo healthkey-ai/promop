@@ -19742,6 +19742,63 @@ class FieldSynonymBatchTest(TestCase):
         self.assertEqual(len(resp.data['hemoglobin_g_dl']), 5)
 
 
+class FieldMappingOrgAdminAccessTest(TestCase):
+    """Org admins (including via trust) can access field mapping endpoints."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import Organization, GroupAccess
+
+        cls.org = Organization.objects.create(name='FM Org', slug='fm-org')
+        cls.org_admin = Identity.objects.create_user(
+            email='fm_orgadmin@t.com', password='x', is_staff=False,
+        )
+        GroupAccess.objects.create(identity=cls.org_admin, org=cls.org, role='org_admin')
+
+        cls.regular_user = Identity.objects.create_user(
+            email='fm_regular@t.com', password='x', is_staff=False,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_org_admin_can_list_field_mappings(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get('/api/v1/field-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(len(resp.data) > 0)
+
+    def test_org_admin_can_create_mapping(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'smoking_status',
+            'vocabulary_id': 'SNOMED',
+            'concept_code': '229819007',
+            'status': 'proposed',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_org_admin_can_get_synonyms(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_org_admin_can_get_synonyms_batch(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get('/api/v1/field-synonyms/batch/?fields=hemoglobin_g_dl')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_regular_user_blocked(self):
+        self.client.force_authenticate(user=self.regular_user)
+        resp = self.client.get('/api/v1/field-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_regular_user_blocked_synonyms(self):
+        self.client.force_authenticate(user=self.regular_user)
+        resp = self.client.get('/api/v1/field-mappings/hemoglobin_g_dl/synonyms/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
 class TherapyLineAuthoringTest(TestCase):
     """POST /api/v1/therapy-lines/ — the write behind the read-only treatment tab.
 
