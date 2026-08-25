@@ -120,7 +120,7 @@ _TAB_GENERAL = frozenset({
     'suppress_demographics_for_others',
     # Reclassified from "other"
     'diagnosis_date', 'death_date', 'heartrate_variability',
-    'no_pre_existing_conditions',
+    'no_pre_existing_conditions', 'ejection_fraction',
 })
 
 _TAB_DISEASE = frozenset({
@@ -164,6 +164,8 @@ _TAB_DISEASE = frozenset({
     'cytogenic_markers', 'molecular_markers',
     'condition_code_icd_10', 'condition_code_snomed_ct',
     'condition_clinical_status', 'prior_procedures',
+    'metastatic_status', 'active_infection_status', 'active_malignancies',
+    'no_active_infection_status', 'no_other_active_malignancies',
 })
 
 _TAB_TREATMENT = frozenset({
@@ -183,7 +185,8 @@ _TAB_TREATMENT = frozenset({
     # Reclassified from "other"
     'toxicity_grade', 'concomitant_medications', 'concomitant_medication_date',
     'concomitant_medication_details', 'washout_period_duration',
-    'remission_duration_min',
+    'remission_duration_min', 'reason_for_discontinuation',
+    'no_concomitant_medication_status',
 })
 
 _TAB_BLOOD = frozenset({
@@ -204,6 +207,12 @@ _TAB_LABS = frozenset({
     'serum_bilirubin_level_total', 'serum_bilirubin_level_direct', 'albumin_g_dl',
     'ldh', 'alkaline_phosphatase', 'c_reactive_protein', 'esr',
     'pulmonary_function_test_result', 'bone_imaging_result',
+    # Additional laboratory and organ-function measurements.
+    'alkaline_phosphatase_u_l', 'alt_u_l', 'ast_u_l', 'bilirubin_total_mg_dl',
+    'bun_mg_dl', 'creatinine_clearance_ml_min', 'creatinine_mg_dl',
+    'egfr_ml_min_173m2', 'estimated_glomerular_filtration_rate',
+    'lactate_dehydrogenase_level', 'renal_adequacy_status',
+    'serum_calcium_mg_dl', 'serum_creatinine_mg_dl',
 })
 
 _TAB_BEHAVIOR = frozenset({
@@ -217,6 +226,19 @@ _TAB_BEHAVIOR = frozenset({
     'no_mental_health_disorder_status', 'no_substance_use_status',
     'substance_use_details', 'no_geographic_exposure_risk',
     'geographic_exposure_risk_details',
+    # Reproductive results and wearable lifestyle summaries are best reviewed
+    # alongside the other behavior and eligibility information.
+    'pregnancy_test_result', 'no_pregnancy_or_lactation_status',
+    'no_tobacco_use_status', 'tobacco_use_details',
+    'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
+    'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
+    'resting_heart_rate_avg_30d', 'hrv_sdnn_avg_30d', 'hrv_rmssd_avg_30d',
+    'oxygen_saturation_min_30d', 'oxygen_saturation_avg_30d', 'respiratory_rate_avg_30d',
+    'sleep_duration_hours_avg_30d', 'vo2_max_avg_30d',
+    'distance_km_per_day_30d', 'walking_speed_avg_30d', 'walking_step_length_avg_30d',
+    'walking_double_support_pct_avg_30d', 'walking_hr_avg_30d',
+    'flights_climbed_per_day_30d', 'active_energy_per_day_30d',
+    'basal_energy_per_day_30d', 'body_mass_avg_30d',
 })
 
 
