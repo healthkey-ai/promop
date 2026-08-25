@@ -141,6 +141,35 @@ FIELD_COMMON_UNITS: dict[str, list[str]] = {
     'monoclonal_protein_urine':      ['mg/24h', 'mg/day'],
     'kappa_flc':                      ['mg/L', 'mg/dL'],
     'lambda_flc':                     ['mg/L', 'mg/dL'],
+    'kappa_lambda_ratio':             ['{ratio}'],
+    'clonal_plasma_cells':            ['%'],
+    # CLL / lymphoma disease markers
+    'absolute_lymphocyte_count':      ['10*3/uL', '10*9/L'],
+    'clonal_b_lymphocyte_count':      ['10*3/uL', '10*9/L'],
+    'clonal_bone_marrow_b_lymphocytes': ['%'],
+    'largest_lymph_node_size':        ['cm', 'mm'],
+    'lymphocyte_doubling_time':       ['mo'],
+    'spleen_size':                    ['cm'],
+    'qtcf_value':                     ['ms'],
+    # Breast cancer / tumor markers
+    'tumor_size':                     ['cm', 'mm'],
+    'pd_l1_tumor_cells':              ['%'],
+    'pd_l1_ic_percentage':            ['%'],
+    'pd_l1_combined_positive_score':  ['{score}'],
+    # Lab aliases (legacy fields that mirror canonical ones)
+    'albumin_level':                  ['g/dL', 'g/L'],
+    'hemoglobin_level':               ['g/dL', 'g/L', 'mmol/L'],
+    'serum_bilirubin_level_total':    ['mg/dL', 'umol/L'],
+    'serum_calcium_level':            ['mg/dL', 'mmol/L'],
+    'serum_creatinine_level':         ['mg/dL', 'umol/L'],
+    'serum_beta2_microglobulin_level': ['mg/L', 'nmol/L'],
+    'white_blood_cell_count':         ['10*3/uL', '10*9/L'],
+    'creatinine_clearance_ml_min':    ['mL/min'],
+    # Cardiac
+    'ejection_fraction':              ['%'],
+    'heartrate_variability':          ['ms'],
+    # Behavior
+    'sleep_hours_per_night':          ['h'],
     # Vital signs
     'weight':                         ['kg', 'lbs'],
     'height':                         ['cm', 'in'],
