@@ -34,7 +34,7 @@ from omop_core.models import (
     FhirConnection, FhirOauthState, Institution,
     ObservationPeriod, PatientSurveyResponse, PersonLanguageSkill, Survey,
     VisitOccurrence,
-    Organization, GroupAccess,
+    Organization, GroupAccess, CustomPatientField,
 )
 from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
 from omop_oncology.models import CancerModifier, Episode, EpisodeEvent, Histology, StemTable
@@ -19419,6 +19419,91 @@ class BulkUpsertObservationIdentityTest(TestCase):
 # =============================================================================
 # Field Concept Mapping API tests
 # =============================================================================
+
+class CustomPatientFieldApiTest(TestCase):
+    """Tests for /api/v1/custom-patient-fields/ creation and discovery."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.staff = Identity.objects.create_user(
+            email='custom-field-staff@t.com', password='x', is_staff=True,
+        )
+        cls.org_admin = Identity.objects.create_user(
+            email='custom-field-org-admin@t.com', password='x',
+        )
+        cls.user = Identity.objects.create_user(email='custom-field-user@t.com', password='x')
+        cls.org = Organization.objects.create(name='Custom Field Org', slug='custom-field-org')
+        GroupAccess.objects.create(identity=cls.org_admin, org=cls.org, role='org_admin')
+        cls.concept = Concept.objects.get(concept_id=4112853)
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def payload(self, **overrides):
+        data = {
+            'confirm_patient_record': True,
+            'field_name': 'tumor_response_note',
+            'display_name': 'Tumor response note',
+            'tab': 'disease',
+            'field_type': 'text',
+            'concept': self.concept.pk,
+            'omop_table': 'observation',
+            'unit': '',
+        }
+        data.update(overrides)
+        return data
+
+    def test_mapping_admin_creates_approved_mapping_and_definition_atomically(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.post('/api/v1/custom-patient-fields/', self.payload(), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        custom_field = CustomPatientField.objects.get(field_name='tumor_response_note')
+        self.assertEqual(custom_field.mapping.status, 'approved')
+        self.assertEqual(custom_field.mapping.concept, self.concept)
+        self.assertEqual(custom_field.mapping.reviewer, self.staff)
+        self.assertEqual(custom_field.mapping.vocabulary_id, self.concept.vocabulary_id)
+        self.assertEqual(custom_field.mapping.concept_code, self.concept.concept_code)
+        self.assertEqual(response.data['concept_name'], self.concept.concept_name)
+
+    def test_creation_requires_explicit_patient_record_confirmation(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.post(
+            '/api/v1/custom-patient-fields/',
+            self.payload(confirm_patient_record=False), format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(CustomPatientField.objects.exists())
+        self.assertFalse(FieldConceptMapping.objects.filter(field_name='tumor_response_note').exists())
+
+    def test_rejects_invalid_or_concrete_field_name_without_leaving_mapping(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.post(
+            '/api/v1/custom-patient-fields/', self.payload(field_name='Not valid'), format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response = self.client.post(
+            '/api/v1/custom-patient-fields/', self.payload(field_name='weight'), format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(FieldConceptMapping.objects.filter(field_name__in=['Not valid', 'weight']).exists())
+
+    def test_org_admin_can_create_and_all_signed_in_users_can_list(self):
+        self.client.force_authenticate(user=self.org_admin)
+        response = self.client.post('/api/v1/custom-patient-fields/', self.payload(), format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get('/api/v1/custom-patient-fields/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]['field_name'], 'tumor_response_note')
+
+    def test_non_admin_cannot_create(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post('/api/v1/custom-patient-fields/', self.payload(), format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
 
 class FieldConceptMappingTest(TestCase):
     """Tests for the /api/v1/field-mappings/ endpoints."""
