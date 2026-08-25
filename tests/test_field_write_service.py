@@ -267,6 +267,23 @@ def test_non_numeric_value_for_a_number_field_fails_closed():
         apply_field_writes(person, {'hemoglobin_g_dl': 'high'}, today=date(2026, 8, 23))
 
 
+def test_assertion_boolean_field_writes_and_rederives_true_and_false():
+    # A direct-boolean assertion field (contraceptive_use; LOINC 8659-8) made writable via its EXISTING
+    # assertion code must round-trip through _get_assertion_data (which reads the same concept) — both
+    # True and False, guarding the bool('False')==True trap. Same concept as the reader → no clobber.
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    _seed_patient_reported_type()
+    ConceptFactory(concept_code='8659-8', concept_name='Contraceptive use')  # LOINC + Measurement by factory default
+
+    r = apply_field_writes(person, {'contraceptive_use': True}, today=date(2026, 8, 25))
+    assert 'contraceptive_use' in r.applied and not r.rejected
+    assert refresh_patient_record(person).contraceptive_use is True
+
+    apply_field_writes(person, {'contraceptive_use': False}, today=date(2026, 8, 25))
+    assert refresh_patient_record(person).contraceptive_use is False  # NOT bool('False')==True
+
+
 # --- genetic_mutations: the LIST-diff write path ---------------------------------------------------
 # Unlike a scalar lab, genetic_mutations is a list — one Measurement per gene (gene LOINC concept,
 # variant→value_as_string, origin→qualifier_concept, interpretation→value_as_concept). Genes dropped

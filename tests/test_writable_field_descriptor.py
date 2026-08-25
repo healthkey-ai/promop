@@ -438,6 +438,11 @@ class TestAttributionsTrackDerivation:
         for field, (code, _vocab, extractor) in DERIVED_FIELD_TO_CODE.items():
             source = inspect.getsource(getattr(prs, extractor))
             writes_field = f"data['{field}']" in source or f'data["{field}"]' in source
+            # _get_assertion_data writes fields data-driven from _ASSERTION_FIELDS (`data[field] = ...`
+            # in a loop, not a literal), so a field it reads counts as written when _ASSERTION_FIELDS
+            # maps this code to it.
+            if not writes_field and extractor == '_get_assertion_data':
+                writes_field = prs._ASSERTION_FIELDS.get(code, (None,))[0] == field
             # The code may be inline or reached through a module-level constant
             # the function names; both count as this extractor reading it.
             mentions_code = f"'{code}'" in source or f'"{code}"' in source

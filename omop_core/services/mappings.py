@@ -311,4 +311,11 @@ DERIVED_FIELD_TO_CODE = {
     # about the field the moment the bug was fixed — see
     # test_every_attribution_still_matches_its_extractor.
     'insurance_type':                ('408729009', 'SNOMED', '_get_social_data'),
+    # Assertion booleans — _get_assertion_data. Made writable via their EXISTING LOINC assertion codes
+    # (the same codes _ASSERTION_FIELDS already reads), so a federated edit round-trips through the
+    # existing reader with no second path to clobber it, and the patient's dated edit supersedes an
+    # older FHIR assertion of the same concept. Only the two DIRECT booleans here; the inverse_boolean
+    # no_* fields need write-side inversion, deferred to healthkey-ai/promop#699.
+    'contraceptive_use':             ('8659-8',    'LOINC',  '_get_assertion_data'),
+    'consent_capability':            ('75985-6',   'LOINC',  '_get_assertion_data'),
 }
