@@ -5,12 +5,13 @@ import FieldMappingPage from "./FieldMappingPage";
 
 const mockGet = vi.fn();
 const mockPost = vi.fn();
+const mockPatch = vi.fn();
 
 vi.mock("@/api/axios", () => ({
   default: {
     get: (...args: unknown[]) => mockGet(...args),
     post: (...args: unknown[]) => mockPost(...args),
-    patch: vi.fn().mockResolvedValue({ data: {} }),
+    patch: (...args: unknown[]) => mockPatch(...args),
     delete: vi.fn().mockResolvedValue({ data: {} }),
   },
 }));
@@ -189,6 +190,7 @@ const renderPage = () =>
 describe("FieldMappingPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockPatch.mockResolvedValue({ data: {} });
     mockGet.mockImplementation((url: string) => {
       if (url === "/v1/field-mappings/") {
         return Promise.resolve({ data: MOCK_DESCRIPTORS });
@@ -248,21 +250,6 @@ describe("FieldMappingPage", () => {
     });
     expect(screen.getByText("proposed")).toBeInTheDocument();
     expect(screen.getByText("SNOMED")).toBeInTheDocument();
-  });
-
-  it("shows 'click to map' for unmapped fields with unresolved suggestions", async () => {
-    renderPage();
-    await waitFor(() => {
-      expect(screen.getByText(/Blood/)).toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByText(/Blood/));
-    await waitFor(() => {
-      expect(screen.getByText("hemoglobin_g_dl")).toBeInTheDocument();
-    });
-    // hemoglobin_g_dl has a suggestion but no mapping in mock data;
-    // propose-all returned 0 created, so it still shows "click to map"
-    const clickToMap = screen.getAllByText("click to map");
-    expect(clickToMap.length).toBeGreaterThan(0);
   });
 
   it("search shows results across all tabs", async () => {
@@ -374,6 +361,26 @@ describe("FieldMappingPage", () => {
     });
     // pack_years has status=proposed, should stay in "Needs Concept Assignment"
     expect(screen.getByText("Needs Concept Assignment")).toBeInTheDocument();
+  });
+
+  it("toggles an existing mapping between proposed and approved", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText(/Behavior/)).toBeInTheDocument());
+    fireEvent.click(screen.getByText(/Behavior/));
+    await waitFor(() => expect(screen.getByText("229819007")).toBeInTheDocument());
+
+    const proposedRow = screen.getByText("229819007").closest("tr");
+    fireEvent.click(proposedRow!.querySelector('[title="Approve mapping"]')!);
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith("/v1/field-mappings/1/", { status: "approved" });
+    });
+
+    // The approved mapping is shown in the Mapped section; clicking its check
+    // returns it to the proposed state instead of deleting the mapping.
+    fireEvent.click(screen.getByTitle("Mark mapping as proposed"));
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith("/v1/field-mappings/2/", { status: "proposed" });
+    });
   });
 
   // ── Phase 1b tests: edit mode ──

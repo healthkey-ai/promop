@@ -255,12 +255,11 @@ export default function FieldMappingPage() {
   const handleConfirm = async (field: FieldDescriptor) => {
     try {
       if (field.mapping) {
-        // Approve existing proposed mapping (already has a resolved concept).
-        if (field.mapping.status === "proposed") {
-          await api.patch(`/v1/field-mappings/${field.mapping.id}/`, { status: "approved" });
-          fetchDescriptors();
-        }
-        // Already approved — no-op (no refetch needed).
+        // This is a state toggle, not a one-way confirmation.  An approved
+        // mapping is still retained as a proposal when a reviewer unchecks it.
+        const status = field.mapping.status === "approved" ? "proposed" : "approved";
+        await api.patch(`/v1/field-mappings/${field.mapping.id}/`, { status });
+        await fetchDescriptors();
       } else if (field.suggestion) {
         // Suggestion has no resolved concept FK — open the dialog so the user
         // can search, select a concept, and create a complete mapping.
@@ -276,7 +275,9 @@ export default function FieldMappingPage() {
     if (f.mapping) {
       return (
         <span className="inline-flex items-center gap-1.5">
-          <span className="font-mono text-xs">{f.mapping.concept_code}</span>
+          <span className={`font-mono text-xs ${f.mapping.status === "proposed" ? "font-bold" : ""}`}>
+            {f.mapping.concept_code}
+          </span>
           <span
             className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
               STATUS_BADGE[f.mapping.status] || "bg-gray-100"
@@ -284,6 +285,13 @@ export default function FieldMappingPage() {
           >
             {f.mapping.status}
           </span>
+        </span>
+      );
+    }
+    if (f.suggestion) {
+      return (
+        <span className="font-mono text-xs font-bold text-gray-700">
+          {f.suggestion.concept_code}
         </span>
       );
     }
@@ -375,8 +383,8 @@ export default function FieldMappingPage() {
                           ? "border-green-500 bg-green-500 text-white"
                           : "border-gray-300 hover:border-primary"
                       }`}
-                      title={f.mapping?.status === "approved" ? "Confirmed" : "Confirm mapping"}
-                      disabled={f.mapping?.status === "approved" || (!f.mapping && !f.suggestion)}
+                      title={f.mapping?.status === "approved" ? "Mark mapping as proposed" : "Approve mapping"}
+                      disabled={!f.mapping && !f.suggestion}
                     >
                       {f.mapping?.status === "approved" && <Check size={10} />}
                     </button>
@@ -528,7 +536,7 @@ export default function FieldMappingPage() {
       <div className="mx-auto max-w-7xl p-6">
         <div className="rounded border border-red-300 bg-red-50 p-4 text-red-700">
           {error}
-          <button onClick={fetchDescriptors} className="ml-3 underline">Retry</button>
+          <button onClick={() => fetchDescriptors()} className="ml-3 underline">Retry</button>
         </div>
       </div>
     );
