@@ -60,6 +60,7 @@ const MOCK_DESCRIPTORS = [
     locked_table: null,
     choices: [],
     formula: null,
+    explanation: null,
   },
   {
     field_name: "smoking_status",
@@ -76,6 +77,7 @@ const MOCK_DESCRIPTORS = [
       { id: 2, display: "Never smoker", sort_order: 1, codes: [] },
     ],
     formula: null,
+    explanation: null,
   },
   {
     field_name: "pack_years",
@@ -100,6 +102,7 @@ const MOCK_DESCRIPTORS = [
     locked_table: null,
     choices: [],
     formula: null,
+    explanation: null,
   },
   {
     // Approved mapping — should reclassify to "editable" (Mapped) section
@@ -125,6 +128,7 @@ const MOCK_DESCRIPTORS = [
     locked_table: null,
     choices: [],
     formula: null,
+    explanation: null,
   },
   {
     field_name: "bmi",
@@ -138,6 +142,7 @@ const MOCK_DESCRIPTORS = [
     locked_table: null,
     choices: [],
     formula: { id: 1, expression: "weight / (height / 100) ^ 2", is_active: false },
+    explanation: "Calculated from weight and height",
   },
   {
     field_name: "date_of_birth",
@@ -151,6 +156,7 @@ const MOCK_DESCRIPTORS = [
     locked_table: "Person",
     choices: [],
     formula: null,
+    explanation: null,
   },
   {
     field_name: "country",
@@ -164,6 +170,7 @@ const MOCK_DESCRIPTORS = [
     locked_table: "Location",
     choices: [],
     formula: null,
+    explanation: null,
   },
   {
     field_name: "hemoglobin",
@@ -190,6 +197,21 @@ const MOCK_DESCRIPTORS = [
     locked_table: null,
     choices: [],
     formula: null,
+    explanation: null,
+  },
+  {
+    field_name: "first_line_therapy",
+    field_type: "text",
+    category: "computed",
+    tab: "treatment",
+    provenance: null,
+    mapping: null,
+    suggestion: null,
+    mappable: false,
+    locked_table: null,
+    choices: [],
+    formula: null,
+    explanation: "Derived from Episode and DrugExposure records",
   },
 ];
 
@@ -494,6 +516,34 @@ describe("FieldMappingPage", () => {
     // smoking_status has no mapping and no suggestion — should show "click to map"
     const clickToMap = screen.getAllByText("click to map");
     expect(clickToMap.length).toBeGreaterThan(0);
+  });
+
+  // ── Therapy fields as computed ──
+
+  it("shows therapy line fields in computed section with explanation", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText(/Treatment/));
+    await waitFor(() => {
+      // Expand the computed section
+      const computedButton = screen.getByText(/read-only — computed by application code/);
+      fireEvent.click(computedButton);
+    });
+    expect(screen.getByText("first_line_therapy")).toBeInTheDocument();
+    expect(screen.getByText("Derived from Episode and DrugExposure records")).toBeInTheDocument();
+  });
+
+  it("renders Formula / Explanation column header in computed section", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
+    });
+    // Expand computed section on General tab (has bmi)
+    const computedButton = screen.getByText(/read-only — computed by application code/);
+    fireEvent.click(computedButton);
+    expect(screen.getByText("Formula / Explanation")).toBeInTheDocument();
   });
 
   // ── Phase 3 tests: choices ──
