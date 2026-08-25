@@ -276,8 +276,9 @@ export default function FieldMappingPage() {
     if (f.mapping) {
       return (
         <span className="inline-flex items-center gap-1.5">
-          <span className={`font-mono text-xs ${f.mapping.status === "proposed" ? "font-bold" : ""}`}>
-            {f.mapping.concept_code}
+          <span className={`text-xs ${f.mapping.status === "proposed" ? "font-bold" : ""}`}>
+            <span className="font-mono">{f.mapping.concept_code}</span>
+            {f.mapping.concept_name && <span className="ml-1 break-words text-gray-600">— {f.mapping.concept_name}</span>}
           </span>
           <span
             className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
