@@ -206,7 +206,7 @@ export function ConceptAssignDialog({
             {selected ? (
               <>
                 <span className="font-mono font-medium">{selected.vocabulary_id}:{selected.concept_code}</span>
-                <span className="truncate">{selected.concept_name || "Unnamed concept"}</span>
+                <span className="min-w-0 break-words">{selected.concept_name || "Unnamed concept"}</span>
                 <button onClick={() => setSelected(null)} className="rounded p-0.5 text-gray-400 hover:text-gray-600" title="Clear selection">
                   <X size={14} />
                 </button>
