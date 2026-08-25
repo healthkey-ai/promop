@@ -64,6 +64,41 @@ concept table.
 
 ---
 
+## Field Concept Mapping Workflow
+
+The **Field Concept Mappings** page (`/field-mappings`) is the curation layer
+between a decision-ready `PatientRecord` field and the OMOP fact that supplies
+it. It lets an organization administrator review the proposed mapping for each
+field, search the loaded Athena vocabulary when a proposal needs changing, and
+approve the mapping that should be used for reads and writes.
+
+![Field Concept Mappings page, showing proposed and approved mappings for Behavior fields](images/concept_mappings.png)
+
+Each row records the clinical meaning and storage details needed to turn a
+PatientRecord field into an interoperable OMOP fact:
+
+| Mapping detail | Why it matters |
+|---|---|
+| **Concept** | Identifies the LOINC, SNOMED, or other OMOP concept that gives the field its clinical meaning. |
+| **Coding** | Shows the source vocabulary, making it easy to distinguish, for example, a LOINC measurement from a SNOMED finding. |
+| **Table** | Selects the OMOP destination, such as `Measurement` for a quantitative lab or `Observation` for an assertion. |
+| **Unit** | Is configured on the measurement field itself so values are stored and interpreted consistently. |
+| **Synonyms** | Captures alternate names that improve vocabulary search and source-data matching. |
+
+Mappings begin as **proposed** so they can be reviewed without changing the
+clinical write path. Approving a mapping confirms that the concept, source
+value, target table, and value type are appropriate; an approved mapping can
+then make its field available for structured write-through. This keeps mapping
+decisions explicit and auditable while allowing the `PatientRecord` projection
+to stay aligned with the underlying OMOP data.
+
+Unit companion columns are intentionally not mapped independently. Their units
+belong to the corresponding measurement field—for example, ANC or albumin—so
+there is one curated mapping for the clinical value rather than a second,
+redundant mapping for its display unit.
+
+---
+
 ## Concept graph API
 
 PROMOP exposes the loaded OMOP graph to API consumers:
