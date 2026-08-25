@@ -30,6 +30,10 @@ from omop_core.services.formula_evaluator import validate_formula
 _INTERNAL_FIELDS = frozenset({
     'id', 'person', 'organization', 'created_at', 'updated_at',
     'derivation_version', 'derived_at', 'user_edited_fields',
+    # Redundant generic therapy fields — duplicated by per-line fields.
+    'therapy_intent', 'reason_for_discontinuation',
+    # Renamed field — replaced by remission_duration.
+    'remission_duration_min',
 })
 
 # Person/profile fields projected from Person model.
@@ -50,15 +54,47 @@ _WEARABLE_METADATA_FIELDS = frozenset({
     'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
 })
 
+# Treatment fields that curators can directly edit (not computed).
+# Therapy line fields from THERAPY_LINE_FIELDS are editable, plus supportive
+# therapy, concomitant medication, and toxicity fields.
+_EDITABLE_TREATMENT_FIELDS = frozenset({
+    # Supportive therapy
+    'supportive_therapies', 'supportive_therapy_start_date',
+    'supportive_therapy_end_date', 'supportive_therapy_intent',
+    'supportive_therapy_date',
+    # Concomitant medication (editable; no_concomitant_medication_status is computed)
+    'concomitant_medication_date', 'concomitant_medications',
+    'concomitant_medication_details',
+    # Other editable treatment fields
+    'toxicity_grade', 'planned_therapies', 'concomitant_medication',
+    'remission_duration',
+})
+
+# Computed therapy-related fields (IDs, counts, summaries — not directly editable).
+_COMPUTED_THERAPY_FIELDS = frozenset({
+    # Per-line IDs
+    'first_line_therapy_id', 'first_line_component_ids', 'first_line_therapy_type_ids',
+    'second_line_therapy_id', 'second_line_component_ids', 'second_line_therapy_type_ids',
+    'later_therapy_ids', 'later_component_ids', 'later_therapy_type_ids',
+    'therapy_component_ids', 'therapy_type_ids',
+    # Summaries and provenance
+    'therapy_ids_provenance', 'therapy_lines_count', 'last_treatment',
+    'treatment_refractory_status', 'relapse_count', 'refractory_status',
+    'washout_period_duration', 'prior_therapy', 'line_of_therapy',
+    'later_therapies', 'later_date',
+    # Negation field
+    'no_concomitant_medication_status',
+})
+
 # Computed fields (derived from other fields, not directly from OMOP).
 _COMPUTED_FIELDS = frozenset({
-    'bmi', 'disease_slug', 'therapy_lines_count',
+    'bmi', 'disease_slug',
     'meets_crab', 'meets_slim', 'involved_uninvolved_ratio',
     'active_infection_status', 'active_malignancies',
     'no_active_infection_status', 'no_hiv_status', 'no_hepatitis_b_status',
     'no_hepatitis_c_status', 'no_other_active_malignancies',
     'no_pre_existing_conditions', 'no_pregnancy_or_lactation_status',
-    'no_mental_health_disorder_status', 'no_concomitant_medication_status',
+    'no_mental_health_disorder_status',
     'no_tobacco_use_status', 'no_substance_use_status',
     'no_geographic_exposure_risk',
 })
@@ -68,27 +104,34 @@ _COMPUTED_FIELDS = frozenset({
 # columns do not belong in the Field Concept Mapping inventory.
 _UNIT_SUFFIX = '_units'
 
-# Explanations for computed fields that lack a FieldFormula.
-# Therapy-line fields are derived programmatically from Episode + DrugExposure.
-_THERAPY_KEYWORDS_FOR_EXPLANATION = (
-    'therapy', 'treatment', 'line_', 'component_ids', 'therapy_type_ids',
-    'therapy_ids', 'concomitant_medication',
-)
+# Specific explanations for computed therapy fields.
+_COMPUTED_THERAPY_EXPLANATIONS = {
+    'therapy_lines_count': 'Count of therapy line Episode records',
+    'last_treatment': 'Latest therapy end date across all lines',
+    'prior_therapy': 'Derived from therapy_lines_count',
+    'treatment_refractory_status': 'Computed from therapy line outcomes',
+    'relapse_count': 'Computed from therapy line outcomes',
+    'refractory_status': 'Computed from therapy line outcomes',
+    'washout_period_duration': 'Computed from last therapy received',
+    'line_of_therapy': 'Derived from therapy line Episode records',
+    'no_concomitant_medication_status': 'Computed negation of concomitant medication presence',
+    'later_therapies': 'Derived from Episode and DrugExposure records',
+    'later_date': 'Derived from Episode and DrugExposure records',
+}
 
 
 def _get_explanation(field_name: str, category: str) -> str | None:
     """Return a human-readable explanation for a computed field without a formula."""
     if category != 'computed':
         return None
-    if field_name in THERAPY_LINE_FIELDS:
-        return 'Derived from Episode and DrugExposure records'
-    if any(kw in field_name for kw in _THERAPY_KEYWORDS_FOR_EXPLANATION):
-        return 'Derived from Episode and DrugExposure records'
+    if field_name in _COMPUTED_THERAPY_FIELDS:
+        return _COMPUTED_THERAPY_EXPLANATIONS.get(
+            field_name, 'Derived from Episode and DrugExposure records',
+        )
     if field_name in _COMPUTED_FIELDS:
         explanations = {
             'bmi': 'Calculated from weight and height',
             'disease_slug': 'URL-safe slug derived from disease name',
-            'therapy_lines_count': 'Count of therapy line Episodes',
             'meets_crab': 'Derived from CRAB criteria fields',
             'meets_slim': 'Derived from SLiM criteria fields',
             'involved_uninvolved_ratio': 'Calculated from kappa and lambda FLC values',
@@ -218,8 +261,10 @@ _TAB_TREATMENT = frozenset({
     # Reclassified from "other"
     'toxicity_grade', 'concomitant_medications', 'concomitant_medication_date',
     'concomitant_medication_details', 'washout_period_duration',
-    'remission_duration_min', 'reason_for_discontinuation',
+    'remission_duration',
     'no_concomitant_medication_status', 'later_date',
+    'treatment_refractory_status', 'therapy_ids_provenance',
+    'last_treatment', 'prior_therapy', 'line_of_therapy',
 })
 
 _TAB_BLOOD = frozenset({
@@ -322,20 +367,20 @@ def _classify_field(field_name: str) -> str:
         return 'unit'
     if field_name in DEMOGRAPHIC_FIELDS:
         return 'profile'
+    # Therapy line fields (names, dates, outcomes, intents, reasons) are editable.
     if field_name in THERAPY_LINE_FIELDS:
+        return 'editable'
+    # Additional editable treatment fields (supportive therapy, concomitant meds, toxicity).
+    if field_name in _EDITABLE_TREATMENT_FIELDS:
+        return 'editable'
+    # Computed therapy fields (IDs, counts, summaries).
+    if field_name in _COMPUTED_THERAPY_FIELDS:
         return 'computed'
     if field_name in _COMPUTED_FIELDS:
         return 'computed'
     if field_name in _WEARABLE_METADATA_FIELDS:
         return 'computed'
     if field_name.endswith(_WEARABLE_30D_SUFFIX):
-        return 'computed'
-    # Therapy-related fields not in THERAPY_LINE_FIELDS but containing therapy keywords.
-    therapy_keywords = (
-        'therapy', 'treatment', 'line_', 'component_ids', 'therapy_type_ids',
-        'therapy_ids', 'concomitant_medication',
-    )
-    if any(kw in field_name for kw in therapy_keywords):
         return 'computed'
     if field_name in PATIENT_RECORD_OMOP_MAPPED_FIELDS:
         return 'needs-concept-set'

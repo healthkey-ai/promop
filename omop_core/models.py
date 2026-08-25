@@ -2523,6 +2523,7 @@ class PatientRecord(models.Model):
 
     # Remission and washout periods
     remission_duration_min = models.TextField(blank=True, null=True)
+    remission_duration = models.TextField(blank=True, null=True, help_text="Duration of remission")
     washout_period_duration = models.TextField(blank=True, null=True)
 
     # Viral infection status

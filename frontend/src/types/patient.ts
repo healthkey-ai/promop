@@ -125,6 +125,9 @@ export interface PatientInfo {
   
   // Planned Therapies
   planned_therapies?: string;
+
+  // Remission
+  remission_duration?: string;
   
   // Blood Markers
   hemoglobin_g_dl?: number;
