@@ -72,6 +72,7 @@ def upsert_therapy_line_episode(
     source_value=None,
     today=None,
     preserve_end_date_when_none=False,
+    overwrite_source_concept=False,
 ):
     """Upsert one line-of-therapy Episode and its links; return the Episode.
 
@@ -83,6 +84,10 @@ def upsert_therapy_line_episode(
             episode_object_concept; falls back to concept 0.
         regimen_source_concept: Concept for episode_source_concept (typically the
             same HemOnc concept when it came from the source), else None.
+        overwrite_source_concept: when True, a provided regimen_source_concept replaces an
+            existing episode_source_concept (the CB reverse-sync, authoritative for its own
+            patients); default False keeps "fill only if empty" so import paths never clobber
+            an asserted source concept. A None concept never clears either way.
         start_date / end_date: date objects (already parsed) or None.
         drug_exposure_ids: iterable of drug_exposure_id to link via EpisodeEvent.
         outcome: optional outcome string → LOT-{n}-outcome Observation.
@@ -136,7 +141,18 @@ def upsert_therapy_line_episode(
         if regimen_concept and episode.episode_object_concept_id != regimen_concept.concept_id:
             episode.episode_object_concept = regimen_concept
             dirty.append('episode_object_concept')
-        if regimen_source_concept and not episode.episode_source_concept_id:
+        # `overwrite_source_concept=True` (the CB reverse-sync, which IS the source of truth for its own
+        # patients) lets a re-resolved regimen replace an existing source concept — without it, editing a
+        # line from regimen A to a different resolved regimen B updates episode_object_concept but leaves
+        # episode_source_concept on A, and the derivation (which reads the source slot first) keeps
+        # reporting A. The default stays "fill only if empty" so the enrich/FHIR import paths never clobber
+        # a concept they asserted from the source. A None here is always "not provided, keep what's there"
+        # (mirrors preserve_end_date_when_none): the whole-line re-send carries a null concept for every
+        # unmapped slug, and clearing on that would destroy an imported regimen concept on an unrelated
+        # (e.g. outcome-only) edit — so we never clear, only overwrite with another resolved concept.
+        if (regimen_source_concept
+                and (overwrite_source_concept or not episode.episode_source_concept_id)
+                and episode.episode_source_concept_id != regimen_source_concept.concept_id):
             episode.episode_source_concept = regimen_source_concept
             dirty.append('episode_source_concept')
         if start_date is not None and episode.episode_start_date != start_date:
