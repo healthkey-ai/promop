@@ -67,7 +67,6 @@ const CATEGORY_LABELS: Record<string, string> = {
   alias: "Legacy Aliases",
   unit: "Unit Fields",
   profile: "Person",
-  location: "Location",
   other: "Other",
 };
 
@@ -88,6 +87,13 @@ const STATUS_BADGE: Record<string, string> = {
   approved: "bg-green-100 text-green-800",
   rejected: "bg-red-100 text-red-800",
 };
+
+/**
+ * Location is not yet a supported field-concept mapping target.  Do not show
+ * its fields in this mapper: presenting a disabled "click to map" control is
+ * misleading until Location mappings can be persisted end-to-end.
+ */
+const isSupportedMapperField = (descriptor: FieldDescriptor) => descriptor.category !== "location";
 
 /** Display category: approved mappings move from their backend category to "editable" (Mapped). */
 const getDisplayCategory = (d: FieldDescriptor): string => {
@@ -123,7 +129,7 @@ export default function FieldMappingPage() {
     setError("");
     try {
       const resp = await api.get("/v1/field-mappings/");
-      setDescriptors(resp.data);
+      setDescriptors(resp.data.filter(isSupportedMapperField));
 
       // Auto-propose mappings only on initial mount, not on every refetch.
       if (autoPropose) {
@@ -136,7 +142,7 @@ export default function FieldMappingPage() {
             if (proposeResp.data.created > 0) {
               // Re-fetch to pick up newly created proposed mappings.
               const refreshed = await api.get("/v1/field-mappings/");
-              setDescriptors(refreshed.data);
+              setDescriptors(refreshed.data.filter(isSupportedMapperField));
             }
           } catch {
             // Non-critical — proposed mappings are a convenience, not required.
@@ -319,11 +325,7 @@ export default function FieldMappingPage() {
   const renderTableCell = (f: FieldDescriptor) => {
     if (f.locked_table) {
       return (
-        <span className="text-xs text-gray-400" title={
-          f.category === "location"
-            ? "Location is an independent table — no OMOP mapping needed"
-            : "Person table (locked)"
-        }>
+        <span className="text-xs text-gray-400" title="Person table (locked)">
           {f.locked_table}
         </span>
       );
