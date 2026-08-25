@@ -14,11 +14,12 @@ pytestmark = pytest.mark.django_db
 
 
 def test_all_concrete_fields_covered():
-    """Every non-internal concrete PatientRecord field appears in the descriptor output."""
+    """Every mapping-relevant concrete PatientRecord field appears in the output."""
     concrete_names = {
         f.name for f in PatientRecord._meta.get_fields()
         if getattr(f, 'concrete', False)
     } - _INTERNAL_FIELDS
+    concrete_names = {name for name in concrete_names if not name.endswith('_units')}
     descriptors = get_all_field_descriptors()
     descriptor_names = {d['field_name'] for d in descriptors}
     missing = concrete_names - descriptor_names
@@ -31,6 +32,17 @@ def test_internal_fields_excluded():
     descriptor_names = {d['field_name'] for d in descriptors}
     for field in _INTERNAL_FIELDS:
         assert field not in descriptor_names, f"Internal field '{field}' should be excluded"
+
+
+def test_unit_companion_fields_excluded():
+    """Units are configured on measurement mappings, not mapped as fields themselves."""
+    descriptor_names = {d['field_name'] for d in get_all_field_descriptors()}
+    unit_fields = {
+        f.name for f in PatientRecord._meta.get_fields()
+        if getattr(f, 'concrete', False) and f.name.endswith('_units')
+    }
+    assert unit_fields
+    assert descriptor_names.isdisjoint(unit_fields)
 
 
 def test_lab_fields_categorized_editable():
@@ -99,7 +111,7 @@ def test_descriptors_have_required_keys():
 def test_categories_are_valid():
     """All categories returned are from the known set."""
     valid_categories = {
-        'editable', 'alias', 'unit', 'profile', 'location',
+        'editable', 'alias', 'profile', 'location',
         'therapy-inference', 'computed', 'needs-concept-set', 'other',
     }
     descriptors = get_all_field_descriptors()

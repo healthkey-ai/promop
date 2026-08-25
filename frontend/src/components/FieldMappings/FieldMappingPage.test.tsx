@@ -186,20 +186,6 @@ const MOCK_DESCRIPTORS = [
     formula: null,
   },
   {
-    field_name: "median_daily_steps_30d",
-    field_type: "float",
-    category: "computed",
-    tab: "other",
-    provenance: null,
-    mapping: null,
-    suggestion: null,
-    mappable: false,
-    locked_table: null,
-    choices: [],
-    formula: null,
-    explanation: null,
-  },
-  {
     field_name: "first_line_therapy",
     field_type: "text",
     category: "computed",
@@ -253,13 +239,22 @@ describe("FieldMappingPage", () => {
     expect(screen.getByText(/Behavior/)).toBeInTheDocument();
   });
 
-  it("defaults to General tab and hides other tab fields", async () => {
+  it("defaults to General tab and hides fields from other tabs", async () => {
     renderPage();
     await waitFor(() => {
       expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
     });
     expect(screen.queryByText("smoking_status")).not.toBeInTheDocument();
     expect(screen.queryByText("hemoglobin_g_dl")).not.toBeInTheDocument();
+  });
+
+  it("does not render an Other tab or Unit Fields category", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: /^Other/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("Unit Fields")).not.toBeInTheDocument();
   });
 
   it("switches tabs and shows relevant fields", async () => {

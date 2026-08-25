@@ -64,9 +64,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   "needs-concept-set": "Needs Concept Assignment",
   editable: "Mapped",
   computed: "Computed",
-  unit: "Unit Fields",
   profile: "Person",
-  other: "Other",
 };
 
 const TAB_LABELS: Record<string, string> = {
@@ -76,10 +74,9 @@ const TAB_LABELS: Record<string, string> = {
   blood: "Blood",
   labs: "Labs",
   behavior: "Behavior",
-  other: "Other",
 };
 
-const TAB_ORDER = ["general", "disease", "treatment", "blood", "labs", "behavior", "other"];
+const TAB_ORDER = ["general", "disease", "treatment", "blood", "labs", "behavior"];
 
 const STATUS_BADGE: Record<string, string> = {
   proposed: "bg-yellow-100 text-yellow-800",
@@ -115,7 +112,7 @@ export default function FieldMappingPage() {
   const [categoryFilter, setCategoryFilter] = useState("");
   const [activeTab, setActiveTab] = useState("general");
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(
-    new Set(["unit", "other", "computed"])
+    new Set(["computed"])
   );
   const [dialogOpen, setDialogOpen] = useState(false);
   const [selectedField, setSelectedField] = useState<FieldDescriptor | null>(null);

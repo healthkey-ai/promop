@@ -63,7 +63,9 @@ _COMPUTED_FIELDS = frozenset({
     'no_geographic_exposure_risk',
 })
 
-# Unit-companion fields (always paired with a measurement field).
+# Unit-companion fields (always paired with a measurement field). Units are
+# curated on the corresponding measurement mapping, so these implementation
+# columns do not belong in the Field Concept Mapping inventory.
 _UNIT_SUFFIX = '_units'
 
 # Explanations for computed fields that lack a FieldFormula.
@@ -461,8 +463,9 @@ def get_all_field_descriptors() -> list[dict]:
         name = f.name
         category = _classify_field(name)
 
-        # Skip internal fields — they have no OMOP mapping relevance.
-        if category == 'internal':
+        # Skip internal and unit-companion fields — neither has an independent
+        # OMOP concept mapping to curate.
+        if category in {'internal', 'unit'}:
             continue
 
         # Provenance from registry.
