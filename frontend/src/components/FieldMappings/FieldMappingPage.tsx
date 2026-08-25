@@ -703,7 +703,7 @@ export default function FieldMappingPage() {
           initialConceptName={selectedField.mapping?.concept_name}
           initialStatus={selectedField.mapping?.status as "proposed" | "approved" | "rejected" | undefined}
           initialNotes={selectedField.mapping?.notes}
-          commonUnits={selectedField.suggestion?.common_units}
+          commonUnits={selectedField.unit_options}
           choices={selectedField.choices}
           onEditChoices={() => {
             const fieldToEdit = selectedField;
