@@ -217,7 +217,7 @@ _TAB_TREATMENT = frozenset({
     'toxicity_grade', 'concomitant_medications', 'concomitant_medication_date',
     'concomitant_medication_details', 'washout_period_duration',
     'remission_duration_min', 'reason_for_discontinuation',
-    'no_concomitant_medication_status',
+    'no_concomitant_medication_status', 'later_date',
 })
 
 _TAB_BLOOD = frozenset({
@@ -228,6 +228,8 @@ _TAB_BLOOD = frozenset({
     'troponin_ng_ml', 'bnp_pg_ml', 'glucose_mg_dl', 'hba1c_percent', 'ldh_u_l',
     'inr', 'pt_seconds', 'ptt_seconds',
     'cea_ng_ml', 'ca19_9_u_ml', 'psa_ng_ml',
+    # Legacy aliases for blood counts
+    'hemoglobin_level', 'platelet_count', 'white_blood_cell_count',
 })
 
 _TAB_LABS = frozenset({
@@ -244,6 +246,7 @@ _TAB_LABS = frozenset({
     'egfr_ml_min_173m2', 'estimated_glomerular_filtration_rate',
     'lactate_dehydrogenase_level', 'renal_adequacy_status',
     'serum_calcium_mg_dl', 'serum_creatinine_mg_dl',
+    'liver_enzyme_levels',
 })
 
 _TAB_BEHAVIOR = frozenset({
