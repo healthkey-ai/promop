@@ -303,6 +303,35 @@ describe("FieldMappingPage", () => {
     expect(personSections.length).toBeGreaterThan(0);
   });
 
+  it("puts Person fields in Needs Concept Assignment until approved", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText("date_of_birth")).toBeInTheDocument());
+    expect(screen.getByText("Needs Concept Assignment")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Person/ })).not.toBeInTheDocument();
+  });
+
+  it("puts an approved Person mapping in Mapped", async () => {
+    const approvedPerson = {
+      ...MOCK_DESCRIPTORS[5],
+      mapping: { ...MOCK_DESCRIPTORS[3].mapping },
+    };
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/field-mappings/") {
+        return Promise.resolve({
+          data: MOCK_DESCRIPTORS.map((descriptor) =>
+            descriptor.field_name === "date_of_birth" ? approvedPerson : descriptor
+          ),
+        });
+      }
+      if (url.startsWith("/v1/field-synonyms/batch/")) return Promise.resolve({ data: {} });
+      return Promise.resolve({ data: [] });
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Mapped")).toBeInTheDocument());
+    const mappedSection = screen.getByText("Mapped").closest("div.mb-3");
+    expect(within(mappedSection!).getByText("date_of_birth")).toBeInTheDocument();
+  });
+
   it("excludes unsupported Location fields from the mapper", async () => {
     renderPage();
     await waitFor(() => {
