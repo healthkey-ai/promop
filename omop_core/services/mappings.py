@@ -164,6 +164,9 @@ FIELD_COMMON_UNITS: dict[str, list[str]] = {
     'serum_creatinine_level':         ['mg/dL', 'umol/L'],
     'serum_beta2_microglobulin_level': ['mg/L', 'nmol/L'],
     'white_blood_cell_count':         ['10*3/uL', '10*9/L'],
+    'absolute_neutrophile_count':     ['10*3/uL', '10*9/L'],
+    'platelet_count':                 ['10*3/uL', '10*9/L'],
+    'red_blood_cell_count':           ['10*6/uL', '10*12/L'],
     'creatinine_clearance_ml_min':    ['mL/min'],
     # Cardiac
     'ejection_fraction':              ['%'],
