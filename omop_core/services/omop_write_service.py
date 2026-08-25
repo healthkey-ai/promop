@@ -265,4 +265,6 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
         outcome=outcome,
         source_value=therapy_name,
         today=today,
+        # CB has no therapy end_date field, so a None here is "omitted", never "clear the end date".
+        preserve_end_date_when_none=True,
     )

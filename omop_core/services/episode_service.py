@@ -71,6 +71,7 @@ def upsert_therapy_line_episode(
     outcome=None,
     source_value=None,
     today=None,
+    preserve_end_date_when_none=False,
 ):
     """Upsert one line-of-therapy Episode and its links; return the Episode.
 
@@ -141,7 +142,14 @@ def upsert_therapy_line_episode(
         if start_date is not None and episode.episode_start_date != start_date:
             episode.episode_start_date = start_date
             dirty.append('episode_start_date')
-        if episode.episode_end_date != end_date:
+        # `preserve_end_date_when_none=True` treats a None end_date as "not provided, keep what's there"
+        # (mirroring start_date's `is not None` guard above). CB's profile-write therapy-line path sets it
+        # because CB has no therapy end_date field, so its None always means "omitted", never "clear" — and
+        # without it a partial edit would NULL an imported episode's episode_end_date, destroying treatment
+        # timing that washout matching relies on. The DEFAULT keeps the original behaviour (None clears) for
+        # callers where None legitimately means an ongoing line, e.g. `lot_inference_service._persist_lots`
+        # recomputing the last line as open-ended under force re-inference.
+        if (end_date is not None or not preserve_end_date_when_none) and episode.episode_end_date != end_date:
             episode.episode_end_date = end_date
             dirty.append('episode_end_date')
         if dirty:

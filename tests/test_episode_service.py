@@ -80,3 +80,48 @@ def test_upsert_therapy_line_episode_updates_corrected_dates_and_outcome_date():
     assert episode.episode_start_date == date(2024, 2, 1)
     assert episode.episode_end_date == date(2024, 5, 1)
     assert outcome.observation_date == date(2024, 5, 1)
+
+
+def test_upsert_preserves_existing_end_date_when_none_and_flag_set():
+    # `preserve_end_date_when_none=True` (the CB profile-write path): a None end_date means "not provided,
+    # keep what's there", NOT "clear it". Regression guard — CB has no therapy end_date field, so without
+    # this a partial edit (e.g. outcome-only) would NULL an imported episode's episode_end_date.
+    _seed_episode_writer_concepts()
+    person = PersonFactory()
+
+    upsert_therapy_line_episode(
+        person, line_number=1,
+        start_date=date(2024, 1, 1), end_date=date(2024, 4, 1),
+        today=date(2024, 1, 1),
+    )
+    # A later edit that carries no end date (e.g. an outcome-only CB PATCH) must not erase it.
+    upsert_therapy_line_episode(
+        person, line_number=1,
+        start_date=date(2024, 1, 1), end_date=None,
+        today=date(2024, 1, 1),
+        preserve_end_date_when_none=True,
+    )
+
+    episode = Episode.objects.get(person=person, episode_number=1)
+    assert episode.episode_end_date == date(2024, 4, 1)   # preserved, not NULLed
+
+
+def test_upsert_clears_end_date_when_none_by_default():
+    # Default (flag unset): a None end_date still clears — the original behaviour, which callers like
+    # `lot_inference_service._persist_lots` rely on to reopen a line recomputed as ongoing.
+    _seed_episode_writer_concepts()
+    person = PersonFactory()
+
+    upsert_therapy_line_episode(
+        person, line_number=1,
+        start_date=date(2024, 1, 1), end_date=date(2024, 4, 1),
+        today=date(2024, 1, 1),
+    )
+    upsert_therapy_line_episode(
+        person, line_number=1,
+        start_date=date(2024, 1, 1), end_date=None,   # no preserve flag → clear
+        today=date(2024, 1, 1),
+    )
+
+    episode = Episode.objects.get(person=person, episode_number=1)
+    assert episode.episode_end_date is None   # cleared (ongoing line)
