@@ -9,7 +9,7 @@ import django.db.models.deletion
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('omop_core', '0172_backfill_extended_field_units'),
+        ('omop_core', '0173_backfill_blood_count_units'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
