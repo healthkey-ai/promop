@@ -363,6 +363,21 @@ describe("FieldMappingPage", () => {
     expect(screen.getByText("Needs Concept Assignment")).toBeInTheDocument();
   });
 
+  it("keeps a proposed mapping out of Mapped even when its source category is editable", async () => {
+    const proposedEditable = {
+      ...MOCK_DESCRIPTORS[2], field_name: "editable_proposal", category: "editable",
+    };
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/field-mappings/") return Promise.resolve({ data: [...MOCK_DESCRIPTORS, proposedEditable] });
+      if (url.startsWith("/v1/field-synonyms/batch/")) return Promise.resolve({ data: {} });
+      return Promise.resolve({ data: [] });
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByText(/Behavior/)).toBeInTheDocument());
+    fireEvent.click(screen.getByText(/Behavior/));
+    expect(screen.getByText("Needs Concept Assignment")).toBeInTheDocument();
+  });
+
   it("toggles an existing mapping between proposed and approved", async () => {
     renderPage();
     await waitFor(() => expect(screen.getByText(/Behavior/)).toBeInTheDocument());

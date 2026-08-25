@@ -116,19 +116,21 @@ export function ConceptAssignDialog({
   const effectiveUnit = isCustomUnit ? customUnit || unit : unit;
 
   const handleSubmit = async () => {
-    if (!selected) return;
+    if (!selected && !isEditing) return;
     setSaving(true);
     setError("");
     try {
       const payload = {
         field_name: fieldName,
-        concept: selected.concept_id,
-        vocabulary_id: selected.vocabulary_id,
-        concept_code: selected.concept_code,
+        concept: selected?.concept_id ?? null,
+        vocabulary_id: selected?.vocabulary_id ?? "",
+        concept_code: selected?.concept_code ?? "",
         unit: effectiveUnit,
         omop_table: omopTable,
         notes,
-        status: "approved",
+        // Clearing a mapping returns it to review rather than leaving an
+        // approved row with no concept in the Mapped list.
+        status: selected ? "approved" : "proposed",
       };
       if (isEditing) {
         await api.patch(`/v1/field-mappings/${existingMappingId}/`, payload);
@@ -400,7 +402,7 @@ export function ConceptAssignDialog({
           </button>
           <button
             onClick={handleSubmit}
-            disabled={!selected || saving}
+            disabled={(!selected && !isEditing) || saving}
             className="rounded bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
             {saving ? "Saving..." : isEditing ? "Update Mapping" : "Save Mapping"}
