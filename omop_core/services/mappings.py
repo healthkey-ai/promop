@@ -468,4 +468,196 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'peripheral_neuropathy_grade':   ('302226006', 'SNOMED'),
     'concomitant_medications':       ('410942007', 'SNOMED'),
     'toxicity_grade':                ('246112005', 'SNOMED'),
+
+    # ── Additional fields to cover all PatientRecord mappable fields ──
+
+    # Labs / measurements (duplicates or alternate names for existing fields)
+    'albumin_level':                 ('1751-7',    'LOINC'),   # Albumin [Mass/volume] in Serum or Plasma
+    'hemoglobin_level':              ('718-7',     'LOINC'),   # Hemoglobin [Mass/volume] in Blood
+    'platelet_count':                ('777-3',     'LOINC'),   # Platelets [#/volume] in Blood
+    'liver_enzyme_levels':           ('1742-6',    'LOINC'),   # ALT [Enzymatic activity/volume] in Serum
+    'serum_bilirubin_level_total':   ('1975-2',    'LOINC'),   # Bilirubin.total [Mass/volume] in Serum
+    'serum_calcium_level':           ('17861-6',   'LOINC'),   # Calcium [Mass/volume] in Serum
+    'serum_creatinine_level':        ('2160-0',    'LOINC'),   # Creatinine [Mass/volume] in Serum
+    'serum_beta2_microglobulin_level': ('32731-2', 'LOINC'),   # Beta-2-Microglobulin [Mass/volume]
+    'bone_imaging_result':           ('24646-7',   'LOINC'),   # Bone XR study
+    'pulmonary_function_test_result': ('19858-0',  'LOINC'),   # Spirometry panel
+    'metastatic_status':             ('399584008', 'SNOMED'),  # Metastasis status
+    'renal_adequacy_status':         ('723188008', 'SNOMED'),  # Renal impairment
+
+    # Pregnancy / reproductive
+    'pregnancy_test_result':         ('2106-3',    'LOINC'),   # Choriogonadotropin [Presence] in Urine
+    'pregnancy_test_date':           ('2106-3',    'LOINC'),   # same LOINC
+
+    # Disease / staging
+    'stage':                         ('21908-9',   'LOINC'),   # Stage group
+    'tumor_stage':                   ('21905-5',   'LOINC'),   # Tumor stage
+    'lymph_node_status':             ('21906-3',   'LOINC'),   # Regional lymph nodes
+    'nodes_stage':                   ('21906-3',   'LOINC'),   # N stage
+    'distant_metastasis_stage':      ('21907-1',   'LOINC'),   # Distant metastasis
+    'metastasis_status':             ('21907-1',   'LOINC'),   # M stage
+    'histologic_type':               ('59847-4',   'LOINC'),   # Histology type Cancer
+    'biopsy_grade':                  ('33732-9',   'LOINC'),   # Histology grade
+    'biopsy_grade_depr':             ('33732-9',   'LOINC'),   # deprecated biopsy_grade
+
+    # Breast cancer specifics
+    'estrogen_receptor_status':      ('16112-5',   'LOINC'),   # Estrogen receptor [Interpretation]
+    'progesterone_receptor_status':  ('16113-3',   'LOINC'),   # Progesterone receptor [Interpretation]
+    'her2_status':                   ('48676-1',   'LOINC'),   # HER2 [Interpretation]
+    'androgen_receptor_status':      ('85310-1',   'LOINC'),   # AR receptor
+    'ki67_proliferation_index':      ('29593-1',   'LOINC'),   # Ki-67
+    'hrd_status':                    ('94077-5',   'LOINC'),   # Homologous recombination deficiency
+    'pd_l1_assay':                   ('85147-7',   'LOINC'),   # PD-L1 by immunohistochemistry
+    'tumor_size':                    ('21889-1',   'LOINC'),   # Tumor size
+    'bone_only_metastasis_status':   ('21907-1',   'LOINC'),   # Distant metastasis
+    'pd_l1_tumor_cells':             ('85147-7',   'LOINC'),   # PD-L1 Cells
+    'pd_l1_ic_percentage':           ('85146-9',   'LOINC'),   # PD-L1 Immune cells
+    'pd_l1_combined_positive_score': ('96267-2',   'LOINC'),   # PD-L1 Combined Positive Score
+
+    # CLL / lymphoma
+    'clonal_b_lymphocyte_count':     ('30374-0',   'LOINC'),   # B cell count
+    'clonal_bone_marrow_b_lymphocytes': ('30374-0', 'LOINC'),  # B cell count
+    'lymphocyte_doubling_time':      ('26474-7',   'LOINC'),   # Lymphocytes [#/volume]
+    'autoimmune_cytopenias_refractory_to_steroids': ('439478003', 'SNOMED'),  # Autoimmune cytopenia
+    'btk_inhibitor_refractory':      ('182854000', 'SNOMED'),  # Treatment refractory
+    'bcl2_inhibitor_refractory':     ('182854000', 'SNOMED'),  # Treatment refractory
+    'measurable_disease_iwcll':      ('711259004', 'SNOMED'),  # Measurable disease
+    'measurable_disease_imwg':       ('711259004', 'SNOMED'),  # Measurable disease
+    'post_transformation_outcome':   ('91860004',  'SNOMED'),  # Richter / transformation
+    'dlbcl_transformation_date':     ('91860004',  'SNOMED'),  # Richter / transformation
+    'transformed_to_dlbcl':          ('91860004',  'SNOMED'),  # Richter / transformation
+    'plasma_cell_leukemia':          ('47082-2',   'LOINC'),   # Plasma cells in bone marrow
+    'largest_lymph_node_size':       ('21889-1',   'LOINC'),   # Size of primary tumor
+    'spleen_size':                   ('16294009',  'SNOMED'),  # Splenomegaly
+    'flipi_score_options':           ('444723004', 'SNOMED'),  # FLIPI
+
+    # Genomics / molecular
+    'genetic_mutations':             ('55232-3',   'LOINC'),   # Genetic analysis summary panel
+    'molecular_markers':             ('55232-3',   'LOINC'),   # Genetic analysis summary panel
+    'cytogenic_markers':             ('55232-3',   'LOINC'),   # Genetic analysis summary panel
+    'protein_expressions':           ('85337-4',   'LOINC'),   # Gene expression panel
+
+    # Demographics / profile
+    'date_of_birth':                 ('21112-8',   'LOINC'),   # Birth date
+    'gender':                        ('46098-0',   'LOINC'),   # Sex
+    'race':                          ('32624-9',   'LOINC'),   # Race
+    'ethnicity':                     ('69490-1',   'LOINC'),   # Ethnicity OMB
+    'patient_age':                   ('30525-0',   'LOINC'),   # Age
+    'phone_number':                  ('42077-8',   'LOINC'),   # Phone number
+    'email':                         ('76435-7',   'LOINC'),   # Telecom email
+    'facility_name':                 ('69476-0',   'LOINC'),   # Facility name
+    'languages_skills':              ('46253-1',   'LOINC'),   # Preferred language
+
+    # Behavioral
+    'consent_capability':            ('405193005', 'SNOMED'),  # Ability to consent
+    'contraceptive_use':             ('13197004',  'SNOMED'),  # Contraception
+    'geographic_exposure_risk_details': ('420008001', 'SNOMED'),  # Travel
+    'substance_use_details':         ('66214007',  'SNOMED'),  # Substance abuse
+    'tobacco_use_details':           ('365981007', 'SNOMED'),  # Tobacco use finding
+
+    # Treatment / therapy line fields
+    'line_of_therapy':               ('52832-8',   'LOINC'),   # Diagnosis to treatment interval
+    'prior_therapy':                 ('410942007', 'SNOMED'),  # Drug or medication
+    'last_treatment':                ('410942007', 'SNOMED'),  # Drug or medication
+    'planned_therapies':             ('410942007', 'SNOMED'),  # Drug or medication
+    'supportive_therapies':          ('410942007', 'SNOMED'),  # Drug or medication
+    'washout_period_duration':       ('260992001', 'SNOMED'),  # Washout period
+    'remission_duration_min':        ('277022003', 'SNOMED'),  # Remission
+    'prior_procedures':              ('71388002',  'SNOMED'),  # Procedure
+    'treatment_refractory_status':   ('182854000', 'SNOMED'),  # Treatment refractory
+    'reason_for_discontinuation':    ('182856003', 'SNOMED'),  # Therapy discontinued
+    'therapy_intent':                ('363589002', 'SNOMED'),  # Intent
+
+    # Therapy line 1
+    'first_line_therapy':            ('410942007', 'SNOMED'),  # Drug or medication
+    'first_line_date':               ('439771001', 'SNOMED'),  # Date of onset
+    'first_line_start_date':         ('439771001', 'SNOMED'),  # Date of onset
+    'first_line_end_date':           ('439771001', 'SNOMED'),  # Date
+    'first_line_outcome':            ('371533000', 'SNOMED'),  # Treatment outcome
+    'first_line_intent':             ('363589002', 'SNOMED'),  # Intent
+    'first_line_discontinuation_reason': ('182856003', 'SNOMED'),  # Therapy discontinued
+    'first_line_therapy_id':         ('410942007', 'SNOMED'),  # Drug or medication
+    'first_line_component_ids':      ('410942007', 'SNOMED'),  # Drug or medication
+    'first_line_therapy_type_ids':   ('410942007', 'SNOMED'),  # Drug or medication
+
+    # Therapy line 2
+    'second_line_therapy':           ('410942007', 'SNOMED'),  # Drug or medication
+    'second_line_date':              ('439771001', 'SNOMED'),  # Date of onset
+    'second_line_start_date':        ('439771001', 'SNOMED'),  # Date of onset
+    'second_line_end_date':          ('439771001', 'SNOMED'),  # Date
+    'second_line_outcome':           ('371533000', 'SNOMED'),  # Treatment outcome
+    'second_line_intent':            ('363589002', 'SNOMED'),  # Intent
+    'second_line_discontinuation_reason': ('182856003', 'SNOMED'),  # Therapy discontinued
+    'second_line_therapy_id':        ('410942007', 'SNOMED'),  # Drug or medication
+    'second_line_component_ids':     ('410942007', 'SNOMED'),  # Drug or medication
+    'second_line_therapy_type_ids':  ('410942007', 'SNOMED'),  # Drug or medication
+
+    # Therapy line 3+
+    'later_therapy':                 ('410942007', 'SNOMED'),  # Drug or medication
+    'later_therapies':               ('410942007', 'SNOMED'),  # Drug or medication
+    'later_date':                    ('439771001', 'SNOMED'),  # Date of onset
+    'later_start_date':              ('439771001', 'SNOMED'),  # Date of onset
+    'later_end_date':                ('439771001', 'SNOMED'),  # Date
+    'later_outcome':                 ('371533000', 'SNOMED'),  # Treatment outcome
+    'later_intent':                  ('363589002', 'SNOMED'),  # Intent
+    'later_discontinuation_reason':  ('182856003', 'SNOMED'),  # Therapy discontinued
+    'later_therapy_ids':             ('410942007', 'SNOMED'),  # Drug or medication
+    'later_component_ids':           ('410942007', 'SNOMED'),  # Drug or medication
+    'later_therapy_type_ids':        ('410942007', 'SNOMED'),  # Drug or medication
+
+    # Supportive therapy
+    'supportive_therapy_date':       ('439771001', 'SNOMED'),  # Date
+    'supportive_therapy_start_date': ('439771001', 'SNOMED'),  # Date
+    'supportive_therapy_end_date':   ('439771001', 'SNOMED'),  # Date
+    'supportive_therapy_intent':     ('363589002', 'SNOMED'),  # Intent
+
+    # Concomitant medication
+    'concomitant_medication_date':   ('439771001', 'SNOMED'),  # Date
+    'concomitant_medication_details': ('410942007', 'SNOMED'), # Drug or medication
+
+    # Therapy provenance / IDs (internal but mappable)
+    'therapy_component_ids':         ('410942007', 'SNOMED'),  # Drug or medication
+    'therapy_ids_provenance':        ('410942007', 'SNOMED'),  # Drug or medication
+    'therapy_type_ids':              ('410942007', 'SNOMED'),  # Drug or medication
+
+    # Condition codes
+    'condition_code_icd_10':         ('29308-4',   'LOINC'),   # Diagnosis
+    'condition_code_snomed_ct':      ('29308-4',   'LOINC'),   # Diagnosis
+
+    # Test metadata
+    'test_date':                     ('33882-2',   'LOINC'),   # Specimen collection date
+    'test_methodology':              ('85069-3',   'LOINC'),   # Test methodology
+    'test_specimen_type':            ('66746-9',   'LOINC'),   # Specimen type
+    'report_interpretation':         ('69115-4',   'LOINC'),   # Report interpretation
+
+    # Assessment dates
+    'ecog_assessment_date':          ('89247-1',   'LOINC'),   # ECOG
+    'sct_date':                      ('77465005',  'SNOMED'),  # SCT
+
+    # Insurance / admin
+    'insurance_type':                ('76437-3',   'LOINC'),   # Insurance type
+    'annual_household_income':       ('77244-2',   'LOINC'),   # Annual income
+
+    # Misc admin/profile
+    'suppress_demographics_for_others': ('445313000', 'SNOMED'),  # Privacy/consent
+    'validated':                     ('410605003', 'SNOMED'),  # Confirmed
+    'validated_by':                  ('410605003', 'SNOMED'),  # Confirmed
+    'validation_date':               ('410605003', 'SNOMED'),  # Confirmed
+    'death_date':                    ('93036-3',   'LOINC'),   # Date of death
+    'number_of_dependents':          ('63514-1',   'LOINC'),   # Number of dependents
+
+    # Other vitals / cardiac
+    'heartrate_variability':         ('80404-7',   'LOINC'),   # HRV SDNN
+    'ejection_fraction':             ('10230-1',   'LOINC'),   # Ejection fraction
+    'qtcf_value':                    ('8632-1',    'LOINC'),   # QTcF interval
+
+    # Additional social
+    'sleep_hours_per_night':         ('93832-4',   'LOINC'),   # Sleep duration
+    'sleep_quality':                 ('93831-6',   'LOINC'),   # Sleep quality
+    'exercise_minutes_per_week':     ('77592-7',   'LOINC'),   # Exercise
+    'drinks_per_week':               ('74013-4',   'LOINC'),   # Alcohol use
+    'diet_type':                     ('81659-4',   'LOINC'),   # Diet
+    'stress_level':                  ('93025-6',   'LOINC'),   # Stress level
+    'social_support':                ('93029-8',   'LOINC'),   # Social support
+    'caregiver_availability_status': ('93030-6',   'LOINC'),   # Caregiver
 }
