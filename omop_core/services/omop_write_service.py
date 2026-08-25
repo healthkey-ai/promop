@@ -204,12 +204,32 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
     start_date = getattr(patient_info, f'{prefix}_start_date', None)
     end_date = getattr(patient_info, f'{prefix}_end_date', None)
     outcome = getattr(patient_info, f'{prefix}_outcome', None)
+    # The caller (CB reverse-sync) may resolve the therapy slug to an OMOP concept via its own
+    # taxonomy crosswalk and pass it as `{prefix}_therapy_concept_id`. Without it the episode's
+    # object/source concept stays "no match" (0) and the derivation reads back therapy_id=None /
+    # name="Unknown"; with it the resolved regimen concept flows into episode_object_concept and
+    # episode_source_concept, so PatientRecord.{prefix}_therapy_id resolves and drug-specific
+    # matching sees the regimen. A None/absent id keeps the prior name-only round-trip.
+    therapy_concept_id = getattr(patient_info, f'{prefix}_therapy_concept_id', None)
 
     if not therapy_name:
         return
 
     if Concept.objects.filter(concept_id=CONCEPT_TREATMENT_REGIMEN).first() is None:
         return
+
+    regimen_concept = (
+        Concept.objects.filter(concept_id=therapy_concept_id).first()
+        if therapy_concept_id else None
+    )
+    if therapy_concept_id and regimen_concept is None:
+        # The caller resolved the slug to a concept its own taxonomy knows, but that concept row is absent
+        # from the package Concept table (vocab/crosswalk skew). Fall through to the name-only episode, but
+        # say so — otherwise the regimen silently reads back as "Unknown" despite the caller resolving it.
+        logger.warning(
+            '{"event": "therapy_concept_not_in_vocab", "line": %d, "concept_id": %s}',
+            line_number, therapy_concept_id,
+        )
 
     # Normalise start_date to a date object
     if start_date and isinstance(start_date, str):
@@ -259,6 +279,12 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
     upsert_therapy_line_episode(
         person,
         line_number=line_number,
+        # Both slots get the CB-resolved regimen concept: object_concept is the standard concept the
+        # episode is about, source_concept is the (patient-asserted) source concept the derivation reads
+        # first — a HemOnc Regimen there is reported 'asserted', anything else 'inferred'. None leaves the
+        # historical no-match fallback untouched.
+        regimen_concept=regimen_concept,
+        regimen_source_concept=regimen_concept,
         start_date=start_date,
         end_date=end_date,
         drug_exposure_ids=drug_exposure_ids,
@@ -267,4 +293,8 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
         today=today,
         # CB has no therapy end_date field, so a None here is "omitted", never "clear the end date".
         preserve_end_date_when_none=True,
+        # CB is authoritative for its patients' therapy lines: a re-resolved regimen must replace an
+        # existing source concept (else an A→B edit keeps deriving A). Still never clears — a null concept
+        # (unmapped slug on the whole-line re-send) leaves any imported concept intact.
+        overwrite_source_concept=True,
     )
