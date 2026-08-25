@@ -31,6 +31,7 @@ interface Props {
   existingMappingId?: number;
   initialConceptId?: number | null;
   initialConceptName?: string;
+  initialStatus?: "proposed" | "approved" | "rejected";
   initialNotes?: string;
   commonUnits?: string[];
   choices?: FieldChoiceInfo[];
@@ -40,7 +41,7 @@ interface Props {
 export function ConceptAssignDialog({
   fieldName, fieldType, onClose, onSaved,
   initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
-  existingMappingId, initialConceptId, initialConceptName, initialNotes, commonUnits,
+  existingMappingId, initialConceptId, initialConceptName, initialStatus, initialNotes, commonUnits,
   choices, onEditChoices,
 }: Props) {
   const isEditing = !!existingMappingId;
@@ -71,6 +72,17 @@ export function ConceptAssignDialog({
 
   const hasCommonUnits = commonUnits && commonUnits.length > 0;
   const isCustomUnit = hasCommonUnits && unit !== "" && !commonUnits.includes(unit);
+  const mappingState = initialStatus || (selected ? "proposed" : "unmapped");
+
+  // These are the OMOP CDM clinical and reference tables implemented by this
+  // application.  A mapping can be advisory for tables that are not currently
+  // writable; limiting the curator UI to the write pipeline hid valid mappings.
+  const OMOP_TABLES = [
+    "Person", "Location", "CareSite", "Provider", "ObservationPeriod",
+    "VisitOccurrence", "ConditionOccurrence", "DrugExposure",
+    "ProcedureOccurrence", "Measurement", "Observation", "Death",
+    "Specimen", "Note", "NoteNlp",
+  ];
 
   const doSearch = useCallback(async (q: string) => {
     if (q.length < 3) {
@@ -175,33 +187,37 @@ export function ConceptAssignDialog({
           Field: <span className="font-mono">{fieldName}</span> ({fieldType})
         </p>
 
-        {/* Mapped concept display */}
-        <div className="mb-4">
-          <label className="mb-1 block text-xs font-medium text-gray-600">Mapped Concept</label>
-          {selected ? (
-            <div className="flex items-center gap-2 rounded border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
-              <span className="font-mono font-medium">
-                {selected.vocabulary_id}:{selected.concept_code}
-              </span>
-              {selected.concept_name && (
-                <>
-                  <span className="text-gray-400">&mdash;</span>
-                  <span>{selected.concept_name}</span>
-                </>
-              )}
-              <button
-                onClick={() => setSelected(null)}
-                className="ml-auto rounded p-0.5 text-gray-400 hover:text-gray-600"
-                title="Clear selection"
-              >
-                <X size={14} />
-              </button>
-            </div>
-          ) : (
-            <div className="rounded border border-dashed border-gray-300 px-3 py-2 text-sm text-gray-400">
-              No concept selected &mdash; search below to assign one
-            </div>
-          )}
+        {/* Mapping summary comes before search so the current decision is clear. */}
+        <div className="mb-3">
+          <div className="mb-1 flex items-center justify-between text-xs font-medium text-gray-600">
+            <span>Mapped Concept</span>
+            <span className={`rounded-full px-2 py-0.5 text-[10px] capitalize ${
+              mappingState === "approved" ? "bg-green-100 text-green-800" :
+              mappingState === "proposed" ? "bg-amber-100 text-amber-800" :
+              "bg-gray-100 text-gray-600"
+            }`}>
+              {mappingState}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 rounded border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
+            {selected ? (
+              <>
+                <span className="font-mono font-medium">{selected.vocabulary_id}:{selected.concept_code}</span>
+                <span className="truncate">{selected.concept_name || "Unnamed concept"}</span>
+                <button onClick={() => setSelected(null)} className="rounded p-0.5 text-gray-400 hover:text-gray-600" title="Clear selection">
+                  <X size={14} />
+                </button>
+              </>
+            ) : <span className="text-gray-400">No concept selected</span>}
+            <select
+              aria-label="OMOP Table"
+              value={omopTable}
+              onChange={(e) => setOmopTable(e.target.value)}
+              className="ml-auto h-8 max-w-48 rounded border border-gray-300 bg-white px-2 text-sm"
+            >
+              {OMOP_TABLES.map((table) => <option key={table} value={table}>{table}</option>)}
+            </select>
+          </div>
         </div>
 
         {/* Concept search */}
@@ -274,7 +290,7 @@ export function ConceptAssignDialog({
         </div>
 
         {/* Additional fields */}
-        <div className="mb-4 grid grid-cols-2 gap-3">
+        <div className="mb-4">
           <div>
             <label className="mb-1 block text-xs font-medium text-gray-600">
               Unit
@@ -314,19 +330,6 @@ export function ConceptAssignDialog({
                 className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
               />
             )}
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-medium text-gray-600">OMOP Table</label>
-            <select
-              value={omopTable}
-              onChange={(e) => setOmopTable(e.target.value)}
-              className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
-            >
-              <option value="Measurement">Measurement</option>
-              <option value="Observation">Observation</option>
-              <option value="ConditionOccurrence">ConditionOccurrence</option>
-              <option value="ProcedureOccurrence">ProcedureOccurrence</option>
-            </select>
           </div>
         </div>
         <div className="mb-4">
