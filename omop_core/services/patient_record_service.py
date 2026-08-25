@@ -101,7 +101,8 @@ _OMOP_DERIVED_FIELDS = [
     'later_outcome', 'later_intent', 'later_discontinuation_reason',
     'therapy_intent', 'reason_for_discontinuation', 'relapse_count',
     'treatment_refractory_status', 'washout_period_duration',
-    'remission_duration_min', 'line_of_therapy', 'prior_therapy',
+    'remission_duration_min', 'remission_duration',
+    'line_of_therapy', 'prior_therapy',
     # Legacy labs (derived via name-based Measurement lookup)
     'hemoglobin_level', 'hemoglobin_level_units',
     'white_blood_cell_count', 'white_blood_cell_count_units',

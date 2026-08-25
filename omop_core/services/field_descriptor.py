@@ -32,6 +32,8 @@ _INTERNAL_FIELDS = frozenset({
     'derivation_version', 'derived_at', 'user_edited_fields',
     # Redundant generic therapy fields — duplicated by per-line fields.
     'therapy_intent', 'reason_for_discontinuation',
+    # Renamed field — replaced by remission_duration.
+    'remission_duration_min',
 })
 
 # Person/profile fields projected from Person model.
@@ -65,6 +67,7 @@ _EDITABLE_TREATMENT_FIELDS = frozenset({
     'concomitant_medication_details',
     # Other editable treatment fields
     'toxicity_grade', 'planned_therapies', 'concomitant_medication',
+    'remission_duration',
 })
 
 # Computed therapy-related fields (IDs, counts, summaries — not directly editable).
@@ -258,7 +261,7 @@ _TAB_TREATMENT = frozenset({
     # Reclassified from "other"
     'toxicity_grade', 'concomitant_medications', 'concomitant_medication_date',
     'concomitant_medication_details', 'washout_period_duration',
-    'remission_duration_min',
+    'remission_duration',
     'no_concomitant_medication_status', 'later_date',
     'treatment_refractory_status', 'therapy_ids_provenance',
     'last_treatment', 'prior_therapy', 'line_of_therapy',
