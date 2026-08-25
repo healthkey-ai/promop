@@ -290,13 +290,13 @@ describe("FieldMappingPage", () => {
     expect(personSections.length).toBeGreaterThan(0);
   });
 
-  it("shows locked Location table for location fields", async () => {
+  it("excludes unsupported Location fields from the mapper", async () => {
     renderPage();
     await waitFor(() => {
       expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
     });
-    const locationElements = screen.getAllByText("Location");
-    expect(locationElements.length).toBeGreaterThan(0);
+    expect(screen.queryByText("country")).not.toBeInTheDocument();
+    expect(screen.queryByText("Location")).not.toBeInTheDocument();
   });
 
   it("opens concept assign dialog on concept cell click", async () => {
