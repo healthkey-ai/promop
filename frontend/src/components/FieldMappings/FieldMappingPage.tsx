@@ -536,7 +536,7 @@ export default function FieldMappingPage() {
       <div className="mx-auto max-w-7xl p-6">
         <div className="rounded border border-red-300 bg-red-50 p-4 text-red-700">
           {error}
-          <button onClick={fetchDescriptors} className="ml-3 underline">Retry</button>
+          <button onClick={() => fetchDescriptors()} className="ml-3 underline">Retry</button>
         </div>
       </div>
     );
