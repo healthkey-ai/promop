@@ -427,8 +427,11 @@ def get_all_field_descriptors() -> list[dict]:
         name = f.name
         category = _classify_field(name)
 
-        # Skip internal fields — they have no OMOP mapping relevance.
-        if category == 'internal':
+        # Skip internal and unit-companion fields — they have no OMOP mapping
+        # relevance. Unit companions (e.g. weight_units) are backend-only
+        # columns used by BMI calculation and derivation; their unit info is
+        # redundant with FIELD_COMMON_UNITS on the measurement fields.
+        if category in ('internal', 'unit'):
             continue
 
         # Provenance from registry.
