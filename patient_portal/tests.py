@@ -19428,9 +19428,14 @@ class FieldConceptMappingTest(TestCase):
         cls.staff = Identity.objects.create_user(
             email='mapping_staff@t.com', password='x', is_staff=True,
         )
+        cls.org_admin = Identity.objects.create_user(
+            email='mapping_org_admin@t.com', password='x',
+        )
         cls.non_staff = Identity.objects.create_user(
             email='mapping_user@t.com', password='x', is_staff=False,
         )
+        cls.org = Organization.objects.create(name='Mapping Admin Org', slug='mapping-admin-org')
+        GroupAccess.objects.create(identity=cls.org_admin, org=cls.org, role='org_admin')
 
     def setUp(self):
         self.client = APIClient()
@@ -19448,10 +19453,29 @@ class FieldConceptMappingTest(TestCase):
         self.assertIn('weight', field_names)
         self.assertTrue(len(resp.data) > 100)
 
-    def test_list_requires_staff(self):
+    def test_list_requires_mapping_admin(self):
         self.client.force_authenticate(user=self.non_staff)
         resp = self.client.get('/api/v1/field-mappings/')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_org_admin_can_list_and_curate_mappings(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get('/api/v1/field-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'smoking_status',
+            'vocabulary_id': 'SNOMED',
+            'concept_code': '229819007',
+            'omop_table': 'Observation',
+            'status': 'proposed',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        resp = self.client.patch(f"/api/v1/field-mappings/{resp.data['id']}/", {
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_list_unauthenticated(self):
         resp = self.client.get('/api/v1/field-mappings/')
@@ -20083,6 +20107,11 @@ class FieldChoiceAPITest(TestCase):
         cls.non_staff = Identity.objects.create_user(
             email='fc_user@test.com', password='pw',
         )
+        cls.org_admin = Identity.objects.create_user(
+            email='fc_org_admin@test.com', password='pw',
+        )
+        cls.org = Organization.objects.create(name='Choice Admin Org', slug='choice-admin-org')
+        GroupAccess.objects.create(identity=cls.org_admin, org=cls.org, role='org_admin')
 
     def setUp(self):
         self.client = APIClient()
@@ -20115,6 +20144,22 @@ class FieldChoiceAPITest(TestCase):
         resp = self.client.get('/api/v1/field-choices/?field_name=disease')
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(any(c['id'] == choice_id for c in resp.data))
+
+    def test_org_admin_can_curate_choices_used_by_field_mappings(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.post('/api/v1/field-choices/', {
+            'field_name': 'disease',
+            'display': 'Org Admin Disease',
+            'sort_order': 0,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        resp = self.client.post(f"/api/v1/field-choices/{resp.data['id']}/codes/", {
+            'code': '12345',
+            'vocabulary_id': 'SNOMED',
+            'is_primary': True,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
 
     def test_patch_choice(self):
         resp = self.client.post('/api/v1/field-choices/', {

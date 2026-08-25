@@ -18,6 +18,7 @@ vi.mock("@/components/Patient/PatientDetail", () => ({
 vi.mock("@/components/Patient/UploadFHIR", () => ({ default: () => <div>UPLOAD_FHIR</div> }));
 vi.mock("@/components/Patient/UploadCSV", () => ({ default: () => <div>UPLOAD_CSV</div> }));
 vi.mock("@/components/OrgAdmin/OrgAdminPage", () => ({ default: () => <div>ORG_ADMIN</div> }));
+vi.mock("@/components/FieldMappings/FieldMappingPage", () => ({ default: () => <div>FIELD_MAPPINGS</div> }));
 vi.mock("@/components/User/UserProfilePage", () => ({ default: () => <div>USER_PROFILE</div> }));
 vi.mock("@/components/Auth/Login", () => ({ Login: () => <div>LOGIN</div> }));
 vi.mock("@/components/Auth/AuthCallback", () => ({ AuthCallback: () => <div>AUTH_CALLBACK</div> }));
@@ -87,6 +88,12 @@ describe("App role-gated routing", () => {
     mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
     renderAt("/org-admin");
     expect(screen.getByText("ORG_ADMIN")).toBeInTheDocument();
+  });
+
+  it("allows an organization admin to access field mappings", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
+    renderAt("/field-mappings");
+    expect(screen.getByText("FIELD_MAPPINGS")).toBeInTheDocument();
   });
 });
 
