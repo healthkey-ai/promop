@@ -59,6 +59,16 @@ jobs:
       - name: Run migrations
         run: python manage.py migrate --noinput
 
+      - name: Run production deploy checks
+        env:
+          DEBUG: 'False'
+          SECRET_KEY: ci-deploy-check-secret-key-not-for-runtime-4f942b6e9d714aca
+          ALLOWED_HOSTS: promop.example.invalid
+          CORS_ALLOWED_ORIGINS: https://promop.example.invalid
+          AUDIT_HMAC_KEY: ci-audit-hmac-key-not-for-runtime
+          EXPORT_SIGNING_KEY: ci-export-signing-key-not-for-runtime
+        run: python manage.py check --deploy --fail-level ERROR
+
       - name: Run tests (Django runner)
         run: python manage.py test omop_core patient_portal --verbosity=2 --noinput
 

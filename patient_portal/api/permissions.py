@@ -27,14 +27,35 @@ def get_request_org(request):
       - session-authenticated requests (backward compat)
       - partner-auth requests (Firebase, SAML — no org scoping)
       - service clients not linked to any organization
+      - tokens from any application that is not a client_credentials app
+        (see below)
     """
     if request.user and getattr(request.user, 'is_staff', False):
         return None
     token = getattr(request, 'auth', None)
     if token is None or isinstance(token, TokenClaims):
         return None
+    # Org scoping is a machine-to-machine trust grant: several call sites treat
+    # `get_request_org(...) is not None` as org-wide write authority, without
+    # consulting the caller's GroupAccess role. ApplicationOrganization rows are
+    # only ever created by patient_portal/management/commands/create_service_client.py,
+    # which only builds GRANT_CLIENT_CREDENTIALS apps — so requiring that grant
+    # type here costs the legitimate service clients nothing, and stops an
+    # authorization_code (SMART, human-facing) app from ever handing a human
+    # org-wide write trust if one were org-linked by hand or by a future command.
+    # This fails CLOSED: a non-client-credentials token simply loses org scoping
+    # and falls back to the stricter per-patient can_access_patient() /
+    # can_write_patient() checks.
+    #
+    # Imported lazily, as every other non-test oauth2_provider.models import in
+    # this codebase is: permissions.py is imported while the app registry is
+    # still loading, so a module-level model import raises AppRegistryNotReady.
+    from oauth2_provider.models import Application
     try:
-        return token.application.org_profile.organization
+        application = token.application
+        if application.authorization_grant_type != Application.GRANT_CLIENT_CREDENTIALS:
+            return None
+        return application.org_profile.organization
     except AttributeError:
         return None
 

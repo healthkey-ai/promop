@@ -290,6 +290,27 @@ class FhirUploadBase(TestCase):
         return Person.objects.filter(family_name='Smith', given_name='Jane').first()
 
 
+class FhirUploadValidationTest(FhirUploadBase):
+    """Malformed FHIR primitives are client errors, not server errors."""
+
+    def test_upload_rejects_non_numeric_observation_quantity(self):
+        bundle = _make_fhir_bundle()
+        observation = next(
+            entry['resource'] for entry in bundle['entry']
+            if entry.get('resource', {}).get('resourceType') == 'Observation'
+        )
+        observation['valueQuantity']['value'] = 'not-a-number'
+        fhir_file = io.BytesIO(json.dumps(bundle).encode('utf-8'))
+        fhir_file.name = 'invalid_bundle.json'
+
+        resp = self.client.post(
+            '/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart'
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('finite number', resp.data['error'])
+
+
 # ---------------------------------------------------------------------------
 # 1. OMOP table population tests
 # ---------------------------------------------------------------------------
@@ -10293,6 +10314,7 @@ class OrgInvitationFlowTest(TestCase):
             email='partner@example.com',
             name='Partner User',
             raw={},
+            email_verified=True,
         )
 
         identity = PartnerAuthentication._get_or_create_identity(claims)
@@ -10322,6 +10344,7 @@ class OrgInvitationFlowTest(TestCase):
             email='existing-partner@example.com',
             name='Existing Partner',
             raw={},
+            email_verified=True,
         )
 
         identity = PartnerAuthentication._get_or_create_identity(claims)
@@ -10343,6 +10366,7 @@ class OrgInvitationFlowTest(TestCase):
             email='claimed@example.com',
             name='Claimed User',
             raw={},
+            email_verified=True,
         )
         partner = PartnerAuthentication._get_or_create_identity(claims)
         self.assertTrue(
@@ -10359,6 +10383,142 @@ class OrgInvitationFlowTest(TestCase):
         partner_grant = GroupAccess.objects.get(identity=partner, org=self.org)
         self.assertEqual(partner_grant.role, 'doctor')
         self.assertFalse(GroupAccess.objects.filter(identity=placeholder).exists())
+
+    def test_unverified_partner_email_does_not_claim_placeholder_access(self):
+        placeholder = Identity.objects.create_user(email='unverified-partner@example.com', password=None)
+        GroupAccess.objects.create(identity=placeholder, org=self.org, role='doctor')
+
+        from patient_portal.api.authentication import PartnerAuthentication
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(
+            issuer='https://issuer.example.com',
+            sub='unverified-partner-sub',
+            email='unverified-partner@example.com',
+            name='Unverified Partner',
+            raw={},
+            email_verified=False,
+        )
+
+        identity = PartnerAuthentication._get_or_create_identity(claims)
+        self.assertNotEqual(identity.pk, placeholder.pk)
+        self.assertEqual(identity.email, '')
+        self.assertFalse(
+            GroupAccess.objects.filter(identity=identity, org=self.org).exists()
+        )
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=placeholder, org=self.org, role='doctor').exists()
+        )
+
+    def test_unverified_partner_email_does_not_link_or_rebind_patient_user(self):
+        from omop_core.models import Person, PatientRecord
+        from patient_portal.api.authentication import _ensure_person
+        from patient_portal.api.providers.base import TokenClaims
+        from patient_portal.models import PatientUser
+
+        existing_identity = Identity.objects.create_user(
+            email='existing-holder@example.com',
+            password='pw',
+        )
+        person = Person.objects.create(
+            person_id=99989,
+            year_of_birth=1970,
+            gender_source_value='F',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+            email='unverified-patient@example.com',
+        )
+        PatientRecord.objects.create(person=person, email='unverified-patient@example.com')
+        PatientUser.objects.create(identity=existing_identity, person=person)
+        partner = Identity.objects.create(
+            issuer='https://issuer.example.com',
+            sub='unverified-patient-sub',
+        )
+        partner.set_unusable_password()
+        partner.save()
+        claims = TokenClaims(
+            issuer=partner.issuer,
+            sub=partner.sub,
+            email='unverified-patient@example.com',
+            name='Unverified Patient',
+            raw={},
+            email_verified=False,
+        )
+
+        _ensure_person(partner, claims)
+
+        self.assertEqual(PatientUser.objects.get(person=person).identity_id, existing_identity.pk)
+        self.assertNotEqual(PatientUser.objects.get(identity=partner).person_id, person.pk)
+
+    def test_verified_partner_email_does_not_rebind_existing_patient_user(self):
+        from omop_core.models import Person, PatientRecord
+        from patient_portal.api.authentication import _ensure_person
+        from patient_portal.api.providers.base import TokenClaims
+        from patient_portal.models import PatientUser
+
+        existing_identity = Identity.objects.create_user(
+            email='verified-holder@example.com',
+            password='pw',
+        )
+        person = Person.objects.create(
+            person_id=99988,
+            year_of_birth=1970,
+            gender_source_value='F',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+            email='verified-patient@example.com',
+        )
+        PatientRecord.objects.create(person=person, email='verified-patient@example.com')
+        PatientUser.objects.create(identity=existing_identity, person=person)
+        partner = Identity.objects.create(
+            issuer='https://issuer.example.com',
+            sub='verified-patient-sub',
+            email='verified-patient@example.com',
+        )
+        partner.set_unusable_password()
+        partner.save()
+        claims = TokenClaims(
+            issuer=partner.issuer,
+            sub=partner.sub,
+            email='verified-patient@example.com',
+            name='Verified Patient',
+            raw={},
+            email_verified=True,
+        )
+
+        _ensure_person(partner, claims)
+
+        self.assertEqual(PatientUser.objects.get(person=person).identity_id, existing_identity.pk)
+        self.assertNotEqual(PatientUser.objects.get(identity=partner).person_id, person.pk)
+
+    def test_partner_auth_cache_treats_legacy_claims_as_unverified_email(self):
+        from django.core.cache import cache
+        from patient_portal.api.authentication import PartnerAuthentication, _token_cache_key
+
+        identity = Identity.objects.create(
+            issuer='https://issuer.example.com',
+            sub='cached-sub',
+            email='cached@example.com',
+        )
+        identity.set_unusable_password()
+        identity.save()
+        cache.set(
+            _token_cache_key('legacy-token'),
+            {
+                'pk': identity.pk,
+                'claims': {
+                    'issuer': identity.issuer,
+                    'sub': identity.sub,
+                    'email': 'cached@example.com',
+                    'name': None,
+                    'raw': {},
+                },
+            },
+            timeout=60,
+        )
+
+        cached_identity, claims = PartnerAuthentication._from_cache('legacy-token')
+        self.assertEqual(cached_identity.pk, identity.pk)
+        self.assertFalse(claims.email_verified)
 
     def test_invite_existing_user_grants_access_immediately(self):
         invitee = Identity.objects.create_user(email='existing-user@example.com', password='pass')
@@ -13627,17 +13787,26 @@ class FhirExportApiTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         from patient_portal.models import PatientUser
+        from django.utils import timezone as tz
+        from oauth2_provider.models import Application, AccessToken
+        import datetime as _dt
+        from omop_core.models import ApplicationOrganization
 
         _make_vocab_fixtures()
         cls.condition_concept = Concept.objects.get(concept_id=4112853)
         cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.org_a = Organization.objects.create(name='Export Org A', slug='export-org-a')
+        cls.org_b = Organization.objects.create(name='Export Org B', slug='export-org-b')
 
         # Patient A — will export their own record
         cls.person_a = Person.objects.create(
             person_id=96001, family_name='Able', given_name='Amy',
             gender_concept_id=8532,
         )
-        cls.patient_a_rec = PatientRecord.objects.create(person=cls.person_a)
+        cls.patient_a_rec = PatientRecord.objects.create(
+            person=cls.person_a,
+            organization=cls.org_a,
+        )
         cls.identity_a = Identity.objects.create_user(email='export-a@test.com', password='pw')
         PatientUser.objects.create(identity=cls.identity_a, person=cls.person_a)
 
@@ -13654,7 +13823,10 @@ class FhirExportApiTest(TestCase):
             person_id=96002, family_name='Baker', given_name='Bob',
             gender_concept_id=8507,
         )
-        cls.patient_b_rec = PatientRecord.objects.create(person=cls.person_b)
+        cls.patient_b_rec = PatientRecord.objects.create(
+            person=cls.person_b,
+            organization=cls.org_b,
+        )
         cls.identity_b = Identity.objects.create_user(email='export-b@test.com', password='pw')
         PatientUser.objects.create(identity=cls.identity_b, person=cls.person_b)
 
@@ -13662,10 +13834,37 @@ class FhirExportApiTest(TestCase):
         cls.staff = Identity.objects.create_user(
             email='export-staff@test.com', password='pw', is_staff=True,
         )
+        cls.oauth_owner = Identity.objects.create_user(
+            email='export-oauth-owner@test.com',
+            password='pw',
+        )
+        cls.app_a = Application.objects.create(
+            name='Export Org A Client',
+            client_id='export-org-a-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=cls.oauth_owner,
+        )
+        ApplicationOrganization.objects.create(
+            application=cls.app_a,
+            organization=cls.org_a,
+        )
+        cls.org_a_read_token = AccessToken.objects.create(
+            user=cls.oauth_owner,
+            application=cls.app_a,
+            token='export-org-a-read-token',
+            expires=tz.now() + _dt.timedelta(hours=1),
+            scope='patient/*.read openid',
+        )
 
     def _client_as(self, identity):
         c = APIClient()
         c.force_authenticate(user=identity)
+        return c
+
+    def _bearer(self, token):
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
         return c
 
     def test_patient_can_export_own_record(self):
@@ -13699,6 +13898,13 @@ class FhirExportApiTest(TestCase):
         bundle = resp.json()
         self.assertEqual(bundle['resourceType'], 'Bundle')
 
+    def test_org_scoped_token_cannot_export_other_org_record(self):
+        """Org-scoped OAuth read token must not export a patient outside its org."""
+        resp = self._bearer(self.org_a_read_token.token).get(
+            f'/api/v1/patient-records/{self.person_b.person_id}/export-fhir/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
     def test_nonexistent_person_returns_404(self):
         """Export of nonexistent person_id returns 404."""
         resp = self._client_as(self.staff).get(
@@ -13715,6 +13921,63 @@ class FhirExportApiTest(TestCase):
         self.assertIn(resp.status_code, [
             status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN,
         ])
+
+    def test_cross_org_professional_cannot_export(self):
+        """A doctor whose GroupAccess is in Org B cannot export an Org A patient.
+
+        Covers the session-authenticated professional boundary, which the
+        org-scoped OAuth token test above does not reach: that path exits at the
+        ``organization != org`` check, this one at ``can_access_patient``.
+        """
+        from omop_core.models import GroupAccess
+
+        doctor_b = Identity.objects.create_user(
+            email='export-doc-b@test.com', password='pw',
+        )
+        GroupAccess.objects.create(
+            identity=doctor_b, org=self.org_b, role='doctor',
+        )
+
+        resp = self._client_as(doctor_b).get(
+            f'/api/v1/patient-records/{self.person_a.person_id}/export-fhir/'
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_same_org_professional_can_export(self):
+        """The same doctor can export a patient held by their own org."""
+        from omop_core.models import GroupAccess
+
+        doctor_a = Identity.objects.create_user(
+            email='export-doc-a@test.com', password='pw',
+        )
+        GroupAccess.objects.create(
+            identity=doctor_a, org=self.org_a, role='doctor',
+        )
+
+        resp = self._client_as(doctor_a).get(
+            f'/api/v1/patient-records/{self.person_a.person_id}/export-fhir/'
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['resourceType'], 'Bundle')
+
+    def test_service_token_can_export_any_record(self):
+        """Service tokens bypass the object boundary, as on patient detail."""
+        service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='hk-labs-sync',
+        )[0]
+        service_identity.set_unusable_password()
+        service_identity.save()
+        c = APIClient()
+        c.force_authenticate(user=service_identity, token='service-token')
+
+        resp = c.get(
+            f'/api/v1/patient-records/{self.person_b.person_id}/export-fhir/'
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['resourceType'], 'Bundle')
 
 
 # ---------------------------------------------------------------------------
@@ -14783,12 +15046,15 @@ class AuthControlsTest(TestCase):
         # First two failures return 401 (invalid credentials).
         for _ in range(2):
             self.assertEqual(self._login('wrong-password').status_code, status.HTTP_401_UNAUTHORIZED)
-        # The third failure triggers lockout; the view returns 403 (account locked).
-        self.assertEqual(self._login('wrong-password').status_code, status.HTTP_403_FORBIDDEN)
+        # Lockout is deliberately indistinguishable from any other failure.
+        locked_failure = self._login('wrong-password')
+        self.assertEqual(locked_failure.status_code, status.HTTP_401_UNAUTHORIZED)
         self.identity.refresh_from_db()
         self.assertTrue(self.identity.is_locked)
-        # Correct password is also refused while locked (403).
-        self.assertEqual(self._login(self.password).status_code, status.HTTP_403_FORBIDDEN)
+        # Correct password is also refused while locked (same generic response).
+        correct_while_locked = self._login(self.password)
+        self.assertEqual(correct_while_locked.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(correct_while_locked.data, locked_failure.data)
 
     def test_successful_login_resets_failure_count(self):
         self._login('wrong-password')
@@ -15102,6 +15368,7 @@ class BreakGlassTest(TestCase):
         cls.org_admin = Identity.objects.create_user(email='bg-admin@test.com', password='pw')
         GroupAccess.objects.create(identity=cls.org_admin, org=cls.org, role='org_admin')
         cls.person = Person.objects.create(person_id=96001)
+        PatientRecord.objects.create(person=cls.person, organization=cls.org)
         cls.patient = Identity.objects.create_user(email='bg-patient@test.com', password='pw')
         PatientUser.objects.create(identity=cls.patient, person=cls.person)
 
@@ -15130,6 +15397,26 @@ class BreakGlassTest(TestCase):
         grant = BreakGlassGrant.objects.get(identity=self.org_admin, person_id=96001)
         self.assertEqual(grant.reason, 'ED admission')
         self.assertTrue(grant.is_active)
+
+    def test_break_glass_requires_target_patient_org_nexus(self):
+        from omop_core.models import Organization
+        other_org = Organization.objects.create(name='Other BG Org', slug='other-bg-org')
+        other_person = Person.objects.create(person_id=96002)
+        PatientRecord.objects.create(person=other_person, organization=other_org)
+
+        resp = self._c(self.org_admin).post('/api/v1/break-glass/', {
+            'person_id': other_person.person_id, 'reason': 'unrelated emergency',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_break_glass_staff_without_org_nexus_is_denied(self):
+        staff = Identity.objects.create_user(
+            email='bg-staff-no-nexus@test.com', password='pw', is_staff=True,
+        )
+        resp = self._c(staff).post('/api/v1/break-glass/', {
+            'person_id': self.person.person_id, 'reason': 'no assigned org',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_break_glass_grants_audit_visibility(self):
         from patient_portal.models import AuditEvent, BreakGlassGrant
@@ -16370,6 +16657,508 @@ class ClinicalSessionAuthorizationTest(TestCase):
 # Vocabulary Snapshot (streaming NDJSON) tests
 # ---------------------------------------------------------------------------
 
+class AnalystWriteGateTest(TestCase):
+    """Analysts may read patient data but must not write it (issue #745).
+
+    ``can_access_patient`` grants the ``analyst`` role, ``can_write_patient``
+    does not (``omop_core.authorization``: ``_READ_ROLES`` vs ``_WRITE_ROLES``).
+    Three write endpoints previously authorized on the read predicate alone, so
+    an analyst could delete patients, rewrite demographics, and create episode
+    events. Each test below asserts both the refusal and that nothing was
+    written — a 403 that still mutated would be the same bug wearing a status
+    code.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.org = Organization.objects.create(
+            name='Analyst Gate Org', slug='analyst-gate-org',
+        )
+        cls.person = Person.objects.create(
+            person_id=453001, given_name='Original', family_name='Name',
+        )
+        PatientRecord.objects.create(person=cls.person, organization=cls.org)
+
+        cls.analyst = Identity.objects.create_user(
+            email='gate-analyst@example.com', password='pw',
+        )
+        GroupAccess.objects.create(
+            identity=cls.analyst, org=cls.org, role='analyst',
+        )
+        cls.doctor = Identity.objects.create_user(
+            email='gate-doctor@example.com', password='pw',
+        )
+        GroupAccess.objects.create(
+            identity=cls.doctor, org=cls.org, role='doctor',
+        )
+
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+
+        # bulk_delete is DELETE, which ScopedTokenPermission refuses outright for
+        # session-authenticated non-staff users — so the only way to reach its
+        # per-person authorization branch is an OAuth2 token carrying write
+        # scope. These applications are deliberately NOT org-linked, so
+        # get_request_org() returns None and the row-level role check applies.
+        from oauth2_provider.models import AccessToken, Application
+        import datetime as _dt
+        from django.utils import timezone as tz
+
+        def _token_for(identity, slug):
+            app = Application.objects.create(
+                name=f'Analyst Gate {slug}',
+                client_id=f'analyst-gate-{slug}',
+                client_type=Application.CLIENT_CONFIDENTIAL,
+                authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+                user=identity,
+            )
+            return AccessToken.objects.create(
+                user=identity,
+                application=app,
+                token=f'analyst-gate-{slug}-token',
+                expires=tz.now() + _dt.timedelta(hours=1),
+                scope='patient/*.read patient/*.write',
+            ).token
+
+        cls.analyst_token = _token_for(cls.analyst, 'analyst')
+        cls.doctor_token = _token_for(cls.doctor, 'doctor')
+
+    def _client(self, identity):
+        client = APIClient()
+        client.force_authenticate(user=identity)
+        return client
+
+    def _bearer(self, token):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+        return client
+
+    def test_analyst_can_read_the_patient_they_cannot_write(self):
+        """Baseline: the refusals below are about the verb, not visibility."""
+        from omop_core.authorization import can_access_patient, can_write_patient
+
+        self.assertTrue(can_access_patient(self.analyst, self.person.person_id))
+        self.assertFalse(can_write_patient(self.analyst, self.person.person_id))
+
+    def test_session_auth_cannot_reach_bulk_delete_at_all(self):
+        """Session DELETE is refused by ScopedTokenPermission before the view runs.
+
+        Recorded so the row-level test below is understood to be exercising the
+        only path that reaches ``bulk_delete``'s per-person branch: an OAuth2
+        token with write scope. A doctor gets the same 403, so this is the
+        permission layer talking, not the role gate.
+        """
+        for identity in (self.analyst, self.doctor):
+            resp = self._client(identity).delete(
+                '/api/patient-info/bulk_delete/',
+                {'person_ids': [self.person.person_id]},
+                format='json',
+            )
+            self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(
+            Person.objects.filter(person_id=self.person.person_id).exists()
+        )
+
+    def test_analyst_oauth_token_cannot_bulk_delete_patients(self):
+        """An org-less write-scoped token bound to an analyst is refused per person."""
+        resp = self._bearer(self.analyst_token).delete(
+            '/api/patient-info/bulk_delete/',
+            {'person_ids': [self.person.person_id]},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['deleted_count'], 0)
+        self.assertTrue(
+            any('read-only' in e for e in resp.data['errors']),
+            resp.data['errors'],
+        )
+        self.assertTrue(
+            Person.objects.filter(person_id=self.person.person_id).exists()
+        )
+
+    def test_doctor_oauth_token_can_bulk_delete_patients(self):
+        """The write role still gets through — the gate is role-based, not blanket."""
+        resp = self._bearer(self.doctor_token).delete(
+            '/api/patient-info/bulk_delete/',
+            {'person_ids': [self.person.person_id]},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['deleted_count'], 1)
+        self.assertFalse(
+            Person.objects.filter(person_id=self.person.person_id).exists()
+        )
+
+    def test_analyst_cannot_patch_person_demographics(self):
+        resp = self._client(self.analyst).patch(
+            f'/api/persons/{self.person.person_id}/',
+            {'given_name': 'Rewritten'},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.given_name, 'Original')
+
+    def test_analyst_cannot_create_episode_event(self):
+        episode = Episode.objects.create(
+            episode_id=453101,
+            person=self.person,
+            episode_concept=Concept.objects.get(concept_id=0),
+            episode_start_date=date(2026, 1, 1),
+            episode_object_concept=Concept.objects.get(concept_id=0),
+            episode_type_concept=self.type_concept,
+        )
+        measurement = Measurement.objects.create(
+            measurement_id=453201,
+            person=self.person,
+            measurement_concept=Concept.objects.get(concept_id=0),
+            measurement_date=date(2026, 1, 1),
+            measurement_type_concept=self.type_concept,
+        )
+
+        resp = self._client(self.analyst).post(
+            '/api/episode-events/',
+            {
+                'episode_id': episode.episode_id,
+                'event_id': measurement.measurement_id,
+                'episode_event_field_concept': self.type_concept.concept_id,
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(
+            EpisodeEvent.objects.filter(episode_id=episode.episode_id).exists()
+        )
+
+
+class GetRequestOrgGrantTypeTest(TestCase):
+    """Org scoping is a machine-to-machine grant (issue #745).
+
+    Several call sites read ``get_request_org(...) is not None`` as org-wide
+    write authority without consulting the caller's role, so the helper must
+    only hand that trust to client_credentials service clients. A human-facing
+    authorization_code application must lose org scoping and fall back to the
+    stricter per-patient predicates.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import AccessToken, Application
+        from omop_core.models import ApplicationOrganization
+        import datetime as _dt
+        from django.utils import timezone as tz
+
+        cls.org = Organization.objects.create(
+            name='Grant Type Org', slug='grant-type-org',
+        )
+        cls.owner = Identity.objects.create_user(
+            email='grant-type-owner@example.com', password='pw',
+        )
+
+        cls.service_app = Application.objects.create(
+            name='Grant Type Service Client',
+            client_id='grant-type-service-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=cls.owner,
+        )
+        ApplicationOrganization.objects.create(
+            application=cls.service_app, organization=cls.org,
+        )
+        cls.service_token = AccessToken.objects.create(
+            user=cls.owner,
+            application=cls.service_app,
+            token='grant-type-service-token',
+            expires=tz.now() + _dt.timedelta(hours=1),
+            scope='patient/*.read patient/*.write',
+        )
+
+        # Same org link, but a human-facing SMART app. No provisioning command
+        # creates this pairing today; the check exists so that one added later
+        # cannot silently promote a human to org-wide write trust.
+        cls.smart_app = Application.objects.create(
+            name='Grant Type SMART Client',
+            client_id='grant-type-smart-client',
+            client_type=Application.CLIENT_PUBLIC,
+            authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE,
+            user=cls.owner,
+            redirect_uris='https://smart.example.invalid/callback',
+        )
+        ApplicationOrganization.objects.create(
+            application=cls.smart_app, organization=cls.org,
+        )
+        cls.smart_token = AccessToken.objects.create(
+            user=cls.owner,
+            application=cls.smart_app,
+            token='grant-type-smart-token',
+            expires=tz.now() + _dt.timedelta(hours=1),
+            scope='patient/*.read patient/*.write',
+        )
+
+    def _request_with(self, token):
+        from rest_framework.test import APIRequestFactory
+        from patient_portal.api.permissions import get_request_org
+
+        request = APIRequestFactory().get('/api/patient-info/')
+        request.user = self.owner
+        request.auth = token
+        return get_request_org(request)
+
+    def test_client_credentials_token_keeps_org_scoping(self):
+        self.assertEqual(self._request_with(self.service_token), self.org)
+
+    def test_authorization_code_token_loses_org_scoping(self):
+        """Fails closed: no org means the per-patient predicates decide."""
+        self.assertIsNone(self._request_with(self.smart_token))
+
+
+class UnverifiedEmailNotStampedOnPersonTest(TestCase):
+    """An unverified address must not be written to a new Person (issue #746).
+
+    The verified-email gate governs the *lookup*. Persisting the claim anyway
+    would leave the takeover vector open by another route: anyone able to
+    register at the IdP could plant a Person row keyed on someone else's
+    address, and the real owner's later verified sign-in would then find two
+    Persons for that email, trip the cross-org collision guard, and be forked
+    into a duplicate instead of linking to their own record.
+    """
+
+    def test_unverified_claim_is_not_persisted_to_person(self):
+        from patient_portal.services import resolve_or_create_person
+
+        identity = Identity.objects.get_or_create(
+            issuer='https://securetoken.google.com/promop-test',
+            sub='unverified-email-stamp',
+        )[0]
+        identity.set_unusable_password()
+        identity.save()
+
+        person = resolve_or_create_person(
+            identity, email='victim@example.com', email_verified=False,
+        )
+
+        self.assertIsNotNone(person)
+        self.assertIsNone(person.email)
+        self.assertFalse(
+            Person.objects.filter(email='victim@example.com').exists(),
+            'an unverified claim must not key a Person on that address',
+        )
+
+    def test_verified_claim_is_persisted_to_person(self):
+        """The permitted half: a verified address still lands on the Person."""
+        from patient_portal.services import resolve_or_create_person
+
+        identity = Identity.objects.get_or_create(
+            issuer='https://securetoken.google.com/promop-test',
+            sub='verified-email-stamp',
+        )[0]
+        identity.set_unusable_password()
+        identity.save()
+
+        person = resolve_or_create_person(
+            identity, email='owner@example.com', email_verified=True,
+        )
+
+        self.assertEqual(person.email, 'owner@example.com')
+
+
+class CsvCreateForNonOrgCallerTest(TestCase):
+    """A write-scoped non-org caller can still introduce new patients (#748).
+
+    The per-row tenancy check runs before the Person exists, and
+    ``can_write_patient`` returns False for every id that does not exist yet —
+    so without a create carve-out the check would reject every new patient a
+    CSV introduces, which is the endpoint's main purpose. The org branch
+    already allowed this; these tests pin the non-org branch to the same rule
+    and prove the carve-out cannot be used to reach an *existing* patient.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.org = Organization.objects.create(
+            name='CSV Create Org', slug='csv-create-nonorg',
+        )
+        cls.doctor = Identity.objects.create_user(
+            email='csv-create-doctor@example.com', password='pw',
+        )
+        GroupAccess.objects.create(
+            identity=cls.doctor, org=cls.org, role='doctor',
+        )
+
+        # Someone else's patient, held by an org this caller has no grant in.
+        cls.other_org = Organization.objects.create(
+            name='CSV Other Org', slug='csv-create-otherorg',
+        )
+        cls.stranger = Person.objects.create(
+            person_id=455001, given_name='Stranger', family_name='Patient',
+        )
+        PatientRecord.objects.create(
+            person=cls.stranger, organization=cls.other_org,
+        )
+
+        from oauth2_provider.models import AccessToken, Application
+        import datetime as _dt
+        from django.utils import timezone as tz
+
+        # Not org-linked, so get_request_org() is None and the non-org branch
+        # of _csv_row_write_error decides.
+        app = Application.objects.create(
+            name='CSV Create Client',
+            client_id='csv-create-nonorg-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=cls.doctor,
+        )
+        cls.token = AccessToken.objects.create(
+            user=cls.doctor,
+            application=app,
+            token='csv-create-nonorg-token',
+            expires=tz.now() + _dt.timedelta(hours=1),
+            scope='patient/*.read patient/*.write',
+        ).token
+
+    def _upload(self, csv_bytes):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.token}')
+        return client.post(
+            '/api/patient-info/upload_csv/',
+            {'file': SimpleUploadedFile(
+                'patients.csv', csv_bytes, content_type='text/csv',
+            )},
+            format='multipart',
+        )
+
+    def test_new_patient_row_is_accepted(self):
+        resp = self._upload(
+            b'person_id,given_name,disease,diagnosis_date\n'
+            b'455002,Newbie,Breast Cancer,2020-04-03\n'
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['errors'], [])
+        self.assertTrue(Person.objects.filter(person_id=455002).exists())
+
+    def test_row_naming_an_existing_unreachable_patient_is_rejected(self):
+        """The carve-out is for creates only — it must not reach a live patient."""
+        resp = self._upload(
+            b'person_id,given_name,disease,diagnosis_date\n'
+            b'455001,Rewritten,Breast Cancer,2021-04-03\n'
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            any('write access' in e for e in resp.data['errors']),
+            resp.data['errors'],
+        )
+        self.stranger.refresh_from_db()
+        self.assertEqual(self.stranger.given_name, 'Stranger')
+
+
+class SurveyTemplateOrgWriteGuardTest(TestCase):
+    """Org-linked apps stay blocked from shared survey templates (issue #745).
+
+    ``_require_admin_for_writes`` is the one call site where *no* org means
+    allowed, so it reads ``org_profile`` off the application directly. Routing
+    it through ``get_request_org`` would let an org-linked non client-credentials
+    app read as "internal" once that helper began restricting itself to the
+    client_credentials grant.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import AccessToken, Application
+        from omop_core.models import ApplicationOrganization
+        import datetime as _dt
+        from django.utils import timezone as tz
+
+        cls.org = Organization.objects.create(
+            name='Survey Guard Org', slug='survey-guard-org',
+        )
+        cls.owner = Identity.objects.create_user(
+            email='survey-guard@example.com', password='pw',
+        )
+
+        def _token(slug, grant, org):
+            app = Application.objects.create(
+                name=f'Survey Guard {slug}',
+                client_id=f'survey-guard-{slug}',
+                client_type=(
+                    Application.CLIENT_PUBLIC
+                    if grant == Application.GRANT_AUTHORIZATION_CODE
+                    else Application.CLIENT_CONFIDENTIAL
+                ),
+                authorization_grant_type=grant,
+                user=cls.owner,
+                redirect_uris=(
+                    'https://survey.example.invalid/cb'
+                    if grant == Application.GRANT_AUTHORIZATION_CODE else ''
+                ),
+            )
+            if org is not None:
+                ApplicationOrganization.objects.create(
+                    application=app, organization=org,
+                )
+            return AccessToken.objects.create(
+                user=cls.owner,
+                application=app,
+                token=f'survey-guard-{slug}-token',
+                expires=tz.now() + _dt.timedelta(hours=1),
+                scope='patient/*.read patient/*.write',
+            ).token
+
+        cls.internal_token = _token(
+            'internal', Application.GRANT_CLIENT_CREDENTIALS, None,
+        )
+        cls.org_service_token = _token(
+            'org-service', Application.GRANT_CLIENT_CREDENTIALS, cls.org,
+        )
+        cls.org_human_token = _token(
+            'org-human', Application.GRANT_AUTHORIZATION_CODE, cls.org,
+        )
+
+    def _post_template(self, token):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+        return client.post(
+            '/api/surveys/',
+            {
+                'name': 'survey-guard-probe',
+                'title': 'Survey Guard Probe',
+                'status': 'ACTIVE',
+                'disease': 'Breast Cancer',
+                'pages': [],
+            },
+            format='json',
+        )
+
+    def test_org_linked_service_app_is_blocked(self):
+        self.assertEqual(
+            self._post_template(self.org_service_token).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    def test_org_linked_human_facing_app_is_blocked(self):
+        """The case the grant-type restriction would otherwise have let through."""
+        self.assertEqual(
+            self._post_template(self.org_human_token).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    def test_internal_service_app_is_not_blocked_by_this_guard(self):
+        """An app with no org is still treated as internal."""
+        self.assertNotEqual(
+            self._post_template(self.internal_token).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+
 class VocabSnapshotStreamTransactionTest(TransactionTestCase):
     """Regression for #342 — the snapshot stream must not raise
     NoActiveSqlTransaction.
@@ -17343,6 +18132,24 @@ class WearableParserUnitTest(TestCase):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, 'w') as zf:
             zf.writestr('readme.txt', 'no export.xml here')
+        with self.assertRaises(ValueError):
+            parse_apple_health_export(buf.getvalue())
+
+    def test_parse_apple_health_rejects_dtd_after_leading_comment(self):
+        import zipfile
+        from omop_core.services.wearable_parsers import parse_apple_health_export
+
+        xml_content = (
+            '<!-- harmless-looking prefix -->'
+            '<!DOCTYPE HealthData [<!ENTITY injected "should not expand">]>'
+            '<HealthData><Record type="HKQuantityTypeIdentifierStepCount" '
+            'startDate="2024-06-01 08:00:00 -0700" '
+            'endDate="2024-06-01 08:30:00 -0700" value="1500"/></HealthData>'
+        )
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as zf:
+            zf.writestr('apple_health_export/export.xml', xml_content)
+
         with self.assertRaises(ValueError):
             parse_apple_health_export(buf.getvalue())
 
@@ -20399,3 +21206,232 @@ class FieldFormulaAPITest(TestCase):
 
         resp = self.client.delete(f'/api/v1/field-formulas/{pk}/')
         self.assertEqual(resp.status_code, 204)
+
+
+class FhirUploadDeniedWriteRollbackTest(TestCase):
+    """A denied FHIR upload must persist nothing (issue #745).
+
+    ``upload_fhir`` writes Person (upsert), Location, Death and
+    VisitOccurrence rows *before* it reaches the role gate at
+    ``# Block analysts from updating existing patients via FHIR upload.``
+    Those writes live inside the per-patient savepoint, and the denial path
+    leaves the loop with ``continue`` — which raises nothing, so the
+    ``finally`` block used to hand ``Atomic.__exit__`` no exception, and
+    Django's ``Atomic.__exit__`` *commits* a savepoint it is not given one
+    for. A caller the view had just refused therefore got their partial
+    demographic, address, mortality and encounter writes persisted anyway.
+    The denial path now sets ``_last_exc`` so the ``finally`` block rolls the
+    savepoint back instead.
+
+    Each assertion below names one of those four pre-check writes. The
+    doctor counterpart at the end posts the *same* bundle through a write
+    role and asserts every one of them lands — without it, this class would
+    pass just as happily against a bundle that never wrote anything.
+    """
+
+    # Fixture demographics. The bundle below says "Alice"; the stored name is
+    # "Alice2", which the view's digit-stripping fuzzy match treats as the same
+    # person and then *rewrites* to the bundle spelling (views.py ~1851-1854),
+    # inside the savepoint and before the role gate. So `given_name` doubles as
+    # a probe for whether the denied Person write was rolled back.
+    STORED_GIVEN = 'Alice2'
+    BUNDLE_GIVEN = 'Alice'
+    FAMILY = 'Rollbackcase'
+    BIRTH_DATE = '1968-04-11'
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.org = Organization.objects.create(
+            name='Rollback Org', slug='rollback-org',
+        )
+        cls.person = Person.objects.create(
+            person_id=454001,
+            given_name=cls.STORED_GIVEN,
+            family_name=cls.FAMILY,
+            year_of_birth=1968,
+            month_of_birth=4,
+            day_of_birth=11,
+        )
+        PatientRecord.objects.create(person=cls.person, organization=cls.org)
+
+        cls.analyst = Identity.objects.create_user(
+            email='rollback-analyst@example.com', password='pw',
+        )
+        GroupAccess.objects.create(
+            identity=cls.analyst, org=cls.org, role='analyst',
+        )
+        cls.doctor = Identity.objects.create_user(
+            email='rollback-doctor@example.com', password='pw',
+        )
+        GroupAccess.objects.create(
+            identity=cls.doctor, org=cls.org, role='doctor',
+        )
+
+        # upload_fhir is a POST, and ScopedTokenPermission refuses POST outright
+        # for session-authenticated non-staff users (safe methods + PATCH only),
+        # so a session analyst never reaches the view at all. The only route to
+        # the per-patient role gate is an OAuth2 token carrying write scope.
+        # These applications are deliberately NOT org-linked, so
+        # get_request_org() returns None, `same_org_upload` is False, and
+        # can_write_patient() alone decides.
+        from oauth2_provider.models import AccessToken, Application
+        import datetime as _dt
+        from django.utils import timezone as tz
+
+        def _token_for(identity, slug):
+            app = Application.objects.create(
+                name=f'Rollback {slug}',
+                client_id=f'rollback-{slug}',
+                client_type=Application.CLIENT_CONFIDENTIAL,
+                authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+                user=identity,
+            )
+            return AccessToken.objects.create(
+                user=identity,
+                application=app,
+                token=f'rollback-{slug}-token',
+                expires=tz.now() + _dt.timedelta(hours=1),
+                scope='patient/*.read patient/*.write',
+            ).token
+
+        cls.analyst_token = _token_for(cls.analyst, 'analyst')
+        cls.doctor_token = _token_for(cls.doctor, 'doctor')
+
+    # -- helpers ----------------------------------------------------------
+
+    def _bundle(self):
+        """A bundle that matches the fixture person and drives all four writes.
+
+        - ``name`` + full ``birthDate`` take the "existing patient" branch
+          (``person_is_new`` False), which is what arms the role gate.
+        - ``address`` drives the Location write (views.py ~1881-1906).
+        - ``deceasedDateTime`` drives the Death write (views.py ~1934-1950).
+        - the ``Encounter`` drives the VisitOccurrence write (views.py ~1952).
+        """
+        pid = 'rollback-patient-1'
+        return {
+            'resourceType': 'Bundle',
+            'type': 'collection',
+            'entry': [
+                {'resource': {
+                    'resourceType': 'Patient',
+                    'id': pid,
+                    'name': [{'family': self.FAMILY, 'given': [self.BUNDLE_GIVEN]}],
+                    'gender': 'female',
+                    'birthDate': self.BIRTH_DATE,
+                    'address': [{
+                        'city': 'Rollbackville',
+                        'state': 'IL',
+                        'postalCode': '62701',
+                        'country': 'US',
+                    }],
+                    'deceasedDateTime': '2025-06-15T00:00:00+00:00',
+                }},
+                {'resource': {
+                    'resourceType': 'Encounter',
+                    'id': 'rollback-encounter-1',
+                    'status': 'finished',
+                    'class': {'code': 'AMB', 'display': 'ambulatory'},
+                    'subject': {'reference': f'Patient/{pid}'},
+                    'period': {'start': '2025-01-06', 'end': '2025-01-06'},
+                }},
+            ],
+        }
+
+    def _upload_as(self, token):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+        fhir_file = io.BytesIO(json.dumps(self._bundle()).encode('utf-8'))
+        fhir_file.name = 'rollback_bundle.json'
+        return client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+        )
+
+    # -- precondition -----------------------------------------------------
+
+    def test_analyst_can_read_but_not_write_this_patient(self):
+        """Documents the precondition: the refusal is about the verb, not visibility."""
+        from omop_core.authorization import can_access_patient, can_write_patient
+
+        self.assertTrue(can_access_patient(self.analyst, self.person.person_id))
+        self.assertFalse(can_write_patient(self.analyst, self.person.person_id))
+        self.assertTrue(can_write_patient(self.doctor, self.person.person_id))
+
+    # -- the denial path --------------------------------------------------
+
+    def test_denied_upload_reports_read_only_error(self):
+        resp = self._upload_as(self.analyst_token)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['updated_count'], 0)
+        self.assertEqual(resp.data['created_count'], 0)
+        self.assertTrue(
+            any(
+                isinstance(e, dict) and 'read-only' in e.get('error', '')
+                for e in resp.data['errors']
+            ),
+            resp.data['errors'],
+        )
+
+    def test_denied_upload_does_not_rewrite_person_demographics(self):
+        """The fuzzy-match rename ran before the gate; it must not survive it."""
+        self._upload_as(self.analyst_token)
+
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.given_name, self.STORED_GIVEN)
+        self.assertEqual(self.person.family_name, self.FAMILY)
+        self.assertEqual(self.person.year_of_birth, 1968)
+
+    def test_denied_upload_creates_no_location(self):
+        from omop_core.models import Location
+
+        self._upload_as(self.analyst_token)
+
+        self.person.refresh_from_db()
+        self.assertIsNone(self.person.location_id)
+        self.assertFalse(Location.objects.filter(city='Rollbackville').exists())
+
+    def test_denied_upload_creates_no_death_row(self):
+        self._upload_as(self.analyst_token)
+
+        self.assertFalse(Death.objects.filter(person=self.person).exists())
+
+    def test_denied_upload_creates_no_visit_occurrence(self):
+        self._upload_as(self.analyst_token)
+
+        self.assertFalse(
+            VisitOccurrence.objects.filter(person=self.person).exists()
+        )
+
+    # -- the positive counterpart ----------------------------------------
+
+    def test_doctor_upload_applies_the_same_writes(self):
+        """The rollback is scoped to the denial path, not to the bundle.
+
+        Same bundle, same org, same endpoint — only the role differs. If this
+        failed, the assertions above would be vacuous.
+        """
+        from omop_core.models import Location
+
+        resp = self._upload_as(self.doctor_token)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertFalse(
+            any(
+                isinstance(e, dict) and 'read-only' in e.get('error', '')
+                for e in resp.data['errors']
+            ),
+            resp.data['errors'],
+        )
+
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.given_name, self.BUNDLE_GIVEN)
+        self.assertIsNotNone(self.person.location_id)
+        self.assertTrue(Location.objects.filter(city='Rollbackville').exists())
+        self.assertTrue(Death.objects.filter(person=self.person).exists())
+        self.assertTrue(
+            VisitOccurrence.objects.filter(person=self.person).exists()
+        )

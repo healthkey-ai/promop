@@ -20,6 +20,7 @@ enrichment is deferred — see fhir_importers issue #10.
 """
 import json
 import logging
+import math
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -31,7 +32,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from omop_core.authorization import can_access_patient
+from omop_core.authorization import can_write_patient
 from omop_core.models import (
     Concept, ConditionOccurrence, DrugExposure, Measurement, Observation, Person,
     PatientDocument, ProcedureOccurrence, ProvenanceRecord,
@@ -144,6 +145,29 @@ def _parse_decimal(value):
         return None
 
 
+def validate_fhir_bundle_types(bundle):
+    """Reject JSON values whose FHIR primitive type cannot be stored safely.
+
+    FHIR ``Quantity.value`` is a decimal, not an arbitrary JSON string. Letting
+    malformed values reach the ORM turns client input errors into 500 responses
+    (or database-specific casting errors).
+    """
+    for entry in bundle.get('entry') or []:
+        resource = entry.get('resource') if isinstance(entry, dict) else None
+        if not isinstance(resource, dict) or resource.get('resourceType') != 'Observation':
+            continue
+        quantity = resource.get('valueQuantity')
+        if not isinstance(quantity, dict) or 'value' not in quantity:
+            continue
+        value = quantity['value']
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise serializers.ValidationError(
+                'Observation.valueQuantity.value must be a finite number.')
+        if not math.isfinite(value):
+            raise serializers.ValidationError(
+                'Observation.valueQuantity.value must be a finite number.')
+
+
 def _reference_range_bound(obs, bound):
     ranges = obs.get('referenceRange') or []
     if not isinstance(ranges, list):
@@ -193,6 +217,7 @@ class FhirSyncRequestSerializer(serializers.Serializer):
             raise serializers.ValidationError("bundle must be a FHIR Bundle resource.")
         if len(value.get('entry', []) or []) > 1000:
             raise serializers.ValidationError("Maximum 1000 bundle entries per request.")
+        validate_fhir_bundle_types(value)
         return value
 
     def validate_actor_iss(self, value):
@@ -253,6 +278,12 @@ class FhirSyncView(APIView):
             actor_iss = data.get('actor_iss', '')
             actor_sub = data.get('actor_sub', '')
             person_id = data.get('person_id')
+            if not is_service_token(request):
+                if getattr(request.user, 'is_authenticated', False):
+                    actor_iss = getattr(request.user, 'issuer', '') or ''
+                    actor_sub = getattr(request.user, 'sub', '') or ''
+                else:
+                    actor_iss = actor_sub = ''
             source_user_id = f"{actor_iss}|{actor_sub}" if actor_iss and actor_sub else ''
         bundle = data['bundle']
 
@@ -917,21 +948,25 @@ class FhirSyncView(APIView):
 
         actor_identity = self._resolve_actor_identity(actor_iss, actor_sub, request.user)
         has_explicit_actor = bool(actor_iss and actor_sub)
+        org = get_request_org(request)
 
         if is_on_behalf_of:
-            if has_explicit_actor and actor_identity is None:
-                return Response({'detail': 'Actor identity not found.'},
-                                status=status.HTTP_403_FORBIDDEN)
-            if has_explicit_actor and actor_identity:
-                if not can_access_patient(actor_identity, person_id):
-                    return Response({'detail': 'Actor does not have access to this patient.'},
+            if is_service_token(request):
+                if has_explicit_actor and actor_identity is None:
+                    return Response({'detail': 'Actor identity not found.'},
                                     status=status.HTTP_403_FORBIDDEN)
-            elif not has_explicit_actor and not is_service_token(request):
-                return Response(
-                    {'detail': 'actor_iss and actor_sub required when writing on behalf of another person.'},
-                    status=status.HTTP_400_BAD_REQUEST)
+                if has_explicit_actor and not can_write_patient(actor_identity, person_id):
+                    return Response({'detail': 'Actor does not have write access to this patient.'},
+                                    status=status.HTTP_403_FORBIDDEN)
+            elif org is None:
+                if not has_explicit_actor:
+                    return Response(
+                        {'detail': 'actor_iss and actor_sub required when writing on behalf of another person.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+                if not can_write_patient(actor_identity, person_id):
+                    return Response({'detail': 'Actor does not have write access to this patient.'},
+                                    status=status.HTTP_403_FORBIDDEN)
 
-        org = get_request_org(request)
         if org is not None:
             from omop_core.models import PatientRecord
             if not PatientRecord.objects.filter(person_id=person_id, organization=org).exists():

@@ -1,7 +1,7 @@
 import functools
 from typing import Any, Callable, ContextManager
 
-from rest_framework import viewsets, status
+from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.request import Request
@@ -1271,13 +1271,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if version_error:
             return Response({'error': version_error}, status=status.HTTP_406_NOT_ACCEPTABLE)
 
-        try:
-            person = Person.objects.get(person_id=pk)
-            patient_record = PatientRecord.objects.get(person=person)
-        except (Person.DoesNotExist, PatientRecord.DoesNotExist):
-            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        person, patient_record, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
 
-        # Object-level permission check (PatientSelfScopePermission)
+        # Object-level permission check (PatientSelfScopePermission). The shared
+        # resolver above enforces the org/professional/patient object boundary;
+        # this keeps DRF permission hooks in the path as a second layer.
         self.check_object_permissions(request, patient_record)
 
         # Content integrity + non-repudiation (S.3.6#10 / PH.2.3#09): serialize
@@ -1328,6 +1328,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     if person_id == 0:
                         last_person = Person.objects.all().order_by('-person_id').first()
                         person_id = last_person.person_id + 1 if last_person else 1000
+
+                    auth_error = _csv_row_write_error(request, person_id)
+                    if auth_error:
+                        raise PermissionError(auth_error)
 
                     dob_raw = (row.get('date_of_birth') or '').strip()
                     dob = parse_date(dob_raw) if dob_raw else None
@@ -1408,7 +1412,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
                         # This is the only projection operation in CSV ingestion. It upserts the
                         # derived read model after all Person/OMOP source facts are committed.
-                        refresh_patient_record(person)
+                        patient_record = refresh_patient_record(person)
+                        if provenance_org is not None and patient_record.organization_id is None:
+                            patient_record.organization = provenance_org
+                            patient_record.save(update_fields=['organization', 'updated_at'])
                     if created:
                         created_count += 1
                         
@@ -1458,6 +1465,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
             if fhir_data.get('resourceType') != 'Bundle':
                 return Response({'error': 'FHIR file must be a Bundle'}, status=status.HTTP_400_BAD_REQUEST)
+
+            from patient_portal.api.fhir.sync import validate_fhir_bundle_types
+            try:
+                validate_fhir_bundle_types(fhir_data)
+            except serializers.ValidationError as exc:
+                return Response({'error': str(exc.detail[0])}, status=status.HTTP_400_BAD_REQUEST)
 
             prov_source, prov_user_id, prov_reason = _extract_provenance(request)
             if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
@@ -2007,6 +2020,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 'patient': f'{given_name} {family_name}',
                                 'error': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.',
                             })
+                            # The Person upsert, Location, Death and VisitOccurrence
+                            # writes above already ran inside this patient's savepoint.
+                            # `continue` raises nothing, so the finally block would see
+                            # _last_exc is None and call _atomic_cm.__exit__(None, None,
+                            # None) — and Django's Atomic.__exit__ COMMITS a savepoint it
+                            # is not given an exception for. Setting _last_exc is what
+                            # routes the finally block to a rollback, so a caller we just
+                            # denied does not get their partial writes persisted.
+                            _last_exc = PermissionError('Write denied for existing patient.')
                             continue
 
                     # Extract disease, stage, and histologic type from Condition
@@ -4453,9 +4475,21 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         errors.append("Person not found.")
                         continue
                     elif org is None and not _is_privileged:
-                        from omop_core.authorization import can_access_patient
+                        from omop_core.authorization import can_access_patient, can_write_patient
                         if not can_access_patient(request.user, person_id):
                             errors.append("Person not found.")
+                            continue
+                        # can_access_patient grants the analyst role, which is read-only
+                        # (omop_core.authorization: 'analyst' is in _READ_ROLES, not
+                        # _WRITE_ROLES) — so the read predicate alone would let an analyst
+                        # delete patients. The read-denial above stays a "not found" so the
+                        # endpoint is not an existence oracle; here the caller demonstrably
+                        # can read the patient, so hiding existence buys nothing and an
+                        # explicit reason is more useful than a false "not found".
+                        if not can_write_patient(request.user, person_id):
+                            errors.append(
+                                "Analysts have read-only access. Contact a doctor or org admin to delete patient data."
+                            )
                             continue
                     with transaction.atomic():
                         # Delete OMOP clinical rows in FK dependency order.
@@ -4586,16 +4620,8 @@ def login_view(request):
                 'user': user_serializer.data
             }, status=status.HTTP_200_OK)
 
-        # Check if the account is locked so we can show a specific message
-        identity = (
-            Identity.objects.filter(uid=username).first()
-            or Identity.objects.filter(email__iexact=username).first()
-        )
-        if identity and identity.is_locked:
-            return Response({
-                'error': 'Account temporarily locked due to too many failed attempts. Please try again later.'
-            }, status=status.HTTP_403_FORBIDDEN)
-
+        # Do not distinguish unknown, invalid, locked, or non-portal accounts.
+        # Authentication callers must not be able to enumerate account state.
         return Response({
             'error': 'Invalid credentials'
         }, status=status.HTTP_401_UNAUTHORIZED)
@@ -4873,6 +4899,43 @@ def _caller_may_write_patient(request, person_id: int) -> bool:
     return can_write_patient(request.user, person_id)
 
 
+def _csv_row_write_error(request, person_id: int) -> str | None:
+    """Return a row-level CSV authorization error, or None when allowed."""
+    if getattr(request, 'auth', None) is not None and is_service_token(request):
+        return None
+
+    org = get_request_org(request)
+    if org is not None:
+        record = PatientRecord.objects.filter(person_id=person_id).first()
+        if (
+            record is not None
+            and record.organization_id is not None
+            and record.organization_id != org.id
+        ):
+            return 'patient belongs to a different organization'
+        return None
+
+    actor = getattr(request, 'user', None)
+    if getattr(actor, 'is_staff', False):
+        return None
+
+    from omop_core.authorization import can_write_patient
+
+    if can_write_patient(actor, person_id):
+        return None
+
+    # A row naming a person_id nobody holds yet is a create, and
+    # can_write_patient has nothing to answer about it — it returns False for
+    # every id that does not exist, which would reject every new patient a CSV
+    # introduces. The org branch above already allows that case; keep the two
+    # consistent. Requiring the Person to be genuinely absent means an existing
+    # patient can never be reached through this carve-out.
+    if not Person.objects.filter(person_id=person_id).exists():
+        return None
+
+    return 'caller does not have write access to this patient'
+
+
 class PatientRecordV1ViewSet(PatientRecordViewSet):
     """v1-only PatientRecord surface.
 
@@ -5069,9 +5132,19 @@ class PersonViewSet(viewsets.GenericViewSet):
                 if not PatientRecord.objects.filter(person=person, organization=org).exists():
                     return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
             elif not getattr(request.user, 'is_staff', False):
-                from omop_core.authorization import can_access_patient
+                from omop_core.authorization import can_access_patient, can_write_patient
                 if not can_access_patient(request.user, person.person_id):
                     return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+                # Reading a person is not permission to rewrite their demographics:
+                # the analyst role passes can_access_patient but is absent from
+                # _WRITE_ROLES. The read-denial above stays a 404 so this route does
+                # not confirm which person_ids exist; a caller who can already read
+                # the row gets the explicit 403 instead.
+                if not can_write_patient(request.user, person.person_id):
+                    return Response(
+                        {'detail': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
 
         changed = []
         for field, (kind, placeholders) in _PERSON_PATCHABLE_FIELDS.items():
@@ -6440,11 +6513,19 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
                 raise PermissionDenied('Episode does not belong to your organization.')
         elif self.request.user and not getattr(self.request.user, 'is_staff', False):
             # Non-org path (partner-auth / session patients): enforce per-patient ownership.
-            from omop_core.authorization import can_access_patient
+            from omop_core.authorization import can_access_patient, can_write_patient
             if episode_id is not None:
                 episode = Episode.objects.filter(episode_id=episode_id).first()
                 if episode is None or not can_access_patient(self.request.user, episode.person_id):
                     raise PermissionDenied('Access denied.')
+                # Creating an episode event is a clinical write, and can_access_patient
+                # is only the read predicate — the analyst role satisfies it but is not
+                # in _WRITE_ROLES. Without this an analyst could append treatment-line
+                # events to any episode they are allowed to read.
+                if not can_write_patient(self.request.user, episode.person_id):
+                    raise PermissionDenied(
+                        'Analysts have read-only access. Contact a doctor or org admin to update patient data.'
+                    )
         serializer.save()
 
 
@@ -7255,8 +7336,13 @@ class SurveyViewSet(viewsets.ModelViewSet):
             return
         if token is not None and not isinstance(token, TokenClaims):
             # OAuth2: allow only internal service apps (no org).
-            # Partner org apps have an org_profile and must not touch shared templates.
-            if get_request_org(request) is None:
+            # Partner org apps have an org_profile and must not touch shared
+            # templates. Read org_profile off the application directly rather
+            # than through get_request_org(), which also returns None for any
+            # non client_credentials grant — that would read an org-linked
+            # human-facing app as "internal" and let it through here, since
+            # this is the one call site where no org means allowed.
+            if getattr(getattr(token, 'application', None), 'org_profile', None) is None:
                 return
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('Survey templates can only be modified by staff or service tokens.')
