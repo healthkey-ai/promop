@@ -1995,6 +1995,13 @@ def _get_vitals_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             data['weight'] = value
             data['weight_units'] = 'kg'
         elif vital_type == 'height':
+            # PatientRecord stores height canonically in centimetres.  A number
+            # of FHIR/OMOP importers retain metres in unit_source_value, so
+            # preserve the numerical meaning before assigning the canonical
+            # PatientRecord unit (rather than treating 1.829 m as 1.829 cm).
+            source_unit = (measurement.unit_source_value or '').strip().lower()
+            if source_unit in {'m', 'meter', 'meters', 'metre', 'metres'}:
+                value *= 100
             data['height'] = value
             data['height_units'] = 'cm'
         elif vital_type == 'temperature':
@@ -3625,7 +3632,13 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
         weight_units = (patient_info.weight_units or 'kg').lower()
         height_units = (patient_info.height_units or 'cm').lower()
         weight_kg = float(weight) * (0.453592 if weight_units in ('lbs', 'lb') else 1.0)
-        height_m = float(height) * (0.0254 if height_units in ('in', 'inch', 'inches') else 0.01)
+        if height_units in ('in', 'inch', 'inches'):
+            height_m = float(height) * 0.0254
+        elif height_units in ('m', 'meter', 'meters', 'metre', 'metres'):
+            # Handle legacy/direct records that predate canonical extraction.
+            height_m = float(height)
+        else:
+            height_m = float(height) * 0.01
         if height_m >= 0.5:  # sanity-check: skip implausible heights
             patient_info.bmi = round(weight_kg / (height_m ** 2), 1)
 

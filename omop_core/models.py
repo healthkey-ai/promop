@@ -2774,6 +2774,11 @@ class PatientRecord(models.Model):
                 height_m = self.height * 0.0254
             elif self.height_units == 'cm':
                 height_m = self.height / 100
+            elif self.height_units in ('m', 'meter', 'meters', 'metre', 'metres'):
+                # Defensive support for legacy/direct values.  New imported
+                # values are normalised to centimetres by the projection
+                # service, but choices are not database constraints.
+                height_m = self.height
             
             self.bmi = round(weight_kg / (height_m ** 2), 2)
         
