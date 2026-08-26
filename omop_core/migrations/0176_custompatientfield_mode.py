@@ -3,7 +3,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
 
-    dependencies = [('omop_core', '0174_custom_patient_fields')]
+    dependencies = [('omop_core', '0175_add_remission_duration')]
 
     operations = [
         migrations.AddField(
