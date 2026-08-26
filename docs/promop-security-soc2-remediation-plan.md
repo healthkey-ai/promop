@@ -89,16 +89,65 @@ patient told the chatbot, silently.
 
 ### Audit CB findings
 
-The CB section carries 13 enumerated HIGH/MEDIUM findings plus roughly 20 in the compact
-list — stored XSS with the DRF token in `localStorage`, any-authenticated-user trial
-write/delete, navigator and researcher PHI access keyed on unverified email,
-unauthenticated signup with an arbitrary email, prompt injection in several LLM paths.
+All filed 2026-08-26, one issue per audit finding ID, so the audit maps onto tracked
+issues without a lookup table. Where two or three findings shared a root cause and a fix,
+they were filed together and every ID appears in the title.
 
-**These are almost entirely unfiled.** A search of the repository found only #2637, #2784,
-#2231 and a handful of `[Security]`-prefixed issues, against ~33 CB findings. There is no
-tracking epic. Filing them, with the audit's own remediation text, is the prerequisite for
-showing an auditor that findings are tracked to closure — and is the largest single piece
-of outstanding work for this certification.
+**HIGH**
+
+| Issue | Audit ID | Finding |
+|---|---|---|
+| #4932 | F1 | Stored XSS via `dangerouslySetInnerHTML` in trial tooltips |
+| #4933 | F3 | Any authenticated user can modify or delete any clinical Trial |
+| #4934 | F4 | DOM XSS in knowledge-graph tooltips via d3 `.html()` |
+| #4935 | F5 | Self-asserted navigator reads any patient's record by inviting them |
+| #4936 | F6 | Unauthenticated signup with arbitrary email hijacks Google sign-in |
+| #4937 | F7, F10, F28 | Researcher PHI access authorized by unverified self-chosen email |
+| #4938 | F8 | OAuth adopts a pre-existing local account matched only on email |
+| #4939 | F18 | Invitation token is a 14-day never-invalidated takeover credential |
+| #4940 | F29 | Researchers self-grant the flag that unmasks applicant identities |
+| #2637 | F2 | DEBUG hard-coded True (pre-existing issue; audit detail added as a comment) |
+| #4772 | F9 | Navigator gets a stranger's profile from POST my-patients (pre-existing) |
+
+**MEDIUM**
+
+| Issue | Audit ID | Finding |
+|---|---|---|
+| #4941 | F11 | Epic OAuth tokens logged in cleartext |
+| #4942 | F12 | TrialLabeledValue write/delete via the `admin_view` branch |
+| #4943 | F13 | Reset/invite URLs with takeover tokens logged and sent to Sentry |
+| #4944 | F14 | `?view=admin_view` exposes internal LLM prompts to any user |
+| #4945 | F15 | Trial authoring gated only by a client-controlled localStorage role |
+| #4946 | F16 | No rate limiting or lockout on password authentication |
+| #4947 | F17, F24 | Login timing side channel enables account enumeration |
+| #4948 | F19 | CSV formula injection in the trials export |
+| #4949 | F20, F21 | Prompt injection into the Standard-of-Care prompt |
+| #4950 | F22 | `StudyInfoSerializer.owner` writable |
+| #4951 | F23 | Type confusion on `supportive_therapies` persistently 500s search |
+| #4952 | F26, F27 | One-time auth tokens shipped to Mixpanel via URL capture |
+| #4953 | F30 | Prompt injection into the SoC comparison prompt |
+| #4954 | F31 | Prompt injection into CRC question generation |
+
+**LOW**
+
+| Issue | Audit ID | Finding |
+|---|---|---|
+| #4955 | F25 | `javascript:` scheme injection in a trial-details anchor href |
+| #4956 | F32 | Google sign-in ignores the ID token's `email_verified` claim |
+
+Three cross-cutting themes are worth treating as single pieces of work rather than 32
+independent fixes:
+
+1. **Email is treated as an authenticated identity when nothing verifies it.** F6, F7, F8,
+   F10, F28, F32 all reduce to this, and #4936/#4937/#4938 cannot be closed independently.
+   A verified-email flow plus provider-`sub` matching plus a uniqueness constraint closes
+   the set. This is the same defect class as PROMOP F1/F5/F8, already fixed in the PROMOP
+   service — the reasoning there transfers.
+2. **Self-asserted roles.** `role` at signup, `is_researcher`, and
+   `has_researcher_contract` are all attacker-settable and all gate PHI. F5, F10, F29.
+3. **Trial free text is attacker-writable and flows into both HTML and LLM prompts.** F3 is
+   the write primitive; F1, F4, F20, F21, F30, F31 are its sinks. Fixing F3 reduces the
+   severity of six other findings.
 
 ## PHR Coordination
 
