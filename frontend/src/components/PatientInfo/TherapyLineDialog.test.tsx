@@ -120,6 +120,7 @@ describe('TherapyLineDialog', () => {
       start_date: '2025-03-01',
       end_date: null,
       outcome: null,
+      regimen_concept_id: null,
       drugs: [{ concept_id: 19026972, source_value: 'lenalidomide' }],
     });
     // Nothing about episodes, type concepts or primary keys.
@@ -232,6 +233,7 @@ describe('TherapyLineDialog', () => {
       start_date: '2025-01-15',
       end_date: '2025-06-15',
       outcome: 'Partial Response',
+      regimen_concept_id: null,
       drugs: [{ concept_id: 1518254, source_value: 'dexamethasone' }],
     });
     expect(mockPost).not.toHaveBeenCalled();

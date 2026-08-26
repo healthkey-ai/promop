@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Search, X, Plus, Trash2 } from 'lucide-react';
 import {
   searchDrugConcepts, authorTherapyLine, updateTherapyLine, THERAPY_OUTCOME_CHOICES,
+  searchTherapyRegimens, getTherapyRegimenDetail,
   type DrugConcept, type EditableTherapyLine,
 } from '@/api/therapyLines';
+import type { TherapyRegimen } from '@/types/therapy';
 
 interface Props {
   personId: number;
@@ -53,6 +55,61 @@ export default function TherapyLineDialog({
   const [error, setError] = useState('');
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Regimen picker state
+  const [regimenQuery, setRegimenQuery] = useState('');
+  const [regimenResults, setRegimenResults] = useState<TherapyRegimen[]>([]);
+  const [regimenSearching, setRegimenSearching] = useState(false);
+  const [selectedRegimen, setSelectedRegimen] = useState<TherapyRegimen | null>(null);
+  const [loadingRegimen, setLoadingRegimen] = useState(false);
+  const regimenDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const doRegimenSearch = useCallback(async (q: string) => {
+    if (q.trim().length < 2) {
+      setRegimenResults([]);
+      return;
+    }
+    setRegimenSearching(true);
+    try {
+      setRegimenResults(await searchTherapyRegimens(q));
+    } catch {
+      setRegimenResults([]);
+    } finally {
+      setRegimenSearching(false);
+    }
+  }, []);
+
+  const selectRegimen = useCallback(async (regimen: TherapyRegimen) => {
+    setRegimenQuery('');
+    setRegimenResults([]);
+    setSelectedRegimen(regimen);
+    setLoadingRegimen(true);
+    try {
+      const detail = await getTherapyRegimenDetail(regimen.code);
+      // Map components to DrugConcept entries for the drug list
+      const componentDrugs: SelectedDrug[] = (detail.components ?? [])
+        .filter((c) => c.concept_id)
+        .map((c) => ({
+          concept_id: c.concept_id!,
+          concept_name: c.concept_name ?? c.title,
+          concept_code: c.concept_code ?? c.code,
+          vocabulary_id: c.vocabulary_id ?? 'HemOnc',
+        }));
+      if (componentDrugs.length > 0) {
+        setDrugs(componentDrugs);
+      }
+    } catch {
+      // Detail fetch failed — regimen is still selected but drugs not auto-populated
+    } finally {
+      setLoadingRegimen(false);
+    }
+  }, []);
+
+  const clearRegimen = useCallback(() => {
+    setSelectedRegimen(null);
+    setRegimenQuery('');
+    setRegimenResults([]);
+  }, []);
+
   const doSearch = useCallback(async (q: string) => {
     if (q.trim().length < 3) {
       setResults([]);
@@ -73,6 +130,12 @@ export default function TherapyLineDialog({
     debounceRef.current = setTimeout(() => { doSearch(query); }, 300);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [query, doSearch]);
+
+  useEffect(() => {
+    if (regimenDebounceRef.current) clearTimeout(regimenDebounceRef.current);
+    regimenDebounceRef.current = setTimeout(() => { doRegimenSearch(regimenQuery); }, 300);
+    return () => { if (regimenDebounceRef.current) clearTimeout(regimenDebounceRef.current); };
+  }, [regimenQuery, doRegimenSearch]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -105,6 +168,7 @@ export default function TherapyLineDialog({
         start_date: startDate || null,
         end_date: endDate || null,
         outcome: outcome || null,
+        regimen_concept_id: selectedRegimen?.concept_id ?? null,
         drugs: drugs.map((d) => ({
           concept_id: d.concept_id,
           source_value: (d.source_value || d.concept_name).slice(0, 50),
@@ -201,6 +265,65 @@ export default function TherapyLineDialog({
               className="w-full rounded-md border border-input px-2 py-1.5 text-sm"
             />
           </label>
+        </div>
+
+        <div className="mt-5">
+          <span className="mb-1 block text-sm font-medium">Regimen (optional)</span>
+          {selectedRegimen ? (
+            <div className="mb-3 flex items-center justify-between rounded border border-primary/30 bg-primary/5 px-3 py-2 text-sm">
+              <span>
+                {selectedRegimen.title}
+                {selectedRegimen.concept_id && (
+                  <span className="ml-2 text-xs text-muted-foreground">
+                    HemOnc {selectedRegimen.concept_id}
+                  </span>
+                )}
+              </span>
+              <button
+                onClick={clearRegimen}
+                aria-label="Clear regimen"
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          ) : (
+            <div className="mb-3">
+              <div className="relative">
+                <Search size={14} className="absolute left-2.5 top-2.5 text-muted-foreground" />
+                <input
+                  type="text"
+                  value={regimenQuery}
+                  onChange={(e) => setRegimenQuery(e.target.value)}
+                  placeholder="Search regimens (e.g. R-CHOP)…"
+                  aria-label="Search regimens"
+                  className="w-full rounded-md border border-input py-1.5 pl-8 pr-3 text-sm"
+                />
+              </div>
+              {regimenSearching && <p className="mt-1 text-xs text-muted-foreground">Searching…</p>}
+              {loadingRegimen && <p className="mt-1 text-xs text-muted-foreground">Loading regimen components…</p>}
+              {regimenResults.length > 0 && (
+                <ul className="mt-1 max-h-40 overflow-y-auto rounded border border-border">
+                  {regimenResults.map((r) => (
+                    <li key={r.code}>
+                      <button
+                        onClick={() => selectRegimen(r)}
+                        className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm hover:bg-muted"
+                      >
+                        <Plus size={12} className="shrink-0 text-muted-foreground" />
+                        <span>{r.title}</span>
+                        {r.concept_id && (
+                          <span className="ml-auto text-xs text-muted-foreground">
+                            {r.concept_id}
+                          </span>
+                        )}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="mt-5">

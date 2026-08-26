@@ -16,6 +16,8 @@ from .views import (
     PatientConsentViewSet,
     PatientMessageViewSet,
     vocabulary_list, concept_lookup, concept_search, concept_list,
+    therapy_regimen_list, therapy_regimen_detail,
+    therapy_component_list, therapy_class_list,
     concept_ancestors, concept_descendants, concept_graph_batch,
     concept_synonyms, concept_synonym_search, concept_replacement,
     vocab_release_list, vocab_release_detail, vocab_release_latest,
@@ -130,4 +132,9 @@ urlpatterns = [
     path('field-formulas/', field_formula_list, name='v1-field-formula-list'),
     path('field-formulas/test/', field_formula_test, name='v1-field-formula-test'),
     path('field-formulas/<int:pk>/', field_formula_detail, name='v1-field-formula-detail'),
+    # Therapy reference endpoints
+    path('therapy-regimens/', therapy_regimen_list, name='v1-therapy-regimen-list'),
+    path('therapy-regimens/<str:code>/', therapy_regimen_detail, name='v1-therapy-regimen-detail'),
+    path('therapy-components/', therapy_component_list, name='v1-therapy-component-list'),
+    path('therapy-classes/', therapy_class_list, name='v1-therapy-class-list'),
 ]

@@ -42,6 +42,9 @@ from omop_core.models import (
     FlipIScore, FollicularLymphomaGrade, PostTransformationOutcome,
     BreastCancerFirstLineTherapy, BreastCancerSecondLineTherapy, BreastCancerLaterLineTherapy,
     MyelomaType, WearableUpload,
+    TherapyRegimen, TherapyComponent, TherapyClass,
+    TherapyRegimenComponent, TherapyComponentClassLink,
+    TherapyRound, DiseaseTherapyRegimen,
     CustomPatientField,
     PERSON_YEAR_PLACEHOLDERS,
 )
@@ -7215,6 +7218,10 @@ _VOCABULARY_REGISTRY = {
     'breast-cancer-second-line-therapy':     BreastCancerSecondLineTherapy,
     'breast-cancer-later-line-therapy':      BreastCancerLaterLineTherapy,
     'myeloma-type':                          MyelomaType,
+    'therapy-regimen':                       TherapyRegimen,
+    'therapy-component':                     TherapyComponent,
+    'therapy-class':                         TherapyClass,
+    'therapy-round':                         TherapyRound,
 }
 
 
@@ -7231,6 +7238,100 @@ def vocabulary_list(request, model_name):
     has_sort_key = any(f.name == 'sort_key' for f in model._meta.get_fields())
     order_field = 'sort_key' if has_sort_key else 'title'
     items = list(model.objects.values('code', 'title', 'source_name', 'source_url').order_by(order_field))
+    return Response(items)
+
+
+# =============================================================================
+# Therapy reference endpoints
+# =============================================================================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def therapy_regimen_list(request):
+    """List therapy regimens, optionally filtered by disease, round, and/or search.
+
+    GET /api/v1/therapy-regimens/?disease=MM&round=first_line_therapy&search=CHOP
+    """
+    qs = TherapyRegimen.objects.all().order_by('title')
+
+    disease_code = request.query_params.get('disease')
+    round_code = request.query_params.get('round')
+    search = request.query_params.get('search', '').strip()
+
+    if disease_code or round_code:
+        dtr_qs = DiseaseTherapyRegimen.objects.all()
+        if disease_code:
+            dtr_qs = dtr_qs.filter(disease__code=disease_code)
+        if round_code:
+            dtr_qs = dtr_qs.filter(round__code=round_code)
+        regimen_ids = dtr_qs.values_list('regimen_id', flat=True)
+        qs = qs.filter(id__in=regimen_ids)
+
+    if search:
+        qs = qs.filter(title__icontains=search)
+
+    items = list(qs.values('code', 'title', 'concept_id')[:50])
+    return Response(items)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def therapy_regimen_detail(request, code):
+    """Single regimen with nested components and their classes.
+
+    GET /api/v1/therapy-regimens/<code>/
+    """
+    try:
+        regimen = TherapyRegimen.objects.get(code=code)
+    except TherapyRegimen.DoesNotExist:
+        return Response({'error': f'Regimen not found: {code}'}, status=status.HTTP_404_NOT_FOUND)
+
+    component_links = TherapyRegimenComponent.objects.filter(
+        regimen=regimen,
+    ).select_related('component', 'component__concept')
+
+    components = []
+    for link in component_links:
+        comp = link.component
+        concept = comp.concept
+        class_links = TherapyComponentClassLink.objects.filter(
+            component=comp,
+        ).select_related('therapy_class')
+        classes = [
+            {'code': cl.therapy_class.code, 'title': cl.therapy_class.title, 'concept_id': cl.therapy_class.concept_id}
+            for cl in class_links
+        ]
+        components.append({
+            'code': comp.code,
+            'title': comp.title,
+            'concept_id': comp.concept_id,
+            'concept_name': concept.concept_name if concept else comp.title,
+            'concept_code': concept.concept_code if concept else comp.code,
+            'vocabulary_id': concept.vocabulary_id if concept else None,
+            'classes': classes,
+        })
+
+    return Response({
+        'code': regimen.code,
+        'title': regimen.title,
+        'concept_id': regimen.concept_id,
+        'components': components,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def therapy_component_list(request):
+    """List all therapy components."""
+    items = list(TherapyComponent.objects.values('code', 'title', 'concept_id').order_by('title'))
+    return Response(items)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def therapy_class_list(request):
+    """List all therapy classes."""
+    items = list(TherapyClass.objects.values('code', 'title', 'concept_id').order_by('title'))
     return Response(items)
 
 
