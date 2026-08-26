@@ -15,11 +15,13 @@ from omop_core.services.mappings import (
     DEMOGRAPHIC_FIELDS,
     THERAPY_LINE_FIELDS,
     THERAPY_LINE_PREFIXES,
+    STAGING_MEAS_FIELDS,
     CONCEPT_GENERIC_LAB,
     CONCEPT_LAB_TYPE,
     CONCEPT_EHR_TYPE,
     CONCEPT_TREATMENT_REGIMEN,
     CONCEPT_DRUG_EXPOSURE_FIELD,
+    CONCEPT_PATIENT_REPORTED_TYPE,
     get_gender_concept,
 )
 
@@ -65,6 +67,12 @@ def sync_to_omop(patient_info, changed_fields: set, today: date = None, changed_
         line_fields = {f'{prefix}_{s}' for s in ('therapy', 'start_date', 'end_date', 'outcome', 'intent', 'discontinuation_reason')}
         if changed_fields & line_fields:
             _sync_therapy_line(person, patient_info, line_number, prefix, today)
+    for field in changed_fields & set(STAGING_MEAS_FIELDS):
+        value = getattr(patient_info, field, None)
+        if value is None:
+            value = changed_data.get(field)
+        # Staging codes pass through verbatim — the reader returns value_as_string as-is.
+        _sync_string_measurement(person, STAGING_MEAS_FIELDS[field], value, today)
 
 
 def _sync_measurement(person, field_name: str, value, today: date) -> None:
@@ -103,15 +111,74 @@ def _sync_measurement(person, field_name: str, value, today: date) -> None:
         del m._skip_patient_record_refresh
 
 
+def _patient_reported_type():
+    """The 'Patient self-report' type concept (32865, vocab 'Type Concept') that patient-authored facts
+    carry. Fail closed if it (or a look-alike in another vocab) is not the genuine row — the type is a
+    scoping KEY, so a wrong concept here would let a CB edit clobber an imported clinical fact."""
+    tc = Concept.objects.filter(
+        concept_id=CONCEPT_PATIENT_REPORTED_TYPE, vocabulary_id='Type Concept').first()
+    if tc is None:
+        raise ValueError(
+            f"type concept {CONCEPT_PATIENT_REPORTED_TYPE} (Patient self-report, vocab 'Type Concept') "
+            "is not loaded")
+    return tc
+
+
+def _sync_string_measurement(person, loinc_code: str, value, today: date) -> None:
+    """Upsert a patient-authored *string*-valued Measurement (a staging code or a normalised receptor
+    status) keyed by the LOINC the derivation reads. The value lands in value_as_string (value_as_number
+    is cleared, so the staging/receptor readers pick the string). The upsert key is scoped to the
+    'Patient self-report' type, so a same-day IMPORTED Lab/EHR fact for the same concept is never
+    clobbered (it carries a different type). Mirrors field_write_service's measurement upsert; a
+    None/blank value is a no-op (a clear does not retract the prior fact — documented, same as labs)."""
+    if value is None or value == '':
+        return
+    concept = (
+        Concept.objects.filter(concept_code=loinc_code, vocabulary_id='LOINC').order_by('concept_id').first()
+        or Concept.objects.filter(concept_id=CONCEPT_GENERIC_LAB).first()
+    )
+    if concept is None:
+        return
+    type_concept = _patient_reported_type()
+    value_str = str(value)[:60]        # Measurement.value_as_string is 60 chars
+    source_value = loinc_code[:50]     # measurement_source_value is 50 chars
+    # measurement_source_value is part of the KEY, not just a stored field: when several staging LOINC
+    # concepts are missing from a partially-loaded vocab they all resolve to the generic sentinel (0),
+    # so without the source in the key stage/T/N/M would share one row and overwrite each other. The
+    # reader matches on source_value too, so this keeps each field on its own row even in that fallback.
+    keys = dict(person=person, measurement_concept=concept, measurement_date=today,
+                is_erroneous=False, measurement_type_concept=type_concept,
+                measurement_source_value=source_value)
+    existing = Measurement.objects.filter(**keys).order_by('measurement_id').first()
+    if existing is not None:
+        existing.value_as_string = value_str
+        existing.value_as_number = None
+        existing._skip_patient_record_refresh = True
+        existing.save(update_fields=['value_as_string', 'value_as_number'])
+        del existing._skip_patient_record_refresh
+        return
+    m = Measurement(
+        measurement_id=next_pk(Measurement, 'measurement_id'),
+        value_as_string=value_str,
+        **keys,
+    )
+    m._skip_patient_record_refresh = True
+    m.save()
+    del m._skip_patient_record_refresh
+
+
 def _sync_condition(person, patient_info, today: date, changed_data: dict = None) -> None:
     if changed_data is None:
         changed_data = {}
     disease = getattr(patient_info, 'disease', None) or changed_data.get('disease')
-    stage = getattr(patient_info, 'stage', None) or changed_data.get('stage')
     icd10 = getattr(patient_info, 'condition_code_icd_10', None) or changed_data.get('condition_code_icd_10')
     snomed = getattr(patient_info, 'condition_code_snomed_ct', None) or changed_data.get('condition_code_snomed_ct')
 
-    source_value = (disease or stage or icd10 or snomed or '')[:50]
+    # `stage` is NOT a condition identifier — it is written as its own staging Measurement (slice 2a).
+    # It used to be a source_value fallback here, which meant a staging-only edit (no disease in the
+    # adapter) minted a ConditionOccurrence named after the stage code (e.g. 'III') and could link a
+    # diseaseless patient. A condition is sourced only from a real diagnosis field now.
+    source_value = (disease or icd10 or snomed or '')[:50]
     if not source_value:
         return
 
