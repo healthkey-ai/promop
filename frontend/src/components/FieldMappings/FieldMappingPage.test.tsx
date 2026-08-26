@@ -34,6 +34,15 @@ vi.mock("./FormulaEditDialog", () => ({
   ),
 }));
 
+vi.mock("@/components/PatientInfo/CustomPatientFields", () => ({
+  AddCustomFieldDialog: ({ tab, onClose }: { tab: string; onClose: () => void }) => (
+    <div data-testid="add-custom-field-dialog">
+      Add custom field for {tab}
+      <button onClick={onClose}>Close add field</button>
+    </div>
+  ),
+}));
+
 const MOCK_DESCRIPTORS = [
   {
     field_name: "hemoglobin_g_dl",
@@ -555,5 +564,12 @@ describe("FieldMappingPage", () => {
     // Choices are no longer in the table — they appear in the concept assign dialog
     // Verify the field still renders correctly
     expect(screen.queryByText("2 choices")).not.toBeInTheDocument();
+  });
+
+  it("opens Add Field from the mapping header for the selected tab", async () => {
+    renderPage();
+    await screen.findByText("Field Concept Mappings");
+    fireEvent.click(screen.getByRole("button", { name: /add field/i }));
+    expect(screen.getByTestId("add-custom-field-dialog")).toHaveTextContent("general");
   });
 });

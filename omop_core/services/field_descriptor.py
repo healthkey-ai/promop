@@ -6,7 +6,7 @@ concept assignments and which still need one.
 """
 from __future__ import annotations
 
-from omop_core.models import PatientRecord, FieldConceptMapping, FieldChoice, FieldFormula
+from omop_core.models import CustomPatientField, PatientRecord, FieldConceptMapping, FieldChoice, FieldFormula
 from omop_core.services.mappings import (
     LAB_FIELD_TO_LOINC,
     LAB_FIELD_ALIAS_TO_CANONICAL,
@@ -574,6 +574,52 @@ def get_all_field_descriptors() -> list[dict]:
             'explanation': _get_explanation(name, category),
             # Generic derivation health surface. Other extractors can add a
             # message here without changing the admin API contract.
+            'derivation_error': derivation_error,
+        })
+
+    # Runtime PatientRecord fields use the JSON projection rather than Django
+    # columns, so they are appended explicitly.  This keeps a newly added field
+    # discoverable in the mapper immediately after its approved mapping saves.
+    for custom in CustomPatientField.objects.select_related('mapping__concept').all():
+        mapping = custom.mapping
+        formula = formulas_by_field.get(custom.field_name)
+        formula_dict = None
+        derivation_error = None
+        if formula:
+            formula_dict = {
+                'id': formula.id,
+                'expression': formula.formula,
+                'is_active': formula.is_active,
+            }
+            validation = validate_formula(formula.formula)
+            if not validation.valid:
+                derivation_error = f"Invalid formula: {'; '.join(validation.errors)}"
+        result.append({
+            'field_name': custom.field_name,
+            'field_type': custom.field_type,
+            'category': 'computed' if custom.mode == 'computed' else 'needs-concept-set',
+            'tab': custom.tab,
+            'provenance': None,
+            'mapping': {
+                'id': mapping.id,
+                'concept_id': mapping.concept_id,
+                'concept_name': mapping.concept.concept_name if mapping.concept else '',
+                'vocabulary_id': mapping.vocabulary_id,
+                'concept_code': mapping.concept_code,
+                'unit': mapping.unit,
+                'omop_table': mapping.omop_table,
+                'status': mapping.status,
+                'reviewer': mapping.reviewer.username if mapping.reviewer else None,
+                'reviewed_at': mapping.reviewed_at.isoformat() if mapping.reviewed_at else None,
+                'notes': mapping.notes,
+            },
+            'suggestion': None,
+            'unit_options': STANDARD_UNIT_CHOICES,
+            'mappable': True,
+            'locked_table': None,
+            'choices': choices_by_field.get(custom.field_name, []),
+            'formula': formula_dict,
+            'explanation': 'Administrator-defined PatientRecord field.',
             'derivation_error': derivation_error,
         })
 

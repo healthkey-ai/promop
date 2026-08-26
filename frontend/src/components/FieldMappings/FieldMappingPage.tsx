@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, ChevronDown, ChevronRight, Search, BookOpen, Check, X, Pencil } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, Search, BookOpen, Check, X, Pencil, Plus } from "lucide-react";
 import api from "@/api/axios";
 import { ConceptAssignDialog } from "./ConceptAssignDialog";
 import { SynonymDialog } from "./SynonymDialog";
 import { FieldChoiceEditor } from "./FieldChoiceEditor";
 import { FormulaEditDialog } from "./FormulaEditDialog";
 import { DerivationInfoDialog } from "./DerivationInfoDialog";
+import { AddCustomFieldDialog } from "@/components/PatientInfo/CustomPatientFields";
 
 interface FieldDescriptor {
   field_name: string;
@@ -121,6 +122,7 @@ export default function FieldMappingPage() {
   const [choiceEditorField, setChoiceEditorField] = useState<FieldDescriptor | null>(null);
   const [formulaEditorField, setFormulaEditorField] = useState<FieldDescriptor | null>(null);
   const [derivationInfoField, setDerivationInfoField] = useState<FieldDescriptor | null>(null);
+  const [addFieldDialogOpen, setAddFieldDialogOpen] = useState(false);
 
   const fetchDescriptors = useCallback(async (autoPropose = false) => {
     setLoading(true);
@@ -571,6 +573,12 @@ export default function FieldMappingPage() {
           Back
         </button>
         <h1 className="text-xl font-semibold">Field Concept Mappings</h1>
+        <button
+          onClick={() => setAddFieldDialogOpen(true)}
+          className="ml-auto inline-flex items-center gap-1 rounded border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+        >
+          <Plus size={15} /> Add field
+        </button>
       </div>
 
       {/* Tab bar */}
@@ -723,6 +731,14 @@ export default function FieldMappingPage() {
             setSelectedField(null);
           }}
           onSaved={handleMappingSaved}
+        />
+      )}
+
+      {addFieldDialogOpen && (
+        <AddCustomFieldDialog
+          tab={activeTab}
+          onClose={() => setAddFieldDialogOpen(false)}
+          onCreated={() => { void fetchDescriptors(); }}
         />
       )}
 
