@@ -12,6 +12,16 @@ services:
         value: 3.11.0
       - key: SECRET_KEY
         generateValue: true
+      # Required by patient_portal.E001/E002/E003, which start.sh enforces
+      # before migrate. Without these a service created from this blueprint —
+      # a DR rebuild, a second environment, a preview — hard-fails at boot.
+      # Independent values: audit tamper-evidence and export signatures are
+      # separate controls, and must not share a key with each other or with
+      # SECRET_KEY. Rotation procedure: docs/signing-key-rotation.md.
+      - key: AUDIT_HMAC_KEY
+        generateValue: true
+      - key: EXPORT_SIGNING_KEY
+        generateValue: true
       - key: DEBUG
         value: False
       - key: DATABASE_URL

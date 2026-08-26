@@ -109,3 +109,96 @@ jobs:
 
       - name: Type check & build
         run: cd frontend && npm run build
+
+  security:
+    name: Security gates
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks scans history, not just the tip, so a secret committed and
+          # then removed in a later commit is still caught.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Pinned: the bandit baseline matches findings by issue TEXT, so a release
+      # that rewords a message invalidates every baseline entry at once and turns
+      # an unrelated PR red.
+      - name: Install security tooling
+        run: pip install 'pip-audit==2.9.0' 'bandit==1.9.4'
+
+      # Dependency CVEs. Blocking on purpose: Dependabot raises advisory PRs but
+      # does not stop a merge, and the SOC2 gap analysis notes those PRs going
+      # unmerged. If this fails, upgrade the dependency — reach for
+      # --ignore-vuln only when there is no fixed version, and say why.
+      - name: Dependency audit (pip-audit)
+        run: pip-audit -r requirements.txt --progress-spinner off
+
+      # Python SAST. Baselined: the codebase carries ~57 MEDIUM findings that are
+      # false positives for its shape (SQL built by string concatenation in
+      # vocabulary loading, temp-directory paths).
+      #
+      # Know what the baseline does and does not give you. Bandit matches a
+      # finding on (text, severity, cwe, confidence, filename, test, test_id) —
+      # line number is deliberately excluded — so a NEW finding whose message is
+      # identical to a baselined one in the SAME file is suppressed. For B608
+      # that message is generic, so a new f-string query in an already-baselined
+      # file will not be caught here. CodeQL covers that case; this gate is the
+      # cheap first pass, not the only one.
+      #
+      # Regenerate deliberately, never to silence a real finding:
+      #   bandit -q -r <apps> -ll -x '*/tests.py,*/tests/*,*/migrations/*' \
+      #     -f json -o .bandit-baseline.json
+      # bandit's own exit code does not reflect baseline-filtered results — it
+      # reports the new finding and still exits 0 — so the gate reads the JSON
+      # and fails explicitly. Verified by planting a finding and watching this
+      # step go red.
+      - name: Python SAST (bandit)
+        run: |
+          bandit -q -r omop_core patient_portal ctomop omop_oncology omop_genomics \
+            -ll -x '*/tests.py,*/tests/*,*/migrations/*' \
+            -b .bandit-baseline.json -f json -o bandit-new.json || true
+          python - <<'CHECK'
+          import json, sys
+          results = json.load(open('bandit-new.json'))['results']
+          for r in results:
+              print(f"{r['issue_severity']} {r['test_id']} "
+                    f"{r['filename']}:{r['line_number']}  {r['issue_text']}")
+          print(f"{len(results)} finding(s) not in the baseline")
+          sys.exit(1 if results else 0)
+          CHECK
+
+      # -ll sets the floor at MEDIUM, which silently disables every LOW test —
+      # including B105/B106/B107, the hardcoded-credential checks. Those matter
+      # more than most MEDIUM findings, so they get their own pass at LOW with a
+      # small dedicated baseline (4 known false positives: a TTL, the
+      # service-token sentinel, a test-only string, an empty PKCE secret).
+      - name: Hardcoded credential scan (bandit)
+        run: |
+          bandit -q -r omop_core patient_portal ctomop omop_oncology omop_genomics \
+            -t B105,B106,B107 -x '*/tests.py,*/tests/*,*/migrations/*' \
+            -b .bandit-credentials-baseline.json -f json -o bandit-creds.json || true
+          python - <<'CHECK'
+          import json, sys
+          results = json.load(open('bandit-creds.json'))['results']
+          for r in results:
+              print(f"{r['test_id']} {r['filename']}:{r['line_number']}  {r['issue_text']}")
+          print(f"{len(results)} hardcoded-credential finding(s) not in the baseline")
+          sys.exit(1 if results else 0)
+          CHECK
+
+      # Committed credentials. Config at .gitleaks.toml allowlists narrowly;
+      # a real secret is rotated, not allowlisted. 8.30+ is required for the
+      # targetRules allowlist scoping the config relies on.
+      - name: Secret scan (gitleaks)
+        run: |
+          GITLEAKS_VERSION=8.30.1
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks detect --source . --config .gitleaks.toml --redact --verbose
