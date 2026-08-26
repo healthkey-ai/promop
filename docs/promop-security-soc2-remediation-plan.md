@@ -1,14 +1,122 @@
-# PROMOP Security and SOC2 Remediation Plan
+# Security and SOC2 Remediation Plan
 
-Date: 2026-08-26
+Date: 2026-08-26 (re-scoped 2026-08-26)
 
 Inputs:
 
 - `~/Downloads/CancerBot-Security-Audit-EN.pdf`
 - `~/Downloads/CancerBot-SOC2-Gap-EN.pdf`
 
-Scope: PROMOP only. CancerBot and EXACT findings are referenced only where they affect
-shared SOC2 evidence or federation boundaries.
+The audit is organised in three sections — **CB**, **EXACT**, **PROMOP** — and each
+finding cites the repository it was found in. That split matters more than it first
+appears, so read "Scope" before working from any finding number.
+
+## Scope
+
+**The certification target is CancerBot's `promop` branch** (`cancerbot-org/cancerbot`).
+That is the deployment being taken to SOC2. This document covers it, and treats the
+standalone PROMOP service as an annex.
+
+The PROMOP F1-F23 findings cite `patient_portal/*` and
+`omop_core/services/wearable_parsers.py` — i.e. the `healthkey-ai/promop` repo, the
+standalone PROMOP service. **CancerBot does not run most of that code.** It embeds PROMOP
+as a wheel pinned in its `requirements.txt`, and that wheel ships only `omop_core`,
+`omop_oncology`, `omop_genomics`:
+
+```toml
+[tool.setuptools.packages.find]
+include = ["omop_core*", "omop_oncology*", "omop_genomics*"]
+```
+
+`patient_portal` is not packaged and not in CancerBot's `INSTALLED_APPS`. The wheel's own
+header states it also excludes "the patient_portal-coupled runtime utilities
+(authorization.py, ...) — those stay PROMOP-service-only and must not be called from a
+host lacking patient_portal."
+
+Consequences, which govern how the finding lists below are read:
+
+- 21 of the 23 PROMOP findings are in code CancerBot never loads. Fixing them hardens the
+  standalone PROMOP service. It does not change CancerBot's SOC2 posture.
+- Only PROMOP F4/F23 (XXE in the Apple Health parser) sit in `omop_core`, which CancerBot
+  does load — and they are **unreachable there**: the only caller is
+  `patient_portal/api/views.py:4136`, which is not installed; `omop_core` ships no
+  `urls.py`; and CancerBot's urlconf mounts only admin/chats/trials. Close them for
+  CancerBot with that trace as evidence, and re-open the question if CancerBot ever adds a
+  wearable upload.
+- CancerBot's own exposure is the audit's **CB** section, plus the findings recorded below
+  that the audit did not cover because it reviewed each repository in isolation.
+
+## CancerBot PROMOP Branch — Primary SOC2 Target
+
+Issues filed in `cancerbot-org/cancerbot` on 2026-08-26. None of these appear in the
+security audit: it reviewed application authorization, not the delivery pipeline, the
+dependency seam, or write-path completeness.
+
+### Delivery pipeline and configuration
+
+| Issue | Severity | Finding |
+|---|---|---|
+| #4919 | HIGH | Deploys to prod/promop/staging are not gated on the test suite — `docker_build` has no `needs:`, so a red suite still ships |
+| #4920 | MEDIUM | `CORS_ALLOW_ALL_ORIGINS = True` on a PHI API, with `authorization` and `x-imp-token` in the header allowlist |
+| #4921 | MEDIUM | No transport security at all — no HSTS, secure cookies, SSL redirect, or `SECURE_PROXY_SSL_HEADER` |
+| #4922 | MEDIUM | Celery/Redis TLS uses `ssl.CERT_NONE` — `rediss://` with no certificate validation |
+| #4923 | MEDIUM | Production frontend builds with `pnpm install --no-frozen-lockfile` |
+| #4924 | MEDIUM | No dependency-audit, SAST, or secret-scanning gate in CI |
+| #4926 | MEDIUM | `StrictHostKeyChecking=no` on every deploy incl. production; `.dockerignore` omits `.git`/`.env` |
+
+Known and already tracked: #2637 (DEBUG) covers half of audit finding CB F2. The committed
+`django-insecure-` SECRET_KEY at `cancerbot/settings.py:71` is the other half and is not
+separately tracked.
+
+### CancerBot ↔ PROMOP seam
+
+The seam's authorization held up under tracing — `?person_id=` is checked against the
+caller's own profile, impersonation re-verifies per request, and no OMOP entry point takes
+a patient identifier from client input. The problems are elsewhere:
+
+| Issue | Severity | Finding |
+|---|---|---|
+| #4927 | HIGH | Chatbot clinical answers never reach OMOP; under `MATCHER_PATIENT_SOURCE=promop` the matcher reads a record missing them |
+| #4925 | MEDIUM | `promop-omop` pinned to an unreviewed commit on an unmerged fork branch (CC8.1) |
+| #4928 | MEDIUM | PROMOP's Django admin ships with the wheel, adding unscoped editable PHI to CancerBot's `/admin/` |
+| #4929 | MEDIUM | The PROMOP import boundary is documented but unenforced; the one PHI-writing endpoint bypasses it |
+| #4930 | MEDIUM | Patient-facing projection is a deny-list over a model defined upstream in a pinned wheel |
+| #4931 | LOW | `PatientInfoSerializer.user` is writable; only a hand-written `pop` prevents cross-patient reassignment |
+
+#4927 is a data-integrity and patient-safety bug rather than a security one, but it is the
+most consequential item found: trial matching runs on a profile missing whatever the
+patient told the chatbot, silently.
+
+### Audit CB findings
+
+The CB section carries 13 enumerated HIGH/MEDIUM findings plus roughly 20 in the compact
+list — stored XSS with the DRF token in `localStorage`, any-authenticated-user trial
+write/delete, navigator and researcher PHI access keyed on unverified email,
+unauthenticated signup with an arbitrary email, prompt injection in several LLM paths.
+
+**These are almost entirely unfiled.** A search of the repository found only #2637, #2784,
+#2231 and a handful of `[Security]`-prefixed issues, against ~33 CB findings. There is no
+tracking epic. Filing them, with the audit's own remediation text, is the prerequisite for
+showing an auditor that findings are tracked to closure — and is the largest single piece
+of outstanding work for this certification.
+
+## PHR Coordination
+
+PROMOP's audience and verified-email enforcement both need a change in
+`healthkey-ai/phr` before they can be deployed. Filed and assigned:
+
+- `healthkey-ai/phr#65` — phr emits no `aud` claim (`SIMPLE_JWT` has no `AUDIENCE`, and the
+  introspection response omits it), so PROMOP will reject every phr token once its change
+  deploys. Suggested shared value `promop-api`; PROMOP sets `PHR_AUDIENCE`, phr sets
+  `JWT_AUDIENCE`. Note that a single global audience unblocks PROMOP without closing
+  sibling-to-sibling replay — that residual risk should be a decision, not an accident.
+- `healthkey-ai/phr#66` — phr emits no `email_verified` claim, so every phr user is treated
+  as unverified: no link to an existing patient record on first login, and invited
+  clinicians' org grants never transfer. phr's `identity_level` (`ial1` = "Email verified")
+  may serve, but it is the default on every account and no confirm-email flow was found, so
+  mapping it may not satisfy the finding.
+
+Neither is on CancerBot's critical path.
 
 ## Current PROMOP Control Baseline
 
@@ -90,6 +198,9 @@ These still need evidence or hardening:
      environments before this change reaches production. It has no
      production default — an unset value fails CLOSED and rejects every
      PHR token, so PHR federation logins break until the variable is set.
+   - Blocked on `healthkey-ai/phr#65`: phr does not currently emit an `aud`
+     claim at all, so setting `PHR_AUDIENCE` is necessary but not sufficient.
+     Until phr ships its side, PHR authentication fails whatever the value.
 
 7. Require dedicated production signing keys.
    - Issue: #749.
