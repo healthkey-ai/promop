@@ -2030,6 +2030,107 @@ class MyelomaType(VocabularyLookup):
 
 
 # ---------------------------------------------------------------------------
+# Therapy reference tables — regimens, components, classes, and linkages
+# ---------------------------------------------------------------------------
+
+class TherapyRegimen(VocabularyLookup):
+    """A named therapy regimen (e.g. R-CHOP), optionally linked to a HemOnc concept."""
+    concept = models.ForeignKey(
+        Concept, on_delete=models.SET_NULL, null=True, blank=True,
+        db_column='concept_id',
+        help_text="HemOnc Regimen concept_id from Athena",
+    )
+
+    class Meta:
+        db_table = 'therapy_regimen'
+
+
+class TherapyComponent(VocabularyLookup):
+    """A drug ingredient used in therapy regimens, optionally linked to a HemOnc/RxNorm concept."""
+    concept = models.ForeignKey(
+        Concept, on_delete=models.SET_NULL, null=True, blank=True,
+        db_column='concept_id',
+        help_text="HemOnc Component or RxNorm Ingredient concept_id",
+    )
+
+    class Meta:
+        db_table = 'therapy_component'
+
+
+class TherapyClass(VocabularyLookup):
+    """A drug class / mechanism of action, optionally linked to a HemOnc Component Class concept."""
+    concept = models.ForeignKey(
+        Concept, on_delete=models.SET_NULL, null=True, blank=True,
+        db_column='concept_id',
+        help_text="HemOnc Component Class concept_id from Athena",
+    )
+
+    class Meta:
+        db_table = 'therapy_class'
+
+
+class TherapyRegimenComponent(models.Model):
+    """Join table linking regimens to their component drugs."""
+    regimen = models.ForeignKey(
+        TherapyRegimen, on_delete=models.CASCADE, related_name='regimen_components',
+    )
+    component = models.ForeignKey(
+        TherapyComponent, on_delete=models.CASCADE, related_name='component_regimens',
+    )
+
+    class Meta:
+        db_table = 'therapy_regimen_component'
+        unique_together = [('regimen', 'component')]
+
+    def __str__(self):
+        return f"{self.regimen} → {self.component}"
+
+
+class TherapyComponentClassLink(models.Model):
+    """Join table linking components to their drug classes."""
+    component = models.ForeignKey(
+        TherapyComponent, on_delete=models.CASCADE, related_name='component_classes',
+    )
+    therapy_class = models.ForeignKey(
+        TherapyClass, on_delete=models.CASCADE, related_name='class_components',
+    )
+
+    class Meta:
+        db_table = 'therapy_component_class'
+        unique_together = [('component', 'therapy_class')]
+
+    def __str__(self):
+        return f"{self.component} → {self.therapy_class}"
+
+
+class TherapyRound(VocabularyLookup):
+    """Line of therapy (e.g. first_line_therapy, second_line_therapy)."""
+
+    class Meta:
+        db_table = 'therapy_round'
+
+
+class DiseaseTherapyRegimen(models.Model):
+    """Links a regimen to a disease + therapy round (line of therapy)."""
+    disease = models.ForeignKey(
+        Disease, on_delete=models.CASCADE, related_name='therapy_regimens',
+    )
+    round = models.ForeignKey(
+        TherapyRound, on_delete=models.CASCADE, related_name='disease_regimens',
+    )
+    regimen = models.ForeignKey(
+        TherapyRegimen, on_delete=models.CASCADE, related_name='disease_rounds',
+    )
+
+    class Meta:
+        db_table = 'disease_therapy_regimen'
+        unique_together = [('disease', 'round', 'regimen')]
+
+    def __str__(self):
+        return f"{self.disease} / {self.round} → {self.regimen}"
+
+
+# ---------------------------------------------------------------------------
 # End controlled vocabulary models
 # ---------------------------------------------------------------------------
 

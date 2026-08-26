@@ -4,6 +4,7 @@ db.*
 !.env.example
 .venv/
 data/
+# Therapy reference CSVs are force-added (git add -f) despite this rule
 
 # Node modules and frontend build
 node_modules/

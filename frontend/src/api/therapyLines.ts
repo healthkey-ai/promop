@@ -1,4 +1,5 @@
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
+import type { TherapyRegimen } from '@/types/therapy';
 
 /**
  * Authoring a line of therapy.
@@ -82,6 +83,24 @@ export async function searchDrugConcepts(query: string): Promise<DrugConcept[]> 
     },
   });
   return (resp.data?.results ?? resp.data ?? []) as DrugConcept[];
+}
+
+/** Search therapy regimens by name, optionally filtered by disease. */
+export async function searchTherapyRegimens(
+  query: string,
+  disease?: string,
+): Promise<TherapyRegimen[]> {
+  if (query.trim().length < 2) return [];
+  const params: Record<string, string> = { search: query.trim() };
+  if (disease) params.disease = disease;
+  const resp = await clinicalClient().get(clinicalUrl('/v1/therapy-regimens/'), { params });
+  return (resp.data ?? []) as TherapyRegimen[];
+}
+
+/** Fetch a single regimen with its component drugs and their classes. */
+export async function getTherapyRegimenDetail(code: string): Promise<TherapyRegimen> {
+  const resp = await clinicalClient().get(clinicalUrl(`/v1/therapy-regimens/${code}/`));
+  return resp.data as TherapyRegimen;
 }
 
 export async function authorTherapyLine(

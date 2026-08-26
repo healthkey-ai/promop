@@ -1,0 +1,391 @@
+therapy_code,therapy_title,therapy_concept_id,component_code,component_title,component_concept_id
+abemaciclib,Abemaciclib (Verzenio),,abemaciclib,Abemaciclib,35802858
+abr,ABR,,acalabrutinib,Acalabrutinib,35802861
+abr,ABR,,bendamustine,Bendamustine,35802918
+abr,ABR,,chemoimmunotherapy_regimen,Chemoimmunotherapy Regimen,
+abr,ABR,,rituximab,Rituximab,35803296
+acalabrutinib_calquence_monotherapy,Acalabrutinib (Calquence) Monotherapy,,acalabrutinib,Acalabrutinib,35802861
+acalabrutinib_obinutuzumab,Acalabrutinib+Obinutuzumab,,acalabrutinib,Acalabrutinib,35802861
+acalabrutinib_obinutuzumab,Acalabrutinib+Obinutuzumab,,obinutuzumab,Obinutuzumab,35803211
+acalabrutinib_rituximab,Acalabrutinib+Rituximab,,acalabrutinib,Acalabrutinib,35802861
+acalabrutinib_rituximab,Acalabrutinib+Rituximab,,rituximab,Rituximab,35803296
+acalabrutinib_venetoclax,Acalabrutinib + Venetoclax,,acalabrutinib,Acalabrutinib,35802861
+acalabrutinib_venetoclax,Acalabrutinib + Venetoclax,,venetoclax,Venetoclax,35803383
+acyclovir,Acyclovir,,acyclovir,Acyclovir,35802865
+adjuvant_chemotherapy,Adjuvant Chemotherapy,,adjuvant_chemotherapy,Adjuvant Chemotherapy,
+adjuvant_hormonal_therapy,Adjuvant Hormonal Therapy,,adjuvant_hormonal_therapy,Adjuvant Hormonal Therapy,
+adjuvant_radiotherapy,Adjuvant Radiotherapy,,adjuvant_radiotherapy,Adjuvant Radiotherapy,
+advil_motrin_ib_ibuprofen,Advil / Motrin IB / Ibuprofen,,ibuprofen,Ibuprofen,1177480
+agsct,Allogeneic Stem Cell Transplant,,agsct,Allogeneic Stem Cell Transplant,
+alemtuzumab_campath,Alemtuzumab (Campath),,alemtuzumab,Alemtuzumab,35802871
+aleve,Aleve,,naproxen_sodium,Naproxen Sodium,
+allopurinol,Allopurinol,,allopurinol,Allopurinol,35802875
+alpelisib_fulvestrant,Alpelisib + Fulvestrant,,alpelisib,Alpelisib,35101867
+alpelisib_fulvestrant,Alpelisib + Fulvestrant,,fulvestrant,Fulvestrant,35803089
+alpelisib_monotherapy,Alpelisib (Piqray) Monotherapy,,alpelisib,Alpelisib,35101867
+anastrozole,Anastrozole (Arimidex),,anastrozole,Anastrozole,35802887
+anastrozole_maintenance,Anastrozole (Arimidex) Maintenance,,anastrozole,Anastrozole,35802887
+antiviral,antiviral,,antiviral,Antiviral,
+asct,Autologous Stem Cell Transplant (ASCT),,asct,Autologous Stem Cell Transplant (ASCT),
+asct_hdm,Autologous Stem Cell Transplant (ASCT) + High Dose Melphalan (HDM),,asct,Autologous Stem Cell Transplant (ASCT),
+asct_hdm,Autologous Stem Cell Transplant (ASCT) + High Dose Melphalan (HDM),,high_dose_melphalan,High Dose Melphalan (140-200),
+aspirin_gt_81mg_daily,Aspirin > 81mg daily,,Aspirin,Aspirin,35802900
+aspirin_lt_81mg_daily,Aspirin =< 81mg daily,,Aspirin,Aspirin,35802900
+atezolizumab,Atezolizumab,,atezolizumab,Atezolizumab,35802902
+atezolizumab_nab_paclitaxel,Atezolizumab + Nab-Paclitaxel,,atezolizumab,Atezolizumab,35802902
+atezolizumab_nab_paclitaxel,Atezolizumab + Nab-Paclitaxel,,chemoimmunotherapy_regimen,Chemoimmunotherapy Regimen,
+atezolizumab_nab_paclitaxel,Atezolizumab + Nab-Paclitaxel,,nab_paclitaxel,Nab-Paclitaxel,
+axi_cil,Axi-Cil (Yescarta) Monotherapy,,axicabtagene_ciloleucel,Axicabtagene Ciloleucel,35802907
+axillary_lnd_lumpectomy_radiation,Axillary LND + Lumpectomy + Radiation,,adjuvant_radiotherapy,Adjuvant Radiotherapy,
+axillary_lnd_lumpectomy_radiation,Axillary LND + Lumpectomy + Radiation,,axillary_lymph_node_dissection_(alnd),Axillary Lymph Node Dissection (ALND),
+axillary_lnd_lumpectomy_radiation,Axillary LND + Lumpectomy + Radiation,,ipsilateral-breast-radiation,Ipsilateral Breast Radiation,
+axillary_lnd_lumpectomy_radiation,Axillary LND + Lumpectomy + Radiation,,lumpectomy,Lumpectomy,
+axillary_lnd_mastectomy,Axillary LND + Mastectomy,,axillary_lymph_node_dissection_(alnd),Axillary Lymph Node Dissection (ALND),
+axillary_lnd_mastectomy,Axillary LND + Mastectomy,,mastectomy,Mastectomy,
+axillary_lnd_mastectomy_radiation,Axillary LND + Mastectomy + Radiation,,adjuvant_radiotherapy,Adjuvant Radiotherapy,
+axillary_lnd_mastectomy_radiation,Axillary LND + Mastectomy + Radiation,,axillary_lymph_node_dissection_(alnd),Axillary Lymph Node Dissection (ALND),
+axillary_lnd_mastectomy_radiation,Axillary LND + Mastectomy + Radiation,,ipsilateral-breast-radiation,Ipsilateral Breast Radiation,
+axillary_lnd_mastectomy_radiation,Axillary LND + Mastectomy + Radiation,,mastectomy,Mastectomy,
+axillary_lnd_radiation,Axillary LND + Radiation,,axillary_lymph_node_dissection_(alnd),Axillary Lymph Node Dissection (ALND),
+axillary_lnd_radiation,Axillary LND + Radiation,,ipsilateral-breast-radiation,Ipsilateral Breast Radiation,
+bactrim,Bactrim (Co-trimoxazole),,sulfamethoxazole,Sulfamethoxazole,1836430
+bactrim,Bactrim (Co-trimoxazole),,trimethoprim,Trimethoprim,1705674
+belantamab_mafodotin,Belantamab Mafodotin (Blenrep) Monotherapy,,belantamab_mafodotin,Belantamab Mafodotin,911953
+bendamustine,Bendamustine Monotherapy,35804017,bendamustine,Bendamustine,35802918
+bendamustine_obinutuzumab,Bendamustine + Obinutuzumab,,bendamustine,Bendamustine,35802918
+bendamustine_obinutuzumab,Bendamustine + Obinutuzumab,,chemoimmunotherapy_regimen,Chemoimmunotherapy Regimen,
+bendamustine_obinutuzumab,Bendamustine + Obinutuzumab,,obinutuzumab,Obinutuzumab,35803211
+blinatumomab,Blinatumomab,,blinatumomab,Blinatumomab,35802927
+bortezomib,Bortezomib (Velcade) Monotherapy,,bortezomib_(velcade),Bortezomib (Velcade),
+bortezomib_(velcade)_maintenance,Bortezomib (Velcade) maintenance,,bortezomib_(velcade),Bortezomib (Velcade),
+br,R-Bendamustine (BR),,bendamustine,Bendamustine,35802918
+br,R-Bendamustine (BR),,chemoimmunotherapy_regimen,Chemoimmunotherapy Regimen,
+br,R-Bendamustine (BR),,rituximab,Rituximab,35803296
+brexu_cel,Brexu-cel (Tecartus) Monotherapy,,brexucabtagene_autoleucel,Brexucabtagene autoleucel,905596
+bupropion,Bupropion (Wellbutrin) - antidepressant,,bupropion,Bupropion,750982
+capecitabine,Capecitabine,1901062062,capecitabine,Capecitabine,35802939
+capivasertib,Capivasertib,,capivasertib,Capivasertib,35802856
+capivasertib_fulvestrant,Capivasertib + Fulvestrant,,capivasertib,Capivasertib,35802856
+capivasertib_fulvestrant,Capivasertib + Fulvestrant,,fulvestrant,Fulvestrant,35803089
+carbamazepine,Carbamazepine (Tegretol) - anticonvulsant,,carbamazepine,Carbamazepine,740275
+carboplatin,Carboplatin,,carboplatin,Carboplatin,35802941
+carfilzomib,Carfilzomib (Kyprolis) Monotherapy,,carfilzomib,Carfilzomib,35802942
+cataflam,Cataflam,,diclofenac_potassium,Diclofenac Potassium,
+chlorambucil_obinutuzumab,Chlorambucil + Obinutuzumab,,chemoimmunotherapy_regimen,Chemoimmunotherapy Regimen,
+chlorambucil_obinutuzumab,Chlorambucil + Obinutuzumab,,chlorambucil,Chlorambucil,35802953
+chlorambucil_obinutuzumab,Chlorambucil + Obinutuzumab,,obinutuzumab,Obinutuzumab,35803211
+chop,CHOP,35803699,cyclophosphamide,Cyclophosphamide,35802975
+chop,CHOP,35803699,doxorubicin,Doxorubicin,35803022
+chop,CHOP,35803699,prednisone,Prednisone,35803268
+chop,CHOP,35803699,vincristine,Vincristine,35803385
+chronic_opioid_therapy,Chronic Opioid Therapy,,analgesic_opioid_agent,Analgesic Opioid Agent,
+cilta_cel,Cilta-cel (Carvykti) Monotherapy,,ciltacabtagene_autoleucel,Ciltacabtagene autoleucel,1525037
+ciprofloxacin,Ciprofloxacin (Cipro) - antibiotic,,ciprofloxacin,Ciprofloxacin,35802957
+cisplatin,Cisplatin,,cisplatin,Cisplatin,35802958
+clarithromycin,Clarithromycin (Biaxin) - antibiotic,,clarithromycin,Clarithromycin,35802961
+clinical_trials,Clinical Trials,,investigational_agent,Investigational Agent,
+contraceptives,Contraceptives (Estrogen-containing medication),,estrogen,Estrogen,
+copanlisib,Copanlisib (Aliqopa) Monotherapy,,copanlisib,Copanlisib,35802968
+cy_bor_d,CyBorD/VCD,,bortezomib_(velcade),Bortezomib (Velcade),
+cy_bor_d,CyBorD/VCD,,cyclophosphamide,Cyclophosphamide,35802975
+cy_bor_d,CyBorD/VCD,,dexamethasone,Dexamethasone,35803008
+cy_bor_d,CyBorD/VCD,,vcd_triplet,VCD triplet,
+cyclophosphamide,Cyclophosphamide Monotherapy,35803690,cyclophosphamide,Cyclophosphamide,35802975
+dara_kd,Dara-Kd,911994,bortezomib_(velcade),Bortezomib (Velcade),
+dara_kd,Dara-Kd,911994,carfilzomib,Carfilzomib,35802942
+dara_kd,Dara-Kd,911994,daratumumab,Daratumumab,35802992
+dara_kd,Dara-Kd,911994,dexamethasone,Dexamethasone,35803008
+dara_pd,Dara-Pd,35806326,daratumumab,Daratumumab,35802992
+dara_pd,Dara-Pd,35806326,dexamethasone,Dexamethasone,35803008
+dara_pd,Dara-Pd,35806326,pomalidomide,Pomalidomide,35803260
+dara_rd,Dara-Rd,35806311,dara_rd_triplet,Dara-Rd triplet,
+dara_rd,Dara-Rd,35806311,daratumumab,Daratumumab,35802992
+dara_rd,Dara-Rd,35806311,dexamethasone,Dexamethasone,35803008
+dara_rd,Dara-Rd,35806311,lenalidomide,Lenalidomide (Revlimid),
+dara_vmp,Dara-VMP,35806282,bortezomib_(velcade),Bortezomib (Velcade),
+dara_vmp,Dara-VMP,35806282,chemoimmunotherapy_regimen,Chemoimmunotherapy Regimen,
+dara_vmp,Dara-VMP,35806282,dara_vmp quadruplet,Dara-VMP quadruplet,
+dara_vmp,Dara-VMP,35806282,daratumumab,Daratumumab,35802992
+dara_vmp,Dara-VMP,35806282,melphalan,Melphalan,35803175
+dara_vmp,Dara-VMP,35806282,prednisone,Prednisone,35803268
+dara_vrd,Dara-VRd,,bortezomib_(velcade),Bortezomib (Velcade),
+dara_vrd,Dara-VRd,,dara_vrd_quadruplet,Dara-VRd quadruplet,
+dara_vrd,Dara-VRd,,daratumumab,Daratumumab,35802992
+dara_vrd,Dara-VRd,,dexamethasone,Dexamethasone,35803008
+dara_vrd,Dara-VRd,,lenalidomide,Lenalidomide (Revlimid),
+daratumumab,Daratumumab (Darzalex/Darzalex Faspro) Monotherapy,,daratumumab,Daratumumab,35802992
+dcybord,DCyBorD,,bortezomib_(velcade),Bortezomib (Velcade),
+dcybord,DCyBorD,,chemoimmunotherapy_regimen,Chemoimmunotherapy Regimen,
+dcybord,DCyBorD,,cyclophosphamide,Cyclophosphamide,35802975
+dcybord,DCyBorD,,daratumumab,Daratumumab,35802992
+dcybord,DCyBorD,,dexamethasone,Dexamethasone,35803008
+denosumab,Denosumab (Xgeva),,denosumab,Denosumab,35803006
+docetaxel,Docetaxel,1957313443,docetaxel,Docetaxel,35803016
+duvelisib,Duvelisib (Copiktra) Monotherapy,,duvelisib,Duvelisib,35803027
+elacestrant,Elacestrant,,elacestrant,Elacestrant,1524876
+elotuzumab,Elotuzumab (Empliciti) Monotherapy,,elotuzumab,Elotuzumab,35803031
+elranatamab_elrexfio,Elranatamab (Elrexfio),,elranatamab,Elranatamab,37557431
+entecavir,Entecavir,,entecavir,Entecavir,1711246
+entrectinib,Entrectinib,,entrectinib,Entrectinib,35803040
+epd,EPd (EloPd),,dexamethasone,Dexamethasone,35803008
+epd,EPd (EloPd),,elotuzumab,Elotuzumab,35803031
+epd,EPd (EloPd),,pomalidomide,Pomalidomide,35803260
+eribulin,Eribulin,1926925205,eribulin,Eribulin,35803049
+erythromycin,Erythromycin - antibiotic,,erythromycin,Erythromycin,37557308
+esa,Erythropoiesis-Stimulating Agent (ESA),,growth_factor,Growth Factor,
+exemestane,Exemestane,,exemestane,Exemestane,35803055
+exemestane_everolimus,Exemestane + Everolimus,,everolimus,Everolimus,35803054
+exemestane_everolimus,Exemestane + Everolimus,,exemestane,Exemestane,35803055
+exemestane_maintenance,Exemestane Maintenance,,exemestane,Exemestane,35803055
+fc,FC,,cyclophosphamide,Cyclophosphamide,35802975
+fc,FC,,fludarabine,Fludarabine,35803076
+fcr,FCR / R-FC,,chemoimmunotherapy_regimen,Chemoimmunotherapy Regimen,
+fcr,FCR / R-FC,,cyclophosphamide,Cyclophosphamide,35802975
+fcr,FCR / R-FC,,fludarabine,Fludarabine,35803076
+fcr,FCR / R-FC,,rituximab,Rituximab,35803296
+fluconazole,Fluconazole (Diflucan) - antifungal,,fluconazole,Fluconazole,35803075
+fludarabine_monotherapy,Fludarabine (Monotherapy),,fludarabine,Fludarabine,35803076
+fluoxetine,Fluoxetine (Prozac) - antidepressant,,fluoxetine,Fluoxetine,755695
+fluvoxamine,Fluvoxamine (Luvox) - antidepressant,,fluvoxamine,Fluvoxamine,751412
+fulvestrant,Fulvestrant (Faslodex),,fulvestrant,Fulvestrant,35803089
+g_csf,Granulocyte-Colony Stimulating factor (G-CSF),,growth_factor,Growth Factor,
+gemcitabine,Gemcitabine,,gemcitabine,Gemcitabine,35803095
+genomic_testing,Genomic Testing,,genomic_testing,Genomic Testing,
+glofitamab,Glofitamab,,glofitamab,Glofitamab,37557120
+gm_csf,Granulocyte–Macrophage Colony-Stimulating Factor (GM-CSF),,growth_factor,Growth Factor,
+grapefruit_juice,Grapefruit juice,,grapefruit-juice,Grapefruit juice,43533099
+heparin_anticoagulant,heparin - anticoagulant,,heparin,Heparin,1367571
+herbal_supplements,"Herbal supplements (e.g., echinacea, ginseng, ginkgo biloba, high-dose turmeric)",,herbal_supplement,Herbal Supplement,
+high_risk-smoldering_mm_treatment,High-Risk Smoldering MM Treatment,,high_risk-smoldering_mm_treatment,High-Risk Smoldering MM Treatment,
+hiv_antiretroviral_therapy,HIV antiretroviral therapy,,hiv_antiretroviral,HIV Antiretroviral,
+hrt,HRT (Estrogen-containing medication),,estrogen,Estrogen,
+ibritumomab_tiuxetan_radioimmunotherapy,Ibritumomab tiuxetan radioimmunotherapy,,ibritumomab_tiuxetan,Ibritumomab tiuxetan,35803112
+ibrutinib_imbruvica_monotherapy,Ibrutinib (Imbruvica) Monotherapy,,ibrutinib,Ibrutinib,35803113
+ibrutinib_obinutuzumab,Ibrutinib+Obinutuzumab,,ibrutinib,Ibrutinib,35803113
+ibrutinib_obinutuzumab,Ibrutinib+Obinutuzumab,,obinutuzumab,Obinutuzumab,35803211
+ibrutinib_rituximab,Ibrutinib+Rituximab,,ibrutinib,Ibrutinib,35803113
+ibrutinib_rituximab,Ibrutinib+Rituximab,,rituximab,Rituximab,35803296
+ide_cel,Ide-cel (Abecma) Monotherapy,,idecabtagene_vicleucel,Idecabtagene vicleucel,35101749
+idelalisib,Idelalisib (Zydelig) Monotherapy,,idelalisib,Idelalisib,35803117
+ifrt_isrt,Involved-Field/Site-Radiotherapy (IFRT/ISRT),,involved_field_radiotherapy_(ifrt),Involved Field Radiotherapy (IFRT),
+immunosuppressant,Immunosuppressant,,immunosuppressant,Immunosuppressant,
+induction_therapy,Induction Therapy,,induction_therapy,Induction Therapy,
+inhaled_corticosteroids,Inhaled corticosteroids,,inhaled_corticosteroid,Inhaled corticosteroid,
+intranasal_corticosteroids,Intranasal corticosteroids,,intranasal_corticosteroid,Intranasal corticosteroid,
+isa_krd,Isa-KRd,,carfilzomib,Carfilzomib,35802942
+isa_krd,Isa-KRd,,dexamethasone,Dexamethasone,35803008
+isa_krd,Isa-KRd,,isa_krd quadruplet,Isa-KRd quadruplet,
+isa_krd,Isa-KRd,,isatuximab,Isatuximab,35803134
+isa_krd,Isa-KRd,,lenalidomide,Lenalidomide (Revlimid),
+isa_pd,Isa-Pd,911941,dexamethasone,Dexamethasone,35803008
+isa_pd,Isa-Pd,911941,isatuximab,Isatuximab,35803134
+isa_pd,Isa-Pd,911941,pomalidomide,Pomalidomide,35803260
+isa_vrd,Isa-VRd,,bortezomib_(velcade),Bortezomib (Velcade),
+isa_vrd,Isa-VRd,,dexamethasone,Dexamethasone,35803008
+isa_vrd,Isa-VRd,,isa_vrd_quadruplet,Isa_VRd quadruplet,
+isa_vrd,Isa-VRd,,isatuximab,Isatuximab,35803134
+isa_vrd,Isa-VRd,,lenalidomide,Lenalidomide (Revlimid),
+isatuximab,Isatuximab (Sarclisa) Monotherapy,,isatuximab,Isatuximab,35803134
+itraconazole,Itraconazole (Sporanox) - antifungal,,itraconazole,Itraconazole,35803136
+ivig,IVIG (intravenous immunoglobulin),,ivig,IVIG (intravenous immunoglobulin),
+ixazomib_maintenance,Ixazomib (maintenance),,ixazomib,Ixazomib,35803139
+kd,Kd,,carfilzomib,Carfilzomib,35802942
+kd,Kd,,dexamethasone,Dexamethasone,35803008
+kd,Kd,,kd_doublet,Kd doublet,
+ketoconazole,Ketoconazole - antifungal,,ketoconazole,Ketoconazole,35803140
+kpd,KPd,35806324,carfilzomib,Carfilzomib,35802942
+kpd,KPd,35806324,dexamethasone,Dexamethasone,35803008
+kpd,KPd,35806324,pomalidomide,Pomalidomide,35803260
+krd,KRd,35806284,carfilzomib,Carfilzomib,35802942
+krd,KRd,35806284,dexamethasone,Dexamethasone,35803008
+krd,KRd,35806284,krd_triplet,KRd triplet,
+krd,KRd,35806284,lenalidomide,Lenalidomide (Revlimid),
+lamivudine,Lamivudine,,lamivudine,Lamivudine,35803143
+lapatinib_(tykerb),Lapatinib (Tykerb),,lapatinib,Lapatinib,35803146
+lapatinib_(tykerb)_maintenance,Lapatinib (Tykerb) Maintenance,,lapatinib,Lapatinib,35803146
+larotrectinib,Larotrectinib,,larotrectinib,Larotrectinib,35803148
+ldr,Low-Dose Radiotherapy,,low_dose_radiotherapy,Low Dose Radiotherapy,
+lenalidomide,Lenalidomide (Revlimid) Monotherapy,,lenalidomide,Lenalidomide (Revlimid),
+lenalidomide_maintenance,Lenalidomide (Revlimid) maintenance,,lenalidomide,Lenalidomide (Revlimid),
+letrozole,Letrozole,1968809226,letrozole,Letrozole,35803154
+letrozole_maintenance,Letrozole Maintenance,,letrozole,Letrozole,35803154
+lhrh_gnrh_agonists,"LHRH/GnRH agonists (e.g., goserelin, leuprolide, triptorelin, buserelin)",,lhrh_gnrh_agonist,LHRH/GnRH agonist,
+liposomal_doxorubicin,Liposomal Doxorubicin,,doxorubicin,Doxorubicin,35803022
+lisocabtagene_maraleucel_(breyanzi),lisocabtagene maraleucel (Breyanzi),,lisocabtagene_maraleucel,lisocabtagene maraleucel,912085
+local_palliative_radiotherapy,Local palliative radiotherapy,,palliative_radiotherapy,Palliative Radiotherapy,
+lr,Lenalidomide (Revlimid) + Rituximab (R2),,lenalidomide,Lenalidomide (Revlimid),
+lr,Lenalidomide (Revlimid) + Rituximab (R2),,rituximab,Rituximab,35803296
+lumpectomy,Lumpectomy,,lumpectomy,Lumpectomy,
+lumpectomy_radiation,Lumpectomy + Radiation,,adjuvant_radiotherapy,Adjuvant Radiotherapy,
+lumpectomy_radiation,Lumpectomy + Radiation,,ipsilateral-breast-radiation,Ipsilateral Breast Radiation,
+lumpectomy_radiation,Lumpectomy + Radiation,,lumpectomy,Lumpectomy,
+margetuximab,Margetuximab,,margetuximab,Margetuximab,912179
+mastectomy,Mastectomy,,mastectomy,Mastectomy,
+mastectomy_radiation,Mastectomy + Radiation,,adjuvant_radiotherapy,Adjuvant Radiotherapy,
+mastectomy_radiation,Mastectomy + Radiation,,ipsilateral-breast-radiation,Ipsilateral Breast Radiation,
+mastectomy_radiation,Mastectomy + Radiation,,mastectomy,Mastectomy,
+megestrol_acetate,Megestrol acetate,,megestrol_acetate,Megestrol acetate,
+melphalan,Melphalan Monotherapy,35804011,cyclophosphamide,Cyclophosphamide,35802975
+melphalan,Melphalan Monotherapy,35804011,melphalan,Melphalan,35803175
+mineralocorticoids,"mineralocorticoids (e.g., fludrocortisone)",,mineralocorticoid,Mineralocorticoid,
+mosunetuzumab,Mosunetuzumab,,mosunetuzumab,Mosunetuzumab,37557145
+mp,MP,,melphalan,Melphalan,35803175
+mp,MP,,prednisone,Prednisone,35803268
+mpt,MPT,35806286,melphalan,Melphalan,35803175
+mpt,MPT,35806286,prednisone,Prednisone,35803268
+mpt,MPT,35806286,thalidomide,Thalidomide,35803338
+neoadjuvant_chemotherapy,Neoadjuvant Chemotherapy,,neoadjuvant_chemotherapy,Neoadjuvant Chemotherapy,
+neratinib_(nerlynx),Neratinib (Nerlynx),,neratinib,Neratinib,35803200
+neratinib_(nerlynx)_maintenance,Neratinib (Nerlynx) Maintenance,,neratinib,Neratinib,35803200
+noadjuvant_hormonal_therapy,Neoadjuvant Hormonal Therapy,,neoadjuvant_hormonal_therapy,Neoadjuvant Hormonal Therapy,
+obinutuzumab,Obinutuzumab (Gazyva) Monotherapy,,obinutuzumab,Obinutuzumab,35803211
+obinutuzumab_methylprednisolone,Obinutuzumab + Methylprednisolone,,methylprednisolone,Methylprednisolone,35803181
+obinutuzumab_methylprednisolone,Obinutuzumab + Methylprednisolone,,obinutuzumab,Obinutuzumab,35803211
+olaparib,Olaparib,,olaparib,Olaparib,35803216
+orelabrutinib,Orelabrutinib Monotherapy,,orelabrutinib_ICP022,Orelabrutinib (ICP-022),
+other_chemotherapy,Other Chemotherapy,,other_chemotherapy,Other Chemotherapy,
+other_lbr,Other Lenalidomide-Based Regimens,,lenalidomide,Lenalidomide (Revlimid),
+other_obr,Other Obinutuzumab-Based Regimens,,obinutuzumab,Obinutuzumab,35803211
+paclitaxel,Paclitaxel,,paclitaxel,Paclitaxel,35803229
+palbociclib,Palbociclib (Ibrance),,palbociclib,Palbociclib,35803231
+palliative_splenectomy,Palliative Splenectomy,,splenectomy,Splenectomy,
+pamidronate,Pamidronate,,pamidronate,Pamidronate,35803233
+pan_bor_dex,Pan-Bor-Dex,,bortezomib_(velcade),Bortezomib (Velcade),
+pan_bor_dex,Pan-Bor-Dex,,daratumumab,Daratumumab,35802992
+pan_bor_dex,Pan-Bor-Dex,,panobinostat,Panobinostat (Farydak),
+paroxetine,Paroxetine (Paxil) - antidepressant,,paroxetine,Paroxetine,722031
+pd,Pd,35806066,dexamethasone,Dexamethasone,35803008
+pd,Pd,35806066,pomalidomide,Pomalidomide,35803260
+pembrolizumab_chemotherapy,Pembrolizumab + Chemotherapy,,chemoimmunotherapy_regimen,Chemoimmunotherapy Regimen,
+pembrolizumab_chemotherapy,Pembrolizumab + Chemotherapy,,pembrolizumab,Pembrolizumab,35803244
+pertuzumab_(perjeta),Pertuzumab (Perjeta),,pertuzumab,Pertuzumab,35803250
+pertuzumab_(perjeta)_maintenance,Pertuzumab (Perjeta) Maintenance,,pertuzumab,Pertuzumab,35803250
+phenobarbital,Phenobarbital - anticonvulsant,,phenobarbital,Phenobarbital,734275
+phenytoin,Phenytoin (Dilantin) - anticonvulsant,,phenytoin,Phenytoin,35803251
+pirtobrutinib_jaypirca),Pirtobrutinib (Jaypirca),,pirtobrutinib,Pirtobrutinib,905743
+plasmapheresis,Plasmapheresis,,plasmapheresis,Plasmapheresis,
+polatuzumab_vedotin,Polatuzumab Vedotin (Polivy),,polatuzumab_vedotin,Polatuzumab Vedotin,35100416
+pomalidomide,Pomalidomide (Pomalyst) Monotherapy,,pomalidomide,Pomalidomide,35803260
+posaconazole,Posaconazole (Noxafil) - antifungal,,posaconazole,Posaconazole,1704139
+pvd,PVd,35806332,bortezomib_(velcade),Bortezomib (Velcade),
+pvd,PVd,35806332,dexamethasone,Dexamethasone,35803008
+pvd,PVd,35806332,pomalidomide,Pomalidomide,35803260
+r_chop,R-CHOP,35805028,chemoimmunotherapy_regimen,Chemoimmunotherapy Regimen,
+r_chop,R-CHOP,35805028,cyclophosphamide,Cyclophosphamide,35802975
+r_chop,R-CHOP,35805028,doxorubicin,Doxorubicin,35803022
+r_chop,R-CHOP,35805028,prednisone,Prednisone,35803268
+r_chop,R-CHOP,35805028,rituximab,Rituximab,35803296
+r_chop,R-CHOP,35805028,vincristine,Vincristine,35803385
+r_chop_r_dhap,R-CHOP+R-DHAP,,chemoimmunotherapy_regimen,Chemoimmunotherapy Regimen,
+r_chop_r_dhap,R-CHOP+R-DHAP,,cisplatin,Cisplatin,35802958
+r_chop_r_dhap,R-CHOP+R-DHAP,,cyclophosphamide,Cyclophosphamide,35802975
+r_chop_r_dhap,R-CHOP+R-DHAP,,cytarabine,Cytarabine,35802979
+r_chop_r_dhap,R-CHOP+R-DHAP,,dexamethasone,Dexamethasone,35803008
+r_chop_r_dhap,R-CHOP+R-DHAP,,doxorubicin,Doxorubicin,35803022
+r_chop_r_dhap,R-CHOP+R-DHAP,,prednisone,Prednisone,35803268
+r_chop_r_dhap,R-CHOP+R-DHAP,,rituximab,Rituximab,35803296
+r_chop_r_dhap,R-CHOP+R-DHAP,,vincristine,Vincristine,35803385
+r_cvp,R-CVP,35805630,chemoimmunotherapy_regimen,Chemoimmunotherapy Regimen,
+r_cvp,R-CVP,35805630,cyclophosphamide,Cyclophosphamide,35802975
+r_cvp,R-CVP,35805630,prednisone,Prednisone,35803268
+r_cvp,R-CVP,35805630,rituximab,Rituximab,35803296
+r_cvp,R-CVP,35805630,vincristine,Vincristine,35803385
+r_dhap,R-DHAP,35805058,cisplatin,Cisplatin,35802958
+r_dhap,R-DHAP,35805058,cytarabine,Cytarabine,35802979
+r_dhap,R-DHAP,35805058,dexamethasone,Dexamethasone,35803008
+r_dhap,R-DHAP,35805058,induction_therapy,Induction Therapy,
+r_dhap,R-DHAP,35805058,rituximab,Rituximab,35803296
+r_hcvad_r_ma,R-HCVAD/R-MA,,cytarabine,Cytarabine,35802979
+r_hcvad_r_ma,R-HCVAD/R-MA,,dexamethasone,Dexamethasone,35803008
+r_hcvad_r_ma,R-HCVAD/R-MA,,doxorubicin,Doxorubicin,35803022
+r_hcvad_r_ma,R-HCVAD/R-MA,,hyperfractionated_cyclophosphamide,Hyperfractionated Cyclophosphamide,
+r_hcvad_r_ma,R-HCVAD/R-MA,,methotrexate,Methotrexate,35803179
+r_hcvad_r_ma,R-HCVAD/R-MA,,rituximab,Rituximab,35803296
+r_hcvad_r_ma,R-HCVAD/R-MA,,vincristine,Vincristine,35803385
+r_idelalisib,R-Idelalisib,,idelalisib,Idelalisib,35803117
+r_idelalisib,R-Idelalisib,,rituximab,Rituximab,35803296
+rd,Rd (Lenalidomide (Revlimid) + Dexamethasone),,dexamethasone,Dexamethasone,35803008
+rd,Rd (Lenalidomide (Revlimid) + Dexamethasone),,lenalidomide,Lenalidomide (Revlimid),
+rd,Rd (Lenalidomide (Revlimid) + Dexamethasone),,rd_doublet,Rd doublet,
+ribociclib,Ribociclib (Kisqali),,ribociclib,Ribociclib,35803291
+rifabutin,Rifabutin (Mycobutin) - antibiotic,,rifabutin,Rifabutin,1777417
+rifampin,"Rifampin (Rifadin, Rimactane) - antibiotic",,rifampin,Rifampin,1763204
+rituximab,Rituximab (Rituxan) Monotherapy,,rituximab,Rituximab,35803296
+rituximab_maintenance_therapy,Rituximab maintenance therapy,,rituximab,Rituximab,35803296
+rituximab_methylprednisolone,Rituximab + Methylprednisolone,,methylprednisolone,Methylprednisolone,35803181
+rituximab_methylprednisolone,Rituximab + Methylprednisolone,,rituximab,Rituximab,35803296
+sacituzumab_govitecan,Sacituzumab Govitecan,1886661881,sacituzumab_govitecan,Sacituzumab Govitecan,35803306
+sd,Sd,,dexamethasone,Dexamethasone,35803008
+sd,Sd,,selinexor,Selinexor,35803311
+selinexor,Selinexor (Xpovio),,selinexor,Selinexor,35803311
+sentinel_lymph_node_biopsy,Sentinel Lymph Node Biopsy (SLNB),,sentinel_lymph_node-biopsy_(slnb),Sentinel Lymph Node Biopsy (SLNB),
+sertraline,Sertraline (Zoloft) - antidepressant,,sertraline,Sertraline,739138
+st_john_s_wort,St. John's Wort,,st_johns_wort,St. John’s Wort,
+svd,SVd,905768,bortezomib_(velcade),Bortezomib (Velcade),
+svd,SVd,905768,dexamethasone,Dexamethasone,35803008
+svd,SVd,905768,selinexor,Selinexor,35803311
+systemic_corticosteroids_gt_10_mg_day,"systemic corticosteroids (e.g., prednisone) > 10 mg/day",,systemic_corticosteroid,Systemic Corticosteroid,
+systemic_corticosteroids_gt_20_mg_day,"systemic corticosteroids (e.g., prednisone) > 20 mg/day",,systemic_corticosteroid,Systemic Corticosteroid,
+systemic_corticosteroids_gt_5_mg_day,"systemic corticosteroids (e.g., prednisone) > 5 mg/day",,systemic_corticosteroid,Systemic Corticosteroid,
+systemic_corticosteroids_lt_5_mg_day,"systemic corticosteroids (e.g., prednisone) =< 5 mg/day",,systemic_corticosteroid,Systemic Corticosteroid,
+talazoparib,Talazoparib,,talazoparib,Talazoparib,35803326
+talquetamab,Talquetamab (Talvey),,talquetamab,Talquetamab,37557177
+tamoxifen,Tamoxifen,1906727248,tamoxifen,Tamoxifen,35803329
+tamoxifen_maintenance,Tamoxifen Maintenance,,tamoxifen,Tamoxifen,35803329
+tazemetostat,Tazemetostat (Tazverik),,tazemetostat,Tazemetostat,42542441
+teclistamab,Teclistamab (Tecvayli) Monotherapy,,teclistamab,Teclistamab,905786
+tenofovir,Tenofovir,,tenofovir,Tenofovir,19011093
+thalidomide_monotherapy,Thalidomide Monotherapy,35806271,thalidomide,Thalidomide,35803338
+tisagenlecleucel,Tisagenlecleucel (Kymriah) Monotherapy,,tisagenlecleucel,Tisagenlecleucel,35803347
+topical_corticosteroids,Topical corticosteroids,,topical_corticosteroid,Topical corticosteroid,
+topiramate,Topiramate (Topamax) - anticonvulsant,,topiramate,Topiramate,742267
+trastuzumab _(herceptin)_maintenance,Trastuzumab (Herceptin) Maintenance,,trastuzumab,Trastuzumab,35803361
+trastuzumab_(herceptin),Trastuzumab (Herceptin),,trastuzumab,Trastuzumab,35803361
+trastuzumab_deruxtecan_(t_dxd_enhertu),Trastuzumab deruxtecan (T-DXd / Enhertu),,trastuzumab_deruxtecan,Trastuzumab Deruxtecan,42542260
+trastuzumab_deruxtecan_t_dxd_enhertu_maintenance,Trastuzumab deruxtecan (T-DXd / Enhertu) Maintenance,,trastuzumab_deruxtecan,Trastuzumab Deruxtecan,42542260
+trastuzumab_emtansine_(t_dm1_kadcyla)_maintenance,Trastuzumab emtansine (T-DM1 / Kadcyla) Maintenance,,trastuzumab_emtansine,Trastuzumab Emtansine,35802866
+trastuzumab_emtansine__(t_dm1_kadcyla),Trastuzumab emtansine (T-DM1 / Kadcyla),,trastuzumab_emtansine,Trastuzumab Emtansine,35802866
+tucatinib_trastuzumab_capecitabine,Tucatinib + Trastuzumab + Capecitabine,,capecitabine,Capecitabine,35802939
+tucatinib_trastuzumab_capecitabine,Tucatinib + Trastuzumab + Capecitabine,,trastuzumab,Trastuzumab,35803361
+tucatinib_trastuzumab_capecitabine,Tucatinib + Trastuzumab + Capecitabine,,tucatinib,Tucatinib,911976
+u2,Umbralisib + Ublituximab (U2),,ublituximab,Ublituximab,35803369
+umbralisib_monotherapy,Umbralisib (Ukoniq) Monotherapy,,umbralisib,Umbralisib,912199
+valacyclovir,Valacyclovir,,valacyclovir,Valacyclovir,35803374
+venetoclax,Venetoclax Monotherapy (Venclexta),,venetoclax,Venetoclax,35803383
+venetoclax_ibrutinib,Venetoclax + Ibrutinib,,ibrutinib,Ibrutinib,35803113
+venetoclax_ibrutinib,Venetoclax + Ibrutinib,,venetoclax,Venetoclax,35803383
+venetoclax_obinutuzumab,Venetoclax + Obinutuzumab,,obinutuzumab,Obinutuzumab,35803211
+venetoclax_obinutuzumab,Venetoclax + Obinutuzumab,,venetoclax,Venetoclax,35803383
+venetoclax_rituximab,Venetoclax + Rituximab,,rituximab,Rituximab,35803296
+venetoclax_rituximab,Venetoclax + Rituximab,,venetoclax,Venetoclax,35803383
+vinorelbine,Vinorelbine,,vinorelbine,Vinorelbine,35803389
+vmp,VMP,35806258,bortezomib_(velcade),Bortezomib (Velcade),
+vmp,VMP,35806258,melphalan,Melphalan,35803175
+vmp,VMP,35806258,prednisone,Prednisone,35803268
+vmp,VMP,35806258,vmp_triplet,VMP triplet,
+voltaren,Voltaren,,diclofenac_sodium,Diclofenac Sodium,
+voriconazole,Voriconazole (Vfend) - antifungal,,voriconazole,Voriconazole,35803393
+vr_cap,VR-CAP,35806082,bortezomib_(velcade),Bortezomib (Velcade),
+vr_cap,VR-CAP,35806082,cyclophosphamide,Cyclophosphamide,35802975
+vr_cap,VR-CAP,35806082,doxorubicin,Doxorubicin,35803022
+vr_cap,VR-CAP,35806082,prednisone,Prednisone,35803268
+vr_cap,VR-CAP,35806082,rituximab,Rituximab,35803296
+vrd,VRd,,bortezomib_(velcade),Bortezomib (Velcade),
+vrd,VRd,,dexamethasone,Dexamethasone,35803008
+vrd,VRd,,lenalidomide,Lenalidomide (Revlimid),
+vrd,VRd,,vrd_triplet,VRd triplet,
+vrd_lite,VRd-lite,,bortezomib_(velcade),Bortezomib (Velcade),
+vrd_lite,VRd-lite,,dexamethasone,Dexamethasone,35803008
+vrd_lite,VRd-lite,,lenalidomide,Lenalidomide (Revlimid),
+vrd_lite,VRd-lite,,vrd_lite_triplet,VRd-lite triplet,
+vtd,VTd,35806259,bortezomib_(velcade),Bortezomib (Velcade),
+vtd,VTd,35806259,dexamethasone,Dexamethasone,35803008
+vtd,VTd,35806259,thalidomide,Thalidomide,35803338
+vtd,VTd,35806259,vtd_triplet,VTd triplet,
+warfarin_anticoagulant,Warfarin - anticoagulant,,warfarin,Warfarin,35803396
+zanubrutinib+rituximab,Zanubrutinib+Rituximab,,rituximab,Rituximab,35803296
+zanubrutinib+rituximab,Zanubrutinib+Rituximab,,zanubrutinib,Zanubrutinib,42542411
+zanubrutinib_brukinsa_monotherapy,Zanubrutinib (Brukinsa) Monotherapy,,zanubrutinib,Zanubrutinib,42542411
+zanubrutinib_obinutuzumab,Zanubrutinib+Obinutuzumab,,obinutuzumab,Obinutuzumab,35803211
+zanubrutinib_obinutuzumab,Zanubrutinib+Obinutuzumab,,zanubrutinib,Zanubrutinib,42542411
+zoledronic_acid,Zoledronic Acid,,zoledronic_acid,Zoledronic Acid,35803399
