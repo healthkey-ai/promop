@@ -713,6 +713,70 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
     )
 
 
+def _get_custom_patient_field_data(snapshot: OmopSnapshot) -> dict[str, object]:
+    """Project approved editable custom mappings from the latest OMOP facts.
+
+    A selected concept is sufficient for imported data; the generated source key
+    makes user-authored corrections unambiguous when concepts are shared.
+    """
+    from omop_core.models import CustomPatientField
+
+    values: dict[str, object] = {}
+    fields = CustomPatientField.objects.filter(
+        mode='editable', mapping__status='approved',
+    ).select_related('mapping__concept')
+    for field in fields:
+        mapping = field.mapping
+        table = mapping.omop_table.strip().lower()
+        source = mapping.source_value
+        concept_id = mapping.concept_id
+        rows = []
+        if table == 'measurement':
+            rows = [row for row in snapshot.measurements if (
+                (source and row.measurement_source_value == source)
+                or (concept_id and row.measurement_concept_id == concept_id)
+            )]
+        elif table == 'observation':
+            rows = [row for row in snapshot.observations if (
+                (source and row.observation_source_value == source)
+                or (concept_id and row.observation_concept_id == concept_id)
+            )]
+        elif table == 'conditionoccurrence':
+            rows = [row for row in snapshot.conditions if row.condition_concept_id == concept_id]
+        elif table == 'drugexposure':
+            rows = [row for row in snapshot.drug_exposures if row.drug_concept_id == concept_id]
+        elif table == 'procedureoccurrence':
+            rows = [row for row in snapshot.procedures if row.procedure_concept_id == concept_id]
+        if not rows:
+            continue
+        row = rows[0]
+        if field.field_type == 'number':
+            value = getattr(row, 'value_as_number', None)
+        elif field.field_type == 'boolean':
+            value = True
+        elif field.field_type == 'date':
+            value = (
+                getattr(row, 'measurement_date', None)
+                or getattr(row, 'observation_date', None)
+                or getattr(row, 'condition_start_date', None)
+                or getattr(row, 'drug_exposure_start_date', None)
+                or getattr(row, 'procedure_date', None)
+            )
+        else:
+            value = (
+                getattr(row, 'value_as_string', None)
+                or getattr(getattr(row, 'value_as_concept', None), 'concept_name', None)
+                or getattr(getattr(row, 'measurement_concept', None), 'concept_name', None)
+                or getattr(getattr(row, 'observation_concept', None), 'concept_name', None)
+                or getattr(getattr(row, 'condition_concept', None), 'concept_name', None)
+                or getattr(getattr(row, 'drug_concept', None), 'concept_name', None)
+                or getattr(getattr(row, 'procedure_concept', None), 'concept_name', None)
+            )
+        if value is not None:
+            values[field.field_name] = value
+    return values
+
+
 def refresh_patient_record(person: Person) -> PatientRecord:
     """Derive and upsert PatientRecord from OMOP tables for a given person.
 
@@ -765,6 +829,8 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             for field, value in section_fn(person, snapshot).items():
                 setattr(patient_info, field, value)
 
+        patient_info.custom_fields = _get_custom_patient_field_data(snapshot)
+
         _compute_derived_fields(patient_info)
 
         patient_info.derivation_version = DERIVATION_VERSION
@@ -776,7 +842,13 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         # the final derivation authority for its target field.
         formula_fields = _apply_active_field_formulas(patient_info)
         if formula_fields:
-            updates = {field: getattr(patient_info, field) for field in formula_fields}
+            concrete_names = {field.name for field in PatientRecord._meta.concrete_fields}
+            updates = {
+                field: getattr(patient_info, field) for field in formula_fields
+                if field in concrete_names
+            }
+            if any(field not in concrete_names for field in formula_fields):
+                updates['custom_fields'] = patient_info.custom_fields
             updates['updated_at'] = timezone.now()
             PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
         return patient_info
@@ -3601,19 +3673,25 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
 
 def _formula_values(patient_info: PatientRecord) -> dict[str, object]:
     """Return scalar PatientRecord values that a validated formula may read."""
-    return {
+    values = {
         field.name: getattr(patient_info, field.name)
         for field in PatientRecord._meta.get_fields()
         if getattr(field, 'concrete', False) and not field.is_relation
     }
+    values.update(patient_info.custom_fields or {})
+    return values
 
 
 def _apply_active_field_formulas(patient_info: PatientRecord) -> set[str]:
     """Apply admin-approved formulas after OMOP and built-in derivations."""
-    from omop_core.models import FieldFormula
+    from omop_core.models import CustomPatientField, FieldFormula
     from omop_core.services.formula_evaluator import evaluate_formula
 
     values = _formula_values(patient_info)
+    custom_fields = dict(patient_info.custom_fields or {})
+    custom_field_names = set(CustomPatientField.objects.filter(
+        mode='computed', mapping__status='approved',
+    ).values_list('field_name', flat=True))
     changed_fields = set()
     for field_formula in FieldFormula.objects.filter(is_active=True).order_by('field_name'):
         try:
@@ -3623,9 +3701,14 @@ def _apply_active_field_formulas(patient_info: PatientRecord) -> set[str]:
             # abort clinical refreshes.
             logger.warning('Skipping invalid formula for %s', field_formula.field_name)
             continue
-        setattr(patient_info, field_formula.field_name, value)
+        if field_formula.field_name in custom_field_names:
+            custom_fields[field_formula.field_name] = value
+        else:
+            setattr(patient_info, field_formula.field_name, value)
         values[field_formula.field_name] = value
         changed_fields.add(field_formula.field_name)
+    if custom_fields != (patient_info.custom_fields or {}):
+        patient_info.custom_fields = custom_fields
     return changed_fields
 
 
@@ -3634,10 +3717,17 @@ def recompute_formula_field(field_formula) -> int:
     if not field_formula.is_active:
         return 0
     updated = 0
+    from omop_core.models import CustomPatientField
+    custom_field_names = set(CustomPatientField.objects.values_list('field_name', flat=True))
     for patient_info in PatientRecord.objects.iterator(chunk_size=500):
         changed_fields = _apply_active_field_formulas(patient_info)
         if changed_fields:
-            updates = {field: getattr(patient_info, field) for field in changed_fields}
+            updates = {
+                field: getattr(patient_info, field) for field in changed_fields
+                if field in {model_field.name for model_field in PatientRecord._meta.concrete_fields}
+            }
+            if changed_fields & custom_field_names:
+                updates['custom_fields'] = patient_info.custom_fields
             updates['updated_at'] = timezone.now()
             PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
             updated += 1

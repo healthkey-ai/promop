@@ -1126,6 +1126,7 @@ class CustomPatientFieldSerializer(serializers.ModelSerializer):
         model = CustomPatientField
         fields = [
             'id', 'field_name', 'display_name', 'tab', 'field_type',
+            'mode',
             'mapping_status', 'concept_id', 'concept_name', 'vocabulary_id',
             'concept_code', 'omop_table', 'unit', 'created_at', 'updated_at',
         ]
@@ -1139,10 +1140,12 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
     display_name = serializers.CharField(max_length=200)
     tab = serializers.ChoiceField(choices=CustomPatientField.TAB_CHOICES)
     field_type = serializers.ChoiceField(choices=CustomPatientField.FIELD_TYPE_CHOICES)
+    mode = serializers.ChoiceField(choices=CustomPatientField.MODE_CHOICES, default='editable')
     concept = serializers.PrimaryKeyRelatedField(queryset=Concept.objects.all())
     omop_table = serializers.CharField(max_length=30)
     unit = serializers.CharField(max_length=30, required=False, allow_blank=True, default='')
     notes = serializers.CharField(required=False, allow_blank=True, default='')
+    formula = serializers.CharField(required=False, allow_blank=False)
 
     def validate_confirm_patient_record(self, value):
         if not value:
@@ -1173,12 +1176,28 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError('Select the OMOP table where this fact is stored.')
         return value
 
+    def validate(self, attrs):
+        if attrs['mode'] == 'computed':
+            formula = attrs.get('formula', '').strip()
+            if not formula:
+                raise serializers.ValidationError({'formula': 'Computed fields require a formula.'})
+            from omop_core.services.formula_evaluator import validate_formula
+            result = validate_formula(formula)
+            if not result.valid:
+                raise serializers.ValidationError({'formula': result.errors})
+            attrs['formula'] = formula
+        else:
+            attrs.pop('formula', None)
+        return attrs
+
     def create(self, validated_data):
         from django.db import transaction
 
         request = self.context['request']
         concept = validated_data.pop('concept')
         validated_data.pop('confirm_patient_record')
+        formula = validated_data.pop('formula', None)
+        field_formula = None
         with transaction.atomic():
             mapping = FieldConceptMapping.objects.create(
                 field_name=validated_data['field_name'],
@@ -1188,6 +1207,13 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
                 omop_table=validated_data.pop('omop_table'),
                 unit=validated_data.pop('unit'),
                 notes=validated_data.pop('notes'),
+                source_value=f"custom:{validated_data['field_name']}",
+                value_kind=(
+                    'number' if validated_data['field_type'] == 'number'
+                    else 'boolean' if validated_data['field_type'] == 'boolean'
+                    else 'date' if validated_data['field_type'] == 'date'
+                    else 'string'
+                ),
                 status='approved',
                 reviewer=request.user,
                 reviewed_at=timezone.now(),
@@ -1199,6 +1225,16 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
             )
             custom_field.full_clean()
             custom_field.save()
+            if custom_field.mode == 'computed':
+                field_formula = FieldFormula.objects.create(
+                    field_name=custom_field.field_name,
+                    formula=formula,
+                    is_active=True,
+                    created_by=request.user,
+                )
+        if field_formula:
+            from omop_core.services.patient_record_service import recompute_formula_field
+            recompute_formula_field(field_formula)
         return custom_field
 
 
@@ -1355,7 +1391,9 @@ class FieldFormulaSerializer(serializers.ModelSerializer):
 
     def validate_field_name(self, value):
         from omop_core.services.field_descriptor import _COMPUTED_FIELDS
-        if value not in _COMPUTED_FIELDS:
+        if value not in _COMPUTED_FIELDS and not CustomPatientField.objects.filter(
+            field_name=value, mode='computed',
+        ).exists():
             raise serializers.ValidationError(
                 f"'{value}' is not an application-computed PatientRecord field."
             )

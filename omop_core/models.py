@@ -3010,11 +3010,16 @@ class CustomPatientField(models.Model):
         ('date', 'Date'),
         ('boolean', 'Boolean'),
     ]
+    MODE_CHOICES = [
+        ('editable', 'Editable'),
+        ('computed', 'Computed'),
+    ]
 
     field_name = models.CharField(max_length=100, unique=True, db_index=True)
     display_name = models.CharField(max_length=200)
     tab = models.CharField(max_length=20, choices=TAB_CHOICES)
     field_type = models.CharField(max_length=20, choices=FIELD_TYPE_CHOICES)
+    mode = models.CharField(max_length=20, choices=MODE_CHOICES, default='editable')
     mapping = models.OneToOneField(
         FieldConceptMapping, on_delete=models.PROTECT, related_name='custom_patient_field',
     )

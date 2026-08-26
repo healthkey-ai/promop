@@ -34,7 +34,7 @@ from omop_core.models import (
     FhirConnection, FhirOauthState, Institution,
     ObservationPeriod, PatientSurveyResponse, PersonLanguageSkill, Survey,
     VisitOccurrence,
-    Organization, GroupAccess, CustomPatientField,
+    Organization, GroupAccess, CustomPatientField, FieldFormula,
 )
 from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
 from omop_oncology.models import CancerModifier, Episode, EpisodeEvent, Histology, StemTable
@@ -20467,6 +20467,35 @@ class CustomPatientFieldApiTest(TestCase):
         self.client.force_authenticate(user=self.user)
         response = self.client.post('/api/v1/custom-patient-fields/', self.payload(), format='json')
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_computed_field_requires_valid_formula_and_creates_an_active_formula(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.post(
+            '/api/v1/custom-patient-fields/',
+            self.payload(
+                field_name='double_weight', display_name='Double weight',
+                field_type='number', mode='computed', formula='weight * 2',
+            ), format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data['mode'], 'computed')
+        formula = FieldFormula.objects.get(field_name='double_weight')
+        self.assertEqual(formula.formula, 'weight * 2')
+        self.assertTrue(formula.is_active)
+
+    def test_computed_field_rejects_missing_or_invalid_formula(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.post(
+            '/api/v1/custom-patient-fields/',
+            self.payload(mode='computed'), format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response = self.client.post(
+            '/api/v1/custom-patient-fields/',
+            self.payload(mode='computed', formula='__import__("os")'), format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(FieldFormula.objects.filter(field_name='tumor_response_note').exists())
 
 
 class FieldConceptMappingTest(TestCase):
