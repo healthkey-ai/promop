@@ -89,7 +89,9 @@ class PartnerAuthentication(BaseAuthentication):
             return None
         if not identity.is_active:
             raise AuthenticationFailed("Account is disabled.")
-        claims = TokenClaims(**data["claims"])
+        claim_data = dict(data["claims"])
+        claim_data.setdefault("email_verified", False)
+        claims = TokenClaims(**claim_data)
         return (identity, claims)
 
     @staticmethod
@@ -104,6 +106,7 @@ class PartnerAuthentication(BaseAuthentication):
                     "email": claims.email,
                     "name": claims.name,
                     "raw": claims.raw,
+                    "email_verified": claims.email_verified,
                 },
             },
             timeout=settings.AUTH_TOKEN_CACHE_TTL,
@@ -116,27 +119,27 @@ class PartnerAuthentication(BaseAuthentication):
     def _get_or_create_identity(claims: TokenClaims) -> Identity:
         identity, created = Identity.objects.get_or_create_from_claims(claims)
         if created:
-            if claims.email:
+            if claims.email and claims.email_verified:
                 identity.email = claims.email
             if claims.name:
                 identity.name = claims.name
             identity.set_unusable_password()
             identity.save(update_fields=["email", "name", "password"])
-            _claim_placeholder_access(identity, claims.email)
+            _claim_placeholder_access(identity, claims.email, claims.email_verified)
             logger.info(
                 "partner_auth: provisioned identity %d (%s|%s)",
                 identity.pk, claims.issuer, claims.sub,
             )
-        elif claims.email and not identity.email:
+        elif claims.email and claims.email_verified and not identity.email:
             identity.email = claims.email
             if claims.name and identity.name != claims.name:
                 identity.name = claims.name
                 identity.save(update_fields=["email", "name"])
             else:
                 identity.save(update_fields=["email"])
-            _claim_placeholder_access(identity, claims.email)
-        elif claims.email:
-            _claim_placeholder_access(identity, claims.email)
+            _claim_placeholder_access(identity, claims.email, claims.email_verified)
+        elif claims.email and claims.email_verified:
+            _claim_placeholder_access(identity, claims.email, claims.email_verified)
             if claims.name and identity.name != claims.name:
                 identity.name = claims.name
                 identity.save(update_fields=["name"])
@@ -150,15 +153,23 @@ def _ensure_person(identity, claims=None):
     email = ""
     if claims:
         email = claims.email or ""
+        email_verified = claims.email_verified
     elif identity.email:
         email = identity.email
+        email_verified = identity.is_local
+    else:
+        email_verified = False
 
-    resolve_or_create_person(identity, email=email)
+    resolve_or_create_person(identity, email=email, email_verified=email_verified)
 
 
-def _claim_placeholder_access(identity: Identity, email: str | None) -> None:
+def _claim_placeholder_access(
+    identity: Identity,
+    email: str | None,
+    email_verified: bool = False,
+) -> None:
     """Move invite grants from an unusable local placeholder to a real login identity."""
-    if not email or identity.issuer == "urn:local":
+    if not email or not email_verified or identity.issuer == "urn:local":
         return
 
     from omop_core.models import GroupAccess

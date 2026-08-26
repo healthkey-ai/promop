@@ -1271,13 +1271,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if version_error:
             return Response({'error': version_error}, status=status.HTTP_406_NOT_ACCEPTABLE)
 
-        try:
-            person = Person.objects.get(person_id=pk)
-            patient_record = PatientRecord.objects.get(person=person)
-        except (Person.DoesNotExist, PatientRecord.DoesNotExist):
-            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        person, patient_record, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
 
-        # Object-level permission check (PatientSelfScopePermission)
+        # Object-level permission check (PatientSelfScopePermission). The shared
+        # resolver above enforces the org/professional/patient object boundary;
+        # this keeps DRF permission hooks in the path as a second layer.
         self.check_object_permissions(request, patient_record)
 
         # Content integrity + non-repudiation (S.3.6#10 / PH.2.3#09): serialize
@@ -1328,6 +1328,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     if person_id == 0:
                         last_person = Person.objects.all().order_by('-person_id').first()
                         person_id = last_person.person_id + 1 if last_person else 1000
+
+                    auth_error = _csv_row_write_error(request, person_id)
+                    if auth_error:
+                        raise PermissionError(auth_error)
 
                     dob_raw = (row.get('date_of_birth') or '').strip()
                     dob = parse_date(dob_raw) if dob_raw else None
@@ -4871,6 +4875,33 @@ def _caller_may_write_patient(request, person_id: int) -> bool:
     from omop_core.authorization import can_write_patient
 
     return can_write_patient(request.user, person_id)
+
+
+def _csv_row_write_error(request, person_id: int) -> str | None:
+    """Return a row-level CSV authorization error, or None when allowed."""
+    if getattr(request, 'auth', None) is not None and is_service_token(request):
+        return None
+
+    org = get_request_org(request)
+    if org is not None:
+        record = PatientRecord.objects.filter(person_id=person_id).first()
+        if (
+            record is not None
+            and record.organization_id is not None
+            and record.organization_id != org.id
+        ):
+            return 'patient belongs to a different organization'
+        return None
+
+    actor = getattr(request, 'user', None)
+    if getattr(actor, 'is_staff', False):
+        return None
+
+    from omop_core.authorization import can_write_patient
+
+    if can_write_patient(actor, person_id):
+        return None
+    return 'caller does not have write access to this patient'
 
 
 class PatientRecordV1ViewSet(PatientRecordViewSet):

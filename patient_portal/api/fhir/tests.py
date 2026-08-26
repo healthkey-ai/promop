@@ -4,12 +4,13 @@ from decimal import Decimal
 
 from django.db import connection
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from patient_portal.models import Identity, PatientUser
 from omop_core.models import (
     ConditionOccurrence, DrugExposure, Measurement, Person, ProvenanceRecord,
-    PatientDocument,
+    PatientDocument, PatientRecord, Organization, GroupAccess,
 )
 
 # OMOP tables use manually-assigned integer PKs fed by Postgres sequences that
@@ -253,6 +254,82 @@ class FhirSyncTests(TestCase):
         self.assertEqual(resp.status_code, 201, resp.content)
         self.assertEqual(resp.json()['person_id'], person.person_id)
         self.assertEqual(Measurement.objects.filter(person=person).count(), 1)
+
+    def test_service_token_explicit_read_only_actor_rejected(self):
+        from omop_core.services.pk import next_pk_batch
+
+        org = Organization.objects.create(name='FHIR Analyst Org', slug='fhir-analyst-org')
+        person = Person.objects.create(
+            person_id=next_pk_batch(Person, 'person_id', 1)[0],
+        )
+        PatientRecord.objects.create(person=person, organization=org)
+        analyst = Identity.objects.create_user(email='fhir-analyst@test.com', password='test')
+        GroupAccess.objects.create(identity=analyst, org=org, role='analyst')
+        service_user = Identity.objects.create(issuer='urn:service', sub='fhir-sync-analyst')
+        service_user.set_unusable_password()
+        service_user.save(update_fields=['password'])
+        client = APIClient()
+        client.force_authenticate(user=service_user, token='service-token')
+
+        resp = client.post('/api/fhir/sync/', {
+            'person_id': person.person_id,
+            'actor_iss': analyst.issuer,
+            'actor_sub': analyst.sub,
+            'bundle': SAMPLE_BUNDLE,
+        }, format='json')
+
+        self.assertEqual(resp.status_code, 403, resp.content)
+        self.assertIn('write access', resp.json()['detail'])
+        self.assertEqual(Measurement.objects.filter(person=person).count(), 0)
+
+    def test_userless_oauth_org_token_ignores_body_actor_for_provenance(self):
+        from datetime import timedelta
+        from oauth2_provider.models import AccessToken, Application
+        from omop_core.models import ApplicationOrganization
+        from omop_core.services.pk import next_pk_batch
+
+        org = Organization.objects.create(name='FHIR OAuth Org', slug='fhir-oauth-org')
+        owner = Identity.objects.create_user(email='fhir-oauth-owner@test.com', password='test')
+        app = Application.objects.create(
+            name='FHIR OAuth App',
+            user=owner,
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+        )
+        ApplicationOrganization.objects.create(application=app, organization=org)
+        token = AccessToken.objects.create(
+            user=None,
+            application=app,
+            token='fhir-userless-write-token',
+            expires=timezone.now() + timedelta(hours=1),
+            scope='patient/*.write',
+        )
+        person = Person.objects.create(
+            person_id=next_pk_batch(Person, 'person_id', 1)[0],
+        )
+        PatientRecord.objects.create(person=person, organization=org)
+        spoofed_actor = Identity.objects.create_user(email='spoofed-fhir@test.com', password='test')
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+
+        resp = client.post('/api/fhir/sync/', {
+            'person_id': person.person_id,
+            'actor_iss': spoofed_actor.issuer,
+            'actor_sub': spoofed_actor.sub,
+            'bundle': SAMPLE_BUNDLE,
+        }, format='json')
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+        measurement = Measurement.objects.get(person=person)
+        provenance = ProvenanceRecord.objects.get(
+            content_type__model='measurement',
+            object_id=measurement.measurement_id,
+        )
+        self.assertEqual(provenance.source_user_id, '')
+        self.assertNotEqual(
+            provenance.source_user_id,
+            f'{spoofed_actor.issuer}|{spoofed_actor.sub}',
+        )
 
     # ---- B0 connector: patient self-service ingest ---------------------- #
 

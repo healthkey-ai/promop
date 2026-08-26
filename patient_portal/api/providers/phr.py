@@ -89,6 +89,7 @@ class PhrTokenProvider(TokenProvider):
             email=claims.get("email", ""),
             name=None,
             raw=claims,
+            email_verified=bool(claims.get("email_verified", False)),
         )
 
     def _verify_jwks(self, token: str, kid: str | None) -> dict[str, Any] | None:
@@ -96,13 +97,17 @@ class PhrTokenProvider(TokenProvider):
         if key is None:
             logger.warning("phr JWKS has no usable key (kid=%s)", kid)
             return None
+        audience = getattr(settings, "PHR_AUDIENCE", "")
+        if not audience:
+            logger.warning("phr audience validation is not configured")
+            return None
         try:
             return jwt.decode(
                 token,
                 key=key,
                 algorithms=["RS256"],
                 issuer=settings.PHR_ISSUER,
-                options={"verify_aud": False},
+                audience=audience,
             )
         except jwt.ExpiredSignatureError:
             raise AuthenticationFailed("phr token expired")

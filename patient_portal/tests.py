@@ -10293,6 +10293,7 @@ class OrgInvitationFlowTest(TestCase):
             email='partner@example.com',
             name='Partner User',
             raw={},
+            email_verified=True,
         )
 
         identity = PartnerAuthentication._get_or_create_identity(claims)
@@ -10322,6 +10323,7 @@ class OrgInvitationFlowTest(TestCase):
             email='existing-partner@example.com',
             name='Existing Partner',
             raw={},
+            email_verified=True,
         )
 
         identity = PartnerAuthentication._get_or_create_identity(claims)
@@ -10343,6 +10345,7 @@ class OrgInvitationFlowTest(TestCase):
             email='claimed@example.com',
             name='Claimed User',
             raw={},
+            email_verified=True,
         )
         partner = PartnerAuthentication._get_or_create_identity(claims)
         self.assertTrue(
@@ -10359,6 +10362,142 @@ class OrgInvitationFlowTest(TestCase):
         partner_grant = GroupAccess.objects.get(identity=partner, org=self.org)
         self.assertEqual(partner_grant.role, 'doctor')
         self.assertFalse(GroupAccess.objects.filter(identity=placeholder).exists())
+
+    def test_unverified_partner_email_does_not_claim_placeholder_access(self):
+        placeholder = Identity.objects.create_user(email='unverified-partner@example.com', password=None)
+        GroupAccess.objects.create(identity=placeholder, org=self.org, role='doctor')
+
+        from patient_portal.api.authentication import PartnerAuthentication
+        from patient_portal.api.providers.base import TokenClaims
+        claims = TokenClaims(
+            issuer='https://issuer.example.com',
+            sub='unverified-partner-sub',
+            email='unverified-partner@example.com',
+            name='Unverified Partner',
+            raw={},
+            email_verified=False,
+        )
+
+        identity = PartnerAuthentication._get_or_create_identity(claims)
+        self.assertNotEqual(identity.pk, placeholder.pk)
+        self.assertEqual(identity.email, '')
+        self.assertFalse(
+            GroupAccess.objects.filter(identity=identity, org=self.org).exists()
+        )
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=placeholder, org=self.org, role='doctor').exists()
+        )
+
+    def test_unverified_partner_email_does_not_link_or_rebind_patient_user(self):
+        from omop_core.models import Person, PatientRecord
+        from patient_portal.api.authentication import _ensure_person
+        from patient_portal.api.providers.base import TokenClaims
+        from patient_portal.models import PatientUser
+
+        existing_identity = Identity.objects.create_user(
+            email='existing-holder@example.com',
+            password='pw',
+        )
+        person = Person.objects.create(
+            person_id=99989,
+            year_of_birth=1970,
+            gender_source_value='F',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+            email='unverified-patient@example.com',
+        )
+        PatientRecord.objects.create(person=person, email='unverified-patient@example.com')
+        PatientUser.objects.create(identity=existing_identity, person=person)
+        partner = Identity.objects.create(
+            issuer='https://issuer.example.com',
+            sub='unverified-patient-sub',
+        )
+        partner.set_unusable_password()
+        partner.save()
+        claims = TokenClaims(
+            issuer=partner.issuer,
+            sub=partner.sub,
+            email='unverified-patient@example.com',
+            name='Unverified Patient',
+            raw={},
+            email_verified=False,
+        )
+
+        _ensure_person(partner, claims)
+
+        self.assertEqual(PatientUser.objects.get(person=person).identity_id, existing_identity.pk)
+        self.assertNotEqual(PatientUser.objects.get(identity=partner).person_id, person.pk)
+
+    def test_verified_partner_email_does_not_rebind_existing_patient_user(self):
+        from omop_core.models import Person, PatientRecord
+        from patient_portal.api.authentication import _ensure_person
+        from patient_portal.api.providers.base import TokenClaims
+        from patient_portal.models import PatientUser
+
+        existing_identity = Identity.objects.create_user(
+            email='verified-holder@example.com',
+            password='pw',
+        )
+        person = Person.objects.create(
+            person_id=99988,
+            year_of_birth=1970,
+            gender_source_value='F',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+            email='verified-patient@example.com',
+        )
+        PatientRecord.objects.create(person=person, email='verified-patient@example.com')
+        PatientUser.objects.create(identity=existing_identity, person=person)
+        partner = Identity.objects.create(
+            issuer='https://issuer.example.com',
+            sub='verified-patient-sub',
+            email='verified-patient@example.com',
+        )
+        partner.set_unusable_password()
+        partner.save()
+        claims = TokenClaims(
+            issuer=partner.issuer,
+            sub=partner.sub,
+            email='verified-patient@example.com',
+            name='Verified Patient',
+            raw={},
+            email_verified=True,
+        )
+
+        _ensure_person(partner, claims)
+
+        self.assertEqual(PatientUser.objects.get(person=person).identity_id, existing_identity.pk)
+        self.assertNotEqual(PatientUser.objects.get(identity=partner).person_id, person.pk)
+
+    def test_partner_auth_cache_treats_legacy_claims_as_unverified_email(self):
+        from django.core.cache import cache
+        from patient_portal.api.authentication import PartnerAuthentication, _token_cache_key
+
+        identity = Identity.objects.create(
+            issuer='https://issuer.example.com',
+            sub='cached-sub',
+            email='cached@example.com',
+        )
+        identity.set_unusable_password()
+        identity.save()
+        cache.set(
+            _token_cache_key('legacy-token'),
+            {
+                'pk': identity.pk,
+                'claims': {
+                    'issuer': identity.issuer,
+                    'sub': identity.sub,
+                    'email': 'cached@example.com',
+                    'name': None,
+                    'raw': {},
+                },
+            },
+            timeout=60,
+        )
+
+        cached_identity, claims = PartnerAuthentication._from_cache('legacy-token')
+        self.assertEqual(cached_identity.pk, identity.pk)
+        self.assertFalse(claims.email_verified)
 
     def test_invite_existing_user_grants_access_immediately(self):
         invitee = Identity.objects.create_user(email='existing-user@example.com', password='pass')
@@ -13627,17 +13766,26 @@ class FhirExportApiTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         from patient_portal.models import PatientUser
+        from django.utils import timezone as tz
+        from oauth2_provider.models import Application, AccessToken
+        import datetime as _dt
+        from omop_core.models import ApplicationOrganization
 
         _make_vocab_fixtures()
         cls.condition_concept = Concept.objects.get(concept_id=4112853)
         cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.org_a = Organization.objects.create(name='Export Org A', slug='export-org-a')
+        cls.org_b = Organization.objects.create(name='Export Org B', slug='export-org-b')
 
         # Patient A — will export their own record
         cls.person_a = Person.objects.create(
             person_id=96001, family_name='Able', given_name='Amy',
             gender_concept_id=8532,
         )
-        cls.patient_a_rec = PatientRecord.objects.create(person=cls.person_a)
+        cls.patient_a_rec = PatientRecord.objects.create(
+            person=cls.person_a,
+            organization=cls.org_a,
+        )
         cls.identity_a = Identity.objects.create_user(email='export-a@test.com', password='pw')
         PatientUser.objects.create(identity=cls.identity_a, person=cls.person_a)
 
@@ -13654,7 +13802,10 @@ class FhirExportApiTest(TestCase):
             person_id=96002, family_name='Baker', given_name='Bob',
             gender_concept_id=8507,
         )
-        cls.patient_b_rec = PatientRecord.objects.create(person=cls.person_b)
+        cls.patient_b_rec = PatientRecord.objects.create(
+            person=cls.person_b,
+            organization=cls.org_b,
+        )
         cls.identity_b = Identity.objects.create_user(email='export-b@test.com', password='pw')
         PatientUser.objects.create(identity=cls.identity_b, person=cls.person_b)
 
@@ -13662,10 +13813,37 @@ class FhirExportApiTest(TestCase):
         cls.staff = Identity.objects.create_user(
             email='export-staff@test.com', password='pw', is_staff=True,
         )
+        cls.oauth_owner = Identity.objects.create_user(
+            email='export-oauth-owner@test.com',
+            password='pw',
+        )
+        cls.app_a = Application.objects.create(
+            name='Export Org A Client',
+            client_id='export-org-a-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=cls.oauth_owner,
+        )
+        ApplicationOrganization.objects.create(
+            application=cls.app_a,
+            organization=cls.org_a,
+        )
+        cls.org_a_read_token = AccessToken.objects.create(
+            user=cls.oauth_owner,
+            application=cls.app_a,
+            token='export-org-a-read-token',
+            expires=tz.now() + _dt.timedelta(hours=1),
+            scope='patient/*.read openid',
+        )
 
     def _client_as(self, identity):
         c = APIClient()
         c.force_authenticate(user=identity)
+        return c
+
+    def _bearer(self, token):
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
         return c
 
     def test_patient_can_export_own_record(self):
@@ -13698,6 +13876,13 @@ class FhirExportApiTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         bundle = resp.json()
         self.assertEqual(bundle['resourceType'], 'Bundle')
+
+    def test_org_scoped_token_cannot_export_other_org_record(self):
+        """Org-scoped OAuth read token must not export a patient outside its org."""
+        resp = self._bearer(self.org_a_read_token.token).get(
+            f'/api/v1/patient-records/{self.person_b.person_id}/export-fhir/'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_nonexistent_person_returns_404(self):
         """Export of nonexistent person_id returns 404."""

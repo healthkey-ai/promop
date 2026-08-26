@@ -16,6 +16,7 @@ from patient_portal.api.permissions import (
     LabSyncPermission,
     ScopedTokenPermission,
     get_request_org,
+    is_service_token,
 )
 
 from .serializers import LabResultCardSerializer, LabValueSerializer, MeasurementUpdateSerializer
@@ -568,7 +569,26 @@ class MeasurementDetailView(APIView):
                 pass
             if m.person_id != own_pid and not can_access_patient(request.user, m.person_id):
                 return None
+        elif not is_service_token(request):
+            return None
         return m
+
+    @staticmethod
+    def _can_write_person(request, person_id):
+        if is_service_token(request):
+            return True
+
+        org = get_request_org(request)
+        if org is not None:
+            return PatientRecord.objects.filter(
+                person_id=person_id, organization=org,
+            ).exists()
+
+        if not (request.user and request.user.is_authenticated):
+            return False
+
+        from omop_core.authorization import can_write_patient
+        return can_write_patient(request.user, person_id)
 
     def get(self, request, measurement_id):
         m = self.get_object(measurement_id, request)
@@ -610,6 +630,11 @@ class MeasurementDetailView(APIView):
             return Response(
                 {'detail': 'Measurement not found.'},
                 status=status.HTTP_404_NOT_FOUND,
+            )
+        if not self._can_write_person(request, m.person_id):
+            return Response(
+                {'detail': 'Write access denied.'},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         serializer = MeasurementUpdateSerializer(data=request.data)
@@ -662,6 +687,11 @@ class MeasurementDetailView(APIView):
                 {'detail': 'Measurement not found.'},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        if not self._can_write_person(request, m.person_id):
+            return Response(
+                {'detail': 'Write access denied.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         person_id = m.person_id
         source = self._provenance_source(request, person_id)
         with transaction.atomic():
@@ -694,7 +724,7 @@ class VisitDeleteView(APIView):
     permission_classes = [LabSyncPermission]
 
     def delete(self, request, visit_id):
-        from omop_core.authorization import can_access_patient
+        from omop_core.authorization import can_access_patient, can_write_patient
 
         try:
             visit = VisitOccurrence.objects.get(visit_occurrence_id=visit_id)
@@ -704,8 +734,7 @@ class VisitDeleteView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        is_service = getattr(request.user, 'issuer', '') == 'urn:service'
-        if not is_service:
+        if not is_service_token(request):
             org = get_request_org(request)
             if org is not None:
                 from omop_core.models import PatientRecord
@@ -717,17 +746,21 @@ class VisitDeleteView(APIView):
                         status=status.HTTP_404_NOT_FOUND,
                     )
             elif request.user and request.user.is_authenticated:
-                from patient_portal.models import PatientUser
-                own_pid = None
-                try:
-                    own_pid = PatientUser.objects.get(identity=request.user).person_id
-                except PatientUser.DoesNotExist:
-                    pass
-                if visit.person_id != own_pid and not can_access_patient(request.user, visit.person_id):
+                if not can_access_patient(request.user, visit.person_id):
                     return Response(
                         {'detail': 'Visit not found.'},
                         status=status.HTTP_404_NOT_FOUND,
                     )
+                if not can_write_patient(request.user, visit.person_id):
+                    return Response(
+                        {'detail': 'Write access denied.'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+            else:
+                return Response(
+                    {'detail': 'Visit not found.'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
         with transaction.atomic():
             ProvenanceRecord.objects.create(

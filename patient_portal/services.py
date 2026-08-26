@@ -122,7 +122,7 @@ def patient_person_for(identity):
     return pu.person
 
 
-def resolve_or_create_person(identity, email=None, allow_create=True):
+def resolve_or_create_person(identity, email=None, allow_create=True, email_verified=None):
     """Resolve an existing Person for *identity*, or auto-provision one.
 
     Lookup order:
@@ -139,8 +139,11 @@ def resolve_or_create_person(identity, email=None, allow_create=True):
     if pu:
         return pu.person
 
+    if email_verified is None:
+        email_verified = getattr(identity, 'is_local', False)
+
     email = (email or getattr(identity, 'email', None) or "").strip()
-    if email:
+    if email and email_verified:
         person_qs = Person.objects.filter(email=email)
         # Legacy fallback while older PatientRecord snapshots still exist.
         email_qs = PatientRecord.objects.filter(email=email)
@@ -153,15 +156,18 @@ def resolve_or_create_person(identity, email=None, allow_create=True):
             pi = email_qs.first() if email_qs.count() == 1 else None
             person = pi.person if pi else None
         if person:
-            # Re-point any existing PatientUser for this person to the current
-            # identity. Needed when the Firebase emulator restarts and issues a
-            # new UID for the same email: the old PatientUser row stays in the
-            # DB (person unique constraint) but its identity is now stale.
-            PatientUser.objects.update_or_create(
-                person=person,
-                defaults={"identity": identity},
+            holder = PatientUser.objects.filter(person=person).first()
+            if holder is None:
+                PatientUser.objects.create(identity=identity, person=person)
+                return person
+            if holder.identity_id == identity.pk:
+                return person
+            logger.warning(
+                "refusing to rebind PatientUser for person %s from identity %s to %s",
+                person.person_id,
+                holder.identity_id,
+                identity.pk,
             )
-            return person
 
     if not allow_create:
         return None
