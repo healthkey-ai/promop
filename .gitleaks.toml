@@ -48,4 +48,9 @@ regexes = [
   '''ci-[a-z-]*-(secret|key)-not-for-runtime[a-z0-9-]*''',
   # Django's own marker for a generated development key.
   '''django-insecure-[a-zA-Z0-9!@#$%^&*(\-_=+)]{20,}''',
+  # Documentation placeholder in docs/quickstart.md's curl examples. Narrow on
+  # purpose: this allowlists the one literal placeholder pair, not the docs tree
+  # and not the curl-auth-user rule, so a real credential pasted into a doc is
+  # still caught.
+  '''admin@example\.com:secret''',
 ]
