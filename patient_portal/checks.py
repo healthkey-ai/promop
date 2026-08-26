@@ -16,6 +16,7 @@ def production_key_separation_check(app_configs, **kwargs):
 
     errors = []
     secret_key = getattr(settings, 'SECRET_KEY', '')
+    configured_keys = {}
     for setting_name, check_id in (
         ('AUDIT_HMAC_KEY', 'patient_portal.E001'),
         ('EXPORT_SIGNING_KEY', 'patient_portal.E002'),
@@ -36,4 +37,16 @@ def production_key_separation_check(app_configs, **kwargs):
                 hint=f'Rotate {setting_name} to a separate managed secret.',
                 id=check_id,
             ))
+        else:
+            configured_keys[setting_name] = value
+
+    if (
+        configured_keys.get('AUDIT_HMAC_KEY')
+        and configured_keys.get('AUDIT_HMAC_KEY') == configured_keys.get('EXPORT_SIGNING_KEY')
+    ):
+        errors.append(Error(
+            'AUDIT_HMAC_KEY and EXPORT_SIGNING_KEY must be different in production.',
+            hint='Provision one managed secret for each signing purpose.',
+            id='patient_portal.E003',
+        ))
     return errors
