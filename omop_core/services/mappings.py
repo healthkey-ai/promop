@@ -129,6 +129,22 @@ CONCEPT_LAB_TYPE          = 32856     # Lab (measurement type)
 CONCEPT_EHR_TYPE          = 32817     # EHR (condition type)
 CONCEPT_TREATMENT_REGIMEN = 32531     # Treatment Regimen (episode concept)
 CONCEPT_DRUG_EXPOSURE_FIELD = 1147094  # drug_exposure_id field concept (EpisodeEvent)
+CONCEPT_PATIENT_REPORTED_TYPE = 32865  # Patient self-report (measurement/observation type, vocab 'Type Concept')
+
+
+# Slice 2a: staging PatientInfo fields written as patient-authored *string* Measurements, keyed by
+# the LOINC the derivation reads back. The staging reader returns value_as_string verbatim, so a CB
+# stage code (e.g. 't1') round-trips unchanged and the matcher compares it to the trial's code list
+# directly — no normalisation or matching-surface reverse-map needed.
+# (Receptor biomarkers her2/er/pr are a SEPARATE follow-up (2a-ii): they must be normalised to
+# Positive/Negative/Equivocal for the hr_status/tnbc_status compute, which then needs a lossy
+# PromopMatchingSurface reverse-map back to the CB enum codes the matcher compares. Not in this change.)
+STAGING_MEAS_FIELDS = {
+    'stage': '21908-9',
+    'tumor_stage': '21905-5',
+    'nodes_stage': '21906-3',
+    'distant_metastasis_stage': '21901-4',
+}
 
 
 # Wearable metric → controlled-vocabulary concept_code.
