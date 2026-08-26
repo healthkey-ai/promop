@@ -1412,7 +1412,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
                         # This is the only projection operation in CSV ingestion. It upserts the
                         # derived read model after all Person/OMOP source facts are committed.
-                        refresh_patient_record(person)
+                        patient_record = refresh_patient_record(person)
+                        if provenance_org is not None and patient_record.organization_id is None:
+                            patient_record.organization = provenance_org
+                            patient_record.save(update_fields=['organization', 'updated_at'])
                     if created:
                         created_count += 1
                         

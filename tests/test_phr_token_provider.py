@@ -154,7 +154,7 @@ def test_hs256_token_falls_back_to_introspection():
     active = MagicMock()
     active.json.return_value = {
         "active": True, "user_id": 42, "email": "pat@example.com",
-        "identity_level": "ial1", "iss": ISSUER,
+        "identity_level": "ial1", "iss": ISSUER, "aud": "promop-api",
     }
     active.raise_for_status.return_value = None
     with patch("patient_portal.api.providers.phr.requests.post",
@@ -162,6 +162,56 @@ def test_hs256_token_falls_back_to_introspection():
         claims = PhrTokenProvider().verify(token)
     post.assert_called_once()
     assert claims is not None and claims.sub == "42"
+
+
+def test_introspection_accepts_audience_list():
+    token = jwt.encode(_access_claims(), "shared-secret", algorithm="HS256")
+    active = MagicMock()
+    active.json.return_value = {
+        "active": True, "user_id": 42, "email": "pat@example.com",
+        "identity_level": "ial1", "iss": ISSUER, "aud": ["other-api", "promop-api"],
+    }
+    active.raise_for_status.return_value = None
+    with patch("patient_portal.api.providers.phr.requests.post", return_value=active):
+        claims = PhrTokenProvider().verify(token)
+    assert claims is not None and claims.sub == "42"
+
+
+def test_introspection_rejects_missing_audience():
+    token = jwt.encode(_access_claims(), "shared-secret", algorithm="HS256")
+    active = MagicMock()
+    active.json.return_value = {
+        "active": True, "user_id": 42, "email": "pat@example.com",
+        "identity_level": "ial1", "iss": ISSUER,
+    }
+    active.raise_for_status.return_value = None
+    with patch("patient_portal.api.providers.phr.requests.post", return_value=active):
+        assert PhrTokenProvider().verify(token) is None
+
+
+def test_introspection_rejects_wrong_audience():
+    token = jwt.encode(_access_claims(), "shared-secret", algorithm="HS256")
+    active = MagicMock()
+    active.json.return_value = {
+        "active": True, "user_id": 42, "email": "pat@example.com",
+        "identity_level": "ial1", "iss": ISSUER, "aud": "other-api",
+    }
+    active.raise_for_status.return_value = None
+    with patch("patient_portal.api.providers.phr.requests.post", return_value=active):
+        assert PhrTokenProvider().verify(token) is None
+
+
+def test_introspection_rejects_when_configured_audience_missing(settings):
+    settings.PHR_AUDIENCE = ""
+    token = jwt.encode(_access_claims(), "shared-secret", algorithm="HS256")
+    active = MagicMock()
+    active.json.return_value = {
+        "active": True, "user_id": 42, "email": "pat@example.com",
+        "identity_level": "ial1", "iss": ISSUER, "aud": "promop-api",
+    }
+    active.raise_for_status.return_value = None
+    with patch("patient_portal.api.providers.phr.requests.post", return_value=active):
+        assert PhrTokenProvider().verify(token) is None
 
 
 def test_introspection_inactive_returns_none():

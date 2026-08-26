@@ -125,6 +125,94 @@ def test_csv_rejects_cross_org_row_without_partial_write():
     assert not ConditionOccurrence.objects.filter(person=person).exists()
 
 
+def test_csv_org_scoped_create_stamps_patient_record_and_blocks_other_org():
+    from django.utils import timezone
+    from oauth2_provider.models import AccessToken, Application
+    from omop_core.models import ApplicationOrganization, Organization
+    from patient_portal.tests import _make_vocab_fixtures
+    import datetime as _dt
+
+    _make_vocab_fixtures()
+    org_a = Organization.objects.create(name='CSV Create Org A', slug='csv-create-org-a')
+    org_b = Organization.objects.create(name='CSV Create Org B', slug='csv-create-org-b')
+    owner_a = Identity.objects.create_user(email='csv-create-a@example.test', password='pw')
+    owner_b = Identity.objects.create_user(email='csv-create-b@example.test', password='pw')
+    app_a = Application.objects.create(
+        name='CSV Create Org A Client',
+        client_id='csv-create-org-a-client',
+        client_type=Application.CLIENT_CONFIDENTIAL,
+        authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+        user=owner_a,
+    )
+    app_b = Application.objects.create(
+        name='CSV Create Org B Client',
+        client_id='csv-create-org-b-client',
+        client_type=Application.CLIENT_CONFIDENTIAL,
+        authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+        user=owner_b,
+    )
+    ApplicationOrganization.objects.create(application=app_a, organization=org_a)
+    ApplicationOrganization.objects.create(application=app_b, organization=org_b)
+    token_a = AccessToken.objects.create(
+        user=owner_a,
+        application=app_a,
+        token='csv-create-org-a-write-token',
+        expires=timezone.now() + _dt.timedelta(hours=1),
+        scope='patient/*.read patient/*.write',
+    )
+    token_b = AccessToken.objects.create(
+        user=owner_b,
+        application=app_b,
+        token='csv-create-org-b-write-token',
+        expires=timezone.now() + _dt.timedelta(hours=1),
+        scope='patient/*.read patient/*.write',
+    )
+
+    request_a = APIRequestFactory().post(
+        '/api/patient-info/upload_csv/',
+        {
+            'file': SimpleUploadedFile(
+                'patients.csv',
+                b'person_id,given_name,disease,diagnosis_date\n98726,OrgA,Breast Cancer,2020-04-03\n',
+                content_type='text/csv',
+            ),
+        },
+        format='multipart',
+    )
+    request_a.user = owner_a
+    request_a.auth = token_a
+
+    response_a = PatientRecordViewSet().upload_csv(request_a)
+
+    assert response_a.status_code == 200
+    assert response_a.data['errors'] == []
+    person = Person.objects.get(person_id=98726)
+    record = PatientRecord.objects.get(person=person)
+    assert record.organization == org_a
+
+    request_b = APIRequestFactory().post(
+        '/api/patient-info/upload_csv/',
+        {
+            'file': SimpleUploadedFile(
+                'patients.csv',
+                b'person_id,given_name,disease,diagnosis_date\n98726,OrgB,Breast Cancer,2021-04-03\n',
+                content_type='text/csv',
+            ),
+        },
+        format='multipart',
+    )
+    request_b.user = owner_b
+    request_b.auth = token_b
+
+    response_b = PatientRecordViewSet().upload_csv(request_b)
+
+    assert response_b.status_code == 200
+    assert 'different organization' in response_b.data['errors'][0]
+    person.refresh_from_db()
+    assert person.given_name == 'OrgA'
+    assert ConditionOccurrence.objects.filter(person=person).count() == 1
+
+
 def test_server_rendered_mapped_submission_does_not_persist_projection_value(monkeypatch):
     identity = Identity.objects.create_user(email='legacy-form@example.test', password='pw')
     person = Person.objects.create(person_id=98722)

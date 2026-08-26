@@ -116,6 +116,10 @@ class PhrTokenProvider(TokenProvider):
             return None
 
     def _verify_introspect(self, token: str) -> dict[str, Any] | None:
+        audience = getattr(settings, "PHR_AUDIENCE", "")
+        if not audience:
+            logger.warning("phr audience validation is not configured")
+            return None
         try:
             resp = requests.post(
                 settings.PHR_INTROSPECT_URL, json={"token": token}, timeout=5
@@ -126,5 +130,14 @@ class PhrTokenProvider(TokenProvider):
             logger.warning("phr introspection failed: %s", exc)
             return None
         if not data.get("active"):
+            return None
+        token_audience = data.get("aud")
+        if isinstance(token_audience, str):
+            audience_matches = token_audience == audience
+        elif isinstance(token_audience, (list, tuple)):
+            audience_matches = audience in token_audience
+        else:
+            audience_matches = False
+        if not audience_matches:
             return None
         return data
