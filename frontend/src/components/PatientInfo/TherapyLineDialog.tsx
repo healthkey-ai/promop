@@ -18,7 +18,7 @@ interface Props {
   onAuthored: (patientInfo: Record<string, unknown>) => void;
 }
 
-type SelectedDrug = DrugConcept & { source_value?: string | null };
+type SelectedDrug = DrugConcept & { source_value?: string | null; class_names?: string[] };
 
 /**
  * Record a line of therapy.
@@ -93,6 +93,7 @@ export default function TherapyLineDialog({
           concept_name: c.concept_name ?? c.title,
           concept_code: c.concept_code ?? c.code,
           vocabulary_id: c.vocabulary_id ?? 'HemOnc',
+          class_names: (c.classes ?? []).map((cl) => cl.title),
         }));
       if (componentDrugs.length > 0) {
         setDrugs(componentDrugs);
@@ -332,16 +333,23 @@ export default function TherapyLineDialog({
             <ul className="mb-2 space-y-1">
               {drugs.map((d) => (
                 <li key={d.concept_id} className="flex items-center justify-between rounded border border-border px-2 py-1 text-sm">
-                  <span>
-                    {d.concept_name}
-                    <span className="ml-2 text-xs text-muted-foreground">
-                      RxNorm {d.concept_code}
+                  <div className="min-w-0 flex-1">
+                    <span>
+                      {d.concept_name}
+                      <span className="ml-2 text-xs text-muted-foreground">
+                        {d.vocabulary_id} {d.concept_code}
+                      </span>
                     </span>
-                  </span>
+                    {d.class_names && d.class_names.length > 0 && (
+                      <p className="text-xs text-muted-foreground truncate">
+                        {d.class_names.join(', ')}
+                      </p>
+                    )}
+                  </div>
                   <button
                     onClick={() => setDrugs((prev) => prev.filter((x) => x.concept_id !== d.concept_id))}
                     aria-label={`Remove ${d.concept_name}`}
-                    className="text-muted-foreground hover:text-red-600"
+                    className="ml-2 shrink-0 text-muted-foreground hover:text-red-600"
                   >
                     <Trash2 size={14} />
                   </button>
