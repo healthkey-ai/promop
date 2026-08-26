@@ -190,6 +190,17 @@ class PatientRecordModelTest(_OmopBase):
         self.assertAlmostEqual(float(pi.platelet_count_thousand_per_ul), 250.5, places=1)
         self.assertAlmostEqual(float(pi.anc_thousand_per_ul), 3.7, places=1)
 
+    def test_bmi_accepts_legacy_height_in_metres(self):
+        """Direct legacy metre values must not be interpreted as centimetres."""
+        pi = PatientRecord.objects.create(
+            person=self.person,
+            weight=122,
+            weight_units='kg',
+            height=1.829,
+            height_units='m',
+        )
+        self.assertAlmostEqual(pi.bmi, 36.47, places=2)
+
     def test_lft_integer_fields_persist(self):
         """LFT integer fields (alt_u_l, ast_u_l, etc.) store correctly."""
         pi = PatientRecord.objects.create(
@@ -414,6 +425,38 @@ class RefreshPatientRecordLabsFromMeasurementTest(_OmopBase):
         pi = refresh_patient_record(self.person)
         # hemoglobin_g_dl is in _OMOP_DERIVED_FIELDS so it should be cleared
         self.assertIsNone(pi.hemoglobin_g_dl)
+
+
+class RefreshPatientRecordVitalsUnitsTest(_OmopBase):
+    """Vital measurements retain the meaning of their recorded units."""
+
+    PERSON_ID = 90235
+
+    def _measurement(self, measurement_id, code, value, unit):
+        concept = _concept(
+            measurement_id + 10_000, f'Vital {code}', self.dom_meas,
+            self.vocab, self.cc, code=code,
+        )
+        return Measurement.objects.create(
+            measurement_id=measurement_id,
+            person=self.person,
+            measurement_concept=concept,
+            measurement_date=date(2023, 5, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_number=value,
+            unit_source_value=unit,
+            measurement_source_value=code,
+        )
+
+    def test_height_in_metres_is_normalised_to_cm_before_bmi(self):
+        self._measurement(92360, '8302-2', 1.829, 'm')
+        self._measurement(92361, '29463-7', 122, 'kg')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertAlmostEqual(pi.height, 182.9, places=1)
+        self.assertEqual(pi.height_units, 'cm')
+        self.assertAlmostEqual(pi.bmi, 36.5, places=1)
 
 
 class LegacyLaboratoryProjectionTest(_OmopBase):
