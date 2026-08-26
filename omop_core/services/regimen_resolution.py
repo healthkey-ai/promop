@@ -182,8 +182,12 @@ def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
         # collapse / 50-char truncation can map distinct names to one slug).
         # Disambiguate with a short hash of the normalized name so the new
         # name gets its own stable concept row.
+        # Not a security use: this only disambiguates a slug collision so two
+        # distinct regimen names get distinct concept rows. Flagged explicitly so
+        # the SAST gate does not have to carry it as a baselined false positive.
         digest = hashlib.sha1(
             normalize_regimen_name(concept_name).encode('utf-8'),
+            usedforsecurity=False,
         ).hexdigest()[:8]
         concept_code = f'{concept_code[:41]}-{digest}'[:50]
         concept = Concept.objects.filter(

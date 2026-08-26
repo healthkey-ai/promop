@@ -84,8 +84,8 @@ evidence work rather than code.
 | P1 10 — FHIR ingest type validation | #751 | **Done** |
 | P1 11 — login response for non-portal accounts | #755 | **Done** |
 | P1 12 — break-glass scope | #755 | **Done** |
-| SOC2 1 — CI security gates | #754 | **Partial** — `check --deploy` in CI; no dependency audit, SAST, or secret scan |
-| SOC2 2 — change-management evidence | #752 | **Not started** — no `CODEOWNERS` on `dev` |
+| SOC2 1 — CI security gates | #754 | **Done** — `check --deploy`, `pip-audit`, bandit (baselined), gitleaks |
+| SOC2 2 — change-management evidence | #752 | **Partial** — `CODEOWNERS` added; branch protection requiring code-owner review is a repo setting, not code |
 | SOC2 3 — audit-key evidence | #749 | **Done** in code and procedure; retaining `verify_audit_integrity` output is the recurring operator step |
 | Operator evidence | #753 | **Not started** |
 

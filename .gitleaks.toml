@@ -1,0 +1,51 @@
+# gitleaks configuration.
+#
+# The gate exists to catch a real credential reaching the repository. The test
+# suite legitimately contains fake ones — OAuth tokens, HMAC keys, JWT signing
+# material — and a scanner that cannot tell them apart is a scanner someone
+# switches off. Everything allowlisted below is a fixture whose value is
+# meaningless outside a test database.
+#
+# Adding to this file is a judgement call: allowlist a *pattern that is
+# structurally test-only*, never a specific real secret that happens to be
+# committed. A real secret gets rotated, not allowlisted.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+description = "Generic API key"
+regex = '''(?i)(api[_-]?key|secret|token|password)['"]?\s*[:=]\s*['"][0-9a-zA-Z\-_=]{20,}['"]'''
+keywords = ["api_key", "apikey", "secret", "token", "password"]
+
+  [rules.allowlist]
+  paths = [
+    '''.*tests?\.py$''',
+    '''.*/tests?/.*''',
+    '''.*/test_[^/]*\.py$''',
+    '''.*\.test\.tsx?$''',
+    '''.*/__tests__/.*''',
+  ]
+
+[allowlist]
+description = "Test fixtures and documented non-secrets"
+paths = [
+  # Test suites mint their own tokens; none of them authenticate anything.
+  '''.*tests?\.py$''',
+  '''.*/tests?/.*''',
+  '''.*/test_[^/]*\.py$''',
+  '''.*\.test\.tsx?$''',
+  '''.*/__tests__/.*''',
+  # Example environment file — placeholder values only, by construction.
+  '''\.env\.example$''',
+  # Lockfiles carry integrity hashes that look like high-entropy secrets.
+  '''package-lock\.json$''',
+  '''pnpm-lock\.yaml$''',
+]
+regexes = [
+  # CI placeholder values, named so they cannot be mistaken for live secrets.
+  '''ci-[a-z-]*-(secret|key)-not-for-runtime[a-z0-9-]*''',
+  # Django's own marker for a generated development key.
+  '''django-insecure-[a-zA-Z0-9!@#$%^&*(\-_=+)]{20,}''',
+]

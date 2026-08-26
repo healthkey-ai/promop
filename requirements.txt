@@ -1,19 +1,19 @@
 asgiref==3.8.1
 google-cloud-bigquery==3.25.0
 google-cloud-storage>=3.1.1
-gdown==5.2.0
+gdown==5.2.2
 certifi==2024.8.30
-cffi==1.16.0
+cffi==2.1.1
 charset-normalizer==3.3.2
-cryptography==43.0.0
+cryptography==50.0.1
 defusedxml==0.7.1
 dj-database-url==2.2.0
-Django==5.2.6
+Django==5.2.17
 django-cors-headers==4.4.0
 djangorestframework==3.15.2
 firebase-admin==7.4.0
 gunicorn==23.0.0
-idna==3.10
+idna==3.19
 oauthlib==3.3.1
 django-oauth-toolkit==3.2.0
 packaging==24.1
@@ -21,12 +21,12 @@ psycopg[binary]==3.3.3
 pycparser==2.23
 PyJWT>=2.10.1
 python-decouple==3.8
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 python3-openid==3.2.0
-requests==2.32.3
+requests==2.34.2
 requests-oauthlib==2.0.0
-sqlparse==0.5.1
-urllib3==2.2.3
+sqlparse==0.6.0
+urllib3==2.7.0
 whitenoise==6.7.0
 django-anymail[mailgun]==12.0
 drf-spectacular==0.28.0
@@ -34,6 +34,6 @@ drf-spectacular==0.28.0
 python-fitparse>=2.0.0
 
 # Testing
-pytest==8.4.2
+pytest==9.0.3
 pytest-django==4.11.1
 factory-boy==3.3.3
