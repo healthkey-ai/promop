@@ -50,7 +50,7 @@ function EditableValue({ field, value, onSave }: { field: CustomField; value: un
   return <input type={field.field_type === "number" ? "number" : field.field_type === "date" ? "date" : "text"} value={draft} disabled={saving} onChange={(e) => setDraft(e.target.value)} onBlur={() => { if (draft !== String(value ?? "")) void save(draft); }} className="mt-1 h-9 w-full rounded border px-3 text-sm disabled:opacity-60" aria-label={field.display_name} />;
 }
 
-function AddCustomFieldDialog({ tab, onClose, onCreated }: {
+export function AddCustomFieldDialog({ tab, onClose, onCreated }: {
   tab: string; onClose: () => void; onCreated: () => void;
 }) {
   const [displayName, setDisplayName] = useState("");
