@@ -7,11 +7,15 @@ no external calls) before the real verify() is invoked.
 
 Verified tokens are cached for up to AUTH_TOKEN_CACHE_TTL seconds (default 60)
 so repeated requests with the same Bearer token skip provider.verify() and DB
-lookups.  A cache hit still honours the token's own ``exp``, and an entry never
-outlives the token it came from, so the cache cannot extend a token's life — see
-issue #759 / audit finding F21.  The TTL bounds the window in which a
-provider-side revocation is not yet visible; that window cannot be closed
-without a round-trip to the provider.
+lookups.  A cache hit honours the token's own ``exp`` where the provider gives
+one, and such an entry never outlives the token it came from — see issue #759 /
+audit finding F21.  The TTL bounds the window in which a provider-side
+revocation is not yet visible; that window cannot be closed without a round-trip
+to the provider.
+
+Where a provider returns no ``exp`` the cache falls back to the TTL alone, and
+F21 is mitigated rather than closed for those tokens.  RFC 7662 makes ``exp``
+optional in an introspection response, so the PHR non-RS256 path can land here.
 """
 from __future__ import annotations
 
@@ -88,9 +92,10 @@ class PartnerAuthentication(BaseAuthentication):
     def _token_expiry(claims_raw) -> int | None:
         """Return the token's ``exp`` as a unix timestamp, or None if absent.
 
-        Providers hand back the decoded claim set as ``raw``; every JWT issuer we
-        accept carries ``exp`` there. A provider that omits it gets None and falls
-        back to the cache TTL alone.
+        Providers hand back the decoded claim set as ``raw``. JWT issuers carry
+        ``exp`` there, but an RFC 7662 introspection response need not — ``exp``
+        is optional in that spec — so this returns None for those and the caller
+        falls back to the cache TTL alone.
         """
         if not isinstance(claims_raw, dict):
             return None
