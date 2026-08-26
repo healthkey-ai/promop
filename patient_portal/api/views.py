@@ -4925,6 +4925,16 @@ def _csv_row_write_error(request, person_id: int) -> str | None:
 
     if can_write_patient(actor, person_id):
         return None
+
+    # A row naming a person_id nobody holds yet is a create, and
+    # can_write_patient has nothing to answer about it — it returns False for
+    # every id that does not exist, which would reject every new patient a CSV
+    # introduces. The org branch above already allows that case; keep the two
+    # consistent. Requiring the Person to be genuinely absent means an existing
+    # patient can never be reached through this carve-out.
+    if not Person.objects.filter(person_id=person_id).exists():
+        return None
+
     return 'caller does not have write access to this patient'
 
 
@@ -7328,8 +7338,13 @@ class SurveyViewSet(viewsets.ModelViewSet):
             return
         if token is not None and not isinstance(token, TokenClaims):
             # OAuth2: allow only internal service apps (no org).
-            # Partner org apps have an org_profile and must not touch shared templates.
-            if get_request_org(request) is None:
+            # Partner org apps have an org_profile and must not touch shared
+            # templates. Read org_profile off the application directly rather
+            # than through get_request_org(), which also returns None for any
+            # non client_credentials grant — that would read an org-linked
+            # human-facing app as "internal" and let it through here, since
+            # this is the one call site where no org means allowed.
+            if getattr(getattr(token, 'application', None), 'org_profile', None) is None:
                 return
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('Survey templates can only be modified by staff or service tokens.')

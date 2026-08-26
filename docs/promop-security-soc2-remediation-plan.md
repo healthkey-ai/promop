@@ -39,6 +39,16 @@ These still need evidence or hardening:
    - Preserve `(issuer, sub)` as the primary login identity.
    - Prevent silent rebinding of an existing `PatientUser` from one identity to another.
    - Add regression tests for unverified-email tokens and verified-email tokens.
+   - Deployment note: `email_verified` is now load-bearing for three behaviours —
+     populating `Identity.email`, migrating placeholder `GroupAccess` invite
+     grants onto a real login identity, and resolving an existing `Person`.
+     Confirm the PHR and Firebase issuers actually emit the claim. If an issuer
+     omits it, every login from it is treated as unverified and fails *silently*:
+     `identity.email` is never set, an invited clinician's org grants never move
+     off the placeholder identity so they sign in with no org access, and each
+     login auto-provisions a duplicate `Person`. Only the address written to
+     `Person.email` is now gated too, so the duplicates do not also poison the
+     email lookup for the real owner.
 
 2. Fix lab-result measurement and visit mutation authorization.
    - Issue: #747.

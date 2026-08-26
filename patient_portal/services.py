@@ -181,7 +181,15 @@ def resolve_or_create_person(identity, email=None, allow_create=True, email_veri
                 gender_source_value="unknown",
                 race_source_value="unknown",
                 ethnicity_source_value="unknown",
-                email=email or None,
+                # Only a verified address may be stamped on the new Person.
+                # The gate above governs the *lookup*; without this it would
+                # still persist an unverified claim, letting anyone who can
+                # register at the IdP plant a Person row keyed on someone
+                # else's address. The real owner's later verified sign-in then
+                # sees two Persons for that email, trips the cross-org
+                # collision guard, and is forked into a duplicate instead of
+                # linking to their own record.
+                email=email if email_verified else None,
             )
             PatientRecord.objects.create(person=person)
             PatientUser.objects.create(identity=identity, person=person)

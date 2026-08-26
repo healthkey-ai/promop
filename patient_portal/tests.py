@@ -16871,6 +16871,249 @@ class GetRequestOrgGrantTypeTest(TestCase):
         self.assertIsNone(self._request_with(self.smart_token))
 
 
+class UnverifiedEmailNotStampedOnPersonTest(TestCase):
+    """An unverified address must not be written to a new Person (issue #746).
+
+    The verified-email gate governs the *lookup*. Persisting the claim anyway
+    would leave the takeover vector open by another route: anyone able to
+    register at the IdP could plant a Person row keyed on someone else's
+    address, and the real owner's later verified sign-in would then find two
+    Persons for that email, trip the cross-org collision guard, and be forked
+    into a duplicate instead of linking to their own record.
+    """
+
+    def test_unverified_claim_is_not_persisted_to_person(self):
+        from patient_portal.services import resolve_or_create_person
+
+        identity = Identity.objects.get_or_create(
+            issuer='https://securetoken.google.com/promop-test',
+            sub='unverified-email-stamp',
+        )[0]
+        identity.set_unusable_password()
+        identity.save()
+
+        person = resolve_or_create_person(
+            identity, email='victim@example.com', email_verified=False,
+        )
+
+        self.assertIsNotNone(person)
+        self.assertIsNone(person.email)
+        self.assertFalse(
+            Person.objects.filter(email='victim@example.com').exists(),
+            'an unverified claim must not key a Person on that address',
+        )
+
+    def test_verified_claim_is_persisted_to_person(self):
+        """The permitted half: a verified address still lands on the Person."""
+        from patient_portal.services import resolve_or_create_person
+
+        identity = Identity.objects.get_or_create(
+            issuer='https://securetoken.google.com/promop-test',
+            sub='verified-email-stamp',
+        )[0]
+        identity.set_unusable_password()
+        identity.save()
+
+        person = resolve_or_create_person(
+            identity, email='owner@example.com', email_verified=True,
+        )
+
+        self.assertEqual(person.email, 'owner@example.com')
+
+
+class CsvCreateForNonOrgCallerTest(TestCase):
+    """A write-scoped non-org caller can still introduce new patients (#748).
+
+    The per-row tenancy check runs before the Person exists, and
+    ``can_write_patient`` returns False for every id that does not exist yet —
+    so without a create carve-out the check would reject every new patient a
+    CSV introduces, which is the endpoint's main purpose. The org branch
+    already allowed this; these tests pin the non-org branch to the same rule
+    and prove the carve-out cannot be used to reach an *existing* patient.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.org = Organization.objects.create(
+            name='CSV Create Org', slug='csv-create-nonorg',
+        )
+        cls.doctor = Identity.objects.create_user(
+            email='csv-create-doctor@example.com', password='pw',
+        )
+        GroupAccess.objects.create(
+            identity=cls.doctor, org=cls.org, role='doctor',
+        )
+
+        # Someone else's patient, held by an org this caller has no grant in.
+        cls.other_org = Organization.objects.create(
+            name='CSV Other Org', slug='csv-create-otherorg',
+        )
+        cls.stranger = Person.objects.create(
+            person_id=455001, given_name='Stranger', family_name='Patient',
+        )
+        PatientRecord.objects.create(
+            person=cls.stranger, organization=cls.other_org,
+        )
+
+        from oauth2_provider.models import AccessToken, Application
+        import datetime as _dt
+        from django.utils import timezone as tz
+
+        # Not org-linked, so get_request_org() is None and the non-org branch
+        # of _csv_row_write_error decides.
+        app = Application.objects.create(
+            name='CSV Create Client',
+            client_id='csv-create-nonorg-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=cls.doctor,
+        )
+        cls.token = AccessToken.objects.create(
+            user=cls.doctor,
+            application=app,
+            token='csv-create-nonorg-token',
+            expires=tz.now() + _dt.timedelta(hours=1),
+            scope='patient/*.read patient/*.write',
+        ).token
+
+    def _upload(self, csv_bytes):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.token}')
+        return client.post(
+            '/api/patient-info/upload_csv/',
+            {'file': SimpleUploadedFile(
+                'patients.csv', csv_bytes, content_type='text/csv',
+            )},
+            format='multipart',
+        )
+
+    def test_new_patient_row_is_accepted(self):
+        resp = self._upload(
+            b'person_id,given_name,disease,diagnosis_date\n'
+            b'455002,Newbie,Breast Cancer,2020-04-03\n'
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['errors'], [])
+        self.assertTrue(Person.objects.filter(person_id=455002).exists())
+
+    def test_row_naming_an_existing_unreachable_patient_is_rejected(self):
+        """The carve-out is for creates only — it must not reach a live patient."""
+        resp = self._upload(
+            b'person_id,given_name,disease,diagnosis_date\n'
+            b'455001,Rewritten,Breast Cancer,2021-04-03\n'
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            any('write access' in e for e in resp.data['errors']),
+            resp.data['errors'],
+        )
+        self.stranger.refresh_from_db()
+        self.assertEqual(self.stranger.given_name, 'Stranger')
+
+
+class SurveyTemplateOrgWriteGuardTest(TestCase):
+    """Org-linked apps stay blocked from shared survey templates (issue #745).
+
+    ``_require_admin_for_writes`` is the one call site where *no* org means
+    allowed, so it reads ``org_profile`` off the application directly. Routing
+    it through ``get_request_org`` would let an org-linked non client-credentials
+    app read as "internal" once that helper began restricting itself to the
+    client_credentials grant.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import AccessToken, Application
+        from omop_core.models import ApplicationOrganization
+        import datetime as _dt
+        from django.utils import timezone as tz
+
+        cls.org = Organization.objects.create(
+            name='Survey Guard Org', slug='survey-guard-org',
+        )
+        cls.owner = Identity.objects.create_user(
+            email='survey-guard@example.com', password='pw',
+        )
+
+        def _token(slug, grant, org):
+            app = Application.objects.create(
+                name=f'Survey Guard {slug}',
+                client_id=f'survey-guard-{slug}',
+                client_type=(
+                    Application.CLIENT_PUBLIC
+                    if grant == Application.GRANT_AUTHORIZATION_CODE
+                    else Application.CLIENT_CONFIDENTIAL
+                ),
+                authorization_grant_type=grant,
+                user=cls.owner,
+                redirect_uris=(
+                    'https://survey.example.invalid/cb'
+                    if grant == Application.GRANT_AUTHORIZATION_CODE else ''
+                ),
+            )
+            if org is not None:
+                ApplicationOrganization.objects.create(
+                    application=app, organization=org,
+                )
+            return AccessToken.objects.create(
+                user=cls.owner,
+                application=app,
+                token=f'survey-guard-{slug}-token',
+                expires=tz.now() + _dt.timedelta(hours=1),
+                scope='patient/*.read patient/*.write',
+            ).token
+
+        cls.internal_token = _token(
+            'internal', Application.GRANT_CLIENT_CREDENTIALS, None,
+        )
+        cls.org_service_token = _token(
+            'org-service', Application.GRANT_CLIENT_CREDENTIALS, cls.org,
+        )
+        cls.org_human_token = _token(
+            'org-human', Application.GRANT_AUTHORIZATION_CODE, cls.org,
+        )
+
+    def _post_template(self, token):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+        return client.post(
+            '/api/surveys/',
+            {
+                'name': 'survey-guard-probe',
+                'title': 'Survey Guard Probe',
+                'status': 'ACTIVE',
+                'disease': 'Breast Cancer',
+                'pages': [],
+            },
+            format='json',
+        )
+
+    def test_org_linked_service_app_is_blocked(self):
+        self.assertEqual(
+            self._post_template(self.org_service_token).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    def test_org_linked_human_facing_app_is_blocked(self):
+        """The case the grant-type restriction would otherwise have let through."""
+        self.assertEqual(
+            self._post_template(self.org_human_token).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    def test_internal_service_app_is_not_blocked_by_this_guard(self):
+        """An app with no org is still treated as internal."""
+        self.assertNotEqual(
+            self._post_template(self.internal_token).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+
 class VocabSnapshotStreamTransactionTest(TransactionTestCase):
     """Regression for #342 — the snapshot stream must not raise
     NoActiveSqlTransaction.
