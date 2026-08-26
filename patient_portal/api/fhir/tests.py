@@ -121,6 +121,15 @@ class FhirSyncTests(TestCase):
         resp = self.client.post('/api/fhir/sync/', {'bundle': {'resourceType': 'Patient'}}, format='json')
         self.assertEqual(resp.status_code, 400)
 
+    def test_rejects_non_numeric_observation_quantity(self):
+        bundle = deepcopy(SAMPLE_BUNDLE)
+        bundle['entry'][1]['resource']['valueQuantity']['value'] = '13.2'
+
+        resp = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('finite number', str(resp.data))
+
     def test_requires_auth(self):
         anon = APIClient()
         resp = anon.post('/api/fhir/sync/', {'bundle': SAMPLE_BUNDLE}, format='json')

@@ -6,11 +6,12 @@ Supported formats:
 """
 import io
 import logging
-import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import NamedTuple
+
+from defusedxml import ElementTree as ET
 
 logger = logging.getLogger(__name__)
 
@@ -388,10 +389,10 @@ _MAX_XML_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB zip bomb limit
 def parse_apple_health_export(zip_bytes: bytes) -> list[WearableSample]:
     """Parse an Apple Health export.zip and return daily wearable samples.
 
-    Streams ``apple_health_export/export.xml`` using ``iterparse`` to keep
-    memory usage low on large exports.  Uses stdlib ``xml.etree.ElementTree``
-    (defusedxml does not expose ``iterparse``).  The root element is cleared
-    after each record to prevent memory accumulation.
+    Streams ``apple_health_export/export.xml`` using ``defusedxml``'s
+    ``iterparse`` to keep memory usage low on large exports while rejecting
+    DTDs and entity expansion. The root element is cleared after each record
+    to prevent memory accumulation.
     """
     try:
         zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
@@ -419,14 +420,6 @@ def parse_apple_health_export(zip_bytes: bytes) -> list[WearableSample]:
     general_hr: dict[date, list[float]] = defaultdict(list)
 
     with zf.open(xml_name) as xml_file:
-        # XXE protection: reject files containing DTD/ENTITY declarations.
-        # defusedxml does not expose iterparse, so we check the first 4KB
-        # for DTD markers before streaming with stdlib. Apple Health exports
-        # never contain DTDs; a crafted upload would.
-        header = xml_file.read(4096)
-        if b'<!DOCTYPE' in header or b'<!ENTITY' in header:
-            raise ValueError('XML file contains DTD/entity declarations; rejected for security.')
-        xml_file.seek(0)
         context = ET.iterparse(xml_file, events=('start', 'end'))
         root = None
         for event, elem in context:

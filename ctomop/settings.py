@@ -242,6 +242,7 @@ PASSWORD_REUSE_DAYS = int(os.environ.get('PASSWORD_REUSE_DAYS', '180'))       # 
 # Audit tamper-evidence (TI.2.2.1) and break-glass (TI.2.3#04).
 AUDIT_HMAC_KEY = os.environ.get('AUDIT_HMAC_KEY', '')                          # falls back to SECRET_KEY when empty
 BREAK_GLASS_TTL_SECONDS = int(os.environ.get('BREAK_GLASS_TTL_SECONDS', '3600'))  # emergency-access window (1h)
+BREAK_GLASS_ALLOW_SERVICE = os.environ.get('BREAK_GLASS_ALLOW_SERVICE', 'false').lower() in ('1', 'true', 'yes')
 # Hash-chain audit rows so row deletion/insertion is detectable (TI.2.2.1). Serializes
 # audit writes via an advisory lock; can be disabled under extreme write load.
 AUDIT_HASH_CHAIN_ENABLED = os.environ.get('AUDIT_HASH_CHAIN_ENABLED', 'true').lower() in ('1', 'true', 'yes')

@@ -1,7 +1,7 @@
 import functools
 from typing import Any, Callable, ContextManager
 
-from rest_framework import viewsets, status
+from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.request import Request
@@ -1465,6 +1465,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
             if fhir_data.get('resourceType') != 'Bundle':
                 return Response({'error': 'FHIR file must be a Bundle'}, status=status.HTTP_400_BAD_REQUEST)
+
+            from patient_portal.api.fhir.sync import validate_fhir_bundle_types
+            try:
+                validate_fhir_bundle_types(fhir_data)
+            except serializers.ValidationError as exc:
+                return Response({'error': str(exc.detail[0])}, status=status.HTTP_400_BAD_REQUEST)
 
             prov_source, prov_user_id, prov_reason = _extract_provenance(request)
             if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
@@ -4614,16 +4620,8 @@ def login_view(request):
                 'user': user_serializer.data
             }, status=status.HTTP_200_OK)
 
-        # Check if the account is locked so we can show a specific message
-        identity = (
-            Identity.objects.filter(uid=username).first()
-            or Identity.objects.filter(email__iexact=username).first()
-        )
-        if identity and identity.is_locked:
-            return Response({
-                'error': 'Account temporarily locked due to too many failed attempts. Please try again later.'
-            }, status=status.HTTP_403_FORBIDDEN)
-
+        # Do not distinguish unknown, invalid, locked, or non-portal accounts.
+        # Authentication callers must not be able to enumerate account state.
         return Response({
             'error': 'Invalid credentials'
         }, status=status.HTTP_401_UNAUTHORIZED)

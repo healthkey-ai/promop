@@ -20,6 +20,7 @@ enrichment is deferred — see fhir_importers issue #10.
 """
 import json
 import logging
+import math
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -144,6 +145,29 @@ def _parse_decimal(value):
         return None
 
 
+def validate_fhir_bundle_types(bundle):
+    """Reject JSON values whose FHIR primitive type cannot be stored safely.
+
+    FHIR ``Quantity.value`` is a decimal, not an arbitrary JSON string. Letting
+    malformed values reach the ORM turns client input errors into 500 responses
+    (or database-specific casting errors).
+    """
+    for entry in bundle.get('entry') or []:
+        resource = entry.get('resource') if isinstance(entry, dict) else None
+        if not isinstance(resource, dict) or resource.get('resourceType') != 'Observation':
+            continue
+        quantity = resource.get('valueQuantity')
+        if not isinstance(quantity, dict) or 'value' not in quantity:
+            continue
+        value = quantity['value']
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise serializers.ValidationError(
+                'Observation.valueQuantity.value must be a finite number.')
+        if not math.isfinite(value):
+            raise serializers.ValidationError(
+                'Observation.valueQuantity.value must be a finite number.')
+
+
 def _reference_range_bound(obs, bound):
     ranges = obs.get('referenceRange') or []
     if not isinstance(ranges, list):
@@ -193,6 +217,7 @@ class FhirSyncRequestSerializer(serializers.Serializer):
             raise serializers.ValidationError("bundle must be a FHIR Bundle resource.")
         if len(value.get('entry', []) or []) > 1000:
             raise serializers.ValidationError("Maximum 1000 bundle entries per request.")
+        validate_fhir_bundle_types(value)
         return value
 
     def validate_actor_iss(self, value):

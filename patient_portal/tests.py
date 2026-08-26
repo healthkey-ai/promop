@@ -290,6 +290,27 @@ class FhirUploadBase(TestCase):
         return Person.objects.filter(family_name='Smith', given_name='Jane').first()
 
 
+class FhirUploadValidationTest(FhirUploadBase):
+    """Malformed FHIR primitives are client errors, not server errors."""
+
+    def test_upload_rejects_non_numeric_observation_quantity(self):
+        bundle = _make_fhir_bundle()
+        observation = next(
+            entry['resource'] for entry in bundle['entry']
+            if entry.get('resource', {}).get('resourceType') == 'Observation'
+        )
+        observation['valueQuantity']['value'] = 'not-a-number'
+        fhir_file = io.BytesIO(json.dumps(bundle).encode('utf-8'))
+        fhir_file.name = 'invalid_bundle.json'
+
+        resp = self.client.post(
+            '/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart'
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('finite number', resp.data['error'])
+
+
 # ---------------------------------------------------------------------------
 # 1. OMOP table population tests
 # ---------------------------------------------------------------------------
@@ -15025,12 +15046,15 @@ class AuthControlsTest(TestCase):
         # First two failures return 401 (invalid credentials).
         for _ in range(2):
             self.assertEqual(self._login('wrong-password').status_code, status.HTTP_401_UNAUTHORIZED)
-        # The third failure triggers lockout; the view returns 403 (account locked).
-        self.assertEqual(self._login('wrong-password').status_code, status.HTTP_403_FORBIDDEN)
+        # Lockout is deliberately indistinguishable from any other failure.
+        locked_failure = self._login('wrong-password')
+        self.assertEqual(locked_failure.status_code, status.HTTP_401_UNAUTHORIZED)
         self.identity.refresh_from_db()
         self.assertTrue(self.identity.is_locked)
-        # Correct password is also refused while locked (403).
-        self.assertEqual(self._login(self.password).status_code, status.HTTP_403_FORBIDDEN)
+        # Correct password is also refused while locked (same generic response).
+        correct_while_locked = self._login(self.password)
+        self.assertEqual(correct_while_locked.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(correct_while_locked.data, locked_failure.data)
 
     def test_successful_login_resets_failure_count(self):
         self._login('wrong-password')
@@ -15344,6 +15368,7 @@ class BreakGlassTest(TestCase):
         cls.org_admin = Identity.objects.create_user(email='bg-admin@test.com', password='pw')
         GroupAccess.objects.create(identity=cls.org_admin, org=cls.org, role='org_admin')
         cls.person = Person.objects.create(person_id=96001)
+        PatientRecord.objects.create(person=cls.person, organization=cls.org)
         cls.patient = Identity.objects.create_user(email='bg-patient@test.com', password='pw')
         PatientUser.objects.create(identity=cls.patient, person=cls.person)
 
@@ -15372,6 +15397,26 @@ class BreakGlassTest(TestCase):
         grant = BreakGlassGrant.objects.get(identity=self.org_admin, person_id=96001)
         self.assertEqual(grant.reason, 'ED admission')
         self.assertTrue(grant.is_active)
+
+    def test_break_glass_requires_target_patient_org_nexus(self):
+        from omop_core.models import Organization
+        other_org = Organization.objects.create(name='Other BG Org', slug='other-bg-org')
+        other_person = Person.objects.create(person_id=96002)
+        PatientRecord.objects.create(person=other_person, organization=other_org)
+
+        resp = self._c(self.org_admin).post('/api/v1/break-glass/', {
+            'person_id': other_person.person_id, 'reason': 'unrelated emergency',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_break_glass_staff_without_org_nexus_is_denied(self):
+        staff = Identity.objects.create_user(
+            email='bg-staff-no-nexus@test.com', password='pw', is_staff=True,
+        )
+        resp = self._c(staff).post('/api/v1/break-glass/', {
+            'person_id': self.person.person_id, 'reason': 'no assigned org',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_break_glass_grants_audit_visibility(self):
         from patient_portal.models import AuditEvent, BreakGlassGrant
@@ -18087,6 +18132,24 @@ class WearableParserUnitTest(TestCase):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, 'w') as zf:
             zf.writestr('readme.txt', 'no export.xml here')
+        with self.assertRaises(ValueError):
+            parse_apple_health_export(buf.getvalue())
+
+    def test_parse_apple_health_rejects_dtd_after_leading_comment(self):
+        import zipfile
+        from omop_core.services.wearable_parsers import parse_apple_health_export
+
+        xml_content = (
+            '<!-- harmless-looking prefix -->'
+            '<!DOCTYPE HealthData [<!ENTITY injected "should not expand">]>'
+            '<HealthData><Record type="HKQuantityTypeIdentifierStepCount" '
+            'startDate="2024-06-01 08:00:00 -0700" '
+            'endDate="2024-06-01 08:30:00 -0700" value="1500"/></HealthData>'
+        )
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as zf:
+            zf.writestr('apple_health_export/export.xml', xml_content)
+
         with self.assertRaises(ValueError):
             parse_apple_health_export(buf.getvalue())
 
