@@ -78,15 +78,15 @@ evidence work rather than code.
 | P0 4 — `export-fhir` object authorization | #744 | **Done** |
 | P0 5 — CSV per-row tenancy | #748 | **Done** |
 | P1 6 — PHR JWT audience validation | #750 | Code complete, **blocked on `healthkey-ai/phr#65`** |
-| P1 7 — dedicated production signing keys | #749 | Code complete, **keys unset in hosted envs; rotation runbook not written** |
-| P1 8 — token cache posture (F21) | — | **Not started**, and never issue-tracked |
+| P1 7 — dedicated production signing keys | #749 | **Done** — keys set in hosted envs; rotation runbook at `docs/signing-key-rotation.md`; `start.sh` now runs `check --deploy` |
+| P1 8 — token cache posture (F21) | #759 | **Done** — cache honours the token's `exp` and no entry outlives its token |
 | P1 9 — Apple Health XML parsing | #751 | **Done** |
 | P1 10 — FHIR ingest type validation | #751 | **Done** |
 | P1 11 — login response for non-portal accounts | #755 | **Done** |
 | P1 12 — break-glass scope | #755 | **Done** |
 | SOC2 1 — CI security gates | #754 | **Partial** — `check --deploy` in CI; no dependency audit, SAST, or secret scan |
 | SOC2 2 — change-management evidence | #752 | **Not started** — no `CODEOWNERS` on `dev` |
-| SOC2 3 — audit-key evidence | #749 | Blocked on the same operator work as P1 7 |
+| SOC2 3 — audit-key evidence | #749 | **Done** in code and procedure; retaining `verify_audit_integrity` output is the recurring operator step |
 | Operator evidence | #753 | **Not started** |
 
 Three things the P0 work turned up that were not in this plan, all fixed in the same PR:
@@ -181,13 +181,13 @@ Two carried gaps, deliberately not fixed and recorded on the closed issues:
      (P0 item 1): phr emits no `email_verified` claim, so every phr user is
      currently treated as unverified.
 
-7. Require dedicated production signing keys. **[Code complete — keys unset in hosted envs]**
+7. Require dedicated production signing keys. **[Done — #749]**
    - Issue: #749.
    - Findings: PROMOP F20 and SOC2 CC7.2 non-repudiation concern.
    - Keep development fallback behavior, but fail production configuration if `AUDIT_HMAC_KEY` or `EXPORT_SIGNING_KEY` is absent.
    - Document rotation procedure.
 
-8. Tighten token cache posture. **[Not started]**
+8. Tighten token cache posture. **[Done — #759]**
    - Finding: PROMOP F21.
    - Keep the cache short, env-configurable, and covered by tests.
    - If provider revocation checks become available, bypass cache for revoked-token-sensitive providers or lower production TTL.

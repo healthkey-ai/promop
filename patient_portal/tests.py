@@ -17159,6 +17159,163 @@ class SurveyTemplateOrgWriteGuardTest(TestCase):
         )
 
 
+class TokenCacheExpiryTest(TestCase):
+    """The verified-token cache must not extend a token's life (issue #759, F21).
+
+    Verification happens when the entry is written; the token keeps ageing after
+    that. Before this, a cache hit re-checked only ``identity.is_active``, so an
+    expired — or provider-revoked — token kept authenticating for the rest of the
+    TTL window. The revocation half cannot be closed without asking the provider,
+    so the TTL bounds it deliberately; the expiry half is closed exactly, because
+    ``exp`` is already in the cached claims.
+    """
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        self.identity = Identity.objects.create(
+            issuer='https://issuer.example.com',
+            sub='cache-expiry-sub',
+            email='cache-expiry@example.com',
+        )
+        self.identity.set_unusable_password()
+        self.identity.save()
+
+    def _claims(self, exp):
+        from patient_portal.api.providers.base import TokenClaims
+
+        return TokenClaims(
+            issuer=self.identity.issuer,
+            sub=self.identity.sub,
+            email=self.identity.email,
+            name=None,
+            raw={'exp': exp} if exp is not None else {},
+            email_verified=True,
+        )
+
+    def _seed_entry(self, token, exp, timeout=300):
+        """Write a cache entry directly, with a backend timeout well beyond *exp*.
+
+        Deliberately not done by patching ``time.time``: that patches the shared
+        ``time`` module, so Django's cache backend sees the future too and expires
+        the entry itself — the assertion then passes without ``_from_cache``'s
+        check ever running. Seeding a live entry whose *claims* are stale is the
+        only way to exercise the check under test.
+        """
+        from django.core.cache import cache
+        from patient_portal.api.authentication import _token_cache_key
+
+        cache.set(
+            _token_cache_key(token),
+            {
+                'pk': self.identity.pk,
+                'claims': {
+                    'issuer': self.identity.issuer,
+                    'sub': self.identity.sub,
+                    'email': self.identity.email,
+                    'name': None,
+                    'raw': {'exp': exp},
+                    'email_verified': True,
+                },
+            },
+            timeout=timeout,
+        )
+
+    def test_cache_hit_on_expired_token_is_refused(self):
+        import time
+
+        from patient_portal.api.authentication import PartnerAuthentication
+
+        # Entry is live in the backend for another 5 minutes; the token it was
+        # built from expired a second ago.
+        self._seed_entry('expired-token', int(time.time()) - 1)
+
+        self.assertIsNone(PartnerAuthentication._from_cache('expired-token'))
+
+    def test_cache_hit_on_unexpired_token_is_served(self):
+        """The counterpart, so the test above cannot pass by rejecting everything."""
+        import time
+
+        from patient_portal.api.authentication import PartnerAuthentication
+
+        self._seed_entry('live-token', int(time.time()) + 300)
+
+        cached = PartnerAuthentication._from_cache('live-token')
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached[0].pk, self.identity.pk)
+
+    def test_expired_entry_is_evicted_not_just_refused(self):
+        import time
+
+        from django.core.cache import cache
+        from patient_portal.api.authentication import (
+            PartnerAuthentication, _token_cache_key,
+        )
+
+        self._seed_entry('evicted-token', int(time.time()) - 1)
+        PartnerAuthentication._from_cache('evicted-token')
+
+        self.assertIsNone(cache.get(_token_cache_key('evicted-token')))
+
+    def test_entry_lifetime_is_capped_by_the_token_expiry(self):
+        """A token expiring sooner than the TTL takes its cache entry with it."""
+        import time
+        from unittest.mock import patch
+
+        from patient_portal.api.authentication import PartnerAuthentication
+
+        with patch('patient_portal.api.authentication.django_cache.set') as mock_set:
+            PartnerAuthentication._to_cache(
+                'short-token', self.identity.pk, self._claims(int(time.time()) + 5),
+            )
+
+        self.assertLessEqual(mock_set.call_args.kwargs['timeout'], 5)
+
+    def test_ttl_still_applies_when_the_token_expires_later(self):
+        """The configured TTL remains the ceiling — it bounds the revocation window."""
+        import time
+        from unittest.mock import patch
+
+        from django.test import override_settings
+        from patient_portal.api.authentication import PartnerAuthentication
+
+        with override_settings(AUTH_TOKEN_CACHE_TTL=60):
+            with patch('patient_portal.api.authentication.django_cache.set') as mock_set:
+                PartnerAuthentication._to_cache(
+                    'long-token', self.identity.pk,
+                    self._claims(int(time.time()) + 3600),
+                )
+
+        self.assertEqual(mock_set.call_args.kwargs['timeout'], 60)
+
+    def test_already_expired_token_is_never_cached(self):
+        import time
+
+        from django.core.cache import cache
+        from patient_portal.api.authentication import (
+            PartnerAuthentication, _token_cache_key,
+        )
+
+        PartnerAuthentication._to_cache(
+            'stale-token', self.identity.pk, self._claims(int(time.time()) - 1),
+        )
+
+        self.assertIsNone(cache.get(_token_cache_key('stale-token')))
+
+    def test_provider_without_exp_still_caches_under_the_ttl(self):
+        """A provider that omits exp falls back to the TTL rather than failing."""
+        from patient_portal.api.authentication import PartnerAuthentication
+
+        PartnerAuthentication._to_cache(
+            'no-exp-token', self.identity.pk, self._claims(None),
+        )
+
+        cached = PartnerAuthentication._from_cache('no-exp-token')
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached[0].pk, self.identity.pk)
+
+
 class VocabSnapshotStreamTransactionTest(TransactionTestCase):
     """Regression for #342 — the snapshot stream must not raise
     NoActiveSqlTransaction.
