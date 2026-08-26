@@ -341,6 +341,14 @@ PHR_INTROSPECT_URL = os.environ.get(
     f"{PHR_BASE_URL}/api/v1/auth/introspect/" if PHR_BASE_URL else "",
 )
 PHR_JWKS_CACHE_TTL = int(os.environ.get("PHR_JWKS_CACHE_TTL", "3600"))
+# Expected `aud` claim on incoming PHR tokens (audit findings PROMOP F10/F16/F17).
+# Both verification paths in patient_portal/api/providers/phr.py treat an unset
+# value as "not configured" and reject every PHR token — fail CLOSED, not open.
+# This is deliberate: a wrong or missing audience must never be silently
+# accepted. Operational consequence: PHR_AUDIENCE must be set in the Render and
+# GCP environments before this change reaches those environments, or every PHR
+# federation login will fail with no other code change required to break it.
+PHR_AUDIENCE = os.environ.get("PHR_AUDIENCE", "promop-api" if DEBUG else "")
 
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "promop-test" if DEBUG else "")
 FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(

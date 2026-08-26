@@ -2014,6 +2014,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                 'patient': f'{given_name} {family_name}',
                                 'error': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.',
                             })
+                            # The Person upsert, Location, Death and VisitOccurrence
+                            # writes above already ran inside this patient's savepoint.
+                            # `continue` raises nothing, so the finally block would see
+                            # _last_exc is None and call _atomic_cm.__exit__(None, None,
+                            # None) — and Django's Atomic.__exit__ COMMITS a savepoint it
+                            # is not given an exception for. Setting _last_exc is what
+                            # routes the finally block to a rollback, so a caller we just
+                            # denied does not get their partial writes persisted.
+                            _last_exc = PermissionError('Write denied for existing patient.')
                             continue
 
                     # Extract disease, stage, and histologic type from Condition
@@ -4460,9 +4469,21 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         errors.append("Person not found.")
                         continue
                     elif org is None and not _is_privileged:
-                        from omop_core.authorization import can_access_patient
+                        from omop_core.authorization import can_access_patient, can_write_patient
                         if not can_access_patient(request.user, person_id):
                             errors.append("Person not found.")
+                            continue
+                        # can_access_patient grants the analyst role, which is read-only
+                        # (omop_core.authorization: 'analyst' is in _READ_ROLES, not
+                        # _WRITE_ROLES) — so the read predicate alone would let an analyst
+                        # delete patients. The read-denial above stays a "not found" so the
+                        # endpoint is not an existence oracle; here the caller demonstrably
+                        # can read the patient, so hiding existence buys nothing and an
+                        # explicit reason is more useful than a false "not found".
+                        if not can_write_patient(request.user, person_id):
+                            errors.append(
+                                "Analysts have read-only access. Contact a doctor or org admin to delete patient data."
+                            )
                             continue
                     with transaction.atomic():
                         # Delete OMOP clinical rows in FK dependency order.
@@ -5103,9 +5124,19 @@ class PersonViewSet(viewsets.GenericViewSet):
                 if not PatientRecord.objects.filter(person=person, organization=org).exists():
                     return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
             elif not getattr(request.user, 'is_staff', False):
-                from omop_core.authorization import can_access_patient
+                from omop_core.authorization import can_access_patient, can_write_patient
                 if not can_access_patient(request.user, person.person_id):
                     return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+                # Reading a person is not permission to rewrite their demographics:
+                # the analyst role passes can_access_patient but is absent from
+                # _WRITE_ROLES. The read-denial above stays a 404 so this route does
+                # not confirm which person_ids exist; a caller who can already read
+                # the row gets the explicit 403 instead.
+                if not can_write_patient(request.user, person.person_id):
+                    return Response(
+                        {'detail': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
 
         changed = []
         for field, (kind, placeholders) in _PERSON_PATCHABLE_FIELDS.items():
@@ -6474,11 +6505,19 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
                 raise PermissionDenied('Episode does not belong to your organization.')
         elif self.request.user and not getattr(self.request.user, 'is_staff', False):
             # Non-org path (partner-auth / session patients): enforce per-patient ownership.
-            from omop_core.authorization import can_access_patient
+            from omop_core.authorization import can_access_patient, can_write_patient
             if episode_id is not None:
                 episode = Episode.objects.filter(episode_id=episode_id).first()
                 if episode is None or not can_access_patient(self.request.user, episode.person_id):
                     raise PermissionDenied('Access denied.')
+                # Creating an episode event is a clinical write, and can_access_patient
+                # is only the read predicate — the analyst role satisfies it but is not
+                # in _WRITE_ROLES. Without this an analyst could append treatment-line
+                # events to any episode they are allowed to read.
+                if not can_write_patient(self.request.user, episode.person_id):
+                    raise PermissionDenied(
+                        'Analysts have read-only access. Contact a doctor or org admin to update patient data.'
+                    )
         serializer.save()
 
 

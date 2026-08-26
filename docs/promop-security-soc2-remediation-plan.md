@@ -76,6 +76,10 @@ These still need evidence or hardening:
    - Findings: PROMOP F10, F16, F17.
    - Configure an expected audience and require it for RS256 PHR token verification.
    - Add tests for wrong-audience rejection.
+   - Deployment note: `PHR_AUDIENCE` must be set in the Render and GCP
+     environments before this change reaches production. It has no
+     production default — an unset value fails CLOSED and rejects every
+     PHR token, so PHR federation logins break until the variable is set.
 
 7. Require dedicated production signing keys.
    - Issue: #749.

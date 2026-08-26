@@ -680,6 +680,27 @@ class LabResultsMutationAuthorizationTest(TestCase):
         self.assertTrue(VisitOccurrence.objects.filter(visit_occurrence_id=510).exists())
         self.assertTrue(Measurement.objects.filter(measurement_id=510).exists())
 
+    def test_org_scoped_read_only_token_cannot_patch_measurement(self):
+        """Issue #747: a read-only SMART scope cannot mutate a lab result.
+
+        The token is org-scoped and the measurement belongs to that org, so the
+        only thing standing between the caller and a write is the SMART scope
+        check in ScopedTokenPermission.has_permission — PATCH requires
+        patient/*.write or user/*.write, and patient/*.read alone must 403.
+        """
+        token = self._oauth_token(user=None, scope='patient/*.read', org=self.org)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+
+        resp = self.client.patch(
+            '/api/lab-results/measurements/510/',
+            {'value': '11.0'},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.measurement.refresh_from_db()
+        self.assertEqual(self.measurement.value_as_number, Decimal('13.5'))
+
     def test_org_scoped_write_token_can_patch_own_org_measurement(self):
         token = self._oauth_token(user=None, scope='patient/*.write', org=self.org)
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
@@ -1247,17 +1268,65 @@ class FirebaseAuthedSyncTest(TestCase):
             status.HTTP_403_FORBIDDEN,
         ])
 
-    def test_firebase_authed_existing_user_no_patientuser_links_via_email(self):
-        new_user = Identity.objects.get_or_create(
+    def _email_match_fixture(self, sub, email='emailmatch@example.com'):
+        """Build an unlinked Identity plus an existing Person carrying *email*."""
+        user = Identity.objects.get_or_create(
             issuer='https://securetoken.google.com/promop-test',
-            sub='firebase-uid-brand-new',
-            defaults={'email': 'emailmatch@example.com'},
+            sub=sub,
+            defaults={'email': email},
         )[0]
-        new_user.set_unusable_password()
-        new_user.is_staff = True  # privileged caller; see setUp note
-        new_user.save()
-        person2 = Person.objects.create(person_id=9002)
-        PatientRecord.objects.create(person=person2, email='emailmatch@example.com')
+        user.set_unusable_password()
+        user.is_staff = True  # privileged caller; see setUp note
+        user.save()
+        person = Person.objects.create(person_id=9002)
+        PatientRecord.objects.create(person=person, email=email)
+        return user, person
+
+    def test_firebase_authed_unverified_email_does_not_claim_existing_person(self):
+        """Issue #746: an unverified email must never claim an existing Person.
+
+        The Identity carries an ``email`` that matches an existing patient, but
+        no verified-email evidence was ever presented (no ``email_verified``
+        claim, and the Firebase issuer means ``is_local`` is False). Account
+        takeover by asserting someone else's address is therefore refused and a
+        fresh Person is auto-provisioned instead.
+        """
+        new_user, person2 = self._email_match_fixture('firebase-uid-unverified')
+        self.client.force_authenticate(user=new_user)
+
+        resp = self.client.post(
+            '/api/lab-results/sync/', self._sync_payload(), format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        pu = PatientUser.objects.get(identity=new_user)
+        self.assertNotEqual(pu.person_id, person2.person_id)
+        self.assertFalse(
+            PatientUser.objects.filter(person=person2).exists(),
+            'existing person must not be claimed by an unverified email',
+        )
+        m = Measurement.objects.get(measurement_id=resp.data['measurement_ids'][0])
+        self.assertEqual(m.person_id, pu.person_id)
+
+    def test_firebase_authed_verified_email_links_to_existing_person(self):
+        """Issue #746: a *verified* email claim still links to the existing Person.
+
+        Locks down the permitted half of the boundary — the security fix must
+        not break legitimate account linking. ``_ensure_person`` is called with
+        ``email_verified=True`` exactly as ``PartnerAuthentication.authenticate``
+        does on every real Firebase request, so the matching Person is claimed.
+        """
+        from patient_portal.api.authentication import _ensure_person
+        from patient_portal.api.providers.base import TokenClaims
+
+        new_user, person2 = self._email_match_fixture('firebase-uid-verified')
+        _ensure_person(new_user, TokenClaims(
+            issuer=new_user.issuer,
+            sub=new_user.sub,
+            email='emailmatch@example.com',
+            name=None,
+            raw={},
+            email_verified=True,
+        ))
         self.client.force_authenticate(user=new_user)
 
         resp = self.client.post(
