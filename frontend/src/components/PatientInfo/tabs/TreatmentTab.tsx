@@ -97,7 +97,19 @@ function HowToAuthor({ descriptor }: { descriptor?: FieldDescriptor }) {
   );
 }
 
-export default function TreatmentTab({ formData, onChange, onRecordRefreshed }: Props) {
+/** Map the patient's disease string to the Disease vocabulary code for API filtering. */
+function diseaseToDiseaseCode(disease?: unknown): string | undefined {
+  if (typeof disease !== 'string') return undefined;
+  const d = disease.toLowerCase();
+  if (d.includes('mantle')) return 'MCL';
+  if (d.includes('follicular')) return 'C3209';
+  if (d.includes('myeloma')) return 'C3242';
+  if (d.includes('cll') || d.includes('chronic lymphocytic')) return 'C2987';
+  if (d.includes('breast')) return 'C9335';
+  return undefined;
+}
+
+export default function TreatmentTab({ formData, onChange, diseaseType: _, onRecordRefreshed }: Props) {
   // person_id rides in the record the tab already receives, so neither the
   // descriptor nor authoring needs an extra prop threaded through both hosts.
   const personId = Number(formData?.person_id ?? formData?.person ?? 0) || null;
@@ -182,6 +194,7 @@ export default function TreatmentTab({ formData, onChange, onRecordRefreshed }: 
           personId={personId}
           defaultLineNumber={linesCount + 1}
           line={dialogState.mode === 'edit' ? dialogState.line : undefined}
+          diseaseCode={diseaseToDiseaseCode(formData?.disease)}
           onClose={() => setDialogState(null)}
           onAuthored={(info) => onRecordRefreshed?.(info)}
         />

@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 _THERAPY_ROUNDS = [
     ('first_line_therapy', 'First Line Therapy'),
     ('second_line_therapy', 'Second Line Therapy'),
+    ('second_round_therapy', 'Second Round Therapy'),
     ('later_line_therapy', 'Later Line Therapy'),
     ('supportive_therapy', 'Supportive Therapy'),
 ]
@@ -70,32 +71,50 @@ class Command(BaseCommand):
             TherapyRound.objects.get_or_create(code=code, defaults={'title': title})
         self.stdout.write(f'TherapyRound: {len(_THERAPY_ROUNDS)} seeded')
 
+        # ── Ensure required diseases exist ──────────────────────────────
+        Disease.objects.get_or_create(
+            code='MCL', defaults={'title': 'Mantle Cell Lymphoma'},
+        )
+
         # ── Load therapies_and_components.csv ─────────────────────────────
         regimen_count = 0
         component_count = 0
         link_count = 0
+        updated_count = 0
         with open(tc_path, newline='') as f:
             reader = csv.DictReader(f)
             for row in reader:
+                concept = _concept_or_none(row.get('therapy_concept_id'))
                 regimen, created = TherapyRegimen.objects.get_or_create(
                     code=row['therapy_code'],
                     defaults={
                         'title': row['therapy_title'],
-                        'concept': _concept_or_none(row.get('therapy_concept_id')),
+                        'concept': concept,
                     },
                 )
                 if created:
                     regimen_count += 1
+                elif concept and regimen.concept_id != concept.concept_id:
+                    regimen.concept = concept
+                    regimen.title = row['therapy_title']
+                    regimen.save(update_fields=['concept', 'title'])
+                    updated_count += 1
 
+                concept = _concept_or_none(row.get('component_concept_id'))
                 component, created = TherapyComponent.objects.get_or_create(
                     code=row['component_code'],
                     defaults={
                         'title': row['component_title'],
-                        'concept': _concept_or_none(row.get('component_concept_id')),
+                        'concept': concept,
                     },
                 )
                 if created:
                     component_count += 1
+                elif concept and component.concept_id != concept.concept_id:
+                    component.concept = concept
+                    component.title = row['component_title']
+                    component.save(update_fields=['concept', 'title'])
+                    updated_count += 1
 
                 _, created = TherapyRegimenComponent.objects.get_or_create(
                     regimen=regimen,
@@ -107,6 +126,7 @@ class Command(BaseCommand):
         self.stdout.write(
             f'therapies_and_components.csv: '
             f'{regimen_count} regimens, {component_count} components, {link_count} links'
+            + (f', {updated_count} concept IDs updated' if updated_count else '')
         )
 
         # ── Load components_and_classes.csv ───────────────────────────────
@@ -115,24 +135,31 @@ class Command(BaseCommand):
         with open(cc_path, newline='') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                # Component should already exist from above
-                component, _ = TherapyComponent.objects.get_or_create(
+                concept = _concept_or_none(row.get('component_concept_id'))
+                component, created = TherapyComponent.objects.get_or_create(
                     code=row['component_code'],
                     defaults={
                         'title': row['component_title'],
-                        'concept': _concept_or_none(row.get('component_concept_id')),
+                        'concept': concept,
                     },
                 )
+                if not created and concept and component.concept_id != concept.concept_id:
+                    component.concept = concept
+                    component.save(update_fields=['concept'])
 
+                concept = _concept_or_none(row.get('class_concept_id'))
                 therapy_class, created = TherapyClass.objects.get_or_create(
                     code=row['class_code'],
                     defaults={
                         'title': row['class_title'],
-                        'concept': _concept_or_none(row.get('class_concept_id')),
+                        'concept': concept,
                     },
                 )
                 if created:
                     class_count += 1
+                elif concept and therapy_class.concept_id != concept.concept_id:
+                    therapy_class.concept = concept
+                    therapy_class.save(update_fields=['concept'])
 
                 _, created = TherapyComponentClassLink.objects.get_or_create(
                     component=component,

@@ -13,6 +13,8 @@ interface Props {
   defaultLineNumber: number;
   /** Existing line to edit. When present, the dialog PATCHes the line episode. */
   line?: EditableTherapyLine;
+  /** Disease code for filtering regimens to this patient's disease. */
+  diseaseCode?: string;
   onClose: () => void;
   /** Receives the re-derived record so the tab updates without a refetch. */
   onAuthored: (patientInfo: Record<string, unknown>) => void;
@@ -37,6 +39,7 @@ export default function TherapyLineDialog({
   personId,
   defaultLineNumber,
   line,
+  diseaseCode,
   onClose,
   onAuthored,
 }: Props) {
@@ -70,13 +73,13 @@ export default function TherapyLineDialog({
     }
     setRegimenSearching(true);
     try {
-      setRegimenResults(await searchTherapyRegimens(q));
+      setRegimenResults(await searchTherapyRegimens(q, diseaseCode));
     } catch {
       setRegimenResults([]);
     } finally {
       setRegimenSearching(false);
     }
-  }, []);
+  }, [diseaseCode]);
 
   const selectRegimen = useCallback(async (regimen: TherapyRegimen) => {
     setRegimenQuery('');
