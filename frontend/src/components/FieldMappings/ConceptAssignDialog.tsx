@@ -405,7 +405,7 @@ export function ConceptAssignDialog({
             disabled={(!selected && !isEditing) || saving}
             className="rounded bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
-            {saving ? "Saving..." : isEditing ? "Update Mapping" : "Save Mapping"}
+            {saving ? "Saving..." : isEditing ? "Update/Approve Mapping" : "Save Mapping"}
           </button>
         </div>
       </div>
