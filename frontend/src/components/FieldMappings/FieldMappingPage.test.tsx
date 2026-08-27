@@ -521,6 +521,10 @@ describe("FieldMappingPage", () => {
         status: "approved",
       }));
     });
+    const updatePayload = mockPatch.mock.calls.find(
+      ([url]: [string]) => url === "/v1/field-mappings/1/",
+    )?.[1];
+    expect(updatePayload).not.toHaveProperty("field_name");
   });
 
   // ── Phase 1c tests: click-to-map UX ──
