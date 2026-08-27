@@ -20669,6 +20669,26 @@ class FieldConceptMappingTest(TestCase):
         self.assertEqual(mapping.reviewer, self.staff)
         self.assertIsNotNone(mapping.reviewed_at)
 
+    def test_update_existing_mapping_can_approve_its_own_hardcoded_loinc(self):
+        """Approving a proposed mapping must not collide with its own extractor."""
+        mapping = FieldConceptMapping.objects.create(
+            field_name='weight', vocabulary_id='LOINC', concept_code='29463-7',
+            status='proposed',
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.patch(
+            f'/api/v1/field-mappings/{mapping.pk}/', {
+                'vocabulary_id': 'LOINC',
+                'concept_code': '29463-7',
+                'status': 'approved',
+            }, format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, 'approved')
+
     # -- DELETE --
 
     def test_delete_mapping(self):
