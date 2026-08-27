@@ -503,7 +503,24 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Edit Concept Mapping")).toBeInTheDocument();
     });
-    expect(screen.getByRole("button", { name: "Update Mapping" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Update/Approve Mapping" })).toBeEnabled();
+  });
+
+  it("approves a proposed mapping when it is updated from the dialog", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText(/Behavior/)).toBeInTheDocument());
+    fireEvent.click(screen.getByText(/Behavior/));
+    await waitFor(() => expect(screen.getByText("229819007")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("229819007"));
+    const submit = await screen.findByRole("button", { name: "Update/Approve Mapping" });
+    fireEvent.click(submit);
+
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith("/v1/field-mappings/1/", expect.objectContaining({
+        status: "approved",
+      }));
+    });
   });
 
   // ── Phase 1c tests: click-to-map UX ──
