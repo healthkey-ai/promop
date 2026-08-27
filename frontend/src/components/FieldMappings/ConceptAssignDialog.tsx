@@ -120,8 +120,7 @@ export function ConceptAssignDialog({
     setSaving(true);
     setError("");
     try {
-      const payload = {
-        field_name: fieldName,
+      const mappingPayload = {
         concept: selected?.concept_id ?? null,
         vocabulary_id: selected?.vocabulary_id ?? "",
         concept_code: selected?.concept_code ?? "",
@@ -133,9 +132,12 @@ export function ConceptAssignDialog({
         status: selected ? "approved" : "proposed",
       };
       if (isEditing) {
-        await api.patch(`/v1/field-mappings/${existingMappingId}/`, payload);
+        // An existing field already owns this mapping.  Update that row in
+        // place and approve it; never send a create-style field_name payload
+        // that could be interpreted as a duplicate mapping request.
+        await api.patch(`/v1/field-mappings/${existingMappingId}/`, mappingPayload);
       } else {
-        await api.post("/v1/field-mappings/", payload);
+        await api.post("/v1/field-mappings/", { field_name: fieldName, ...mappingPayload });
       }
       onSaved();
     } catch (err: unknown) {
