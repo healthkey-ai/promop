@@ -43,6 +43,13 @@ _PERSON_FIELDS = frozenset({
     'validation_date', 'suppress_demographics_for_others', 'patient_age',
 })
 
+# These audit attributes are copied verbatim from Person during refresh.  They
+# are shown as computed fields so the mapper makes that relationship explicit,
+# rather than inviting a clinical Concept mapping for administrative metadata.
+_DIRECT_PERSON_EQUIVALENCE_FIELDS = frozenset({
+    'validated', 'validated_by', 'validation_date',
+})
+
 # Location fields.
 _LOCATION_FIELDS = frozenset({
     'country', 'region', 'city', 'postal_code', 'latitude', 'longitude',
@@ -124,6 +131,8 @@ def _get_explanation(field_name: str, category: str) -> str | None:
     """Return a human-readable explanation for a computed field without a formula."""
     if category != 'computed':
         return None
+    if field_name in _DIRECT_PERSON_EQUIVALENCE_FIELDS:
+        return f'Equivalent to Person.{field_name}'
     if field_name in _COMPUTED_THERAPY_FIELDS:
         return _COMPUTED_THERAPY_EXPLANATIONS.get(
             field_name, 'Derived from Episode and DrugExposure records',
@@ -355,6 +364,8 @@ def _classify_field(field_name: str) -> str:
     """Assign a category to a PatientRecord field."""
     if field_name in _INTERNAL_FIELDS:
         return 'internal'
+    if field_name in _DIRECT_PERSON_EQUIVALENCE_FIELDS:
+        return 'computed'
     if field_name in _PERSON_FIELDS:
         return 'profile'
     if field_name in _LOCATION_FIELDS:
