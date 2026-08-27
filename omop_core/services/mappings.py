@@ -615,9 +615,6 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
 
     # Misc admin/profile
     'suppress_demographics_for_others': ('445313000', 'SNOMED'),  # Privacy/consent
-    'validated':                     ('410605003', 'SNOMED'),  # Confirmed
-    'validated_by':                  ('410605003', 'SNOMED'),  # Confirmed
-    'validation_date':               ('410605003', 'SNOMED'),  # Confirmed
     'death_date':                    ('93036-3',   'LOINC'),   # Date of death
     'number_of_dependents':          ('63514-1',   'LOINC'),   # Number of dependents
 

@@ -20726,6 +20726,27 @@ class FieldConceptMappingTest(TestCase):
         self.assertEqual(tab_by_field.get('serum_creatinine_level'), 'labs')
         self.assertEqual(tab_by_field.get('first_line_therapy'), 'treatment')
 
+    def test_validation_audit_fields_are_non_mappable_person_equivalences(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/field-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        descriptors = {item['field_name']: item for item in resp.data}
+
+        for field_name in ('validated', 'validated_by', 'validation_date'):
+            with self.subTest(field_name=field_name):
+                descriptor = descriptors[field_name]
+                self.assertEqual(descriptor['category'], 'computed')
+                self.assertFalse(descriptor['mappable'])
+                self.assertIsNone(descriptor['mapping'])
+                self.assertEqual(descriptor['formula'], {
+                    'id': FieldFormula.objects.get(field_name=field_name).id,
+                    'expression': field_name,
+                    'is_active': True,
+                })
+                self.assertEqual(
+                    descriptor['explanation'], f'Equivalent to Person.{field_name}',
+                )
+
 
 class FieldSynonymTest(TestCase):
     """Tests for /api/v1/field-mappings/<field_name>/synonyms/ endpoints."""
