@@ -483,7 +483,10 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'hiv_status':                    ('86406008',  'SNOMED'),
     'hepatitis_b_status':            ('66071002',  'SNOMED'),
     'hepatitis_c_status':            ('50711007',  'SNOMED'),
-    'preexisting_conditions':        ('161615003', 'SNOMED'),
+    # Aligned with the mapping migration 0182 seeds (#723). _build_suggestion
+    # runs unconditionally, so a different code here would show a suggestion
+    # permanently disagreeing with the field's own recorded mapping.
+    'preexisting_conditions':        ('102478008', 'SNOMED'),
     # Treatment
     'refractory_status':             ('182854000', 'SNOMED'),
     'relapse_count':                 ('263855007', 'SNOMED'),
@@ -578,7 +581,8 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'phone_number':                  ('42077-8',   'LOINC'),   # Phone number
     'email':                         ('76435-7',   'LOINC'),   # Telecom email
     'facility_name':                 ('69476-0',   'LOINC'),   # Facility name
-    'languages_skills':              ('46253-1',   'LOINC'),   # Preferred language
+    # Aligned with migration 0182 (#774); see the note on preexisting_conditions.
+    'languages_skills':              ('61909002',  'SNOMED'),  # Language
 
     # Behavioral
     'consent_capability':            ('405193005', 'SNOMED'),  # Ability to consent
