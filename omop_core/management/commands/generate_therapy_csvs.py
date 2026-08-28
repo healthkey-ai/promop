@@ -38,12 +38,14 @@ _ROUND_MAP = {
     'second round therapy': 'second_line_therapy',
 }
 
+# Disease names → Disease.code values.  Must match the codes in the Disease
+# vocabulary table (seeded by migrations 0056/0057 and 0178).
 _DISEASE_MAP = {
     'mantle cell lymphoma': 'MCL',
-    'chronic lymphocytic leukemia': 'CLL',
-    'multiple myeloma': 'MM',
-    'follicular lymphoma': 'FL',
-    'breast cancer': 'BC',
+    'chronic lymphocytic leukemia': 'C2987',
+    'multiple myeloma': 'C3242',
+    'follicular lymphoma': 'C3209',
+    'breast cancer': 'C9335',
     'diffuse large b-cell lymphoma': 'DLBCL',
 }
 
