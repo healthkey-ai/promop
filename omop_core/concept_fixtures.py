@@ -51,6 +51,14 @@ _VOCABULARIES = [
          vocabulary_reference='HealthKey local mint',
          vocabulary_version='v1',
          vocabulary_concept_id=0),
+    # Locally-authored clinical assertions with no Athena code (#785, migration
+    # 0180). Same quarantine rules as HK-Wearable: source='HealthKey',
+    # standard_concept=None, concept_id in the OHDSI custom range.
+    dict(vocabulary_id='HK-Observation',
+         vocabulary_name='HealthKey local observation source concepts',
+         vocabulary_reference='https://healthkey.ai',
+         vocabulary_version='1.0',
+         vocabulary_concept_id=0),
     dict(vocabulary_id='Episode',
          vocabulary_name='OMOP Episode',
          vocabulary_reference='OMOP generated',
@@ -411,6 +419,21 @@ _CONCEPTS = [
     # standard-deviation form, and filing RMSSD under it is the same defect
     # class as the pre-#413 walking_speed → BMI mapping. See #438.
     _hk(4, 'R-R interval RMSSD (heart rate variability)', 'Measurement', 'Clinical Observation', 'HK-WEAR-HRV-RMSSD'),
+
+    # Clinical assertions with no Athena code (#785). Duplicated from migration
+    # 0180 so a test database has them; omop_core/tests.py asserts the two do
+    # not drift. Two of the three are mapped by 0181 and read back as curated
+    # assertions; ecog-assessment-date is minted but deliberately unmapped —
+    # it is the event date of the ECOG score row, not a fact of its own.
+    _c(2_100_007_850, 'ECOG performance status assessment date', 'Observation',
+       'HK-Observation', 'Clinical Observation', None, 'hko:ecog-assessment-date',
+       source='HealthKey'),
+    _c(2_100_007_851, 'BCL-2 inhibitor refractory disease status', 'Observation',
+       'HK-Observation', 'Clinical Observation', None, 'hko:bcl2-inhibitor-refractory',
+       source='HealthKey'),
+    _c(2_100_007_852, 'BTK inhibitor refractory disease status', 'Observation',
+       'HK-Observation', 'Clinical Observation', None, 'hko:btk-inhibitor-refractory',
+       source='HealthKey'),
 
     # ------------------------------------------------------------------
     # HemOnc therapy regimen concepts — required for first_line_therapy_id

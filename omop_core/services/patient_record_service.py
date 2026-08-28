@@ -525,6 +525,21 @@ _ASSERTION_FIELDS = {
     '75618-3': ('no_mental_health_disorder_status', 'inverse_boolean'),
     '74204-0': ('no_substance_use_status', 'inverse_boolean'),
     '82593-5': ('no_geographic_exposure_risk', 'inverse_boolean'),
+    # Locally minted (#785, migrations 0180/0181). No Athena code says which
+    # drug class the disease is refractory to, so these are the curated answer
+    # to that question. _get_cll_data still infers the same fields from drug
+    # exposures; a row here supersedes that — see _CURATED_REFRACTORY_CODES.
+    'hko:btk-inhibitor-refractory': ('btk_inhibitor_refractory', 'boolean'),
+    'hko:bcl2-inhibitor-refractory': ('bcl2_inhibitor_refractory', 'boolean'),
+}
+
+# The curated codes above, by the field each answers. _get_cll_data runs after
+# _get_assertion_data in the extractor list and assigns field by field, so
+# without this check its drug-exposure inference would overwrite an explicitly
+# curated answer on every refresh.
+_CURATED_REFRACTORY_CODES = {
+    'btk_inhibitor_refractory': 'hko:btk-inhibitor-refractory',
+    'bcl2_inhibitor_refractory': 'hko:bcl2-inhibitor-refractory',
 }
 
 _ASSERTION_DETAIL_FIELDS = {
@@ -3396,9 +3411,14 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         for o in observations
     )
 
-    if had_btk:
+    # A curated assertion answers the question directly. The inference is a
+    # fallback for records that have none: it means "took the drug and
+    # progressed at some point", not "this drug failed", so it must not
+    # overwrite a clinician's explicit answer on the next derivation.
+    curated_codes = {_observation_code(o) for o in observations}
+    if had_btk and _CURATED_REFRACTORY_CODES['btk_inhibitor_refractory'] not in curated_codes:
         data['btk_inhibitor_refractory'] = has_progression
-    if had_bcl2:
+    if had_bcl2 and _CURATED_REFRACTORY_CODES['bcl2_inhibitor_refractory'] not in curated_codes:
         data['bcl2_inhibitor_refractory'] = has_progression
 
     # ALC doubling time — filter from snapshot by LOINC concept code 731-0
