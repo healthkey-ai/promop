@@ -391,6 +391,7 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Assign Concept")).toBeInTheDocument();
     });
+    expect(screen.getByRole("option", { name: "CDISC" })).toBeInTheDocument();
   });
 
   it("keeps units out of the field list while retaining mapping columns", async () => {
