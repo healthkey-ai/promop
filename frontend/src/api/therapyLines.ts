@@ -85,14 +85,27 @@ export async function searchDrugConcepts(query: string): Promise<DrugConcept[]> 
   return (resp.data?.results ?? resp.data ?? []) as DrugConcept[];
 }
 
-/** Search therapy regimens by name, optionally filtered by disease. */
+/** Search therapy regimens by name, optionally filtered by disease and round. */
 export async function searchTherapyRegimens(
   query: string,
   disease?: string,
+  round?: string,
 ): Promise<TherapyRegimen[]> {
   if (query.trim().length < 2) return [];
   const params: Record<string, string> = { search: query.trim() };
   if (disease) params.disease = disease;
+  if (round) params.round = round;
+  const resp = await clinicalClient().get(clinicalUrl('/v1/therapy-regimens/'), { params });
+  return (resp.data ?? []) as TherapyRegimen[];
+}
+
+/** List all regimens for a disease+round combination (no search query needed). */
+export async function listTherapyRegimens(
+  disease: string,
+  round?: string,
+): Promise<TherapyRegimen[]> {
+  const params: Record<string, string> = { disease };
+  if (round) params.round = round;
   const resp = await clinicalClient().get(clinicalUrl('/v1/therapy-regimens/'), { params });
   return (resp.data ?? []) as TherapyRegimen[];
 }
