@@ -114,8 +114,9 @@ function diseaseToDiseaseCode(
     if (d.includes('mantle')) return 'MCL';
     if (d.includes('follicular')) return 'C3209';
     if (d.includes('myeloma') || d === 'mm') return 'C3242';
-    if (d.includes('cll') || d.includes('chronic lymphocytic')) return 'C2987';
+    if (d.includes('cll') || d.includes('chronic lymphocytic') || d.includes('chronic lymphoid')) return 'C2987';
     if (d.includes('breast')) return 'C9335';
+    if (d.includes('diffuse large b-cell') || d.includes('dlbcl')) return 'DLBCL';
   }
   // Fall back to the type-safe diseaseType prop.
   // 'lymphoma' is intentionally omitted — it groups MCL and FL, and picking
