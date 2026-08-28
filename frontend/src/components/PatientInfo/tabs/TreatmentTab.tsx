@@ -97,19 +97,37 @@ function HowToAuthor({ descriptor }: { descriptor?: FieldDescriptor }) {
   );
 }
 
-/** Map the patient's disease string to the Disease vocabulary code for API filtering. */
-function diseaseToDiseaseCode(disease?: unknown): string | undefined {
-  if (typeof disease !== 'string') return undefined;
-  const d = disease.toLowerCase();
-  if (d.includes('mantle')) return 'MCL';
-  if (d.includes('follicular')) return 'C3209';
-  if (d.includes('myeloma')) return 'C3242';
-  if (d.includes('cll') || d.includes('chronic lymphocytic')) return 'C2987';
-  if (d.includes('breast')) return 'C9335';
-  return undefined;
+/**
+ * Map the patient's disease string to the Disease vocabulary code for API filtering.
+ *
+ * Uses the raw disease string (not diseaseType) so MCL and FL are distinguishable —
+ * both map to diseaseType='lymphoma' but have different Disease codes.
+ * Falls back to the broader diseaseType when the raw string is absent.
+ */
+function diseaseToDiseaseCode(
+  disease: unknown,
+  diseaseType: Props['diseaseType'],
+): string | undefined {
+  // Try the raw disease string first for finer discrimination (MCL vs FL).
+  if (typeof disease === 'string') {
+    const d = disease.toLowerCase();
+    if (d.includes('mantle')) return 'MCL';
+    if (d.includes('follicular')) return 'C3209';
+    if (d.includes('myeloma') || d === 'mm') return 'C3242';
+    if (d.includes('cll') || d.includes('chronic lymphocytic')) return 'C2987';
+    if (d.includes('breast')) return 'C9335';
+  }
+  // Fall back to the type-safe diseaseType prop.
+  const TYPE_TO_CODE: Record<string, string> = {
+    myeloma: 'C3242',
+    cll: 'C2987',
+    lymphoma: 'C3209',
+    breast: 'C9335',
+  };
+  return TYPE_TO_CODE[diseaseType];
 }
 
-export default function TreatmentTab({ formData, onChange, diseaseType: _, onRecordRefreshed }: Props) {
+export default function TreatmentTab({ formData, onChange, diseaseType, onRecordRefreshed }: Props) {
   // person_id rides in the record the tab already receives, so neither the
   // descriptor nor authoring needs an extra prop threaded through both hosts.
   const personId = Number(formData?.person_id ?? formData?.person ?? 0) || null;
@@ -194,7 +212,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType: _, onRec
           personId={personId}
           defaultLineNumber={linesCount + 1}
           line={dialogState.mode === 'edit' ? dialogState.line : undefined}
-          diseaseCode={diseaseToDiseaseCode(formData?.disease)}
+          diseaseCode={diseaseToDiseaseCode(formData?.disease, diseaseType)}
           onClose={() => setDialogState(null)}
           onAuthored={(info) => onRecordRefreshed?.(info)}
         />

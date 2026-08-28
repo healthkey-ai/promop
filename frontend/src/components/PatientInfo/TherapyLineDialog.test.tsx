@@ -200,6 +200,59 @@ describe('TherapyLineDialog', () => {
     expect(mockPost).not.toHaveBeenCalled();
   });
 
+  it('passes disease code to regimen search when provided', async () => {
+    // The regimen picker filters by disease so clinicians see only relevant regimens.
+    mockGet.mockResolvedValue({ data: [{ code: 'rd', title: 'Rd', concept_id: 35806112 }] });
+    render(
+      <TherapyLineDialog
+        personId={262}
+        defaultLineNumber={1}
+        diseaseCode="C3242"
+        onClose={onClose}
+        onAuthored={onAuthored}
+      />,
+    );
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByLabelText('Search regimens'), { target: { value: 'Rd' } });
+    await act(async () => { vi.advanceTimersByTime(400); });
+    vi.useRealTimers();
+
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    const regimenCall = mockGet.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('therapy-regimens'),
+    );
+    expect(regimenCall).toBeDefined();
+    expect((regimenCall![1] as { params: Record<string, unknown> }).params).toMatchObject({
+      search: 'Rd',
+      disease: 'C3242',
+    });
+  });
+
+  it('omits disease param from regimen search when diseaseCode is undefined', async () => {
+    mockGet.mockResolvedValue({ data: [{ code: 'rd', title: 'Rd', concept_id: 35806112 }] });
+    render(
+      <TherapyLineDialog
+        personId={262}
+        defaultLineNumber={1}
+        onClose={onClose}
+        onAuthored={onAuthored}
+      />,
+    );
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByLabelText('Search regimens'), { target: { value: 'Rd' } });
+    await act(async () => { vi.advanceTimersByTime(400); });
+    vi.useRealTimers();
+
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    const regimenCall = mockGet.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('therapy-regimens'),
+    );
+    expect(regimenCall).toBeDefined();
+    expect((regimenCall![1] as { params: Record<string, unknown> }).params).not.toHaveProperty('disease');
+  });
+
   it('edits an existing line by patching its episode', async () => {
     render(
       <TherapyLineDialog
