@@ -2,8 +2,9 @@
 
 This runbook defines the reproducible ARTEMIS runtime used to evaluate a
 reviewed, scoped OMOP cohort. It does **not** author `Episode` or
-`EpisodeEvent` rows. The subsequent PRomop adapter will consume the reviewed
-alignment output and perform that write with its own audit and rollback policy.
+`EpisodeEvent` rows. It produces the validated JSON artifact consumed by the
+separate PRomop Episode adapter, which performs that write with its own audit
+and rollback policy.
 
 ARTEMIS is pinned to upstream commit `242b5a24864b85a44c62d95a98cbaa2d16c55539`
 (package version 1.6.0). The image pins R 4.4.3 and records both the ARTEMIS
@@ -25,8 +26,8 @@ separate write schema. Therefore the database role must have:
 
 Use one disposable, run-specific write schema such as
 `artemis_791_uat_20260828`; it must not equal the CDM schema. Delete it only
-after retaining the output manifest, alignment CSV, row counts, and approval
-record. Secrets are injected at run time through the deployment secret store or
+after retaining the output manifest, alignment CSV, adapter JSON, row counts,
+and approval record. Secrets are injected at run time through the deployment secret store or
 an untracked `--env-file`; they are never committed, placed in cohort JSON, or
 passed in a command line.
 
@@ -103,15 +104,50 @@ docker run --rm --env-file artemis.env \
   promop-artemis:791
 ```
 
-The expected artifacts are `artemis-alignments.csv` and
-`artemis-run-manifest.json`. Do not import this CSV into PRomop manually. The
-Episode/EpisodeEvent adapter is a separate, reviewed operation.
+The expected artifacts are `artemis-alignments.csv` (audit-only),
+`artemis-episodes.json`, and `artemis-run-manifest.json`. The JSON has the
+strict adapter contract:
+
+```json
+{
+  "schema_version": "1",
+  "episodes": [{
+    "person_id": 123,
+    "line_number": 1,
+    "start_date": "2024-01-01",
+    "end_date": "2024-03-01",
+    "drug_exposure_ids": [9001, 9002]
+  }]
+}
+```
+
+`person_id`, `line_number`, `start_date`, and non-empty local
+`drug_exposure_ids` are required; `end_date`, `regimen_concept_id`, and
+`outcome` are optional. The runner derives local exposure IDs using a read-only
+query over the *same scoped cohort*. It reconstructs ARTEMIS's encoded drug
+record positions and requires each aligned ingredient/date to resolve to
+exactly one local `drug_exposure_id`. It aborts rather than emitting JSON for
+an ambiguous or missing link; it never guesses by using every exposure in a
+date range. ARTEMIS regimen labels do not reliably identify a local OMOP
+concept, so this initial bridge deliberately omits `regimen_concept_id` rather
+than minting or guessing a concept. It preserves the raw alignment CSV for
+clinical review.
+
+After clinical review, validate before writing:
+
+```bash
+python manage.py materialize_artemis_episodes \
+  --input artemis-output/artemis-episodes.json --dry-run
+```
+
+Only the separately approved materializer can write `Episode` and
+`EpisodeEvent` rows; never import the CSV directly.
 
 ## Validation and audit
 
 Before accepting results, retain the image digest, upstream commit, cohort JSON
 digest, config validation transcript, database role grants, cohort row count,
-the manifest, alignment CSV, runner logs, and reviewer approvals in the change
+the manifest, alignment CSV, adapter JSON, runner logs, and reviewer approvals in the change
 record. Validate that:
 
 1. the cohort count is the approved scoped count;

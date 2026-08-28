@@ -1,4 +1,5 @@
 """Guardrails for the checked-in, non-production ARTEMIS runner."""
+import json
 from pathlib import Path
 
 
@@ -22,6 +23,21 @@ def test_artemis_runner_defaults_to_no_database_execution():
     assert 'ARTEMIS_NONPROD_APPROVED", unset = "") != "yes"' in runner
     assert 'ARTEMIS_ALLOW_WRITE", unset = "") != "yes"' in runner
     assert "dry-run-validated-no-database-connection" in runner
+
+
+def test_artemis_runner_emits_the_materializer_json_contract_fixture():
+    runner = (RUNTIME / "run_artemis.R").read_text()
+    fixture = json.loads((RUNTIME / "fixtures" / "artemis-episodes.json").read_text())
+
+    assert '"/work/output/artemis-episodes.json"' in runner
+    assert 'schema_version = "1"' in runner
+    assert "drug_exposure_ids" in runner
+    assert "Cannot prove a unique local drug_exposure_id" in runner
+    assert "CompleteDrugRecord" in runner
+    assert fixture["schema_version"] == "1"
+    assert set(fixture["episodes"][0]) == {
+        "person_id", "line_number", "start_date", "end_date", "drug_exposure_ids",
+    }
 
 
 def test_artemis_runbook_covers_the_required_operational_controls():
