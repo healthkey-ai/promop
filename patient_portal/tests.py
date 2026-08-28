@@ -5393,6 +5393,7 @@ class AthenaVocabularyLoadTest(TestCase):
              'vocabulary_version', 'vocabulary_concept_id'],
             [['HemOnc', 'HemOnc Oncology', '', 'v2024', '0'],
              ['RxNorm', 'RxNorm', '', '2024AA', '0'],
+             ['CDISC', 'Clinical Data Interchange Standards Consortium', '', '2024', '0'],
              ['CPT4', 'CPT-4', '', '2024', '0']],  # out of scope — should be skipped
         )
         self._write_tsv(directory, 'DOMAIN.csv',
@@ -5417,6 +5418,8 @@ class AthenaVocabularyLoadTest(TestCase):
              ['5000003', 'bortezomib',           'Drug', 'RxNorm', 'Ingredient', 'S', '1421', '19700101', '20991231', ''],
              # RxNorm Branded — should be loaded
              ['5000004', 'Velcade',              'Drug', 'RxNorm', 'Branded Drug', 'S', '213269', '19700101', '20991231', ''],
+             # CDISC concept requested for PatientRecord.bone_lesions (#786).
+             ['37533916', 'Number of Bone Lesions', 'Measurement', 'CDISC', 'Clinical Finding', 'S', 'C100061', '19700101', '20991231', ''],
              # CPT4 concept — should be SKIPPED (not in vocabulary scope)
              ['5000099', 'Out-of-scope concept', 'Drug', 'CPT4', 'Clinical Finding', 'S', '123456', '19700101', '20991231', '']],
         )
@@ -5453,6 +5456,11 @@ class AthenaVocabularyLoadTest(TestCase):
         self.assertTrue(Concept.objects.filter(concept_id=5000001).exists())  # HemOnc
         self.assertTrue(Concept.objects.filter(concept_id=5000003).exists())  # RxNorm Ingredient
         self.assertTrue(Concept.objects.filter(concept_id=5000004).exists())  # RxNorm Branded
+        self.assertTrue(Concept.objects.filter(
+            concept_id=37533916,
+            vocabulary_id='CDISC',
+            concept_name='Number of Bone Lesions',
+        ).exists())
         self.assertFalse(Concept.objects.filter(concept_id=5000099).exists())  # CPT4 — excluded
 
     def test_load_filters_concept_relationships(self):
