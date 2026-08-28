@@ -4,7 +4,7 @@
 > Last revised: 2026-08-18
 
 > **Versioning note:** All new integrations should target `/api/v1/` paths. The legacy
-> unversioned `/api/` paths still work but return `Deprecation: true` / `Sunset: Tue, 01 Sep 2026 00:00:00 GMT`
+> unversioned `/api/` paths still work but return `Deprecation: true` / `Sunset: Tue, 01 Dec 2026 00:00:00 GMT`
 > headers. The OpenAPI schema and Swagger UI are at `/api/v1/schema/` and `/api/v1/docs/`.
 
 ---
