@@ -372,9 +372,11 @@ def get_gender_concept(gender_str):
 #                      test_methodology and oncotype_dx_score of one 85337-4
 #                      report, and ecog_assessment_date is the date of the
 #                      ecog_performance_status observation
-#   genuinely          btk_inhibitor_refractory and bcl2_inhibitor_refractory
-#   ambiguous          both read SNOMED 182842009; the code alone cannot say
-#                      which drug failed
+#   resolved (#785)    btk_inhibitor_refractory and bcl2_inhibitor_refractory
+#                      both read SNOMED 182842009, which cannot say which drug
+#                      class failed. Migrations 0180/0181 mint a source concept
+#                      per class and map it; the SNOMED entries below remain the
+#                      read path for records written before that.
 #
 # field → (concept_code, vocabulary_id, attributed_from_extractor)
 DERIVED_FIELD_TO_CODE = {

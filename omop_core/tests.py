@@ -2453,6 +2453,34 @@ class WearableConceptMappingTest(TestCase):
                 f'{expected_terms[metric]}',
             )
 
+    def test_clinical_source_concepts_match_seed_definitions(self):
+        """Migration 0180 duplicates its rows into the fixture; no drift (#785).
+
+        Same trade as 0143: the migration hard-codes definitions so it stays
+        frozen against the code as written, and this test is what stops the two
+        copies diverging.
+        """
+        from importlib import import_module
+
+        mig = import_module(
+            'omop_core.migrations.0180_seed_clinical_field_source_concepts')
+        seed_by_key = {
+            (r['vocabulary_id'], r['concept_code']): r for r in self._seed_rows()
+        }
+
+        for concept_id, concept_code, concept_name in mig._CONCEPTS:
+            key = ('HK-Observation', concept_code)
+            self.assertIn(
+                key, seed_by_key,
+                f'migration 0180 seeds {key}, which the fixture does not')
+            seeded = seed_by_key[key]
+            self.assertEqual(seeded['concept_id'], concept_id,
+                             f'{concept_code} concept_id differs')
+            self.assertEqual(seeded['concept_name'], concept_name,
+                             f'{concept_code} concept_name differs')
+            self.assertEqual(seeded['domain_id'], 'Observation')
+            self.assertEqual(seeded['source'], 'HealthKey')
+
     def test_runtime_migration_matches_seed_definitions(self):
         """Migration 0143 duplicates concept rows; the copies must not drift.
 
@@ -4849,7 +4877,16 @@ class HealthKeyConceptSurvivesReloadTest(TestCase):
         saved_ids = {r[0] for r in saved}
         self.assertIn(2_000_000_001, saved_ids)
 
-        # Simulate TRUNCATE — delete all concepts
+        # Simulate TRUNCATE — delete all concepts.
+        #
+        # FieldConceptMapping.concept is on_delete=PROTECT, so the curated
+        # mappings migration 0181 seeds block a bulk concept delete. Clear them
+        # first: a real TRUNCATE ... CASCADE would take dependents with it, and
+        # the loader never issues one anyway — it sets _direct=False precisely
+        # because concept is referenced by patient data. The PROTECT is doing
+        # its job; it is this simulation that is blunter than production.
+        from omop_core.models import FieldConceptMapping
+        FieldConceptMapping.objects.all().delete()
         Concept.objects.all().delete()
         self.assertFalse(Concept.objects.filter(concept_id=2_000_000_001).exists())
 
