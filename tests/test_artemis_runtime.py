@@ -34,6 +34,7 @@ def test_artemis_runner_emits_the_materializer_json_contract_fixture():
     assert "drug_exposure_ids" in runner
     assert "Cannot prove a unique local drug_exposure_id" in runner
     assert "CompleteDrugRecord" in runner
+    assert "Refusing to overwrite artemis-episodes.json" in runner
     assert fixture["schema_version"] == "1"
     assert set(fixture["episodes"][0]) == {
         "person_id", "line_number", "start_date", "end_date", "drug_exposure_ids",

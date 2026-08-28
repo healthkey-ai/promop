@@ -133,6 +133,10 @@ concept, so this initial bridge deliberately omits `regimen_concept_id` rather
 than minting or guessing a concept. It preserves the raw alignment CSV for
 clinical review.
 
+Use a fresh, empty output directory for each execution. The runner refuses to
+overwrite an existing `artemis-episodes.json`, preventing a failed run from
+leaving a stale artifact that could later be materialized by mistake.
+
 After clinical review, validate before writing:
 
 ```bash

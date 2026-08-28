@@ -160,6 +160,9 @@ if (Sys.getenv("ARTEMIS_NONPROD_APPROVED", unset = "") != "yes") {
 if (Sys.getenv("ARTEMIS_ALLOW_WRITE", unset = "") != "yes") {
   stop("Execution is blocked. Set ARTEMIS_ALLOW_WRITE=yes for the dedicated disposable write schema.")
 }
+if (file.exists("/work/output/artemis-episodes.json")) {
+  stop("Refusing to overwrite artemis-episodes.json; use a fresh run output directory to avoid stale materialization input")
+}
 
 library(ARTEMIS)
 connection_details <- DatabaseConnector::createConnectionDetails(
