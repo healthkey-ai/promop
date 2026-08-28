@@ -5517,12 +5517,92 @@ class AthenaVocabularyLoadTest(TestCase):
         self.assertEqual(Concept.objects.count(), before_concepts)
         self.assertEqual(Relationship.objects.count(), before_rels)
 
+    def _write_replace_bundle_covering_db(self, directory, omit_concept_ids=()):
+        """Rewrite CONCEPT.csv from the database, minus *omit_concept_ids*.
+
+        Two constraints have to hold at once. --replace refuses to run when the
+        bundle omits a vocabulary the database holds (migrations seed Type
+        Concept rows the minimal fixture lacks), so every vocabulary needs a
+        row. But the concepts named in *omit_concept_ids* must be absent, or
+        nothing is stale, _remove_stale_concepts returns at its empty-set guard,
+        and the removal path this test exists to exercise never runs at all.
+        """
+        rows = [
+            [str(c.concept_id), c.concept_name, c.domain_id, c.vocabulary_id,
+             c.concept_class_id, c.standard_concept or '', c.concept_code,
+             '19700101', '20991231', '']
+            for c in Concept.objects.exclude(concept_id=0)
+            if c.concept_id not in omit_concept_ids
+        ]
+        self._write_tsv(directory, 'CONCEPT.csv',
+            ['concept_id', 'concept_name', 'domain_id', 'vocabulary_id',
+             'concept_class_id', 'standard_concept', 'concept_code',
+             'valid_start_date', 'valid_end_date', 'invalid_reason'],
+            rows,
+        )
+
+    def test_replace_load_retains_patient_data_end_to_end(self):
+        """A full --replace run must not take patient data with it (#680).
+
+        The Critical bug: --replace issued TRUNCATE ... CASCADE over the
+        vocabulary tables, and because Person FKs concept, CASCADE reached
+        person and everything referencing it — 1,263 patient records on
+        staging, with the job exiting 0.
+
+        tests/test_load_athena_vocabularies.py already covers
+        _remove_stale_concepts in isolation. This drives the whole command, so
+        a regression that reintroduced a bulk delete anywhere in the load path
+        — not just in that helper — is caught too.
+        """
+        from omop_core.models import Measurement, Person
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_minimal_athena(tmpdir)
+            self._load_minimal_athena(tmpdir)
+
+            # A patient whose rows point at loaded concepts, as a real database's do.
+            hemonc = Concept.objects.get(concept_id=5000002)
+            person = Person.objects.create(
+                person_id=770001, year_of_birth=1970,
+                gender_concept=Concept.objects.get(concept_id=5000001),
+            )
+            measurement = Measurement.objects.create(
+                measurement_id=770001, person=person,
+                measurement_concept=hemonc,
+                measurement_date=date(2026, 1, 1),
+                measurement_type_concept=hemonc,
+            )
+
+            # Reload with --replace, dropping the very concepts this patient's
+            # rows point at. That makes them stale, so removal actually runs —
+            # and it is the removal cascading into person that #680 was.
+            # Only the measurement's concept is dropped: omitting both HemOnc
+            # rows would leave the vocabulary uncovered and trip the coverage
+            # guard before removal is ever reached.
+            self._write_replace_bundle_covering_db(
+                tmpdir, omit_concept_ids={5000002})
+            self._load_minimal_athena(tmpdir, replace=True)
+
+        self.assertTrue(
+            Person.objects.filter(person_id=770001).exists(),
+            '--replace deleted the patient row (#680)')
+        self.assertTrue(
+            Measurement.objects.filter(measurement_id=770001).exists(),
+            '--replace deleted the patient\'s clinical rows (#680)')
+        measurement.refresh_from_db()
+        self.assertEqual(measurement.person_id, person.person_id)
+        # The stale concept really was removed, so the assertions above are not
+        # passing simply because nothing happened; and the measurement's link
+        # was cleared rather than the row being deleted with it.
+        self.assertFalse(Concept.objects.filter(concept_id=5000002).exists())
+        self.assertEqual(measurement.measurement_concept_id, 0)
+
     def test_load_records_version_history_append_only(self):
         """The loader appends version-history rows on each load, never truncating (#305).
 
-        (--replace itself TRUNCATEs vocab tables, which Postgres refuses inside the
-        atomic test transaction; the append-only trail is what we assert here — two
-        loads accumulate rows rather than overwriting.)
+        (The append-only trail is what we assert here — two loads accumulate rows
+        rather than overwriting. --replace no longer truncates anything: it removes
+        stale concepts individually after clearing their references, see #680.)
         """
         from omop_core.models import VocabularyVersionHistory
         with tempfile.TemporaryDirectory() as tmpdir:
