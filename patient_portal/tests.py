@@ -5428,7 +5428,10 @@ class AthenaVocabularyLoadTest(TestCase):
              # CDISC concept requested for PatientRecord.bone_lesions (#786).
              ['37533916', 'Number of Bone Lesions', 'Measurement', 'CDISC', 'Clinical Finding', 'S', 'C100061', '19700101', '20991231', ''],
              # MeSH concept requested for PatientRecord.cytogenic_markers (#803).
-             ['19138268', 'Chromosome Aberrations', 'Observation', 'MeSH', 'Main Heading', 'S', 'D002869', '19700101', '20991231', ''],
+             # standard_concept is empty on purpose: MeSH is a non-standard source
+             # vocabulary in OMOP, so the fixture must not imply the loader
+             # yields something usable in a *_concept_id column.
+             ['19138268', 'Chromosome Aberrations', 'Observation', 'MeSH', 'Main Heading', '', 'D002869', '19700101', '20991231', ''],
              # CPT4 concept — should be SKIPPED (not in vocabulary scope)
              ['5000099', 'Out-of-scope concept', 'Drug', 'CPT4', 'Clinical Finding', 'S', '123456', '19700101', '20991231', '']],
         )
