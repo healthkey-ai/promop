@@ -377,7 +377,8 @@ class Command(BaseCommand):
                 f"{', '.join(missing)}. This database cannot reliably map clinical "
                 'conditions, diagnoses, medications, and labs. Fetch an Athena bundle '
                 'that includes the missing vocabularies and rerun this command without '
-                '--replace; --replace truncates clinical data.'
+                '--replace, which would remove the loaded concepts this database '
+                'still maps clinical data against.'
             )
         self._log(
             '  verified required clinical vocabularies: ' +
