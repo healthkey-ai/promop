@@ -11,7 +11,6 @@ from omop_core.services.mappings import (
     LAB_FIELD_TO_LOINC,
     LAB_FIELD_ALIAS_TO_CANONICAL,
     DEMOGRAPHIC_FIELDS,
-    THERAPY_LINE_FIELDS,
     DERIVED_FIELD_TO_CODE,
     FIELD_COMMON_UNITS,
     STANDARD_UNIT_CHOICES,
@@ -62,8 +61,8 @@ _WEARABLE_METADATA_FIELDS = frozenset({
 })
 
 # Treatment fields that curators can directly edit (not computed).
-# Therapy line fields from THERAPY_LINE_FIELDS are editable, plus supportive
-# therapy, concomitant medication, and toxicity fields.
+# Therapy lines are deliberately absent: they are projections of persisted
+# Episode/EpisodeEvent rows, not independently editable PatientRecord columns.
 _EDITABLE_TREATMENT_FIELDS = frozenset({
     # Supportive therapy
     'supportive_therapies', 'supportive_therapy_start_date',
@@ -92,6 +91,15 @@ _COMPUTED_THERAPY_FIELDS = frozenset({
     # Negation field
     'no_concomitant_medication_status',
 })
+
+# Every per-line projection is code-computed from the persisted Episode and
+# EpisodeEvent grouping.  Keep this prefix-based so newly added line columns do
+# not accidentally reappear as editable mapping candidates.
+_EPISODE_COMPUTED_FIELDS = frozenset(
+    field.name
+    for field in PatientRecord._meta.concrete_fields
+    if field.name.startswith(('first_line_', 'second_line_', 'later_'))
+)
 
 # Computed fields (derived from other fields, not directly from OMOP).
 _COMPUTED_FIELDS = frozenset({
@@ -137,6 +145,8 @@ def _get_explanation(field_name: str, category: str) -> str | None:
         return _COMPUTED_THERAPY_EXPLANATIONS.get(
             field_name, 'Derived from Episode and DrugExposure records',
         )
+    if field_name in _EPISODE_COMPUTED_FIELDS:
+        return 'Code-computed from persisted Episode and EpisodeEvent records'
     if field_name in _COMPUTED_FIELDS:
         explanations = {
             'bmi': 'Calculated from weight and height',
@@ -378,9 +388,8 @@ def _classify_field(field_name: str) -> str:
         return 'unit'
     if field_name in DEMOGRAPHIC_FIELDS:
         return 'profile'
-    # Therapy line fields (names, dates, outcomes, intents, reasons) are editable.
-    if field_name in THERAPY_LINE_FIELDS:
-        return 'editable'
+    if field_name in _EPISODE_COMPUTED_FIELDS:
+        return 'computed'
     # Additional editable treatment fields (supportive therapy, concomitant meds, toxicity).
     if field_name in _EDITABLE_TREATMENT_FIELDS:
         return 'editable'
