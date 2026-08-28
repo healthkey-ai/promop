@@ -18,7 +18,7 @@ from tests.factories import ConceptFactory, MeasurementFactory, PersonFactory, V
 
 pytestmark = pytest.mark.django_db
 
-LAB_TYPE = 32856   # CONCEPT_LAB_TYPE — the type the numeric write path stamps
+EHR_TYPE = 32817   # a genuinely IMPORTED/EHR type — distinct from what the numeric write path stamps
 
 
 def test_generic_fallback_keeps_numeric_labs_on_distinct_rows():
@@ -72,25 +72,28 @@ def test_generic_fallback_re_edit_stays_on_one_row():
 
 
 def test_a_same_day_imported_loinc_coded_lab_is_overwritten_by_a_patient_edit():
-    # Pins a PRE-EXISTING numeric-path behaviour surfaced in the #4889 review: unlike the staging string
-    # path, the numeric upsert does NOT scope the key by measurement_type_concept, so a same-day imported
-    # lab under the same LOINC concept + source_value is overwritten in place by a patient edit. Pinned so
-    # a future type-scoping/provenance fix flips it deliberately (tracked as a follow-up).
+    # Pins a PRE-EXISTING numeric-path gap surfaced in the #4889 review. Unlike the staging string path,
+    # the numeric upsert does NOT scope the key by measurement_type_concept — so it overwrites a same-day
+    # imported lab (same concept + source_value) IN PLACE even though that imported row carries a DISTINCT
+    # type (EHR) from what a patient edit represents. Using a distinct imported type makes this a real
+    # guard, not a tautology: today the write ignores type and clobbers it; when #787 adds type-scoping +
+    # patient-reported provenance, the write will no longer match the EHR-typed row, so it must be
+    # PRESERVED and the patient edit must land on its own row — at which point both assertions below flip.
     loinc = VocabularyFactory(vocabulary_id='LOINC', vocabulary_name='LOINC')
     ConceptFactory(concept_id=0, concept_name='No matching concept', concept_code='0', vocabulary=loinc)
     concept = ConceptFactory(concept_id=910718, concept_code='718-7', vocabulary=loinc,
                              concept_name='Hemoglobin [Mass/volume] in Blood')
     tc = VocabularyFactory(vocabulary_id='Type Concept', vocabulary_name='Type Concept')
-    lab_type = ConceptFactory(concept_id=LAB_TYPE, concept_code=str(LAB_TYPE), concept_name='Lab',
+    ehr_type = ConceptFactory(concept_id=EHR_TYPE, concept_code=str(EHR_TYPE), concept_name='EHR',
                               vocabulary=tc)
     person = PersonFactory()
     imported = MeasurementFactory(person=person, measurement_concept=concept, measurement_date=date(2026, 1, 1),
-                                  measurement_type_concept=lab_type, measurement_source_value='718-7',
+                                  measurement_type_concept=ehr_type, measurement_source_value='718-7',
                                   value_as_number=9.9)
 
     sync_to_omop(SimpleNamespace(person=person, hemoglobin_g_dl=12.5), {'hemoglobin_g_dl'},
                  today=date(2026, 1, 1))
 
     imported.refresh_from_db()
-    assert float(imported.value_as_number) == 12.5   # overwritten in place — the pre-existing numeric gap
+    assert float(imported.value_as_number) == 12.5   # today: clobbered in place despite the distinct type
     assert Measurement.objects.filter(person=person, measurement_source_value='718-7').count() == 1
