@@ -84,10 +84,24 @@ def _sync_measurement(person, field_name: str, value, today: date) -> None:
     if concept is None:
         return
     type_concept = Concept.objects.filter(concept_id=CONCEPT_LAB_TYPE).first() or concept
+    # measurement_source_value is part of the KEY, not just a stored field (#4889): when several lab LOINC
+    # concepts are missing from a partially-loaded vocab they all resolve to the generic sentinel
+    # (CONCEPT_GENERIC_LAB), so without the source in the key two same-day fields would share one row and
+    # the second would overwrite the first's value while keeping the first's source. For a real (resolved)
+    # LOINC concept the source_value is 1:1 with the concept, so this narrows nothing. The create branch
+    # has always stored measurement_source_value=loinc_code, so this matches every row it ever wrote —
+    # re-edits still update in place, no data migration needed.
+    #
+    # NOTE this key is narrower than before but still LOOSER than the staging string path
+    # (_sync_string_measurement), which additionally scopes by measurement_type_concept + is_erroneous.
+    # The numeric path stamps CONCEPT_LAB_TYPE (not the patient-reported type) and does not type-scope, so
+    # a same-day IMPORTED LOINC-coded lab is still overwritten in place — a pre-existing provenance gap
+    # this fix neither introduces nor closes (tracked as a follow-up for the numeric path).
     existing = Measurement.objects.filter(
         person=person,
         measurement_concept=concept,
         measurement_date=today,
+        measurement_source_value=loinc_code,
     ).first()
     if existing:
         existing.value_as_number = value
