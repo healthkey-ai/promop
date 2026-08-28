@@ -200,8 +200,8 @@ describe('TherapyLineDialog', () => {
     expect(mockPost).not.toHaveBeenCalled();
   });
 
-  it('passes disease code to regimen search when provided', async () => {
-    // The regimen picker filters by disease so clinicians see only relevant regimens.
+  it('pre-populates regimen dropdown filtered by disease and line', async () => {
+    // With a diseaseCode, the dialog loads regimens for that disease+line on mount.
     mockGet.mockResolvedValue({ data: [{ code: 'rd', title: 'Rd', concept_id: 35806112 }] });
     render(
       <TherapyLineDialog
@@ -213,23 +213,23 @@ describe('TherapyLineDialog', () => {
       />,
     );
 
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    fireEvent.change(screen.getByLabelText('Search regimens'), { target: { value: 'Rd' } });
-    await act(async () => { vi.advanceTimersByTime(400); });
-    vi.useRealTimers();
-
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
     const regimenCall = mockGet.mock.calls.find(
       (c) => typeof c[0] === 'string' && c[0].includes('therapy-regimens'),
     );
     expect(regimenCall).toBeDefined();
     expect((regimenCall![1] as { params: Record<string, unknown> }).params).toMatchObject({
-      search: 'Rd',
       disease: 'C3242',
+      round: 'first_line_therapy',
     });
+    // Dropdown is rendered with the regimen option.
+    await waitFor(() => expect(screen.getByLabelText('Select regimen')).toBeInTheDocument());
+    expect(screen.getByText('Rd')).toBeInTheDocument();
   });
 
-  it('omits disease param from regimen search when diseaseCode is undefined', async () => {
+  it('falls back to search mode when diseaseCode is undefined', async () => {
+    // Without a diseaseCode, the dropdown cannot be populated — the dialog shows
+    // a link to search all regimens instead.
     mockGet.mockResolvedValue({ data: [{ code: 'rd', title: 'Rd', concept_id: 35806112 }] });
     render(
       <TherapyLineDialog
@@ -239,6 +239,9 @@ describe('TherapyLineDialog', () => {
         onAuthored={onAuthored}
       />,
     );
+
+    // Click the "Search all regimens" link to enter search mode.
+    fireEvent.click(screen.getByText(/search all regimens/i));
 
     vi.useFakeTimers({ shouldAdvanceTime: true });
     fireEvent.change(screen.getByLabelText('Search regimens'), { target: { value: 'Rd' } });
