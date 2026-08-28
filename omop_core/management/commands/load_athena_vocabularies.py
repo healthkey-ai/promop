@@ -53,7 +53,6 @@ VOCAB_SCOPE = frozenset({
 # bundle, even though the importer supports it when a CVX-inclusive bundle is
 # used.
 REQUIRED_CLINICAL_VOCABULARIES = frozenset({'LOINC', 'RxNorm', 'SNOMED', 'ICD10CM'})
-RXNORM_CLASS_SCOPE = frozenset({'Ingredient', 'Clinical Drug', 'Branded Drug', 'Clinical Drug Comp'})
 # A --replace reload deletes the entire vocabulary before applying this filter.
 # Keep every LOINC domain relevant to patient-clinical data; the preflight below
 # turns any future scope drift into a safe, actionable failure.
@@ -202,8 +201,6 @@ def _concept_in_scope(vid, concept_code, concept_class_id, domain_id):
         return False
     if vid == 'ATC':
         return concept_code.startswith('L')
-    if vid in ('RxNorm', 'RxNorm Extension'):
-        return concept_class_id in RXNORM_CLASS_SCOPE
     if vid == 'LOINC':
         return domain_id in LOINC_DOMAIN_SCOPE
     return True

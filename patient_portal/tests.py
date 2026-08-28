@@ -5405,6 +5405,8 @@ class AthenaVocabularyLoadTest(TestCase):
             [['HemOnc Class', 'HemOnc Class', '0'],
              ['Ingredient', 'Ingredient', '0'],
              ['Branded Drug', 'Branded Drug', '0'],
+             ['Brand Name', 'Brand Name', '0'],
+             ['Quant Clinical Drug', 'Quant Clinical Drug', '0'],
              ['Clinical Finding', 'Clinical Finding', '0']],
         )
         self._write_tsv(directory, 'CONCEPT.csv',
@@ -5418,6 +5420,9 @@ class AthenaVocabularyLoadTest(TestCase):
              ['5000003', 'bortezomib',           'Drug', 'RxNorm', 'Ingredient', 'S', '1421', '19700101', '20991231', ''],
              # RxNorm Branded — should be loaded
              ['5000004', 'Velcade',              'Drug', 'RxNorm', 'Branded Drug', 'S', '213269', '19700101', '20991231', ''],
+             # RxNorm classes outside the former four-class scope — should be loaded.
+             ['5000005', 'Benadryl',             'Drug', 'RxNorm', 'Brand Name', 'S', '235473', '19700101', '20991231', ''],
+             ['5000006', '150 ML sodium chloride 9 MG/ML Injection', 'Drug', 'RxNorm', 'Quant Clinical Drug', 'S', '1362', '19700101', '20991231', ''],
              # CDISC concept requested for PatientRecord.bone_lesions (#786).
              ['37533916', 'Number of Bone Lesions', 'Measurement', 'CDISC', 'Clinical Finding', 'S', 'C100061', '19700101', '20991231', ''],
              # CPT4 concept — should be SKIPPED (not in vocabulary scope)
@@ -5456,6 +5461,8 @@ class AthenaVocabularyLoadTest(TestCase):
         self.assertTrue(Concept.objects.filter(concept_id=5000001).exists())  # HemOnc
         self.assertTrue(Concept.objects.filter(concept_id=5000003).exists())  # RxNorm Ingredient
         self.assertTrue(Concept.objects.filter(concept_id=5000004).exists())  # RxNorm Branded
+        self.assertTrue(Concept.objects.filter(concept_id=5000005).exists())  # RxNorm Brand Name
+        self.assertTrue(Concept.objects.filter(concept_id=5000006).exists())  # RxNorm Quant Clinical Drug
         self.assertTrue(Concept.objects.filter(
             concept_id=37533916,
             vocabulary_id='CDISC',
