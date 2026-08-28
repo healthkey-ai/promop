@@ -36,8 +36,11 @@ def _payload(person, *exposures, **overrides):
     row = {
         "person_id": person.person_id,
         "line_number": 1,
-        "start_date": "2024-01-01",
-        "end_date": "2024-03-01",
+        "start_date": str(min(exposure.drug_exposure_start_date for exposure in exposures)),
+        "end_date": str(max(
+            exposure.drug_exposure_end_date or exposure.drug_exposure_start_date
+            for exposure in exposures
+        )),
         "drug_exposure_ids": [exposure.drug_exposure_id for exposure in exposures],
     }
     row.update(overrides)
@@ -47,8 +50,14 @@ def _payload(person, *exposures, **overrides):
 def test_materializes_fixture_output_via_episode_service_and_reruns_idempotently():
     _seed_writer_concepts()
     person = PersonFactory()
-    first = DrugExposureFactory(person=person, drug_exposure_start_date=date(2024, 1, 1))
-    second = DrugExposureFactory(person=person, drug_exposure_start_date=date(2024, 1, 2))
+    first = DrugExposureFactory(
+        person=person, drug_exposure_start_date=date(2024, 1, 1),
+        drug_exposure_end_date=date(2024, 3, 1),
+    )
+    second = DrugExposureFactory(
+        person=person, drug_exposure_start_date=date(2024, 1, 2),
+        drug_exposure_end_date=date(2024, 3, 1),
+    )
     payload = _payload(person, first, second)
 
     first_result = materialize_artemis_output(payload)
@@ -105,6 +114,20 @@ def test_rejects_exposure_owned_by_another_person():
 
     with pytest.raises(ValidationError, match="another person"):
         validate_artemis_output(_payload(person, foreign))
+
+
+def test_rejects_alignment_dates_not_anchored_to_source_events():
+    person = PersonFactory()
+    exposure = DrugExposureFactory(
+        person=person,
+        drug_exposure_start_date=date(2024, 1, 1),
+        drug_exposure_end_date=date(2024, 3, 1),
+    )
+
+    with pytest.raises(ValidationError, match="earliest selected DrugExposure"):
+        validate_artemis_output(_payload(person, exposure, start_date="2024-01-02"))
+    with pytest.raises(ValidationError, match="latest selected DrugExposure"):
+        validate_artemis_output(_payload(person, exposure, end_date="2024-02-29"))
 
 
 def test_command_dry_run_validates_fixture_without_writing(tmp_path, capsys):

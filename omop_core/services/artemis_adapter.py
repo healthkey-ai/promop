@@ -139,6 +139,24 @@ def validate_artemis_output(payload: Any) -> list[ArtemisEpisode]:
             raise _error(f"{label} references an unknown drug_exposure_id")
         if any(exposure.person_id != person.person_id for exposure in exposures):
             raise _error(f"{label} references a DrugExposure belonging to another person")
+        # ARTEMIS's processed alignment is a relative-time summary, not an
+        # event table.  Its runner must resolve every selected component back
+        # to local DrugExposure rows before producing this document.  Requiring
+        # the bounded interval to agree with those source events prevents an
+        # arbitrary CSV date from becoming an authoritative Episode date.
+        exposure_start = min(exposure.drug_exposure_start_date for exposure in exposures)
+        exposure_end = max(
+            exposure.drug_exposure_end_date or exposure.drug_exposure_start_date
+            for exposure in exposures
+        )
+        if start_date != exposure_start:
+            raise _error(
+                f"{label}.start_date must equal the earliest selected DrugExposure date"
+            )
+        if end_date is not None and end_date != exposure_end:
+            raise _error(
+                f"{label}.end_date must equal the latest selected DrugExposure end date"
+            )
 
         regimen_concept = None
         regimen_concept_id = row.get("regimen_concept_id")
