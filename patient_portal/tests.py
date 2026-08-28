@@ -5394,6 +5394,7 @@ class AthenaVocabularyLoadTest(TestCase):
             [['HemOnc', 'HemOnc Oncology', '', 'v2024', '0'],
              ['RxNorm', 'RxNorm', '', '2024AA', '0'],
              ['CDISC', 'Clinical Data Interchange Standards Consortium', '', '2024', '0'],
+             ['MeSH', 'Medical Subject Headings', '', '2024', '0'],
              ['CPT4', 'CPT-4', '', '2024', '0']],  # out of scope — should be skipped
         )
         self._write_tsv(directory, 'DOMAIN.csv',
@@ -5407,7 +5408,8 @@ class AthenaVocabularyLoadTest(TestCase):
              ['Branded Drug', 'Branded Drug', '0'],
              ['Brand Name', 'Brand Name', '0'],
              ['Quant Clinical Drug', 'Quant Clinical Drug', '0'],
-             ['Clinical Finding', 'Clinical Finding', '0']],
+             ['Clinical Finding', 'Clinical Finding', '0'],
+             ['Main Heading', 'Main Heading', '0']],
         )
         self._write_tsv(directory, 'CONCEPT.csv',
             ['concept_id', 'concept_name', 'domain_id', 'vocabulary_id',
@@ -5425,6 +5427,11 @@ class AthenaVocabularyLoadTest(TestCase):
              ['5000006', '150 ML sodium chloride 9 MG/ML Injection', 'Drug', 'RxNorm', 'Quant Clinical Drug', 'S', '1362', '19700101', '20991231', ''],
              # CDISC concept requested for PatientRecord.bone_lesions (#786).
              ['37533916', 'Number of Bone Lesions', 'Measurement', 'CDISC', 'Clinical Finding', 'S', 'C100061', '19700101', '20991231', ''],
+             # MeSH concept requested for PatientRecord.cytogenic_markers (#803).
+             # standard_concept is empty on purpose: MeSH is a non-standard source
+             # vocabulary in OMOP, so the fixture must not imply the loader
+             # yields something usable in a *_concept_id column.
+             ['19138268', 'Chromosome Aberrations', 'Observation', 'MeSH', 'Main Heading', '', 'D002869', '19700101', '20991231', ''],
              # CPT4 concept — should be SKIPPED (not in vocabulary scope)
              ['5000099', 'Out-of-scope concept', 'Drug', 'CPT4', 'Clinical Finding', 'S', '123456', '19700101', '20991231', '']],
         )
@@ -5467,6 +5474,14 @@ class AthenaVocabularyLoadTest(TestCase):
             concept_id=37533916,
             vocabulary_id='CDISC',
             concept_name='Number of Bone Lesions',
+        ).exists())
+        # MeSH is in scope so 'Chromosome Aberrations' can be assigned to
+        # cytogenic_markers in the mapping UI, which can only offer concepts
+        # the loader actually stored (#803).
+        self.assertTrue(Concept.objects.filter(
+            concept_id=19138268,
+            vocabulary_id='MeSH',
+            concept_name='Chromosome Aberrations',
         ).exists())
         self.assertFalse(Concept.objects.filter(concept_id=5000099).exists())  # CPT4 — excluded
 
