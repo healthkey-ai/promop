@@ -128,7 +128,10 @@ query over the *same scoped cohort*. It reconstructs ARTEMIS's encoded drug
 record positions and requires each aligned ingredient/date to resolve to
 exactly one local `drug_exposure_id`. It aborts rather than emitting JSON for
 an ambiguous or missing link; it never guesses by using every exposure in a
-date range. ARTEMIS regimen labels do not reliably identify a local OMOP
+date range. After resolving the selected local exposures, it emits their true
+interval: the minimum `drug_exposure_start_date` and the maximum
+`drug_exposure_end_date` (falling back to start date when end is null). ARTEMIS
+regimen labels do not reliably identify a local OMOP
 concept, so this initial bridge deliberately omits `regimen_concept_id` rather
 than minting or guessing a concept. It preserves the raw alignment CSV for
 clinical review.
