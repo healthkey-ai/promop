@@ -35,7 +35,7 @@ VOCAB_SCOPE = frozenset({
     # Genomic + oncology coding vocabularies (#459)
     'OMOP Genomic', 'ICDO3', 'NCIt',
     # Oncology staging/grading modifiers + cancer registry
-    'Cancer Modifier', 'NAACCR',
+    'Cancer Modifier', 'NAACCR', 'CDISC',
     # OMOP-generated metadata. 'Episode' carries the Treatment Regimen concept the
     # line-of-therapy episodes point at; 'CDM' carries the field concepts
     # EpisodeEvent references. Both were hand-seeded until the seeder was retired —
