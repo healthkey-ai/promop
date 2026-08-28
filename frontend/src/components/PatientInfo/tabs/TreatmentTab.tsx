@@ -118,10 +118,12 @@ function diseaseToDiseaseCode(
     if (d.includes('breast')) return 'C9335';
   }
   // Fall back to the type-safe diseaseType prop.
+  // 'lymphoma' is intentionally omitted — it groups MCL and FL, and picking
+  // one code would show the wrong regimens for the other. Without a raw
+  // disease string the picker falls back to "search all regimens".
   const TYPE_TO_CODE: Record<string, string> = {
     myeloma: 'C3242',
     cll: 'C2987',
-    lymphoma: 'C3209',
     breast: 'C9335',
   };
   return TYPE_TO_CODE[diseaseType];

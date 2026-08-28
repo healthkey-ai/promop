@@ -79,11 +79,17 @@ export default function TherapyLineDialog({
   const regimenDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Load regimens for this disease + line number on mount and when line changes.
-  const loadAvailableRegimens = useCallback(async (disease: string, line: string) => {
-    const round = lineToRound(Number(line) || 1);
+  // Key on the computed round (3 values), not the raw lineNumber, so typing "12"
+  // does not fire two calls — only a round change triggers a refetch.
+  const round = lineToRound(Number(lineNumber) || 1);
+
+  const loadAvailableRegimens = useCallback(async (disease: string, r: string) => {
+    // Clear any previously selected regimen when the round changes so the
+    // clinician must re-select from the updated list.
+    setSelectedRegimen(null);
     setLoadingAvailable(true);
     try {
-      setAvailableRegimens(await listTherapyRegimens(disease, round));
+      setAvailableRegimens(await listTherapyRegimens(disease, r));
     } catch {
       setAvailableRegimens([]);
     } finally {
@@ -94,9 +100,9 @@ export default function TherapyLineDialog({
   useEffect(() => {
     if (!diseaseCode) return;
     (async () => {
-      await loadAvailableRegimens(diseaseCode, lineNumber);
+      await loadAvailableRegimens(diseaseCode, round);
     })();
-  }, [diseaseCode, lineNumber, loadAvailableRegimens]);
+  }, [diseaseCode, round, loadAvailableRegimens]);
 
   const doRegimenSearch = useCallback(async (q: string) => {
     if (q.trim().length < 2) {
