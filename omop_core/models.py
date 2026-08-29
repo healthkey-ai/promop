@@ -847,10 +847,16 @@ class Person(models.Model):
         return f"Person {self.person_id}"
 
 
+# The four capabilities are independent, not a scale: understanding a language
+# without reading it is ordinary, and so is reading without speaking. A person
+# therefore gets one row per capability they have, rather than one row carrying
+# a combined level -- which could not express reading or understanding at all,
+# and forced two separate abilities to be asserted or denied together.
 SKILL_LEVEL_CHOICES = [
     ('speak', 'Speak'),
+    ('read', 'Read'),
     ('write', 'Write'),
-    ('both', 'Both Speak and Write'),
+    ('understand', 'Understand'),
 ]
 
 
@@ -864,7 +870,8 @@ class PersonLanguageSkill(models.Model):
     language_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='person_language_skills', 
                                         db_column='language_concept_id')
     skill_level = models.CharField(max_length=10, choices=SKILL_LEVEL_CHOICES, 
-                                  help_text="Language skill level: speak, write, both")
+                                  help_text="One capability the person has in this language: "
+                                            "speak, read, write or understand")
     is_primary = models.BooleanField(
         default=False, db_default=False,
         help_text="Is this the person's primary language?")
@@ -873,14 +880,23 @@ class PersonLanguageSkill(models.Model):
 
     class Meta:
         db_table = 'person_language_skill'
-        unique_together = ['person', 'language_concept']
+        # One row per capability, so a person may hold up to four rows for the
+        # same language.
+        unique_together = ['person', 'language_concept', 'skill_level']
         indexes = [
             models.Index(fields=['person', 'is_primary']),
         ]
         constraints = [
-            # At most one primary language per person. manage_language_skills
-            # clears the others in Python before setting one; this makes the
-            # invariant hold for every other writer too, including raw SQL.
+            # Exactly one row per person carries the primary flag, and that
+            # row's language is the person's primary language. The flag sits on
+            # a single representative row rather than on every row of that
+            # language: a person can hold four rows for English, and marking
+            # all four primary would make "which language is primary" a count
+            # rather than a lookup, with no way to enforce that the four agree.
+            #
+            # manage_language_skills cleared the others in Python before setting
+            # one; this makes the invariant hold for every other writer too,
+            # including raw SQL.
             models.UniqueConstraint(
                 fields=['person'],
                 condition=Q(is_primary=True),
@@ -889,9 +905,9 @@ class PersonLanguageSkill(models.Model):
             # SKILL_LEVEL_CHOICES is validation, not a constraint. The derived
             # languages_skills string interpolates this value verbatim, so an
             # unchecked write surfaces in the API rather than being rejected.
-            # There is no usable coded value set for the speak/write/both
-            # trichotomy -- see the migration for why -- so the literals are
-            # pinned here instead.
+            # There is no usable coded value set for these four capabilities
+            # -- see the migration for why -- so the literals are pinned here
+            # instead.
             models.CheckConstraint(
                 check=Q(skill_level__in=[c for c, _label in SKILL_LEVEL_CHOICES]),
                 name='person_language_skill_skill_level_valid',
@@ -2879,7 +2895,7 @@ class PatientRecord(models.Model):
         return self.person.get_primary_language()
     
     def get_languages_display(self):
-        """Return a human-readable string of languages and skills like 'English: speak, Spanish: both'"""
+        """Human-readable languages and skills, e.g. 'English: speak, Spanish: read'."""
         skills = self.get_languages()
         if not skills:
             return "No languages recorded"

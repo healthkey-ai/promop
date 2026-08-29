@@ -4,16 +4,19 @@ The table enforced almost nothing: two rows could claim to be a person's primary
 language, skill_level accepted any string up to ten characters, and any of the
 2.4M concepts satisfied the language_concept FK. All three databases held zero
 rows when this was written, so the constraints go on before there is anything to
-repair.
+repair -- and for the same reason the skill vocabulary can be replaced outright
+rather than migrated.
 
-skill_level stays as literals rather than becoming a concept FK. There is no
-usable coded value set for the speak/write/both trichotomy: the nearest SNOMED
-concepts are speech-pathology findings -- 4118707 "Able to speak", 4115799
-"Unable to speak" -- which assert something clinically different, since a
-patient who speaks a language but does not write it is not "unable to write".
-37162770 "Language written" is an Observable Entity, a question rather than an
-answer, and nothing codes "both". Coding these would repeat the mistake #807
-avoided for "Performance Status" and "Prior Therapies".
+skill_level becomes four independent capabilities: speak, read, write,
+understand. They are not a scale. Understanding a language without reading it is
+ordinary, and so is reading without speaking, so a person gets one row per
+capability rather than one row carrying a combined level. That is why the unique
+key gains skill_level: a combined level could say nothing about reading or
+understanding, and forced two separate abilities to be asserted together.
+
+The literals stay literals here. HK-Language concepts coding these four
+capabilities are minted separately, alongside the skill_concept FK that resolves
+to them -- this migration is the constraint layer they will hang off.
 
 The language-domain rule is a trigger because a CHECK constraint cannot
 subquery. The alternative -- a composite FK to concept(concept_id, domain_id) --
@@ -30,7 +33,6 @@ language" are Language/Qualifier Value).
 """
 
 from django.db import migrations, models
-
 
 _TRIGGER_SQL = """
 CREATE OR REPLACE FUNCTION person_language_skill_check_language_domain()
@@ -67,14 +69,27 @@ DROP FUNCTION IF EXISTS person_language_skill_check_language_domain();
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('omop_core', '0181_seed_refractory_field_mappings'),
+        ('omop_core', '0183_update_m_protein_type_values'),
     ]
 
     operations = [
+        migrations.AlterUniqueTogether(
+            name='personlanguageskill',
+            unique_together=set(),
+        ),
         migrations.AlterField(
             model_name='personlanguageskill',
             name='is_primary',
             field=models.BooleanField(db_default=False, default=False, help_text="Is this the person's primary language?"),
+        ),
+        migrations.AlterField(
+            model_name='personlanguageskill',
+            name='skill_level',
+            field=models.CharField(choices=[('speak', 'Speak'), ('read', 'Read'), ('write', 'Write'), ('understand', 'Understand')], help_text='One capability the person has in this language: speak, read, write or understand', max_length=10),
+        ),
+        migrations.AlterUniqueTogether(
+            name='personlanguageskill',
+            unique_together={('person', 'language_concept', 'skill_level')},
         ),
         migrations.AddConstraint(
             model_name='personlanguageskill',
@@ -82,7 +97,7 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='personlanguageskill',
-            constraint=models.CheckConstraint(condition=models.Q(('skill_level__in', ['speak', 'write', 'both'])), name='person_language_skill_skill_level_valid'),
+            constraint=models.CheckConstraint(condition=models.Q(('skill_level__in', ['speak', 'read', 'write', 'understand'])), name='person_language_skill_skill_level_valid'),
         ),
         migrations.RunSQL(sql=_TRIGGER_SQL, reverse_sql=_TRIGGER_REVERSE_SQL),
     ]

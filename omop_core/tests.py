@@ -5323,14 +5323,14 @@ class PersonLanguageSkillConstraintTest(TestCase):
     def test_a_person_cannot_have_two_primary_languages(self):
         PersonLanguageSkill.objects.create(
             person=self.person, language_concept=self.english,
-            skill_level='both', is_primary=True)
+            skill_level='speak', is_primary=True)
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
                 PersonLanguageSkill.objects.create(
                     person=self.person, language_concept=self.spanish,
                     skill_level='speak', is_primary=True)
 
-    def test_a_person_may_have_many_non_primary_languages(self):
+    def test_a_person_may_have_many_non_primary_rows(self):
         """The constraint is partial: only is_primary=True rows collide.
 
         The first row becomes primary on its own (see the save() tests below),
@@ -5346,6 +5346,34 @@ class PersonLanguageSkillConstraintTest(TestCase):
             PersonLanguageSkill.objects.filter(
                 person=self.person, is_primary=True).count(), 1)
 
+    # -- one row per capability --------------------------------------------
+
+    def test_a_person_may_hold_every_capability_for_one_language(self):
+        """The four capabilities are independent, so they are separate rows.
+
+        Understanding a language without reading it is ordinary, and so is
+        reading without speaking; a single combined level cannot say either.
+        """
+        for value, _label in PersonLanguageSkill.SKILL_LEVEL_CHOICES:
+            PersonLanguageSkill.objects.create(
+                person=self.person, language_concept=self.english,
+                skill_level=value)
+        self.assertEqual(
+            PersonLanguageSkill.objects.filter(
+                person=self.person, language_concept=self.english).count(),
+            len(PersonLanguageSkill.SKILL_LEVEL_CHOICES))
+
+    def test_the_same_capability_twice_for_one_language_is_rejected(self):
+        """Uniqueness moved to (person, language, skill), not (person, language)."""
+        PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='read')
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                PersonLanguageSkill.objects.create(
+                    person=self.person, language_concept=self.english,
+                    skill_level='read')
+
     # -- first language becomes primary ------------------------------------
 
     def test_the_first_language_a_person_gets_becomes_primary(self):
@@ -5356,13 +5384,13 @@ class PersonLanguageSkillConstraintTest(TestCase):
         """
         skill = PersonLanguageSkill.objects.create(
             person=self.person, language_concept=self.english,
-            skill_level='both')
+            skill_level='speak')
         self.assertTrue(skill.is_primary)
 
     def test_a_later_language_does_not_displace_the_primary(self):
         first = PersonLanguageSkill.objects.create(
             person=self.person, language_concept=self.english,
-            skill_level='both')
+            skill_level='speak')
         second = PersonLanguageSkill.objects.create(
             person=self.person, language_concept=self.spanish,
             skill_level='speak')
@@ -5373,7 +5401,7 @@ class PersonLanguageSkillConstraintTest(TestCase):
     def test_an_explicit_primary_on_the_first_row_is_kept(self):
         skill = PersonLanguageSkill.objects.create(
             person=self.person, language_concept=self.english,
-            skill_level='both', is_primary=True)
+            skill_level='speak', is_primary=True)
         self.assertTrue(skill.is_primary)
 
     def test_the_next_language_takes_over_when_no_primary_remains(self):
@@ -5384,7 +5412,7 @@ class PersonLanguageSkillConstraintTest(TestCase):
         """
         first = PersonLanguageSkill.objects.create(
             person=self.person, language_concept=self.english,
-            skill_level='both')
+            skill_level='speak')
         first.delete()
         second = PersonLanguageSkill.objects.create(
             person=self.person, language_concept=self.spanish,
@@ -5394,19 +5422,19 @@ class PersonLanguageSkillConstraintTest(TestCase):
     def test_one_persons_primary_does_not_suppress_anothers(self):
         PersonLanguageSkill.objects.create(
             person=self.person, language_concept=self.english,
-            skill_level='both')
+            skill_level='speak')
         other = PersonLanguageSkill.objects.create(
             person=self.other_person, language_concept=self.english,
-            skill_level='both')
+            skill_level='speak')
         self.assertTrue(other.is_primary)
 
     def test_different_people_each_keep_their_own_primary(self):
         PersonLanguageSkill.objects.create(
             person=self.person, language_concept=self.english,
-            skill_level='both', is_primary=True)
+            skill_level='speak', is_primary=True)
         PersonLanguageSkill.objects.create(
             person=self.other_person, language_concept=self.english,
-            skill_level='both', is_primary=True)
+            skill_level='speak', is_primary=True)
         self.assertEqual(
             PersonLanguageSkill.objects.filter(is_primary=True).count(), 2)
 
@@ -5414,7 +5442,7 @@ class PersonLanguageSkillConstraintTest(TestCase):
         """UPDATE must be caught too, not just INSERT."""
         PersonLanguageSkill.objects.create(
             person=self.person, language_concept=self.english,
-            skill_level='both', is_primary=True)
+            skill_level='speak', is_primary=True)
         second = PersonLanguageSkill.objects.create(
             person=self.person, language_concept=self.spanish,
             skill_level='speak', is_primary=False)
@@ -5445,6 +5473,48 @@ class PersonLanguageSkillConstraintTest(TestCase):
             PersonLanguageSkill.objects.count(),
             len(PersonLanguageSkill.SKILL_LEVEL_CHOICES))
 
+    def test_deleting_the_primary_row_promotes_a_survivor(self):
+        """The database enforces at most one primary, not at least one.
+
+        save() only fires on insert, so without this a person whose flagged row
+        was deleted would keep their remaining languages and never regain a
+        primary.
+        """
+        first = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak')
+        second = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='read')
+        self.assertTrue(first.is_primary)
+
+        first.delete()
+
+        second.refresh_from_db()
+        self.assertTrue(second.is_primary)
+
+    def test_deleting_a_non_primary_row_promotes_nothing(self):
+        first = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak')
+        second = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='read')
+        second.delete()
+        first.refresh_from_db()
+        self.assertTrue(first.is_primary)
+        self.assertEqual(
+            PersonLanguageSkill.objects.filter(
+                person=self.person, is_primary=True).count(), 1)
+
+    def test_deleting_the_last_row_leaves_nothing_to_promote(self):
+        only = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='speak')
+        only.delete()
+        self.assertFalse(
+            PersonLanguageSkill.objects.filter(person=self.person).exists())
+
     # -- language domain ---------------------------------------------------
 
     def test_a_non_language_concept_is_rejected(self):
@@ -5457,20 +5527,20 @@ class PersonLanguageSkillConstraintTest(TestCase):
             with transaction.atomic():
                 PersonLanguageSkill.objects.create(
                     person=self.person, language_concept=self.heart_disease,
-                    skill_level='both')
+                    skill_level='speak')
         self.assertIn('not Language', str(ctx.exception))
 
     def test_a_language_concept_is_accepted(self):
         skill = PersonLanguageSkill.objects.create(
             person=self.person, language_concept=self.english,
-            skill_level='both')
+            skill_level='speak')
         self.assertEqual(skill.language_concept.domain_id, 'Language')
 
     def test_repointing_a_row_at_a_non_language_concept_is_rejected(self):
         """The trigger fires on UPDATE OF language_concept_id, not only INSERT."""
         skill = PersonLanguageSkill.objects.create(
             person=self.person, language_concept=self.english,
-            skill_level='both')
+            skill_level='speak')
         with self.assertRaises(Exception) as ctx:
             with transaction.atomic():
                 skill.language_concept = self.heart_disease
@@ -5496,7 +5566,7 @@ class PersonLanguageSkillConstraintTest(TestCase):
                 '(person_id, language_concept_id, skill_level, '
                 ' created_date, updated_date) '
                 'VALUES (%s, %s, %s, NOW(), NOW())',
-                [self.person.person_id, self.english.concept_id, 'both'],
+                [self.person.person_id, self.english.concept_id, 'speak'],
             )
         self.assertFalse(
             PersonLanguageSkill.objects.get(person=self.person).is_primary)

@@ -79,10 +79,10 @@ class TestLanguagesSkills:
         person = PersonFactory()
         en = _language_concept('English')
         es = _language_concept('Spanish')
-        PersonLanguageSkill.objects.create(person=person, language_concept=en, skill_level='both')
+        PersonLanguageSkill.objects.create(person=person, language_concept=en, skill_level='read')
         PersonLanguageSkill.objects.create(person=person, language_concept=es, skill_level='speak')
         data = _cmd().get_demographics(person)
-        assert 'English: both' in data['languages_skills']
+        assert 'English: read' in data['languages_skills']
         assert 'Spanish: speak' in data['languages_skills']
 
 
