@@ -898,6 +898,31 @@ class PersonLanguageSkill(models.Model):
             ),
         ]
 
+    def save(self, *args, **kwargs):
+        """Make the first language a person gets their primary one.
+
+        Without this the column default wins and a person can end up with
+        several languages and no primary, which the derived languages_skills
+        string has no way to express. Keyed on "no primary exists" rather than
+        "no rows exist" so it also heals the case where the primary row was
+        deleted: the next language added takes over.
+
+        Only on insert, and only when nothing is already primary — an explicit
+        is_primary=True still wins, and an existing primary is never displaced
+        silently. Two concurrent inserts can both see no primary; the partial
+        unique index is what stops them both landing.
+        """
+        if self._state.adding and not self.is_primary:
+            has_primary = PersonLanguageSkill.objects.filter(
+                person_id=self.person_id, is_primary=True,
+            ).exists()
+            if not has_primary:
+                self.is_primary = True
+                update_fields = kwargs.get('update_fields')
+                if update_fields is not None:
+                    kwargs['update_fields'] = set(update_fields) | {'is_primary'}
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"Person {self.person_id}: {self.language_concept.concept_name} ({self.skill_level})"
 

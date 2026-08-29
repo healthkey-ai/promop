@@ -5313,6 +5313,8 @@ class PersonLanguageSkillConstraintTest(TestCase):
                                '297487008')
         cls.spanish = _concept(4182511, 'Spanish language', language_domain,
                                '297510001')
+        cls.french = _concept(4181534, 'French language', language_domain,
+                              '297504001')
         cls.heart_disease = _concept(4057432, 'Heart disease', condition_domain,
                                      '56265001')
 
@@ -5329,15 +5331,74 @@ class PersonLanguageSkillConstraintTest(TestCase):
                     skill_level='speak', is_primary=True)
 
     def test_a_person_may_have_many_non_primary_languages(self):
-        """The constraint is partial: only is_primary=True rows collide."""
+        """The constraint is partial: only is_primary=True rows collide.
+
+        The first row becomes primary on its own (see the save() tests below),
+        so the additional ones are what this exercises.
+        """
+        for concept in (self.english, self.spanish, self.french):
+            PersonLanguageSkill.objects.create(
+                person=self.person, language_concept=concept,
+                skill_level='speak')
+        self.assertEqual(
+            PersonLanguageSkill.objects.filter(person=self.person).count(), 3)
+        self.assertEqual(
+            PersonLanguageSkill.objects.filter(
+                person=self.person, is_primary=True).count(), 1)
+
+    # -- first language becomes primary ------------------------------------
+
+    def test_the_first_language_a_person_gets_becomes_primary(self):
+        """Otherwise a person can hold several languages and no primary.
+
+        The derived languages_skills string has no way to express "no primary",
+        so the column default alone leaves the read model ambiguous.
+        """
+        skill = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='both')
+        self.assertTrue(skill.is_primary)
+
+    def test_a_later_language_does_not_displace_the_primary(self):
+        first = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='both')
+        second = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.spanish,
+            skill_level='speak')
+        first.refresh_from_db()
+        self.assertTrue(first.is_primary)
+        self.assertFalse(second.is_primary)
+
+    def test_an_explicit_primary_on_the_first_row_is_kept(self):
+        skill = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='both', is_primary=True)
+        self.assertTrue(skill.is_primary)
+
+    def test_the_next_language_takes_over_when_no_primary_remains(self):
+        """Keyed on "no primary exists", not "no rows exist", so it self-heals.
+
+        Deleting the primary row would otherwise leave the person with
+        languages and no primary, and nothing would ever restore one.
+        """
+        first = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='both')
+        first.delete()
+        second = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.spanish,
+            skill_level='speak')
+        self.assertTrue(second.is_primary)
+
+    def test_one_persons_primary_does_not_suppress_anothers(self):
         PersonLanguageSkill.objects.create(
             person=self.person, language_concept=self.english,
-            skill_level='both', is_primary=False)
-        PersonLanguageSkill.objects.create(
-            person=self.person, language_concept=self.spanish,
-            skill_level='speak', is_primary=False)
-        self.assertEqual(
-            PersonLanguageSkill.objects.filter(person=self.person).count(), 2)
+            skill_level='both')
+        other = PersonLanguageSkill.objects.create(
+            person=self.other_person, language_concept=self.english,
+            skill_level='both')
+        self.assertTrue(other.is_primary)
 
     def test_different_people_each_keep_their_own_primary(self):
         PersonLanguageSkill.objects.create(
@@ -5423,6 +5484,11 @@ class PersonLanguageSkillConstraintTest(TestCase):
 
         Before db_default, the column carried no DEFAULT, so an insert omitting
         is_primary failed on NOT NULL instead of defaulting to false.
+
+        This also pins the boundary of the first-language-becomes-primary rule:
+        it lives in save(), so a raw insert — or bulk_create, which does not
+        call save() — gets the column default and no primary. The database
+        guarantees at most one primary; it does not guarantee there is one.
         """
         with connection.cursor() as cursor:
             cursor.execute(
