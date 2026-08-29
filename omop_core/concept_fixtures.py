@@ -59,7 +59,7 @@ _VOCABULARIES = [
          vocabulary_reference='https://healthkey.ai',
          vocabulary_version='1.0',
          vocabulary_concept_id=0),
-    # Locally-authored codes for the four language capabilities (#813). SNOMED
+    # Locally-authored codes for the four language capabilities (#827). SNOMED
     # has no value set for them: its nearest concepts are speech-pathology
     # findings ('Able to speak', 'Unable to speak') asserting something
     # clinically different, and nothing codes "understand" as a language skill.
@@ -445,7 +445,7 @@ _CONCEPTS = [
        'HK-Observation', 'Clinical Observation', None, 'hko:btk-inhibitor-refractory',
        source='HealthKey'),
 
-    # Language capabilities (#813). Domain is 'Meas Value' because these are
+    # Language capabilities (#827). Domain is 'Meas Value' because these are
     # answers, not attributes: they are what a person's skill in a language IS,
     # so they belong where OMOP puts value concepts. The language itself stays
     # a 'Language'-domain SNOMED concept -- the two are different axes, and

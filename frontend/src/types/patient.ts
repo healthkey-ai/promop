@@ -24,7 +24,7 @@ export interface PatientInfo {
   race?: string | null;
   ethnicity?: string | null;
 
-  // Flattened language capabilities, derived from PersonLanguageSkill (#813).
+  // Flattened language capabilities, derived from PersonLanguageSkill (#827).
   // Three-valued: undefined/null means nobody asked about that language, false
   // means the patient was asked and does not have the capability. Collapsing
   // the two would make every unasked patient look incapable to a trial filter.

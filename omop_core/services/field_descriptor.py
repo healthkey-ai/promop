@@ -95,7 +95,7 @@ _COMPUTED_THERAPY_FIELDS = frozenset({
 
 # Computed fields (derived from other fields, not directly from OMOP).
 _COMPUTED_FIELDS = frozenset({
-    # Flattened language capabilities (#813) -- derived from
+    # Flattened language capabilities (#827) -- derived from
     # PersonLanguageSkill, so editing them here would be overwritten by
     # the next refresh.
     'english_speak', 'english_read', 'english_write', 'english_understand',

@@ -2889,7 +2889,7 @@ class PatientRecord(models.Model):
     # Languages (denormalized from PersonLanguageSkill for API consumption)
     languages_skills = models.TextField(blank=True, null=True)
 
-    # Flattened language capabilities, for trial matching and CDS (#813).
+    # Flattened language capabilities, for trial matching and CDS (#827).
     #
     # languages_skills is a display string; matching a criterion like "can read
     # English" against it means parsing prose in a WHERE clause. These eight

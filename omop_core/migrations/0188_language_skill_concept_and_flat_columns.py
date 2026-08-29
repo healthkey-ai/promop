@@ -1,4 +1,4 @@
-"""skill_concept and the flattened capability columns (#813).
+"""skill_concept and the flattened capability columns (#827).
 
 Two halves of the same idea: make language capability something a query can act
 on.

@@ -1,4 +1,4 @@
-"""Mint local concepts for the four language capabilities (#813).
+"""Mint local concepts for the four language capabilities (#827).
 
 speak, read, write and understand have no coded equivalent to borrow. SNOMED's
 nearest concepts are speech-pathology findings -- 4118707 "Able to speak",
