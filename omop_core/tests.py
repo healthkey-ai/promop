@@ -2483,7 +2483,7 @@ class WearableConceptMappingTest(TestCase):
             self.assertEqual(seeded['source'], 'HealthKey')
 
     def test_language_capability_concepts_match_seed_definitions(self):
-        """Migration 0187 duplicates its rows into the fixture; no drift (#813).
+        """Migration 0187 duplicates its rows into the fixture; no drift (#827).
 
         Same trade as 0180: the migration hard-codes definitions so it stays
         frozen against the code as written, and this test is what stops the two
@@ -5763,7 +5763,7 @@ class LanguageHelperMethodTest(TestCase):
 
 
 class LanguageSkillConceptAndFlatColumnTest(TestCase):
-    """#813 — capabilities are coded, and flattened for matching.
+    """#827 — capabilities are coded, and flattened for matching.
 
     Two halves: skill_concept carries the HK-Language code for a row, and the
     eight PatientRecord booleans unroll the same facts into columns a query can

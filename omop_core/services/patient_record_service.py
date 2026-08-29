@@ -230,7 +230,7 @@ _OMOP_DERIVED_FIELDS = [
 PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset({
     'date_of_birth', 'gender', 'race', 'ethnicity', 'languages_skills',
     'country', 'region', 'city', 'postal_code', 'latitude', 'longitude',
-    # Flattened language capabilities (#813). Derived from PersonLanguageSkill
+    # Flattened language capabilities (#827). Derived from PersonLanguageSkill
     # by _flatten_language_capabilities, so they are read-only over the API:
     # a PATCH would be silently overwritten by the next refresh.
     'english_speak', 'english_read', 'english_write', 'english_understand',
@@ -880,7 +880,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 # ---------------------------------------------------------------------------
 
 
-# Flattened language capabilities (#813). The concept names are SNOMED's, which
+# Flattened language capabilities (#827). The concept names are SNOMED's, which
 # carry the "language" suffix -- 4180186 is "English language", not "English".
 _FLATTENED_LANGUAGES = {
     'english': 'English language',
