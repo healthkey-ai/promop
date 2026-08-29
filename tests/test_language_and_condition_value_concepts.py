@@ -25,7 +25,7 @@ pytestmark = pytest.mark.django_db
 def _migration():
     from importlib import import_module
     return import_module(
-        'omop_core.migrations.0182_seed_language_and_condition_value_concepts')
+        'omop_core.migrations.0185_seed_language_and_condition_value_concepts')
 
 
 @pytest.fixture(autouse=True)
