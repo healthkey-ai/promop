@@ -83,14 +83,19 @@ beforeEach(() => {
 });
 
 describe("CodeMappingPage", () => {
-  it("lists mapped and unmapped quarantined concepts", async () => {
+  it("organizes mapped and unmapped quarantined concepts by vocabulary tabs", async () => {
     renderPage();
 
     expect(await screen.findByText("HealthKey preferred language")).toBeInTheDocument();
-    expect(screen.getByText("Walking step length")).toBeInTheDocument();
-    expect(screen.getByText("HK-WEAR-STEP-LENGTH")).toBeInTheDocument();
+    expect(screen.queryByText("Walking step length")).not.toBeInTheDocument();
     expect(screen.getByText("Unmapped")).toBeInTheDocument();
     expect(screen.getByText(/2 quarantined concepts/)).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Vocabulary" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /HK-Wearable/ }));
+    expect(screen.getByText("Walking step length")).toBeInTheDocument();
+    expect(screen.getByText("HK-WEAR-STEP-LENGTH")).toBeInTheDocument();
+    expect(screen.queryByText("HealthKey preferred language")).not.toBeInTheDocument();
   });
 
   it("creates a new source code mapping", async () => {
@@ -99,7 +104,7 @@ describe("CodeMappingPage", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "New Code" }));
     const dialog = screen.getByRole("heading", { name: "New Code" }).closest("form")!;
-    fireEvent.change(within(dialog).getByLabelText("Source"), { target: { value: "HK-Wearable" } });
+    fireEvent.change(within(dialog).getByLabelText("Source vocabulary"), { target: { value: "HK-Wearable" } });
     fireEvent.change(within(dialog).getByLabelText("Code"), { target: { value: "HK-WEAR-HRV-RMSSD" } });
     fireEvent.change(within(dialog).getByLabelText("Destination OMOP Concept ID"), { target: { value: "2039000003" } });
     fireEvent.change(within(dialog).getByLabelText("Destination concept name"), { target: { value: "Heart rate variability RMSSD" } });
