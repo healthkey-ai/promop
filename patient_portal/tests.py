@@ -18124,13 +18124,25 @@ class AdminDeletePatientTest(TestCase):
 class MyelomaTypeVocabularyTest(TestCase):
     """Verify MyelomaType vocabulary is seeded and served via API."""
 
+    EXPECTED_TITLES = [
+        'IgG kappa',
+        'IgG lambda',
+        'IgA kappa',
+        'IgA lambda',
+        'IgD kappa',
+        'IgD lambda',
+        'IgE kappa',
+        'IgE lambda',
+        'IgM kappa',
+        'IgM lambda',
+        'Light-chain kappa',
+        'Light-chain lambda',
+    ]
+
     def test_myeloma_type_vocab_seeded(self):
         from omop_core.models import MyelomaType
-        codes = list(MyelomaType.objects.values_list('code', flat=True))
-        self.assertIn('igg-kappa', codes)
-        self.assertIn('light-chain-kappa', codes)
-        self.assertIn('non-secretory', codes)
-        self.assertGreaterEqual(len(codes), 14)
+        titles = list(MyelomaType.objects.order_by('title').values_list('title', flat=True))
+        self.assertEqual(titles, sorted(self.EXPECTED_TITLES))
 
     def test_myeloma_type_api_endpoint(self):
         user = Identity.objects.create_user(email='mmvocab@test.com', password='pass')
@@ -18138,8 +18150,32 @@ class MyelomaTypeVocabularyTest(TestCase):
         resp = self.client.get('/api/v1/vocabularies/myeloma-type/')
         self.assertEqual(resp.status_code, 200)
         titles = [r['title'] for r in resp.json()]
-        self.assertIn('IgG Kappa', titles)
-        self.assertIn('Non-secretory', titles)
+        self.assertEqual(titles, sorted(self.EXPECTED_TITLES))
+
+    def test_migration_normalizes_existing_record_display_values(self):
+        import importlib
+
+        from django.apps import apps as global_apps
+        from omop_core.models import Organization, PatientRecord, Person
+
+        org = Organization.objects.create(
+            name='M-Protein Type Test Org',
+            slug='m-protein-type-test-org',
+        )
+        person = Person.objects.create(person_id=112001)
+        record = PatientRecord.objects.create(
+            person=person,
+            organization=org,
+            myeloma_type='Light Chain Only (Kappa)',
+        )
+
+        migration = importlib.import_module(
+            'omop_core.migrations.0183_update_m_protein_type_values',
+        )
+        migration.update_m_protein_types(global_apps, None)
+
+        record.refresh_from_db()
+        self.assertEqual(record.myeloma_type, 'Light-chain kappa')
 
 
 class MeetsCrabSlimFieldTest(_SmartBase):
@@ -18154,7 +18190,7 @@ class MeetsCrabSlimFieldTest(_SmartBase):
             organization=cls.organization,
             meets_crab=True,
             meets_slim=False,
-            myeloma_type='IgG Kappa',
+            myeloma_type='IgG kappa',
         )
 
     def _get_patient_info(self):
@@ -18177,17 +18213,17 @@ class MeetsCrabSlimFieldTest(_SmartBase):
     def test_myeloma_type_in_response(self):
         data = self._get_patient_info()
         self.assertIn('myeloma_type', data)
-        self.assertEqual(data['myeloma_type'], 'IgG Kappa')
+        self.assertEqual(data['myeloma_type'], 'IgG kappa')
 
     def test_myeloma_type_is_derive_only(self):
         resp = self.write_client.patch(
             f'/api/v1/patient-records/{self.mm_person.person_id}/',
-            data=json.dumps({'myeloma_type': 'IgA Lambda'}),
+            data=json.dumps({'myeloma_type': 'IgA lambda'}),
             content_type='application/json',
         )
         self.assertEqual(resp.status_code, 405)
         self.mm_record.refresh_from_db()
-        self.assertEqual(self.mm_record.myeloma_type, 'IgG Kappa')
+        self.assertEqual(self.mm_record.myeloma_type, 'IgG kappa')
 
 
 # =============================================================================

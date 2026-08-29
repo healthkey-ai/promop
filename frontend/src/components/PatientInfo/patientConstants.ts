@@ -101,11 +101,10 @@ export const FL_TUMOR_GRADE_OPTIONS = [
   'Grade 3b (solid sheets of centroblasts)',
 ];
 export const MYELOMA_TYPE_OPTIONS = [
-  'IgG Kappa', 'IgG Lambda', 'IgA Kappa', 'IgA Lambda',
-  'IgD Kappa', 'IgD Lambda', 'IgE Kappa', 'IgE Lambda',
-  'IgM Kappa', 'IgM Lambda',
-  'Light Chain Only (Kappa)', 'Light Chain Only (Lambda)',
-  'Non-secretory', 'Biclonal',
+  'IgG kappa', 'IgG lambda', 'IgA kappa', 'IgA lambda',
+  'IgD kappa', 'IgD lambda', 'IgE kappa', 'IgE lambda',
+  'IgM kappa', 'IgM lambda',
+  'Light-chain kappa', 'Light-chain lambda',
 ];
 export const ISS_STAGE_OPTIONS = ['Stage I', 'Stage II', 'Stage III'];
 export const MRD_STATUS_OPTIONS = [

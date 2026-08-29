@@ -239,7 +239,7 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
     <>
       <Section title="Disease Characteristics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField label="Myeloma Type" name="myeloma_type" descriptor={descriptors.myeloma_type} type="select" value={formData?.myeloma_type} options={myelomaTypeOptions.length ? myelomaTypeOptions.map((o: { value: string }) => o.value) : MYELOMA_TYPE_OPTIONS} onChange={onChange} vocabSource={myelomaTypeSource} />
+          <ClinicalField label="M-Protein Type" name="myeloma_type" descriptor={descriptors.myeloma_type} type="select" value={formData?.myeloma_type} options={myelomaTypeOptions.length ? myelomaTypeOptions.map((o: { value: string }) => o.value) : MYELOMA_TYPE_OPTIONS} onChange={onChange} vocabSource={myelomaTypeSource} />
           <ClinicalField label="ISS Stage" name="stage" descriptor={descriptors.stage} type="select" value={formData?.stage} options={ISS_STAGE_OPTIONS} onChange={onChange} />
           <ClinicalField label="R-ISS Stage" name="r_iss_stage" descriptor={descriptors.r_iss_stage} unknownField type="select" value={formData?.r_iss_stage} options={ISS_STAGE_OPTIONS} onChange={onChange} />
           <ClinicalField label="Durie-Salmon Stage" name="durie_salmon_stage" descriptor={descriptors.durie_salmon_stage} unknownField type="text" value={formData?.durie_salmon_stage} onChange={onChange} />
