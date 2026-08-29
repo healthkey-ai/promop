@@ -6043,7 +6043,7 @@ class LanguageSkillReviewFindingsTest(TestCase):
 
         call_command('manage_language_skills',
                      person_id=self.person.person_id,
-                     add_language='English language:speak', stdout=StringIO())
+                     set_language='297487008:speak', stdout=StringIO())
 
         self.record.refresh_from_db()
         self.assertTrue(self.record.english_speak)
@@ -6067,9 +6067,169 @@ class LanguageSkillReviewFindingsTest(TestCase):
         out = StringIO()
         call_command('manage_language_skills',
                      person_id=self.person.person_id,
-                     set_primary='English language', stdout=out, stderr=out)
+                     set_primary='297487008', stdout=out, stderr=out)
 
         self.assertEqual(
             PersonLanguageSkill.objects.filter(
                 person=self.person, is_primary=True).count(), 1)
         self.assertEqual(self.person.get_primary_language(), 'English language')
+
+
+class ManageLanguageSkillsCommandTest(TestCase):
+    """#812 — the command mints nothing and resolves nothing by name.
+
+    What it replaced created ten concepts at 40000001-40000010 in a fabricated
+    'LANGUAGE' vocabulary flagged standard_concept='S', then looked them up by
+    concept_name with a fallback across every loaded vocabulary. Each of those
+    is pinned here, because none of them fails loudly: a bad concept looks
+    standard to every consumer, and a name match returns the wrong row rather
+    than no row.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import ConceptClass, Domain, Vocabulary
+
+        cls.person = Person.objects.create(person_id=884001)
+        cls.record = PatientRecord.objects.create(person=cls.person)
+
+        snomed, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0})
+        cls.qualifier, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Qualifier Value',
+            defaults={'concept_class_name': 'Qualifier Value',
+                      'concept_class_concept_id': 0})
+        cls.language_domain, _ = Domain.objects.get_or_create(
+            domain_id='Language',
+            defaults={'domain_name': 'Language', 'domain_concept_id': 0})
+        cls.condition_domain, _ = Domain.objects.get_or_create(
+            domain_id='Condition',
+            defaults={'domain_name': 'Condition', 'domain_concept_id': 19})
+        cls.snomed = snomed
+
+        for concept_id, name, code in ((4180186, 'English language', '297487008'),
+                                       (4182511, 'Spanish language', '297510001')):
+            Concept.objects.get_or_create(
+                concept_id=concept_id,
+                defaults=dict(concept_name=name, domain=cls.language_domain,
+                              vocabulary=snomed, concept_class=cls.qualifier,
+                              standard_concept='S', concept_code=code,
+                              valid_start_date=date(1970, 1, 1),
+                              valid_end_date=date(2099, 12, 31)))
+
+    def _run(self, **kwargs):
+        from django.core.management import call_command
+        from io import StringIO
+        out = StringIO()
+        call_command('manage_language_skills', stdout=out, stderr=out, **kwargs)
+        return out.getvalue()
+
+    # -- it mints nothing --------------------------------------------------
+
+    def test_the_command_creates_no_concepts(self):
+        """The whole defect in #812 was that it created concepts at all."""
+        before = Concept.objects.count()
+        self._run(person_id=self.person.person_id,
+                  set_language='297487008:speak,read')
+        self.assertEqual(Concept.objects.count(), before)
+
+    def test_no_fabricated_language_vocabulary_is_created(self):
+        self._run(person_id=self.person.person_id, set_language='297487008:speak')
+        self.assertFalse(
+            Concept.objects.filter(vocabulary_id='LANGUAGE').exists())
+
+    def test_nothing_lands_in_the_ohdsi_concept_id_range(self):
+        """Local mints must sit at >= LOCAL_CONCEPT_ID_MIN; these sat at 4e7."""
+        from omop_core.concept_fixtures import LOCAL_CONCEPT_ID_MIN
+
+        self._run(person_id=self.person.person_id, set_language='297487008:speak')
+        self.assertFalse(
+            Concept.objects.filter(source='HealthKey',
+                                   concept_id__lt=LOCAL_CONCEPT_ID_MIN).exists())
+
+    # -- it resolves by code, not name -------------------------------------
+
+    def test_a_language_is_addressed_by_code(self):
+        self._run(person_id=self.person.person_id,
+                  set_language='297487008:speak,read')
+        self.assertEqual(
+            set(PersonLanguageSkill.objects.filter(person=self.person)
+                .values_list('skill_level', flat=True)),
+            {'speak', 'read'})
+
+    def test_a_name_is_not_accepted_as_a_code(self):
+        out = self._run(person_id=self.person.person_id,
+                        set_language='English language:speak')
+        self.assertIn('not a loaded Language-domain concept', out)
+        self.assertFalse(
+            PersonLanguageSkill.objects.filter(person=self.person).exists())
+
+    def test_a_same_named_concept_in_another_domain_is_refused(self):
+        """The old fallback searched every vocabulary by name.
+
+        A Condition concept called 'English language' would have matched and
+        been stored as somebody's language.
+        """
+        Concept.objects.create(
+            concept_id=4999002, concept_name='English language',
+            domain=self.condition_domain, vocabulary=self.snomed,
+            concept_class=self.qualifier, standard_concept='S',
+            concept_code='999999998', valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31))
+
+        out = self._run(person_id=self.person.person_id,
+                        set_language='999999998:speak')
+        self.assertIn('not a loaded Language-domain concept', out)
+        self.assertFalse(
+            PersonLanguageSkill.objects.filter(person=self.person).exists())
+
+    # -- replace semantics and derivation ----------------------------------
+
+    def test_setting_a_language_replaces_its_capabilities(self):
+        self._run(person_id=self.person.person_id,
+                  set_language='297487008:speak,read')
+        self._run(person_id=self.person.person_id, set_language='297487008:write')
+        self.assertEqual(
+            set(PersonLanguageSkill.objects.filter(person=self.person)
+                .values_list('skill_level', flat=True)),
+            {'write'})
+
+    def test_an_empty_capability_list_clears_the_language(self):
+        self._run(person_id=self.person.person_id, set_language='297487008:speak')
+        self._run(person_id=self.person.person_id, set_language='297487008:')
+        self.assertFalse(
+            PersonLanguageSkill.objects.filter(person=self.person).exists())
+
+    def test_an_unknown_capability_is_refused(self):
+        out = self._run(person_id=self.person.person_id,
+                        set_language='297487008:fluent')
+        self.assertIn('fluent', out)
+        self.assertFalse(
+            PersonLanguageSkill.objects.filter(person=self.person).exists())
+
+    # -- the lookup helper -------------------------------------------------
+
+    def test_find_language_prints_codes_to_use(self):
+        """Searching by name is safe; writing by name is not.
+
+        The helper exists so the operator sees the ambiguity and picks, rather
+        than the command resolving it silently.
+        """
+        out = self._run(find_language='English')
+        self.assertIn('297487008', out)
+        self.assertIn('English language', out)
+
+    def test_find_language_ignores_other_domains(self):
+        Concept.objects.create(
+            concept_id=4999003, concept_name='English speaking difficulty',
+            domain=self.condition_domain, vocabulary=self.snomed,
+            concept_class=self.qualifier, standard_concept='S',
+            concept_code='999999997', valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31))
+        out = self._run(find_language='English')
+        self.assertNotIn('999999997', out)
+
+    def test_find_language_says_so_when_nothing_matches(self):
+        out = self._run(find_language='Klingon')
+        self.assertIn('No loaded SNOMED Language concept', out)
