@@ -452,7 +452,7 @@ _CONCEPTS = [
     # filing a language under 'Meas Value' is the mistake manage_language_skills
     # made (#812).
     #
-    # Duplicated from migration 0186 so a test database has them; the drift test
+    # Duplicated from migration 0187 so a test database has them; the drift test
     # in omop_core/tests.py asserts the two definitions stay identical.
     _c(2_100_007_853, 'Speaks language', 'Meas Value',
        'HK-Language', 'Qualifier Value', None, 'hkl:speak', source='HealthKey'),

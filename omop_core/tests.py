@@ -2483,7 +2483,7 @@ class WearableConceptMappingTest(TestCase):
             self.assertEqual(seeded['source'], 'HealthKey')
 
     def test_language_capability_concepts_match_seed_definitions(self):
-        """Migration 0186 duplicates its rows into the fixture; no drift (#813).
+        """Migration 0187 duplicates its rows into the fixture; no drift (#813).
 
         Same trade as 0180: the migration hard-codes definitions so it stays
         frozen against the code as written, and this test is what stops the two
@@ -2492,7 +2492,7 @@ class WearableConceptMappingTest(TestCase):
         from importlib import import_module
 
         mig = import_module(
-            'omop_core.migrations.0186_seed_language_capability_concepts')
+            'omop_core.migrations.0187_seed_language_capability_concepts')
         seed_by_key = {
             (r['vocabulary_id'], r['concept_code']): r for r in self._seed_rows()
         }
@@ -2501,7 +2501,7 @@ class WearableConceptMappingTest(TestCase):
             key = ('HK-Language', concept_code)
             self.assertIn(
                 key, seed_by_key,
-                f'migration 0186 seeds {key}, which the fixture does not')
+                f'migration 0187 seeds {key}, which the fixture does not')
             seeded = seed_by_key[key]
             self.assertEqual(seeded['concept_id'], concept_id,
                              f'{concept_code} concept_id differs')
@@ -2521,7 +2521,7 @@ class WearableConceptMappingTest(TestCase):
         from omop_core.models import SKILL_LEVEL_CHOICES
 
         mig = import_module(
-            'omop_core.migrations.0186_seed_language_capability_concepts')
+            'omop_core.migrations.0187_seed_language_capability_concepts')
         minted = {code.split(':', 1)[1] for _cid, code, _name in mig._CONCEPTS}
         self.assertEqual(minted, {v for v, _label in SKILL_LEVEL_CHOICES})
 

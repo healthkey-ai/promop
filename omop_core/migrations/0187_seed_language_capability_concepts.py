@@ -105,7 +105,7 @@ def unseed_capability_concepts(apps, schema_editor):
 
 class Migration(migrations.Migration):
 
-    dependencies = [('omop_core', '0185_seed_language_and_condition_value_concepts')]
+    dependencies = [('omop_core', '0186_seed_language_and_condition_value_concepts')]
 
     operations = [
         migrations.RunPython(seed_capability_concepts, unseed_capability_concepts),
