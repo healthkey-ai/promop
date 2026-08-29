@@ -230,6 +230,11 @@ _OMOP_DERIVED_FIELDS = [
 PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset({
     'date_of_birth', 'gender', 'race', 'ethnicity', 'languages_skills',
     'country', 'region', 'city', 'postal_code', 'latitude', 'longitude',
+    # Flattened language capabilities (#813). Derived from PersonLanguageSkill
+    # by _flatten_language_capabilities, so they are read-only over the API:
+    # a PATCH would be silently overwritten by the next refresh.
+    'english_speak', 'english_read', 'english_write', 'english_understand',
+    'spanish_speak', 'spanish_read', 'spanish_write', 'spanish_understand',
     # These are populated by section extractors but are not cleared before a
     # refresh (mostly because they carry structured / negative findings). They
     # nevertheless originate from OMOP facts and must not become writable
@@ -874,6 +879,42 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 # Section extractors — each returns a dict of {field_name: value}
 # ---------------------------------------------------------------------------
 
+
+# Flattened language capabilities (#813). The concept names are SNOMED's, which
+# carry the "language" suffix -- 4180186 is "English language", not "English".
+_FLATTENED_LANGUAGES = {
+    'english': 'English language',
+    'spanish': 'Spanish language',
+}
+
+
+def _flatten_language_capabilities(language_summary):
+    """Unroll {language: [capability, ...]} into the eight boolean columns.
+
+    Three-valued, and the third value carries the weight. A language absent from
+    the summary was never asked about, so its four columns stay None; a language
+    present was asked about, so capabilities it does not list are False. That
+    line is drawn per language rather than per person on purpose: knowing
+    somebody speaks English says nothing about whether anyone asked them about
+    Spanish, and treating it as an answer would manufacture negatives that a
+    trial filter would then act on.
+
+    Returns every one of the eight keys on every call, including None ones, so
+    that clearing a person's languages resets the columns instead of leaving
+    stale True values behind.
+    """
+    from omop_core.models import SKILL_LEVEL_CHOICES
+
+    capabilities = [value for value, _label in SKILL_LEVEL_CHOICES]
+    flattened = {}
+    for prefix, concept_name in _FLATTENED_LANGUAGES.items():
+        held = language_summary.get(concept_name)
+        for capability in capabilities:
+            flattened[f'{prefix}_{capability}'] = (
+                None if held is None else capability in held
+            )
+    return flattened
+
 def _get_demographics(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
@@ -924,6 +965,7 @@ def _get_demographics(person: Person, snapshot: OmopSnapshot = None) -> dict:
     language_summary = person.get_language_skills_summary()
     if language_summary:
         data['languages_skills'] = format_language_skills(language_summary)
+    data.update(_flatten_language_capabilities(language_summary))
 
     data.update({
         'email': person.email,

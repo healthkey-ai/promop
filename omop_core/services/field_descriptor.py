@@ -95,6 +95,11 @@ _COMPUTED_THERAPY_FIELDS = frozenset({
 
 # Computed fields (derived from other fields, not directly from OMOP).
 _COMPUTED_FIELDS = frozenset({
+    # Flattened language capabilities (#813) -- derived from
+    # PersonLanguageSkill, so editing them here would be overwritten by
+    # the next refresh.
+    'english_speak', 'english_read', 'english_write', 'english_understand',
+    'spanish_speak', 'spanish_read', 'spanish_write', 'spanish_understand',
     'bmi', 'disease_slug',
     'meets_crab', 'meets_slim', 'involved_uninvolved_ratio',
     'active_infection_status', 'active_malignancies',
@@ -122,6 +127,14 @@ _COMPUTED_THERAPY_EXPLANATIONS = {
     'washout_period_duration': 'Computed from last therapy received',
     'line_of_therapy': 'Derived from therapy line Episode records',
     'no_concomitant_medication_status': 'Computed negation of concomitant medication presence',
+    'english_speak': 'Derived from PersonLanguageSkill rows for this language',
+    'english_read': 'Derived from PersonLanguageSkill rows for this language',
+    'english_write': 'Derived from PersonLanguageSkill rows for this language',
+    'english_understand': 'Derived from PersonLanguageSkill rows for this language',
+    'spanish_speak': 'Derived from PersonLanguageSkill rows for this language',
+    'spanish_read': 'Derived from PersonLanguageSkill rows for this language',
+    'spanish_write': 'Derived from PersonLanguageSkill rows for this language',
+    'spanish_understand': 'Derived from PersonLanguageSkill rows for this language',
     'later_therapies': 'Derived from Episode and DrugExposure records',
     'later_date': 'Derived from Episode and DrugExposure records',
 }
@@ -201,6 +214,8 @@ _TAB_GENERAL = frozenset({
     'hepatitis_c_status', 'no_hepatitis_c_status',
     'weight', 'height', 'bmi', 'systolic_blood_pressure', 'diastolic_blood_pressure',
     'heartrate', 'languages_skills', 'facility_name',
+    'english_speak', 'english_read', 'english_write', 'english_understand',
+    'spanish_speak', 'spanish_read', 'spanish_write', 'spanish_understand',
     'validated', 'validated_by', 'validation_date', 'patient_age',
     'suppress_demographics_for_others',
     # Reclassified from "other"

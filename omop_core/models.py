@@ -886,6 +886,25 @@ class Person(models.Model):
         return primary.language_concept.concept_name if primary else None
 
 
+_LANGUAGE_CAPABILITY_VOCABULARY = 'HK-Language'
+
+
+def _language_capability_concept_id(skill_level):
+    """concept_id of the HK-Language code for a capability, or None.
+
+    Resolved by (vocabulary_id, concept_code) -- never by concept_name, which is
+    the rule in docs/vocabularies.md and the defect in #812. Returns None when
+    the mint has not been seeded, so a language can still be stored.
+    """
+    return (
+        Concept.objects
+        .filter(vocabulary_id=_LANGUAGE_CAPABILITY_VOCABULARY,
+                concept_code=f'hkl:{skill_level}')
+        .values_list('concept_id', flat=True)
+        .first()
+    )
+
+
 def format_language_skills(summary):
     """Render ``{language: [capability, ...]}`` as a human-readable string.
 
@@ -929,6 +948,17 @@ class PersonLanguageSkill(models.Model):
     skill_level = models.CharField(max_length=10, choices=SKILL_LEVEL_CHOICES, 
                                   help_text="One capability the person has in this language: "
                                             "speak, read, write or understand")
+    # The coded form of skill_level, mirroring OMOP's value_as_concept /
+    # value_source_value pairing: skill_level stays the raw value the row was
+    # written with, skill_concept is what it resolves to. Nullable because a row
+    # can be written before the HK-Language concepts are seeded -- a fresh
+    # database runs migrations in order, and nothing should fail because the
+    # mint has not landed yet. save() fills it in when it can.
+    skill_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='person_language_skill_levels',
+        db_column='skill_concept_id',
+        help_text="HK-Language concept coding skill_level")
     is_primary = models.BooleanField(
         default=False, db_default=False,
         help_text="Is this the person's primary language?")
@@ -985,6 +1015,15 @@ class PersonLanguageSkill(models.Model):
         silently. Two concurrent inserts can both see no primary; the partial
         unique index is what stops them both landing.
         """
+        if self.skill_concept_id is None and self.skill_level:
+            # Resolved here rather than by the caller so every write path gets
+            # the code, including the management command and the org import.
+            # Missing concepts are left null rather than raising: the row is
+            # still valid without its code, and refusing the write would make
+            # the mint a hard dependency of storing a language at all.
+            self.skill_concept_id = _language_capability_concept_id(
+                self.skill_level)
+
         if self._state.adding and not self.is_primary:
             has_primary = PersonLanguageSkill.objects.filter(
                 person_id=self.person_id, is_primary=True,
@@ -2849,6 +2888,49 @@ class PatientRecord(models.Model):
 
     # Languages (denormalized from PersonLanguageSkill for API consumption)
     languages_skills = models.TextField(blank=True, null=True)
+
+    # Flattened language capabilities, for trial matching and CDS (#813).
+    #
+    # languages_skills is a display string; matching a criterion like "can read
+    # English" against it means parsing prose in a WHERE clause. These eight
+    # columns are the same facts as indexable booleans, unrolled over the two
+    # languages that gate trials here and the four capabilities. Derived from
+    # PersonLanguageSkill, never written directly.
+    #
+    # Three-valued on purpose. NULL means nobody asked about that language;
+    # False means the person was asked and does not have that capability. A
+    # trial that needs English readers must exclude the second and not the
+    # first, which a two-valued column cannot express -- every patient never
+    # asked would look like a patient who cannot read.
+    #
+    # Known per language, not per capability: one row for English tells you the
+    # person was asked about English, so the other three English columns become
+    # False rather than NULL. It tells you nothing about Spanish, which stays
+    # NULL. Inferring across languages would manufacture negatives.
+    english_speak = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Derived: person speaks English. NULL = not asked.")
+    english_read = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Derived: person reads English. NULL = not asked.")
+    english_write = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Derived: person writes English. NULL = not asked.")
+    english_understand = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Derived: person understands English. NULL = not asked.")
+    spanish_speak = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Derived: person speaks Spanish. NULL = not asked.")
+    spanish_read = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Derived: person reads Spanish. NULL = not asked.")
+    spanish_write = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Derived: person writes Spanish. NULL = not asked.")
+    spanish_understand = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Derived: person understands Spanish. NULL = not asked.")
 
     # Lymphoma (Follicular Lymphoma)
     gelf_criteria_status = models.TextField(blank=True, null=True)
