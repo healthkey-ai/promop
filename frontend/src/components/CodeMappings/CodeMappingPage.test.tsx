@@ -48,6 +48,22 @@ const rows = [
     notes: "",
     has_mapping: true,
   },
+  {
+    concept_id: 2039000003,
+    concept_name: "Resting heart rate",
+    concept_code: "HK-WEAR-RESTING-HR",
+    concept_vocabulary_id: "HK-Wearable",
+    domain_id: "Measurement",
+    concept_class_id: "Clinical Observation",
+    mapping_id: 8,
+    source_vocabulary_id: "HK-Wearable",
+    source_code: "HK-WEAR-RESTING-HR",
+    source_code_description: "Resting heart rate",
+    source: "HK-Wearable",
+    status: "active",
+    notes: "",
+    has_mapping: true,
+  },
 ];
 
 const references = {
@@ -86,16 +102,22 @@ describe("CodeMappingPage", () => {
   it("organizes mapped and unmapped quarantined concepts by vocabulary tabs", async () => {
     renderPage();
 
-    expect(await screen.findByText("HealthKey preferred language")).toBeInTheDocument();
-    expect(screen.queryByText("Walking step length")).not.toBeInTheDocument();
-    expect(screen.getByText("Unmapped")).toBeInTheDocument();
-    expect(screen.getByText(/2 quarantined concepts/)).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Vocabulary" })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /HK-Wearable/ }));
-    expect(screen.getByText("Walking step length")).toBeInTheDocument();
-    expect(screen.getByText("HK-WEAR-STEP-LENGTH")).toBeInTheDocument();
+    expect(await screen.findByText("Walking step length")).toBeInTheDocument();
+    expect(screen.getByText("Resting heart rate")).toBeInTheDocument();
     expect(screen.queryByText("HealthKey preferred language")).not.toBeInTheDocument();
+    expect(screen.getByText(/3 quarantined concepts/)).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Vocabulary" })).toBeInTheDocument();
+    const tabs = screen.getAllByRole("button").filter((button) => button.textContent?.includes("HK-"));
+    expect(tabs.map((tab) => tab.textContent)).toEqual([
+      "HK-Wearable2",
+      "HK-Language1/1",
+      "HK-Observation0",
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: /HK-Language/ }));
+    expect(screen.getByText("HealthKey preferred language")).toBeInTheDocument();
+    expect(screen.getByText("Unmapped")).toBeInTheDocument();
+    expect(screen.queryByText("Walking step length")).not.toBeInTheDocument();
   });
 
   it("creates a new source code mapping", async () => {
@@ -124,7 +146,9 @@ describe("CodeMappingPage", () => {
     mockPatch.mockResolvedValue({ data: {} });
     renderPage();
 
-    const languageRow = (await screen.findByText("HealthKey preferred language")).closest("tr")!;
+    await screen.findByText("Walking step length");
+    fireEvent.click(screen.getByRole("button", { name: /HK-Language/ }));
+    const languageRow = screen.getByText("HealthKey preferred language").closest("tr")!;
     fireEvent.click(within(languageRow).getByRole("button", { name: /Edit HealthKey preferred language/ }));
     const dialog = screen.getByRole("heading", { name: "Edit Code" }).closest("form")!;
     fireEvent.change(within(dialog).getByLabelText("Code"), { target: { value: "HK-LANG-EN" } });

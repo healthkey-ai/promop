@@ -120,18 +120,6 @@ export default function CodeMappingPage() {
     })();
   }, [fetchRows]);
 
-  const vocabularyOptions = useMemo(() => {
-    const values = new Set<string>();
-    rows.forEach((row) => {
-      if (row.source_vocabulary_id) values.add(row.source_vocabulary_id);
-      if (row.concept_vocabulary_id) values.add(row.concept_vocabulary_id);
-    });
-    references.vocabularies.forEach((vocab) => values.add(vocab.vocabulary_id));
-    return [...values].sort();
-  }, [references.vocabularies, rows]);
-
-  const selectedVocabulary = activeVocabulary || vocabularyOptions[0] || "";
-
   const vocabularyStats = useMemo(() => {
     const counts: Record<string, { total: number; unmapped: number }> = {};
     rows.forEach((row) => {
@@ -143,6 +131,23 @@ export default function CodeMappingPage() {
     });
     return counts;
   }, [rows]);
+
+  const vocabularyOptions = useMemo(() => {
+    const values = new Set<string>();
+    rows.forEach((row) => {
+      if (row.source_vocabulary_id) values.add(row.source_vocabulary_id);
+      if (row.concept_vocabulary_id) values.add(row.concept_vocabulary_id);
+    });
+    references.vocabularies.forEach((vocab) => values.add(vocab.vocabulary_id));
+    return [...values].sort((left, right) => {
+      const leftCount = vocabularyStats[left]?.total ?? 0;
+      const rightCount = vocabularyStats[right]?.total ?? 0;
+      if (leftCount !== rightCount) return rightCount - leftCount;
+      return left.localeCompare(right);
+    });
+  }, [references.vocabularies, rows, vocabularyStats]);
+
+  const selectedVocabulary = activeVocabulary || vocabularyOptions[0] || "";
 
   const filteredRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
