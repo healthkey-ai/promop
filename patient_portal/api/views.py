@@ -8026,84 +8026,24 @@ def _clean_required(data, field_name):
     return value
 
 
-def _parse_local_concept_id(data):
+def _parse_destination_concept_id(data):
     raw = data.get('target_concept_id') or data.get('concept_id')
     try:
         concept_id = int(raw)
     except (TypeError, ValueError):
         raise serializers.ValidationError({'target_concept_id': 'Enter a valid integer concept id.'})
-    if concept_id < LOCAL_CONCEPT_ID_MIN:
-        raise serializers.ValidationError({
-            'target_concept_id': f'Local destination concepts must be >= {LOCAL_CONCEPT_ID_MIN}.'
-        })
     return concept_id
 
 
-def _ensure_local_concept(data):
-    concept_id = _parse_local_concept_id(data)
-    vocabulary_id = _clean_required(data, 'target_vocabulary_id')
-    if not _is_local_vocabulary_id(vocabulary_id):
+def _get_destination_concept(data):
+    """Return the existing OMOP concept selected as a mapping destination."""
+    concept_id = _parse_destination_concept_id(data)
+    try:
+        return Concept.objects.get(concept_id=concept_id)
+    except Concept.DoesNotExist:
         raise serializers.ValidationError({
-            'target_vocabulary_id': 'Destination vocabulary must be a local HK-* vocabulary.'
+            'target_concept_id': 'Destination OMOP concept not found.'
         })
-
-    concept_name = _clean_required(data, 'target_concept_name')
-    concept_code = str(data.get('target_concept_code') or data.get('source_code') or concept_id).strip()
-    domain_id = str(data.get('domain_id') or 'Observation').strip()
-    concept_class_id = str(data.get('concept_class_id') or 'Clinical Observation').strip()
-
-    vocabulary, _ = Vocabulary.objects.get_or_create(
-        vocabulary_id=vocabulary_id,
-        defaults={
-            'vocabulary_name': str(data.get('target_vocabulary_name') or vocabulary_id).strip(),
-            'vocabulary_reference': 'HealthKey local vocabulary',
-            'vocabulary_version': 'local',
-            'vocabulary_concept_id': 0,
-        },
-    )
-    domain, _ = Domain.objects.get_or_create(
-        domain_id=domain_id,
-        defaults={'domain_name': domain_id, 'domain_concept_id': 0},
-    )
-    concept_class, _ = ConceptClass.objects.get_or_create(
-        concept_class_id=concept_class_id,
-        defaults={'concept_class_name': concept_class_id, 'concept_class_concept_id': 0},
-    )
-
-    concept, created = Concept.objects.get_or_create(
-        concept_id=concept_id,
-        defaults={
-            'concept_name': concept_name,
-            'domain': domain,
-            'vocabulary': vocabulary,
-            'concept_class': concept_class,
-            'standard_concept': None,
-            'concept_code': concept_code,
-            'valid_start_date': _date(1970, 1, 1),
-            'valid_end_date': LOCAL_CONCEPT_VALID_END,
-            'invalid_reason': None,
-            'source': 'HealthKey',
-        },
-    )
-    if not created:
-        if not _local_concept_queryset().filter(concept_id=concept.concept_id).exists():
-            raise serializers.ValidationError({
-                'target_concept_id': 'Destination concept must be a local quarantined concept.'
-            })
-        updates = {}
-        if concept.concept_name != concept_name:
-            updates['concept_name'] = concept_name
-        if concept.vocabulary_id != vocabulary_id:
-            updates['vocabulary'] = vocabulary
-        if concept.domain_id != domain_id:
-            updates['domain'] = domain
-        if concept.concept_class_id != concept_class_id:
-            updates['concept_class'] = concept_class
-        if updates:
-            for attr, value in updates.items():
-                setattr(concept, attr, value)
-            concept.save(update_fields=[*updates.keys()])
-    return concept
 
 
 def _upsert_source_code_mapping(concept, data, user):
@@ -8122,9 +8062,6 @@ def _upsert_source_code_mapping(concept, data, user):
         ).first()
         if mapping is None:
             raise serializers.ValidationError({'mapping_id': 'Mapping not found for this concept.'})
-    if mapping is None:
-        mapping = SourceCodeConceptMapping.objects.filter(target_concept=concept).order_by('id').first()
-
     values = {
         'source_vocabulary_id': source_vocabulary_id,
         'source_code': source_code,
@@ -8155,38 +8092,38 @@ def _upsert_source_code_mapping(concept, data, user):
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def code_mapping_list(request):
-    """GET: list local concepts with source-code aliases. POST: create one."""
+    """GET: list curated source-code-to-OMOP-concept mappings. POST: create one."""
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
-        concepts = _local_concept_queryset()
+        mappings = SourceCodeConceptMapping.objects.select_related('target_concept')
         source_filter = request.query_params.get('source')
         if source_filter:
-            concepts = concepts.filter(
-                Q(vocabulary_id=source_filter)
-                | Q(source_code_mappings__source_vocabulary_id=source_filter)
-            ).distinct()
+            mappings = mappings.filter(source_vocabulary_id=source_filter)
         search = request.query_params.get('search')
         if search:
             q = search.strip()
             search_filter = (
-                Q(concept_name__icontains=q)
-                | Q(concept_code__icontains=q)
-                | Q(source_code_mappings__source_code__icontains=q)
-                | Q(source_code_mappings__source_vocabulary_id__icontains=q)
+                Q(target_concept__concept_name__icontains=q)
+                | Q(target_concept__concept_code__icontains=q)
+                | Q(source_code__icontains=q)
+                | Q(source_vocabulary_id__icontains=q)
             )
             if q.isdigit():
-                search_filter |= Q(concept_id=int(q))
-            concepts = concepts.filter(search_filter).distinct()
-        rows = _code_mapping_rows(concepts)
+                search_filter |= Q(target_concept_id=int(q))
+            mappings = mappings.filter(search_filter)
+        rows = [
+            _serialize_code_mapping_row(mapping.target_concept, mapping)
+            for mapping in mappings.order_by('source_vocabulary_id', 'source_code', 'id')
+        ]
         status_filter = request.query_params.get('status')
         if status_filter:
             rows = [row for row in rows if row['status'] == status_filter]
         return Response(rows)
 
     with transaction.atomic():
-        concept = _ensure_local_concept(request.data)
+        concept = _get_destination_concept(request.data)
         mapping = _upsert_source_code_mapping(concept, request.data, request.user)
     return Response(_serialize_code_mapping_row(concept, mapping), status=status.HTTP_201_CREATED)
 
@@ -8194,14 +8131,14 @@ def code_mapping_list(request):
 @api_view(['PATCH'])
 @permission_classes([IsAuthenticated])
 def code_mapping_detail(request, concept_id):
-    """Add or update a source-code mapping for an existing local concept."""
+    """Add or update a source-code mapping for an existing destination concept."""
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     try:
-        concept = _local_concept_queryset().get(concept_id=concept_id)
+        concept = Concept.objects.get(concept_id=concept_id)
     except Concept.DoesNotExist:
-        return Response({'detail': 'Local concept not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'detail': 'Destination OMOP concept not found.'}, status=status.HTTP_404_NOT_FOUND)
 
     with transaction.atomic():
         mapping = _upsert_source_code_mapping(concept, request.data, request.user)

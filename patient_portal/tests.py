@@ -20697,6 +20697,17 @@ class CodeMappingApiTest(TestCase):
             valid_end_date=date(2099, 12, 31),
             source='HealthKey',
         )
+        cls.standard_destination = Concept.objects.create(
+            concept_id=2039000999,
+            concept_name='Standard destination concept',
+            domain=cls.domain,
+            vocabulary=cls.language_vocab,
+            concept_class=cls.concept_class,
+            standard_concept='S',
+            concept_code='STANDARD-DESTINATION',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
         SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='HK-Wearable',
             source_code='HK-WEAR-STRIDE-COUNT',
@@ -20722,65 +20733,44 @@ class CodeMappingApiTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertTrue(any(row['concept_id'] == self.local_wearable.concept_id for row in resp.data))
 
-    def test_list_includes_quarantined_concept_without_source_code(self):
+    def test_list_contains_source_code_mappings_only(self):
         self.client.force_authenticate(user=self.staff)
         resp = self.client.get('/api/v1/code-mappings/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         by_concept = {row['concept_id']: row for row in resp.data}
 
-        language_row = by_concept[self.local_language.concept_id]
-        self.assertFalse(language_row['has_mapping'])
-        self.assertEqual(language_row['status'], 'unmapped')
-        self.assertEqual(language_row['source'], 'HK-Language')
+        self.assertNotIn(self.local_language.concept_id, by_concept)
 
         wearable_row = by_concept[self.local_wearable.concept_id]
         self.assertTrue(wearable_row['has_mapping'])
         self.assertEqual(wearable_row['source_code'], 'HK-WEAR-STRIDE-COUNT')
 
-    def test_create_new_code_mapping_creates_local_concept(self):
+    def test_create_new_code_mapping_uses_existing_omop_destination(self):
         self.client.force_authenticate(user=self.staff)
         resp = self.client.post('/api/v1/code-mappings/', {
             'source_vocabulary_id': 'HK-Wearable',
             'source_code': 'HK-WEAR-GAIT-SYMMETRY',
-            'source_code_description': 'Gait symmetry',
-            'target_concept_id': 2039000003,
-            'target_concept_name': 'Gait symmetry',
-            'target_concept_code': 'HK-WEAR-GAIT-SYMMETRY',
-            'target_vocabulary_id': 'HK-Wearable',
-            'domain_id': 'Observation',
-            'concept_class_id': 'Clinical Observation',
+            'target_concept_id': self.standard_destination.concept_id,
             'notes': 'Seeded from wearable source code.',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
-        self.assertEqual(resp.data['concept_id'], 2039000003)
+        self.assertEqual(resp.data['concept_id'], self.standard_destination.concept_id)
         self.assertEqual(resp.data['source_code'], 'HK-WEAR-GAIT-SYMMETRY')
-        self.assertTrue(Concept.objects.filter(concept_id=2039000003, source='HealthKey').exists())
         self.assertTrue(SourceCodeConceptMapping.objects.filter(
             source_vocabulary_id='HK-Wearable',
             source_code='HK-WEAR-GAIT-SYMMETRY',
+            target_concept=self.standard_destination,
         ).exists())
 
-    def test_create_rejects_standard_omop_range_and_non_local_target_vocab(self):
+    def test_create_rejects_unknown_destination_concept(self):
         self.client.force_authenticate(user=self.staff)
         resp = self.client.post('/api/v1/code-mappings/', {
             'source_vocabulary_id': 'HK-Wearable',
-            'source_code': 'BAD-LOW-ID',
-            'target_concept_id': 12345,
-            'target_concept_name': 'Bad low id',
-            'target_vocabulary_id': 'HK-Wearable',
+            'source_code': 'UNKNOWN-DESTINATION',
+            'target_concept_id': 999999999,
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('target_concept_id', resp.data)
-
-        resp = self.client.post('/api/v1/code-mappings/', {
-            'source_vocabulary_id': 'HK-Wearable',
-            'source_code': 'BAD-VOCAB',
-            'target_concept_id': 2039000004,
-            'target_concept_name': 'Bad vocabulary',
-            'target_vocabulary_id': 'LOINC',
-        }, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('target_vocabulary_id', resp.data)
 
     def test_patch_adds_source_code_to_unmapped_local_concept(self):
         self.client.force_authenticate(user=self.staff)

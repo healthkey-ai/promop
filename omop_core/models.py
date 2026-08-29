@@ -1791,7 +1791,7 @@ class SourceToConceptMap(models.Model):
 
 
 class SourceCodeConceptMapping(models.Model):
-    """HealthKey-curated incoming source code -> local OMOP concept mapping."""
+    """HealthKey-curated incoming source code -> destination OMOP concept mapping."""
 
     STATUS_CHOICES = [
         ('proposed', 'Proposed'),

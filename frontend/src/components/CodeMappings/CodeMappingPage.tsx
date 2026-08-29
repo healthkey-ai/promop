@@ -20,12 +20,6 @@ interface CodeMappingRow {
   has_mapping: boolean;
 }
 
-interface ReferenceData {
-  vocabularies: Array<{ vocabulary_id: string; vocabulary_name: string }>;
-  domains: Array<{ domain_id: string; domain_name: string }>;
-  concept_classes: Array<{ concept_class_id: string; concept_class_name: string }>;
-}
-
 interface ConceptResult {
   concept_id: number;
   concept_name: string;
@@ -38,14 +32,8 @@ interface ConceptResult {
 interface MappingForm {
   source_vocabulary_id: string;
   source_code: string;
-  source_code_description: string;
   target_concept_id: string;
   target_concept_name: string;
-  target_concept_code: string;
-  target_vocabulary_id: string;
-  target_vocabulary_name: string;
-  domain_id: string;
-  concept_class_id: string;
   status: "proposed" | "approved" | "rejected";
   notes: string;
 }
@@ -53,14 +41,8 @@ interface MappingForm {
 const emptyForm: MappingForm = {
   source_vocabulary_id: "",
   source_code: "",
-  source_code_description: "",
   target_concept_id: "",
   target_concept_name: "",
-  target_concept_code: "",
-  target_vocabulary_id: "HK-Observation",
-  target_vocabulary_name: "",
-  domain_id: "Observation",
-  concept_class_id: "Clinical Observation",
   status: "proposed",
   notes: "",
 };
@@ -83,14 +65,8 @@ function buildEditForm(row: CodeMappingRow): MappingForm {
   return {
     source_vocabulary_id: row.source_vocabulary_id || row.concept_vocabulary_id,
     source_code: row.source_code,
-    source_code_description: row.source_code_description,
     target_concept_id: String(row.concept_id),
     target_concept_name: row.concept_name,
-    target_concept_code: row.concept_code,
-    target_vocabulary_id: row.concept_vocabulary_id,
-    target_vocabulary_name: "",
-    domain_id: row.domain_id || "Observation",
-    concept_class_id: row.concept_class_id || "Clinical Observation",
     status: row.status === "unmapped" ? "proposed" : row.status,
     notes: row.notes || "",
   };
@@ -99,11 +75,6 @@ function buildEditForm(row: CodeMappingRow): MappingForm {
 export default function CodeMappingPage() {
   const navigate = useNavigate();
   const [rows, setRows] = useState<CodeMappingRow[]>([]);
-  const [references, setReferences] = useState<ReferenceData>({
-    vocabularies: [],
-    domains: [],
-    concept_classes: [],
-  });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -120,12 +91,8 @@ export default function CodeMappingPage() {
     setLoading(true);
     setError("");
     try {
-      const [rowResp, referenceResp] = await Promise.all([
-        api.get<CodeMappingRow[]>("/v1/code-mappings/"),
-        api.get<ReferenceData>("/v1/code-mappings/vocabularies/"),
-      ]);
+      const rowResp = await api.get<CodeMappingRow[]>("/v1/code-mappings/");
       setRows(rowResp.data);
-      setReferences(referenceResp.data);
     } catch {
       setError("Failed to load code mappings.");
     } finally {
@@ -155,16 +122,14 @@ export default function CodeMappingPage() {
     const values = new Set<string>();
     rows.forEach((row) => {
       if (row.source_vocabulary_id) values.add(row.source_vocabulary_id);
-      if (row.concept_vocabulary_id) values.add(row.concept_vocabulary_id);
     });
-    references.vocabularies.forEach((vocab) => values.add(vocab.vocabulary_id));
     return [...values].sort((left, right) => {
       const leftCount = vocabularyStats[left]?.total ?? 0;
       const rightCount = vocabularyStats[right]?.total ?? 0;
       if (leftCount !== rightCount) return rightCount - leftCount;
       return left.localeCompare(right);
     });
-  }, [references.vocabularies, rows, vocabularyStats]);
+  }, [rows, vocabularyStats]);
 
   const selectedVocabulary = activeVocabulary || vocabularyOptions[0] || "";
   const selectedVocabularyStats = vocabularyStats[selectedVocabulary] || { total: 0, unmapped: 0 };
@@ -175,7 +140,6 @@ export default function CodeMappingPage() {
       if (
         selectedVocabulary
         && row.source_vocabulary_id !== selectedVocabulary
-        && row.concept_vocabulary_id !== selectedVocabulary
       ) {
         return false;
       }
@@ -200,7 +164,6 @@ export default function CodeMappingPage() {
     total: rows.length,
     proposed: rows.filter((row) => row.status === "proposed").length,
     approved: rows.filter((row) => row.status === "approved").length,
-    unmapped: rows.filter((row) => !row.has_mapping).length,
   }), [rows]);
 
   const openNewDialog = () => {
@@ -232,7 +195,7 @@ export default function CodeMappingPage() {
     try {
       const payload = {
         ...form,
-        status: dialogMode === "edit" ? "approved" : form.status,
+        status: form.status,
         target_concept_id: Number(form.target_concept_id),
         mapping_id: selectedRow?.mapping_id,
       };
@@ -262,19 +225,6 @@ export default function CodeMappingPage() {
     setForm((prev) => ({ ...prev, [field]: value }));
   };
 
-  const suggestAll = async () => {
-    setSaving(true);
-    setError("");
-    try {
-      await api.post("/v1/code-mappings/propose-all/", { source: selectedVocabulary });
-      await fetchRows();
-    } catch {
-      setError("Failed to suggest code mappings.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const searchConcepts = async (query: string) => {
     const q = query.trim();
     setConceptSearchQuery(q);
@@ -294,7 +244,7 @@ export default function CodeMappingPage() {
   };
 
   const suggestCurrentCode = () => {
-    const query = form.source_code_description || form.target_concept_name || form.source_code || selectedRow?.concept_name || "";
+    const query = form.target_concept_name || form.source_code || selectedRow?.concept_name || "";
     void searchConcepts(query.replace(/[-_]/g, " "));
   };
 
@@ -303,9 +253,6 @@ export default function CodeMappingPage() {
       ...prev,
       target_concept_id: String(concept.concept_id),
       target_concept_name: concept.concept_name,
-      target_concept_code: concept.concept_code,
-      target_vocabulary_id: concept.vocabulary_id,
-      domain_id: concept.domain_id || prev.domain_id,
     }));
   };
 
@@ -321,7 +268,6 @@ export default function CodeMappingPage() {
         mapping_id: row.mapping_id,
         source_vocabulary_id: row.source_vocabulary_id,
         source_code: row.source_code,
-        source_code_description: row.source_code_description,
         status: nextStatus,
         notes: row.notes,
       });
@@ -354,7 +300,7 @@ export default function CodeMappingPage() {
             <div>
               <h1 className="text-2xl font-semibold text-slate-950">Code Mapping</h1>
               <p className="text-sm text-slate-600">
-                {stats.total} quarantined concepts, {stats.approved} approved, {stats.proposed} proposed, {stats.unmapped} unmapped codes
+                {stats.total} source-code mappings, {stats.approved} approved, {stats.proposed} proposed
               </p>
             </div>
           </div>
@@ -363,7 +309,7 @@ export default function CodeMappingPage() {
             className="inline-flex items-center gap-2 rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
           >
             <Plus size={16} />
-            New Code
+            New Mapping
           </button>
         </div>
 
@@ -379,7 +325,7 @@ export default function CodeMappingPage() {
             <input
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search codes, concepts, vocabularies, or concept ids"
+              placeholder="Search source codes, destination concepts, source systems, or OMOP IDs"
               className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-slate-700"
             />
           </label>
@@ -410,28 +356,19 @@ export default function CodeMappingPage() {
         </div>
 
         <div className="mb-4 flex flex-wrap items-center gap-3 text-sm text-slate-600">
-          <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-800">
-            Unmapped Codes: {selectedVocabularyStats.unmapped}
+          <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
+            {selectedVocabularyStats.total} mappings in this source system
           </span>
-          <button
-            type="button"
-            onClick={suggestAll}
-            disabled={saving || selectedVocabularyStats.unmapped === 0}
-            className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-          >
-            <Sparkles size={15} />
-            Suggest
-          </button>
         </div>
 
         <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
           <table className="w-full border-collapse text-left text-sm">
             <thead className="bg-slate-100 text-xs uppercase text-slate-600">
               <tr>
-                <th className="px-4 py-3 font-semibold">Code</th>
+                <th className="px-4 py-3 font-semibold">Source code</th>
                 <th className="px-4 py-3 font-semibold">Destination OMOP Concept ID</th>
                 <th className="px-4 py-3 font-semibold">Concept</th>
-                <th className="px-4 py-3 font-semibold">Vocabulary</th>
+                <th className="px-4 py-3 font-semibold">Source code system</th>
                 <th className="px-4 py-3 font-semibold">Status</th>
                 <th className="w-16 px-4 py-3 font-semibold" aria-label="Actions" />
               </tr>
@@ -440,7 +377,7 @@ export default function CodeMappingPage() {
               {filteredRows.map((row) => (
                 <tr key={`${row.concept_id}-${row.mapping_id ?? "unmapped"}`} className="hover:bg-slate-50">
                   <td className="px-4 py-3 font-mono text-xs text-slate-900">
-                    {row.source_code || <span className="font-sans text-slate-500">Unmapped</span>}
+                    {row.source_code}
                   </td>
                   <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.concept_id}</td>
                   <td className="px-4 py-3">
@@ -497,7 +434,7 @@ export default function CodeMappingPage() {
           <form onSubmit={submitForm} className="w-full max-w-3xl rounded-md bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
               <h2 className="text-lg font-semibold text-slate-950">
-                {dialogMode === "new" ? "New Code" : "Edit Code"}
+                {dialogMode === "new" ? "New Mapping" : "Edit Mapping"}
               </h2>
               <button
                 type="button"
@@ -511,7 +448,7 @@ export default function CodeMappingPage() {
 
             <div className="grid max-h-[70vh] gap-4 overflow-y-auto px-5 py-5 md:grid-cols-2">
               <label className="grid gap-1 text-sm font-medium text-slate-700">
-                Source vocabulary
+                Source code system
                 <input
                   list="code-mapping-source-vocabularies"
                   value={form.source_vocabulary_id}
@@ -521,62 +458,12 @@ export default function CodeMappingPage() {
                 />
               </label>
               <label className="grid gap-1 text-sm font-medium text-slate-700">
-                Code
+                Source concept code
                 <input
                   value={form.source_code}
                   onChange={(e) => setField("source_code", e.target.value)}
                   required
                   className="h-10 rounded-md border border-slate-300 px-3 font-mono text-sm font-normal text-slate-950"
-                />
-              </label>
-              <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
-                Code description
-                <input
-                  value={form.source_code_description}
-                  onChange={(e) => setField("source_code_description", e.target.value)}
-                  className="h-10 rounded-md border border-slate-300 px-3 text-sm font-normal text-slate-950"
-                />
-              </label>
-              <label className="grid gap-1 text-sm font-medium text-slate-700">
-                Destination OMOP Concept ID
-                <input
-                  type="number"
-                  min={2000000000}
-                  value={form.target_concept_id}
-                  onChange={(e) => setField("target_concept_id", e.target.value)}
-                  required
-                  readOnly={dialogMode === "edit"}
-                  className="h-10 rounded-md border border-slate-300 px-3 font-mono text-sm font-normal text-slate-950 read-only:bg-slate-100"
-                />
-              </label>
-              <label className="grid gap-1 text-sm font-medium text-slate-700">
-                Target vocabulary
-                <input
-                  list="code-mapping-target-vocabularies"
-                  value={form.target_vocabulary_id}
-                  onChange={(e) => setField("target_vocabulary_id", e.target.value)}
-                  required
-                  readOnly={dialogMode === "edit"}
-                  className="h-10 rounded-md border border-slate-300 px-3 font-mono text-sm font-normal text-slate-950 read-only:bg-slate-100"
-                />
-              </label>
-              <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
-                Destination concept name
-                <input
-                  value={form.target_concept_name}
-                  onChange={(e) => setField("target_concept_name", e.target.value)}
-                  required
-                  readOnly={dialogMode === "edit"}
-                  className="h-10 rounded-md border border-slate-300 px-3 text-sm font-normal text-slate-950 read-only:bg-slate-100"
-                />
-              </label>
-              <label className="grid gap-1 text-sm font-medium text-slate-700">
-                Target concept code
-                <input
-                  value={form.target_concept_code}
-                  onChange={(e) => setField("target_concept_code", e.target.value)}
-                  readOnly={dialogMode === "edit"}
-                  className="h-10 rounded-md border border-slate-300 px-3 font-mono text-sm font-normal text-slate-950 read-only:bg-slate-100"
                 />
               </label>
               <label className="grid gap-1 text-sm font-medium text-slate-700">
@@ -591,6 +478,20 @@ export default function CodeMappingPage() {
                   <option value="rejected">Rejected</option>
                 </select>
               </label>
+              <label className="grid gap-1 text-sm font-medium text-slate-700">
+                Destination OMOP Concept ID
+                <input
+                  type="number"
+                  value={form.target_concept_id}
+                  onChange={(e) => setField("target_concept_id", e.target.value)}
+                  required
+                  readOnly={dialogMode === "edit"}
+                  className="h-10 rounded-md border border-slate-300 px-3 font-mono text-sm font-normal text-slate-950 read-only:bg-slate-100"
+                />
+              </label>
+              <div className="self-end rounded-md bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                {form.target_concept_name || "Choose a destination concept below"}
+              </div>
               <div className="md:col-span-2">
                 <div className="mb-2 flex items-center justify-between">
                   <label className="text-sm font-medium text-slate-700" htmlFor="code-mapping-concept-search">
@@ -634,26 +535,6 @@ export default function CodeMappingPage() {
                   ))}
                 </div>
               </div>
-              <label className="grid gap-1 text-sm font-medium text-slate-700">
-                Domain
-                <input
-                  list="code-mapping-domains"
-                  value={form.domain_id}
-                  onChange={(e) => setField("domain_id", e.target.value)}
-                  readOnly={dialogMode === "edit"}
-                  className="h-10 rounded-md border border-slate-300 px-3 text-sm font-normal text-slate-950 read-only:bg-slate-100"
-                />
-              </label>
-              <label className="grid gap-1 text-sm font-medium text-slate-700">
-                Concept class
-                <input
-                  list="code-mapping-classes"
-                  value={form.concept_class_id}
-                  onChange={(e) => setField("concept_class_id", e.target.value)}
-                  readOnly={dialogMode === "edit"}
-                  className="h-10 rounded-md border border-slate-300 px-3 text-sm font-normal text-slate-950 read-only:bg-slate-100"
-                />
-              </label>
               <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
                 Notes
                 <textarea
@@ -667,17 +548,6 @@ export default function CodeMappingPage() {
 
             <datalist id="code-mapping-source-vocabularies">
               {vocabularyOptions.map((source) => <option key={source} value={source} />)}
-            </datalist>
-            <datalist id="code-mapping-target-vocabularies">
-              {references.vocabularies.map((vocab) => <option key={vocab.vocabulary_id} value={vocab.vocabulary_id} />)}
-            </datalist>
-            <datalist id="code-mapping-domains">
-              {references.domains.map((domain) => <option key={domain.domain_id} value={domain.domain_id} />)}
-            </datalist>
-            <datalist id="code-mapping-classes">
-              {references.concept_classes.map((conceptClass) => (
-                <option key={conceptClass.concept_class_id} value={conceptClass.concept_class_id} />
-              ))}
             </datalist>
 
             <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-4">
@@ -693,7 +563,7 @@ export default function CodeMappingPage() {
                 disabled={saving}
                 className="rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-60"
               >
-                {saving ? "Saving" : dialogMode === "edit" ? "Update/Approve Mapping" : "Save Mapping"}
+                {saving ? "Saving" : dialogMode === "edit" ? "Update Mapping" : "Save Mapping"}
               </button>
             </div>
           </form>
