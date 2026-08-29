@@ -5920,3 +5920,156 @@ class LanguageSkillConceptAndFlatColumnTest(TestCase):
             for capability in ('speak', 'read', 'write', 'understand'):
                 self.assertEqual(
                     _classify_field(f'{language}_{capability}'), 'computed')
+
+
+class LanguageSkillReviewFindingsTest(TestCase):
+    """Defects found reviewing the merged language work (#827).
+
+    All four shipped. Each is pinned here rather than only fixed, because each
+    is the kind that stays quiet: three produce a wrong value or a half-done
+    write without raising anything a caller would notice.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import ConceptClass, Domain, Vocabulary
+
+        cls.person = Person.objects.create(person_id=883001)
+        cls.record = PatientRecord.objects.create(person=cls.person)
+
+        snomed, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0})
+        qualifier, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Qualifier Value',
+            defaults={'concept_class_name': 'Qualifier Value',
+                      'concept_class_concept_id': 0})
+        language_domain, _ = Domain.objects.get_or_create(
+            domain_id='Language',
+            defaults={'domain_name': 'Language', 'domain_concept_id': 0})
+
+        for concept_id, name, code in ((4180186, 'English language', '297487008'),
+                                       (4182511, 'Spanish language', '297510001')):
+            Concept.objects.get_or_create(
+                concept_id=concept_id,
+                defaults=dict(concept_name=name, domain=language_domain,
+                              vocabulary=snomed, concept_class=qualifier,
+                              standard_concept='S', concept_code=code,
+                              valid_start_date=date(1970, 1, 1),
+                              valid_end_date=date(2099, 12, 31)))
+
+    def _refresh(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(self.person)
+        self.record.refresh_from_db()
+
+    # -- 1. flattening must not depend on the concept's display name -------
+
+    def test_a_renamed_language_concept_still_flattens(self):
+        """Keying on concept_name let a SNOMED rename blank four columns.
+
+        Silently, and in the direction that makes a patient look unasked rather
+        than raising -- so a trial filter would drop them with nothing logged.
+        """
+        from omop_core.services.patient_record_service import set_language_skills
+
+        set_language_skills(self.person, {'english': ['speak']})
+        Concept.objects.filter(concept_id=4180186).update(concept_name='English')
+
+        self._refresh()
+        self.assertTrue(self.record.english_speak)
+
+    def test_flattening_ignores_a_language_that_shares_a_name(self):
+        """The code is the identity, so a same-named concept is not English."""
+        from omop_core.models import ConceptClass, Domain, Vocabulary
+        from omop_core.services.patient_record_service import set_language_skills
+
+        impostor = Concept.objects.create(
+            concept_id=4999001, concept_name='English language',
+            domain=Domain.objects.get(domain_id='Language'),
+            vocabulary=Vocabulary.objects.get(vocabulary_id='SNOMED'),
+            concept_class=ConceptClass.objects.get(concept_class_id='Qualifier Value'),
+            standard_concept='S', concept_code='999999999',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+        PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=impostor, skill_level='speak')
+
+        self._refresh()
+        self.assertIsNone(self.record.english_speak)
+
+    # -- 2. the replace must be all-or-nothing ------------------------------
+
+    def test_a_rejected_payload_writes_nothing(self):
+        """A 400 used to describe a write that had half happened.
+
+        The loop validated and wrote one language at a time, so a bad second
+        language left the first already stored.
+        """
+        from omop_core.services.patient_record_service import (
+            LanguageSkillError, set_language_skills)
+
+        with self.assertRaises(LanguageSkillError):
+            set_language_skills(
+                self.person, {'english': ['speak'], 'spanish': ['fluent']})
+
+        self.assertFalse(
+            PersonLanguageSkill.objects.filter(person=self.person).exists())
+
+    def test_a_rejected_payload_does_not_strip_existing_rows(self):
+        """Replace is delete-then-create; a failure between the two lost data."""
+        from omop_core.services.patient_record_service import (
+            LanguageSkillError, set_language_skills)
+
+        set_language_skills(self.person, {'english': ['speak', 'read']})
+        with self.assertRaises(LanguageSkillError):
+            set_language_skills(
+                self.person, {'english': ['write'], 'spanish': ['fluent']})
+
+        self.assertEqual(
+            set(PersonLanguageSkill.objects.filter(person=self.person)
+                .values_list('skill_level', flat=True)),
+            {'speak', 'read'})
+
+    # -- 3 & 4. the management command --------------------------------------
+
+    def test_the_command_refreshes_the_projection(self):
+        """Nothing on PersonLanguageSkill triggers a refresh.
+
+        A command that only wrote the row left the read model disagreeing with
+        the database until something else happened to re-derive it.
+        """
+        from django.core.management import call_command
+        from io import StringIO
+
+        call_command('manage_language_skills',
+                     person_id=self.person.person_id,
+                     add_language='English language:speak', stdout=StringIO())
+
+        self.record.refresh_from_db()
+        self.assertTrue(self.record.english_speak)
+
+    def test_set_primary_survives_a_language_with_several_capabilities(self):
+        """.get(person, language) raised once a language had two rows.
+
+        Which is now the normal case, not an edge one.
+        """
+        from django.core.management import call_command
+        from io import StringIO
+
+        from omop_core.services.patient_record_service import set_language_skills
+        # English deliberately has two rows: with one, .get() succeeds and the
+        # test proves nothing. The defect only appears once a language carries
+        # more than one capability, which is now the normal case.
+        set_language_skills(self.person, {'english': ['speak', 'read'],
+                                          'spanish': ['write']})
+        PersonLanguageSkill.objects.filter(person=self.person).update(is_primary=False)
+
+        out = StringIO()
+        call_command('manage_language_skills',
+                     person_id=self.person.person_id,
+                     set_primary='English language', stdout=out, stderr=out)
+
+        self.assertEqual(
+            PersonLanguageSkill.objects.filter(
+                person=self.person, is_primary=True).count(), 1)
+        self.assertEqual(self.person.get_primary_language(), 'English language')
