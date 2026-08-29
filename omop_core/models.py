@@ -846,6 +846,63 @@ class Person(models.Model):
             return f"{self.given_name} {self.family_name}".strip()
         return f"Person {self.person_id}"
 
+    def get_language_skills_summary(self):
+        """Return ``{language_name: [capability, ...]}``.
+
+        Restored after ed52738 removed it and left three PatientRecord callers
+        raising AttributeError (#817). Not restored verbatim: the original
+        returned ``{language_name: skill_level}``, one entry per language, which
+        since #810 would silently drop every capability but one — a person
+        holding English speak *and* read would come back with only whichever row
+        the database returned last.
+
+        Ordered by language then capability so the output is stable across
+        calls rather than following insertion order.
+        """
+        summary = {}
+        rows = (
+            self.language_skills
+            .select_related('language_concept')
+            .order_by('language_concept__concept_name', 'skill_level')
+        )
+        for skill in rows:
+            summary.setdefault(
+                skill.language_concept.concept_name, []).append(skill.skill_level)
+        return summary
+
+    def get_primary_language(self):
+        """Return the person's primary language name, or None.
+
+        Exactly one row per person carries is_primary, and that row's language
+        is the primary language, so this reads the flag rather than assuming one
+        row per language.
+        """
+        primary = (
+            self.language_skills
+            .filter(is_primary=True)
+            .select_related('language_concept')
+            .first()
+        )
+        return primary.language_concept.concept_name if primary else None
+
+
+def format_language_skills(summary):
+    """Render ``{language: [capability, ...]}`` as a human-readable string.
+
+    Capabilities within a language are comma-separated and languages are
+    separated by semicolons -- 'English language: read, speak; Spanish
+    language: speak'. A comma alone cannot do both jobs: with one row per
+    capability, 'English: speak, read, Spanish: speak' gives no way to tell
+    where one language's capabilities end.
+
+    Shared by PatientRecord.get_languages_display and the languages_skills
+    derivation so the two cannot disagree about the same person.
+    """
+    return '; '.join(
+        f'{language}: {", ".join(capabilities)}'
+        for language, capabilities in summary.items()
+    )
+
 
 # The four capabilities are independent, not a scale: understanding a language
 # without reading it is ordinary, and so is reading without speaking. A person
@@ -2942,15 +2999,14 @@ class PatientRecord(models.Model):
         return self.person.get_primary_language()
     
     def get_languages_display(self):
-        """Human-readable languages and skills, e.g. 'English: speak, Spanish: read'."""
+        """Human-readable languages and skills.
+
+        e.g. 'English language: read, speak; Spanish language: speak'.
+        """
         skills = self.get_languages()
         if not skills:
             return "No languages recorded"
-        
-        display_parts = []
-        for language, skill in skills.items():
-            display_parts.append(f"{language}: {skill}")
-        return ", ".join(display_parts)
+        return format_language_skills(skills)
 
     def save(self, *args, **kwargs):
         """Calculate BMI, age, and update therapy-related computed fields when saving"""
