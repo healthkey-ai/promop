@@ -16,7 +16,7 @@ import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import DiseaseTab from './DiseaseTab';
 import { __resetWritableFieldsCache, fetchWritableFields } from '@/hooks/useWritableFields';
 import { useVocabulary } from '@/hooks/useVocabulary';
-import { STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS } from '../patientConstants';
+import { MYELOMA_TYPE_OPTIONS, STEM_CELL_TRANSPLANT_OPTIONS, SCT_ELIGIBILITY_OPTIONS } from '../patientConstants';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -160,11 +160,34 @@ describe('MyelomaSection — SCT fields', () => {
 
   // --- Labels ---------------------------------------------------------------
 
+  it('labels the myeloma subtype field as M-Protein Type', () => {
+    renderMyeloma();
+    expect(screen.getByText('M-Protein Type')).toBeInTheDocument();
+    expect(screen.queryByText('Myeloma Type')).not.toBeInTheDocument();
+  });
+
   it('renders all three SCT field labels', () => {
     renderMyeloma();
     expect(screen.getByText('Prior SCT Type')).toBeInTheDocument();
     expect(screen.getByText('SCT Date')).toBeInTheDocument();
     expect(screen.getByText('SCT Eligibility')).toBeInTheDocument();
+  });
+
+  it('keeps the myeloma type fallback options aligned with the requested value set', () => {
+    expect(MYELOMA_TYPE_OPTIONS).toEqual([
+      'IgG kappa',
+      'IgG lambda',
+      'IgA kappa',
+      'IgA lambda',
+      'IgD kappa',
+      'IgD lambda',
+      'IgE kappa',
+      'IgE lambda',
+      'IgM kappa',
+      'IgM lambda',
+      'Light-chain kappa',
+      'Light-chain lambda',
+    ]);
   });
 
   // --- sct_date (date input) ------------------------------------------------
