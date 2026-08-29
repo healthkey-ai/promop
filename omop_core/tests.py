@@ -5613,3 +5613,150 @@ class PersonLanguageSkillConstraintTest(TestCase):
             )
         self.assertFalse(
             PersonLanguageSkill.objects.get(person=self.person).is_primary)
+
+
+class LanguageHelperMethodTest(TestCase):
+    """#817 — the PatientRecord/Person language helpers actually run.
+
+    All three raised AttributeError from ed52738 (2026-01-28) until this, because
+    that commit removed the Person methods they call and left the callers behind.
+    Seven months passed unnoticed: no test covered any of them. The absence of
+    coverage was the defect; the AttributeError was only what it let through.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import ConceptClass, Domain, Vocabulary
+
+        cls.person = Person.objects.create(person_id=881001)
+        cls.record = PatientRecord.objects.create(person=cls.person)
+
+        snomed, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0},
+        )
+        qualifier, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Qualifier Value',
+            defaults={'concept_class_name': 'Qualifier Value',
+                      'concept_class_concept_id': 0},
+        )
+        language_domain, _ = Domain.objects.get_or_create(
+            domain_id='Language',
+            defaults={'domain_name': 'Language', 'domain_concept_id': 0},
+        )
+
+        def _language(concept_id, name, code):
+            return Concept.objects.create(
+                concept_id=concept_id, concept_name=name,
+                domain=language_domain, vocabulary=snomed,
+                concept_class=qualifier, standard_concept='S',
+                concept_code=code, valid_start_date=date(1970, 1, 1),
+                valid_end_date=date(2099, 12, 31),
+            )
+
+        cls.english = _language(4180186, 'English language', '297487008')
+        cls.spanish = _language(4182511, 'Spanish language', '297510001')
+
+    def _skill(self, concept, level):
+        return PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=concept, skill_level=level)
+
+    # -- the methods run at all --------------------------------------------
+
+    def test_the_helpers_do_not_raise_on_a_person_with_no_languages(self):
+        self.assertEqual(self.record.get_languages(), {})
+        self.assertEqual(self.record.get_languages_display(),
+                         'No languages recorded')
+        self.assertIsNone(self.record.get_primary_language())
+
+    # -- capabilities are not collapsed ------------------------------------
+
+    def test_every_capability_survives_the_summary(self):
+        """The original returned one entry per language and lost the rest.
+
+        Restoring it verbatim would drop three of these four silently.
+        """
+        for level, _label in PersonLanguageSkill.SKILL_LEVEL_CHOICES:
+            self._skill(self.english, level)
+        self.assertEqual(
+            self.record.get_languages(),
+            {'English language': ['read', 'speak', 'understand', 'write']},
+        )
+
+    def test_several_languages_are_kept_apart(self):
+        self._skill(self.english, 'speak')
+        self._skill(self.english, 'read')
+        self._skill(self.spanish, 'speak')
+        self.assertEqual(
+            self.record.get_languages(),
+            {'English language': ['read', 'speak'],
+             'Spanish language': ['speak']},
+        )
+
+    def test_the_summary_is_ordered_not_insertion_ordered(self):
+        """Stable output across calls, so a display string cannot flap."""
+        self._skill(self.spanish, 'write')
+        self._skill(self.english, 'speak')
+        self._skill(self.english, 'read')
+        self.assertEqual(list(self.record.get_languages()),
+                         ['English language', 'Spanish language'])
+        self.assertEqual(self.record.get_languages()['English language'],
+                         ['read', 'speak'])
+
+    # -- display -----------------------------------------------------------
+
+    def test_display_separates_languages_from_capabilities(self):
+        """A comma alone cannot do both jobs once a language has several.
+
+        'English: speak, read, Spanish: speak' gives no way to see where one
+        language's capabilities end.
+        """
+        self._skill(self.english, 'speak')
+        self._skill(self.english, 'read')
+        self._skill(self.spanish, 'speak')
+        self.assertEqual(
+            self.record.get_languages_display(),
+            'English language: read, speak; Spanish language: speak',
+        )
+
+    # -- primary language --------------------------------------------------
+
+    def test_primary_language_reads_the_flag(self):
+        self._skill(self.english, 'speak')          # first row -> primary
+        self._skill(self.spanish, 'speak')
+        self.assertEqual(self.record.get_primary_language(), 'English language')
+
+    def test_primary_language_is_the_flagged_row_not_the_first_language(self):
+        """The flag is the source of truth, not row order.
+
+        A person can hold many rows for the primary language; only the flagged
+        one identifies it.
+        """
+        self._skill(self.english, 'speak')
+        spanish = self._skill(self.spanish, 'speak')
+        PersonLanguageSkill.objects.filter(person=self.person).update(
+            is_primary=False)
+        PersonLanguageSkill.objects.filter(pk=spanish.pk).update(is_primary=True)
+        self.assertEqual(self.record.get_primary_language(), 'Spanish language')
+
+    # -- the derived field agrees with the display -------------------------
+
+    def test_the_derived_field_uses_the_same_formatter(self):
+        """Two formatters over one person could disagree; there is now one.
+
+        languages_skills previously joined per row, repeating the language name
+        once per capability: 'English language: speak, English language: read'.
+        """
+        from omop_core.services.patient_record_service import refresh_patient_record
+
+        self._skill(self.english, 'speak')
+        self._skill(self.english, 'read')
+        self._skill(self.spanish, 'speak')
+
+        refresh_patient_record(self.person)
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.languages_skills,
+                         self.record.get_languages_display())
+        self.assertEqual(
+            self.record.languages_skills,
+            'English language: read, speak; Spanish language: speak')
