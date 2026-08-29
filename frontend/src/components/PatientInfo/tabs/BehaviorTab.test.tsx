@@ -10,13 +10,19 @@
  * an approved mapping becomes editable here with no change to this file.
  */
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import BehaviorTab from './BehaviorTab';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 
 const mockGet = vi.fn();
+const mockPatch = vi.fn();
 vi.mock('@/api/axios', () => ({
-  default: { get: (...a: unknown[]) => mockGet(...a), post: vi.fn(), patch: vi.fn() },
+  default: {
+    get: (...a: unknown[]) => mockGet(...a),
+    post: vi.fn(),
+    patch: (...a: unknown[]) => mockPatch(...a),
+  },
 }));
 
 vi.mock('@/hooks/useVocabulary', () => ({
@@ -44,10 +50,16 @@ beforeEach(() => {
   vi.clearAllMocks();
   __resetWritableFieldsCache();
   mockGet.mockResolvedValue({ data: DESCRIPTORS });
+  mockPatch.mockResolvedValue({ data: {} });
 });
 
-function renderTab(formData: Record<string, unknown> = {}) {
-  return render(<BehaviorTab formData={formData} onChange={vi.fn()} />);
+function renderTab(
+  formData: Record<string, unknown> = {},
+  onRefresh: () => void = vi.fn(),
+) {
+  return render(
+    <BehaviorTab formData={formData} onChange={vi.fn()} onRefresh={onRefresh} />,
+  );
 }
 
 describe('BehaviorTab', () => {
@@ -115,5 +127,55 @@ describe('BehaviorTab', () => {
     for (const title of ['Lifestyle Factors', 'Socioeconomic Factors']) {
       expect(screen.getByText(title)).toBeInTheDocument();
     }
+  });
+});
+
+/**
+ * Language skills (#808).
+ *
+ * The only editor on this tab that does not write a PatientRecord column: each
+ * capability is a PersonLanguageSkill row, so the control saves on the spot and
+ * asks the page to re-read rather than folding into the form's own state.
+ */
+describe('BehaviorTab — language skills', () => {
+  it('reads the current selection out of the derived columns', async () => {
+    renderTab({ person_id: 7, english_speak: true, english_read: true,
+                english_write: false, english_understand: null });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.getByText('Speak, Read')).toBeInTheDocument();
+  });
+
+  it('shows a language nobody has been asked about as not recorded', async () => {
+    renderTab({ person_id: 7, english_speak: true });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    // English is set, Spanish has never been asked — so exactly one is blank.
+    expect(screen.getAllByText('Not recorded')).toHaveLength(1);
+  });
+
+  it('treats an asserted false as unselected, not as selected', async () => {
+    // false means asked and does not have it. Showing it as ticked would invert
+    // the answer in front of whoever is editing it.
+    renderTab({ person_id: 7, english_speak: false, english_read: false,
+                english_write: false, english_understand: false });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.getAllByText('Not recorded')).toHaveLength(2);
+  });
+
+  it('saves the edit and asks the page to re-read', async () => {
+    const onRefresh = vi.fn();
+    renderTab({ person_id: 7 }, onRefresh);
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    await userEvent.click(screen.getAllByRole('button', { name: /not recorded/i })[0]);
+    await userEvent.click(await screen.findByText('Speak'));
+
+    await waitFor(() => expect(mockPatch).toHaveBeenCalledWith(
+      '/v1/persons/7/',
+      { language_skills: { english: ['speak'] } },
+    ));
+    await waitFor(() => expect(onRefresh).toHaveBeenCalled());
   });
 });

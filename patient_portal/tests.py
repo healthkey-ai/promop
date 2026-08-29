@@ -21964,3 +21964,190 @@ class FhirUploadDeniedWriteRollbackTest(TestCase):
         self.assertTrue(
             VisitOccurrence.objects.filter(person=self.person).exists()
         )
+
+
+class PersonLanguageSkillPatchTest(_SmartBase):
+    """#808 — setting a patient's language skills through the API.
+
+    Rows, not columns: each capability is its own PersonLanguageSkill row, so
+    this rides the persons PATCH rather than getting its own endpoint. One
+    endpoint means one authorization check rather than a second that could drift
+    from it.
+    """
+
+    def setUp(self):
+        from omop_core.models import (
+            Concept, ConceptClass, Domain, PersonLanguageSkill, Vocabulary,
+        )
+        from omop_core.services.pk import next_pk
+
+        self.person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=self.person, organization=self.organization)
+
+        snomed, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0})
+        qualifier, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Qualifier Value',
+            defaults={'concept_class_name': 'Qualifier Value',
+                      'concept_class_concept_id': 0})
+        language_domain, _ = Domain.objects.get_or_create(
+            domain_id='Language',
+            defaults={'domain_name': 'Language', 'domain_concept_id': 0})
+
+        for concept_id, name, code in (
+            (4180186, 'English language', '297487008'),
+            (4182511, 'Spanish language', '297510001'),
+        ):
+            Concept.objects.get_or_create(
+                concept_id=concept_id,
+                defaults=dict(
+                    concept_name=name, domain=language_domain, vocabulary=snomed,
+                    concept_class=qualifier, standard_concept='S',
+                    concept_code=code, valid_start_date=date(1970, 1, 1),
+                    valid_end_date=date(2099, 12, 31)))
+        self.PersonLanguageSkill = PersonLanguageSkill
+
+    def _url(self):
+        return f'/api/persons/{self.person.person_id}/'
+
+    def _auth(self):
+        return {'HTTP_AUTHORIZATION': f'Bearer {self.write_token.token}'}
+
+    def _patch(self, payload, token=None):
+        auth = ({'HTTP_AUTHORIZATION': f'Bearer {token}'} if token
+                else self._auth())
+        return self.client.patch(
+            self._url(), {'language_skills': payload},
+            content_type='application/json', **auth)
+
+    def _record(self):
+        return PatientRecord.objects.get(person=self.person)
+
+    # -- happy path --------------------------------------------------------
+
+    def test_capabilities_are_stored_as_rows(self):
+        resp = self._patch({'english': ['speak', 'read']})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('language_skills', resp.data['updated_fields'])
+        self.assertEqual(
+            set(self.PersonLanguageSkill.objects
+                .filter(person=self.person).values_list('skill_level', flat=True)),
+            {'speak', 'read'})
+
+    def test_the_flattened_columns_are_derived_in_the_same_request(self):
+        """A 200 that left the read model stale would be a lie about the write."""
+        self._patch({'english': ['read']})
+        record = self._record()
+        self.assertTrue(record.english_read)
+        self.assertFalse(record.english_speak)
+        self.assertEqual(record.languages_skills, 'English language: read')
+
+    def test_both_languages_can_be_set_at_once(self):
+        self._patch({'english': ['speak'], 'spanish': ['write']})
+        record = self._record()
+        self.assertTrue(record.english_speak)
+        self.assertTrue(record.spanish_write)
+
+    # -- replace semantics -------------------------------------------------
+
+    def test_a_second_write_replaces_rather_than_merges(self):
+        self._patch({'english': ['speak', 'read']})
+        self._patch({'english': ['write']})
+        self.assertEqual(
+            set(self.PersonLanguageSkill.objects
+                .filter(person=self.person).values_list('skill_level', flat=True)),
+            {'write'})
+
+    def test_a_language_left_out_is_untouched(self):
+        """Setting English must assert nothing about Spanish.
+
+        Otherwise every edit to one language would silently claim the other was
+        asked about and answered.
+        """
+        self._patch({'english': ['speak'], 'spanish': ['read']})
+        self._patch({'english': ['write']})
+        record = self._record()
+        self.assertTrue(record.spanish_read)
+
+    def test_an_empty_list_clears_the_language(self):
+        self._patch({'english': ['speak']})
+        self._patch({'english': []})
+        self.assertFalse(
+            self.PersonLanguageSkill.objects.filter(person=self.person).exists())
+        self.assertIsNone(self._record().english_speak)
+
+    def test_an_unchanged_write_reports_no_update(self):
+        self._patch({'english': ['speak']})
+        resp = self._patch({'english': ['speak']})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertNotIn('language_skills', resp.data['updated_fields'])
+
+    # -- the rows are properly formed --------------------------------------
+
+    def test_the_first_capability_written_becomes_primary(self):
+        self._patch({'english': ['speak', 'read']})
+        self.assertEqual(
+            self.PersonLanguageSkill.objects.filter(
+                person=self.person, is_primary=True).count(), 1)
+
+    def test_written_rows_carry_their_capability_concept(self):
+        """The service must not bypass save() -- bulk_create would skip this."""
+        self._patch({'english': ['read']})
+        skill = self.PersonLanguageSkill.objects.get(person=self.person)
+        self.assertEqual(skill.skill_concept.concept_code, 'hkl:read')
+
+    # -- validation --------------------------------------------------------
+
+    def test_an_unknown_capability_is_rejected(self):
+        resp = self._patch({'english': ['fluent']})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('fluent', resp.data['detail'])
+        self.assertFalse(
+            self.PersonLanguageSkill.objects.filter(person=self.person).exists())
+
+    def test_an_unknown_language_is_rejected(self):
+        resp = self._patch({'klingon': ['speak']})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('klingon', resp.data['detail'])
+
+    def test_a_non_list_of_capabilities_is_rejected(self):
+        resp = self._patch({'english': 'speak'})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_a_non_object_payload_is_rejected(self):
+        resp = self.client.patch(
+            self._url(), {'language_skills': ['speak']},
+            content_type='application/json', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # -- authorization -----------------------------------------------------
+
+    def test_an_unauthenticated_write_is_refused(self):
+        resp = self.client.patch(
+            self._url(), {'language_skills': {'english': ['speak']}},
+            content_type='application/json')
+        self.assertIn(resp.status_code,
+                      (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+        self.assertFalse(
+            self.PersonLanguageSkill.objects.filter(person=self.person).exists())
+
+    def test_a_read_only_token_cannot_write_languages(self):
+        resp = self._patch({'english': ['speak']}, token=self.read_token.token)
+        self.assertIn(resp.status_code,
+                      (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+        self.assertFalse(
+            self.PersonLanguageSkill.objects.filter(person=self.person).exists())
+
+    # -- the rest of the patch still works ---------------------------------
+
+    def test_language_skills_ride_alongside_a_demographic_patch(self):
+        """One request, one refresh: they must not fight over the projection."""
+        resp = self.client.patch(
+            self._url(),
+            {'given_name': 'Ada', 'language_skills': {'english': ['read']}},
+            content_type='application/json', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.given_name, 'Ada')
+        self.assertTrue(self._record().english_read)
