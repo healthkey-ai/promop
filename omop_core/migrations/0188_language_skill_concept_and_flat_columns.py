@@ -33,7 +33,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('omop_core', '0186_seed_language_capability_concepts'),
+        ('omop_core', '0187_seed_language_capability_concepts'),
     ]
 
     operations = [
