@@ -59,6 +59,16 @@ _VOCABULARIES = [
          vocabulary_reference='https://healthkey.ai',
          vocabulary_version='1.0',
          vocabulary_concept_id=0),
+    # Locally-authored codes for the four language capabilities (#813). SNOMED
+    # has no value set for them: its nearest concepts are speech-pathology
+    # findings ('Able to speak', 'Unable to speak') asserting something
+    # clinically different, and nothing codes "understand" as a language skill.
+    # Same quarantine rules as the other HK-* vocabularies.
+    dict(vocabulary_id='HK-Language',
+         vocabulary_name='HealthKey language capability concepts',
+         vocabulary_reference='https://healthkey.ai',
+         vocabulary_version='1.0',
+         vocabulary_concept_id=0),
     dict(vocabulary_id='Episode',
          vocabulary_name='OMOP Episode',
          vocabulary_reference='OMOP generated',
@@ -434,6 +444,24 @@ _CONCEPTS = [
     _c(2_100_007_852, 'BTK inhibitor refractory disease status', 'Observation',
        'HK-Observation', 'Clinical Observation', None, 'hko:btk-inhibitor-refractory',
        source='HealthKey'),
+
+    # Language capabilities (#813). Domain is 'Meas Value' because these are
+    # answers, not attributes: they are what a person's skill in a language IS,
+    # so they belong where OMOP puts value concepts. The language itself stays
+    # a 'Language'-domain SNOMED concept -- the two are different axes, and
+    # filing a language under 'Meas Value' is the mistake manage_language_skills
+    # made (#812).
+    #
+    # Duplicated from migration 0186 so a test database has them; the drift test
+    # in omop_core/tests.py asserts the two definitions stay identical.
+    _c(2_100_007_853, 'Speaks language', 'Meas Value',
+       'HK-Language', 'Qualifier Value', None, 'hkl:speak', source='HealthKey'),
+    _c(2_100_007_854, 'Reads language', 'Meas Value',
+       'HK-Language', 'Qualifier Value', None, 'hkl:read', source='HealthKey'),
+    _c(2_100_007_855, 'Writes language', 'Meas Value',
+       'HK-Language', 'Qualifier Value', None, 'hkl:write', source='HealthKey'),
+    _c(2_100_007_856, 'Understands language', 'Meas Value',
+       'HK-Language', 'Qualifier Value', None, 'hkl:understand', source='HealthKey'),
 
     # ------------------------------------------------------------------
     # HemOnc therapy regimen concepts — required for first_line_therapy_id

@@ -2482,6 +2482,49 @@ class WearableConceptMappingTest(TestCase):
             self.assertEqual(seeded['domain_id'], 'Observation')
             self.assertEqual(seeded['source'], 'HealthKey')
 
+    def test_language_capability_concepts_match_seed_definitions(self):
+        """Migration 0186 duplicates its rows into the fixture; no drift (#813).
+
+        Same trade as 0180: the migration hard-codes definitions so it stays
+        frozen against the code as written, and this test is what stops the two
+        copies diverging.
+        """
+        from importlib import import_module
+
+        mig = import_module(
+            'omop_core.migrations.0186_seed_language_capability_concepts')
+        seed_by_key = {
+            (r['vocabulary_id'], r['concept_code']): r for r in self._seed_rows()
+        }
+
+        for concept_id, concept_code, concept_name in mig._CONCEPTS:
+            key = ('HK-Language', concept_code)
+            self.assertIn(
+                key, seed_by_key,
+                f'migration 0186 seeds {key}, which the fixture does not')
+            seeded = seed_by_key[key]
+            self.assertEqual(seeded['concept_id'], concept_id,
+                             f'{concept_code} concept_id differs')
+            self.assertEqual(seeded['concept_name'], concept_name,
+                             f'{concept_code} concept_name differs')
+            self.assertEqual(seeded['domain_id'], 'Meas Value')
+            self.assertEqual(seeded['source'], 'HealthKey')
+            self.assertIsNone(seeded['standard_concept'])
+
+    def test_every_skill_level_has_a_capability_concept(self):
+        """The mint must cover the vocabulary, not a subset of it.
+
+        A capability with no concept would be silently unmatchable in trial
+        criteria while looking present in the enum.
+        """
+        from importlib import import_module
+        from omop_core.models import SKILL_LEVEL_CHOICES
+
+        mig = import_module(
+            'omop_core.migrations.0186_seed_language_capability_concepts')
+        minted = {code.split(':', 1)[1] for _cid, code, _name in mig._CONCEPTS}
+        self.assertEqual(minted, {v for v, _label in SKILL_LEVEL_CHOICES})
+
     def test_runtime_migration_matches_seed_definitions(self):
         """Migration 0143 duplicates concept rows; the copies must not drift.
 
