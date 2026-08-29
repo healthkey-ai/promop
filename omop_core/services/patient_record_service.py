@@ -21,6 +21,7 @@ from omop_core.models import (
     Person, PatientRecord, ConditionOccurrence, Concept, ConceptAncestor,
     Measurement, Observation, DrugExposure, Location, ProcedureOccurrence,
     Death, ConceptRelationship, PERSON_YEAR_PLACEHOLDERS,
+    format_language_skills,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
 from omop_core.services.mappings import (
@@ -915,13 +916,14 @@ def _get_demographics(person: Person, snapshot: OmopSnapshot = None) -> dict:
     elif person.ethnicity_source_value and person.ethnicity_source_value != 'unknown':
         data['ethnicity'] = person.ethnicity_source_value
 
-    lang_skills = person.language_skills.select_related('language_concept').all()
-    if lang_skills.exists():
-        parts = [
-            f'{ls.language_concept.concept_name}: {ls.skill_level}'
-            for ls in lang_skills
-        ]
-        data['languages_skills'] = ', '.join(parts)
+    # One entry per language with its capabilities grouped, not one per row.
+    # Since #810 a person holds a row per capability, so the old per-row join
+    # repeated the language name up to four times: "English language: speak,
+    # English language: read, ...". Shares its formatter with
+    # PatientRecord.get_languages_display so the two cannot disagree.
+    language_summary = person.get_language_skills_summary()
+    if language_summary:
+        data['languages_skills'] = format_language_skills(language_summary)
 
     data.update({
         'email': person.email,
