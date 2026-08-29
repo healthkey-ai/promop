@@ -169,6 +169,6 @@ def unseed(apps, schema_editor):
 
 class Migration(migrations.Migration):
 
-    dependencies = [('omop_core', '0184_person_language_skill_constraints')]
+    dependencies = [('omop_core', '0185_merge_20260829_0817')]
 
     operations = [migrations.RunPython(seed, unseed)]
