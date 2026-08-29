@@ -8109,7 +8109,7 @@ def _ensure_local_concept(data):
 def _upsert_source_code_mapping(concept, data, user):
     source_vocabulary_id = _clean_required(data, 'source_vocabulary_id')
     source_code = _clean_required(data, 'source_code')
-    status_value = str(data.get('status') or 'active').strip()
+    status_value = str(data.get('status') or 'proposed').strip()
     valid_statuses = {choice for choice, _label in SourceCodeConceptMapping.STATUS_CHOICES}
     if status_value not in valid_statuses:
         raise serializers.ValidationError({'status': f"Status must be one of: {', '.join(sorted(valid_statuses))}."})
@@ -8237,6 +8237,50 @@ def code_mapping_vocabularies(request):
     })
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def propose_all_code_mappings(request):
+    """Create proposed self-mappings for local concepts with no source code row."""
+    if not _can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    source_filter = str(request.data.get('source') or request.query_params.get('source') or '').strip()
+    concepts = _local_concept_queryset()
+    if source_filter:
+        concepts = concepts.filter(vocabulary_id=source_filter)
+
+    existing_concept_ids = set(
+        SourceCodeConceptMapping.objects.values_list('target_concept_id', flat=True)
+    )
+    to_create = []
+    for concept in concepts.exclude(concept_id__in=existing_concept_ids):
+        if not concept.vocabulary_id or not concept.concept_code:
+            continue
+        to_create.append(SourceCodeConceptMapping(
+            source_vocabulary_id=concept.vocabulary_id,
+            source_code=concept.concept_code,
+            source_code_description=concept.concept_name,
+            target_concept=concept,
+            source=concept.vocabulary_id,
+            status='proposed',
+            notes='Auto-proposed from local quarantined concept.',
+            created_by=request.user,
+            updated_by=request.user,
+        ))
+
+    if to_create:
+        SourceCodeConceptMapping.objects.bulk_create(to_create, ignore_conflicts=True)
+
+    created_codes = [
+        f'{mapping.source_vocabulary_id}:{mapping.source_code}'
+        for mapping in to_create
+    ]
+    return Response(
+        {'created': len(created_codes), 'codes': created_codes},
+        status=status.HTTP_201_CREATED if created_codes else status.HTTP_200_OK,
+    )
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def custom_patient_field_list(request):
@@ -8340,10 +8384,13 @@ def propose_all_mappings(request):
     from omop_core.services.field_descriptor import get_all_field_descriptors
 
     descriptors = get_all_field_descriptors()
+    tab_filter = str(request.data.get('tab') or request.query_params.get('tab') or '').strip()
 
     # Collect fields that need a proposed mapping.
     to_propose: list[dict] = []
     for d in descriptors:
+        if tab_filter and d.get('tab') != tab_filter:
+            continue
         if not d['mappable']:
             continue
         if d['mapping']:

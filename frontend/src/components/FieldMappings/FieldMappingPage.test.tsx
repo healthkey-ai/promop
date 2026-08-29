@@ -393,6 +393,40 @@ describe("FieldMappingPage", () => {
     });
   });
 
+  it("suggests field mappings for the active tab", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith("/v1/field-mappings/propose-all/", { tab: "general" });
+    });
+  });
+
+  it("suggests concepts for the selected field from the dialog", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/Behavior/)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText(/Behavior/));
+    await waitFor(() => {
+      expect(screen.getByText("smoking_status")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByText("click to map")[0]);
+    const dialog = await screen.findByText("Assign Concept");
+    fireEvent.click(within(dialog.closest("div")!).getByRole("button", { name: "Suggest" }));
+
+    await waitFor(() => {
+      expect(mockGet).toHaveBeenCalledWith("/v1/concepts/search/", {
+        params: { q: "smoking status", limit: "50" },
+      });
+    });
+  });
+
   it("keeps units out of the field list while retaining mapping columns", async () => {
     renderPage();
     await waitFor(() => {
