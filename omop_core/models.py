@@ -846,7 +846,7 @@ class Person(models.Model):
             return f"{self.given_name} {self.family_name}".strip()
         return f"Person {self.person_id}"
 
-    def get_language_skills_summary(self):
+    def get_language_skills_summary(self, rows=None):
         """Return ``{language_name: [capability, ...]}``.
 
         Restored after ed52738 removed it and left three PatientRecord callers
@@ -859,15 +859,38 @@ class Person(models.Model):
         Ordered by language then capability so the output is stable across
         calls rather than following insertion order.
         """
+        if rows is None:
+            rows = self.language_skills.select_related('language_concept').all()
         summary = {}
-        rows = (
-            self.language_skills
-            .select_related('language_concept')
-            .order_by('language_concept__concept_name', 'skill_level')
-        )
-        for skill in rows:
+        for skill in sorted(
+                rows, key=lambda s: (s.language_concept.concept_name, s.skill_level)):
             summary.setdefault(
                 skill.language_concept.concept_name, []).append(skill.skill_level)
+        return summary
+
+    def get_language_capabilities_by_code(self, rows=None):
+        """Return ``{concept_code: [capability, ...]}`` for this person.
+
+        The code-keyed twin of get_language_skills_summary, which keys on
+        concept_name because it feeds a display string. Anything that has to
+        *identify* a language -- the flattened PatientRecord columns, most of
+        all -- must key on the code: concept names are release text, and
+        matching on them means a SNOMED rename silently blanks a column while
+        the rows sit there intact. That is the failure docs/vocabularies.md:216
+        exists to prevent, and #812 is an instance of.
+
+        ``rows`` lets a caller that has already fetched the language skills pass
+        them in. refresh_patient_record needs both this and the name-keyed
+        summary for the same person, and querying twice put it over its query
+        budget for one derivation.
+        """
+        if rows is None:
+            rows = self.language_skills.select_related('language_concept').all()
+        summary = {}
+        for skill in sorted(
+                rows, key=lambda s: (s.language_concept.concept_code, s.skill_level)):
+            summary.setdefault(
+                skill.language_concept.concept_code, []).append(skill.skill_level)
         return summary
 
     def get_primary_language(self):

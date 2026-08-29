@@ -880,15 +880,17 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 # ---------------------------------------------------------------------------
 
 
-# Flattened language capabilities (#827). The concept names are SNOMED's, which
-# carry the "language" suffix -- 4180186 is "English language", not "English".
-_FLATTENED_LANGUAGES = {
-    'english': 'English language',
-    'spanish': 'Spanish language',
+# Alias -> the SNOMED code for that language. An alias table in server code, not
+# a name lookup: resolution is still by (vocabulary_id, concept_code), which is
+# the rule in docs/vocabularies.md and the defect in #812. The aliases match the
+# prefixes on the flattened PatientRecord columns so the two cannot drift apart.
+LANGUAGE_ALIASES = {
+    'english': '297487008',
+    'spanish': '297510001',
 }
 
 
-def _flatten_language_capabilities(language_summary):
+def _flatten_language_capabilities(capabilities_by_code):
     """Unroll {language: [capability, ...]} into the eight boolean columns.
 
     Three-valued, and the third value carries the weight. A language absent from
@@ -902,13 +904,20 @@ def _flatten_language_capabilities(language_summary):
     Returns every one of the eight keys on every call, including None ones, so
     that clearing a person's languages resets the columns instead of leaving
     stale True values behind.
+
+    Keyed on concept_code, not concept_name. Matching on the name meant a SNOMED
+    release renaming "English language" blanked all four English columns while
+    the rows sat there intact -- silently, and in the direction that makes a
+    patient look unasked rather than erroring. LANGUAGE_ALIASES is the same
+    table set_language_skills writes through, so the reader and the writer
+    identify a language the same way.
     """
     from omop_core.models import SKILL_LEVEL_CHOICES
 
     capabilities = [value for value, _label in SKILL_LEVEL_CHOICES]
     flattened = {}
-    for prefix, concept_name in _FLATTENED_LANGUAGES.items():
-        held = language_summary.get(concept_name)
+    for prefix, concept_code in LANGUAGE_ALIASES.items():
+        held = capabilities_by_code.get(concept_code)
         for capability in capabilities:
             flattened[f'{prefix}_{capability}'] = (
                 None if held is None else capability in held
@@ -962,10 +971,16 @@ def _get_demographics(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # repeated the language name up to four times: "English language: speak,
     # English language: read, ...". Shares its formatter with
     # PatientRecord.get_languages_display so the two cannot disagree.
-    language_summary = person.get_language_skills_summary()
+    # Fetched once and shared: the display string keys on concept_name and the
+    # flattened columns key on concept_code, and querying for each put this
+    # derivation over its query budget.
+    language_rows = list(
+        person.language_skills.select_related('language_concept').all())
+    language_summary = person.get_language_skills_summary(language_rows)
     if language_summary:
         data['languages_skills'] = format_language_skills(language_summary)
-    data.update(_flatten_language_capabilities(language_summary))
+    data.update(_flatten_language_capabilities(
+        person.get_language_capabilities_by_code(language_rows)))
 
     data.update({
         'email': person.email,
@@ -4124,16 +4139,6 @@ def _compute_lymphocyte_doubling_time(alc_points):
 # Language skills (#808)
 # ---------------------------------------------------------------------------
 
-# Alias -> the SNOMED code for that language. An alias table in server code, not
-# a name lookup: resolution is still by (vocabulary_id, concept_code), which is
-# the rule in docs/vocabularies.md and the defect in #812. The aliases match the
-# prefixes on the flattened PatientRecord columns so the two cannot drift apart.
-LANGUAGE_ALIASES = {
-    'english': '297487008',
-    'spanish': '297510001',
-}
-
-
 class LanguageSkillError(ValueError):
     """A language-skills payload the caller must fix."""
 
@@ -4158,54 +4163,63 @@ def set_language_skills(person, skills_by_alias):
 
     Returns the number of rows created and removed. Raises LanguageSkillError
     for an unknown alias, an unknown capability, or a missing language concept.
+
+    Atomic, and deliberately so: replacing a language is a delete followed by a
+    create, and a payload naming two languages used to write the first before
+    rejecting the second. The caller got a 400 describing a write that had
+    half-happened, and a failure between the delete and the create left
+    capabilities removed and not restored.
     """
+    from django.db import transaction
+
     from omop_core.models import Concept, PersonLanguageSkill, SKILL_LEVEL_CHOICES
 
     valid_capabilities = {value for value, _label in SKILL_LEVEL_CHOICES}
     created = removed = 0
 
-    for alias, capabilities in skills_by_alias.items():
-        if alias not in LANGUAGE_ALIASES:
-            raise LanguageSkillError(
-                f"unknown language {alias!r}; expected one of "
-                f"{sorted(LANGUAGE_ALIASES)}")
-        if not isinstance(capabilities, (list, tuple)):
-            raise LanguageSkillError(
-                f"{alias}: expected a list of capabilities, got "
-                f"{type(capabilities).__name__}")
+    with transaction.atomic():
+        for alias, capabilities in skills_by_alias.items():
+            if alias not in LANGUAGE_ALIASES:
+                raise LanguageSkillError(
+                    f"unknown language {alias!r}; expected one of "
+                    f"{sorted(LANGUAGE_ALIASES)}")
+            if not isinstance(capabilities, (list, tuple)):
+                raise LanguageSkillError(
+                    f"{alias}: expected a list of capabilities, got "
+                    f"{type(capabilities).__name__}")
 
-        unknown = [c for c in capabilities if c not in valid_capabilities]
-        if unknown:
-            raise LanguageSkillError(
-                f"{alias}: unknown capabilities {unknown}; expected any of "
-                f"{sorted(valid_capabilities)}")
+            unknown = [c for c in capabilities if c not in valid_capabilities]
+            if unknown:
+                raise LanguageSkillError(
+                    f"{alias}: unknown capabilities {unknown}; expected any of "
+                    f"{sorted(valid_capabilities)}")
 
-        concept = Concept.objects.filter(
-            vocabulary_id='SNOMED', concept_code=LANGUAGE_ALIASES[alias],
-        ).first()
-        if concept is None:
-            # SNOMED loads separately from migrations. Refusing beats writing
-            # the row against a concept that is not there.
-            raise LanguageSkillError(
-                f"{alias}: SNOMED concept {LANGUAGE_ALIASES[alias]} is not "
-                f"loaded, so the language cannot be recorded")
+            concept = Concept.objects.filter(
+                vocabulary_id='SNOMED', concept_code=LANGUAGE_ALIASES[alias],
+            ).first()
+            if concept is None:
+                # SNOMED loads separately from migrations. Refusing beats writing
+                # the row against a concept that is not there.
+                raise LanguageSkillError(
+                    f"{alias}: SNOMED concept {LANGUAGE_ALIASES[alias]} is not "
+                    f"loaded, so the language cannot be recorded")
 
-        wanted = set(capabilities)
-        existing = {
-            row.skill_level: row
-            for row in PersonLanguageSkill.objects.filter(
-                person=person, language_concept=concept)
-        }
+            wanted = set(capabilities)
+            existing = {
+                row.skill_level: row
+                for row in PersonLanguageSkill.objects.filter(
+                    person=person, language_concept=concept)
+            }
 
-        for capability in sorted(set(existing) - wanted):
-            existing[capability].delete()
-            removed += 1
-        for capability in sorted(wanted - set(existing)):
-            # Not bulk_create: save() resolves skill_concept and makes the
-            # person's first language their primary one, and bulk_create runs
-            # neither.
-            PersonLanguageSkill.objects.create(
-                person=person, language_concept=concept, skill_level=capability)
-            created += 1
+            for capability in sorted(set(existing) - wanted):
+                existing[capability].delete()
+                removed += 1
+            for capability in sorted(wanted - set(existing)):
+                # Not bulk_create: save() resolves skill_concept and makes the
+                # person's first language their primary one, and bulk_create runs
+                # neither.
+                PersonLanguageSkill.objects.create(
+                    person=person, language_concept=concept, skill_level=capability)
+                created += 1
 
     return created, removed

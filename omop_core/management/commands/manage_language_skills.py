@@ -4,6 +4,7 @@ from omop_core.models import (
     Person, PersonLanguageSkill, Concept, Vocabulary, Domain, ConceptClass,
     SKILL_LEVEL_CHOICES,
 )
+from omop_core.services.patient_record_service import refresh_patient_record
 
 
 class Command(BaseCommand):
@@ -175,6 +176,12 @@ class Command(BaseCommand):
                 defaults={},
             )
 
+            # The eight flattened PatientRecord columns and languages_skills are
+            # derived, and nothing on PersonLanguageSkill triggers a refresh, so
+            # a command that only wrote the row left the read model disagreeing
+            # with the database until something else happened to re-derive it.
+            refresh_patient_record(person)
+
             action = 'Created' if created else 'Updated'
             self.stdout.write(self.style.SUCCESS(f'{action} language skill: {language_name} - {skill_level}'))
 
@@ -196,23 +203,27 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.ERROR(f'Language concept "{language_name}" not found'))
                 return
             
-            # Check if person has this language skill
-            try:
-                language_skill = PersonLanguageSkill.objects.get(
-                    person=person,
-                    language_concept=language_concept
-                )
-            except PersonLanguageSkill.DoesNotExist:
+            # A person holds one row per capability, so a language can have up
+            # to four. .get() here raised MultipleObjectsReturned as soon as
+            # anyone recorded two capabilities in the same language. The primary
+            # flag lives on a single representative row, so pick the earliest
+            # deterministically rather than whichever the database returns.
+            language_skill = (
+                PersonLanguageSkill.objects
+                .filter(person=person, language_concept=language_concept)
+                .order_by('created_date', 'id')
+                .first()
+            )
+            if language_skill is None:
                 self.stdout.write(self.style.ERROR(f'Person does not have {language_name} skill. Add it first.'))
                 return
 
-            # Remove primary from all other languages
+            # Clear first, then set: the partial unique index allows only one
+            # primary row per person, so setting before clearing would collide.
             PersonLanguageSkill.objects.filter(person=person).update(is_primary=False)
-            
-            # Set this language as primary
-            language_skill.is_primary = True
-            language_skill.save()
+            PersonLanguageSkill.objects.filter(pk=language_skill.pk).update(is_primary=True)
 
+            refresh_patient_record(person)
             self.stdout.write(self.style.SUCCESS(f'Set {language_name} as primary language'))
 
         except Exception as e:
