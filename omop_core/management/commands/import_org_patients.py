@@ -40,6 +40,7 @@ The importer:
 Typical run time: ~1–3 s per patient on a local PostgreSQL instance.
 """
 import json
+import logging
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
@@ -65,6 +66,7 @@ from omop_core.models import (
     PatientTrialEnrollment,
     Person,
     PersonLanguageSkill,
+    SKILL_LEVEL_CHOICES,
     ProcedureOccurrence,
     Specimen,
     Survey,
@@ -74,6 +76,8 @@ from omop_core.models import (
 )
 from omop_core.services.pk import next_pk_batch
 from omop_core.services.patient_record_service import refresh_patient_record
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -520,12 +524,25 @@ class Command(BaseCommand):
             lang_cid = ls.get('language_concept_id')
             if lang_cid and not Concept.objects.filter(concept_id=lang_cid).exists():
                 continue  # skip unknown language concepts
+            # skill_level is part of the identity now -- a person holds one row
+            # per capability -- and the column is CHECK-constrained, so an
+            # absent or retired value cannot be defaulted into place. The old
+            # default here was 'both', which the constraint rejects.
+            skill_level = ls.get('skill_level')
+            if skill_level not in {v for v, _label in SKILL_LEVEL_CHOICES}:
+                logger.warning(
+                    'Skipping language skill for person %s: skill_level %r is '
+                    'not one of %s',
+                    person.person_id, skill_level,
+                    [v for v, _label in SKILL_LEVEL_CHOICES],
+                )
+                continue
             try:
                 PersonLanguageSkill.objects.get_or_create(
                     person=person,
                     language_concept_id=lang_cid,
+                    skill_level=skill_level,
                     defaults={
-                        'skill_level': ls.get('skill_level', 'both'),
                         'is_primary': ls.get('is_primary', False),
                     },
                 )

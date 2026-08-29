@@ -847,30 +847,97 @@ class Person(models.Model):
         return f"Person {self.person_id}"
 
 
+# The four capabilities are independent, not a scale: understanding a language
+# without reading it is ordinary, and so is reading without speaking. A person
+# therefore gets one row per capability they have, rather than one row carrying
+# a combined level -- which could not express reading or understanding at all,
+# and forced two separate abilities to be asserted or denied together.
+SKILL_LEVEL_CHOICES = [
+    ('speak', 'Speak'),
+    ('read', 'Read'),
+    ('write', 'Write'),
+    ('understand', 'Understand'),
+]
+
+
 class PersonLanguageSkill(models.Model):
     """Language skills for a person - supports multiple languages with different skill levels."""
-    
-    SKILL_LEVEL_CHOICES = [
-        ('speak', 'Speak'),
-        ('write', 'Write'),
-        ('both', 'Both Speak and Write'),
-    ]
+
+    # Kept as a class attribute for callers that reference it through the model.
+    SKILL_LEVEL_CHOICES = SKILL_LEVEL_CHOICES
     
     person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='language_skills')
     language_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='person_language_skills', 
                                         db_column='language_concept_id')
     skill_level = models.CharField(max_length=10, choices=SKILL_LEVEL_CHOICES, 
-                                  help_text="Language skill level: speak, write, both")
-    is_primary = models.BooleanField(default=False, help_text="Is this the person's primary language?")
+                                  help_text="One capability the person has in this language: "
+                                            "speak, read, write or understand")
+    is_primary = models.BooleanField(
+        default=False, db_default=False,
+        help_text="Is this the person's primary language?")
     created_date = models.DateTimeField(auto_now_add=True)
     updated_date = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = 'person_language_skill'
-        unique_together = ['person', 'language_concept']
+        # One row per capability, so a person may hold up to four rows for the
+        # same language.
+        unique_together = ['person', 'language_concept', 'skill_level']
         indexes = [
             models.Index(fields=['person', 'is_primary']),
         ]
+        constraints = [
+            # Exactly one row per person carries the primary flag, and that
+            # row's language is the person's primary language. The flag sits on
+            # a single representative row rather than on every row of that
+            # language: a person can hold four rows for English, and marking
+            # all four primary would make "which language is primary" a count
+            # rather than a lookup, with no way to enforce that the four agree.
+            #
+            # manage_language_skills cleared the others in Python before setting
+            # one; this makes the invariant hold for every other writer too,
+            # including raw SQL.
+            models.UniqueConstraint(
+                fields=['person'],
+                condition=Q(is_primary=True),
+                name='person_language_skill_one_primary_per_person',
+            ),
+            # SKILL_LEVEL_CHOICES is validation, not a constraint. The derived
+            # languages_skills string interpolates this value verbatim, so an
+            # unchecked write surfaces in the API rather than being rejected.
+            # There is no usable coded value set for these four capabilities
+            # -- see the migration for why -- so the literals are pinned here
+            # instead.
+            models.CheckConstraint(
+                check=Q(skill_level__in=[c for c, _label in SKILL_LEVEL_CHOICES]),
+                name='person_language_skill_skill_level_valid',
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        """Make the first language a person gets their primary one.
+
+        Without this the column default wins and a person can end up with
+        several languages and no primary, which the derived languages_skills
+        string has no way to express. Keyed on "no primary exists" rather than
+        "no rows exist" so it also heals the case where the primary row was
+        deleted: the next language added takes over.
+
+        Only on insert, and only when nothing is already primary — an explicit
+        is_primary=True still wins, and an existing primary is never displaced
+        silently. Two concurrent inserts can both see no primary; the partial
+        unique index is what stops them both landing.
+        """
+        if self._state.adding and not self.is_primary:
+            has_primary = PersonLanguageSkill.objects.filter(
+                person_id=self.person_id, is_primary=True,
+            ).exists()
+            if not has_primary:
+                self.is_primary = True
+                update_fields = kwargs.get('update_fields')
+                if update_fields is not None:
+                    kwargs['update_fields'] = set(update_fields) | {'is_primary'}
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"Person {self.person_id}: {self.language_concept.concept_name} ({self.skill_level})"
@@ -2875,7 +2942,7 @@ class PatientRecord(models.Model):
         return self.person.get_primary_language()
     
     def get_languages_display(self):
-        """Return a human-readable string of languages and skills like 'English: speak, Spanish: both'"""
+        """Human-readable languages and skills, e.g. 'English: speak, Spanish: read'."""
         skills = self.get_languages()
         if not skills:
             return "No languages recorded"

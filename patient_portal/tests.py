@@ -10130,7 +10130,7 @@ class OrganizationCleanupServiceTest(TestCase):
         PersonLanguageSkill.objects.create(
             person=person,
             language_concept=_make_test_concept(9400004, 'Cleanup Language', 'CLANG', 'Language'),
-            skill_level='both',
+            skill_level='speak',
         )
         survey = Survey.objects.create(name='cleanup-survey', title='Cleanup Survey')
         PatientSurveyResponse.objects.create(person=person, survey=survey)

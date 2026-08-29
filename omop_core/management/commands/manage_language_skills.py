@@ -1,6 +1,9 @@
 from django.core.management.base import BaseCommand
 from django.db import transaction
-from omop_core.models import Person, PersonLanguageSkill, Concept, Vocabulary, Domain, ConceptClass
+from omop_core.models import (
+    Person, PersonLanguageSkill, Concept, Vocabulary, Domain, ConceptClass,
+    SKILL_LEVEL_CHOICES,
+)
 
 
 class Command(BaseCommand):
@@ -15,7 +18,7 @@ class Command(BaseCommand):
         parser.add_argument(
             '--add-language',
             type=str,
-            help='Add a language (format: "language_name:skill_level", e.g., "English:both")'
+            help='Add a language (format: "language_name:skill_level", e.g., "English:speak")'
         )
         parser.add_argument(
             '--set-primary',
@@ -143,8 +146,10 @@ class Command(BaseCommand):
             language_name = language_name.strip()
             skill_level = skill_level.strip()
 
-            if skill_level not in ['speak', 'write', 'both']:
-                self.stdout.write(self.style.ERROR(f'Invalid skill level: {skill_level}. Use: speak, write, both'))
+            valid_levels = [v for v, _label in SKILL_LEVEL_CHOICES]
+            if skill_level not in valid_levels:
+                self.stdout.write(self.style.ERROR(
+                    f'Invalid skill level: {skill_level}. Use: {", ".join(valid_levels)}'))
                 return
 
             # Find language concept (prefer LANGUAGE vocabulary)
@@ -161,10 +166,13 @@ class Command(BaseCommand):
                 return
 
             # Create or update language skill
+            # One row per capability: skill_level is part of the identity, so
+            # adding "English:read" no longer overwrites "English:speak".
             language_skill, created = PersonLanguageSkill.objects.update_or_create(
                 person=person,
                 language_concept=language_concept,
-                defaults={'skill_level': skill_level}
+                skill_level=skill_level,
+                defaults={},
             )
 
             action = 'Created' if created else 'Updated'

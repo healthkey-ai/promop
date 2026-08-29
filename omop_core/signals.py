@@ -28,6 +28,7 @@ from django.dispatch import receiver
 from .models import (
     ConditionOccurrence, DrugExposure, Measurement,
     Observation, ProcedureOccurrence,
+    PersonLanguageSkill,
 )
 
 logger = logging.getLogger(__name__)
@@ -127,3 +128,39 @@ def observation_deleted(sender, instance, **kwargs):
 @receiver(post_delete, sender=ProcedureOccurrence)
 def procedure_occurrence_deleted(sender, instance, **kwargs):
     _refresh_for_instance(instance)
+
+
+# ---------------------------------------------------------------------------
+# Primary language
+# ---------------------------------------------------------------------------
+
+@receiver(post_delete, sender=PersonLanguageSkill)
+def person_language_skill_deleted(sender, instance, **kwargs):
+    """Promote another row when the primary language row is deleted.
+
+    PersonLanguageSkill.save() makes the first row a person gets their primary
+    one, but that only fires on insert. Since a person can hold several rows per
+    language, deleting the flagged row would otherwise leave them with languages
+    and no primary, and nothing would ever restore one -- the database enforces
+    at most one primary, not at least one.
+
+    Promotes the earliest surviving row, so the choice is deterministic rather
+    than whatever the database happens to return first.
+
+    Deleting a Person cascades to these rows, and this receiver fires for each.
+    The promotion it does then is wasted but harmless: the promoted row is
+    itself deleted moments later, still inside the same cascade.
+    """
+    if not instance.is_primary:
+        return
+
+    survivor = (
+        PersonLanguageSkill.objects
+        .filter(person_id=instance.person_id)
+        .order_by('created_date', 'id')
+        .first()
+    )
+    if survivor is None:
+        return
+
+    PersonLanguageSkill.objects.filter(pk=survivor.pk).update(is_primary=True)
