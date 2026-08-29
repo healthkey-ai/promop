@@ -4163,6 +4163,30 @@ def set_language_skills(person, skills_by_alias):
 
     Returns the number of rows created and removed. Raises LanguageSkillError
     for an unknown alias, an unknown capability, or a missing language concept.
+    """
+    unknown_aliases = [a for a in skills_by_alias if a not in LANGUAGE_ALIASES]
+    if unknown_aliases:
+        raise LanguageSkillError(
+            f"unknown language {unknown_aliases[0]!r}; expected one of "
+            f"{sorted(LANGUAGE_ALIASES)}")
+
+    return set_language_skills_by_code(
+        person,
+        {LANGUAGE_ALIASES[alias]: capabilities
+         for alias, capabilities in skills_by_alias.items()},
+        labels={LANGUAGE_ALIASES[alias]: alias for alias in skills_by_alias},
+    )
+
+
+def set_language_skills_by_code(person, skills_by_code, labels=None):
+    """Replace a person's capabilities, addressing each language by SNOMED code.
+
+    The general form. set_language_skills is the two-language alias wrapper the
+    API uses; management commands and anything reaching the other 876 SNOMED
+    languages come through here.
+
+    ``labels`` optionally maps a code to a friendlier name for error messages,
+    so the API can say "english" where the CLI says the code.
 
     Atomic, and deliberately so: replacing a language is a delete followed by a
     create, and a payload naming two languages used to write the first before
@@ -4174,35 +4198,39 @@ def set_language_skills(person, skills_by_alias):
 
     from omop_core.models import Concept, PersonLanguageSkill, SKILL_LEVEL_CHOICES
 
+    labels = labels or {}
     valid_capabilities = {value for value, _label in SKILL_LEVEL_CHOICES}
     created = removed = 0
 
     with transaction.atomic():
-        for alias, capabilities in skills_by_alias.items():
-            if alias not in LANGUAGE_ALIASES:
-                raise LanguageSkillError(
-                    f"unknown language {alias!r}; expected one of "
-                    f"{sorted(LANGUAGE_ALIASES)}")
+        for concept_code, capabilities in skills_by_code.items():
+            label = labels.get(concept_code, concept_code)
+
             if not isinstance(capabilities, (list, tuple)):
                 raise LanguageSkillError(
-                    f"{alias}: expected a list of capabilities, got "
+                    f"{label}: expected a list of capabilities, got "
                     f"{type(capabilities).__name__}")
 
             unknown = [c for c in capabilities if c not in valid_capabilities]
             if unknown:
                 raise LanguageSkillError(
-                    f"{alias}: unknown capabilities {unknown}; expected any of "
+                    f"{label}: unknown capabilities {unknown}; expected any of "
                     f"{sorted(valid_capabilities)}")
 
+            # By (vocabulary_id, concept_code) and constrained to the Language
+            # domain. Never by concept_name: docs/vocabularies.md:216, and the
+            # defect this replaces (#812) matched names across every loaded
+            # vocabulary, so "English" could resolve to anything so named.
             concept = Concept.objects.filter(
-                vocabulary_id='SNOMED', concept_code=LANGUAGE_ALIASES[alias],
+                vocabulary_id='SNOMED', concept_code=concept_code,
+                domain_id='Language',
             ).first()
             if concept is None:
                 # SNOMED loads separately from migrations. Refusing beats writing
                 # the row against a concept that is not there.
                 raise LanguageSkillError(
-                    f"{alias}: SNOMED concept {LANGUAGE_ALIASES[alias]} is not "
-                    f"loaded, so the language cannot be recorded")
+                    f"{label}: SNOMED concept {concept_code} is not a loaded "
+                    f"Language-domain concept, so it cannot be recorded")
 
             wanted = set(capabilities)
             existing = {
