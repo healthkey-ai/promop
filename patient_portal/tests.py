@@ -27,6 +27,7 @@ from rest_framework.test import APIClient
 from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
     Person, PatientRecord, ProvenanceRecord, FieldConceptMapping,
+    SourceCodeConceptMapping,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     Death, PatientDocument, RecordRevision,
     Relationship, ConceptRelationship, ConceptAncestor,
@@ -20627,6 +20628,176 @@ class CustomPatientFieldApiTest(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(FieldFormula.objects.filter(field_name='tumor_response_note').exists())
+
+
+class CodeMappingApiTest(TestCase):
+    """Tests for the /api/v1/code-mappings/ endpoints."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = Identity.objects.create_user(
+            email='code_mapping_staff@t.com', password='x', is_staff=True,
+        )
+        cls.org_admin = Identity.objects.create_user(
+            email='code_mapping_org_admin@t.com', password='x',
+        )
+        cls.non_staff = Identity.objects.create_user(
+            email='code_mapping_user@t.com', password='x', is_staff=False,
+        )
+        cls.org = Organization.objects.create(name='Code Mapping Admin Org', slug='code-mapping-admin-org')
+        GroupAccess.objects.create(identity=cls.org_admin, org=cls.org, role='org_admin')
+
+        cls.domain, _ = Domain.objects.get_or_create(
+            domain_id='Observation',
+            defaults={'domain_name': 'Observation', 'domain_concept_id': 27},
+        )
+        cls.concept_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Clinical Observation',
+            defaults={'concept_class_name': 'Clinical Observation', 'concept_class_concept_id': 0},
+        )
+        cls.language_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HK-Language',
+            defaults={
+                'vocabulary_name': 'HealthKey Language',
+                'vocabulary_reference': 'HealthKey local vocabulary',
+                'vocabulary_version': 'local',
+                'vocabulary_concept_id': 0,
+            },
+        )
+        cls.wearable_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HK-Wearable',
+            defaults={
+                'vocabulary_name': 'HealthKey Wearable',
+                'vocabulary_reference': 'HealthKey local vocabulary',
+                'vocabulary_version': 'local',
+                'vocabulary_concept_id': 0,
+            },
+        )
+        cls.local_language = Concept.objects.create(
+            concept_id=2039000001,
+            concept_name='HealthKey preferred language',
+            domain=cls.domain,
+            vocabulary=cls.language_vocab,
+            concept_class=cls.concept_class,
+            standard_concept=None,
+            concept_code='HK-LANG-PREFERRED',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+            source='HealthKey',
+        )
+        cls.local_wearable = Concept.objects.create(
+            concept_id=2039000002,
+            concept_name='HealthKey wearable stride count',
+            domain=cls.domain,
+            vocabulary=cls.wearable_vocab,
+            concept_class=cls.concept_class,
+            standard_concept=None,
+            concept_code='HK-WEAR-STRIDE-COUNT',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+            source='HealthKey',
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='HK-Wearable',
+            source_code='HK-WEAR-STRIDE-COUNT',
+            source_code_description='Stride count',
+            target_concept=cls.local_wearable,
+            source='HK-Wearable',
+            status='active',
+            created_by=cls.staff,
+            updated_by=cls.staff,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_list_requires_mapping_admin(self):
+        self.client.force_authenticate(user=self.non_staff)
+        resp = self.client.get('/api/v1/code-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_org_admin_can_list_code_mappings(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.get('/api/v1/code-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(any(row['concept_id'] == self.local_wearable.concept_id for row in resp.data))
+
+    def test_list_includes_quarantined_concept_without_source_code(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/code-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        by_concept = {row['concept_id']: row for row in resp.data}
+
+        language_row = by_concept[self.local_language.concept_id]
+        self.assertFalse(language_row['has_mapping'])
+        self.assertEqual(language_row['status'], 'unmapped')
+        self.assertEqual(language_row['source'], 'HK-Language')
+
+        wearable_row = by_concept[self.local_wearable.concept_id]
+        self.assertTrue(wearable_row['has_mapping'])
+        self.assertEqual(wearable_row['source_code'], 'HK-WEAR-STRIDE-COUNT')
+
+    def test_create_new_code_mapping_creates_local_concept(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': 'HK-Wearable',
+            'source_code': 'HK-WEAR-GAIT-SYMMETRY',
+            'source_code_description': 'Gait symmetry',
+            'target_concept_id': 2039000003,
+            'target_concept_name': 'Gait symmetry',
+            'target_concept_code': 'HK-WEAR-GAIT-SYMMETRY',
+            'target_vocabulary_id': 'HK-Wearable',
+            'domain_id': 'Observation',
+            'concept_class_id': 'Clinical Observation',
+            'notes': 'Seeded from wearable source code.',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['concept_id'], 2039000003)
+        self.assertEqual(resp.data['source_code'], 'HK-WEAR-GAIT-SYMMETRY')
+        self.assertTrue(Concept.objects.filter(concept_id=2039000003, source='HealthKey').exists())
+        self.assertTrue(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='HK-Wearable',
+            source_code='HK-WEAR-GAIT-SYMMETRY',
+        ).exists())
+
+    def test_create_rejects_standard_omop_range_and_non_local_target_vocab(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': 'HK-Wearable',
+            'source_code': 'BAD-LOW-ID',
+            'target_concept_id': 12345,
+            'target_concept_name': 'Bad low id',
+            'target_vocabulary_id': 'HK-Wearable',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('target_concept_id', resp.data)
+
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': 'HK-Wearable',
+            'source_code': 'BAD-VOCAB',
+            'target_concept_id': 2039000004,
+            'target_concept_name': 'Bad vocabulary',
+            'target_vocabulary_id': 'LOINC',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('target_vocabulary_id', resp.data)
+
+    def test_patch_adds_source_code_to_unmapped_local_concept(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.local_language.concept_id}/', {
+            'source_vocabulary_id': 'HK-Language',
+            'source_code': 'HK-LANG-EN',
+            'source_code_description': 'English',
+            'status': 'active',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['source_code'], 'HK-LANG-EN')
+        self.assertEqual(resp.data['status'], 'active')
+        self.assertTrue(SourceCodeConceptMapping.objects.filter(
+            target_concept=self.local_language,
+            source_vocabulary_id='HK-Language',
+            source_code='HK-LANG-EN',
+        ).exists())
 
 
 class FieldConceptMappingTest(TestCase):
