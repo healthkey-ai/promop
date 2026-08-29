@@ -23,6 +23,7 @@ from django.test import TestCase
 from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
     Organization, Person, PatientRecord, ConditionOccurrence, DrugExposure, Measurement, Observation,
+    PersonLanguageSkill,
 )
 from omop_core.services.patient_record_service import refresh_patient_record
 
@@ -5261,3 +5262,175 @@ class SeededEmploymentStatusMappingTest(TestCase):
         record = refresh_patient_record(person)
 
         self.assertEqual(record.employment_status, 'Employed full-time')
+
+
+class PersonLanguageSkillConstraintTest(TestCase):
+    """#809 — person_language_skill enforces its rules in the database.
+
+    Every rule here was previously Python-only or absent, so a management
+    command, a raw insert, or any future write path could break it silently.
+    These run under the Django runner rather than pytest on purpose: pytest
+    builds its database with --no-migrations, so the RunSQL trigger below never
+    exists there and the domain tests would pass without a trigger present.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import ConceptClass, Domain, Vocabulary
+
+        cls.person = Person.objects.create(person_id=880001)
+        cls.other_person = Person.objects.create(person_id=880002)
+
+        snomed, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0},
+        )
+        qualifier, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Qualifier Value',
+            defaults={'concept_class_name': 'Qualifier Value',
+                      'concept_class_concept_id': 0},
+        )
+        language_domain, _ = Domain.objects.get_or_create(
+            domain_id='Language',
+            defaults={'domain_name': 'Language', 'domain_concept_id': 0},
+        )
+        condition_domain, _ = Domain.objects.get_or_create(
+            domain_id='Condition',
+            defaults={'domain_name': 'Condition', 'domain_concept_id': 19},
+        )
+
+        def _concept(concept_id, name, domain, code):
+            return Concept.objects.create(
+                concept_id=concept_id, concept_name=name, domain=domain,
+                vocabulary=snomed, concept_class=qualifier,
+                standard_concept='S', concept_code=code,
+                valid_start_date=date(1970, 1, 1),
+                valid_end_date=date(2099, 12, 31),
+            )
+
+        # The two concepts #774 named, plus a non-language one to reject.
+        cls.english = _concept(4180186, 'English language', language_domain,
+                               '297487008')
+        cls.spanish = _concept(4182511, 'Spanish language', language_domain,
+                               '297510001')
+        cls.heart_disease = _concept(4057432, 'Heart disease', condition_domain,
+                                     '56265001')
+
+    # -- one primary per person --------------------------------------------
+
+    def test_a_person_cannot_have_two_primary_languages(self):
+        PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='both', is_primary=True)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                PersonLanguageSkill.objects.create(
+                    person=self.person, language_concept=self.spanish,
+                    skill_level='speak', is_primary=True)
+
+    def test_a_person_may_have_many_non_primary_languages(self):
+        """The constraint is partial: only is_primary=True rows collide."""
+        PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='both', is_primary=False)
+        PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.spanish,
+            skill_level='speak', is_primary=False)
+        self.assertEqual(
+            PersonLanguageSkill.objects.filter(person=self.person).count(), 2)
+
+    def test_different_people_each_keep_their_own_primary(self):
+        PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='both', is_primary=True)
+        PersonLanguageSkill.objects.create(
+            person=self.other_person, language_concept=self.english,
+            skill_level='both', is_primary=True)
+        self.assertEqual(
+            PersonLanguageSkill.objects.filter(is_primary=True).count(), 2)
+
+    def test_promoting_a_second_language_to_primary_is_rejected(self):
+        """UPDATE must be caught too, not just INSERT."""
+        PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='both', is_primary=True)
+        second = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.spanish,
+            skill_level='speak', is_primary=False)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                second.is_primary = True
+                second.save(update_fields=['is_primary'])
+
+    # -- skill_level -------------------------------------------------------
+
+    def test_skill_level_outside_the_vocabulary_is_rejected(self):
+        """choices is validation, not a constraint; .create() bypasses it."""
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                PersonLanguageSkill.objects.create(
+                    person=self.person, language_concept=self.english,
+                    skill_level='fluent')
+
+    def test_every_declared_skill_level_is_accepted(self):
+        """Guards against the CHECK drifting from SKILL_LEVEL_CHOICES."""
+        for i, (value, _label) in enumerate(
+                PersonLanguageSkill.SKILL_LEVEL_CHOICES):
+            person = Person.objects.create(person_id=880100 + i)
+            PersonLanguageSkill.objects.create(
+                person=person, language_concept=self.english,
+                skill_level=value)
+        self.assertEqual(
+            PersonLanguageSkill.objects.count(),
+            len(PersonLanguageSkill.SKILL_LEVEL_CHOICES))
+
+    # -- language domain ---------------------------------------------------
+
+    def test_a_non_language_concept_is_rejected(self):
+        """The FK accepts any of 2.4M concepts; the trigger narrows it.
+
+        This is the exact failure manage_language_skills can produce today via
+        its unqualified concept_name__iexact fallback (#808).
+        """
+        with self.assertRaises(Exception) as ctx:
+            with transaction.atomic():
+                PersonLanguageSkill.objects.create(
+                    person=self.person, language_concept=self.heart_disease,
+                    skill_level='both')
+        self.assertIn('not Language', str(ctx.exception))
+
+    def test_a_language_concept_is_accepted(self):
+        skill = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='both')
+        self.assertEqual(skill.language_concept.domain_id, 'Language')
+
+    def test_repointing_a_row_at_a_non_language_concept_is_rejected(self):
+        """The trigger fires on UPDATE OF language_concept_id, not only INSERT."""
+        skill = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='both')
+        with self.assertRaises(Exception) as ctx:
+            with transaction.atomic():
+                skill.language_concept = self.heart_disease
+                skill.save(update_fields=['language_concept'])
+        self.assertIn('not Language', str(ctx.exception))
+
+    # -- database-level default --------------------------------------------
+
+    def test_is_primary_defaults_at_the_database_not_only_in_django(self):
+        """A writer that bypasses the ORM must still get a valid row.
+
+        Before db_default, the column carried no DEFAULT, so an insert omitting
+        is_primary failed on NOT NULL instead of defaulting to false.
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(
+                'INSERT INTO person_language_skill '
+                '(person_id, language_concept_id, skill_level, '
+                ' created_date, updated_date) '
+                'VALUES (%s, %s, %s, NOW(), NOW())',
+                [self.person.person_id, self.english.concept_id, 'both'],
+            )
+        self.assertFalse(
+            PersonLanguageSkill.objects.get(person=self.person).is_primary)

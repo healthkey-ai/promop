@@ -18,7 +18,7 @@ from omop_core.management.commands.populate_patient_record import Command
 from omop_core.models import PersonLanguageSkill, ProvenanceRecord
 from omop_core.services.patient_record_service import _get_tumor_size_data, refresh_patient_record
 from tests.factories import (
-    ConceptFactory, PersonFactory, PatientRecordFactory,
+    ConceptFactory, DomainFactory, PersonFactory, PatientRecordFactory,
     MeasurementFactory, ObservationFactory,
     ConditionOccurrenceFactory, DrugExposureFactory,
     VocabularyFactory,
@@ -44,6 +44,21 @@ def _loinc_concept(code, name, vocab_id='LOINC'):
 # get_demographics — languages_skills
 # ---------------------------------------------------------------------------
 
+def _language_concept(name):
+    """A Language-domain concept, which is what the schema now requires.
+
+    person_language_skill has a trigger rejecting any concept whose domain is
+    not 'Language' (#809). pytest builds its database with --no-migrations, so
+    that trigger does not exist here — meaning these tests would otherwise pass
+    on rows the real database refuses. Building the concept correctly keeps the
+    fixture honest about what can actually be stored.
+    """
+    return ConceptFactory(
+        concept_name=name,
+        domain=DomainFactory(domain_id='Language', domain_name='Language'),
+    )
+
+
 class TestLanguagesSkills:
 
     def test_no_language_skills_omitted(self):
@@ -53,7 +68,7 @@ class TestLanguagesSkills:
 
     def test_single_language_skill_formatted(self):
         person = PersonFactory()
-        lang_concept = ConceptFactory(concept_name='English')
+        lang_concept = _language_concept('English')
         PersonLanguageSkill.objects.create(
             person=person, language_concept=lang_concept, skill_level='speak'
         )
@@ -62,8 +77,8 @@ class TestLanguagesSkills:
 
     def test_multiple_languages_joined(self):
         person = PersonFactory()
-        en = ConceptFactory(concept_name='English')
-        es = ConceptFactory(concept_name='Spanish')
+        en = _language_concept('English')
+        es = _language_concept('Spanish')
         PersonLanguageSkill.objects.create(person=person, language_concept=en, skill_level='both')
         PersonLanguageSkill.objects.create(person=person, language_concept=es, skill_level='speak')
         data = _cmd().get_demographics(person)

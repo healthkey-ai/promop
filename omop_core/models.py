@@ -847,21 +847,27 @@ class Person(models.Model):
         return f"Person {self.person_id}"
 
 
+SKILL_LEVEL_CHOICES = [
+    ('speak', 'Speak'),
+    ('write', 'Write'),
+    ('both', 'Both Speak and Write'),
+]
+
+
 class PersonLanguageSkill(models.Model):
     """Language skills for a person - supports multiple languages with different skill levels."""
-    
-    SKILL_LEVEL_CHOICES = [
-        ('speak', 'Speak'),
-        ('write', 'Write'),
-        ('both', 'Both Speak and Write'),
-    ]
+
+    # Kept as a class attribute for callers that reference it through the model.
+    SKILL_LEVEL_CHOICES = SKILL_LEVEL_CHOICES
     
     person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='language_skills')
     language_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='person_language_skills', 
                                         db_column='language_concept_id')
     skill_level = models.CharField(max_length=10, choices=SKILL_LEVEL_CHOICES, 
                                   help_text="Language skill level: speak, write, both")
-    is_primary = models.BooleanField(default=False, help_text="Is this the person's primary language?")
+    is_primary = models.BooleanField(
+        default=False, db_default=False,
+        help_text="Is this the person's primary language?")
     created_date = models.DateTimeField(auto_now_add=True)
     updated_date = models.DateTimeField(auto_now=True)
 
@@ -870,6 +876,26 @@ class PersonLanguageSkill(models.Model):
         unique_together = ['person', 'language_concept']
         indexes = [
             models.Index(fields=['person', 'is_primary']),
+        ]
+        constraints = [
+            # At most one primary language per person. manage_language_skills
+            # clears the others in Python before setting one; this makes the
+            # invariant hold for every other writer too, including raw SQL.
+            models.UniqueConstraint(
+                fields=['person'],
+                condition=Q(is_primary=True),
+                name='person_language_skill_one_primary_per_person',
+            ),
+            # SKILL_LEVEL_CHOICES is validation, not a constraint. The derived
+            # languages_skills string interpolates this value verbatim, so an
+            # unchecked write surfaces in the API rather than being rejected.
+            # There is no usable coded value set for the speak/write/both
+            # trichotomy -- see the migration for why -- so the literals are
+            # pinned here instead.
+            models.CheckConstraint(
+                check=Q(skill_level__in=[c for c, _label in SKILL_LEVEL_CHOICES]),
+                name='person_language_skill_skill_level_valid',
+            ),
         ]
 
     def __str__(self):
