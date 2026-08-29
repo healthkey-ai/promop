@@ -92,7 +92,7 @@ export default function CodeMappingPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
-  const [sourceFilter, setSourceFilter] = useState("");
+  const [activeVocabulary, setActiveVocabulary] = useState("");
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
   const [form, setForm] = useState<MappingForm>(emptyForm);
@@ -120,7 +120,7 @@ export default function CodeMappingPage() {
     })();
   }, [fetchRows]);
 
-  const sourceOptions = useMemo(() => {
+  const vocabularyOptions = useMemo(() => {
     const values = new Set<string>();
     rows.forEach((row) => {
       if (row.source_vocabulary_id) values.add(row.source_vocabulary_id);
@@ -130,10 +130,28 @@ export default function CodeMappingPage() {
     return [...values].sort();
   }, [references.vocabularies, rows]);
 
+  const selectedVocabulary = activeVocabulary || vocabularyOptions[0] || "";
+
+  const vocabularyStats = useMemo(() => {
+    const counts: Record<string, { total: number; unmapped: number }> = {};
+    rows.forEach((row) => {
+      const key = row.source_vocabulary_id || row.concept_vocabulary_id;
+      if (!key) return;
+      if (!counts[key]) counts[key] = { total: 0, unmapped: 0 };
+      counts[key].total += 1;
+      if (!row.has_mapping) counts[key].unmapped += 1;
+    });
+    return counts;
+  }, [rows]);
+
   const filteredRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return rows.filter((row) => {
-      if (sourceFilter && row.source_vocabulary_id !== sourceFilter && row.concept_vocabulary_id !== sourceFilter) {
+      if (
+        selectedVocabulary
+        && row.source_vocabulary_id !== selectedVocabulary
+        && row.concept_vocabulary_id !== selectedVocabulary
+      ) {
         return false;
       }
       if (!q) return true;
@@ -146,7 +164,7 @@ export default function CodeMappingPage() {
         String(row.concept_id),
       ].some((value) => value.toLowerCase().includes(q));
     });
-  }, [rows, searchQuery, sourceFilter]);
+  }, [rows, searchQuery, selectedVocabulary]);
 
   const stats = useMemo(() => ({
     total: rows.length,
@@ -250,7 +268,7 @@ export default function CodeMappingPage() {
           </div>
         )}
 
-        <div className="mb-4 grid gap-3 md:grid-cols-[1fr_240px]">
+        <div className="mb-4">
           <label className="relative block">
             <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
             <input
@@ -260,17 +278,30 @@ export default function CodeMappingPage() {
               className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-slate-700"
             />
           </label>
-          <select
-            value={sourceFilter}
-            onChange={(e) => setSourceFilter(e.target.value)}
-            className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-slate-700"
-            aria-label="Source filter"
-          >
-            <option value="">All sources</option>
-            {sourceOptions.map((source) => (
-              <option key={source} value={source}>{source}</option>
-            ))}
-          </select>
+        </div>
+
+        <div className="mb-4 flex gap-2 overflow-x-auto border-b border-slate-200">
+          {vocabularyOptions.map((vocabulary) => {
+            const selected = vocabulary === selectedVocabulary;
+            const counts = vocabularyStats[vocabulary] || { total: 0, unmapped: 0 };
+            return (
+              <button
+                key={vocabulary}
+                type="button"
+                onClick={() => setActiveVocabulary(vocabulary)}
+                className={`whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium ${
+                  selected
+                    ? "border-slate-950 text-slate-950"
+                    : "border-transparent text-slate-600 hover:border-slate-300 hover:text-slate-950"
+                }`}
+              >
+                {vocabulary}
+                <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600">
+                  {counts.unmapped ? `${counts.total}/${counts.unmapped}` : counts.total}
+                </span>
+              </button>
+            );
+          })}
         </div>
 
         <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
@@ -280,7 +311,7 @@ export default function CodeMappingPage() {
                 <th className="px-4 py-3 font-semibold">Code</th>
                 <th className="px-4 py-3 font-semibold">Destination OMOP Concept ID</th>
                 <th className="px-4 py-3 font-semibold">Concept</th>
-                <th className="px-4 py-3 font-semibold">Source</th>
+                <th className="px-4 py-3 font-semibold">Vocabulary</th>
                 <th className="px-4 py-3 font-semibold">Status</th>
                 <th className="w-16 px-4 py-3 font-semibold" aria-label="Actions" />
               </tr>
@@ -318,7 +349,7 @@ export default function CodeMappingPage() {
               {filteredRows.length === 0 && (
                 <tr>
                   <td colSpan={6} className="px-4 py-8 text-center text-sm text-slate-500">
-                    No code mappings match the current filters.
+                    No code mappings match the current tab and search.
                   </td>
                 </tr>
               )}
@@ -346,7 +377,7 @@ export default function CodeMappingPage() {
 
             <div className="grid max-h-[70vh] gap-4 overflow-y-auto px-5 py-5 md:grid-cols-2">
               <label className="grid gap-1 text-sm font-medium text-slate-700">
-                Source
+                Source vocabulary
                 <input
                   list="code-mapping-source-vocabularies"
                   value={form.source_vocabulary_id}
@@ -458,7 +489,7 @@ export default function CodeMappingPage() {
             </div>
 
             <datalist id="code-mapping-source-vocabularies">
-              {sourceOptions.map((source) => <option key={source} value={source} />)}
+              {vocabularyOptions.map((source) => <option key={source} value={source} />)}
             </datalist>
             <datalist id="code-mapping-target-vocabularies">
               {references.vocabularies.map((vocab) => <option key={vocab.vocabulary_id} value={vocab.vocabulary_id} />)}
