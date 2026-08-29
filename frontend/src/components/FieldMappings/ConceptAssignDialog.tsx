@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Search, X } from "lucide-react";
+import { Search, Sparkles, X } from "lucide-react";
 import api from "@/api/axios";
 
 interface ConceptResult {
@@ -106,6 +106,10 @@ export function ConceptAssignDialog({
       setSearching(false);
     }
   }, [vocabFilter]);
+
+  const handleSuggest = () => {
+    setSearchQuery(fieldName.replace(/_/g, " "));
+  };
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -226,6 +230,16 @@ export function ConceptAssignDialog({
         </div>
 
         {/* Concept search */}
+        <div className="mb-2 flex justify-end">
+          <button
+            type="button"
+            onClick={handleSuggest}
+            className="inline-flex items-center gap-1.5 rounded border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+          >
+            <Sparkles size={13} />
+            Suggest
+          </button>
+        </div>
         <div className="mb-3 flex gap-2">
           <div className="relative flex-1">
             <Search size={14} className="absolute left-2.5 top-2.5 text-gray-400" />

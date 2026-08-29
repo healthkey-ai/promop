@@ -1771,8 +1771,8 @@ class SourceCodeConceptMapping(models.Model):
     """HealthKey-curated incoming source code -> local OMOP concept mapping."""
 
     STATUS_CHOICES = [
-        ('active', 'Active'),
-        ('retired', 'Retired'),
+        ('proposed', 'Proposed'),
+        ('approved', 'Approved'),
         ('rejected', 'Rejected'),
     ]
 
@@ -1784,7 +1784,7 @@ class SourceCodeConceptMapping(models.Model):
         db_constraint=False,
     )
     source = models.CharField(max_length=50, blank=True, default='HealthKey', db_index=True)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='proposed')
     notes = models.TextField(blank=True, default='')
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,

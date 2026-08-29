@@ -20703,7 +20703,7 @@ class CodeMappingApiTest(TestCase):
             source_code_description='Stride count',
             target_concept=cls.local_wearable,
             source='HK-Wearable',
-            status='active',
+            status='approved',
             created_by=cls.staff,
             updated_by=cls.staff,
         )
@@ -20788,16 +20788,30 @@ class CodeMappingApiTest(TestCase):
             'source_vocabulary_id': 'HK-Language',
             'source_code': 'HK-LANG-EN',
             'source_code_description': 'English',
-            'status': 'active',
+            'status': 'proposed',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.assertEqual(resp.data['source_code'], 'HK-LANG-EN')
-        self.assertEqual(resp.data['status'], 'active')
+        self.assertEqual(resp.data['status'], 'proposed')
         self.assertTrue(SourceCodeConceptMapping.objects.filter(
             target_concept=self.local_language,
             source_vocabulary_id='HK-Language',
             source_code='HK-LANG-EN',
         ).exists())
+
+    def test_propose_all_code_mappings_creates_proposed_rows_for_source(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/code-mappings/propose-all/', {
+            'source': 'HK-Language',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertGreaterEqual(resp.data['created'], 1)
+        self.assertIn('HK-Language:HK-LANG-PREFERRED', resp.data['codes'])
+        self.assertTrue(all(code.startswith('HK-Language:') for code in resp.data['codes']))
+        mapping = SourceCodeConceptMapping.objects.get(target_concept=self.local_language)
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertEqual(mapping.source_vocabulary_id, 'HK-Language')
+        self.assertEqual(mapping.source_code, 'HK-LANG-PREFERRED')
 
 
 class FieldConceptMappingTest(TestCase):
