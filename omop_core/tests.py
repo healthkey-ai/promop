@@ -5760,3 +5760,163 @@ class LanguageHelperMethodTest(TestCase):
         self.assertEqual(
             self.record.languages_skills,
             'English language: read, speak; Spanish language: speak')
+
+
+class LanguageSkillConceptAndFlatColumnTest(TestCase):
+    """#813 — capabilities are coded, and flattened for matching.
+
+    Two halves: skill_concept carries the HK-Language code for a row, and the
+    eight PatientRecord booleans unroll the same facts into columns a query can
+    filter on without parsing the display string.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import ConceptClass, Domain, Vocabulary
+
+        cls.person = Person.objects.create(person_id=882001)
+        cls.record = PatientRecord.objects.create(person=cls.person)
+
+        snomed, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0})
+        qualifier, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Qualifier Value',
+            defaults={'concept_class_name': 'Qualifier Value',
+                      'concept_class_concept_id': 0})
+        language_domain, _ = Domain.objects.get_or_create(
+            domain_id='Language',
+            defaults={'domain_name': 'Language', 'domain_concept_id': 0})
+
+        def _language(concept_id, name, code):
+            return Concept.objects.create(
+                concept_id=concept_id, concept_name=name, domain=language_domain,
+                vocabulary=snomed, concept_class=qualifier, standard_concept='S',
+                concept_code=code, valid_start_date=date(1970, 1, 1),
+                valid_end_date=date(2099, 12, 31))
+
+        cls.english = _language(4180186, 'English language', '297487008')
+        cls.spanish = _language(4182511, 'Spanish language', '297510001')
+
+    def _skill(self, concept, level):
+        return PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=concept, skill_level=level)
+
+    def _refresh(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(self.person)
+        self.record.refresh_from_db()
+
+    # -- skill_concept -----------------------------------------------------
+
+    def test_skill_concept_is_resolved_on_save(self):
+        """Every write path gets the code, not just callers that remember to.
+
+        Migration 0186 seeds the HK-Language mint, so it is present here.
+        """
+        skill = self._skill(self.english, 'read')
+        self.assertIsNotNone(skill.skill_concept_id)
+        self.assertEqual(skill.skill_concept.concept_code, 'hkl:read')
+        self.assertEqual(skill.skill_concept.vocabulary_id, 'HK-Language')
+
+    def test_each_capability_resolves_to_its_own_concept(self):
+        concepts = {}
+        for level, _label in PersonLanguageSkill.SKILL_LEVEL_CHOICES:
+            concepts[level] = self._skill(self.english, level).skill_concept_id
+        self.assertEqual(len(set(concepts.values())), len(concepts))
+
+    def test_a_row_still_saves_when_the_mint_is_absent(self):
+        """The mint must not become a hard dependency of storing a language.
+
+        A fresh database can reach a write before the seed migration has run.
+        """
+        Concept.objects.filter(vocabulary_id='HK-Language').delete()
+        skill = self._skill(self.english, 'speak')
+        self.assertIsNone(skill.skill_concept_id)
+
+    def test_an_explicitly_set_concept_is_not_overwritten(self):
+        other = Concept.objects.get(concept_code='hkl:write')
+        skill = PersonLanguageSkill.objects.create(
+            person=self.person, language_concept=self.english,
+            skill_level='read', skill_concept=other)
+        self.assertEqual(skill.skill_concept_id, other.concept_id)
+
+    # -- flattened columns -------------------------------------------------
+
+    def test_capabilities_present_become_true(self):
+        self._skill(self.english, 'speak')
+        self._skill(self.english, 'read')
+        self._refresh()
+        self.assertTrue(self.record.english_speak)
+        self.assertTrue(self.record.english_read)
+
+    def test_capabilities_absent_for_a_known_language_become_false(self):
+        """Asked about English, so the unlisted English capabilities are known."""
+        self._skill(self.english, 'speak')
+        self._refresh()
+        self.assertFalse(self.record.english_read)
+        self.assertFalse(self.record.english_write)
+        self.assertFalse(self.record.english_understand)
+
+    def test_an_unasked_language_stays_null_not_false(self):
+        """The distinction the whole three-valued design exists for.
+
+        Knowing somebody speaks English says nothing about whether anyone asked
+        them about Spanish. Recording False would manufacture a negative that a
+        trial filter then acts on.
+        """
+        self._skill(self.english, 'speak')
+        self._refresh()
+        for capability in ('speak', 'read', 'write', 'understand'):
+            self.assertIsNone(getattr(self.record, f'spanish_{capability}'),
+                              f'spanish_{capability} should be unknown')
+
+    def test_a_person_with_no_languages_has_all_eight_null(self):
+        self._refresh()
+        for language in ('english', 'spanish'):
+            for capability in ('speak', 'read', 'write', 'understand'):
+                self.assertIsNone(
+                    getattr(self.record, f'{language}_{capability}'))
+
+    def test_both_languages_are_flattened_independently(self):
+        self._skill(self.english, 'read')
+        self._skill(self.spanish, 'speak')
+        self._refresh()
+        self.assertTrue(self.record.english_read)
+        self.assertFalse(self.record.english_speak)
+        self.assertTrue(self.record.spanish_speak)
+        self.assertFalse(self.record.spanish_read)
+
+    def test_removing_a_language_clears_its_columns(self):
+        """Derivation must reset, not only ever set.
+
+        Emitting only the keys it knows about would leave a stale True behind
+        after the underlying row is deleted.
+        """
+        skill = self._skill(self.spanish, 'speak')
+        self._refresh()
+        self.assertTrue(self.record.spanish_speak)
+
+        skill.delete()
+        self._refresh()
+        self.assertIsNone(self.record.spanish_speak)
+
+    def test_the_flat_columns_agree_with_the_display_string(self):
+        """Two views of one person must not contradict each other."""
+        self._skill(self.english, 'speak')
+        self._skill(self.english, 'understand')
+        self._refresh()
+        self.assertEqual(self.record.languages_skills,
+                         'English language: speak, understand')
+        self.assertTrue(self.record.english_speak)
+        self.assertTrue(self.record.english_understand)
+        self.assertFalse(self.record.english_write)
+
+    def test_the_flat_columns_are_not_editable(self):
+        """They are derived; an edit here would be overwritten by the refresh."""
+        from omop_core.services.field_descriptor import _classify_field
+
+        for language in ('english', 'spanish'):
+            for capability in ('speak', 'read', 'write', 'understand'):
+                self.assertEqual(
+                    _classify_field(f'{language}_{capability}'), 'computed')

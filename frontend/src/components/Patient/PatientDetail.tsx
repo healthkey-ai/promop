@@ -482,6 +482,21 @@ export default function PatientDetail({
   }, [doSave]);
 
    
+  // Re-read the record from the server. Used where an edit lands somewhere the
+  // form does not own -- wearable imports, and language skills, whose eight
+  // flattened columns are derived from PersonLanguageSkill rows rather than
+  // patched directly.
+  const reloadPatientInfo = useCallback(() => {
+    if (!personId) return;
+    api.get(`/patient-info/${personId}/`)
+      .then((res) => {
+        const d = res.data.patient_info;
+        setPatientInfo(d);
+        setEditedInfo(d);
+      })
+      .catch(() => {});
+  }, [personId]);
+
   const handleFieldChange = useCallback((field: string, value: unknown) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
     const updated = { ...base, [field]: value };
@@ -860,8 +875,8 @@ export default function PatientDetail({
                 {activeTab === 3 && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
                 {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
-                {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
-                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={() => { if (personId) { api.get(`/patient-info/${personId}/`).then(res => { const d = res.data.patient_info; setPatientInfo(d); setEditedInfo(d); }).catch(() => {}); } }} />}
+                {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
+                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
                 {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} />}
                 {activeCustomTab && (

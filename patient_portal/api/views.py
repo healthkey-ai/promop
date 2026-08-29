@@ -53,7 +53,9 @@ from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.patient_record_service import (
     FHIR_CONDITION_STAGE_SOURCE_VALUE,
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
+    LanguageSkillError,
     refresh_patient_record,
+    set_language_skills,
 )
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.lot_inference_service import infer_lot_for_person
@@ -5333,14 +5335,37 @@ class PersonViewSet(viewsets.GenericViewSet):
         # did not. The Location row was updated and the projection was not,
         # leaving the database saying Somerville while the record read Cambridge,
         # under a 200 reporting no change at all.
+        # ---- Language skills (#808) ---------------------------------------
+        # Rows, not columns, so they are handled apart from the loops above:
+        # each capability a person has in a language is its own
+        # PersonLanguageSkill row. Replace semantics per language named; a
+        # language left out of the payload is untouched, which is what keeps one
+        # language's answer from implying anything about the other.
+        touched_languages = []
+        if 'language_skills' in request.data:
+            payload = request.data['language_skills']
+            if not isinstance(payload, dict):
+                return Response(
+                    {'detail': "'language_skills' must be an object mapping a "
+                               "language to its capabilities."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                created, removed = set_language_skills(person, payload)
+            except LanguageSkillError as exc:
+                return Response({'detail': str(exc)},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if created or removed:
+                touched_languages = ['language_skills']
+
         if changed:
             person.save(update_fields=changed)
-        if changed or touched_location:
+        if changed or touched_location or touched_languages:
             refresh_patient_record(person)
 
         return Response({
             'person_id': person.person_id,
-            'updated_fields': changed + touched_location,
+            'updated_fields': changed + touched_location + touched_languages,
         })
 
 

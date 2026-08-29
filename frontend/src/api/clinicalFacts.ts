@@ -300,3 +300,55 @@ export async function writeFieldValues(
   }
   await writeProfileFields(personId, profile);
 }
+
+/** The capabilities a person can have in a language, server-side vocabulary. */
+export const LANGUAGE_CAPABILITIES = ['speak', 'read', 'write', 'understand'] as const;
+export type LanguageCapability = typeof LANGUAGE_CAPABILITIES[number];
+
+/** Languages the flattened PatientRecord columns cover. */
+export const FLATTENED_LANGUAGES = ['english', 'spanish'] as const;
+export type FlattenedLanguage = typeof FLATTENED_LANGUAGES[number];
+
+/**
+ * Replace a person's capabilities in the languages named.
+ *
+ * Rows, not columns: each capability is its own PersonLanguageSkill row, so
+ * this cannot go through `writeProfileFields`. It rides the same persons PATCH
+ * so it inherits one authorization check rather than a second one that could
+ * drift from it.
+ *
+ * Replace, not merge — the listed capabilities become exactly what is stored
+ * for that language. Languages left out of `skills` are untouched, so setting
+ * English asserts nothing about Spanish.
+ *
+ * An empty list clears a language back to unknown rather than recording that
+ * the person has no capability in it. Capability lives in the presence of a
+ * row, so no rows means no answer; the server documents the same limit.
+ */
+export async function writeLanguageSkills(
+  personId: number | string,
+  skills: Partial<Record<FlattenedLanguage, LanguageCapability[]>>,
+): Promise<void> {
+  if (Object.keys(skills).length === 0) return;
+  await clinicalClient().patch(
+    clinicalUrl(`/v1/persons/${personId}/`),
+    { language_skills: skills },
+  );
+}
+
+/**
+ * Read a language's capabilities back out of the flattened PatientRecord columns.
+ *
+ * The record carries `english_speak`, `english_read` and so on; the editor wants
+ * `['speak', 'read']`. Only true counts as held: false means asked and does not
+ * have it, null means nobody asked, and neither belongs in a selection.
+ */
+export function languageCapabilitiesFrom(
+  record: Record<string, unknown> | undefined,
+  language: FlattenedLanguage,
+): LanguageCapability[] {
+  if (!record) return [];
+  return LANGUAGE_CAPABILITIES.filter(
+    (capability) => record[`${language}_${capability}`] === true,
+  );
+}
