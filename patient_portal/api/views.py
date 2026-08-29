@@ -25,6 +25,7 @@ from django.core.validators import validate_email
 from omop_core.models import (
     Organization,
     Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
+    SourceCodeConceptMapping,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
     PatientDocument, PatientTrialEnrollment, PatientGroupMembership, Survey, PatientSurveyResponse,
@@ -7935,6 +7936,280 @@ class VocabSnapshotView(APIView):
 def _can_manage_field_mappings(user):
     """Whether a user may curate the shared field mapping configuration."""
     return bool(getattr(user, 'is_staff', False) or has_org_admin_access(user))
+
+
+LOCAL_CONCEPT_ID_MIN = 2_000_000_000
+LOCAL_CONCEPT_VALID_END = _date(2099, 12, 31)
+
+
+def _is_local_vocabulary_id(vocabulary_id):
+    return bool(vocabulary_id and vocabulary_id.startswith('HK-'))
+
+
+def _local_concept_queryset():
+    return Concept.objects.select_related('domain', 'vocabulary', 'concept_class').filter(
+        concept_id__gte=LOCAL_CONCEPT_ID_MIN,
+        standard_concept__isnull=True,
+    ).filter(
+        Q(source='HealthKey') | Q(vocabulary__vocabulary_id__startswith='HK-')
+    )
+
+
+def _serialize_code_mapping_row(concept, mapping=None):
+    return {
+        'concept_id': concept.concept_id,
+        'concept_name': concept.concept_name,
+        'concept_code': concept.concept_code,
+        'concept_vocabulary_id': concept.vocabulary_id,
+        'domain_id': concept.domain_id,
+        'concept_class_id': concept.concept_class_id,
+        'standard_concept': concept.standard_concept,
+        'concept_source': concept.source or '',
+        'mapping_id': mapping.id if mapping else None,
+        'source_vocabulary_id': mapping.source_vocabulary_id if mapping else '',
+        'source_code': mapping.source_code if mapping else '',
+        'source_code_description': mapping.source_code_description if mapping else '',
+        'source': mapping.source if mapping else (concept.vocabulary_id or concept.source or ''),
+        'status': mapping.status if mapping else 'unmapped',
+        'notes': mapping.notes if mapping else '',
+        'has_mapping': bool(mapping),
+    }
+
+
+def _code_mapping_rows(queryset):
+    rows = []
+    mappings_by_concept = {}
+    mappings = SourceCodeConceptMapping.objects.filter(
+        target_concept__in=queryset,
+    ).order_by('target_concept_id', 'source_vocabulary_id', 'source_code')
+    for mapping in mappings:
+        mappings_by_concept.setdefault(mapping.target_concept_id, []).append(mapping)
+
+    for concept in queryset.order_by('vocabulary_id', 'concept_code', 'concept_id'):
+        concept_mappings = mappings_by_concept.get(concept.concept_id) or []
+        if concept_mappings:
+            rows.extend(_serialize_code_mapping_row(concept, mapping) for mapping in concept_mappings)
+        else:
+            rows.append(_serialize_code_mapping_row(concept))
+    return rows
+
+
+def _clean_required(data, field_name):
+    value = str(data.get(field_name, '')).strip()
+    if not value:
+        raise serializers.ValidationError({field_name: 'This field is required.'})
+    return value
+
+
+def _parse_local_concept_id(data):
+    raw = data.get('target_concept_id') or data.get('concept_id')
+    try:
+        concept_id = int(raw)
+    except (TypeError, ValueError):
+        raise serializers.ValidationError({'target_concept_id': 'Enter a valid integer concept id.'})
+    if concept_id < LOCAL_CONCEPT_ID_MIN:
+        raise serializers.ValidationError({
+            'target_concept_id': f'Local destination concepts must be >= {LOCAL_CONCEPT_ID_MIN}.'
+        })
+    return concept_id
+
+
+def _ensure_local_concept(data):
+    concept_id = _parse_local_concept_id(data)
+    vocabulary_id = _clean_required(data, 'target_vocabulary_id')
+    if not _is_local_vocabulary_id(vocabulary_id):
+        raise serializers.ValidationError({
+            'target_vocabulary_id': 'Destination vocabulary must be a local HK-* vocabulary.'
+        })
+
+    concept_name = _clean_required(data, 'target_concept_name')
+    concept_code = str(data.get('target_concept_code') or data.get('source_code') or concept_id).strip()
+    domain_id = str(data.get('domain_id') or 'Observation').strip()
+    concept_class_id = str(data.get('concept_class_id') or 'Clinical Observation').strip()
+
+    vocabulary, _ = Vocabulary.objects.get_or_create(
+        vocabulary_id=vocabulary_id,
+        defaults={
+            'vocabulary_name': str(data.get('target_vocabulary_name') or vocabulary_id).strip(),
+            'vocabulary_reference': 'HealthKey local vocabulary',
+            'vocabulary_version': 'local',
+            'vocabulary_concept_id': 0,
+        },
+    )
+    domain, _ = Domain.objects.get_or_create(
+        domain_id=domain_id,
+        defaults={'domain_name': domain_id, 'domain_concept_id': 0},
+    )
+    concept_class, _ = ConceptClass.objects.get_or_create(
+        concept_class_id=concept_class_id,
+        defaults={'concept_class_name': concept_class_id, 'concept_class_concept_id': 0},
+    )
+
+    concept, created = Concept.objects.get_or_create(
+        concept_id=concept_id,
+        defaults={
+            'concept_name': concept_name,
+            'domain': domain,
+            'vocabulary': vocabulary,
+            'concept_class': concept_class,
+            'standard_concept': None,
+            'concept_code': concept_code,
+            'valid_start_date': _date(1970, 1, 1),
+            'valid_end_date': LOCAL_CONCEPT_VALID_END,
+            'invalid_reason': None,
+            'source': 'HealthKey',
+        },
+    )
+    if not created:
+        if not _local_concept_queryset().filter(concept_id=concept.concept_id).exists():
+            raise serializers.ValidationError({
+                'target_concept_id': 'Destination concept must be a local quarantined concept.'
+            })
+        updates = {}
+        if concept.concept_name != concept_name:
+            updates['concept_name'] = concept_name
+        if concept.vocabulary_id != vocabulary_id:
+            updates['vocabulary'] = vocabulary
+        if concept.domain_id != domain_id:
+            updates['domain'] = domain
+        if concept.concept_class_id != concept_class_id:
+            updates['concept_class'] = concept_class
+        if updates:
+            for attr, value in updates.items():
+                setattr(concept, attr, value)
+            concept.save(update_fields=[*updates.keys()])
+    return concept
+
+
+def _upsert_source_code_mapping(concept, data, user):
+    source_vocabulary_id = _clean_required(data, 'source_vocabulary_id')
+    source_code = _clean_required(data, 'source_code')
+    status_value = str(data.get('status') or 'active').strip()
+    valid_statuses = {choice for choice, _label in SourceCodeConceptMapping.STATUS_CHOICES}
+    if status_value not in valid_statuses:
+        raise serializers.ValidationError({'status': f"Status must be one of: {', '.join(sorted(valid_statuses))}."})
+
+    existing_id = data.get('mapping_id')
+    mapping = None
+    if existing_id:
+        mapping = SourceCodeConceptMapping.objects.filter(
+            id=existing_id, target_concept=concept,
+        ).first()
+        if mapping is None:
+            raise serializers.ValidationError({'mapping_id': 'Mapping not found for this concept.'})
+    if mapping is None:
+        mapping = SourceCodeConceptMapping.objects.filter(target_concept=concept).order_by('id').first()
+
+    values = {
+        'source_vocabulary_id': source_vocabulary_id,
+        'source_code': source_code,
+        'source_code_description': str(data.get('source_code_description') or '').strip(),
+        'source': str(data.get('source') or source_vocabulary_id).strip(),
+        'status': status_value,
+        'notes': str(data.get('notes') or '').strip(),
+        'updated_by': user,
+    }
+    try:
+        if mapping is None:
+            mapping = SourceCodeConceptMapping.objects.create(
+                target_concept=concept,
+                created_by=user,
+                **values,
+            )
+        else:
+            for field, value in values.items():
+                setattr(mapping, field, value)
+            mapping.save()
+    except IntegrityError:
+        raise serializers.ValidationError({
+            'source_code': 'This source vocabulary/code pair is already mapped.'
+        })
+    return mapping
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def code_mapping_list(request):
+    """GET: list local concepts with source-code aliases. POST: create one."""
+    if not _can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == 'GET':
+        concepts = _local_concept_queryset()
+        source_filter = request.query_params.get('source')
+        if source_filter:
+            concepts = concepts.filter(
+                Q(vocabulary_id=source_filter)
+                | Q(source_code_mappings__source_vocabulary_id=source_filter)
+            ).distinct()
+        search = request.query_params.get('search')
+        if search:
+            q = search.strip()
+            search_filter = (
+                Q(concept_name__icontains=q)
+                | Q(concept_code__icontains=q)
+                | Q(source_code_mappings__source_code__icontains=q)
+                | Q(source_code_mappings__source_vocabulary_id__icontains=q)
+            )
+            if q.isdigit():
+                search_filter |= Q(concept_id=int(q))
+            concepts = concepts.filter(search_filter).distinct()
+        rows = _code_mapping_rows(concepts)
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            rows = [row for row in rows if row['status'] == status_filter]
+        return Response(rows)
+
+    with transaction.atomic():
+        concept = _ensure_local_concept(request.data)
+        mapping = _upsert_source_code_mapping(concept, request.data, request.user)
+    return Response(_serialize_code_mapping_row(concept, mapping), status=status.HTTP_201_CREATED)
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def code_mapping_detail(request, concept_id):
+    """Add or update a source-code mapping for an existing local concept."""
+    if not _can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        concept = _local_concept_queryset().get(concept_id=concept_id)
+    except Concept.DoesNotExist:
+        return Response({'detail': 'Local concept not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    with transaction.atomic():
+        mapping = _upsert_source_code_mapping(concept, request.data, request.user)
+    return Response(_serialize_code_mapping_row(concept, mapping))
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def code_mapping_vocabularies(request):
+    """Reference values for the Code Mapping curation dialog."""
+    if not _can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    local_vocabulary_ids = set(
+        _local_concept_queryset().values_list('vocabulary_id', flat=True).distinct()
+    )
+    vocabularies = Vocabulary.objects.filter(
+        Q(vocabulary_id__startswith='HK-') | Q(vocabulary_id__in=local_vocabulary_ids)
+    ).order_by('vocabulary_id')
+    return Response({
+        'vocabularies': [
+            {'vocabulary_id': v.vocabulary_id, 'vocabulary_name': v.vocabulary_name}
+            for v in vocabularies
+        ],
+        'domains': [
+            {'domain_id': d.domain_id, 'domain_name': d.domain_name}
+            for d in Domain.objects.order_by('domain_id')
+        ],
+        'concept_classes': [
+            {'concept_class_id': c.concept_class_id, 'concept_class_name': c.concept_class_name}
+            for c in ConceptClass.objects.order_by('concept_class_id')
+        ],
+    })
 
 
 @api_view(['GET', 'POST'])

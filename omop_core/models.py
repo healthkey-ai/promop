@@ -1604,6 +1604,53 @@ class SourceToConceptMap(models.Model):
         indexes = [models.Index(fields=['source_code'], name='ix_stcm_source_code')]
 
 
+class SourceCodeConceptMapping(models.Model):
+    """HealthKey-curated incoming source code -> local OMOP concept mapping."""
+
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('retired', 'Retired'),
+        ('rejected', 'Rejected'),
+    ]
+
+    source_vocabulary_id = models.CharField(max_length=50, db_index=True)
+    source_code = models.CharField(max_length=100, db_index=True)
+    source_code_description = models.CharField(max_length=255, blank=True, default='')
+    target_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, related_name='source_code_mappings',
+        db_constraint=False,
+    )
+    source = models.CharField(max_length=50, blank=True, default='HealthKey', db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
+    notes = models.TextField(blank=True, default='')
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'source_code_concept_mapping'
+        indexes = [
+            models.Index(fields=['source_vocabulary_id', 'source_code'], name='ix_sccm_source_code'),
+            models.Index(fields=['target_concept', 'status'], name='ix_sccm_target_status'),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['source_vocabulary_id', 'source_code'],
+                name='uq_sccm_source_vocabulary_code',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.source_vocabulary_id}:{self.source_code} -> {self.target_concept_id}"
+
+
 class RegimenMappingGap(models.Model):
     """Mapping-gap report for regimen/drug names that could not be matched to a
     validated HemOnc (or other licensed-vocabulary) concept at ingest time.
