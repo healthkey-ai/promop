@@ -176,14 +176,20 @@ legacy `upload_fhir_bundle` in `views.py` (`:3341`, `:3388`, `:3411`, `:3586`, `
 | **Source Code** | text | ✅ | typed, or carried in by an import |
 | **Source Code System** | `<select>` of external code systems + blank | ❌ | `GET /v1/code-mappings/reference/`. Blank is legal and means "uncoded" |
 | **Source Code Description** | text | ❌ | typed; prefilled by the import from the source text |
-| **Destination Concept ID** | number | ✅ | typed, or set by picking a concept search result |
-| **Destination Vocabulary** | `<select>` of `HK-*` + blank | ❌ | the `HK-*` vocabulary when the destination was minted; blank for an Athena concept |
-| **Destination Concept Name** | text | ✅ | read-only for an existing Athena concept; editable for a minted `HK-*` one (renaming a HealthKey-authored concept is legitimate curation) |
-| **Destination OMOP Table** | `<select>` | ✅ | keys of `_MAPPING_TARGETS` (`omop_core/services/write_descriptor.py:290`) |
-| **Destination Concept Class** | read-only | — | from the resolved concept's `concept_class_id`; blank until a concept is chosen |
+| **Destination Vocabulary** | `<select>`: SNOMED, LOINC, RxNorm, ICD10CM, HemOnc + every `HK-*` | ✅ | scopes the concept search below it |
+| **Destination Concept Name** | searchable text | ✅ | typing searches `/v1/concepts/search/` scoped to the chosen vocabulary; picking a result fills the ID |
+| **Destination Concept ID** | number, **writable** | ✅ | typed directly, or filled by the search. Typing an ID resolves it and back-fills name, vocabulary and class |
+| **Destination OMOP Table** | `<select>` | ✅ | keys of `_MAPPING_TARGETS` (`omop_core/services/write_descriptor.py:290`); defaulted from the concept's domain |
+| **Destination Concept Class** | read-only, computed | — | from the resolved concept; blank until a concept is chosen |
 | **Provenance line** | read-only | — | who created the row: an import (with its source system and occurrence count) or a named curator |
 | **Status** | `<select>` | ✅ | proposed / approved / rejected; imports write `proposed` |
 | **Notes** | textarea | ❌ | |
+
+The destination block reads vocabulary → name → ID → table → class, because that is the order a
+curator fills it: they know they want a LOINC code, they search by name, and the ID follows.
+**Destination Concept ID is writable**, including when editing an existing mapping — re-pointing
+a proposed mapping at a standard concept is the single most common curation action and must not
+require deleting and recreating the row.
 
 Source and destination are visually separated with headings; Status sits in the footer beside
 Save, because it is a review action rather than a source attribute. The provenance line is what
@@ -225,12 +231,21 @@ Mirrors the Field Concept Mapping page, which already solves this: tabs pick a s
 a tab two collapsible sections split review work from settled work
 (`FieldMappingPage.tsx:96-104`, where `mapping.status === "approved"` is the whole test).
 
-**Tabs** — one per `HK-*` destination vocabulary, from
-`Vocabulary.objects.filter(vocabulary_id__startswith='HK-')`: today `HK-Drug`, `HK-Labs`,
-`HK-Language`, `HK-Observation`, `HK-Regimen`, `HK-Wearable`, plus `HK-Procedure` once a
-procedure is quarantined (`regimen_resolution.py:159 _ensure_hk_vocab` creates it on first use).
-A vocabulary with zero mappings still gets a tab, so a curator can see the empty bucket. LOINC and SNOMED get no
-tab, per §1.1 rule 1. There is **no "All" tab** — it answers no question a curator has.
+**Tabs** — one per vocabulary that a mapping's **destination concept** belongs to. That is every
+`HK-*` vocabulary (today `HK-Drug`, `HK-Labs`, `HK-Language`, `HK-Observation`, `HK-Regimen`,
+`HK-Wearable`, plus `HK-Procedure` once a procedure is quarantined —
+`regimen_resolution.py:159 _ensure_hk_vocab` creates it on first use) **and the standard
+vocabularies a curator re-points into: SNOMED, LOINC, RxNorm, ICD10CM, HemOnc.**
+
+The earlier draft of this plan excluded SNOMED and LOINC on the grounds that they "don't get
+mapped". That confused two different things. §1.1 rule 1 says a LOINC/SNOMED code arriving as a
+*source* needs no mapping row — true, and unchanged. But the whole point of curation is that an
+SME looks at a proposed `HK-*` mapping and re-points its **destination** at a standard concept.
+That mapping then has a SNOMED or LOINC destination and needs somewhere to live; without those
+tabs the curator's own output would be invisible to them.
+
+A vocabulary with zero mappings still gets a tab so a curator can see the empty bucket. There is
+**no "All" tab** — it answers no question a curator has.
 
 **Sections within each tab:**
 
@@ -328,9 +343,16 @@ Migration `0191_source_code_mapping_direction.py`:
   **"Source concept code" → "Source Code"**; the word *concept* never appears on the source side.
 - Source Code System and Destination Vocabulary become `<select>`s fed by
   `/v1/code-mappings/reference/`, fetched once on mount with the rows.
-- Destination Concept Class renders read-only from the selected concept — extend `ConceptResult`
+- Destination Concept ID is **writable in edit mode too** (it is `readOnly` today at `:487`).
+  Typing an id calls `/v1/concepts/<id>/` and back-fills name, vocabulary, class and table;
+  an unresolvable id shows an inline error rather than silently saving.
+- Destination Vocabulary scopes the concept search (`/v1/concepts/search/?vocabulary_id=…`), so
+  a curator who wants a LOINC code is not wading through SNOMED hits.
+- Destination Concept Class renders read-only from the resolved concept — extend `ConceptResult`
   with `concept_class_id`, which `/v1/concepts/search/` already returns
   (`views.py:6988 _serialize_concept`).
+- The footer button reads **Update & Approve** when it will also flip status to approved, and
+  shows the §4.6 progress panel while the re-point request is in flight.
 - `buildEditForm` loses the `|| row.concept_vocabulary_id` fallback (`:66`).
 - Tabs and Unmapped/Mapped sections per §3.3, driven by the reference endpoint rather than by
   values scraped from loaded rows. No "All" tab.
@@ -510,6 +532,25 @@ Decisions specific to this trigger:
   import has no referencing rows. Do not delete it: consumers mirror the concept table per ADR
   0001, so withdrawing a published concept_id is worse than leaving one unreferenced. Offer
   `--delete-orphan-mints`, defaulting off, mirroring `remap_shadow_concepts --keep-mints`.
+
+**The approve button is the trigger.** A curator changes the destination in the dialog and clicks
+**Update & Approve**; that one action saves the mapping, flips it to `approved`, and re-points the
+stored rows. There is no separate "apply" step to forget.
+
+**It needs progress feedback.** The rewrite touches every clinical row carrying that source code
+across every patient, so it can run for a while on a loaded database. The approve response
+returns what it did — `{old_concept_id, new_concept_id, rows_updated, persons_marked_stale}` —
+and the dialog shows a blocking status panel while the request is in flight:
+
+```
+   Updating concept 2000000042 → 3046299
+   ████████████░░░░░░░░  rewriting clinical rows…
+```
+
+then resolves to `Updated 1,284 rows across 96 patients. 96 patient records queued for
+re-derivation.` The panel is not cosmetic: without it a curator sees a frozen dialog and clicks
+again, and a second approve of the same mapping is a no-op only because §4.6 matches on the old
+destination — which is one more reason that guard matters.
 
 Ship it as both: a service function the approve endpoint calls, and an `apply_approved_mappings`
 management command for replay and repair. It shares its core with §4.7 — the same walk over
