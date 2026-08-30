@@ -375,11 +375,44 @@ def resolve_source_code(*, source_vocabulary_id, source_code, source_text,
     """
 ```
 
-Rules 3 and 4 are `_get_or_create_quarantine_concept` (`:172`) as it already stands; the new
-work is rules 1–2 and writing the proposed `SourceCodeConceptMapping` where
-`record_mapping_gap` (`:118`) currently writes only a `RegimenMappingGap`. Write both for now —
-the gap table is the regimen-specific report and has its own consumers
-(`report_regimen_mapping_gaps.py`); §7 covers collapsing them later.
+Rules 3 and 4 are `_get_or_create_quarantine_concept` (`:172`) as it already stands. Note the
+existing shape is *not* three branches: `get_or_create_quarantine_regimen` (`:225`) resolves the
+concept — fetch an existing `HK-*` slug or mint one — and then **always** calls
+`record_mapping_gap` (`:118`). Two outcomes, with the curation record written unconditionally
+alongside the second. That is exactly §1.1 rules 3–4; the only difference is which table holds
+the curation record.
+
+The new work is therefore rules 1–2, plus replacing the gap row with a proposed
+`SourceCodeConceptMapping`.
+
+**Replace, do not dual-write.** `RegimenMappingGap` has exactly one consumer — the management
+command `report_regimen_mapping_gaps.py`, which prints a table to stdout. There is no API
+endpoint, no admin registration, no serializer, and nothing in `frontend/src` (verified by
+grep). Its own docstring calls itself "the curation queue", so curation today means remembering
+to run a CLI command and acting on the printout by hand. Every column it prints has an
+equivalent on the proposed mapping once #838 lands:
+
+| gap column | proposed mapping |
+|---|---|
+| `source_value` | `source_code` |
+| `quarantine_concept_id` | `target_concept` — the minted destination |
+| `matched_concept_id` | the destination after a curator re-points it |
+| `occurrence_count` | `occurrence_count` |
+| `last_seen` | `last_seen` |
+| `source_system` | `origin_system` |
+| `status` | `status` |
+
+The mapping table is a strict superset and has a UI. Dual-writing would maintain two queues for
+one job and guarantee they drift, so:
+
+- `resolve_source_code` writes the proposed mapping only;
+- a data migration converts existing `RegimenMappingGap` rows into proposed mappings
+  (`normalized_name`/`source_value` → `source_code`, `quarantine_concept` → `target_concept`,
+  counts and timestamps carried across, `source_system` → `origin_system`);
+- `report_regimen_mapping_gaps` is re-pointed at `SourceCodeConceptMapping` filtered to
+  `HK-Regimen`/`HK-Drug` destinations, so the CLI keeps working for anyone scripting against it;
+- `RegimenMappingGap` itself is dropped in a follow-up once the re-pointed command has run
+  clean against staging.
 
 Then route the three ingest paths through it:
 
@@ -478,11 +511,9 @@ Plus both backend suites (Django runner and pytest) and `npm run lint`, `npm run
 
 ## 7. Open questions
 
-- **`RegimenMappingGap` vs `SourceCodeConceptMapping`.** After §4.5 the two overlap: both record
-  "an inbound name we could not match, quarantined under HK-*, awaiting curation". The gap table
-  is regimen-specific and has its own reporting command. §4.5 writes both to avoid breaking that
-  consumer; collapsing the gap table into the mapping table is a follow-on once the Code Mapping
-  UI can show everything the regimen report shows.
+- **Retiring `RegimenMappingGap`.** §4.5 migrates its rows into proposed mappings and re-points
+  its one CLI consumer, but stops short of dropping the table. Dropping it is a follow-up, after
+  the re-pointed command has run clean against staging.
 - **Minting a destination from the dialog.** §1.1 puts minting at import, which is where it
   belongs. A curator facing a proposed mapping whose minted concept is wrong can re-point it at
   an Athena concept, but cannot mint a *different* HK-* concept from the dialog. Probably fine —
