@@ -400,11 +400,24 @@ Then route the three ingest paths through it:
 **A Measurement dedup-key trap that will bite here.** The four `_upsert_clinical` tables
 (condition/drug/procedure/observation, `sync.py:840`) key on `(source_value, date)` and
 explicitly *update the concept in place* — the docstring at `:844` says so and
-`fhir/tests.py:669` asserts it. Measurement does not: `_ingest_observations` keys on
-`(concept_id, date, source_value-when-unmapped)` (`sync.py:532-549`), so a code that resolved to
-0 and now resolves to 437233 finds nothing at `(437233, date)` and **inserts a second row**,
-stranding the old one. Fix it by dropping `measurement_concept_id` from the key and keying on
-`(measurement_source_value, date)` like the other four — which is what the bulk-write path
+`fhir/tests.py:669` asserts it. Neither Measurement path does. Both put the concept *in* the
+identity and drop the source value out of it as soon as a concept resolves:
+
+```python
+# _insert_discrete_observations (sync.py:484) — ordinary labs
+source_key = source_value if not concept_id else None
+return (date_value, datetime_value, concept_id, source_key, _norm_num(value))
+
+# _upsert_rollup_observations (sync.py:536) — daily rollups
+sv_key = o['sv'] if not o['cid'] else None
+```
+
+So a code that resolved to concept A and now resolves to concept B finds nothing at B's key and
+**inserts a second row**, stranding the A row beside it. The discrete path is worse: it is
+append-only (`_bulk_insert` at `:519`), so it cannot update a concept even in principle.
+
+Fix both by keying on `(measurement_source_value, date)` and leaving the concept out, like the
+other four — which is what the bulk-write path
 already does (*"The concept column stays outside every key, which lets a vocabulary load upgrade
 a stored row in place instead of stranding a duplicate beside it"*). The comment at `sync.py:532`
 shows the key was widened only so distinct *unmapped* metrics could coexist on one day; keying on
