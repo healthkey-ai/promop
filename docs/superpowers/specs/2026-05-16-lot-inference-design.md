@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-16
 **Updated:** 2026-05-16
-**Status:** Draft (v2)
+**Status:** As-built design
 **Issue:** #67 — use OHDSI Artemis gap/switch rules + HealthTree phase-aware myeloma rules to infer lines of therapy
 
 ---
