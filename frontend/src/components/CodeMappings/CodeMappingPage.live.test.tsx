@@ -13,10 +13,17 @@
  *
  *   DATABASE_URL=... manage.py shell < scratchpad/reset_roundtrip.py
  *
+ * The component's axios instance is hardcoded to the '/api' prefix, exactly as
+ * it is in the browser, so requests resolve against jsdom's origin
+ * (http://localhost:3000) and reach Django through the Vite dev proxy. Both
+ * servers must be up; without the proxy every request 404s at :3000 and the
+ * page renders "Failed to load code mappings."
+ *
  * To run it:
  *
  *   DATABASE_URL=postgresql://postgres@localhost:5432/promop_dev DEBUG=True \
  *     .venv/bin/python manage.py runserver 9200 --noreload
+ *   npm --prefix frontend run dev          # the proxy this depends on
  *   CODE_MAPPING_LIVE_URL=http://localhost:9200/api \
  *     CODE_MAPPING_LIVE_TOKEN=<bearer> \
  *     CODE_MAPPING_LIVE_SOURCE_CODE=SFLC-K \

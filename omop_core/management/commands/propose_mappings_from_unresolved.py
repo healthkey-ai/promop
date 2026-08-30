@@ -160,10 +160,15 @@ class Command(BaseCommand):
 
         verb = 'Would propose' if not apply_changes else 'Proposed'
         self.stdout.write('')
+        # On --apply report what was actually written. Falling through to the
+        # candidate count when nothing was proposed claimed rows the run never
+        # created, which is the one number an operator reads.
+        count = totals['proposed'] if apply_changes else (
+            totals['candidates'] - totals['skipped_known'] - totals['resolvable'])
         self.stdout.write(self.style.SUCCESS(
-            f'{verb} {totals["proposed"] or totals["candidates"] - totals["skipped_known"]} '
-            f'mapping(s) from {totals["candidates"]} candidate(s); '
-            f'{totals["skipped_known"]} already curated.'
+            f'{verb} {count} mapping(s) from {totals["candidates"]} candidate(s); '
+            f'{totals["skipped_known"]} already curated, '
+            f'{totals["resolvable"]} already resolvable.'
         ))
         if totals['resolvable']:
             self.stdout.write(self.style.WARNING(

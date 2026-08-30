@@ -399,10 +399,19 @@ export default function CodeMappingPage() {
   /** Source code systems offered for the chosen domain, blank option first. */
   const sourceCodeSystems = useMemo(() => {
     const offered = reference.source_code_systems_by_domain[form.domain_id] || [];
-    return offered.some((s) => s.vocabulary_id === "")
+    const withBlank = offered.some((s) => s.vocabulary_id === "")
       ? offered
       : [{ vocabulary_id: "", label: "None — uncoded / free text" }, ...offered];
-  }, [reference, form.domain_id]);
+    // A stored system the domain's catalogue does not list still has to render
+    // as itself. Without this the select falls back to its first option and an
+    // ICD-10-CM-coded row minted into HK-Labs displays as "uncoded" — the same
+    // "the source column shows the wrong thing" defect this page exists to fix.
+    const current = form.source_vocabulary_id;
+    if (current && !withBlank.some((s) => s.vocabulary_id === current)) {
+      return [...withBlank, { vocabulary_id: current, label: `${current} — not typical for this domain` }];
+    }
+    return withBlank;
+  }, [reference, form.domain_id, form.source_vocabulary_id]);
 
   const openNewDialog = () => {
     setSelectedRow(null);
@@ -499,8 +508,11 @@ export default function CodeMappingPage() {
   };
 
   const searchConcepts = async (query: string, vocabulary = searchVocabulary) => {
+    // Keep the raw value in state and trim only for the request. Trimming
+    // before setState meant typing a space produced the same string back, React
+    // re-rendered without it, and a multi-word search could never be typed.
+    setConceptSearchQuery(query);
     const q = query.trim();
-    setConceptSearchQuery(q);
     if (q.length < 3) {
       setConceptResults([]);
       return;
@@ -1022,16 +1034,18 @@ export default function CodeMappingPage() {
                     />
                   </Field>
 
-                  <Field id="destination_concept_name" label="Destination Concept Name" tip={TIP.destination_concept_name}>
-                    <input
-                      id="destination_concept_name"
-                      title={TIP.destination_concept_name}
-                      value={form.destination_concept_name}
-                      onChange={(e) => setField("destination_concept_name", e.target.value)}
-                      required
-                      className={INPUT_CLASS}
-                    />
-                  </Field>
+                  {/* Read-only: the API has no write path for a concept name, so an
+                      editable box accepted a rename, saved, and let the old name
+                      come back on refetch with no error. Renaming a
+                      HealthKey-minted concept is real curation, but it needs a
+                      write path first. */}
+                  <ReadOnlyField
+                    id="destination_concept_name"
+                    label="Destination Concept Name"
+                    tip={TIP.destination_concept_name}
+                    value={form.destination_concept_name}
+                    testId="destination-concept-name"
+                  />
 
                   <ReadOnlyField
                     id="destination_concept_code"

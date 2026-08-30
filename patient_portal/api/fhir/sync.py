@@ -484,6 +484,13 @@ class FhirSyncView(APIView):
                     cache[(vocab, value)] = mapping.target_concept
                     if vocab == '*':
                         for other in by_vocab:
+                            # Never over a LOINC/SNOMED direct hit. There the
+                            # code *is* the concept, and resolve_source_code
+                            # returns it before consulting any mapping -- so
+                            # overriding here would make the two resolution
+                            # paths disagree about the same input.
+                            if other in SELF_RESOLVING_VOCABULARIES:
+                                continue
                             if value in by_vocab[other]:
                                 cache[(other, value)] = mapping.target_concept
         return cache
@@ -603,7 +610,13 @@ class FhirSyncView(APIView):
         # job -- services/code_mapping.repoint_clinical_rows -- not this one's,
         # which is append-only.)
         def identities(date_value, datetime_value, concept_id, source_value, value):
-            keys = [('sv', date_value, datetime_value, source_value, _norm_num(value))]
+            # The source-value key carries the concept too. Without it, two
+            # observations at the same instant and value whose codeable yields
+            # no text (no text, no display, no code) collapse into one row --
+            # the concept used to keep them apart, and dropping it outright
+            # traded one duplicate bug for a data-loss one.
+            keys = [('sv', date_value, datetime_value, source_value,
+                     concept_id, _norm_num(value))]
             if concept_id:
                 keys.append(('cid', date_value, datetime_value, concept_id, _norm_num(value)))
             return keys

@@ -21047,6 +21047,38 @@ class CodeMappingApiTest(TestCase):
         self.assertTrue(next(v for v in dest if v['vocabulary_id'] == 'HK-Labs')['is_local'])
         self.assertFalse(next(v for v in dest if v['vocabulary_id'] == 'LOINC')['is_local'])
 
+    def test_deprecated_vocabularies_alias_still_serves(self):
+        """The alias kept "for one release" 500'd on every call.
+
+        It returned code_mapping_reference(request), but that is @api_view
+        decorated, so it received a DRF Request where its wrapper asserts on
+        django.http.HttpRequest. An alias kept for compatibility that raises is
+        worse than no alias, and no test covered it.
+        """
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/code-mappings/vocabularies/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('source_code_systems_by_domain', resp.data)
+        self.assertIn('domains', resp.data)
+
+    def test_unloaded_self_resolving_code_still_reaches_the_queue(self):
+        """A LOINC code whose concept is not loaded must not vanish.
+
+        Rule 1 returns early for LOINC/SNOMED, and returning None there dropped
+        the code to concept 0 with nothing in the review queue -- the likeliest
+        way a code goes missing, since LOINC is the dominant source system for
+        the labs this feature is for.
+        """
+        concept, _ = resolve_source_code(
+            source_code='99999-9', source_vocabulary_id='LOINC',
+            source_text='Not loaded on this deploy', omop_table='measurement',
+        )
+        self.assertIsNone(concept, 'must not mint an HK concept over a real LOINC code')
+        gap = SourceCodeConceptMapping.objects.filter(source_code='99999-9').first()
+        self.assertIsNotNone(gap, 'the code vanished with nothing in the queue')
+        self.assertEqual(gap.status, 'proposed')
+        self.assertIsNone(gap.target_concept_id)
+
     def test_reference_omop_tables_are_keyed_by_domain(self):
         self.client.force_authenticate(user=self.staff)
         resp = self.client.get('/api/v1/code-mappings/reference/')

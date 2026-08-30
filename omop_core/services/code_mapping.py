@@ -30,7 +30,7 @@ arrive again.
 import logging
 
 from django.contrib.contenttypes.models import ContentType
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Case, IntegerField, Q, When
 from django.utils import timezone
 
@@ -113,6 +113,13 @@ def normalize_omop_table(omop_table):
     }.get(value, value)
 
 
+# source_code is CharField(100). A proposal stores the inbound value truncated
+# to that, so every lookup has to truncate the same way -- otherwise a long
+# free-text source is stored short, matched long, and the approved mapping never
+# takes effect, which is the failure this whole feature exists to fix.
+SOURCE_CODE_MAX = 100
+
+
 def approved_mapping_for(source_vocabulary_id, source_code):
     """Return the approved mapping for this code, or None.
 
@@ -124,7 +131,7 @@ def approved_mapping_for(source_vocabulary_id, source_code):
         return None
     return SourceCodeConceptMapping.objects.filter(
         source_vocabulary_id=source_vocabulary_id or '',
-        source_code__iexact=source_code,
+        source_code__iexact=source_code[:SOURCE_CODE_MAX],
         status='approved',
     ).select_related('target_concept').first()
 
@@ -161,28 +168,41 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
     # Truncated before the lookup as well as the create. Looking up the full
     # string but storing 100 chars means every later sighting of a longer source
     # text misses, re-enters the create branch, and trips the unique constraint.
-    source_code = source_code[:100]
+    source_code = source_code[:SOURCE_CODE_MAX]
     mapping = SourceCodeConceptMapping.objects.filter(
         source_vocabulary_id=source_vocabulary_id or '',
         source_code__iexact=source_code,
     ).first()
 
     if mapping is None:
-        return SourceCodeConceptMapping.objects.create(
-            source_vocabulary_id=source_vocabulary_id or '',
-            source_code=source_code,
-            source_code_description=(source_text or '')[:255],
-            target_concept=concept,
-            destination_vocabulary_id=concept.vocabulary_id or '',
-            omop_table=omop_table,
-            source=SOURCE_HEALTHKEY,
-            status='proposed',
-            origin='import',
-            origin_system=source_system,
-            occurrence_count=1,
-            first_seen=now,
-            last_seen=now,
-        )
+        try:
+            # Savepointed: two ETL workers importing the same new code both miss
+            # the filter above and both insert. Without this the loser's
+            # IntegrityError escapes and fails the entire bundle with a 500 --
+            # a normal condition for a parallel import, not an error.
+            with transaction.atomic():
+                return SourceCodeConceptMapping.objects.create(
+                    source_vocabulary_id=source_vocabulary_id or '',
+                    source_code=source_code,
+                    source_code_description=(source_text or '')[:255],
+                    target_concept=concept,
+                    destination_vocabulary_id=(concept.vocabulary_id or '') if concept else '',
+                    omop_table=omop_table,
+                    source=SOURCE_HEALTHKEY,
+                    status='proposed',
+                    origin='import',
+                    origin_system=source_system,
+                    occurrence_count=1,
+                    first_seen=now,
+                    last_seen=now,
+                )
+        except IntegrityError:
+            mapping = SourceCodeConceptMapping.objects.filter(
+                source_vocabulary_id=source_vocabulary_id or '',
+                source_code__iexact=source_code,
+            ).first()
+            if mapping is None:
+                raise
 
     if mapping.status == 'approved':
         return mapping
@@ -208,9 +228,27 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
         return None, None
     table = normalize_omop_table(omop_table)
 
-    # Rule 1 — a LOINC/SNOMED code is its own concept.
+    # Rule 1 — a LOINC/SNOMED code is its own concept, so it never needs a
+    # curated mapping and never gets one minted.
     if source_vocabulary_id in SELF_RESOLVING_VOCABULARIES:
-        return _direct_concept(source_vocabulary_id, source_code), None
+        concept = _direct_concept(source_vocabulary_id, source_code)
+        if concept is not None:
+            return concept, None
+        # ...unless that concept is not loaded on this deploy. Returning None
+        # here would drop the code to concept 0 with nothing in the review
+        # queue, and LOINC is the dominant source system for the labs this
+        # feature is for -- so it would be the likeliest way a code goes
+        # missing. Record the gap without minting: the right fix is a
+        # vocabulary load, not a HealthKey concept shadowing a real LOINC one.
+        _record_proposal(
+            source_vocabulary_id=source_vocabulary_id,
+            source_code=source_code,
+            source_text=source_text,
+            concept=None,
+            omop_table=table,
+            source_system=source_system,
+        )
+        return None, None
 
     # Rule 2 — an approved mapping beats everything else.
     approved = approved_mapping_for(source_vocabulary_id, source_code)
@@ -273,11 +311,14 @@ def _source_value_match(model, source_col, mapping):
     characters, so a curator who typed the full name would otherwise miss.
     """
     width = model._meta.get_field(source_col).max_length or 50
-    candidates = {
-        value[:width]
-        for value in (mapping.source_code, mapping.source_code_description)
-        if value
-    }
+    candidates = {mapping.source_code[:width]} if mapping.source_code else set()
+    # The description only joins the key for *import*-created proposals, where
+    # it holds the display text ingest actually wrote. On a curator-created row
+    # it is free prose -- "Glucose" against a GLU-3 code -- and using it as a
+    # bulk-UPDATE key would re-point every unrelated producer's "Glucose" row in
+    # the database and mark those patients stale.
+    if mapping.origin == 'import' and mapping.source_code_description:
+        candidates.add(mapping.source_code_description[:width])
     match = Q()
     for value in candidates:
         match |= Q(**{f'{source_col}__iexact': value})

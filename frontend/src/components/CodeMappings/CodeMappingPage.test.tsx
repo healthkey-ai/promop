@@ -331,12 +331,13 @@ describe("CodeMappingPage", () => {
       ]);
     });
 
-    it("edits only the destination id and name; the rest follow from the concept", async () => {
+    it("edits only the destination id; the rest follow from the concept", async () => {
       await openDialog();
       const readOnly = (label: string) =>
         (screen.getByLabelText(label) as HTMLInputElement).readOnly;
       expect(readOnly("Destination Concept ID")).toBe(false);
-      expect(readOnly("Destination Concept Name")).toBe(false);
+      // Name is derived too: the API has no write path for a concept name.
+      expect(readOnly("Destination Concept Name")).toBe(true);
       expect(readOnly("Destination Concept Code")).toBe(true);
       expect(readOnly("Destination Vocabulary ID")).toBe(true);
       expect(readOnly("Destination Concept Class")).toBe(true);
@@ -492,6 +493,48 @@ describe("CodeMappingPage", () => {
       await openDialog();
       fireEvent.click(screen.getByRole("button", { name: /Delete/ }));
       await waitFor(() => expect(mockDelete).toHaveBeenCalledWith("/v1/code-mappings/7/"));
+    });
+  });
+
+  describe("review regressions", () => {
+    const openDialog = async () => {
+      renderPage();
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      fireEvent.click(cell.closest("tr")!);
+      return await screen.findByText("Edit Mapping");
+    };
+
+    it("lets a multi-word concept search be typed", async () => {
+      // Trimming the controlled value before setState fed the same string back,
+      // so React re-rendered without the space and a space could never be typed.
+      await openDialog();
+      const search = screen.getByLabelText(/Search destination concepts/i);
+      fireEvent.change(search, { target: { value: "serum " } });
+      expect(search).toHaveValue("serum ");
+      fireEvent.change(search, { target: { value: "serum m-protein" } });
+      expect(search).toHaveValue("serum m-protein");
+    });
+
+    it("does not offer to edit the destination concept name", async () => {
+      // The API has no write path for it, so an editable box accepted a rename
+      // and let the old value come back on refetch with no error.
+      await openDialog();
+      const name = screen.getByLabelText("Destination Concept Name") as HTMLInputElement;
+      expect(name.readOnly).toBe(true);
+    });
+
+    it("shows a source system the domain's catalogue does not list", async () => {
+      // An ICD-10-CM-coded row minted into HK-Labs has domain Measurement,
+      // whose catalogue has no ICD10CM. Falling back to the first option
+      // rendered it as "uncoded" — the defect this page exists to remove.
+      renderPage([{ ...proposedRow, source_vocabulary_id: "ICD10CM", domain_id: "Measurement" }]);
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      fireEvent.click(cell.closest("tr")!);
+      await screen.findByText("Edit Mapping");
+
+      const select = screen.getByLabelText("Source Code System") as HTMLSelectElement;
+      expect(select.value).toBe("ICD10CM");
+      expect(Array.from(select.options).map((o) => o.value)).toContain("ICD10CM");
     });
   });
 });

@@ -762,3 +762,51 @@ server on real Postgres: the queue item an import proposed, every dialog control
 tipped, source systems scoped to the domain, and the re-point verified in the database — one row,
 moved from the minted `HK-Labs` concept to LOINC 3046299, no duplicate, PatientRecord marked
 stale.
+
+---
+
+## 11. Second review pass (12 findings, all fixed)
+
+- **The deprecated alias 500'd on every call.** `code_mapping_vocabularies` returned
+  `code_mapping_reference(request)`, but that is `@api_view`-decorated and asserts on
+  `django.http.HttpRequest`, so the compatibility path kept "for one release" raised every time and
+  no test covered it. Body extracted into a plain helper both views call.
+- **The re-point matched on curator free text.** The §10 fix added
+  `source_code_description` to the match set, which is right for an import proposal (it holds the
+  display text ingest wrote) and unbounded for a curator-typed one — `"Glucose"` against a
+  `GLU-3` code would have re-pointed every unrelated producer's Glucose row in the database. Now
+  restricted to `origin='import'`. That in turn required dropping the `origin` flip on approve:
+  origin is provenance of creation, not who last touched the row, and overwriting it erased the
+  fact the description was ingest's.
+- **A long free-text source could never take effect.** `_record_proposal` truncated to 100 chars
+  while `approved_mapping_for` and the ingest overlay looked up untruncated, so the approved
+  mapping never matched — the exact failure the feature exists to fix. All lookups now truncate to
+  `SOURCE_CODE_MAX`.
+- **Concurrent ingest 500'd whole bundles.** Filter-then-create raced on the unique constraint.
+  Savepointed with a re-fetch on conflict; two ETL workers importing one new code is normal, not
+  an error.
+- **An unloaded LOINC/SNOMED code vanished.** Rule 1 returned before the mint branch, so a code
+  whose concept is not loaded on a deploy landed at 0 with nothing in the queue — the likeliest
+  way a code goes missing, LOINC being the dominant system for these labs. It now records a
+  proposal *without* minting; the fix is a vocabulary load, not a HealthKey concept shadowing a
+  real LOINC one. That made `target_concept` nullable, which is the honest model — "seen, no
+  destination yet" is a review state — and incidentally fixed an INNER JOIN that hid mappings
+  whose concept a vocabulary reload had removed.
+- **The two resolution paths disagreed.** The cache overlay wrote a blank-source mapping under
+  every vocabulary the value appeared in, including LOINC and SNOMED, overriding the direct hit
+  `resolve_source_code` guarantees wins.
+- **The new dedup key dropped the concept**, collapsing two same-instant observations whose
+  codeable yields no text. The concept is back in the source-value key alongside it.
+- **A multi-word concept search could not be typed** — the controlled value was trimmed before
+  `setState`, so a space round-tripped away.
+- **Destination Concept Name accepted edits and dropped them**; there is no write path for a
+  concept name. Read-only, with the tooltip corrected.
+- **A coded source could display as "uncoded"** when its system was outside the domain's
+  catalogue — the same "source column shows the wrong thing" defect this page exists to remove.
+  The stored value is now injected as an option.
+- Plus a command summary that reported rows it had not written.
+
+Live round trip re-run after all of it: 4 passed, and the row moved from the minted `HK-Labs`
+concept to LOINC 3046299 with no duplicate. One harness note recorded in the test header — the
+component's axios uses the `/api` prefix as it does in the browser, so the Vite dev proxy must be
+up or every request 404s at :3000 and the page reports "Failed to load code mappings".

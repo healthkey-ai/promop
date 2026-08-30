@@ -8013,6 +8013,41 @@ def _serialize_code_mapping_row(concept, mapping=None):
     code system reports '', which is a real state: paper labs and clinicians'
     notes carry no code system at all.
     """
+    # A mapping can legitimately have no destination yet: a code seen at ingest
+    # whose concept is not loaded is a review-queue row, not an error.
+    if concept is None:
+        return {
+            'destination_concept_id': None,
+            'destination_concept_name': '',
+            'destination_concept_code': '',
+            'destination_vocabulary_id': mapping.destination_vocabulary_id if mapping else '',
+            'destination_concept_class_id': '',
+            'destination_omop_table': mapping.omop_table if mapping else '',
+            'destination_domain_id': '',
+            'standard_concept': None,
+            'concept_source': '',
+            'mapping_id': mapping.id if mapping else None,
+            'domain_id': mapping.domain_id if mapping else '',
+            'source_vocabulary_id': mapping.source_vocabulary_id if mapping else '',
+            'source_code': mapping.source_code if mapping else '',
+            'source_code_description': mapping.source_code_description if mapping else '',
+            'source_concept_id': mapping.source_concept_id if mapping else None,
+            'source': mapping.source if mapping else '',
+            'status': mapping.status if mapping else 'unmapped',
+            'notes': mapping.notes if mapping else '',
+            'origin': mapping.origin if mapping else '',
+            'origin_system': mapping.origin_system if mapping else '',
+            'occurrence_count': mapping.occurrence_count if mapping else 0,
+            'first_seen': mapping.first_seen if mapping else None,
+            'last_seen': mapping.last_seen if mapping else None,
+            'has_mapping': bool(mapping),
+            'concept_id': None,
+            'concept_name': '',
+            'concept_code': '',
+            'concept_vocabulary_id': '',
+            'domain': '',
+            'concept_class_id': '',
+        }
     return {
         # Destination
         'destination_concept_id': concept.concept_id,
@@ -8209,10 +8244,11 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
             mapping.target_concept = concept
             for field, value in values.items():
                 setattr(mapping, field, value)
-            # A curator touching the row takes ownership of it, so a later
-            # import cannot present it as a machine proposal.
-            if status_value == 'approved':
-                mapping.origin = 'curator'
+            # origin is *provenance of creation*, not who last touched the
+            # row: an import proposed it and a curator approved it, and both
+            # are true. Overwriting it on approve also erased the fact that
+            # the description held ingest's display text, which is what the
+            # re-point matches stored rows on.
             mapping.save()
     except IntegrityError:
         raise serializers.ValidationError({
@@ -8340,7 +8376,10 @@ def code_mapping_reference(request):
     """
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    return Response(_code_mapping_reference_payload())
 
+
+def _code_mapping_reference_payload():
     known = {
         v.vocabulary_id: v.vocabulary_name
         for v in Vocabulary.objects.filter(
@@ -8356,7 +8395,7 @@ def code_mapping_reference(request):
         (v, known[v]) for v in _STANDARD_DESTINATION_VOCABULARIES if v in known
     ]
 
-    return Response({
+    return {
         'domains': [
             {'domain_id': domain_id, 'label': label}
             for domain_id, label in source_vocabularies.DOMAIN_CHOICES
@@ -8381,14 +8420,22 @@ def code_mapping_reference(request):
         # the consequence of the domain choice is visible without the frontend
         # holding a second copy of the mapping.
         'omop_tables': dict(source_vocabularies.DOMAIN_TO_TABLE),
-    })
+    }
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def code_mapping_vocabularies(request):
-    """Deprecated alias for code_mapping_reference (kept for one release)."""
-    return code_mapping_reference(request)
+    """Deprecated alias for code_mapping_reference (kept for one release).
+
+    Calls the plain helper, not the view: code_mapping_reference is
+    @api_view-decorated, so invoking it here would hand a DRF Request to a
+    wrapper that asserts on django.http.HttpRequest and 500 on every call --
+    an alias kept for compatibility that raises is worse than no alias.
+    """
+    if not _can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    return Response(_code_mapping_reference_payload())
 
 
 @api_view(['GET', 'POST'])

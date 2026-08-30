@@ -1854,7 +1854,16 @@ class SourceCodeConceptMapping(models.Model):
     # ── The destination side: what it means ──────────────────────────────
     target_concept = models.ForeignKey(
         Concept, on_delete=models.DO_NOTHING, related_name='source_code_mappings',
-        db_constraint=False,
+        db_constraint=False, null=True, blank=True,
+        help_text=(
+            'The OMOP concept this source code means. Null while a code has '
+            'been seen but has no destination yet -- a LOINC code whose concept '
+            'is not loaded on this deploy, say. That is a real review-queue '
+            'state, and it also keeps the row visible if a vocabulary reload '
+            'removes the concept it pointed at (db_constraint=False permits '
+            'exactly that, and a non-nullable FK would hide the orphan behind '
+            'an INNER JOIN).'
+        ),
     )
     destination_vocabulary_id = models.CharField(
         max_length=20, blank=True, default='', db_index=True,
