@@ -65,6 +65,14 @@ from omop_core.services.demographics import resolve_concept as resolve_demograph
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
+from omop_core.services.code_mapping import (
+    CLINICAL_TABLES,
+    NO_MATCHING_CONCEPT_ID,
+    normalize_omop_table,
+    repoint_clinical_rows,
+)
+from omop_core.services.write_descriptor import mapping_table_is_writable
+from omop_core.services import source_vocabularies
 from omop_core.services.regimen_resolution import (
     get_or_create_quarantine_drug,
     get_or_create_quarantine_observation,
@@ -6892,6 +6900,23 @@ def _concept_graph_single_response(request, concept_id, direction):
 
 @api_view(['GET'])
 @permission_classes([ScopedTokenPermission])
+def concept_detail(request, concept_id):
+    """One OMOP concept by id.
+
+    The Code Mapping dialog lets a curator type a destination concept id
+    directly, and everything under it -- name, code, vocabulary, class, standard
+    flag -- is derived from the concept rather than typed. That needs a
+    by-id read; `concepts/lookup/` translates the other way, (vocabulary, code)
+    to id, and cannot answer this.
+    """
+    concept = Concept.objects.filter(concept_id=concept_id).first()
+    if concept is None:
+        return Response({'detail': 'Concept not found.'}, status=status.HTTP_404_NOT_FOUND)
+    return _set_release_etag(request, Response(_serialize_concept(concept, _vocab_version_map())))
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
 def concept_ancestors(request, concept_id):
     return _concept_graph_single_response(request, concept_id, 'ancestors')
 
@@ -7971,52 +7996,103 @@ def _is_local_vocabulary_id(vocabulary_id):
     return bool(vocabulary_id and vocabulary_id.startswith('HK-'))
 
 
-def _local_concept_queryset():
-    return Concept.objects.select_related('domain', 'vocabulary', 'concept_class').filter(
-        concept_id__gte=LOCAL_CONCEPT_ID_MIN,
-        standard_concept__isnull=True,
-    ).filter(
-        Q(source='HealthKey') | Q(vocabulary__vocabulary_id__startswith='HK-')
-    )
+# Standard vocabularies a curator re-points a proposed mapping into. These get
+# destination tabs: a mapping whose destination an SME moved to a LOINC concept
+# has to be visible somewhere, or their own output disappears on them.
+_STANDARD_DESTINATION_VOCABULARIES = (
+    'SNOMED', 'LOINC', 'RxNorm', 'RxNorm Extension', 'ICD10CM', 'HemOnc',
+)
 
 
 def _serialize_code_mapping_row(concept, mapping=None):
+    """One row of the Code Mapping list: a source code and where it lands.
+
+    Keys read in the direction of the mapping. The source side never falls back
+    to anything on the destination concept -- doing so is what put HK-Wearable,
+    a minting vocabulary, in the source column (#834). A mapping with no source
+    code system reports '', which is a real state: paper labs and clinicians'
+    notes carry no code system at all.
+    """
+    # A mapping can legitimately have no destination yet: a code seen at ingest
+    # whose concept is not loaded is a review-queue row, not an error.
+    if concept is None:
+        return {
+            'destination_concept_id': None,
+            'destination_concept_name': '',
+            'destination_concept_code': '',
+            'destination_vocabulary_id': mapping.destination_vocabulary_id if mapping else '',
+            'destination_concept_class_id': '',
+            'destination_omop_table': mapping.omop_table if mapping else '',
+            'destination_domain_id': '',
+            'standard_concept': None,
+            'concept_source': '',
+            'mapping_id': mapping.id if mapping else None,
+            'domain_id': mapping.domain_id if mapping else '',
+            'source_vocabulary_id': mapping.source_vocabulary_id if mapping else '',
+            'source_code': mapping.source_code if mapping else '',
+            'source_code_description': mapping.source_code_description if mapping else '',
+            'source_concept_id': mapping.source_concept_id if mapping else None,
+            'source': mapping.source if mapping else '',
+            'status': mapping.status if mapping else 'unmapped',
+            'notes': mapping.notes if mapping else '',
+            'origin': mapping.origin if mapping else '',
+            'origin_system': mapping.origin_system if mapping else '',
+            'occurrence_count': mapping.occurrence_count if mapping else 0,
+            'first_seen': mapping.first_seen if mapping else None,
+            'last_seen': mapping.last_seen if mapping else None,
+            'has_mapping': bool(mapping),
+            'concept_id': None,
+            'concept_name': '',
+            'concept_code': '',
+            'concept_vocabulary_id': '',
+            'domain': '',
+            'concept_class_id': '',
+        }
     return {
+        # Destination
+        'destination_concept_id': concept.concept_id,
+        'destination_concept_name': concept.concept_name,
+        'destination_concept_code': concept.concept_code,
+        'destination_vocabulary_id': (
+            (mapping.destination_vocabulary_id if mapping else '')
+            or concept.vocabulary_id or ''
+        ),
+        'destination_concept_class_id': concept.concept_class_id,
+        'destination_omop_table': mapping.omop_table if mapping else '',
+        'destination_domain_id': concept.domain_id,
+        'standard_concept': concept.standard_concept,
+        'concept_source': concept.source or '',
+        # Source
+        'mapping_id': mapping.id if mapping else None,
+        # The curator's own domain choice, which scopes the source code system
+        # list and derives the table. Not the destination concept's domain --
+        # that is 'destination_domain_id' above, and conflating the two is how
+        # the table came to be picked twice by two different rules.
+        'domain_id': mapping.domain_id if mapping else '',
+        'source_vocabulary_id': mapping.source_vocabulary_id if mapping else '',
+        'source_code': mapping.source_code if mapping else '',
+        'source_code_description': mapping.source_code_description if mapping else '',
+        # The concept for the source code itself, when that vocabulary is
+        # loaded. Null is the normal case and means nothing is wrong.
+        'source_concept_id': mapping.source_concept_id if mapping else None,
+        'source': mapping.source if mapping else '',
+        # Review state and provenance
+        'status': mapping.status if mapping else 'unmapped',
+        'notes': mapping.notes if mapping else '',
+        'origin': mapping.origin if mapping else '',
+        'origin_system': mapping.origin_system if mapping else '',
+        'occurrence_count': mapping.occurrence_count if mapping else 0,
+        'first_seen': mapping.first_seen if mapping else None,
+        'last_seen': mapping.last_seen if mapping else None,
+        'has_mapping': bool(mapping),
+        # Legacy alias. The frontend and App.test.tsx read concept_id today;
+        # kept for one release so this rename is not a breaking change.
         'concept_id': concept.concept_id,
         'concept_name': concept.concept_name,
         'concept_code': concept.concept_code,
         'concept_vocabulary_id': concept.vocabulary_id,
-        'domain_id': concept.domain_id,
         'concept_class_id': concept.concept_class_id,
-        'standard_concept': concept.standard_concept,
-        'concept_source': concept.source or '',
-        'mapping_id': mapping.id if mapping else None,
-        'source_vocabulary_id': mapping.source_vocabulary_id if mapping else '',
-        'source_code': mapping.source_code if mapping else '',
-        'source_code_description': mapping.source_code_description if mapping else '',
-        'source': mapping.source if mapping else (concept.vocabulary_id or concept.source or ''),
-        'status': mapping.status if mapping else 'unmapped',
-        'notes': mapping.notes if mapping else '',
-        'has_mapping': bool(mapping),
     }
-
-
-def _code_mapping_rows(queryset):
-    rows = []
-    mappings_by_concept = {}
-    mappings = SourceCodeConceptMapping.objects.filter(
-        target_concept__in=queryset,
-    ).order_by('target_concept_id', 'source_vocabulary_id', 'source_code')
-    for mapping in mappings:
-        mappings_by_concept.setdefault(mapping.target_concept_id, []).append(mapping)
-
-    for concept in queryset.order_by('vocabulary_id', 'concept_code', 'concept_id'):
-        concept_mappings = mappings_by_concept.get(concept.concept_id) or []
-        if concept_mappings:
-            rows.extend(_serialize_code_mapping_row(concept, mapping) for mapping in concept_mappings)
-        else:
-            rows.append(_serialize_code_mapping_row(concept))
-    return rows
 
 
 def _clean_required(data, field_name):
@@ -8027,7 +8103,10 @@ def _clean_required(data, field_name):
 
 
 def _parse_destination_concept_id(data):
-    raw = data.get('target_concept_id') or data.get('concept_id')
+    # destination_concept_id is the current name; the other two are the
+    # pre-#834 spellings, kept so existing callers keep working.
+    raw = (data.get('destination_concept_id') or data.get('target_concept_id')
+           or data.get('concept_id'))
     try:
         concept_id = int(raw)
     except (TypeError, ValueError):
@@ -8046,47 +8125,157 @@ def _get_destination_concept(data):
         })
 
 
-def _upsert_source_code_mapping(concept, data, user):
-    source_vocabulary_id = _clean_required(data, 'source_vocabulary_id')
-    source_code = _clean_required(data, 'source_code')
-    status_value = str(data.get('status') or 'proposed').strip()
+def _upsert_source_code_mapping(concept, data, user, mapping=None):
+    """Create or update one mapping. Returns (mapping, repoint_result).
+
+    ``repoint_result`` is non-None when the save moved an approved mapping's
+    destination, in which case the clinical rows already stored have been
+    re-pointed. Approving is the moment a curation decision reaches the data;
+    doing it in the same request is what makes the dialog's Update & Approve
+    button mean what it says.
+    """
+    # Blank is legal and meaningful: a paper lab test name or a phrase from a
+    # note has no code system, and requiring one would make those unmappable.
+    source_vocabulary_id = str(
+        data.get('source_vocabulary_id',
+                 '' if mapping is None else mapping.source_vocabulary_id) or ''
+    ).strip()
+    if source_vocabulary_id.startswith('HK-'):
+        raise serializers.ValidationError({'source_vocabulary_id': (
+            'HK-* vocabularies are minting destinations, not source code '
+            'systems. Leave this blank for an uncoded source.'
+        )})
+    if mapping is None or 'source_code' in data:
+        source_code = _clean_required(data, 'source_code')
+    else:
+        source_code = mapping.source_code
+
+    # The domain is the curator's first choice and settles the destination
+    # table, so it is validated before the table is read.
+    domain_id = str(
+        data.get('domain_id', '' if mapping is None else mapping.domain_id) or ''
+    ).strip()
+    if domain_id and domain_id not in source_vocabularies.DOMAIN_TO_TABLE:
+        raise serializers.ValidationError({'domain_id': (
+            f"Unknown domain {domain_id!r}. Expected one of: "
+            f"{', '.join(sorted(source_vocabularies.DOMAIN_TO_TABLE))}."
+        )})
+
+    status_value = str(
+        data.get('status') or ('proposed' if mapping is None else mapping.status)
+    ).strip()
     valid_statuses = {choice for choice, _label in SourceCodeConceptMapping.STATUS_CHOICES}
     if status_value not in valid_statuses:
         raise serializers.ValidationError({'status': f"Status must be one of: {', '.join(sorted(valid_statuses))}."})
 
-    existing_id = data.get('mapping_id')
-    mapping = None
-    if existing_id:
-        mapping = SourceCodeConceptMapping.objects.filter(
-            id=existing_id, target_concept=concept,
+    omop_table = normalize_omop_table(data.get('omop_table') or data.get('destination_omop_table'))
+    if omop_table and not mapping_table_is_writable(omop_table):
+        raise serializers.ValidationError({'omop_table': (
+            f"Unknown OMOP table {omop_table!r}. Expected one of: "
+            f"{', '.join(sorted(CLINICAL_TABLES))}."
+        )})
+    # The table follows from the domain (§3.2). A caller that sent both has to
+    # have them agree -- silently preferring one would put the fact in a table
+    # the curator did not choose. A caller that sent neither table gets the
+    # derived one, which is what the dialog shows read-only.
+    derived_table = source_vocabularies.table_for_domain(domain_id)
+    if omop_table and domain_id and derived_table != omop_table:
+        raise serializers.ValidationError({'omop_table': (
+            f"Domain {domain_id!r} lands in {derived_table!r}, not "
+            f"{omop_table!r}."
+        )})
+    if not omop_table:
+        omop_table = derived_table
+
+    # The source code's own concept, when we hold that vocabulary. Blank source
+    # system means uncoded free text, which has no concept by definition.
+    source_concept = None
+    if source_vocabulary_id and source_code:
+        source_concept = Concept.objects.filter(
+            vocabulary_id=source_vocabulary_id, concept_code=source_code,
         ).first()
+
+    if mapping is None and data.get('mapping_id'):
+        mapping = SourceCodeConceptMapping.objects.filter(id=data['mapping_id']).first()
         if mapping is None:
-            raise serializers.ValidationError({'mapping_id': 'Mapping not found for this concept.'})
-    values = {
-        'source_vocabulary_id': source_vocabulary_id,
-        'source_code': source_code,
-        'source_code_description': str(data.get('source_code_description') or '').strip(),
-        'source': str(data.get('source') or source_vocabulary_id).strip(),
-        'status': status_value,
-        'notes': str(data.get('notes') or '').strip(),
-        'updated_by': user,
-    }
+            raise serializers.ValidationError({'mapping_id': 'Mapping not found.'})
+
+    previous_concept_id = mapping.target_concept_id if mapping else None
+
+    # Only fields the caller actually sent. A PATCH that approves by sending
+    # status alone must not blank omop_table -- the re-point would then find no
+    # table, move nothing, and still report success.
+    values = {'updated_by': user}
+    if mapping is None or 'domain_id' in data:
+        values['domain_id'] = domain_id
+    if mapping is None or 'source_vocabulary_id' in data:
+        values['source_vocabulary_id'] = source_vocabulary_id
+    if mapping is None or 'source_code' in data:
+        values['source_code'] = source_code
+    # Re-resolved whenever either half of the source identity moved, and only
+    # then: a PATCH that just approves must not re-run a lookup whose answer
+    # cannot have changed.
+    if mapping is None or 'source_vocabulary_id' in data or 'source_code' in data:
+        values['source_concept'] = source_concept
+    if mapping is None or 'source_code_description' in data:
+        values['source_code_description'] = str(data.get('source_code_description') or '').strip()
+    if mapping is None or 'destination_vocabulary_id' in data or not mapping.destination_vocabulary_id:
+        values['destination_vocabulary_id'] = (
+            str(data.get('destination_vocabulary_id') or '').strip()
+            or concept.vocabulary_id or ''
+        )
+    if omop_table:
+        values['omop_table'] = omop_table
+    if 'source' in data:
+        values['source'] = str(data.get('source') or '').strip()
+    if mapping is None or 'status' in data:
+        values['status'] = status_value
+    if 'notes' in data:
+        values['notes'] = str(data.get('notes') or '').strip()
     try:
         if mapping is None:
             mapping = SourceCodeConceptMapping.objects.create(
                 target_concept=concept,
                 created_by=user,
+                origin='curator',
                 **values,
             )
         else:
+            mapping.target_concept = concept
             for field, value in values.items():
                 setattr(mapping, field, value)
+            # origin is *provenance of creation*, not who last touched the
+            # row: an import proposed it and a curator approved it, and both
+            # are true. Overwriting it on approve also erased the fact that
+            # the description held ingest's display text, which is what the
+            # re-point matches stored rows on.
             mapping.save()
     except IntegrityError:
         raise serializers.ValidationError({
             'source_code': 'This source vocabulary/code pair is already mapped.'
         })
-    return mapping
+
+    # The rows already stored only move when an approved mapping points
+    # somewhere new. Approving a mapping that never moved, or editing one that
+    # is still proposed, touches no clinical data.
+    # Two flows reach here, and both have to move rows:
+    #   - editing a proposed mapping off the concept an import minted;
+    #   - creating a mapping outright for a code whose rows sit at concept 0,
+    #     which is what "New Mapping" on an unresolved code does.
+    # The second has no previous destination recorded, so it re-points from
+    # NO_MATCHING_CONCEPT_ID -- otherwise the most direct curation action in the
+    # UI would leave every stored row untouched and report success.
+    repoint = None
+    if previous_concept_id is None:
+        previous_concept_id = NO_MATCHING_CONCEPT_ID
+    moved = previous_concept_id != concept.concept_id
+    if status_value == 'approved' and moved:
+        repoint = repoint_clinical_rows(
+            mapping=mapping,
+            old_concept_id=previous_concept_id,
+            new_concept_id=concept.concept_id,
+        )
+    return mapping, repoint
 
 
 @api_view(['GET', 'POST'])
@@ -8124,98 +8313,129 @@ def code_mapping_list(request):
 
     with transaction.atomic():
         concept = _get_destination_concept(request.data)
-        mapping = _upsert_source_code_mapping(concept, request.data, request.user)
-    return Response(_serialize_code_mapping_row(concept, mapping), status=status.HTTP_201_CREATED)
+        mapping, repoint = _upsert_source_code_mapping(concept, request.data, request.user)
+    payload = _serialize_code_mapping_row(concept, mapping)
+    payload['repoint'] = repoint
+    return Response(payload, status=status.HTTP_201_CREATED)
 
 
-@api_view(['PATCH'])
+@api_view(['PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
-def code_mapping_detail(request, concept_id):
-    """Add or update a source-code mapping for an existing destination concept."""
+def code_mapping_detail(request, mapping_id):
+    """Edit or delete one mapping.
+
+    Keyed on the mapping, not on its destination concept: two source codes
+    legitimately share one destination (an ICD-10 code and a free-text
+    diagnosis both meaning multiple myeloma), which made the old
+    concept-keyed URL ambiguous about which row it addressed.
+
+    A PATCH that approves a re-pointed mapping also rewrites the clinical rows
+    already stored, and reports what it did under ``repoint`` so the dialog can
+    show progress rather than appearing to hang.
+    """
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
-    try:
-        concept = Concept.objects.get(concept_id=concept_id)
-    except Concept.DoesNotExist:
-        return Response({'detail': 'Destination OMOP concept not found.'}, status=status.HTTP_404_NOT_FOUND)
+    mapping = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related('target_concept').first()
+    if mapping is None:
+        return Response({'detail': 'Mapping not found.'}, status=status.HTTP_404_NOT_FOUND)
 
+    if request.method == 'DELETE':
+        mapping.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    data = request.data
+    concept = (
+        _get_destination_concept(data)
+        if (data.get('destination_concept_id') or data.get('target_concept_id') or data.get('concept_id'))
+        else mapping.target_concept
+    )
     with transaction.atomic():
-        mapping = _upsert_source_code_mapping(concept, request.data, request.user)
-    return Response(_serialize_code_mapping_row(concept, mapping))
+        mapping, repoint = _upsert_source_code_mapping(concept, data, request.user, mapping=mapping)
+    payload = _serialize_code_mapping_row(concept, mapping)
+    payload['repoint'] = repoint
+    return Response(payload)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def code_mapping_reference(request):
+    """Reference values for the Code Mapping dialog and tab strip.
+
+    Source and destination are deliberately different lists. A source code
+    system is something codes arrive *in* -- ICD-10, LOINC, an NDC -- and is
+    never an HK-* vocabulary, because those are where we mint destinations.
+    A destination vocabulary is either a standard one a curator re-points into
+    or an HK-* one an import minted under.
+
+    The source list is scoped by domain and comes from the static catalogue in
+    ``services/source_vocabularies``, not from the ``vocabulary`` table: most
+    of those systems are ones we receive codes in without holding their
+    concepts, and deriving the list from what happens to be loaded would block
+    a curator from recording a mapping they can already make correctly.
+    """
+    if not _can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    return Response(_code_mapping_reference_payload())
+
+
+def _code_mapping_reference_payload():
+    known = {
+        v.vocabulary_id: v.vocabulary_name
+        for v in Vocabulary.objects.filter(
+            vocabulary_id__in=_STANDARD_DESTINATION_VOCABULARIES,
+        ).order_by('vocabulary_id')
+    }
+    hk_vocabularies = list(
+        Vocabulary.objects.filter(vocabulary_id__startswith='HK-')
+        .order_by('vocabulary_id')
+        .values_list('vocabulary_id', 'vocabulary_name')
+    )
+    standard = [
+        (v, known[v]) for v in _STANDARD_DESTINATION_VOCABULARIES if v in known
+    ]
+
+    return {
+        'domains': [
+            {'domain_id': domain_id, 'label': label}
+            for domain_id, label in source_vocabularies.DOMAIN_CHOICES
+        ],
+        # Scoped per domain, each list led by the blank "uncoded" option --
+        # a parsed paper lab or a phrase from a note has no code system, and
+        # that is the common case rather than an omission.
+        'source_code_systems_by_domain': {
+            domain_id: source_vocabularies.source_systems_for(domain_id)
+            for domain_id, _label in source_vocabularies.DOMAIN_CHOICES
+        },
+        # Tab order: the standard vocabularies a curator re-points into first,
+        # then the HK-* buckets imports fill.
+        'destination_vocabularies': [
+            {'vocabulary_id': v, 'vocabulary_name': n, 'is_local': False}
+            for v, n in standard
+        ] + [
+            {'vocabulary_id': v, 'vocabulary_name': n, 'is_local': True}
+            for v, n in hk_vocabularies
+        ],
+        # {domain_id: table}. The dialog shows the derived table read-only, so
+        # the consequence of the domain choice is visible without the frontend
+        # holding a second copy of the mapping.
+        'omop_tables': dict(source_vocabularies.DOMAIN_TO_TABLE),
+    }
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def code_mapping_vocabularies(request):
-    """Reference values for the Code Mapping curation dialog."""
+    """Deprecated alias for code_mapping_reference (kept for one release).
+
+    Calls the plain helper, not the view: code_mapping_reference is
+    @api_view-decorated, so invoking it here would hand a DRF Request to a
+    wrapper that asserts on django.http.HttpRequest and 500 on every call --
+    an alias kept for compatibility that raises is worse than no alias.
+    """
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
-
-    local_vocabulary_ids = set(
-        _local_concept_queryset().values_list('vocabulary_id', flat=True).distinct()
-    )
-    vocabularies = Vocabulary.objects.filter(
-        Q(vocabulary_id__startswith='HK-') | Q(vocabulary_id__in=local_vocabulary_ids)
-    ).order_by('vocabulary_id')
-    return Response({
-        'vocabularies': [
-            {'vocabulary_id': v.vocabulary_id, 'vocabulary_name': v.vocabulary_name}
-            for v in vocabularies
-        ],
-        'domains': [
-            {'domain_id': d.domain_id, 'domain_name': d.domain_name}
-            for d in Domain.objects.order_by('domain_id')
-        ],
-        'concept_classes': [
-            {'concept_class_id': c.concept_class_id, 'concept_class_name': c.concept_class_name}
-            for c in ConceptClass.objects.order_by('concept_class_id')
-        ],
-    })
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def propose_all_code_mappings(request):
-    """Create proposed self-mappings for local concepts with no source code row."""
-    if not _can_manage_field_mappings(request.user):
-        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
-
-    source_filter = str(request.data.get('source') or request.query_params.get('source') or '').strip()
-    concepts = _local_concept_queryset()
-    if source_filter:
-        concepts = concepts.filter(vocabulary_id=source_filter)
-
-    existing_concept_ids = set(
-        SourceCodeConceptMapping.objects.values_list('target_concept_id', flat=True)
-    )
-    to_create = []
-    for concept in concepts.exclude(concept_id__in=existing_concept_ids):
-        if not concept.vocabulary_id or not concept.concept_code:
-            continue
-        to_create.append(SourceCodeConceptMapping(
-            source_vocabulary_id=concept.vocabulary_id,
-            source_code=concept.concept_code,
-            source_code_description=concept.concept_name,
-            target_concept=concept,
-            source=concept.vocabulary_id,
-            status='proposed',
-            notes='Auto-proposed from local quarantined concept.',
-            created_by=request.user,
-            updated_by=request.user,
-        ))
-
-    if to_create:
-        SourceCodeConceptMapping.objects.bulk_create(to_create, ignore_conflicts=True)
-
-    created_codes = [
-        f'{mapping.source_vocabulary_id}:{mapping.source_code}'
-        for mapping in to_create
-    ]
-    return Response(
-        {'created': len(created_codes), 'codes': created_codes},
-        status=status.HTTP_201_CREATED if created_codes else status.HTTP_200_OK,
-    )
+    return Response(_code_mapping_reference_payload())
 
 
 @api_view(['GET', 'POST'])
