@@ -8004,6 +8004,23 @@ _STANDARD_DESTINATION_VOCABULARIES = (
 )
 
 
+def _mapping_author(mapping):
+    """Display name for the human who created a mapping, '' for a machine.
+
+    The Unmapped queue is ordered machine-first then by author, so this is the
+    sort key as well as the label -- an import row has no author and sorts
+    above every human's.
+    """
+    user = getattr(mapping, 'created_by', None) if mapping else None
+    if user is None:
+        return ''
+    return (
+        getattr(user, 'get_full_name', lambda: '')()
+        or getattr(user, 'email', '')
+        or str(user)
+    )
+
+
 def _serialize_code_mapping_row(concept, mapping=None):
     """One row of the Code Mapping list: a source code and where it lands.
 
@@ -8037,6 +8054,7 @@ def _serialize_code_mapping_row(concept, mapping=None):
             'notes': mapping.notes if mapping else '',
             'origin': mapping.origin if mapping else '',
             'origin_system': mapping.origin_system if mapping else '',
+            'created_by': _mapping_author(mapping),
             'occurrence_count': mapping.occurrence_count if mapping else 0,
             'first_seen': mapping.first_seen if mapping else None,
             'last_seen': mapping.last_seen if mapping else None,
@@ -8081,6 +8099,7 @@ def _serialize_code_mapping_row(concept, mapping=None):
         'notes': mapping.notes if mapping else '',
         'origin': mapping.origin if mapping else '',
         'origin_system': mapping.origin_system if mapping else '',
+        'created_by': _mapping_author(mapping),
         'occurrence_count': mapping.occurrence_count if mapping else 0,
         'first_seen': mapping.first_seen if mapping else None,
         'last_seen': mapping.last_seen if mapping else None,
@@ -8161,9 +8180,14 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
             f"{', '.join(sorted(source_vocabularies.DOMAIN_TO_TABLE))}."
         )})
 
-    status_value = str(
-        data.get('status') or ('proposed' if mapping is None else mapping.status)
-    ).strip()
+    # A new mapping is always proposed. Creating and approving in one act
+    # removes the review step the Unmapped queue exists to provide, and it is
+    # also what let a create write clinical data -- now approval is the only
+    # transition that does, which is a far easier property to reason about.
+    if mapping is None:
+        status_value = 'proposed'
+    else:
+        status_value = str(data.get('status') or mapping.status).strip()
     valid_statuses = {choice for choice, _label in SourceCodeConceptMapping.STATUS_CHOICES}
     if status_value not in valid_statuses:
         raise serializers.ValidationError({'status': f"Status must be one of: {', '.join(sorted(valid_statuses))}."})
@@ -8200,6 +8224,9 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         if mapping is None:
             raise serializers.ValidationError({'mapping_id': 'Mapping not found.'})
 
+    # Captured before the save: whether this is the first sign-off, and
+    # where the mapping pointed beforehand.
+    was_approved = mapping is not None and mapping.status == 'approved'
     previous_concept_id = mapping.target_concept_id if mapping else None
 
     # Only fields the caller actually sent. A PATCH that approves by sending
@@ -8255,26 +8282,38 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
             'source_code': 'This source vocabulary/code pair is already mapped.'
         })
 
-    # The rows already stored only move when an approved mapping points
-    # somewhere new. Approving a mapping that never moved, or editing one that
-    # is still proposed, touches no clinical data.
-    # Two flows reach here, and both have to move rows:
-    #   - editing a proposed mapping off the concept an import minted;
-    #   - creating a mapping outright for a code whose rows sit at concept 0,
-    #     which is what "New Mapping" on an unresolved code does.
-    # The second has no previous destination recorded, so it re-points from
-    # NO_MATCHING_CONCEPT_ID -- otherwise the most direct curation action in the
-    # UI would leave every stored row untouched and report success.
+    # What should move the stored rows is a human signing off on what a code
+    # means -- not, as an earlier version had it, the destination happening to
+    # change. Those coincide when a curator re-points an import's proposal, and
+    # they do NOT when a curator writes a mapping themselves: they pick the
+    # destination at creation, so by the time they approve it has not moved, and
+    # keying on movement alone would approve the mapping while leaving every
+    # unresolved row at concept 0 and reporting success.
+    #
+    # So a *first* approval sweeps concept 0 -- claiming the rows this source
+    # code left unresolved -- and any approval that also moved the destination
+    # sweeps the old one. Both can apply at once, and their counts are summed
+    # so the dialog reports everything it touched.
     repoint = None
-    if previous_concept_id is None:
-        previous_concept_id = NO_MATCHING_CONCEPT_ID
-    moved = previous_concept_id != concept.concept_id
-    if status_value == 'approved' and moved:
-        repoint = repoint_clinical_rows(
-            mapping=mapping,
-            old_concept_id=previous_concept_id,
-            new_concept_id=concept.concept_id,
-        )
+    if status_value == 'approved':
+        sources = set()
+        if not was_approved:
+            sources.add(NO_MATCHING_CONCEPT_ID)
+        if previous_concept_id is not None and previous_concept_id != concept.concept_id:
+            sources.add(previous_concept_id)
+        sources.discard(concept.concept_id)
+
+        for old_concept_id in sorted(sources):
+            outcome = repoint_clinical_rows(
+                mapping=mapping,
+                old_concept_id=old_concept_id,
+                new_concept_id=concept.concept_id,
+            )
+            if repoint is None:
+                repoint = outcome
+            else:
+                for key, value in outcome.items():
+                    repoint[key] += value
     return mapping, repoint
 
 
@@ -8286,7 +8325,8 @@ def code_mapping_list(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
-        mappings = SourceCodeConceptMapping.objects.select_related('target_concept')
+        mappings = SourceCodeConceptMapping.objects.select_related(
+            'target_concept', 'created_by')
         source_filter = request.query_params.get('source')
         if source_filter:
             mappings = mappings.filter(source_vocabulary_id=source_filter)
@@ -8336,7 +8376,8 @@ def code_mapping_detail(request, mapping_id):
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
-    mapping = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related('target_concept').first()
+    mapping = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related(
+        'target_concept', 'created_by').first()
     if mapping is None:
         return Response({'detail': 'Mapping not found.'}, status=status.HTTP_404_NOT_FOUND)
 

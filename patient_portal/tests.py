@@ -21218,10 +21218,13 @@ class CodeMappingRepointTest(TestCase):
         other.refresh_from_db()
         self.assertEqual(other.measurement_concept_id, self.corrected.concept_id)
 
-    def test_approving_without_moving_the_destination_touches_no_rows(self):
+    def test_approving_without_moving_the_destination_leaves_the_row_alone(self):
+        """A first approval sweeps concept 0 for its source code, so a repoint
+        result is reported -- but the row already sits on the destination, so
+        nothing moves."""
         resp = self._approve_at(self.minted.concept_id)
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-        self.assertIsNone(resp.data['repoint'])
+        self.assertEqual(resp.data['repoint']['rows_updated'], 0)
         self.row.refresh_from_db()
         self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
 
@@ -22836,9 +22839,14 @@ class CodeMappingRepointSafetyTest(TestCase):
         self.assertEqual(self.mapping.omop_table, 'measurement')
         self.assertEqual(resp.data['repoint']['rows_updated'], 1)
 
-    def test_new_approved_mapping_repoints_rows_sitting_at_concept_zero(self):
+    def test_approving_a_new_mapping_repoints_rows_sitting_at_concept_zero(self):
         """"New Mapping" on an unresolved code is the most direct curation
-        action there is, and it has to move the rows."""
+        action there is, and it has to move the rows.
+
+        Creation is always proposed now, so the move belongs to the approval --
+        and the destination has not changed between the two, which is exactly
+        why the first approval sweeps concept 0 rather than keying on movement.
+        """
         Measurement.objects.create(
             measurement_id=8893007, person=self.person,
             measurement_concept_id=0,
@@ -22846,14 +22854,18 @@ class CodeMappingRepointSafetyTest(TestCase):
             measurement_type_concept=self.type_concept,
             measurement_source_value='POTASSIUM', value_as_number=Decimal('4.1'),
         )
-        resp = self.client.post('/api/v1/code-mappings/', {
+        created = self.client.post('/api/v1/code-mappings/', {
             'source_vocabulary_id': '',
             'source_code': 'POTASSIUM',
             'destination_concept_id': self.standard.concept_id,
             'omop_table': 'measurement',
-            'status': 'approved',
         }, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED, created.data)
+        self.assertEqual(created.data['status'], 'proposed')
+
+        resp = self.client.patch(f'/api/v1/code-mappings/{created.data["mapping_id"]}/',
+                                 {'status': 'approved'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.assertEqual(resp.data['repoint']['rows_updated'], 1)
         self.assertEqual(
             Measurement.objects.get(measurement_id=8893007).measurement_concept_id,
@@ -22872,14 +22884,16 @@ class CodeMappingRepointSafetyTest(TestCase):
             measurement_source_value=long_name[:50],
             value_as_number=Decimal('1.0'),
         )
-        resp = self.client.post('/api/v1/code-mappings/', {
+        created = self.client.post('/api/v1/code-mappings/', {
             'source_vocabulary_id': '',
             'source_code': long_name,
             'destination_concept_id': self.standard.concept_id,
             'omop_table': 'measurement',
-            'status': 'approved',
         }, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED, created.data)
+        resp = self.client.patch(f'/api/v1/code-mappings/{created.data["mapping_id"]}/',
+                                 {'status': 'approved'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.assertEqual(resp.data['repoint']['rows_updated'], 1)
 
     def test_collapse_removes_provenance_for_the_rows_it_deletes(self):
@@ -22938,3 +22952,131 @@ class CodeMappingRepointSafetyTest(TestCase):
             Measurement.objects.get(measurement_id=8893011).measurement_concept_id,
             self.standard.concept_id,
         )
+
+
+class CodeMappingCuratorWorkflowTest(TestCase):
+    """A curator-created mapping is proposed, and approval is what moves rows.
+
+    Creating and approving in one act removed the review step the Unmapped
+    queue exists for, and it made a create write clinical data. Approval is now
+    the only transition that does.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.curator = Identity.objects.create_user(
+            email='queue_curator@t.com', password='x', is_staff=True,
+        )
+        cls.domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        cls.concept_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+        cls.vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_reference': 'x',
+                      'vocabulary_version': '2.77', 'vocabulary_concept_id': 0},
+        )
+        cls.destination = Concept.objects.create(
+            concept_id=3046350, concept_name='Potassium [Moles/volume] in Serum',
+            domain=cls.domain, vocabulary=cls.vocab, concept_class=cls.concept_class,
+            standard_concept='S', concept_code='2823-3',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        cls.other = Concept.objects.create(
+            concept_id=3046351, concept_name='Some other concept',
+            domain=cls.domain, vocabulary=cls.vocab, concept_class=cls.concept_class,
+            standard_concept='S', concept_code='1111-1',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        cls.type_concept = Concept.objects.create(
+            concept_id=32817, concept_name='EHR',
+            domain=cls.domain, vocabulary=cls.vocab, concept_class=cls.concept_class,
+            standard_concept='S', concept_code='EHR',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.curator)
+        self.person = Person.objects.create(
+            person_id=910003, gender_concept_id=0, year_of_birth=1970,
+            race_concept_id=0, ethnicity_concept_id=0,
+        )
+        self.row = Measurement.objects.create(
+            measurement_id=8894001, person=self.person,
+            measurement_concept_id=0,               # unresolved, as an import left it
+            measurement_date=date(2026, 9, 1),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='POTASSIUM', value_as_number=Decimal('4.1'),
+        )
+
+    def _create(self, status_value='approved'):
+        return self.client.post('/api/v1/code-mappings/', {
+            'domain_id': 'Measurement',
+            'source_vocabulary_id': '',
+            'source_code': 'POTASSIUM',
+            'destination_concept_id': self.destination.concept_id,
+            'omop_table': 'measurement',
+            'status': status_value,
+        }, format='json')
+
+    def test_creation_is_always_proposed(self):
+        """Even when the client asks for approved."""
+        resp = self._create(status_value='approved')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['status'], 'proposed')
+        self.assertEqual(resp.data['origin'], 'curator')
+
+    def test_creation_moves_no_clinical_data(self):
+        """Approval is the only transition that rewrites patient rows."""
+        resp = self._create()
+        self.assertIsNone(resp.data['repoint'])
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, 0)
+
+    def test_first_approval_claims_the_unresolved_rows(self):
+        """The trap: the curator picked the destination at creation, so by the
+        time they approve it has not moved. Keying the re-point on movement
+        alone would approve the mapping and leave every row at concept 0."""
+        mapping_id = self._create().data['mapping_id']
+        resp = self.client.patch(f'/api/v1/code-mappings/{mapping_id}/', {
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.destination.concept_id)
+
+    def test_later_re_point_moves_rows_off_the_old_destination(self):
+        mapping_id = self._create().data['mapping_id']
+        self.client.patch(f'/api/v1/code-mappings/{mapping_id}/',
+                          {'status': 'approved'}, format='json')
+        resp = self.client.patch(f'/api/v1/code-mappings/{mapping_id}/', {
+            'destination_concept_id': self.other.concept_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.other.concept_id)
+
+    def test_the_creating_curator_is_reported(self):
+        self._create()
+        resp = self.client.get('/api/v1/code-mappings/')
+        row = next(r for r in resp.data if r['source_code'] == 'POTASSIUM')
+        self.assertEqual(row['created_by'], 'queue_curator@t.com')
+        self.assertEqual(row['origin'], 'curator')
+
+    def test_import_rows_report_no_author(self):
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='', source_code='SODIUM',
+            target_concept=self.destination, omop_table='measurement',
+            domain_id='Measurement', status='proposed',
+            origin='import', origin_system='fhir-sync',
+        )
+        resp = self.client.get('/api/v1/code-mappings/')
+        row = next(r for r in resp.data if r['source_code'] == 'SODIUM')
+        self.assertEqual(row['created_by'], '')
