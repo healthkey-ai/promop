@@ -142,6 +142,7 @@ export default function CodeMappingPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeVocabulary, setActiveVocabulary] = useState("");
   const [mappedCollapsed, setMappedCollapsed] = useState(true);
+  const [showRejected, setShowRejected] = useState(false);
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
   const [form, setForm] = useState<MappingForm>(emptyForm);
@@ -212,7 +213,11 @@ export default function CodeMappingPage() {
   const visibleRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return rows.filter((row) => {
-      if (row.status === "rejected") return false;
+      // Rejected rows are hidden but reachable. Filtering them out with no way
+      // back would strand the source code for good: it appears in neither
+      // section, cannot be re-opened to un-reject, and re-creating it trips the
+      // (source_vocabulary_id, source_code) unique constraint.
+      if (row.status === "rejected" && !showRejected) return false;
       if (selectedVocabulary && row.destination_vocabulary_id !== selectedVocabulary) return false;
       if (!q) return true;
       return [
@@ -224,7 +229,7 @@ export default function CodeMappingPage() {
         String(row.destination_concept_id),
       ].some((value) => (value || "").toLowerCase().includes(q));
     });
-  }, [rows, searchQuery, selectedVocabulary]);
+  }, [rows, searchQuery, selectedVocabulary, showRejected]);
 
   /** Highest occurrence count first: the code seen 400 times is worth more of a curator's time. */
   const byOccurrence = (a: CodeMappingRow, b: CodeMappingRow) =>
@@ -234,6 +239,11 @@ export default function CodeMappingPage() {
   const unmappedRows = useMemo(
     () => visibleRows.filter((r) => r.status !== "approved").sort(byOccurrence),
     [visibleRows],
+  );
+  const rejectedCount = useMemo(
+    () => rows.filter((r) => r.status === "rejected"
+      && (!selectedVocabulary || r.destination_vocabulary_id === selectedVocabulary)).length,
+    [rows, selectedVocabulary],
   );
   const mappedRows = useMemo(
     () => visibleRows.filter((r) => r.status === "approved").sort(byOccurrence),
@@ -584,9 +594,21 @@ export default function CodeMappingPage() {
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-700">
             Unmapped <span className="font-normal text-slate-500">({unmappedRows.length})</span>
           </h2>
-          <p className="mb-2 text-xs text-slate-500">
-            The destination concept exists — an import minted or chose it — but no curator has confirmed it.
-          </p>
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <p className="text-xs text-slate-500">
+              The destination concept exists — an import minted or chose it — but no curator has confirmed it.
+            </p>
+            {rejectedCount > 0 && (
+              <label className="flex shrink-0 items-center gap-1.5 text-xs text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={showRejected}
+                  onChange={(e) => setShowRejected(e.target.checked)}
+                />
+                Show {rejectedCount} rejected
+              </label>
+            )}
+          </div>
           {renderTable(unmappedRows, "Nothing awaiting review in this vocabulary.")}
         </section>
 

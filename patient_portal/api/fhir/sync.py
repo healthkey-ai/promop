@@ -40,7 +40,10 @@ from omop_core.models import (
     Concept, ConditionOccurrence, DrugExposure, Measurement, Observation, Person,
     PatientDocument, ProcedureOccurrence, ProvenanceRecord, SourceCodeConceptMapping,
 )
-from omop_core.services.code_mapping import SELF_RESOLVING_VOCABULARIES
+from omop_core.services.code_mapping import (
+    SELF_RESOLVING_VOCABULARIES,
+    resolve_source_code,
+)
 from omop_core.services.pk import next_pk_batch
 from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.api.permissions import ScopedTokenPermission, get_request_org, is_service_token
@@ -461,24 +464,44 @@ class FhirSyncView(APIView):
             ).filter(
                 status='approved', _code_upper__in=list(wanted),
             ).select_related('target_concept')
+            # value.upper() -> the inbound spellings, so the loop below is
+            # O(mappings) rather than O(mappings x distinct values).
+            by_upper = defaultdict(list)
+            for value in (all_codes | all_source_texts):
+                by_upper[value.upper()].append(value)
+
             for mapping in approved:
                 vocab = mapping.source_vocabulary_id or '*'
                 if vocab in SELF_RESOLVING_VOCABULARIES:
                     continue
                 # Keyed by the *inbound* spelling, since that is what _lookup
-                # has in hand, not by however the curator typed it.
-                for value in (all_codes | all_source_texts):
-                    if value.upper() == mapping.source_code.upper():
-                        cache[(vocab, value)] = mapping.target_concept
+                # has in hand, not by however the curator typed it. A mapping
+                # with no source code system is written under every vocabulary
+                # the code arrived in as well as '*', because _lookup tries
+                # (vocab, code) first -- without this an approved mapping would
+                # lose to the direct Athena hit it exists to override.
+                for value in by_upper.get(mapping.source_code.upper(), ()):
+                    cache[(vocab, value)] = mapping.target_concept
+                    if vocab == '*':
+                        for other in by_vocab:
+                            if value in by_vocab[other]:
+                                cache[(other, value)] = mapping.target_concept
         return cache
 
-    def _lookup(self, codeable, cache):
+    def _lookup(self, codeable, cache, omop_table=None):
         """Resolve a CodeableConcept to a concept, curated mappings included.
 
         A coded entry is tried first in its own vocabulary, then across
         vocabularies. If nothing coded resolves, the source *text* is tried --
         that is how a paper lab test name or a scribbled diagnosis, which
         carries no code at all, reaches the concept a curator mapped it to.
+
+        When `omop_table` is given and nothing resolves, the code is minted
+        under an HK-* vocabulary and a *proposed* mapping is recorded, so the
+        fact keeps a real concept and the code reaches the review queue instead
+        of vanishing into concept 0 with nobody told. Results are written back
+        into `cache`, so a code repeated across a bundle costs one mint, not
+        one per occurrence.
         """
         for coding in _codings(codeable):
             code = coding.get('code')
@@ -489,9 +512,43 @@ class FhirSyncView(APIView):
             if concept:
                 return concept
         text = _source_text(codeable)
-        if text:
-            return cache.get(('*', text))
-        return None
+        if text and cache.get(('*', text)):
+            return cache[('*', text)]
+        if omop_table is None:
+            return None
+
+        # Mint. Prefer a coded identity over free text: a code is stable across
+        # producers, while display text varies by who typed it.
+        source_code, source_vocab = text, ''
+        for coding in _codings(codeable):
+            if coding.get('code'):
+                source_code = coding['code']
+                source_vocab = _SYSTEM_VOCAB.get(coding.get('system', '')) or ''
+                break
+        if not source_code:
+            return None
+
+        # Negative results are cached too. A LOINC code with no concept loaded
+        # resolves to nothing by design (rule 1 never mints for LOINC), and
+        # without this every occurrence in the bundle re-queries -- turning a
+        # flat cost into one per row.
+        mint_key = ('mint', source_vocab, source_code)
+        if mint_key in cache:
+            return cache[mint_key]
+
+        concept, _mapping = resolve_source_code(
+            source_code=source_code,
+            source_vocabulary_id=source_vocab,
+            source_text=text or source_code,
+            omop_table=omop_table,
+            source_system='fhir-sync',
+        )
+        cache[mint_key] = concept
+        if concept is not None:
+            cache[(source_vocab or '*', source_code)] = concept
+            if text:
+                cache[('*', text)] = concept
+        return concept
 
     # ------------------------------------------------------------------ #
     # Batched ingestion
@@ -511,7 +568,7 @@ class FhirSyncView(APIView):
     def _parse_obs(self, obs, cache):
         """Pull the fields one Observation maps onto a Measurement."""
         effective = obs.get('effectiveDateTime') or (obs.get('effectivePeriod') or {}).get('start')
-        concept = self._lookup(obs.get('code'), cache)
+        concept = self._lookup(obs.get('code'), cache, 'measurement')
         interpretation = _first_codeable(obs.get('interpretation'))
         interpretation_concept = self._lookup(interpretation, cache)
         qty = obs.get('valueQuantity') or {}
@@ -600,6 +657,7 @@ class FhirSyncView(APIView):
 
         meas_ct = ContentType.objects.get_for_model(Measurement)
         touched, new_rows = [], []
+        staged = set()   # (concept, date) already queued for insert this bundle
         with suppress_patient_record_refresh():
             for (sv_key, obs_date), o in desired.items():
                 cid = o['cid']
@@ -615,6 +673,14 @@ class FhirSyncView(APIView):
                 )
                 existing = list(existing_qs.order_by('measurement_id'))
                 if not existing:
+                    # Nothing stored yet, but a row for this same concept and
+                    # day may already be staged from an earlier entry in this
+                    # bundle under different display text. Two producers'
+                    # spellings of one daily rollup are one row, not two.
+                    if cid and (cid, obs_date) in staged:
+                        continue
+                    if cid:
+                        staged.add((cid, obs_date))
                     new_rows.append(Measurement(
                         person=person,
                         measurement_concept_id=cid,
@@ -639,8 +705,14 @@ class FhirSyncView(APIView):
                         content_type=meas_ct, object_id__in=extra_ids).delete()
                     Measurement.objects.filter(measurement_id__in=extra_ids).delete()
 
+                # Never trade a resolved concept for 'No matching concept'. A
+                # code can stop resolving between imports -- a vocabulary not
+                # loaded on this deploy, a mapping the cache did not reproduce
+                # -- and writing 0 over a good concept would lose curation that
+                # already happened.
+                next_cid = cid or keep.measurement_concept_id
                 changed = (
-                    keep.measurement_concept_id != cid
+                    keep.measurement_concept_id != next_cid
                     or _norm_num(keep.value_as_number) != _norm_num(o['value'])
                     or keep.measurement_datetime != o['dt']
                     or keep.value_as_string != o['vstr']
@@ -653,7 +725,7 @@ class FhirSyncView(APIView):
                 if changed:
                     # Concept updated in place, so approving a mapping upgrades
                     # the stored row instead of stranding a duplicate beside it.
-                    keep.measurement_concept_id = cid
+                    keep.measurement_concept_id = next_cid
                     keep.value_as_number = o['value']
                     keep.measurement_datetime = o['dt']
                     keep.value_as_string = o['vstr']
@@ -682,7 +754,7 @@ class FhirSyncView(APIView):
             if start is None:
                 self._count_skipped(skipped, 'Condition', 'missing_onset_date')
                 continue
-            concept = self._lookup(cond.get('code'), cache)
+            concept = self._lookup(cond.get('code'), cache, 'condition')
             rows.append(ConditionOccurrence(
                 person=person,
                 condition_concept=concept or no_match,
@@ -709,7 +781,7 @@ class FhirSyncView(APIView):
                                     'missing_effective_or_authored_date')
                 continue
             codeable = med.get('medicationCodeableConcept')
-            concept = self._lookup(codeable, cache)
+            concept = self._lookup(codeable, cache, 'drug_exposure')
             rows.append(DrugExposure(
                 person=person,
                 drug_concept=concept or no_match,
@@ -730,7 +802,7 @@ class FhirSyncView(APIView):
             if date is None:
                 self._count_skipped(skipped, 'Procedure', 'missing_performed_date')
                 continue
-            concept = self._lookup(proc.get('code'), cache)
+            concept = self._lookup(proc.get('code'), cache, 'procedure')
             rows.append(ProcedureOccurrence(
                 person=person,
                 procedure_concept=concept or no_match,
@@ -751,7 +823,7 @@ class FhirSyncView(APIView):
             if date is None:
                 self._count_skipped(skipped, 'Immunization', 'missing_occurrence_date')
                 continue
-            concept = self._lookup(imm.get('vaccineCode'), cache)
+            concept = self._lookup(imm.get('vaccineCode'), cache, 'drug_exposure')
             rows.append(DrugExposure(
                 person=person,
                 drug_concept=concept or no_match,
@@ -792,7 +864,7 @@ class FhirSyncView(APIView):
                 self._count_skipped(skipped, item['resource_type'],
                                     'missing_effective_date')
                 continue
-            concept = self._lookup(item['code'], cache)
+            concept = self._lookup(item['code'], cache, 'observation')
             rows.append(Observation(
                 person=person,
                 observation_concept=concept or no_match,

@@ -29,7 +29,9 @@ arrive again.
 """
 import logging
 
+from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
+from django.db.models import Case, IntegerField, When
 from django.utils import timezone
 
 from omop_core.models import (
@@ -40,6 +42,7 @@ from omop_core.models import (
     Observation,
     PatientRecord,
     ProcedureOccurrence,
+    ProvenanceRecord,
     SourceCodeConceptMapping,
 )
 from omop_core.services.regimen_resolution import (
@@ -54,6 +57,10 @@ logger = logging.getLogger(__name__)
 # Vocabularies whose codes are their own concepts. A source code in one of
 # these resolves directly and never generates a mapping row (rule 1).
 SELF_RESOLVING_VOCABULARIES = frozenset({'LOINC', 'SNOMED'})
+
+# OMOP 'No matching concept'. Where an unresolved fact sits, and therefore the
+# concept a first approval usually moves rows off.
+NO_MATCHING_CONCEPT_ID = 0
 
 # Clinical table -> (model, concept column, source-value column). The concept
 # column is what a re-point rewrites; the source-value column is how a mapping
@@ -74,6 +81,25 @@ _QUARANTINE_TARGETS = {
     'condition': ('HK-Condition', 'Condition', 'Clinical Finding', 'hkc'),
     'drug_exposure': ('HK-Drug', 'Drug', 'Drug', 'hkd'),
     'procedure': ('HK-Procedure', 'Procedure', 'Procedure', 'hkp'),
+}
+
+
+# What makes two rows the same event, per table. Mirrors the bulk write path's
+# _UPSERT_KEYS. Measurement and Observation diverge from the other three on
+# purpose: several distinct results for one analyte on one day are real, so the
+# raw value columns have to separate them.
+_COLLAPSE_IDENTITY = {
+    'measurement_concept_id': (
+        'measurement_date', 'measurement_datetime', 'value_as_number',
+        'value_as_string',
+    ),
+    'observation_concept_id': (
+        'observation_date', 'observation_datetime', 'value_as_number',
+        'value_as_string', 'value_source_value',
+    ),
+    'condition_concept_id': ('condition_start_date',),
+    'drug_concept_id': ('drug_exposure_start_date',),
+    'procedure_concept_id': ('procedure_date',),
 }
 
 
@@ -104,12 +130,22 @@ def approved_mapping_for(source_vocabulary_id, source_code):
 
 
 def _direct_concept(source_vocabulary_id, source_code):
+    """Resolve a code against Athena.
+
+    With no source code system this searches every vocabulary, which can match
+    more than one concept -- an in-house numeric code can collide with a real
+    one. Standard concepts win, then the lowest id, so the answer is at least
+    stable run to run rather than whatever the planner returned first.
+    """
     if not source_code:
         return None
     qs = Concept.objects.filter(concept_code=source_code)
     if source_vocabulary_id:
         qs = qs.filter(vocabulary_id=source_vocabulary_id)
-    return qs.first()
+    return qs.order_by(
+        Case(When(standard_concept='S', then=0), default=1, output_field=IntegerField()),
+        'concept_id',
+    ).first()
 
 
 def _record_proposal(*, source_vocabulary_id, source_code, source_text,
@@ -122,6 +158,10 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
     would let an import quietly undo a curator.
     """
     now = timezone.now()
+    # Truncated before the lookup as well as the create. Looking up the full
+    # string but storing 100 chars means every later sighting of a longer source
+    # text misses, re-enters the create branch, and trips the unique constraint.
+    source_code = source_code[:100]
     mapping = SourceCodeConceptMapping.objects.filter(
         source_vocabulary_id=source_vocabulary_id or '',
         source_code__iexact=source_code,
@@ -130,7 +170,7 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
     if mapping is None:
         return SourceCodeConceptMapping.objects.create(
             source_vocabulary_id=source_vocabulary_id or '',
-            source_code=source_code[:100],
+            source_code=source_code,
             source_code_description=(source_text or '')[:255],
             target_concept=concept,
             destination_vocabulary_id=concept.vocabulary_id or '',
@@ -251,8 +291,12 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
         return result
     model, concept_col, source_col = entry
 
+    # Ingest truncates every *_source_value to 50 chars, so a curator who typed
+    # the full name would match nothing and the approval would silently move no
+    # rows. Match on what was actually stored.
+    stored_width = model._meta.get_field(source_col).max_length or 50
     qs = model.objects.filter(**{
-        f'{source_col}__iexact': mapping.source_code,
+        f'{source_col}__iexact': mapping.source_code[:stored_width],
         concept_col: old_concept_id,
     })
     person_ids = set(qs.values_list('person_id', flat=True).distinct())
@@ -290,32 +334,36 @@ def _collapse_duplicates(model, concept_col, source_col, source_code,
                          concept_id, person_ids):
     """Collapse rows the re-point just made identical.
 
-    If a patient already held a row at the new destination for the same source
-    value and date, the rewrite has produced two rows for one fact. Keep the
-    earliest and delete the rest, the rule ``_upsert_clinical`` already applies
-    on the ingest path.
+    "Identical" is the event identity CLAUDE.md documents for the bulk write
+    path, not just (person, date). Measurement and Observation carry more of it
+    on purpose: a patient legitimately has several distinct results for one
+    analyte on one day, and keying on the date alone would delete real results
+    rather than dedupe a re-point.
     """
-    date_col = {
-        'measurement_concept_id': 'measurement_date',
-        'observation_concept_id': 'observation_date',
-        'condition_concept_id': 'condition_start_date',
-        'drug_concept_id': 'drug_exposure_start_date',
-        'procedure_concept_id': 'procedure_date',
-    }[concept_col]
+    identity_cols = _COLLAPSE_IDENTITY[concept_col]
     pk_col = model._meta.pk.name
 
-    rows = model.objects.filter(
-        person_id__in=person_ids,
-        **{f'{source_col}__iexact': source_code, concept_col: concept_id},
-    ).order_by(pk_col).values_list(pk_col, 'person_id', date_col)
+    rows = (
+        model.objects
+        .filter(person_id__in=person_ids,
+                **{f'{source_col}__iexact': source_code, concept_col: concept_id})
+        .order_by(pk_col)
+        .values_list(pk_col, 'person_id', *identity_cols)
+    )
 
     seen, doomed = set(), []
-    for pk, person_id, event_date in rows:
-        key = (person_id, event_date)
+    for row in rows:
+        pk, key = row[0], row[1:]
         if key in seen:
             doomed.append(pk)
         else:
             seen.add(key)
     if doomed:
+        # Provenance points at these by object_id; leaving it behind would
+        # strand rows referring to facts that no longer exist.
+        content_type = ContentType.objects.get_for_model(model)
+        ProvenanceRecord.objects.filter(
+            content_type=content_type, object_id__in=doomed,
+        ).delete()
         model.objects.filter(**{f'{pk_col}__in': doomed}).delete()
     return len(doomed)

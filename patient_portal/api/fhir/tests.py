@@ -994,11 +994,17 @@ class CuratedMappingResolutionTest(TestCase):
         person_id = first.json()['person_id']
         original = Measurement.objects.get(person_id=person_id)
 
+        # The first import minted a destination and proposed the mapping
+        # itself, which is the queue a curator works from -- so this re-points
+        # that row rather than creating a second one for the same code.
+        mapping = SourceCodeConceptMapping.objects.get(source_code='M-PROTEIN, SERUM')
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertEqual(mapping.origin, 'import')
+
         target = self._concept(3046314, '33358-6', 'LOINC', 'Serum M-protein')
-        mapping = SourceCodeConceptMapping.objects.create(
-            source_vocabulary_id='', source_code='M-PROTEIN, SERUM',
-            target_concept=target, omop_table='measurement', status='approved',
-        )
+        mapping.target_concept = target
+        mapping.status = 'approved'
+        mapping.save(update_fields=['target_concept', 'status'])
         repoint_clinical_rows(
             mapping=mapping,
             old_concept_id=original.measurement_concept_id,

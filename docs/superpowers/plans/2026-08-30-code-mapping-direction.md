@@ -647,3 +647,35 @@ Recorded so review can check the reasoning rather than re-derive it.
 - **A latent bug fixed in passing:** `_ensure_hk_vocab` raised `KeyError` for any `HK-*`
   vocabulary not in its hardcoded dict, so minting into `HK-Labs` or `HK-Condition` crashed. It
   now falls back to a generated name.
+
+---
+
+## 9. Review findings and fixes (PR #845)
+
+A `/code-review high` pass found 13 issues; all were real and all are fixed. The three that
+mattered most:
+
+- **The re-point deleted real data.** `_collapse_duplicates` keyed on `(person, date)` alone, so
+  a patient with a fasting and a post-prandial glucose on one day lost all but the first when a
+  mapping was approved. It now keys on the event identity CLAUDE.md documents for the bulk write
+  path — Measurement and Observation carry the raw value columns precisely because several
+  distinct results for one analyte on one day are real. Two tests pin both directions: distinct
+  same-day results survive, genuine duplicates still collapse.
+- **The resolver was not wired into ingest at all.** `resolve_source_code` had no caller outside
+  tests and the backfill command, so §1.1 rules 3–4 were not in force: unresolved FHIR codes
+  still landed at concept 0 with nothing in the review queue. `_lookup` now takes the OMOP table
+  and mints + proposes, with results (including negatives) cached per bundle so query count stays
+  flat. The PR description had claimed otherwise; it was wrong.
+- **A new approved mapping re-pointed nothing.** `moved` required a previous destination, and a
+  freshly created mapping has none — so "New Mapping" on an unresolved code, the most direct
+  curation action in the UI, left every stored row at 0 and reported success. It now re-points
+  from `NO_MATCHING_CONCEPT_ID`.
+
+Also fixed: a re-import could downgrade a resolved concept back to 0 and delete its neighbours;
+two spellings of one rollup in a single bundle produced two rows; PATCH was full-replace, so
+approving with `{"status": "approved"}` blanked `omop_table` and silently moved nothing;
+`_record_proposal` looked up untruncated and stored truncated, so a >100-char source text
+recreated forever and tripped the unique constraint; the re-point matched full-width source codes
+against values ingest truncates to 50; collapse orphaned `ProvenanceRecord` rows; a rejected
+mapping became permanently unreachable and unrecreatable; `_direct_concept` was
+order-nondeterministic; and two functions were left dead.

@@ -67,6 +67,7 @@ from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.services.code_mapping import (
     CLINICAL_TABLES,
+    NO_MATCHING_CONCEPT_ID,
     normalize_omop_table,
     repoint_clinical_rows,
 )
@@ -8007,15 +8008,6 @@ _OMOP_TABLE_LABELS = (
 )
 
 
-def _local_concept_queryset():
-    return Concept.objects.select_related('domain', 'vocabulary', 'concept_class').filter(
-        concept_id__gte=LOCAL_CONCEPT_ID_MIN,
-        standard_concept__isnull=True,
-    ).filter(
-        Q(source='HealthKey') | Q(vocabulary__vocabulary_id__startswith='HK-')
-    )
-
-
 def _serialize_code_mapping_row(concept, mapping=None):
     """One row of the Code Mapping list: a source code and where it lands.
 
@@ -8065,24 +8057,6 @@ def _serialize_code_mapping_row(concept, mapping=None):
     }
 
 
-def _code_mapping_rows(queryset):
-    rows = []
-    mappings_by_concept = {}
-    mappings = SourceCodeConceptMapping.objects.filter(
-        target_concept__in=queryset,
-    ).order_by('target_concept_id', 'source_vocabulary_id', 'source_code')
-    for mapping in mappings:
-        mappings_by_concept.setdefault(mapping.target_concept_id, []).append(mapping)
-
-    for concept in queryset.order_by('vocabulary_id', 'concept_code', 'concept_id'):
-        concept_mappings = mappings_by_concept.get(concept.concept_id) or []
-        if concept_mappings:
-            rows.extend(_serialize_code_mapping_row(concept, mapping) for mapping in concept_mappings)
-        else:
-            rows.append(_serialize_code_mapping_row(concept))
-    return rows
-
-
 def _clean_required(data, field_name):
     value = str(data.get(field_name, '')).strip()
     if not value:
@@ -8124,15 +8098,23 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     """
     # Blank is legal and meaningful: a paper lab test name or a phrase from a
     # note has no code system, and requiring one would make those unmappable.
-    source_vocabulary_id = str(data.get('source_vocabulary_id') or '').strip()
+    source_vocabulary_id = str(
+        data.get('source_vocabulary_id',
+                 '' if mapping is None else mapping.source_vocabulary_id) or ''
+    ).strip()
     if source_vocabulary_id.startswith('HK-'):
         raise serializers.ValidationError({'source_vocabulary_id': (
             'HK-* vocabularies are minting destinations, not source code '
             'systems. Leave this blank for an uncoded source.'
         )})
-    source_code = _clean_required(data, 'source_code')
+    if mapping is None or 'source_code' in data:
+        source_code = _clean_required(data, 'source_code')
+    else:
+        source_code = mapping.source_code
 
-    status_value = str(data.get('status') or 'proposed').strip()
+    status_value = str(
+        data.get('status') or ('proposed' if mapping is None else mapping.status)
+    ).strip()
     valid_statuses = {choice for choice, _label in SourceCodeConceptMapping.STATUS_CHOICES}
     if status_value not in valid_statuses:
         raise serializers.ValidationError({'status': f"Status must be one of: {', '.join(sorted(valid_statuses))}."})
@@ -8151,20 +8133,29 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
 
     previous_concept_id = mapping.target_concept_id if mapping else None
 
-    values = {
-        'source_vocabulary_id': source_vocabulary_id,
-        'source_code': source_code,
-        'source_code_description': str(data.get('source_code_description') or '').strip(),
-        'destination_vocabulary_id': (
+    # Only fields the caller actually sent. A PATCH that approves by sending
+    # status alone must not blank omop_table -- the re-point would then find no
+    # table, move nothing, and still report success.
+    values = {'updated_by': user}
+    if mapping is None or 'source_vocabulary_id' in data:
+        values['source_vocabulary_id'] = source_vocabulary_id
+    if mapping is None or 'source_code' in data:
+        values['source_code'] = source_code
+    if mapping is None or 'source_code_description' in data:
+        values['source_code_description'] = str(data.get('source_code_description') or '').strip()
+    if mapping is None or 'destination_vocabulary_id' in data or not mapping.destination_vocabulary_id:
+        values['destination_vocabulary_id'] = (
             str(data.get('destination_vocabulary_id') or '').strip()
             or concept.vocabulary_id or ''
-        ),
-        'omop_table': omop_table,
-        'source': str(data.get('source') or '').strip(),
-        'status': status_value,
-        'notes': str(data.get('notes') or '').strip(),
-        'updated_by': user,
-    }
+        )
+    if omop_table:
+        values['omop_table'] = omop_table
+    if 'source' in data:
+        values['source'] = str(data.get('source') or '').strip()
+    if mapping is None or 'status' in data:
+        values['status'] = status_value
+    if 'notes' in data:
+        values['notes'] = str(data.get('notes') or '').strip()
     try:
         if mapping is None:
             mapping = SourceCodeConceptMapping.objects.create(
@@ -8190,13 +8181,17 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # The rows already stored only move when an approved mapping points
     # somewhere new. Approving a mapping that never moved, or editing one that
     # is still proposed, touches no clinical data.
-    # The common case is a curator re-pointing a *proposed* mapping off the
-    # concept an import minted and approving it in one action, so this must not
-    # be limited to mappings that were already approved.
+    # Two flows reach here, and both have to move rows:
+    #   - editing a proposed mapping off the concept an import minted;
+    #   - creating a mapping outright for a code whose rows sit at concept 0,
+    #     which is what "New Mapping" on an unresolved code does.
+    # The second has no previous destination recorded, so it re-points from
+    # NO_MATCHING_CONCEPT_ID -- otherwise the most direct curation action in the
+    # UI would leave every stored row untouched and report success.
     repoint = None
-    # `is not None`: concept 0 is 'No matching concept', a real previous
-    # destination that a first approval very often moves rows off.
-    moved = previous_concept_id is not None and previous_concept_id != concept.concept_id
+    if previous_concept_id is None:
+        previous_concept_id = NO_MATCHING_CONCEPT_ID
+    moved = previous_concept_id != concept.concept_id
     if status_value == 'approved' and moved:
         repoint = repoint_clinical_rows(
             mapping=mapping,

@@ -15,7 +15,7 @@ from typing import Any
 import os
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from patient_portal.models import Identity
@@ -22533,3 +22533,180 @@ class PersonLanguageSkillPatchTest(_SmartBase):
         self.person.refresh_from_db()
         self.assertEqual(self.person.given_name, 'Ada')
         self.assertTrue(self._record().english_read)
+
+
+class CodeMappingRepointSafetyTest(TestCase):
+    """The re-point must move rows without destroying distinct facts.
+
+    Found in review of PR #845: the collapse keyed on (person, date) alone, so
+    a patient with several real results for one analyte on one day had all but
+    the first hard-deleted.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = Identity.objects.create_user(
+            email='repoint_safety@t.com', password='x', is_staff=True,
+        )
+        cls.domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        cls.concept_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+        cls.vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_reference': 'x',
+                      'vocabulary_version': '2.77', 'vocabulary_concept_id': 0},
+        )
+
+        def concept(cid, code, name):
+            return Concept.objects.create(
+                concept_id=cid, concept_name=name, domain=cls.domain,
+                vocabulary=cls.vocab, concept_class=cls.concept_class,
+                standard_concept='S', concept_code=code,
+                valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+            )
+
+        cls.minted = concept(2039000301, 'hkl:glucose', 'GLUCOSE')
+        cls.standard = concept(3046320, '2345-7', 'Glucose [Mass/volume] in Serum')
+        cls.type_concept = concept(32817, 'EHR', 'EHR')
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.staff)
+        self.person = Person.objects.create(
+            person_id=910002, gender_concept_id=0, year_of_birth=1970,
+            race_concept_id=0, ethnicity_concept_id=0,
+        )
+        self.mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='', source_code='GLUCOSE',
+            target_concept=self.minted, destination_vocabulary_id='HK-Labs',
+            omop_table='measurement', status='proposed', origin='import',
+        )
+
+    def _measurement(self, pk, when, value, dt=None):
+        return Measurement.objects.create(
+            measurement_id=pk, person=self.person,
+            measurement_concept_id=self.minted.concept_id,
+            measurement_date=when, measurement_datetime=dt,
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='GLUCOSE', value_as_number=value,
+        )
+
+    def test_distinct_same_day_results_all_survive_a_repoint(self):
+        """A fasting and a post-prandial glucose on one day are two facts."""
+        self._measurement(8893001, date(2026, 8, 12), Decimal('5.1'),
+                          timezone.make_aware(datetime(2026, 8, 12, 8, 0)))
+        self._measurement(8893002, date(2026, 8, 12), Decimal('9.4'),
+                          timezone.make_aware(datetime(2026, 8, 12, 14, 0)))
+        self._measurement(8893003, date(2026, 8, 12), Decimal('7.2'),
+                          timezone.make_aware(datetime(2026, 8, 12, 20, 0)))
+
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
+            'destination_concept_id': self.standard.concept_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        rows = Measurement.objects.filter(person=self.person)
+        self.assertEqual(rows.count(), 3, 'a re-point deleted real results')
+        self.assertEqual(
+            {r.measurement_concept_id for r in rows}, {self.standard.concept_id},
+        )
+        self.assertEqual(resp.data['repoint']['rows_collapsed'], 0)
+
+    def test_genuine_duplicates_still_collapse(self):
+        """Same value, same instant: one fact stored twice."""
+        when = timezone.make_aware(datetime(2026, 8, 12, 8, 0))
+        self._measurement(8893004, date(2026, 8, 12), Decimal('5.1'), when)
+        self._measurement(8893005, date(2026, 8, 12), Decimal('5.1'), when)
+
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
+            'destination_concept_id': self.standard.concept_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.data['repoint']['rows_collapsed'], 1)
+        self.assertEqual(Measurement.objects.filter(person=self.person).count(), 1)
+
+    def test_partial_patch_does_not_blank_the_omop_table(self):
+        """Approving by sending status alone must still know where to look.
+
+        A full-replace PATCH cleared omop_table, so the re-point found no table,
+        moved nothing, and reported success anyway.
+        """
+        self._measurement(8893006, date(2026, 8, 12), Decimal('5.1'))
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
+            'destination_concept_id': self.standard.concept_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.omop_table, 'measurement')
+        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+
+    def test_new_approved_mapping_repoints_rows_sitting_at_concept_zero(self):
+        """"New Mapping" on an unresolved code is the most direct curation
+        action there is, and it has to move the rows."""
+        Measurement.objects.create(
+            measurement_id=8893007, person=self.person,
+            measurement_concept_id=0,
+            measurement_date=date(2026, 8, 14),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='POTASSIUM', value_as_number=Decimal('4.1'),
+        )
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': '',
+            'source_code': 'POTASSIUM',
+            'destination_concept_id': self.standard.concept_id,
+            'omop_table': 'measurement',
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(
+            Measurement.objects.get(measurement_id=8893007).measurement_concept_id,
+            self.standard.concept_id,
+        )
+
+    def test_repoint_matches_source_values_truncated_at_ingest(self):
+        """Ingest truncates *_source_value to 50 chars; a curator typing the
+        full name must still match the rows that were stored."""
+        long_name = 'Immunofixation electrophoresis monoclonal protein serum panel'
+        Measurement.objects.create(
+            measurement_id=8893008, person=self.person,
+            measurement_concept_id=0,
+            measurement_date=date(2026, 8, 15),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value=long_name[:50],
+            value_as_number=Decimal('1.0'),
+        )
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': '',
+            'source_code': long_name,
+            'destination_concept_id': self.standard.concept_id,
+            'omop_table': 'measurement',
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+
+    def test_collapse_removes_provenance_for_the_rows_it_deletes(self):
+        when = timezone.make_aware(datetime(2026, 8, 12, 8, 0))
+        self._measurement(8893009, date(2026, 8, 12), Decimal('5.1'), when)
+        doomed = self._measurement(8893010, date(2026, 8, 12), Decimal('5.1'), when)
+        ct = ContentType.objects.get_for_model(Measurement)
+        ProvenanceRecord.objects.create(
+            content_type=ct, object_id=doomed.measurement_id, source='test',
+        )
+        self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
+            'destination_concept_id': self.standard.concept_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertFalse(
+            ProvenanceRecord.objects.filter(
+                content_type=ct, object_id=doomed.measurement_id).exists(),
+            'provenance left pointing at a deleted row',
+        )
