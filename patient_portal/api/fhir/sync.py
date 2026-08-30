@@ -33,10 +33,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from omop_core.authorization import can_write_patient
+from django.db.models import Q
+from django.db.models.functions import Upper
+
 from omop_core.models import (
     Concept, ConditionOccurrence, DrugExposure, Measurement, Observation, Person,
-    PatientDocument, ProcedureOccurrence, ProvenanceRecord,
+    PatientDocument, ProcedureOccurrence, ProvenanceRecord, SourceCodeConceptMapping,
 )
+from omop_core.services.code_mapping import SELF_RESOLVING_VOCABULARIES
 from omop_core.services.pk import next_pk_batch
 from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.api.permissions import ScopedTokenPermission, get_request_org, is_service_token
@@ -398,8 +402,14 @@ class FhirSyncView(APIView):
         """
         by_vocab = defaultdict(set)
         all_codes = set()
+        all_source_texts = set()
 
         def collect(codeable):
+            # An uncoded source -- a paper lab's test name, a phrase from a
+            # note -- has only text, and a curator maps it by that text.
+            text = _source_text(codeable)
+            if text:
+                all_source_texts.add(text)
             for coding in _codings(codeable):
                 code = coding.get('code')
                 if not code:
@@ -428,9 +438,48 @@ class FhirSyncView(APIView):
         if all_codes:
             for c in Concept.objects.filter(concept_code__in=list(all_codes)):
                 cache.setdefault(('*', c.concept_code), c)
+
+        # Curated mappings, overlaid onto the same cache so per-row lookup stays
+        # a dict hit. One extra query for the whole bundle, not one per row.
+        #
+        # Only approved rows: a proposed mapping is a draft an import wrote for
+        # review, and letting it steer resolution would mean an import silently
+        # ratifying its own guess.
+        #
+        # These overwrite the direct hits above rather than filling gaps behind
+        # them, because overriding a wrong automatic resolution is precisely
+        # what a curator approves a mapping to do. LOINC and SNOMED are exempt:
+        # there the code *is* the concept, so a mapping could only ever drift
+        # from Athena.
+        # Matched case-insensitively via UPPER(): an uncoded source is a lab's
+        # or a clinician's free text, and 'M-Protein, Serum' and
+        # 'M-PROTEIN, SERUM' are one test, not two.
+        wanted = {v.upper() for v in (all_codes | all_source_texts) if v}
+        if wanted:
+            approved = SourceCodeConceptMapping.objects.annotate(
+                _code_upper=Upper('source_code'),
+            ).filter(
+                status='approved', _code_upper__in=list(wanted),
+            ).select_related('target_concept')
+            for mapping in approved:
+                vocab = mapping.source_vocabulary_id or '*'
+                if vocab in SELF_RESOLVING_VOCABULARIES:
+                    continue
+                # Keyed by the *inbound* spelling, since that is what _lookup
+                # has in hand, not by however the curator typed it.
+                for value in (all_codes | all_source_texts):
+                    if value.upper() == mapping.source_code.upper():
+                        cache[(vocab, value)] = mapping.target_concept
         return cache
 
     def _lookup(self, codeable, cache):
+        """Resolve a CodeableConcept to a concept, curated mappings included.
+
+        A coded entry is tried first in its own vocabulary, then across
+        vocabularies. If nothing coded resolves, the source *text* is tried --
+        that is how a paper lab test name or a scribbled diagnosis, which
+        carries no code at all, reaches the concept a curator mapped it to.
+        """
         for coding in _codings(codeable):
             code = coding.get('code')
             if not code:
@@ -439,6 +488,9 @@ class FhirSyncView(APIView):
             concept = (cache.get((vocab, code)) if vocab else None) or cache.get(('*', code))
             if concept:
                 return concept
+        text = _source_text(codeable)
+        if text:
+            return cache.get(('*', text))
         return None
 
     # ------------------------------------------------------------------ #
@@ -478,30 +530,41 @@ class FhirSyncView(APIView):
         }
 
     def _insert_discrete_observations(self, person, observations, ehr_type, cache, source_user_id, org, skipped):
-        # Mapped rows dedup by resolved concept, not producer display text. If
-        # no concept resolved, keep source text in the key so unrelated local
-        # metrics do not collapse into one concept_id=0 row.
-        def identity(date_value, datetime_value, concept_id, source_value, value):
-            source_key = source_value if not concept_id else None
-            return (date_value, datetime_value, concept_id, source_key,
-                    _norm_num(value))
-        existing = {
-            identity(d, dt, cid, sv, v)
-            for d, dt, cid, sv, v in Measurement.objects.filter(person=person).values_list(
+        # A stored row is matched two ways, and either match means "already
+        # have it". Both are needed, for different reasons:
+        #
+        #   by concept -- producers send one LOINC code under varying display
+        #     text, and those are one result, not several.
+        #   by source value -- the concept is the column curation changes.
+        #     Approving a mapping moves a row from the concept an import minted
+        #     to the one an SME chose, and with only the concept key the next
+        #     import would find nothing and insert a second row for the same
+        #     lab draw. A corrected code would then double every result it
+        #     touched.
+        #
+        # (Bringing the stored row's concept up to date is the approve path's
+        # job -- services/code_mapping.repoint_clinical_rows -- not this one's,
+        # which is append-only.)
+        def identities(date_value, datetime_value, concept_id, source_value, value):
+            keys = [('sv', date_value, datetime_value, source_value, _norm_num(value))]
+            if concept_id:
+                keys.append(('cid', date_value, datetime_value, concept_id, _norm_num(value)))
+            return keys
+        seen = set()
+        for d, dt, cid, sv, v in Measurement.objects.filter(person=person).values_list(
                 'measurement_date', 'measurement_datetime', 'measurement_concept_id',
-                'measurement_source_value', 'value_as_number')
-        }
-        seen = set(existing)
+                'measurement_source_value', 'value_as_number'):
+            seen.update(identities(d, dt, cid, sv, v))
         rows = []
         for obs in observations:
             o = self._parse_obs(obs, cache)
             if o['date'] is None:
                 self._count_skipped(skipped, 'Observation', 'missing_effective_date')
                 continue
-            key = identity(o['date'], o['dt'], o['cid'], o['sv'], o['value'])
-            if key in seen:
+            keys = identities(o['date'], o['dt'], o['cid'], o['sv'], o['value'])
+            if any(key in seen for key in keys):
                 continue
-            seen.add(key)
+            seen.update(keys)
             rows.append(Measurement(
                 person=person,
                 measurement_concept_id=o['cid'],
@@ -529,24 +592,27 @@ class FhirSyncView(APIView):
             if o['date'] is None:
                 self._count_skipped(skipped, 'Observation', 'missing_effective_date')
                 continue
-            # Unmapped rows all share concept_id 0, so a plain (cid, date) key
-            # collapses every distinct unmapped metric into one slot per day.
-            # Add source_value to the key for cid == 0 so they coexist; mapped
-            # rows keep the natural (concept, date) grain.
-            sv_key = o['sv'] if not o['cid'] else None
-            desired[(o['cid'], o['date'], sv_key)] = o
+            # Keyed on source value so a rollup keeps its slot when curation
+            # moves its concept; the DB lookup below still matches on either.
+            desired[(o['sv'], o['date'])] = o
         if not desired:
             return []
 
         meas_ct = ContentType.objects.get_for_model(Measurement)
         touched, new_rows = [], []
         with suppress_patient_record_refresh():
-            for (cid, obs_date, sv_key), o in desired.items():
+            for (sv_key, obs_date), o in desired.items():
+                cid = o['cid']
+                # Either match counts. Source value finds the row after a
+                # curator moved its concept; concept finds it when the producer
+                # changed its display text. Matching only one way loses a row
+                # to a duplicate in the other case.
+                match = Q(measurement_source_value=sv_key)
+                if cid:
+                    match |= Q(measurement_concept_id=cid)
                 existing_qs = Measurement.objects.filter(
-                    person=person, measurement_concept_id=cid, measurement_date=obs_date,
+                    match, person=person, measurement_date=obs_date,
                 )
-                if sv_key is not None:
-                    existing_qs = existing_qs.filter(measurement_source_value=sv_key)
                 existing = list(existing_qs.order_by('measurement_id'))
                 if not existing:
                     new_rows.append(Measurement(
@@ -574,7 +640,8 @@ class FhirSyncView(APIView):
                     Measurement.objects.filter(measurement_id__in=extra_ids).delete()
 
                 changed = (
-                    _norm_num(keep.value_as_number) != _norm_num(o['value'])
+                    keep.measurement_concept_id != cid
+                    or _norm_num(keep.value_as_number) != _norm_num(o['value'])
                     or keep.measurement_datetime != o['dt']
                     or keep.value_as_string != o['vstr']
                     or keep.value_as_concept_id != o['vcid']
@@ -584,6 +651,9 @@ class FhirSyncView(APIView):
                     or keep.range_high != o['range_high']
                 )
                 if changed:
+                    # Concept updated in place, so approving a mapping upgrades
+                    # the stored row instead of stranding a duplicate beside it.
+                    keep.measurement_concept_id = cid
                     keep.value_as_number = o['value']
                     keep.measurement_datetime = o['dt']
                     keep.value_as_string = o['vstr']
@@ -593,7 +663,8 @@ class FhirSyncView(APIView):
                     keep.range_low = o['range_low']
                     keep.range_high = o['range_high']
                     keep._skip_patient_record_refresh = True
-                    keep.save(update_fields=['value_as_number', 'measurement_datetime',
+                    keep.save(update_fields=['measurement_concept_id',
+                                             'value_as_number', 'measurement_datetime',
                                              'value_as_string', 'value_as_concept',
                                              'unit_source_value', 'value_source_value',
                                              'range_low', 'range_high'])

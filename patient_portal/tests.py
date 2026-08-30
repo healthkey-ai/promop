@@ -16,8 +16,10 @@ import os
 import tempfile
 import unittest
 from datetime import date, timedelta
+from decimal import Decimal
 
 from patient_portal.models import Identity
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 from django.contrib.contenttypes.models import ContentType
@@ -37,6 +39,7 @@ from omop_core.models import (
     VisitOccurrence,
     Organization, GroupAccess, CustomPatientField, FieldFormula,
 )
+from omop_core.services.code_mapping import CLINICAL_TABLES, resolve_source_code
 from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
 from omop_oncology.models import CancerModifier, Episode, EpisodeEvent, Histology, StemTable
 
@@ -20631,7 +20634,14 @@ class CustomPatientFieldApiTest(TestCase):
 
 
 class CodeMappingApiTest(TestCase):
-    """Tests for the /api/v1/code-mappings/ endpoints."""
+    """Tests for the /api/v1/code-mappings/ endpoints.
+
+    Fixtures deliberately put an *external* code system on the source side and
+    a different concept on the destination. The suite used to map HK-Wearable
+    codes to the very concepts carrying them, which encoded the direction bug
+    of #834 -- an HK-* vocabulary is where destinations are minted, never a
+    system codes arrive in.
+    """
 
     @classmethod
     def setUpTestData(cls):
@@ -20648,79 +20658,84 @@ class CodeMappingApiTest(TestCase):
         GroupAccess.objects.create(identity=cls.org_admin, org=cls.org, role='org_admin')
 
         cls.domain, _ = Domain.objects.get_or_create(
-            domain_id='Observation',
-            defaults={'domain_name': 'Observation', 'domain_concept_id': 27},
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
         )
         cls.concept_class, _ = ConceptClass.objects.get_or_create(
-            concept_class_id='Clinical Observation',
-            defaults={'concept_class_name': 'Clinical Observation', 'concept_class_concept_id': 0},
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
         )
-        cls.language_vocab, _ = Vocabulary.objects.get_or_create(
-            vocabulary_id='HK-Language',
+        cls.labs_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HK-Labs',
             defaults={
-                'vocabulary_name': 'HealthKey Language',
+                'vocabulary_name': 'HealthKey Labs',
                 'vocabulary_reference': 'HealthKey local vocabulary',
                 'vocabulary_version': 'local',
                 'vocabulary_concept_id': 0,
             },
         )
-        cls.wearable_vocab, _ = Vocabulary.objects.get_or_create(
-            vocabulary_id='HK-Wearable',
+        cls.loinc_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
             defaults={
-                'vocabulary_name': 'HealthKey Wearable',
-                'vocabulary_reference': 'HealthKey local vocabulary',
-                'vocabulary_version': 'local',
+                'vocabulary_name': 'LOINC',
+                'vocabulary_reference': 'https://loinc.org',
+                'vocabulary_version': '2.77',
                 'vocabulary_concept_id': 0,
             },
         )
-        cls.local_language = Concept.objects.create(
-            concept_id=2039000001,
-            concept_name='HealthKey preferred language',
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='ICD10CM',
+            defaults={
+                'vocabulary_name': 'ICD-10-CM',
+                'vocabulary_reference': 'https://www.cdc.gov/nchs/icd/icd10cm.htm',
+                'vocabulary_version': '2024',
+                'vocabulary_concept_id': 0,
+            },
+        )
+
+        # The concept an import would mint for an unrecognised lab name.
+        cls.minted = Concept.objects.create(
+            concept_id=2039000101,
+            concept_name='M-PROTEIN, SERUM',
             domain=cls.domain,
-            vocabulary=cls.language_vocab,
+            vocabulary=cls.labs_vocab,
             concept_class=cls.concept_class,
             standard_concept=None,
-            concept_code='HK-LANG-PREFERRED',
+            concept_code='hkl:m-protein-serum',
             valid_start_date=date(1970, 1, 1),
             valid_end_date=date(2099, 12, 31),
             source='HealthKey',
         )
-        cls.local_wearable = Concept.objects.create(
-            concept_id=2039000002,
-            concept_name='HealthKey wearable stride count',
+        # The standard concept a curator would re-point it at.
+        cls.standard = Concept.objects.create(
+            concept_id=3046299,
+            concept_name='Protein.monoclonal [Mass/volume] in Serum or Plasma',
             domain=cls.domain,
-            vocabulary=cls.wearable_vocab,
-            concept_class=cls.concept_class,
-            standard_concept=None,
-            concept_code='HK-WEAR-STRIDE-COUNT',
-            valid_start_date=date(1970, 1, 1),
-            valid_end_date=date(2099, 12, 31),
-            source='HealthKey',
-        )
-        cls.standard_destination = Concept.objects.create(
-            concept_id=2039000999,
-            concept_name='Standard destination concept',
-            domain=cls.domain,
-            vocabulary=cls.language_vocab,
+            vocabulary=cls.loinc_vocab,
             concept_class=cls.concept_class,
             standard_concept='S',
-            concept_code='STANDARD-DESTINATION',
+            concept_code='33358-3',
             valid_start_date=date(1970, 1, 1),
             valid_end_date=date(2099, 12, 31),
         )
-        SourceCodeConceptMapping.objects.create(
-            source_vocabulary_id='HK-Wearable',
-            source_code='HK-WEAR-STRIDE-COUNT',
-            source_code_description='Stride count',
-            target_concept=cls.local_wearable,
-            source='HK-Wearable',
-            status='approved',
-            created_by=cls.staff,
-            updated_by=cls.staff,
+
+        cls.mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',           # uncoded: a paper lab test name
+            source_code='M-PROTEIN, SERUM',
+            source_code_description='M-protein, serum',
+            target_concept=cls.minted,
+            destination_vocabulary_id='HK-Labs',
+            omop_table='measurement',
+            status='proposed',
+            origin='import',
+            origin_system='hk-labs',
+            occurrence_count=14,
         )
 
     def setUp(self):
         self.client = APIClient()
+
+    # ---------------------------------------------------------------- access
 
     def test_list_requires_mapping_admin(self):
         self.client.force_authenticate(user=self.non_staff)
@@ -20731,77 +20746,440 @@ class CodeMappingApiTest(TestCase):
         self.client.force_authenticate(user=self.org_admin)
         resp = self.client.get('/api/v1/code-mappings/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertTrue(any(row['concept_id'] == self.local_wearable.concept_id for row in resp.data))
+        self.assertTrue(any(r['source_code'] == 'M-PROTEIN, SERUM' for r in resp.data))
 
-    def test_list_contains_source_code_mappings_only(self):
+    # ------------------------------------------------------------ direction
+
+    def test_uncoded_source_reports_blank_not_the_destination_vocabulary(self):
+        """A mapping with no source code system must not borrow its destination's.
+
+        The old serializer fell back to the destination concept's vocabulary,
+        which is how HK-Wearable came to be displayed as a source code system.
+        """
         self.client.force_authenticate(user=self.staff)
         resp = self.client.get('/api/v1/code-mappings/')
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        by_concept = {row['concept_id']: row for row in resp.data}
+        row = next(r for r in resp.data if r['source_code'] == 'M-PROTEIN, SERUM')
+        self.assertEqual(row['source_vocabulary_id'], '')
+        self.assertEqual(row['destination_vocabulary_id'], 'HK-Labs')
 
-        self.assertNotIn(self.local_language.concept_id, by_concept)
-
-        wearable_row = by_concept[self.local_wearable.concept_id]
-        self.assertTrue(wearable_row['has_mapping'])
-        self.assertEqual(wearable_row['source_code'], 'HK-WEAR-STRIDE-COUNT')
-
-    def test_create_new_code_mapping_uses_existing_omop_destination(self):
+    def test_hk_vocabulary_rejected_as_source_code_system(self):
         self.client.force_authenticate(user=self.staff)
         resp = self.client.post('/api/v1/code-mappings/', {
-            'source_vocabulary_id': 'HK-Wearable',
-            'source_code': 'HK-WEAR-GAIT-SYMMETRY',
-            'target_concept_id': self.standard_destination.concept_id,
-            'notes': 'Seeded from wearable source code.',
+            'source_vocabulary_id': 'HK-Labs',
+            'source_code': 'SOMETHING',
+            'destination_concept_id': self.standard.concept_id,
+            'omop_table': 'measurement',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('source_vocabulary_id', resp.data)
+
+    def test_model_rejects_hk_source_vocabulary(self):
+        mapping = SourceCodeConceptMapping(
+            source_vocabulary_id='HK-Wearable',
+            source_code='HK-WEAR-STEP-LENGTH',
+            target_concept=self.minted,
+        )
+        with self.assertRaises(DjangoValidationError):
+            mapping.clean()
+
+    # ------------------------------------------------------------ CRUD
+
+    def test_create_mapping_to_existing_standard_concept(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': 'ICD10CM',
+            'source_code': 'C90.00',
+            'source_code_description': 'Multiple myeloma not having achieved remission',
+            'destination_concept_id': self.standard.concept_id,
+            'omop_table': 'measurement',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
-        self.assertEqual(resp.data['concept_id'], self.standard_destination.concept_id)
-        self.assertEqual(resp.data['source_code'], 'HK-WEAR-GAIT-SYMMETRY')
-        self.assertTrue(SourceCodeConceptMapping.objects.filter(
-            source_vocabulary_id='HK-Wearable',
-            source_code='HK-WEAR-GAIT-SYMMETRY',
-            target_concept=self.standard_destination,
-        ).exists())
+        self.assertEqual(resp.data['destination_concept_id'], self.standard.concept_id)
+        self.assertEqual(resp.data['source_code'], 'C90.00')
+        self.assertEqual(resp.data['origin'], 'curator')
 
     def test_create_rejects_unknown_destination_concept(self):
         self.client.force_authenticate(user=self.staff)
         resp = self.client.post('/api/v1/code-mappings/', {
-            'source_vocabulary_id': 'HK-Wearable',
-            'source_code': 'UNKNOWN-DESTINATION',
-            'target_concept_id': 999999999,
+            'source_vocabulary_id': 'ICD10CM',
+            'source_code': 'C90.01',
+            'destination_concept_id': 999999999,
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('target_concept_id', resp.data)
 
-    def test_patch_adds_source_code_to_unmapped_local_concept(self):
+    def test_create_rejects_unknown_omop_table(self):
         self.client.force_authenticate(user=self.staff)
-        resp = self.client.patch(f'/api/v1/code-mappings/{self.local_language.concept_id}/', {
-            'source_vocabulary_id': 'HK-Language',
-            'source_code': 'HK-LANG-EN',
-            'source_code_description': 'English',
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': 'ICD10CM',
+            'source_code': 'C90.02',
+            'destination_concept_id': self.standard.concept_id,
+            'omop_table': 'not_a_table',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('omop_table', resp.data)
+
+    def test_two_source_codes_may_share_one_destination(self):
+        """The normal case, and what made the old concept-keyed URL ambiguous."""
+        self.client.force_authenticate(user=self.staff)
+        for code in ('C90.00', 'MULTIPLE MYELOMA'):
+            resp = self.client.post('/api/v1/code-mappings/', {
+                'source_vocabulary_id': 'ICD10CM' if code.startswith('C') else '',
+                'source_code': code,
+                'destination_concept_id': self.standard.concept_id,
+                'omop_table': 'measurement',
+            }, format='json')
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+        mappings = SourceCodeConceptMapping.objects.filter(target_concept=self.standard)
+        self.assertEqual(mappings.count(), 2)
+        # Each is individually addressable by its own id.
+        for mapping in mappings:
+            resp = self.client.patch(f'/api/v1/code-mappings/{mapping.id}/', {
+                'source_vocabulary_id': mapping.source_vocabulary_id,
+                'source_code': mapping.source_code,
+                'notes': f'reviewed {mapping.source_code}',
+                'omop_table': 'measurement',
+            }, format='json')
+            self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(
+            {m.notes for m in SourceCodeConceptMapping.objects.filter(target_concept=self.standard)},
+            {'reviewed C90.00', 'reviewed MULTIPLE MYELOMA'},
+        )
+
+    def test_delete_removes_one_mapping_and_leaves_the_sibling(self):
+        self.client.force_authenticate(user=self.staff)
+        sibling = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10CM',
+            source_code='C90.00',
+            target_concept=self.standard,
+            destination_vocabulary_id='LOINC',
+            omop_table='measurement',
+        )
+        resp = self.client.delete(f'/api/v1/code-mappings/{sibling.id}/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(id=sibling.id).exists())
+        self.assertTrue(SourceCodeConceptMapping.objects.filter(id=self.mapping.id).exists())
+
+    def test_blank_source_systems_stay_distinct(self):
+        """'' is a value, not NULL, so two uncoded codes do not collide."""
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='M PROTEIN',
+            target_concept=self.standard,
+            omop_table='measurement',
+        )
+        self.assertEqual(
+            SourceCodeConceptMapping.objects.filter(source_vocabulary_id='').count(), 2,
+        )
+
+    # ------------------------------------------------------------ reference
+
+    def test_reference_separates_source_systems_from_destinations(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/code-mappings/reference/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        source_ids = {v['vocabulary_id'] for v in resp.data['source_code_systems']}
+        dest_ids = {v['vocabulary_id'] for v in resp.data['destination_vocabularies']}
+
+        # No HK-* vocabulary is offered as a system codes arrive in.
+        self.assertFalse(any(v.startswith('HK-') for v in source_ids))
+        # Systems we hold no concepts for are still offered, so a curator is not
+        # blocked on a vocabulary load.
+        self.assertIn('ICDO3', source_ids)
+        # A curator re-points into standard vocabularies, so those need tabs.
+        self.assertIn('LOINC', dest_ids)
+        self.assertIn('HK-Labs', dest_ids)
+
+    def test_reference_omop_tables_are_writable_targets(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/code-mappings/reference/')
+        values = {t['value'] for t in resp.data['omop_tables']}
+        self.assertEqual(values, set(CLINICAL_TABLES))
+
+
+class CodeMappingRepointTest(TestCase):
+    """Approving a re-pointed mapping must rewrite the rows already stored.
+
+    Without this, approval only changes what the *next* import produces, so a
+    patient whose bundle is never re-sent keeps the minted HK-* concept forever
+    and the curator's decision never reaches the data.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = Identity.objects.create_user(
+            email='repoint_staff@t.com', password='x', is_staff=True,
+        )
+        cls.domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        cls.concept_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+        cls.labs_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HK-Labs',
+            defaults={'vocabulary_name': 'HealthKey Labs', 'vocabulary_reference': 'local',
+                      'vocabulary_version': 'local', 'vocabulary_concept_id': 0},
+        )
+        cls.loinc_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_reference': 'https://loinc.org',
+                      'vocabulary_version': '2.77', 'vocabulary_concept_id': 0},
+        )
+        cls.minted = Concept.objects.create(
+            concept_id=2039000201, concept_name='M-PROTEIN, SERUM',
+            domain=cls.domain, vocabulary=cls.labs_vocab, concept_class=cls.concept_class,
+            standard_concept=None, concept_code='hkl:m-protein-serum',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+            source='HealthKey',
+        )
+        cls.standard = Concept.objects.create(
+            concept_id=3046300, concept_name='Protein.monoclonal [Mass/volume] in Serum',
+            domain=cls.domain, vocabulary=cls.loinc_vocab, concept_class=cls.concept_class,
+            standard_concept='S', concept_code='33358-3',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        cls.corrected = Concept.objects.create(
+            concept_id=3046304, concept_name='Corrected by hand',
+            domain=cls.domain, vocabulary=cls.loinc_vocab, concept_class=cls.concept_class,
+            standard_concept='S', concept_code='77777-7',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        cls.type_concept = Concept.objects.create(
+            concept_id=32817, concept_name='EHR',
+            domain=cls.domain, vocabulary=cls.loinc_vocab, concept_class=cls.concept_class,
+            standard_concept='S', concept_code='EHR',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.staff)
+        self.person = Person.objects.create(
+            person_id=910001, gender_concept_id=0, year_of_birth=1970,
+            race_concept_id=0, ethnicity_concept_id=0,
+        )
+        self.mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='M-PROTEIN, SERUM',
+            target_concept=self.minted,
+            destination_vocabulary_id='HK-Labs',
+            omop_table='measurement',
+            status='proposed',
+            origin='import',
+            origin_system='hk-labs',
+            occurrence_count=14,
+        )
+        self.row = self._measurement(
+            8892001, self.minted.concept_id, date(2026, 8, 12), Decimal('3.2'),
+        )
+
+    def _measurement(self, pk, concept_id, when, value,
+                     source_value='M-PROTEIN, SERUM'):
+        return Measurement.objects.create(
+            measurement_id=pk,
+            person=self.person,
+            measurement_concept_id=concept_id,
+            measurement_date=when,
+            measurement_type_concept=self.type_concept,
+            measurement_source_value=source_value,
+            value_as_number=value,
+        )
+
+    def _approve_at(self, concept_id):
+        return self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
+            'source_vocabulary_id': '',
+            'source_code': 'M-PROTEIN, SERUM',
+            'destination_concept_id': concept_id,
+            'omop_table': 'measurement',
+            'status': 'approved',
+        }, format='json')
+
+    def test_approving_a_repointed_mapping_updates_the_stored_row(self):
+        resp = self._approve_at(self.standard.concept_id)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
+        # One row, not two: the point of the whole exercise.
+        self.assertEqual(Measurement.objects.filter(person=self.person).count(), 1)
+        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+
+    def test_repoint_marks_patient_records_for_re_derivation(self):
+        """Derivation is deferred, not skipped: 12-32s per patient is too slow
+        to run inside an approve request, so the record is marked stale."""
+        # The signal chain already derived one when the Measurement landed.
+        record = PatientRecord.objects.get(person=self.person)
+        PatientRecord.objects.filter(pk=record.pk).update(derivation_version=7)
+        self._approve_at(self.standard.concept_id)
+        record.refresh_from_db()
+        self.assertEqual(record.derivation_version, 0)
+
+    def test_hand_corrected_row_is_left_alone(self):
+        """Matched on the old destination, so an approval cannot clobber a row
+        someone already fixed by hand."""
+        other = self._measurement(
+            8892002, self.corrected.concept_id, date(2026, 8, 13), Decimal('3.4'),
+        )
+        self._approve_at(self.standard.concept_id)
+        other.refresh_from_db()
+        self.assertEqual(other.measurement_concept_id, self.corrected.concept_id)
+
+    def test_approving_without_moving_the_destination_touches_no_rows(self):
+        resp = self._approve_at(self.minted.concept_id)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIsNone(resp.data['repoint'])
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
+
+    def test_repoint_collapses_a_row_it_makes_duplicate(self):
+        """If the patient already held a row at the new destination for the same
+        source value and date, re-pointing would produce two rows for one fact."""
+        self._measurement(
+            8892003, self.standard.concept_id, date(2026, 8, 12), Decimal('3.2'),
+        )
+        resp = self._approve_at(self.standard.concept_id)
+        self.assertEqual(resp.data['repoint']['rows_collapsed'], 1)
+        self.assertEqual(
+            Measurement.objects.filter(
+                person=self.person, measurement_source_value='M-PROTEIN, SERUM',
+                measurement_date=date(2026, 8, 12),
+            ).count(),
+            1,
+        )
+
+    def test_proposed_mapping_does_not_repoint(self):
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
+            'source_vocabulary_id': '',
+            'source_code': 'M-PROTEIN, SERUM',
+            'destination_concept_id': self.standard.concept_id,
+            'omop_table': 'measurement',
             'status': 'proposed',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-        self.assertEqual(resp.data['source_code'], 'HK-LANG-EN')
-        self.assertEqual(resp.data['status'], 'proposed')
-        self.assertTrue(SourceCodeConceptMapping.objects.filter(
-            target_concept=self.local_language,
-            source_vocabulary_id='HK-Language',
-            source_code='HK-LANG-EN',
-        ).exists())
+        self.assertIsNone(resp.data['repoint'])
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
 
-    def test_propose_all_code_mappings_creates_proposed_rows_for_source(self):
-        self.client.force_authenticate(user=self.staff)
-        resp = self.client.post('/api/v1/code-mappings/propose-all/', {
-            'source': 'HK-Language',
-        }, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
-        self.assertGreaterEqual(resp.data['created'], 1)
-        self.assertIn('HK-Language:HK-LANG-PREFERRED', resp.data['codes'])
-        self.assertTrue(all(code.startswith('HK-Language:') for code in resp.data['codes']))
-        mapping = SourceCodeConceptMapping.objects.get(target_concept=self.local_language)
+
+class CodeMappingResolutionTest(TestCase):
+    """resolve_source_code: the four rules that decide what a code becomes."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        cls.concept_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+        cls.loinc_vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_reference': 'https://loinc.org',
+                      'vocabulary_version': '2.77', 'vocabulary_concept_id': 0},
+        )
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='ICD10CM',
+            defaults={'vocabulary_name': 'ICD-10-CM', 'vocabulary_reference': 'x',
+                      'vocabulary_version': '2024', 'vocabulary_concept_id': 0},
+        )
+        cls.loinc_concept = Concept.objects.create(
+            concept_id=3046301, concept_name='Serum M-protein',
+            domain=cls.domain, vocabulary=cls.loinc_vocab, concept_class=cls.concept_class,
+            standard_concept='S', concept_code='33358-4',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+    def test_loinc_source_resolves_directly_and_mints_no_mapping(self):
+        """Rule 1: the Athena concept *is* the LOINC code, so a mapping row for
+        it could only ever drift from Athena."""
+        concept, mapping = resolve_source_code(
+            source_code='33358-4', source_vocabulary_id='LOINC', omop_table='measurement',
+        )
+        self.assertEqual(concept.concept_id, self.loinc_concept.concept_id)
+        self.assertIsNone(mapping)
+        self.assertEqual(SourceCodeConceptMapping.objects.count(), 0)
+
+    def test_unresolvable_code_mints_and_proposes(self):
+        """Rule 3: never drop a code, never block on a curator."""
+        concept, mapping = resolve_source_code(
+            source_code='MPS', source_vocabulary_id='', source_text='M-PROTEIN, SERUM',
+            omop_table='measurement', source_system='hk-labs',
+        )
+        self.assertIsNotNone(concept)
+        self.assertEqual(concept.vocabulary_id, 'HK-Labs')
+        self.assertEqual(concept.source, 'HealthKey')
+        self.assertIsNone(concept.standard_concept)
+        self.assertGreaterEqual(concept.concept_id, 2_000_000_000)
+
         self.assertEqual(mapping.status, 'proposed')
-        self.assertEqual(mapping.source_vocabulary_id, 'HK-Language')
-        self.assertEqual(mapping.source_code, 'HK-LANG-PREFERRED')
+        self.assertEqual(mapping.origin, 'import')
+        self.assertEqual(mapping.origin_system, 'hk-labs')
+        self.assertEqual(mapping.occurrence_count, 1)
+
+    def test_repeat_sighting_mints_once_and_counts(self):
+        for _ in range(3):
+            resolve_source_code(
+                source_code='MPS', source_text='M-PROTEIN, SERUM',
+                omop_table='measurement', source_system='hk-labs',
+            )
+        self.assertEqual(SourceCodeConceptMapping.objects.count(), 1)
+        self.assertEqual(SourceCodeConceptMapping.objects.get().occurrence_count, 3)
+        self.assertEqual(Concept.objects.filter(vocabulary_id='HK-Labs').count(), 1)
+
+    def test_approved_mapping_overrides_a_direct_concept_hit(self):
+        """Rule 2: overriding a wrong automatic resolution is what an approved
+        mapping is for."""
+        other = Concept.objects.create(
+            concept_id=3046302, concept_name='Curator-chosen concept',
+            domain=self.domain, vocabulary=self.loinc_vocab, concept_class=self.concept_class,
+            standard_concept='S', concept_code='99999-9',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10CM', source_code='33358-4',
+            target_concept=other, destination_vocabulary_id='LOINC',
+            omop_table='measurement', status='approved',
+        )
+        concept, mapping = resolve_source_code(
+            source_code='33358-4', source_vocabulary_id='ICD10CM', omop_table='measurement',
+        )
+        self.assertEqual(concept.concept_id, other.concept_id)
+        self.assertEqual(mapping.status, 'approved')
+
+    def test_proposed_mapping_does_not_override(self):
+        """Rule 4: a draft an import wrote must not steer the next import, or
+        the machine ratifies its own guess."""
+        other = Concept.objects.create(
+            concept_id=3046303, concept_name='Not yet approved',
+            domain=self.domain, vocabulary=self.loinc_vocab, concept_class=self.concept_class,
+            standard_concept='S', concept_code='88888-8',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10CM', source_code='33358-4',
+            target_concept=other, omop_table='measurement', status='proposed',
+        )
+        concept, _ = resolve_source_code(
+            source_code='33358-4', source_vocabulary_id='ICD10CM', omop_table='measurement',
+        )
+        self.assertNotEqual(concept.concept_id, other.concept_id)
+
+    def test_import_does_not_bump_an_approved_mapping_back_to_proposed(self):
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='', source_code='MPS',
+            target_concept=self.loinc_concept, omop_table='measurement', status='approved',
+        )
+        resolve_source_code(
+            source_code='MPS', source_text='M-PROTEIN, SERUM', omop_table='measurement',
+        )
+        self.assertEqual(SourceCodeConceptMapping.objects.get().status, 'approved')
 
 
 class FieldConceptMappingTest(TestCase):

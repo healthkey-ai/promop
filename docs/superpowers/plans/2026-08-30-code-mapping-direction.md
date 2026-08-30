@@ -1,7 +1,8 @@
 # Code Mapping: source code → destination OMOP concept
 
 **Date:** 2026-08-30
-**Status:** Plan — not yet implemented
+**Status:** Implemented on `feat/834-code-mapping-direction`
+**Deviations from plan:** see §8
 **Issue:** [#834](https://github.com/healthkey-ai/promop/issues/834) (reopened; PR #835 did not fix it)
 **Executes in parallel with:** the Field Concept Mapping dialog work (separate surface; the two
 feature areas sit ~250 lines apart in `patient_portal/api/views.py` and ~1500 apart in
@@ -611,3 +612,38 @@ Plus both backend suites (Django runner and pytest) and `npm run lint`, `npm run
   belongs. A curator facing a proposed mapping whose minted concept is wrong can re-point it at
   an Athena concept, but cannot mint a *different* HK-* concept from the dialog. Probably fine —
   flagging it in case SME review turns up a need.
+
+---
+
+## 8. Deviations taken during implementation
+
+Recorded so review can check the reasoning rather than re-derive it.
+
+- **`regimen_resolution.py` was not renamed.** The plan called for renaming it
+  `concept_resolution.py`. It has six live callers in `views.py` and renaming it in the same
+  change as the behaviour work would have made the diff hard to read. The new entry point lives
+  in a new `omop_core/services/code_mapping.py` that imports the existing quarantine helpers, so
+  there is still exactly one minting path. The rename is worth doing on its own.
+- **`RegimenMappingGap` rows are not yet migrated into proposed mappings.** `resolve_source_code`
+  writes only the proposed mapping, as planned, and `propose_mappings_from_unresolved` unions the
+  gap table in so nothing is double-proposed. Converting the existing gap rows and re-pointing
+  `report_regimen_mapping_gaps` is left as the follow-up §7 already describes.
+- **Measurement dedup keeps *both* key forms rather than replacing one with the other.** The plan
+  said to drop the concept from the key and key on source value. Doing only that broke a real
+  behaviour the concept key was carrying: producers send one LOINC code under varying display
+  text, and those are one result. Both paths now match a stored row on **either** key, which
+  keeps the display-text collapse and still lets the concept move underneath a row. The test that
+  caught it (`fhir/tests.py::test_mapped_observation_dedup_uses_resolved_concept_not_display`)
+  was right and the plan was wrong.
+- **`repoint_clinical_rows` treats concept 0 as a real previous destination.** `if not
+  old_concept_id` skipped it, and 0 — OMOP "No matching concept" — is the single most common
+  value a first approval moves rows *off*. Both the service and the view now test `is None`.
+- **The page defaults to the tab with review work**, not the first tab. With SNOMED first
+  alphabetically and the proposals in `HK-Labs`, the queue looked empty on load.
+- **`propose_mappings_from_unresolved` reports already-resolvable codes separately.** Against
+  `promop_dev`, 5,737 measurement rows hold `concept_id=0` for LOINC `38483-4`, which resolves
+  fine today — they were imported before the vocabulary was loaded. Those need re-pointing, not
+  a proposal, and the command says so instead of skipping them silently.
+- **A latent bug fixed in passing:** `_ensure_hk_vocab` raised `KeyError` for any `HK-*`
+  vocabulary not in its hardcoded dict, so minting into `HK-Labs` or `HK-Condition` crashed. It
+  now falls back to a generated name.

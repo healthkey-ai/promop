@@ -456,6 +456,11 @@ class SyncView(APIView):
                     vocabulary_id=HK_LABS_VOCAB_ID,
                     concept_class_id='Lab Test',
                     standard_concept=None,
+                    # Every HK-* row is HealthKey-authored; concept_fixtures
+                    # asserts that invariant and this path was breaking it,
+                    # leaving locally minted labs indistinguishable from
+                    # licensed vocabulary content.
+                    source='HealthKey',
                     concept_code=code[:50],
                     valid_start_date=date(1970, 1, 1),
                     valid_end_date=date(2099, 12, 31),

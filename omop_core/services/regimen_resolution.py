@@ -49,11 +49,16 @@ SOURCE_HEALTHKEY = 'HealthKey'
 
 # HK-Regimen / HK-Drug are seeded by migration 0118; the others are created
 # here on first use (same on-demand pattern as HK-Labs in lab_results/sync.py).
+HK_LABS_VOCAB_ID = 'HK-Labs'
+HK_CONDITION_VOCAB_ID = 'HK-Condition'
+
 _HK_VOCAB_DEFAULTS = {
     HK_REGIMEN_VOCAB_ID: 'HealthKey local regimen quarantine',
     HK_DRUG_VOCAB_ID: 'HealthKey local drug quarantine',
     HK_OBSERVATION_VOCAB_ID: 'HealthKey local observation quarantine',
     HK_PROCEDURE_VOCAB_ID: 'HealthKey local procedure quarantine',
+    HK_LABS_VOCAB_ID: 'HealthKey local lab quarantine',
+    HK_CONDITION_VOCAB_ID: 'HealthKey local condition quarantine',
 }
 
 
@@ -160,7 +165,8 @@ def _ensure_hk_vocab(vocabulary_id):
     vocab, _ = Vocabulary.objects.get_or_create(
         vocabulary_id=vocabulary_id,
         defaults={
-            'vocabulary_name': _HK_VOCAB_DEFAULTS[vocabulary_id],
+            'vocabulary_name': _HK_VOCAB_DEFAULTS.get(
+            vocabulary_id, f'HealthKey local {vocabulary_id} quarantine'),
             'vocabulary_reference': 'https://healthkey.ai',
             'vocabulary_version': '1.0',
             'vocabulary_concept_id': 0,

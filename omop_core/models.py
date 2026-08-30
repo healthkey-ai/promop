@@ -1791,24 +1791,77 @@ class SourceToConceptMap(models.Model):
 
 
 class SourceCodeConceptMapping(models.Model):
-    """HealthKey-curated incoming source code -> destination OMOP concept mapping."""
+    """An incoming source code and the OMOP concept it resolves to.
+
+    The direction never reverses: a code encountered in a FHIR bundle, a paper
+    lab report, or a clinician's note on the left; the OMOP concept it means on
+    the right.  The destination is either an existing Athena concept or one
+    minted locally under an ``HK-*`` vocabulary when Athena has nothing for it.
+
+    Ingest reads this table (``services/code_mapping.resolve_source_code``), so
+    a row here is not a note — it decides what a later import resolves to, and
+    approving one rewrites the rows already stored.  Only ``approved`` rows
+    take effect; ``proposed`` is the review queue an import fills.
+    """
 
     STATUS_CHOICES = [
         ('proposed', 'Proposed'),
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
     ]
+    ORIGIN_CHOICES = [
+        ('import', 'Import'),
+        ('curator', 'Curator'),
+    ]
 
-    source_vocabulary_id = models.CharField(max_length=50, db_index=True)
+    # ── The source side: what arrived ────────────────────────────────────
+    source_vocabulary_id = models.CharField(
+        max_length=50, blank=True, default='', db_index=True,
+        help_text=(
+            'External code system the code arrived in (ICD10CM, LOINC, SNOMED, '
+            'NDC, ...). Blank means uncoded — a paper lab test name or free '
+            'text from a note, which is legitimate and common. Never an HK-* '
+            'vocabulary: those are minting destinations, not source systems.'
+        ),
+    )
     source_code = models.CharField(max_length=100, db_index=True)
     source_code_description = models.CharField(max_length=255, blank=True, default='')
+
+    # ── The destination side: what it means ──────────────────────────────
     target_concept = models.ForeignKey(
         Concept, on_delete=models.DO_NOTHING, related_name='source_code_mappings',
         db_constraint=False,
     )
+    destination_vocabulary_id = models.CharField(
+        max_length=20, blank=True, default='', db_index=True,
+        help_text=(
+            "Vocabulary of the destination concept. An HK-* value means the "
+            "concept was minted locally; a standard vocabulary (SNOMED, LOINC, "
+            "...) means a curator re-pointed it at real Athena content."
+        ),
+    )
+    omop_table = models.CharField(
+        max_length=30, blank=True, default='',
+        help_text='Clinical table the fact lands in (measurement, condition, ...).',
+    )
+
     source = models.CharField(max_length=50, blank=True, default='HealthKey', db_index=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='proposed')
     notes = models.TextField(blank=True, default='')
+
+    # ── Provenance: who proposed this and how often it has been seen ─────
+    # An SME reviewing the queue needs to know whether a row is a machine's
+    # guess or a colleague's decision, and which codes are worth their time.
+    origin = models.CharField(
+        max_length=10, choices=ORIGIN_CHOICES, default='curator', db_index=True,
+    )
+    origin_system = models.CharField(
+        max_length=50, blank=True, default='',
+        help_text="Ingest channel that raised it, e.g. 'fhir-upload', 'hk-labs'.",
+    )
+    occurrence_count = models.IntegerField(default=0)
+    first_seen = models.DateTimeField(null=True, blank=True)
+    last_seen = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='+',
@@ -1825,16 +1878,34 @@ class SourceCodeConceptMapping(models.Model):
         indexes = [
             models.Index(fields=['source_vocabulary_id', 'source_code'], name='ix_sccm_source_code'),
             models.Index(fields=['target_concept', 'status'], name='ix_sccm_target_status'),
+            models.Index(fields=['destination_vocabulary_id', 'status'], name='ix_sccm_dest_status'),
         ]
         constraints = [
+            # Blank source systems stay distinct from each other: Postgres treats
+            # '' as a value, not NULL, so ('', 'M-PROTEIN') and ('', 'M PROTEIN')
+            # are two rows and uncoded codes do not collide.
             models.UniqueConstraint(
                 fields=['source_vocabulary_id', 'source_code'],
                 name='uq_sccm_source_vocabulary_code',
             ),
         ]
 
+    def clean(self):
+        # An HK-* vocabulary is where we mint destinations. Accepting one as a
+        # source system is what produced the self-mappings this model shipped
+        # with (HK-Wearable:CODE -> the very concept carrying that code), which
+        # map nothing. Reject it at the model so no path can reintroduce them.
+        if (self.source_vocabulary_id or '').startswith('HK-'):
+            raise ValidationError({
+                'source_vocabulary_id': (
+                    'HK-* vocabularies are minting destinations, not source '
+                    'code systems. Leave this blank for an uncoded source.'
+                ),
+            })
+
     def __str__(self):
-        return f"{self.source_vocabulary_id}:{self.source_code} -> {self.target_concept_id}"
+        source = self.source_vocabulary_id or '(uncoded)'
+        return f"{source}:{self.source_code} -> {self.target_concept_id}"
 
 
 class RegimenMappingGap(models.Model):
