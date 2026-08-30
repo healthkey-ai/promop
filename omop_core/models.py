@@ -9,6 +9,8 @@ from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db.models.functions import Upper
 import re
 
+from omop_core.services import source_vocabularies
+
 
 # Person.year_of_birth values that mean "not known" rather than a birth year.
 # Registration seeds 1900 (patient_portal/services.py, api/patient_signup.py,
@@ -1815,6 +1817,16 @@ class SourceCodeConceptMapping(models.Model):
     ]
 
     # ── The source side: what arrived ────────────────────────────────────
+    domain_id = models.CharField(
+        max_length=20, blank=True, default='', db_index=True,
+        help_text=(
+            'OMOP domain of the fact this code describes (Condition, Drug, '
+            'Measurement, Observation, Procedure). The curator picks it first: '
+            'it scopes which source code systems are plausible and settles '
+            'which clinical table the fact lands in, so omop_table follows '
+            'from it rather than being chosen separately.'
+        ),
+    )
     source_vocabulary_id = models.CharField(
         max_length=50, blank=True, default='', db_index=True,
         help_text=(
@@ -1826,6 +1838,18 @@ class SourceCodeConceptMapping(models.Model):
     )
     source_code = models.CharField(max_length=100, db_index=True)
     source_code_description = models.CharField(max_length=255, blank=True, default='')
+    source_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING, null=True, blank=True,
+        related_name='source_code_mappings_as_source', db_constraint=False,
+        help_text=(
+            'The OMOP concept for the source code *itself*, when that '
+            'vocabulary is loaded. Distinct from target_concept, which is the '
+            'destination: an ICD-10-CM code has a concept of its own even '
+            'though the fact should carry a different, standard one. Null is '
+            'normal -- most source systems are ones we receive codes in '
+            'without holding their concepts.'
+        ),
+    )
 
     # ── The destination side: what it means ──────────────────────────────
     target_concept = models.ForeignKey(
@@ -1900,6 +1924,20 @@ class SourceCodeConceptMapping(models.Model):
                 'source_vocabulary_id': (
                     'HK-* vocabularies are minting destinations, not source '
                     'code systems. Leave this blank for an uncoded source.'
+                ),
+            })
+
+        # The domain decides the table (§3.2), so the two cannot disagree. A
+        # row saying "Drug" while pointing at `measurement` would send the
+        # fact somewhere the curator did not choose and a re-point would
+        # rewrite the wrong table.
+        expected_table = source_vocabularies.table_for_domain(self.domain_id)
+        if self.domain_id and self.omop_table and expected_table != self.omop_table:
+            raise ValidationError({
+                'omop_table': (
+                    f"Domain {self.domain_id!r} lands in "
+                    f"{expected_table or '(no table)'}, not "
+                    f"{self.omop_table!r}."
                 ),
             })
 

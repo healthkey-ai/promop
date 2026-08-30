@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Pencil, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 import api from "@/api/axios";
@@ -16,20 +17,29 @@ import api from "@/api/axios";
  * proposed mapping off the concept an import minted and onto a standard one -
  * which is why SNOMED and LOINC have tabs too: that re-pointing is what puts
  * mappings there.
+ *
+ * The dialog reads top to bottom in the direction of the mapping: a SOURCE
+ * block then a DESTINATION block. Every control is labelled and carries a
+ * tooltip - the screen is dense enough that a field whose meaning has to be
+ * inferred is a defect, and it had one (the source code value sat in an
+ * unlabelled input).
  */
 
 interface CodeMappingRow {
   mapping_id: number | null;
+  domain_id?: string;
   source_vocabulary_id: string;
   source_code: string;
   source_code_description: string;
+  source_concept_id?: number | null;
   destination_concept_id: number;
   destination_concept_name: string;
   destination_concept_code: string;
   destination_vocabulary_id: string;
   destination_concept_class_id: string;
   destination_omop_table: string;
-  destination_domain_id: string;
+  destination_domain_id?: string;
+  standard_concept?: string | null;
   status: "proposed" | "approved" | "rejected" | "unmapped";
   notes: string;
   origin: string;
@@ -54,10 +64,21 @@ interface VocabularyRef {
   is_local?: boolean;
 }
 
+interface DomainRef {
+  domain_id: string;
+  label: string;
+}
+
+interface SourceCodeSystemRef {
+  vocabulary_id: string;
+  label: string;
+}
+
 interface Reference {
-  source_code_systems: VocabularyRef[];
+  domains: DomainRef[];
+  source_code_systems_by_domain: Record<string, SourceCodeSystemRef[]>;
   destination_vocabularies: VocabularyRef[];
-  omop_tables: { value: string; label: string }[];
+  omop_tables: Record<string, string>;
 }
 
 interface RepointResult {
@@ -67,35 +88,44 @@ interface RepointResult {
 }
 
 interface MappingForm {
-  source_code: string;
+  domain_id: string;
   source_vocabulary_id: string;
+  source_code: string;
   source_code_description: string;
-  destination_vocabulary_id: string;
-  destination_concept_name: string;
+  source_concept_id: string;
   destination_concept_id: string;
+  destination_concept_name: string;
+  destination_concept_code: string;
+  destination_vocabulary_id: string;
   destination_concept_class_id: string;
+  standard_concept: string;
   omop_table: string;
   status: "proposed" | "approved" | "rejected";
   notes: string;
 }
 
 const emptyForm: MappingForm = {
-  source_code: "",
+  domain_id: "",
   source_vocabulary_id: "",
+  source_code: "",
   source_code_description: "",
-  destination_vocabulary_id: "",
-  destination_concept_name: "",
+  source_concept_id: "",
   destination_concept_id: "",
+  destination_concept_name: "",
+  destination_concept_code: "",
+  destination_vocabulary_id: "",
   destination_concept_class_id: "",
+  standard_concept: "",
   omop_table: "",
   status: "proposed",
   notes: "",
 };
 
 const emptyReference: Reference = {
-  source_code_systems: [],
+  domains: [],
+  source_code_systems_by_domain: {},
   destination_vocabularies: [],
-  omop_tables: [],
+  omop_tables: {},
 };
 
 const statusClass: Record<string, string> = {
@@ -105,28 +135,143 @@ const statusClass: Record<string, string> = {
   unmapped: "bg-amber-100 text-amber-800",
 };
 
-/** OMOP domain -> the clinical table its facts land in. */
+/**
+ * OMOP domain -> the clinical table its facts land in. Only a fallback: the
+ * reference endpoint is authoritative, and hardcoding the mapping in the
+ * frontend is what this table exists to avoid. It covers the window before the
+ * first fetch resolves.
+ */
 const DOMAIN_TO_TABLE: Record<string, string> = {
-  Measurement: "measurement",
-  Observation: "observation",
   Condition: "condition",
   Drug: "drug_exposure",
+  Measurement: "measurement",
+  Observation: "observation",
   Procedure: "procedure",
 };
 
-function buildEditForm(row: CodeMappingRow): MappingForm {
+/** Tooltip copy, verbatim from the design (plan section 3.1). */
+const TIP = {
+  domain:
+    "What kind of fact this is. Chosen first: it decides which code systems are offered and which OMOP table the fact lands in.",
+  source_code_system:
+    "The external code system the value arrived in — NDC or ATC for drugs, ICD-10-CM or SNOMED for conditions. Leave as None for uncoded data; a parsed paper lab or a phrase from a note has no code system, which is normal.",
+  source_code_value:
+    "Exactly what appears in the source data — the code if there is one, otherwise the raw text.",
+  source_description:
+    "Human-readable description of the source code, where the source supplies one.",
+  source_concept_id:
+    "The OMOP concept for the source code itself, if that vocabulary is loaded. Blank is normal — most source systems are ones we receive codes in without holding their concepts.",
+  destination_concept_id:
+    "The OMOP concept this source code means. Type an id directly or pick one from the search above.",
+  destination_concept_name:
+    "Name of the destination concept. Editable only for a HealthKey-minted concept; Athena concepts are named by Athena.",
+  destination_concept_code:
+    "The destination concept's own code in its vocabulary, e.g. 33358-3.",
+  destination_vocabulary_id:
+    "Vocabulary the destination concept belongs to — SNOMED, LOINC, or an HK-* vocabulary when we minted it.",
+  destination_concept_class:
+    "The concept's class within its vocabulary, e.g. Clinical Finding, Lab Test.",
+  standard_concept:
+    "'S' means a standard Athena concept. Blank means a HealthKey-minted concept in a quarantined HK-* vocabulary.",
+  destination_table:
+    "The OMOP clinical table the fact is stored in. Follows from Domain.",
+  search:
+    "Search OMOP concepts by name or code. Suggest seeds the search from the source description.",
+  search_vocabulary:
+    "Which vocabulary the search looks in. Defaults to the destination's own vocabulary; widen it to re-point a minted HK-* mapping at a standard concept.",
+  status:
+    "Proposed is awaiting review. Approving also re-points the clinical rows already stored. Rejected hides the row behind a filter.",
+  notes: "Why this decision was made, for the next curator who opens the row.",
+} as const;
+
+const READ_ONLY_CLASS =
+  "h-10 rounded-md border border-slate-200 bg-slate-100 px-3 font-mono text-sm font-normal text-slate-700";
+const INPUT_CLASS = "h-10 rounded-md border border-slate-300 px-3 text-sm font-normal text-slate-950";
+
+/**
+ * A labelled control. The tooltip affordance sits outside the <label> and is
+ * aria-hidden so the accessible name stays the field name alone.
+ */
+function Field({
+  id,
+  label,
+  tip,
+  className = "",
+  children,
+}: {
+  id: string;
+  label: string;
+  tip: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className={`grid gap-1 ${className}`}>
+      <div className="flex items-center gap-1">
+        <label htmlFor={id} className="text-sm font-medium text-slate-700">
+          {label}
+        </label>
+        <span title={tip} aria-hidden="true" className="cursor-help text-xs text-slate-400">
+          ⓘ
+        </span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/** Derived from the resolved concept or from Domain; shown, never chosen. */
+function ReadOnlyField({
+  id,
+  label,
+  tip,
+  value,
+  testId,
+}: {
+  id: string;
+  label: string;
+  tip: string;
+  value: string;
+  testId: string;
+}) {
+  return (
+    <Field id={id} label={label} tip={tip}>
+      <input
+        id={id}
+        data-testid={testId}
+        value={value}
+        readOnly
+        title={tip}
+        placeholder="—"
+        className={READ_ONLY_CLASS}
+      />
+    </Field>
+  );
+}
+
+function omopTableFor(reference: Reference, domainId: string): string {
+  if (!domainId) return "";
+  return reference.omop_tables[domainId] || DOMAIN_TO_TABLE[domainId] || "";
+}
+
+function buildEditForm(row: CodeMappingRow, reference: Reference): MappingForm {
+  const domainId = row.domain_id || row.destination_domain_id || "";
   return {
-    source_code: row.source_code,
+    domain_id: domainId,
     // No fallback to the destination vocabulary. A mapping with no source code
     // system genuinely has none, and showing the destination's there is what
     // put HK-Wearable in the source column to begin with.
     source_vocabulary_id: row.source_vocabulary_id,
+    source_code: row.source_code,
     source_code_description: row.source_code_description || "",
-    destination_vocabulary_id: row.destination_vocabulary_id,
-    destination_concept_name: row.destination_concept_name,
+    source_concept_id: row.source_concept_id ? String(row.source_concept_id) : "",
     destination_concept_id: String(row.destination_concept_id),
+    destination_concept_name: row.destination_concept_name,
+    destination_concept_code: row.destination_concept_code || "",
+    destination_vocabulary_id: row.destination_vocabulary_id,
     destination_concept_class_id: row.destination_concept_class_id || "",
-    omop_table: row.destination_omop_table || DOMAIN_TO_TABLE[row.destination_domain_id] || "",
+    standard_concept: row.standard_concept || "",
+    omop_table: row.destination_omop_table || omopTableFor(reference, domainId),
     status: row.status === "unmapped" ? "proposed" : row.status,
     notes: row.notes || "",
   };
@@ -146,6 +291,7 @@ export default function CodeMappingPage() {
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
   const [form, setForm] = useState<MappingForm>(emptyForm);
+  const [searchVocabulary, setSearchVocabulary] = useState("");
   const [conceptSearchQuery, setConceptSearchQuery] = useState("");
   const [conceptResults, setConceptResults] = useState<ConceptResult[]>([]);
   const [searchingConcepts, setSearchingConcepts] = useState(false);
@@ -161,7 +307,7 @@ export default function CodeMappingPage() {
         api.get<Reference>("/v1/code-mappings/reference/"),
       ]);
       setRows(rowResp.data);
-      setReference(refResp.data || emptyReference);
+      setReference({ ...emptyReference, ...(refResp.data || {}) });
     } catch {
       setError("Failed to load code mappings.");
     } finally {
@@ -250,9 +396,18 @@ export default function CodeMappingPage() {
     [visibleRows],
   );
 
+  /** Source code systems offered for the chosen domain, blank option first. */
+  const sourceCodeSystems = useMemo(() => {
+    const offered = reference.source_code_systems_by_domain[form.domain_id] || [];
+    return offered.some((s) => s.vocabulary_id === "")
+      ? offered
+      : [{ vocabulary_id: "", label: "None — uncoded / free text" }, ...offered];
+  }, [reference, form.domain_id]);
+
   const openNewDialog = () => {
     setSelectedRow(null);
-    setForm({ ...emptyForm, destination_vocabulary_id: selectedVocabulary });
+    setForm({ ...emptyForm });
+    setSearchVocabulary("");
     setConceptSearchQuery("");
     setConceptResults([]);
     setRepointResult(null);
@@ -261,7 +416,8 @@ export default function CodeMappingPage() {
 
   const openEditDialog = (row: CodeMappingRow) => {
     setSelectedRow(row);
-    setForm(buildEditForm(row));
+    setForm(buildEditForm(row, reference));
+    setSearchVocabulary(row.destination_vocabulary_id || "");
     setConceptSearchQuery("");
     setConceptResults([]);
     setRepointResult(null);
@@ -280,21 +436,49 @@ export default function CodeMappingPage() {
     setForm((prev) => ({ ...prev, [field]: value }));
   };
 
-  /** Apply a concept to the form: id, name, vocabulary, class, and a default table. */
+  /**
+   * Domain is the first choice and it settles two others: which source code
+   * systems are plausible, and which OMOP table the fact lands in.
+   */
+  const setDomain = (domainId: string) => {
+    setForm((prev) => {
+      const offered = reference.source_code_systems_by_domain[domainId] || [];
+      const stillOffered =
+        !prev.source_vocabulary_id
+        || offered.some((s) => s.vocabulary_id === prev.source_vocabulary_id);
+      return {
+        ...prev,
+        domain_id: domainId,
+        source_vocabulary_id: stillOffered ? prev.source_vocabulary_id : "",
+        omop_table: omopTableFor(reference, domainId),
+      };
+    });
+  };
+
+  /** Apply a concept to the form: id, name, code, vocabulary, class, standard flag. */
   const applyConcept = (concept: ConceptResult) => {
-    setForm((prev) => ({
-      ...prev,
-      destination_concept_id: String(concept.concept_id),
-      destination_concept_name: concept.concept_name,
-      destination_vocabulary_id: concept.vocabulary_id,
-      destination_concept_class_id: concept.concept_class_id || "",
-      omop_table: prev.omop_table || DOMAIN_TO_TABLE[concept.domain_id] || "",
-    }));
+    setForm((prev) => {
+      // A concept only supplies the domain when the curator has not chosen one;
+      // Domain is theirs, and the table follows from it, not from the concept.
+      const domainId = prev.domain_id || concept.domain_id || "";
+      return {
+        ...prev,
+        domain_id: domainId,
+        destination_concept_id: String(concept.concept_id),
+        destination_concept_name: concept.concept_name,
+        destination_concept_code: concept.concept_code || "",
+        destination_vocabulary_id: concept.vocabulary_id,
+        destination_concept_class_id: concept.concept_class_id || "",
+        standard_concept: concept.standard_concept || "",
+        omop_table: prev.omop_table || omopTableFor(reference, domainId),
+      };
+    });
   };
 
   /**
-   * Resolve a hand-typed concept id. Concept class is never typed - it follows
-   * from the concept - so it has to be fetched whenever the id changes by hand.
+   * Resolve a hand-typed concept id. Everything below the id - name, code,
+   * vocabulary, class, standard flag - follows from the concept, so it has to
+   * be fetched whenever the id changes by hand.
    */
   const resolveConceptId = async (rawId: string) => {
     const id = rawId.trim();
@@ -305,11 +489,16 @@ export default function CodeMappingPage() {
       setError("");
     } catch {
       setError(`No OMOP concept with id ${id}.`);
-      setField("destination_concept_class_id", "");
+      setForm((prev) => ({
+        ...prev,
+        destination_concept_code: "",
+        destination_concept_class_id: "",
+        standard_concept: "",
+      }));
     }
   };
 
-  const searchConcepts = async (query: string) => {
+  const searchConcepts = async (query: string, vocabulary = searchVocabulary) => {
     const q = query.trim();
     setConceptSearchQuery(q);
     if (q.length < 3) {
@@ -319,9 +508,9 @@ export default function CodeMappingPage() {
     setSearchingConcepts(true);
     try {
       const params: Record<string, string> = { q, limit: "25" };
-      // Scope to the chosen destination vocabulary so a curator after a LOINC
-      // code is not wading through a million SNOMED hits.
-      if (form.destination_vocabulary_id) params.vocabulary_id = form.destination_vocabulary_id;
+      // Scope to the destination vocabulary so a curator after a LOINC code is
+      // not wading through a million SNOMED hits.
+      if (vocabulary) params.vocabulary_id = vocabulary;
       const resp = await api.get("/v1/concepts/search/", { params });
       setConceptResults(resp.data.results || resp.data || []);
     } catch {
@@ -395,6 +584,7 @@ export default function CodeMappingPage() {
     setError("");
     try {
       await api.patch(`/v1/code-mappings/${row.mapping_id}/`, {
+        domain_id: row.domain_id || row.destination_domain_id || "",
         source_vocabulary_id: row.source_vocabulary_id,
         source_code: row.source_code,
         source_code_description: row.source_code_description,
@@ -554,6 +744,7 @@ export default function CodeMappingPage() {
           <label className="relative block">
             <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
             <input
+              aria-label="Search mappings"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search source codes, destination concepts, or OMOP IDs"
@@ -627,7 +818,12 @@ export default function CodeMappingPage() {
 
       {dialogMode && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
-          <form onSubmit={submitForm} className="w-full max-w-3xl rounded-md bg-white shadow-xl">
+          <form
+            onSubmit={submitForm}
+            role="dialog"
+            aria-label={dialogMode === "new" ? "New Mapping" : "Edit Mapping"}
+            className="w-full max-w-3xl rounded-md bg-white shadow-xl"
+          >
             <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
               <h2 className="text-lg font-semibold text-slate-950">
                 {dialogMode === "new" ? "New Mapping" : "Edit Mapping"}
@@ -643,156 +839,237 @@ export default function CodeMappingPage() {
             </div>
 
             <div className="max-h-[70vh] overflow-y-auto px-5 py-5">
-              <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Source</h3>
-              <div className="mb-5 grid gap-4 md:grid-cols-2">
-                <label className="grid gap-1 text-sm font-medium text-slate-700">
-                  Source Code
-                  <input
-                    id="source_code"
-                    value={form.source_code}
-                    onChange={(e) => setField("source_code", e.target.value)}
-                    required
-                    className="h-10 rounded-md border border-slate-300 px-3 font-mono text-sm font-normal text-slate-950"
-                  />
-                </label>
-                <label className="grid gap-1 text-sm font-medium text-slate-700">
-                  Source Code System
-                  <select
-                    id="source_vocabulary_id"
-                    value={form.source_vocabulary_id}
-                    onChange={(e) => setField("source_vocabulary_id", e.target.value)}
-                    className="h-10 rounded-md border border-slate-300 px-3 text-sm font-normal text-slate-950"
-                  >
-                    {/* Blank is a real answer: a paper lab or a note has no code system. */}
-                    <option value="">— none (uncoded / free text) —</option>
-                    {reference.source_code_systems.map((v) => (
-                      <option key={v.vocabulary_id} value={v.vocabulary_id}>{v.vocabulary_id}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
-                  Source Code Description
-                  <input
-                    id="source_code_description"
-                    value={form.source_code_description}
-                    onChange={(e) => setField("source_code_description", e.target.value)}
-                    className="h-10 rounded-md border border-slate-300 px-3 text-sm font-normal text-slate-950"
-                  />
-                </label>
-              </div>
+              {/* ── SOURCE ───────────────────────────────────────────────── */}
+              <fieldset
+                data-testid="source-block"
+                className="mb-5 rounded-md border border-slate-200 p-4"
+              >
+                <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Source — the code as it arrived
+                </legend>
+                <div data-testid="source-fields" className="grid gap-4 md:grid-cols-2">
+                  {/* Domain is first on purpose: it decides which code systems
+                      are offered and which OMOP table the fact lands in. */}
+                  <Field id="domain_id" label="Domain" tip={TIP.domain}>
+                    <select
+                      id="domain_id"
+                      title={TIP.domain}
+                      value={form.domain_id}
+                      onChange={(e) => setDomain(e.target.value)}
+                      required
+                      className={INPUT_CLASS}
+                    >
+                      <option value="">— select —</option>
+                      {reference.domains.map((d) => (
+                        <option key={d.domain_id} value={d.domain_id}>{d.label || d.domain_id}</option>
+                      ))}
+                    </select>
+                  </Field>
 
-              <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Destination</h3>
-              <div className="grid gap-4 md:grid-cols-2">
-                <label className="grid gap-1 text-sm font-medium text-slate-700">
-                  Destination Vocabulary
-                  <select
-                    id="destination_vocabulary_id"
-                    value={form.destination_vocabulary_id}
-                    onChange={(e) => setField("destination_vocabulary_id", e.target.value)}
-                    className="h-10 rounded-md border border-slate-300 px-3 text-sm font-normal text-slate-950"
-                  >
-                    <option value="">— select —</option>
-                    {reference.destination_vocabularies.map((v) => (
-                      <option key={v.vocabulary_id} value={v.vocabulary_id}>{v.vocabulary_id}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="grid gap-1 text-sm font-medium text-slate-700">
-                  Destination Concept Name
-                  <input
-                    id="destination_concept_name"
-                    value={form.destination_concept_name}
-                    onChange={(e) => setField("destination_concept_name", e.target.value)}
-                    required
-                    className="h-10 rounded-md border border-slate-300 px-3 text-sm font-normal text-slate-950"
+                  <Field id="source_vocabulary_id" label="Source Code System" tip={TIP.source_code_system}>
+                    <select
+                      id="source_vocabulary_id"
+                      title={TIP.source_code_system}
+                      value={form.source_vocabulary_id}
+                      onChange={(e) => setField("source_vocabulary_id", e.target.value)}
+                      className={INPUT_CLASS}
+                    >
+                      {/* Blank is a real answer: a paper lab or a note has no code system. */}
+                      {sourceCodeSystems.map((s) => (
+                        <option key={s.vocabulary_id || "__none__"} value={s.vocabulary_id}>
+                          {s.label || s.vocabulary_id}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+
+                  <Field id="source_code" label="Source Code Value" tip={TIP.source_code_value}>
+                    <input
+                      id="source_code"
+                      title={TIP.source_code_value}
+                      value={form.source_code}
+                      onChange={(e) => setField("source_code", e.target.value)}
+                      required
+                      className={`${INPUT_CLASS} font-mono`}
+                    />
+                  </Field>
+
+                  <Field id="source_code_description" label="Source Description" tip={TIP.source_description}>
+                    <input
+                      id="source_code_description"
+                      title={TIP.source_description}
+                      value={form.source_code_description}
+                      onChange={(e) => setField("source_code_description", e.target.value)}
+                      className={INPUT_CLASS}
+                    />
+                  </Field>
+
+                  <ReadOnlyField
+                    id="source_concept_id"
+                    label="Source Concept ID"
+                    tip={TIP.source_concept_id}
+                    value={form.source_concept_id}
+                    testId="source-concept-id"
                   />
-                </label>
-                <label className="grid gap-1 text-sm font-medium text-slate-700">
-                  Destination Concept ID
-                  <input
-                    id="destination_concept_id"
-                    type="number"
-                    value={form.destination_concept_id}
-                    onChange={(e) => setField("destination_concept_id", e.target.value)}
-                    onBlur={(e) => void resolveConceptId(e.target.value)}
-                    required
-                    className="h-10 rounded-md border border-slate-300 px-3 font-mono text-sm font-normal text-slate-950"
-                  />
-                </label>
-                <label className="grid gap-1 text-sm font-medium text-slate-700">
-                  Destination OMOP Table
-                  <select
-                    id="omop_table"
-                    value={form.omop_table}
-                    onChange={(e) => setField("omop_table", e.target.value)}
-                    required
-                    className="h-10 rounded-md border border-slate-300 px-3 text-sm font-normal text-slate-950"
-                  >
-                    <option value="">— select —</option>
-                    {reference.omop_tables.map((t) => (
-                      <option key={t.value} value={t.value}>{t.label}</option>
+                </div>
+              </fieldset>
+
+              {/* ── DESTINATION ──────────────────────────────────────────── */}
+              <fieldset
+                data-testid="destination-block"
+                className="rounded-md border border-slate-200 p-4"
+              >
+                <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Destination — the OMOP concept it means
+                </legend>
+
+                {/* Search sits at the top: picking a concept fills everything below it. */}
+                <div className="mb-4">
+                  <div className="mb-2 flex items-end justify-between gap-3">
+                    <div className="flex items-center gap-1">
+                      <label className="text-sm font-medium text-slate-700" htmlFor="code-mapping-concept-search">
+                        Search destination concepts
+                      </label>
+                      <span title={TIP.search} aria-hidden="true" className="cursor-help text-xs text-slate-400">ⓘ</span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-1">
+                        <label className="text-sm font-medium text-slate-700" htmlFor="code-mapping-search-vocabulary">
+                          Search vocabulary
+                        </label>
+                        <span title={TIP.search_vocabulary} aria-hidden="true" className="cursor-help text-xs text-slate-400">ⓘ</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={suggestCurrentCode}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                      >
+                        <Sparkles size={13} />
+                        Suggest
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
+                      <input
+                        id="code-mapping-concept-search"
+                        title={TIP.search}
+                        value={conceptSearchQuery}
+                        onChange={(e) => void searchConcepts(e.target.value)}
+                        placeholder={
+                          searchVocabulary
+                            ? `Search ${searchVocabulary} concepts...`
+                            : "Search destination concepts..."
+                        }
+                        className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-slate-700"
+                      />
+                    </div>
+                    {/* Destination Vocabulary ID itself is read-only - it is a
+                        property of the resolved concept. The search still needs
+                        a scope a curator can widen, or re-pointing a minted
+                        HK-* mapping at a standard concept would be impossible,
+                        which is the whole point of the queue. */}
+                    <select
+                      id="code-mapping-search-vocabulary"
+                      title={TIP.search_vocabulary}
+                      value={searchVocabulary}
+                      onChange={(e) => {
+                        setSearchVocabulary(e.target.value);
+                        void searchConcepts(conceptSearchQuery, e.target.value);
+                      }}
+                      className="h-10 w-40 shrink-0 rounded-md border border-slate-300 px-2 text-sm text-slate-950"
+                    >
+                      <option value="">All vocabularies</option>
+                      {reference.destination_vocabularies.map((v) => (
+                        <option key={v.vocabulary_id} value={v.vocabulary_id}>{v.vocabulary_id}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="mt-2 max-h-40 overflow-y-auto rounded-md border border-slate-200">
+                    {searchingConcepts && <div className="px-3 py-2 text-sm text-slate-500">Searching...</div>}
+                    {!searchingConcepts && conceptResults.length === 0 && conceptSearchQuery.length >= 3 && (
+                      <div className="px-3 py-2 text-sm text-slate-500">No suggestions found.</div>
+                    )}
+                    {!searchingConcepts && conceptResults.map((concept) => (
+                      <button
+                        key={concept.concept_id}
+                        type="button"
+                        onClick={() => applyConcept(concept)}
+                        className="grid w-full grid-cols-[8rem_1fr_6rem] gap-2 border-b border-slate-100 px-3 py-2 text-left text-xs last:border-0 hover:bg-slate-50"
+                      >
+                        <span className="font-mono text-slate-700">{concept.concept_code}</span>
+                        <span className="text-slate-900">{concept.concept_name}</span>
+                        <span className="font-mono text-slate-500">{concept.vocabulary_id}</span>
+                      </button>
                     ))}
-                  </select>
-                </label>
-                <div className="grid gap-1 text-sm font-medium text-slate-700">
-                  Destination Concept Class
-                  {/* Read-only: the class follows from the concept, it is not a choice. */}
-                  <div
-                    data-testid="destination-concept-class"
-                    className="flex h-10 items-center rounded-md bg-slate-100 px-3 text-sm font-normal text-slate-700"
-                  >
-                    {form.destination_concept_class_id || "—"}
                   </div>
                 </div>
-              </div>
 
-              <div className="mt-4">
-                <div className="mb-2 flex items-center justify-between">
-                  <label className="text-sm font-medium text-slate-700" htmlFor="code-mapping-concept-search">
-                    Search destination concepts
-                  </label>
-                  <button
-                    type="button"
-                    onClick={suggestCurrentCode}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
-                  >
-                    <Sparkles size={13} />
-                    Suggest
-                  </button>
-                </div>
-                <div className="relative">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
-                  <input
-                    id="code-mapping-concept-search"
-                    value={conceptSearchQuery}
-                    onChange={(e) => void searchConcepts(e.target.value)}
-                    placeholder={
-                      form.destination_vocabulary_id
-                        ? `Search ${form.destination_vocabulary_id} concepts...`
-                        : "Search destination concepts..."
-                    }
-                    className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-slate-700"
+                {/* The order a curator checks them in: the id, its name, then
+                    the four facts that follow from it, then the table. */}
+                <div data-testid="destination-fields" className="grid gap-4 md:grid-cols-2">
+                  <Field id="destination_concept_id" label="Destination Concept ID" tip={TIP.destination_concept_id}>
+                    <input
+                      id="destination_concept_id"
+                      title={TIP.destination_concept_id}
+                      type="number"
+                      value={form.destination_concept_id}
+                      onChange={(e) => setField("destination_concept_id", e.target.value)}
+                      onBlur={(e) => void resolveConceptId(e.target.value)}
+                      required
+                      className={`${INPUT_CLASS} font-mono`}
+                    />
+                  </Field>
+
+                  <Field id="destination_concept_name" label="Destination Concept Name" tip={TIP.destination_concept_name}>
+                    <input
+                      id="destination_concept_name"
+                      title={TIP.destination_concept_name}
+                      value={form.destination_concept_name}
+                      onChange={(e) => setField("destination_concept_name", e.target.value)}
+                      required
+                      className={INPUT_CLASS}
+                    />
+                  </Field>
+
+                  <ReadOnlyField
+                    id="destination_concept_code"
+                    label="Destination Concept Code"
+                    tip={TIP.destination_concept_code}
+                    value={form.destination_concept_code}
+                    testId="destination-concept-code"
+                  />
+                  <ReadOnlyField
+                    id="destination_vocabulary_id"
+                    label="Destination Vocabulary ID"
+                    tip={TIP.destination_vocabulary_id}
+                    value={form.destination_vocabulary_id}
+                    testId="destination-vocabulary-id"
+                  />
+                  <ReadOnlyField
+                    id="destination_concept_class_id"
+                    label="Destination Concept Class"
+                    tip={TIP.destination_concept_class}
+                    value={form.destination_concept_class_id}
+                    testId="destination-concept-class"
+                  />
+                  <ReadOnlyField
+                    id="standard_concept"
+                    label="Standard Concept"
+                    tip={TIP.standard_concept}
+                    value={form.standard_concept}
+                    testId="standard-concept"
+                  />
+                  <ReadOnlyField
+                    id="omop_table"
+                    label="Destination Table"
+                    tip={TIP.destination_table}
+                    value={form.omop_table}
+                    testId="destination-table"
                   />
                 </div>
-                <div className="mt-2 max-h-40 overflow-y-auto rounded-md border border-slate-200">
-                  {searchingConcepts && <div className="px-3 py-2 text-sm text-slate-500">Searching...</div>}
-                  {!searchingConcepts && conceptResults.length === 0 && conceptSearchQuery.length >= 3 && (
-                    <div className="px-3 py-2 text-sm text-slate-500">No suggestions found.</div>
-                  )}
-                  {!searchingConcepts && conceptResults.map((concept) => (
-                    <button
-                      key={concept.concept_id}
-                      type="button"
-                      onClick={() => applyConcept(concept)}
-                      className="grid w-full grid-cols-[8rem_1fr_6rem] gap-2 border-b border-slate-100 px-3 py-2 text-left text-xs last:border-0 hover:bg-slate-50"
-                    >
-                      <span className="font-mono text-slate-700">{concept.concept_code}</span>
-                      <span className="text-slate-900">{concept.concept_name}</span>
-                      <span className="font-mono text-slate-500">{concept.vocabulary_id}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
+              </fieldset>
 
               {selectedRow?.origin === "import" && (
                 <p className="mt-4 rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600">
@@ -801,15 +1078,20 @@ export default function CodeMappingPage() {
                 </p>
               )}
 
-              <label className="mt-4 grid gap-1 text-sm font-medium text-slate-700">
-                Notes
+              <div className="mt-4 grid gap-1">
+                <div className="flex items-center gap-1">
+                  <label className="text-sm font-medium text-slate-700" htmlFor="notes">Notes</label>
+                  <span title={TIP.notes} aria-hidden="true" className="cursor-help text-xs text-slate-400">ⓘ</span>
+                </div>
                 <textarea
+                  id="notes"
+                  title={TIP.notes}
                   value={form.notes}
                   onChange={(e) => setField("notes", e.target.value)}
                   rows={2}
                   className="rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-950"
                 />
-              </label>
+              </div>
 
               {/* Re-pointing rewrites every stored row carrying this code, which
                   can run for a while. Without this the dialog looks frozen and a
@@ -841,10 +1123,12 @@ export default function CodeMappingPage() {
 
             <div className="flex items-center justify-between gap-2 border-t border-slate-200 px-5 py-4">
               <div className="flex items-center gap-3">
-                <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
-                  Status
+                <div className="flex items-center gap-2">
+                  <label className="text-sm font-medium text-slate-700" htmlFor="status">Status</label>
+                  <span title={TIP.status} aria-hidden="true" className="cursor-help text-xs text-slate-400">ⓘ</span>
                   <select
                     id="status"
+                    title={TIP.status}
                     value={form.status}
                     onChange={(e) => setField("status", e.target.value)}
                     className="h-9 rounded-md border border-slate-300 px-2 text-sm font-normal text-slate-950"
@@ -853,7 +1137,7 @@ export default function CodeMappingPage() {
                     <option value="approved">Approved</option>
                     <option value="rejected">Rejected</option>
                   </select>
-                </label>
+                </div>
                 {selectedRow?.mapping_id && (
                   <button
                     type="button"

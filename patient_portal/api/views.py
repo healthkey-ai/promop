@@ -72,6 +72,7 @@ from omop_core.services.code_mapping import (
     repoint_clinical_rows,
 )
 from omop_core.services.write_descriptor import mapping_table_is_writable
+from omop_core.services import source_vocabularies
 from omop_core.services.regimen_resolution import (
     get_or_create_quarantine_drug,
     get_or_create_quarantine_observation,
@@ -6899,6 +6900,23 @@ def _concept_graph_single_response(request, concept_id, direction):
 
 @api_view(['GET'])
 @permission_classes([ScopedTokenPermission])
+def concept_detail(request, concept_id):
+    """One OMOP concept by id.
+
+    The Code Mapping dialog lets a curator type a destination concept id
+    directly, and everything under it -- name, code, vocabulary, class, standard
+    flag -- is derived from the concept rather than typed. That needs a
+    by-id read; `concepts/lookup/` translates the other way, (vocabulary, code)
+    to id, and cannot answer this.
+    """
+    concept = Concept.objects.filter(concept_id=concept_id).first()
+    if concept is None:
+        return Response({'detail': 'Concept not found.'}, status=status.HTTP_404_NOT_FOUND)
+    return _set_release_etag(request, Response(_serialize_concept(concept, _vocab_version_map())))
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
 def concept_ancestors(request, concept_id):
     return _concept_graph_single_response(request, concept_id, 'ancestors')
 
@@ -7978,33 +7996,11 @@ def _is_local_vocabulary_id(vocabulary_id):
     return bool(vocabulary_id and vocabulary_id.startswith('HK-'))
 
 
-# OMOP housekeeping vocabularies: real rows, but nothing ever arrives coded in
-# them, so offering them as source code systems is noise.
-_INTERNAL_VOCABULARIES = (
-    'CDM', 'Episode', 'Gender', 'Race', 'Ethnicity',
-    'Type Concept', 'Visit', 'None', 'LOCAL', 'FHIR',
-)
-
-# Code systems we see in inbound data but hold no concept rows for.
-_EXTRA_SOURCE_CODE_SYSTEMS = (
-    ('ICDO3', 'ICD-O-3 (oncology morphology/topography)'),
-    ('NDC', 'National Drug Code'),
-    ('CPT4', 'CPT-4 procedure codes'),
-)
-
 # Standard vocabularies a curator re-points a proposed mapping into. These get
 # destination tabs: a mapping whose destination an SME moved to a LOINC concept
 # has to be visible somewhere, or their own output disappears on them.
 _STANDARD_DESTINATION_VOCABULARIES = (
     'SNOMED', 'LOINC', 'RxNorm', 'RxNorm Extension', 'ICD10CM', 'HemOnc',
-)
-
-_OMOP_TABLE_LABELS = (
-    ('measurement', 'Measurement'),
-    ('observation', 'Observation'),
-    ('condition', 'Condition Occurrence'),
-    ('drug_exposure', 'Drug Exposure'),
-    ('procedure', 'Procedure Occurrence'),
 )
 
 
@@ -8033,9 +8029,17 @@ def _serialize_code_mapping_row(concept, mapping=None):
         'concept_source': concept.source or '',
         # Source
         'mapping_id': mapping.id if mapping else None,
+        # The curator's own domain choice, which scopes the source code system
+        # list and derives the table. Not the destination concept's domain --
+        # that is 'destination_domain_id' above, and conflating the two is how
+        # the table came to be picked twice by two different rules.
+        'domain_id': mapping.domain_id if mapping else '',
         'source_vocabulary_id': mapping.source_vocabulary_id if mapping else '',
         'source_code': mapping.source_code if mapping else '',
         'source_code_description': mapping.source_code_description if mapping else '',
+        # The concept for the source code itself, when that vocabulary is
+        # loaded. Null is the normal case and means nothing is wrong.
+        'source_concept_id': mapping.source_concept_id if mapping else None,
         'source': mapping.source if mapping else '',
         # Review state and provenance
         'status': mapping.status if mapping else 'unmapped',
@@ -8052,7 +8056,6 @@ def _serialize_code_mapping_row(concept, mapping=None):
         'concept_name': concept.concept_name,
         'concept_code': concept.concept_code,
         'concept_vocabulary_id': concept.vocabulary_id,
-        'domain_id': concept.domain_id,
         'concept_class_id': concept.concept_class_id,
     }
 
@@ -8112,6 +8115,17 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     else:
         source_code = mapping.source_code
 
+    # The domain is the curator's first choice and settles the destination
+    # table, so it is validated before the table is read.
+    domain_id = str(
+        data.get('domain_id', '' if mapping is None else mapping.domain_id) or ''
+    ).strip()
+    if domain_id and domain_id not in source_vocabularies.DOMAIN_TO_TABLE:
+        raise serializers.ValidationError({'domain_id': (
+            f"Unknown domain {domain_id!r}. Expected one of: "
+            f"{', '.join(sorted(source_vocabularies.DOMAIN_TO_TABLE))}."
+        )})
+
     status_value = str(
         data.get('status') or ('proposed' if mapping is None else mapping.status)
     ).strip()
@@ -8125,6 +8139,26 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
             f"Unknown OMOP table {omop_table!r}. Expected one of: "
             f"{', '.join(sorted(CLINICAL_TABLES))}."
         )})
+    # The table follows from the domain (§3.2). A caller that sent both has to
+    # have them agree -- silently preferring one would put the fact in a table
+    # the curator did not choose. A caller that sent neither table gets the
+    # derived one, which is what the dialog shows read-only.
+    derived_table = source_vocabularies.table_for_domain(domain_id)
+    if omop_table and domain_id and derived_table != omop_table:
+        raise serializers.ValidationError({'omop_table': (
+            f"Domain {domain_id!r} lands in {derived_table!r}, not "
+            f"{omop_table!r}."
+        )})
+    if not omop_table:
+        omop_table = derived_table
+
+    # The source code's own concept, when we hold that vocabulary. Blank source
+    # system means uncoded free text, which has no concept by definition.
+    source_concept = None
+    if source_vocabulary_id and source_code:
+        source_concept = Concept.objects.filter(
+            vocabulary_id=source_vocabulary_id, concept_code=source_code,
+        ).first()
 
     if mapping is None and data.get('mapping_id'):
         mapping = SourceCodeConceptMapping.objects.filter(id=data['mapping_id']).first()
@@ -8137,10 +8171,17 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # status alone must not blank omop_table -- the re-point would then find no
     # table, move nothing, and still report success.
     values = {'updated_by': user}
+    if mapping is None or 'domain_id' in data:
+        values['domain_id'] = domain_id
     if mapping is None or 'source_vocabulary_id' in data:
         values['source_vocabulary_id'] = source_vocabulary_id
     if mapping is None or 'source_code' in data:
         values['source_code'] = source_code
+    # Re-resolved whenever either half of the source identity moved, and only
+    # then: a PATCH that just approves must not re-run a lookup whose answer
+    # cannot have changed.
+    if mapping is None or 'source_vocabulary_id' in data or 'source_code' in data:
+        values['source_concept'] = source_concept
     if mapping is None or 'source_code_description' in data:
         values['source_code_description'] = str(data.get('source_code_description') or '').strip()
     if mapping is None or 'destination_vocabulary_id' in data or not mapping.destination_vocabulary_id:
@@ -8290,22 +8331,22 @@ def code_mapping_reference(request):
     never an HK-* vocabulary, because those are where we mint destinations.
     A destination vocabulary is either a standard one a curator re-points into
     or an HK-* one an import minted under.
+
+    The source list is scoped by domain and comes from the static catalogue in
+    ``services/source_vocabularies``, not from the ``vocabulary`` table: most
+    of those systems are ones we receive codes in without holding their
+    concepts, and deriving the list from what happens to be loaded would block
+    a curator from recording a mapping they can already make correctly.
     """
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     known = {
         v.vocabulary_id: v.vocabulary_name
-        for v in Vocabulary.objects.exclude(vocabulary_id__startswith='HK-')
-        .exclude(vocabulary_id__in=_INTERNAL_VOCABULARIES)
-        .order_by('vocabulary_id')
+        for v in Vocabulary.objects.filter(
+            vocabulary_id__in=_STANDARD_DESTINATION_VOCABULARIES,
+        ).order_by('vocabulary_id')
     }
-    # Systems we accept codes from but hold no concepts for. Without these a
-    # curator is blocked on a vocabulary load to record a mapping they can
-    # already make correctly.
-    for code, label in _EXTRA_SOURCE_CODE_SYSTEMS:
-        known.setdefault(code, label)
-
     hk_vocabularies = list(
         Vocabulary.objects.filter(vocabulary_id__startswith='HK-')
         .order_by('vocabulary_id')
@@ -8316,10 +8357,17 @@ def code_mapping_reference(request):
     ]
 
     return Response({
-        'source_code_systems': [
-            {'vocabulary_id': code, 'vocabulary_name': label}
-            for code, label in sorted(known.items())
+        'domains': [
+            {'domain_id': domain_id, 'label': label}
+            for domain_id, label in source_vocabularies.DOMAIN_CHOICES
         ],
+        # Scoped per domain, each list led by the blank "uncoded" option --
+        # a parsed paper lab or a phrase from a note has no code system, and
+        # that is the common case rather than an omission.
+        'source_code_systems_by_domain': {
+            domain_id: source_vocabularies.source_systems_for(domain_id)
+            for domain_id, _label in source_vocabularies.DOMAIN_CHOICES
+        },
         # Tab order: the standard vocabularies a curator re-points into first,
         # then the HK-* buckets imports fill.
         'destination_vocabularies': [
@@ -8329,9 +8377,10 @@ def code_mapping_reference(request):
             {'vocabulary_id': v, 'vocabulary_name': n, 'is_local': True}
             for v, n in hk_vocabularies
         ],
-        'omop_tables': [
-            {'value': key, 'label': label} for key, label in _OMOP_TABLE_LABELS
-        ],
+        # {domain_id: table}. The dialog shows the derived table read-only, so
+        # the consequence of the domain choice is visible without the frontend
+        # holding a second copy of the mapping.
+        'omop_tables': dict(source_vocabularies.DOMAIN_TO_TABLE),
     })
 
 

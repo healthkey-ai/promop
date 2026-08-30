@@ -225,12 +225,20 @@ in the order a curator checks them.
 | **Destination Concept Name** | text | ✅ | "Name of the destination concept. Editable only for a HealthKey-minted concept; Athena concepts are named by Athena." |
 | **Destination Concept Code** | read-only | — | "The destination concept's own code in its vocabulary, e.g. 33358-3." |
 | **Destination Vocabulary ID** | read-only | — | "Vocabulary the destination concept belongs to — SNOMED, LOINC, or an HK-* vocabulary when we minted it." |
+| **Search vocabulary** | `<select>`, defaults to the destination's, widenable to "All vocabularies" | ❌ | Scopes the concept search only. |
 | **Destination Concept Class** | read-only | — | "The concept's class within its vocabulary, e.g. Clinical Finding, Lab Test." |
 | **Standard Concept** | read-only | — | "'S' means a standard Athena concept. Blank means a HealthKey-minted concept in a quarantined HK-* vocabulary." |
 | **Destination Table** | read-only, from Domain | ✅ | "The OMOP clinical table the fact is stored in. Follows from Domain." |
 
 Everything below Destination Concept ID is derived from the resolved concept, so all of it is
-read-only except the name. **"Destination OMOP Concept ID" is renamed "Destination Concept ID"** —
+read-only except the name.
+
+**Destination Vocabulary ID and the search scope are two different fields.** An earlier draft had
+one control doing both, which does not work: the vocabulary *of the concept you have* cannot also
+be the vocabulary *you are searching for a replacement in*, and making it read-only would lock a
+curator out of re-pointing an `HK-*` mint at a LOINC or SNOMED concept — the primary curation
+action. So the destination's vocabulary is read-only and derived, and a separate labelled **Search
+vocabulary** select scopes the search, defaulting to the destination's and widenable to all. **"Destination OMOP Concept ID" is renamed "Destination Concept ID"** —
 OMOP is always the destination in code mapping, so the word carried no information and made the
 longest label on the screen the least informative one.
 
@@ -722,3 +730,35 @@ recreated forever and tripped the unique constraint; the re-point matched full-w
 against values ingest truncates to 50; collapse orphaned `ProvenanceRecord` rows; a rejected
 mapping became permanently unreachable and unrecreatable; `_direct_concept` was
 order-nondeterministic; and two functions were left dead.
+
+---
+
+## 10. What the live round trip found
+
+The mocked suites were green — 1759 backend, 401 frontend — while three defects sat in the code.
+All three were invisible to a mock by construction, and all are fixed.
+
+- **`GET /v1/concepts/{id}/` did not exist.** The dialog resolves a hand-typed destination id
+  against it to back-fill name, code, vocabulary, class and standard flag. The route was never
+  added, so the request fell through to the SPA catch-all and returned HTML; the mocked test
+  returned a concept and passed. Added `concept_detail` — `concepts/lookup/` translates
+  (vocabulary, code) → id and cannot answer the reverse.
+- **Approving moved no rows, and said it had.** Ingest writes `_source_text(codeable)` — the
+  resource's display text — into `*_source_value`, while a proposal records the *code* when the
+  resource carried one. A FHIR Observation coded `SFLC-K` with text
+  `SERUM FREE LIGHT CHAIN KAPPA` therefore produced a mapping keyed on the code and a measurement
+  keyed on the text, and the re-point matched neither. The approval returned 200 with the row
+  still on the minted concept: exactly the silent failure §2.1 is about, reintroduced one level
+  down. `_source_value_match` now matches on either.
+- **Migration 0191 was edited after it had been applied.** Django records an applied migration and
+  will not re-run it, so the two new columns never reached `promop_dev` while the migration state
+  reported current. Split into `0192_source_code_mapping_domain`. Editing an applied migration is
+  only safe while it is unmerged; a `manage.py migrate` reporting "no migrations to apply" is not
+  evidence the schema matches the model — the DB/model sync check in CLAUDE.md is.
+
+The round trip itself lives in `CodeMappingPage.live.test.tsx`, skipped unless
+`CODE_MAPPING_LIVE_URL` is set. It drives the real component over real HTTP against a real Django
+server on real Postgres: the queue item an import proposed, every dialog control labelled and
+tipped, source systems scoped to the domain, and the re-point verified in the database — one row,
+moved from the minted `HK-Labs` concept to LOINC 3046299, no duplicate, PatientRecord marked
+stale.

@@ -31,7 +31,7 @@ import logging
 
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
-from django.db.models import Case, IntegerField, When
+from django.db.models import Case, IntegerField, Q, When
 from django.utils import timezone
 
 from omop_core.models import (
@@ -254,6 +254,36 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
 # Re-pointing rows already stored
 # --------------------------------------------------------------------------
 
+def _source_value_match(model, source_col, mapping):
+    """Match the clinical rows a mapping actually produced.
+
+    A mapping's key and its rows' key are not always the same string. Ingest
+    writes ``_source_text(codeable)`` into ``*_source_value`` -- the resource's
+    display text -- while a proposal records the *code* where the resource
+    carried one, because a code is stable across producers and display text is
+    not. So a FHIR Observation coded ``SFLC-K`` with text
+    ``SERUM FREE LIGHT CHAIN KAPPA`` yields a mapping keyed on the code and a
+    measurement keyed on the text.
+
+    Matching on the code alone found nothing, and an approval then reported
+    success while moving no rows -- the silent failure this whole feature
+    exists to prevent. Match on either, since ingest may have stored either.
+
+    Also truncated to the stored column width: ingest caps source values at 50
+    characters, so a curator who typed the full name would otherwise miss.
+    """
+    width = model._meta.get_field(source_col).max_length or 50
+    candidates = {
+        value[:width]
+        for value in (mapping.source_code, mapping.source_code_description)
+        if value
+    }
+    match = Q()
+    for value in candidates:
+        match |= Q(**{f'{source_col}__iexact': value})
+    return match
+
+
 def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
                           apply_changes=True):
     """Move stored clinical rows from one destination concept to another.
@@ -291,14 +321,10 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
         return result
     model, concept_col, source_col = entry
 
-    # Ingest truncates every *_source_value to 50 chars, so a curator who typed
-    # the full name would match nothing and the approval would silently move no
-    # rows. Match on what was actually stored.
-    stored_width = model._meta.get_field(source_col).max_length or 50
-    qs = model.objects.filter(**{
-        f'{source_col}__iexact': mapping.source_code[:stored_width],
-        concept_col: old_concept_id,
-    })
+    qs = model.objects.filter(
+        _source_value_match(model, source_col, mapping),
+        **{concept_col: old_concept_id},
+    )
     person_ids = set(qs.values_list('person_id', flat=True).distinct())
     result['rows_updated'] = qs.count()
     if not apply_changes or not result['rows_updated']:
@@ -317,7 +343,8 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
         with suppress_patient_record_refresh():
             qs.update(**{concept_col: new_concept_id})
             result['rows_collapsed'] = _collapse_duplicates(
-                model, concept_col, source_col, mapping.source_code,
+                model, concept_col, source_col,
+                _source_value_match(model, source_col, mapping),
                 new_concept_id, person_ids,
             )
 
@@ -330,7 +357,7 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
     return result
 
 
-def _collapse_duplicates(model, concept_col, source_col, source_code,
+def _collapse_duplicates(model, concept_col, source_col, match,
                          concept_id, person_ids):
     """Collapse rows the re-point just made identical.
 
@@ -345,8 +372,7 @@ def _collapse_duplicates(model, concept_col, source_col, source_code,
 
     rows = (
         model.objects
-        .filter(person_id__in=person_ids,
-                **{f'{source_col}__iexact': source_code, concept_col: concept_id})
+        .filter(match, person_id__in=person_ids, **{concept_col: concept_id})
         .order_by(pk_col)
         .values_list(pk_col, 'person_id', *identity_cols)
     )
