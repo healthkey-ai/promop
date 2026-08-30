@@ -141,90 +141,111 @@ legacy `upload_fhir_bundle` in `views.py` (`:3341`, `:3388`, `:3411`, `:3586`, `
 
 ### 3.1 Dialog layout
 
+Two blocks, visually separated, read top to bottom in the direction of the mapping.
+**Every field is labelled and carries a tooltip** — the dialog currently has an unlabelled input
+holding the source code value, which is indefensible on a screen this conceptually dense.
+
 ```
-┌── Edit Mapping ─────────────────────────────────────────────────────┐
-│  SOURCE                                                             │
-│  ┌──────────────────────────┬──────────────────────────┐            │
-│  │ Source Code              │ Source Code System       │            │
-│  │ [ C90.00              ]  │ [ ICD10CM            ▾]  │            │
-│  └──────────────────────────┴──────────────────────────┘            │
-│  Source Code Description  [ Multiple myeloma not having…        ]   │
-│                                                                     │
-│  DESTINATION                                                        │
-│  ┌──────────────────────────┬──────────────────────────┐            │
-│  │ Destination Concept ID   │ Destination Vocabulary   │            │
-│  │ [ 437233              ]  │ [ SNOMED             ▾]  │            │
-│  └──────────────────────────┴──────────────────────────┘            │
-│  Destination Concept Name [ Multiple myeloma                    ]   │
-│  ┌──────────────────────────┬──────────────────────────┐            │
-│  │ Destination OMOP Table   │ Destination Concept Class│            │
-│  │ [ Condition          ▾]  │  Clinical Finding  (ro)  │            │
-│  └──────────────────────────┴──────────────────────────┘            │
-│                                                                     │
-│  [🔍 Search destination concepts…              ] [✨ Suggest]        │
-│  ┌───────────────────────────────────────────────────────────────┐  │
-│  │ 437233   Multiple myeloma            SNOMED   Condition       │  │
-│  └───────────────────────────────────────────────────────────────┘  │
-│                                                                     │
-│  Minted by import 2026-08-30 from fhir-upload · 14 occurrences      │
-│  Status  [ Proposed ▾]     Notes [                              ]   │
-│                                        [ Cancel ]  [ Save Mapping ] │
-└─────────────────────────────────────────────────────────────────────┘
+┌── Edit Mapping ─────────────────────────────────────────────────────────────┐
+│                                                                             │
+│ ╭─ SOURCE — the code as it arrived ─────────────────────────────────────╮   │
+│ │ Domain              ⓘ  [ Measurement                              ▾]  │   │
+│ │ Source Code System  ⓘ  [ None — uncoded / free text               ▾]  │   │
+│ │ Source Code Value   ⓘ  [ M-PROTEIN, SERUM                          ]  │   │
+│ │ Source Description  ⓘ  [ Serum M-protein, electrophoresis          ]  │   │
+│ │ Source Concept ID   ⓘ  [ —                       ] (read-only)        │   │
+│ ╰───────────────────────────────────────────────────────────────────────╯   │
+│                                                                             │
+│ ╭─ DESTINATION — the OMOP concept it means ─────────────────────────────╮   │
+│ │ [🔍 Search LOINC concepts…                         ] [✨ Suggest]     │   │
+│ │ ┌───────────────────────────────────────────────────────────────────┐ │   │
+│ │ │ 33358-3  Protein.monoclonal [Mass/volume] in Serum   LOINC        │ │   │
+│ │ └───────────────────────────────────────────────────────────────────┘ │   │
+│ │ Destination Concept ID     ⓘ [ 3046299                             ]  │   │
+│ │ Destination Concept Name   ⓘ [ Protein.monoclonal [Mass/volume]…   ]  │   │
+│ │ Destination Concept Code   ⓘ [ 33358-3            ] (read-only)       │   │
+│ │ Destination Vocabulary ID  ⓘ [ LOINC              ] (read-only)       │   │
+│ │ Destination Concept Class  ⓘ [ Lab Test           ] (read-only)       │   │
+│ │ Standard Concept           ⓘ [ S                  ] (read-only)       │   │
+│ │ Destination Table          ⓘ [ measurement        ] (from Domain)     │   │
+│ ╰───────────────────────────────────────────────────────────────────────╯   │
+│                                                                             │
+│  Proposed by import (fhir-sync) · seen 14 times                             │
+│  Status ⓘ [ Proposed ▾]   Notes [                    ]  [Cancel] [Save]     │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-| Field | Control | Required | Source of truth |
+#### Source block
+
+| Field | Control | Required | Tooltip |
 |---|---|---|---|
-| **Source Code** | text | ✅ | typed, or carried in by an import |
-| **Source Code System** | `<select>` of external code systems + blank | ❌ | `GET /v1/code-mappings/reference/`. Blank is legal and means "uncoded" |
-| **Source Code Description** | text | ❌ | typed; prefilled by the import from the source text |
-| **Destination Vocabulary** | `<select>`: SNOMED, LOINC, RxNorm, ICD10CM, HemOnc + every `HK-*` | ✅ | scopes the concept search below it |
-| **Destination Concept Name** | searchable text | ✅ | typing searches `/v1/concepts/search/` scoped to the chosen vocabulary; picking a result fills the ID |
-| **Destination Concept ID** | number, **writable** | ✅ | typed directly, or filled by the search. Typing an ID resolves it and back-fills name, vocabulary and class |
-| **Destination OMOP Table** | `<select>` | ✅ | keys of `_MAPPING_TARGETS` (`omop_core/services/write_descriptor.py:290`); defaulted from the concept's domain |
-| **Destination Concept Class** | read-only, computed | — | from the resolved concept; blank until a concept is chosen |
-| **Provenance line** | read-only | — | who created the row: an import (with its source system and occurrence count) or a named curator |
-| **Status** | `<select>` | ✅ | proposed / approved / rejected; imports write `proposed` |
-| **Notes** | textarea | ❌ | |
+| **Domain** | `<select>`: Condition, Drug, Measurement, Observation, Procedure | ✅ | "What kind of fact this is. Chosen first: it decides which code systems are offered and which OMOP table the fact lands in." |
+| **Source Code System** | `<select>`, scoped to Domain, blank first | ❌ | "The external code system the value arrived in — NDC or ATC for drugs, ICD-10-CM or SNOMED for conditions. Leave as None for uncoded data; a parsed paper lab or a phrase from a note has no code system, which is normal." |
+| **Source Code Value** | text | ✅ | "Exactly what appears in the source data — the code if there is one, otherwise the raw text." |
+| **Source Description** | text | ❌ | "Human-readable description of the source code, where the source supplies one." |
+| **Source Concept ID** | read-only | — | "The OMOP concept for the source code itself, if that vocabulary is loaded. Blank is normal — most source systems are ones we receive codes in without holding their concepts." |
 
-The destination block reads vocabulary → name → ID → table → class, because that is the order a
-curator fills it: they know they want a LOINC code, they search by name, and the ID follows.
-**Destination Concept ID is writable**, including when editing an existing mapping — re-pointing
-a proposed mapping at a standard concept is the single most common curation action and must not
-require deleting and recreating the row.
+**Domain is the first choice** because it is the one a curator can make by looking at the data,
+and it settles the two things they would otherwise have to reason about separately: which code
+systems are plausible, and which OMOP table the fact belongs in. Changing Domain re-scopes the
+Source Code System list and re-derives the Destination Table.
 
-Source and destination are visually separated with headings; Status sits in the footer beside
-Save, because it is a review action rather than a source attribute. The provenance line is what
-tells an SME whether they are reviewing a machine's guess or a colleague's decision.
+`Source Concept ID` is new and read-only. It records that the source code *itself* resolves to a
+loaded Athena concept — an ICD-10-CM code has a concept even when it is not the standard one the
+fact should carry. Keeping it distinct from the destination is what stops the two being conflated,
+which is the confusion this whole issue is about.
 
-### 3.2 Source Code System dropdown
+#### Source code systems by domain
 
-A `<select>`, not a datalist over values already in the table — the datalist is what let
-`HK-Wearable` breed. Contents come from a new reference endpoint: every `Vocabulary` that is a
-plausible *incoming* code system, i.e. **not** `HK-*` and not OMOP housekeeping:
+Catalogue lives in `omop_core/services/source_vocabularies.py`, static rather than read from the
+`vocabulary` table. Most of these are systems we *receive* codes in without holding their
+concepts — an NDC on a dispensing record, a dm+d code from a UK extract — and deriving the list
+from loaded vocabularies would offer only the handful we happen to have and block a curator from
+recording a mapping they can already make correctly. OHDSI `vocabulary_id` spellings, so a
+mapping recorded today lines up with a later vocabulary load.
 
-```python
-_INTERNAL_VOCABULARIES = {'CDM', 'Episode', 'Gender', 'Race', 'Ethnicity',
-                          'Type Concept', 'Visit', 'None', 'LOCAL', 'FHIR'}
-```
+| Domain | Systems offered |
+|---|---|
+| **Condition** | SNOMED, ICD10CM, ICD10, ICD10GM, ICD10CA, ICD11, ICD9CM, Read, CTV3, ICDO3, Orphanet, OMIM, HPO, MedDRA, NCIt, ICPC, CIEL, Nebraska Lexicon, DRG, APR-DRG |
+| **Procedure** | SNOMED, CPT4, HCPCS, ICD10PCS, ICD9Proc, CDT, Revenue Code, OPCS4, OPS, CCAM, CCI |
+| **Drug** | RxNorm, RxNorm Extension, NDC, ATC, dm+d, CVX, MVX, HemOnc, Multum, FDB, Medi-Span, Gold Standard, GPI, VANDF, NDFRT, UNII, SPL, AMT, CCDD |
+| **Measurement** | LOINC, SNOMED, CPT4, UCUM, Nebraska Lexicon |
+| **Observation** | SNOMED, LOINC, ICD10CM, HCPCS, NCIt, PPI |
 
-Against `promop_dev` that yields `ATC`, `CVX`, `HemOnc`, `ICD10CM`, `LOINC`, `RxNorm`,
-`RxNorm Extension`, `SNOMED`, `UCUM`, plus a curated list of systems we accept codes from but
-hold no concepts for, so a curator is not blocked on a vocabulary load:
+Every domain also offers **None — uncoded / free text**, first in the list.
 
-```python
-_EXTRA_SOURCE_CODE_SYSTEMS = [
-    ('ICDO3', 'ICD-O-3 (oncology morphology/topography)'),
-    ('NDC',   'National Drug Code'),
-    ('CPT4',  'CPT-4 procedure codes'),
-]
-```
+#### Destination block
 
-The first option is blank, labelled *"— none (uncoded / free text) —"*: a lab PDF or a doctor's
-note genuinely has no code system, and #834's thread is explicit that source vocabulary must not
-be required.
+Search sits at the top, because picking a concept fills everything below it. The fields then read
+in the order a curator checks them.
 
-LOINC and SNOMED **do** appear here — a curator can always hand-write a mapping from one. What
-§1.1 rule 1 says is that imports never *generate* one for them.
+| Field | Control | Required | Tooltip |
+|---|---|---|---|
+| **Destination Concept ID** | number, writable | ✅ | "The OMOP concept this source code means. Type an id directly or pick one from the search above." |
+| **Destination Concept Name** | text | ✅ | "Name of the destination concept. Editable only for a HealthKey-minted concept; Athena concepts are named by Athena." |
+| **Destination Concept Code** | read-only | — | "The destination concept's own code in its vocabulary, e.g. 33358-3." |
+| **Destination Vocabulary ID** | read-only | — | "Vocabulary the destination concept belongs to — SNOMED, LOINC, or an HK-* vocabulary when we minted it." |
+| **Destination Concept Class** | read-only | — | "The concept's class within its vocabulary, e.g. Clinical Finding, Lab Test." |
+| **Standard Concept** | read-only | — | "'S' means a standard Athena concept. Blank means a HealthKey-minted concept in a quarantined HK-* vocabulary." |
+| **Destination Table** | read-only, from Domain | ✅ | "The OMOP clinical table the fact is stored in. Follows from Domain." |
+
+Everything below Destination Concept ID is derived from the resolved concept, so all of it is
+read-only except the name. **"Destination OMOP Concept ID" is renamed "Destination Concept ID"** —
+OMOP is always the destination in code mapping, so the word carried no information and made the
+longest label on the screen the least informative one.
+
+### 3.2 Domain drives the destination table
+
+| Domain | Destination table |
+|---|---|
+| Condition | `condition_occurrence` |
+| Drug | `drug_exposure` |
+| Measurement | `measurement` |
+| Observation | `observation` |
+| Procedure | `procedure_occurrence` |
+
+The curator never picks the table. It is shown, read-only, so the consequence of the Domain
+choice is visible rather than implied.
 
 ### 3.3 Tabs and sections
 
@@ -284,6 +305,13 @@ Each is one GitHub issue, one branch, one PR into `dev`, in dependency order.
 - `source_vocabulary_id` — keep the column name (it is the OMOP STCM name), add
   `blank=True, default=''` so uncoded source codes are legal, and a `help_text` stating it is an
   **external** code system, never `HK-*`.
+- Add `domain_id = CharField(max_length=20, blank=True, default='')` — Condition / Drug /
+  Measurement / Observation / Procedure. The curator's first choice, and what scopes the source
+  code system list and derives `omop_table`.
+- Add `source_concept = FK(Concept, null=True)` — the concept for the **source code itself**, when
+  that vocabulary is loaded. An ICD-10-CM code has a concept even when it is not the standard one
+  the fact should carry, and keeping it distinct from the destination is what stops the two being
+  conflated.
 - Add `destination_vocabulary_id = CharField(max_length=20, blank=True, default='')` — the
   `HK-*` vocabulary when minted, blank for an Athena destination.
 - Add `omop_table = CharField(max_length=30, blank=True, default='')`, validated through
@@ -323,9 +351,16 @@ Migration `0191_source_code_mapping_direction.py`:
   `destination_concept_name`, `destination_concept_code`, `destination_vocabulary_id`,
   `destination_concept_class_id`, `destination_omop_table` — keeping `concept_id` as an alias
   for one release, since `App.test.tsx` and any external caller read it today.
-- New `GET /v1/code-mappings/reference/` →
-  `{source_code_systems, destination_vocabularies, omop_tables}` per §3.2/§3.3. Keep
-  `code-mappings/vocabularies/` as a thin alias for one release.
+- New `GET /v1/code-mappings/reference/` returning
+  `{domains, source_code_systems_by_domain, destination_vocabularies, omop_tables}`:
+  - `domains` — the five, with labels, from `services/source_vocabularies.DOMAIN_CHOICES`
+  - `source_code_systems_by_domain` — `{domain_id: [{vocabulary_id, label}, ...]}`, each list led
+    by the blank "None — uncoded / free text" option
+  - `destination_vocabularies` — standard vocabularies plus every `HK-*`, for the tab strip
+  - `omop_tables` — `{domain_id: table}`, so the dialog can show the derived table without
+    hardcoding the mapping in the frontend
+
+  Keep `code-mappings/vocabularies/` as a thin alias for one release.
 - Re-key `code_mapping_detail` to `code-mappings/<int:mapping_id>/` (`v1_urls.py:128`) and add
   `DELETE` — a curator who mis-keys a source code currently cannot remove the row.
 - `_upsert_source_code_mapping` — validate `omop_table`, reject `HK-*` source systems, and stop
@@ -338,8 +373,16 @@ Migration `0191_source_code_mapping_direction.py`:
 
 `frontend/src/components/CodeMappings/CodeMappingPage.tsx`:
 
-- `MappingForm` gains `source_code_description`, `destination_vocabulary_id`, `omop_table`;
-  `target_concept_*` renamed `destination_concept_*` to match the wire format.
+- `MappingForm` carries the full §3.1 field set: `domain_id`, `source_vocabulary_id`,
+  `source_code`, `source_code_description`, `source_concept_id`, then
+  `destination_concept_id`, `destination_concept_name`, `destination_concept_code`,
+  `destination_vocabulary_id`, `destination_concept_class_id`, `standard_concept`, `omop_table`.
+- **No unlabelled inputs.** The dialog currently has one holding the source code value. Every
+  control gets a visible `<label>` bound by `htmlFor`, and a tooltip (`title` plus an `ⓘ`
+  affordance) carrying the §3.1 text — this screen is conceptually dense enough that a field
+  whose meaning has to be inferred is a defect.
+- Domain drives everything: changing it re-scopes the Source Code System select and re-derives
+  the read-only Destination Table.
 - Dialog rebuilt to §3.1 with `SOURCE`/`DESTINATION` headings and the provenance line.
   **"Source concept code" → "Source Code"**; the word *concept* never appears on the source side.
 - Source Code System and Destination Vocabulary become `<select>`s fed by
