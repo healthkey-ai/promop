@@ -292,7 +292,7 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
 # Re-pointing rows already stored
 # --------------------------------------------------------------------------
 
-def _source_value_match(model, source_col, mapping):
+def _source_value_match(model, source_col, mapping, include_description=True):
     """Match the clinical rows a mapping actually produced.
 
     A mapping's key and its rows' key are not always the same string. Ingest
@@ -317,7 +317,15 @@ def _source_value_match(model, source_col, mapping):
     # it is free prose -- "Glucose" against a GLU-3 code -- and using it as a
     # bulk-UPDATE key would re-point every unrelated producer's "Glucose" row in
     # the database and mark those patients stale.
-    if mapping.origin == 'import' and mapping.source_code_description:
+    #
+    # `include_description=False` narrows it further for the concept-0 sweep.
+    # An import's *own* rows sit at the concept it minted, not at 0, so the
+    # old-destination sweep is what moves them and it keeps the description.
+    # The concept-0 sweep reaches rows the import never wrote -- pre-existing
+    # unresolved data -- and matching those on a generic display string like
+    # "Glucose" would claim every producer's unresolved Glucose row for this
+    # one code.
+    if include_description and mapping.origin == 'import' and mapping.source_code_description:
         candidates.add(mapping.source_code_description[:width])
     match = Q()
     for value in candidates:
@@ -326,7 +334,7 @@ def _source_value_match(model, source_col, mapping):
 
 
 def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
-                          apply_changes=True):
+                          apply_changes=True, match_description=True):
     """Move stored clinical rows from one destination concept to another.
 
     Approving a mapping that a curator re-pointed has to rewrite the rows
@@ -346,7 +354,11 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
 
     Returns ``{'rows_updated', 'persons_marked_stale', 'rows_collapsed'}``.
     """
-    result = {'rows_updated': 0, 'persons_marked_stale': 0, 'rows_collapsed': 0}
+    # person_ids is carried so a caller running more than one sweep can union
+    # them; counting each sweep's total would report more affected patients
+    # than exist when a person has rows in both.
+    result = {'rows_updated': 0, 'persons_marked_stale': 0, 'rows_collapsed': 0,
+              'person_ids': set()}
     # `is None`, not falsiness: concept 0 is OMOP's "No matching concept" and is
     # the single most common value a re-point moves rows *off*.
     if old_concept_id is None or not new_concept_id or old_concept_id == new_concept_id:
@@ -362,13 +374,13 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
         return result
     model, concept_col, source_col = entry
 
-    qs = model.objects.filter(
-        _source_value_match(model, source_col, mapping),
-        **{concept_col: old_concept_id},
-    )
+    match = _source_value_match(
+        model, source_col, mapping, include_description=match_description)
+    qs = model.objects.filter(match, **{concept_col: old_concept_id})
     person_ids = set(qs.values_list('person_id', flat=True).distinct())
     result['rows_updated'] = qs.count()
     if not apply_changes or not result['rows_updated']:
+        result['person_ids'] = set(person_ids) if not apply_changes else set()
         result['persons_marked_stale'] = len(person_ids) if not apply_changes else 0
         return result
 
@@ -376,6 +388,7 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
         # Marked before the write: an abort mid-update would otherwise leave
         # rewritten rows whose PatientRecord is never selected for re-derivation,
         # because backfill_patient_records selects on derivation_version.
+        result['person_ids'] = set(person_ids)
         result['persons_marked_stale'] = PatientRecord.objects.filter(
             person_id__in=person_ids,
         ).update(derivation_version=0)
@@ -384,8 +397,7 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
         with suppress_patient_record_refresh():
             qs.update(**{concept_col: new_concept_id})
             result['rows_collapsed'] = _collapse_duplicates(
-                model, concept_col, source_col,
-                _source_value_match(model, source_col, mapping),
+                model, concept_col, source_col, match,
                 new_concept_id, person_ids,
             )
 

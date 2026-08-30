@@ -23080,3 +23080,68 @@ class CodeMappingCuratorWorkflowTest(TestCase):
         resp = self.client.get('/api/v1/code-mappings/')
         row = next(r for r in resp.data if r['source_code'] == 'SODIUM')
         self.assertEqual(row['created_by'], '')
+
+    def test_post_carrying_mapping_id_cannot_silently_unapprove(self):
+        """A POST may upsert by mapping_id. Deciding status before resolving the
+        row made every such call look like a create: an approved mapping was
+        silently downgraded to proposed and the re-point skipped while its
+        destination moved -- the silent-approval failure through the POST door.
+        """
+        created = self._create()
+        mapping_id = created.data['mapping_id']
+        self.client.patch(f'/api/v1/code-mappings/{mapping_id}/',
+                          {'status': 'approved'}, format='json')
+
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'mapping_id': mapping_id,
+            'domain_id': 'Measurement',
+            'source_vocabulary_id': '',
+            'source_code': 'POTASSIUM',
+            'destination_concept_id': self.other.concept_id,
+            'omop_table': 'measurement',
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.data['status'], 'approved', 'the mapping was un-approved')
+        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.other.concept_id)
+
+    def test_invalid_status_on_create_is_still_rejected(self):
+        """Forcing proposed-on-create must not swallow a typo."""
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'domain_id': 'Measurement',
+            'source_vocabulary_id': '',
+            'source_code': 'CHLORIDE',
+            'destination_concept_id': self.destination.concept_id,
+            'omop_table': 'measurement',
+            'status': 'aproved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('status', resp.data)
+
+    def test_concept_zero_sweep_does_not_match_a_generic_description(self):
+        """An import proposal's description is ingest's display text, and using
+        it for the concept-0 sweep would claim every producer's unresolved row
+        carrying that same generic string."""
+        other_producer = Measurement.objects.create(
+            measurement_id=8894002, person=self.person,
+            measurement_concept_id=0,
+            measurement_date=date(2026, 9, 3),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='Potassium level',   # a different producer
+            value_as_number=Decimal('3.9'),
+        )
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='', source_code='K-9',
+            source_code_description='Potassium level',
+            target_concept=self.destination, omop_table='measurement',
+            domain_id='Measurement', status='proposed',
+            origin='import', origin_system='fhir-sync',
+        )
+        self.client.patch(f'/api/v1/code-mappings/{mapping.id}/',
+                          {'status': 'approved'}, format='json')
+        other_producer.refresh_from_db()
+        self.assertEqual(
+            other_producer.measurement_concept_id, 0,
+            'the concept-0 sweep claimed a row it only matched by description',
+        )

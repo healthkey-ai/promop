@@ -8180,17 +8180,29 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
             f"{', '.join(sorted(source_vocabularies.DOMAIN_TO_TABLE))}."
         )})
 
+    # Resolve the row FIRST. A POST may carry mapping_id to upsert an existing
+    # mapping, and deciding status before knowing that made every such call
+    # look like a create: status forced to proposed, an approved mapping
+    # silently un-approved, and the re-point skipped while its destination
+    # moved -- the silent-approval failure, through the POST door.
+    if mapping is None and data.get('mapping_id'):
+        mapping = SourceCodeConceptMapping.objects.filter(id=data['mapping_id']).first()
+        if mapping is None:
+            raise serializers.ValidationError({'mapping_id': 'Mapping not found.'})
+
+    # Validate what the caller actually sent before deciding what to store, so
+    # a typo'd status is still a 400 rather than being silently swallowed by
+    # the proposed-on-create rule below.
+    valid_statuses = {choice for choice, _label in SourceCodeConceptMapping.STATUS_CHOICES}
+    requested_status = str(data.get('status') or '').strip()
+    if requested_status and requested_status not in valid_statuses:
+        raise serializers.ValidationError({'status': f"Status must be one of: {', '.join(sorted(valid_statuses))}."})
+
     # A new mapping is always proposed. Creating and approving in one act
     # removes the review step the Unmapped queue exists to provide, and it is
     # also what let a create write clinical data -- now approval is the only
     # transition that does, which is a far easier property to reason about.
-    if mapping is None:
-        status_value = 'proposed'
-    else:
-        status_value = str(data.get('status') or mapping.status).strip()
-    valid_statuses = {choice for choice, _label in SourceCodeConceptMapping.STATUS_CHOICES}
-    if status_value not in valid_statuses:
-        raise serializers.ValidationError({'status': f"Status must be one of: {', '.join(sorted(valid_statuses))}."})
+    status_value = 'proposed' if mapping is None else (requested_status or mapping.status)
 
     omop_table = normalize_omop_table(data.get('omop_table') or data.get('destination_omop_table'))
     if omop_table and not mapping_table_is_writable(omop_table):
@@ -8218,11 +8230,6 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         source_concept = Concept.objects.filter(
             vocabulary_id=source_vocabulary_id, concept_code=source_code,
         ).first()
-
-    if mapping is None and data.get('mapping_id'):
-        mapping = SourceCodeConceptMapping.objects.filter(id=data['mapping_id']).first()
-        if mapping is None:
-            raise serializers.ValidationError({'mapping_id': 'Mapping not found.'})
 
     # Captured before the save: whether this is the first sign-off, and
     # where the mapping pointed beforehand.
@@ -8303,17 +8310,27 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
             sources.add(previous_concept_id)
         sources.discard(concept.concept_id)
 
+        affected_persons = set()
         for old_concept_id in sorted(sources):
             outcome = repoint_clinical_rows(
                 mapping=mapping,
                 old_concept_id=old_concept_id,
                 new_concept_id=concept.concept_id,
+                # The concept-0 sweep reaches rows this mapping's own import
+                # never wrote, so it matches the code only -- see
+                # _source_value_match.
+                match_description=old_concept_id != NO_MATCHING_CONCEPT_ID,
             )
+            affected_persons |= outcome.pop('person_ids', set())
             if repoint is None:
                 repoint = outcome
             else:
                 for key, value in outcome.items():
                     repoint[key] += value
+        if repoint is not None:
+            # Distinct patients, not the sum of each sweep's total: a person
+            # with rows in both would otherwise be reported twice.
+            repoint['persons_marked_stale'] = len(affected_persons)
     return mapping, repoint
 
 

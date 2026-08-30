@@ -311,6 +311,7 @@ export default function CodeMappingPage() {
   const [activeVocabulary, setActiveVocabulary] = useState("");
   const [mappedCollapsed, setMappedCollapsed] = useState(true);
   const [showRejected, setShowRejected] = useState(false);
+  const [banner, setBanner] = useState<string | null>(null);
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
   const [form, setForm] = useState<MappingForm>(emptyForm);
@@ -555,6 +556,12 @@ export default function CodeMappingPage() {
     void searchConcepts(query.replace(/[-_]/g, " "));
   };
 
+  // Keyed on the same condition submitForm branches on. dialogMode can say
+  // "edit" for a row with no mapping_id (toggleApproval opens one that way),
+  // and the two diverging let a curator pick Approved on what the server then
+  // treats as a create and silently downgrades.
+  const isNewMapping = !selectedRow?.mapping_id;
+
   const willRepoint =
     dialogMode === "edit"
     && form.status === "approved"
@@ -612,8 +619,13 @@ export default function CodeMappingPage() {
       return;
     }
     setError("");
+    // Approving from the table triggers the same clinical rewrite the dialog
+    // does. Dropping the response left a curator with no sign that 400 rows
+    // had just moved -- the table simply refetched.
+    const approving = row.status !== "approved";
+    if (approving) setBanner(null);
     try {
-      await api.patch(`/v1/code-mappings/${row.mapping_id}/`, {
+      const resp = await api.patch(`/v1/code-mappings/${row.mapping_id}/`, {
         domain_id: row.domain_id || row.destination_domain_id || "",
         source_vocabulary_id: row.source_vocabulary_id,
         source_code: row.source_code,
@@ -624,7 +636,16 @@ export default function CodeMappingPage() {
         status: row.status === "approved" ? "proposed" : "approved",
         notes: row.notes,
       });
+      const repoint: RepointResult | null = resp.data?.repoint ?? null;
       await fetchAll();
+      if (repoint && repoint.rows_updated) {
+        setBanner(
+          `${row.source_code}: updated ${repoint.rows_updated} row(s) across `
+          + `${repoint.persons_marked_stale} patient(s)`
+          + (repoint.rows_collapsed ? `, ${repoint.rows_collapsed} duplicate(s) collapsed` : "")
+          + ". Patient records queued for re-derivation.",
+        );
+      }
     } catch {
       setError("Failed to update code mapping status.");
     }
@@ -767,6 +788,15 @@ export default function CodeMappingPage() {
         {error && (
           <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             {error}
+          </div>
+        )}
+
+        {banner && (
+          <div
+            role="status"
+            className="mb-4 rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900"
+          >
+            {banner}
           </div>
         )}
 
@@ -1171,9 +1201,9 @@ export default function CodeMappingPage() {
                       transition that rewrites patient data. */}
                   <select
                     id="status"
-                    title={dialogMode === "new" ? TIP.status_new : TIP.status}
-                    value={dialogMode === "new" ? "proposed" : form.status}
-                    disabled={dialogMode === "new"}
+                    title={isNewMapping ? TIP.status_new : TIP.status}
+                    value={isNewMapping ? "proposed" : form.status}
+                    disabled={isNewMapping}
                     onChange={(e) => setField("status", e.target.value)}
                     className="h-9 rounded-md border border-slate-300 px-2 text-sm font-normal text-slate-950 disabled:bg-slate-100 disabled:text-slate-500"
                   >
