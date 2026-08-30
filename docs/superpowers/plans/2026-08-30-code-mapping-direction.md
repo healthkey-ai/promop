@@ -470,7 +470,57 @@ Tests, `patient_portal/api/fhir/tests.py` and `patient_portal/api/lab_results/te
 - minted HK-Labs concepts carry `source='HealthKey'`;
 - query count stays flat as the bundle grows.
 
-### 4.6 — Backfill the queue from data already imported
+### 4.6 — Approving a mapping must re-point the rows already stored
+
+Without this, approval only changes what the *next* import produces. A patient whose bundle is
+never re-sent keeps the minted `HK-*` concept forever, and the curator's decision is invisible in
+the data — the §2.1 failure again, one level up: the decision is recorded and never acted on.
+
+Trigger: a mapping goes `proposed → approved`, **or** an already-approved mapping's
+`target_concept` changes. Both are the same operation — re-point rows from the old destination to
+the new one.
+
+`omop_core/management/commands/remap_shadow_concepts.py` already does this job for a different
+reason (#415) and has solved the hard parts. Extract its machinery into a service function rather
+than writing a second one:
+
+- `_affected_person_ids` (`:227`) — collect the person set from only the columns being rewritten;
+  the comment there records that including untouched columns forced needless re-derivation
+- `_mark_stale` (`:437`) — `PatientRecord.objects.filter(person_id__in=…).update(derivation_version=0)`,
+  marked **before** any write, so an abort mid-loop cannot leave rewritten rows that
+  `backfill_patient_records` will never revisit
+- the whole block wrapped in `suppress_patient_record_refresh()`
+- dry-run by default, `--apply` to write
+
+Decisions specific to this trigger:
+
+- **Match on the old destination, not just the source value.** Rewrite rows where
+  `*_source_value = mapping.source_code` **and** `*_concept_id = <previous destination>`. A row
+  whose concept someone already corrected by hand must not be clobbered by a later approval.
+- **Do not re-derive inline.** The rewrite is a couple of bulk `UPDATE`s and is fast; derivation
+  is the expensive half, at 12–32s per bulk-loaded patient (CLAUDE.md → *Deferring the
+  PatientRecord Derivation*). There is no task queue in this project — `requirements.txt` has no
+  Celery/RQ/django-q — so the approve request rewrites synchronously and marks
+  `derivation_version=0`, leaving `backfill_patient_records` to re-derive on its own schedule.
+  That is the pattern `remap_shadow_concepts` already uses.
+- **Collapse, do not duplicate.** If re-pointing lands a row on an identity another row already
+  occupies at the new destination, collapse onto the earliest and delete the rest — the rule
+  `_upsert_clinical` applies (`sync.py:840`).
+- **Leave the orphaned mint alone by default.** After re-pointing, the `HK-*` concept minted at
+  import has no referencing rows. Do not delete it: consumers mirror the concept table per ADR
+  0001, so withdrawing a published concept_id is worse than leaving one unreferenced. Offer
+  `--delete-orphan-mints`, defaulting off, mirroring `remap_shadow_concepts --keep-mints`.
+
+Ship it as both: a service function the approve endpoint calls, and an `apply_approved_mappings`
+management command for replay and repair. It shares its core with §4.7 — the same walk over
+clinical rows from a different starting point.
+
+Tests: approving a re-pointed mapping updates the stored row in place with **no re-import** and
+no row-count change; a hand-corrected row at a third concept is left alone; affected
+PatientRecords come back with `derivation_version=0`; the orphaned mint survives by default; a
+person with no affected rows is not marked stale.
+
+### 4.7 — Backfill the queue from data already imported
 
 Everything imported before 4.5 left its unresolved codes as `concept_id = 0` rows with the text
 in `*_source_value` and nothing in the mapping table. A management command
@@ -480,6 +530,7 @@ backlog appears in the Unmapped tab with real occurrence counts. `--dry-run` fir
 it would mint before it mints.
 
 This is what replaces the deleted `propose_all_code_mappings`, in the direction that has meaning.
+It shares its clinical-row walk with §4.6.
 
 ---
 
@@ -502,9 +553,10 @@ Per the project's UI-round-trip rule the acceptance evidence is not a passing un
 3. Open Code Mapping; the code is in the **Unmapped** section of its `HK-*` tab, with an
    occurrence count and an import provenance line.
 4. Re-point it at a real SNOMED concept and approve it.
-5. Re-import the same bundle.
-6. Read the OMOP row back: `*_concept_id` is the approved destination, not the minted `HK-*`
-   concept and not 0 — and there is exactly one row, not two.
+5. **Without re-importing**, read the OMOP row back: `*_concept_id` is already the approved
+   destination, not the minted `HK-*` concept and not 0 (§4.6).
+6. Re-import the same bundle anyway. The row is unchanged and there is still exactly one of it,
+   not two (§4.5).
 
 Plus both backend suites (Django runner and pytest) and `npm run lint`, `npm run build`,
 `npm test -- --run` green.
