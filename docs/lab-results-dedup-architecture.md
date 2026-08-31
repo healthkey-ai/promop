@@ -15,6 +15,40 @@ allocates a new primary key and creates a `Measurement`.
 
 Every sync still creates a new `VisitOccurrence`, representing the upload/commit event.
 
+## Concept Resolution
+
+hk-labs sends `match_method` on every measurement — which of its own tiers resolved the
+test (`loinc`, `alias_exact`, `name_fallback`, `manual`, `unmatched`) — plus
+`test_name_normalized` and, where the report carried one, a lab-native
+`source_code`/`source_code_system`.
+
+A test whose LOINC code resolves is answered by that code and needs no curation. Every
+other test goes through `omop_core/services/code_mapping.resolve_source_code`, which
+honours an approved mapping, otherwise mints under `HK-Labs` **and** files a *proposed*
+`SourceCodeConceptMapping` with `origin='import'`. Sync used to mint inline instead, so
+hk-labs-originated unresolved tests never reached the Code Mapping review queue
+(hk-labs#50).
+
+- **What keys the proposal** — the lab-native code when there is one, else the normalized
+  test name. The measurement stores the printed *name* in `measurement_source_value`, so
+  the proposal's description carries that name; `_source_value_match` matches stored rows
+  on the code or the description, which is how approving a code-keyed mapping still
+  re-points rows the code never appeared on.
+- **Where `match_method` goes** — the proposal's `origin_system`, as `hk-labs:<method>`.
+  A curator reading the queue sees which tier produced the row without opening the report.
+- **Destination column** — a resolved or minted concept is written to
+  `measurement_concept_id` (and, when minted, also to `measurement_source_concept_id`).
+  `repoint_clinical_rows` rewrites the destination column on approval, so a mint parked
+  only in the source column would strand these rows at the invented concept.
+- **A LOINC code with no concept loaded here** resolves to nothing and is recorded as a
+  gap, never minted — an HK concept shadowing a real LOINC one is what
+  `remap_shadow_concepts` exists to undo. Such rows sit at concept 0, and dedup falls back
+  to matching on `measurement_source_value` so two unresolved tests from one draw are not
+  collapsed into one.
+
+Resolution is per distinct code and cached for the request, so concept work stays flat in
+the number of measurements and `occurrence_count` counts syncs, not rows.
+
 ## Ownership Model
 
 `MeasurementOwnership` links each upload visit to each measurement contributed by that

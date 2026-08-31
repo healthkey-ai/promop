@@ -7,13 +7,12 @@ Accepts a batch of measurements from hk-labs commit step.
 Handles:
   - LOINC concept lookup
   - UCUM unit mapping
-  - HK-Labs source concept creation (for LOINC-unmatched tests)
+  - governed resolution of LOINC-unmatched tests (services.code_mapping),
+    which mints under HK-Labs *and* files the code in the review queue
   - CareSite get_or_create (if lab_name provided)
   - VisitOccurrence creation (one per upload/commit)
 Returns: created measurement_ids + visit_occurrence_id
 """
-import re
-import unicodedata
 from datetime import date
 
 import logging
@@ -29,6 +28,7 @@ from omop_core.models import (
     CareSite, Concept, Measurement, MeasurementOwnership,
     Person, ProvenanceRecord, VisitOccurrence,
 )
+from omop_core.services.code_mapping import resolve_source_code
 from omop_core.services.pk import next_pk, next_pk_batch
 from patient_portal.api.permissions import LabSyncPermission, get_request_org, is_service_token
 
@@ -41,11 +41,56 @@ DOCUMENT_EXTRACTION_CONCEPT_ID = 32883
 OUTPATIENT_VISIT_CONCEPT_ID = 9202
 
 
-def _normalize_slug(name):
-    """Normalize a test name to a stable concept_code slug: 'hkl:<slug>'."""
-    s = unicodedata.normalize('NFKD', name.lower())
-    s = re.sub(r'[^a-z0-9]+', '-', s).strip('-')
-    return f'hkl:{s}'
+ORIGIN_SYSTEM = 'hk-labs'
+
+
+def _origin_system(match_method):
+    """The proposal's origin_system, carrying hk-labs' own match tier.
+
+    hk-labs classifies every test it sends -- `loinc`, `alias_exact`,
+    `name_fallback`, `manual`, `unmatched` -- and that tier is the most useful
+    thing a curator can know about a queued code: `unmatched` is hk-labs saying
+    "a human has to look at this", while `name_fallback` is a guess it already
+    made and wants confirmed.
+
+    It rides in origin_system rather than notes because notes is curator prose
+    -- an import writing there would eventually overwrite a human's -- and
+    because the Code Mapping UI already renders origin_system beside the origin
+    ("proposed by import (hk-labs:unmatched)"). Nothing filters on an exact
+    'hk-labs', so qualifying it costs nothing.
+    """
+    method = (match_method or '').strip()
+    return f'{ORIGIN_SYSTEM}:{method}'[:50] if method else ORIGIN_SYSTEM
+
+
+def _resolution_key(item):
+    """The (source_vocabulary_id, source_code) a test is curated under.
+
+    Only ever consulted for a test whose LOINC code did *not* resolve, so a
+    LOINC code still present here is one this deploy has no concept for. That
+    is the gap worth reporting -- rule 1 in the resolver files it for review
+    and pointedly does not mint, since an HK concept shadowing a real LOINC one
+    is what remap_shadow_concepts exists to undo.
+
+    Otherwise prefer a lab-native code when the hk-labs parser found one: a
+    code is stable across reports while the printed test name is not. Failing
+    that the name is the only identity the test has, normalized when hk-labs
+    sent a normalized form so one queue row covers every spelling of it.
+
+    Never an HK-* source vocabulary: those are minting destinations, and
+    SourceCodeConceptMapping.clean() rejects them outright.
+    """
+    loinc_code = (item.get('loinc_code') or '').strip()
+    if loinc_code:
+        return 'LOINC', loinc_code
+    code = (item.get('source_code') or '').strip()
+    if code:
+        vocabulary_id = (item.get('source_code_system') or '').strip()
+        if vocabulary_id.upper().startswith('HK-'):
+            vocabulary_id = ''
+        return vocabulary_id, code
+    name = (item.get('test_name_normalized') or '').strip() or item['test_name'].strip()
+    return '', name
 
 
 def _ensure_hk_deps(domain_id, concept_class_id):
@@ -115,7 +160,16 @@ class MeasurementItemSerializer(serializers.Serializer):
     range_high = serializers.DecimalField(max_digits=15, decimal_places=5, required=False, allow_null=True)
     source_text = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     source_unit = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    # How hk-labs itself resolved the test ('loinc', 'alias_exact',
+    # 'name_fallback', 'manual', 'unmatched'). Recorded on the proposal a
+    # LOINC-unmatched test raises, so a curator sees which tier produced it.
     match_method = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    # The test's own identity, as hk-labs parsed it: a lab-native code where
+    # the report carried one, and a normalized form of the printed name. Both
+    # feed _resolution_key.
+    test_name_normalized = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    source_code = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    source_code_system = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
 
 class SyncRequestSerializer(serializers.Serializer):
@@ -277,7 +331,7 @@ class SyncView(APIView):
                 for c in Concept.objects.filter(vocabulary_id='UCUM', concept_code__in=unit_codes)
             }
 
-        hk_concept_cache = self._preload_hk_concepts(items, loinc_cache)
+        concept_cache = self._resolve_unmatched_concepts(items, loinc_cache)
         care_site = self._get_or_create_care_site(data.get('lab_name'))
         visit = self._create_visit_occurrence(
             person_id=person_id,
@@ -295,7 +349,7 @@ class SyncView(APIView):
 
         for item in items:
             existing_id = self._find_existing_measurement(
-                person_id, item, loinc_cache, hk_concept_cache,
+                person_id, item, loinc_cache, concept_cache,
             )
             if existing_id is not None:
                 all_measurement_ids.append(existing_id)
@@ -320,7 +374,7 @@ class SyncView(APIView):
                 type_concept=type_concept,
                 loinc_cache=loinc_cache,
                 ucum_cache=ucum_cache,
-                hk_concept_cache=hk_concept_cache,
+                concept_cache=concept_cache,
             ))
         if new_objects:
             Measurement.objects.bulk_create(new_objects)
@@ -420,55 +474,81 @@ class SyncView(APIView):
         person = resolve_or_create_person(identity)
         return person.person_id
 
-    def _preload_hk_concepts(self, items, loinc_cache):
-        """Pre-fetch or create HK-Labs concepts for LOINC-unmatched tests."""
-        names_needing_hk = set()
+    def _resolve_unmatched_concepts(self, items, loinc_cache):
+        """Resolve every LOINC-unmatched test through the governed resolver.
+
+        A test whose LOINC code resolves is already answered -- the code *is*
+        the concept (rule 1 in services.code_mapping), so it needs no mapping
+        and gets none. Everything else goes through ``resolve_source_code``,
+        which honours an approved mapping, else mints under HK-Labs and files a
+        *proposed* mapping beside it. Minting inline here instead, as this
+        method used to, meant hk-labs' `unmatched` tests were quietly invented
+        and never reached the Code Mapping queue -- hk-labs#50.
+
+        Cost stays flat in the number of measurements: one resolution per
+        distinct (source vocabulary, source code), cached for the rest of the
+        request. That also keeps ``occurrence_count`` honest -- a proposal is
+        bumped once per sync, not once per row of a repeated test.
+
+        Returns ``{resolution key: Concept or None}``.
+        """
+        cache = {}
         for item in items:
             loinc_code = item.get('loinc_code')
-            if not loinc_code or loinc_code not in loinc_cache:
-                names_needing_hk.add(item['test_name'])
-
-        if not names_needing_hk:
-            return {}
-
-        slugs = {_normalize_slug(name): name for name in names_needing_hk}
-        existing = Concept.objects.filter(
-            vocabulary_id=HK_LABS_VOCAB_ID,
-            concept_code__in=list(slugs.keys()),
-        )
-        cache = {}
-        for c in existing:
-            for slug, name in list(slugs.items()):
-                if slug == c.concept_code:
-                    cache[name] = c.concept_id
-
-        missing = names_needing_hk - set(cache.keys())
-        if missing:
-            _ensure_hk_deps('Measurement', 'Lab Test')
-            new_ids = next_pk_batch(Concept, 'concept_id', len(missing))
-            new_concepts = []
-            for concept_id, name in zip(new_ids, missing):
-                code = _normalize_slug(name)
-                new_concepts.append(Concept(
-                    concept_id=concept_id,
-                    concept_name=name[:255],
-                    domain_id='Measurement',
-                    vocabulary_id=HK_LABS_VOCAB_ID,
-                    concept_class_id='Lab Test',
-                    standard_concept=None,
-                    # Every HK-* row is HealthKey-authored; concept_fixtures
-                    # asserts that invariant and this path was breaking it,
-                    # leaving locally minted labs indistinguishable from
-                    # licensed vocabulary content.
-                    source='HealthKey',
-                    concept_code=code[:50],
-                    valid_start_date=date(1970, 1, 1),
-                    valid_end_date=date(2099, 12, 31),
-                ))
-                cache[name] = concept_id
-            Concept.objects.bulk_create(new_concepts)
-
+            if loinc_code and loinc_code in loinc_cache:
+                continue
+            key = _resolution_key(item)
+            if key in cache:
+                continue
+            source_vocabulary_id, source_code = key
+            concept, _mapping = resolve_source_code(
+                source_code=source_code,
+                source_vocabulary_id=source_vocabulary_id,
+                # The display text, which is what ingest writes into
+                # measurement_source_value below. It becomes the proposal's
+                # description, and _source_value_match matches stored rows on
+                # the code *or* the description -- so an approval re-points
+                # these rows even when the key is a lab-native code the
+                # measurement itself never carried.
+                source_text=item['test_name'],
+                omop_table='measurement',
+                source_system=_origin_system(item.get('match_method')),
+            )
+            cache[key] = concept
         return cache
+
+    @staticmethod
+    def _concept_ids(item, loinc_cache, concept_cache):
+        """(measurement_concept_id, measurement_source_concept_id) for one item.
+
+        A resolved LOINC code lands in measurement_concept_id, as before. A
+        resolved-or-minted concept lands there too: that is the column
+        ``repoint_clinical_rows`` rewrites when a curator approves the
+        proposal, so a minted concept parked only in the source column would
+        leave these rows stranded at the invented concept forever. The mint is
+        *also* written to measurement_source_concept_id -- it genuinely is the
+        concept for the source test, and rows written before this change carry
+        it there and have to keep deduping.
+
+        (0, None) means there was nothing to resolve to: a LOINC code whose
+        concept this deploy has not loaded. The resolver records that gap
+        without minting, because an HK concept shadowing a real LOINC one is
+        exactly what remap_shadow_concepts exists to undo.
+        """
+        loinc_code = item.get('loinc_code')
+        if loinc_code:
+            concept = loinc_cache.get(loinc_code)
+            if concept:
+                return concept.concept_id, None
+        concept = concept_cache.get(_resolution_key(item))
+        if concept is None:
+            return 0, None
+        source_concept_id = (
+            concept.concept_id
+            if (concept.vocabulary_id or '').startswith('HK-')
+            else None
+        )
+        return concept.concept_id, source_concept_id
 
     def _get_or_create_care_site(self, lab_name):
         if not lab_name:
@@ -531,22 +611,11 @@ class SyncView(APIView):
         )
 
     def _build_measurement(self, measurement_id, person_id, item, visit, type_concept,
-                           loinc_cache, ucum_cache, hk_concept_cache):
-        loinc_code = item.get('loinc_code')
-        test_name = item['test_name']
-
-        measurement_concept_id = 0
-        measurement_source_concept_id = None
-        measurement_source_value = test_name[:50]
-
-        if loinc_code:
-            concept = loinc_cache.get(loinc_code)
-            if concept:
-                measurement_concept_id = concept.concept_id
-            else:
-                measurement_source_concept_id = hk_concept_cache.get(test_name)
-        else:
-            measurement_source_concept_id = hk_concept_cache.get(test_name)
+                           loinc_cache, ucum_cache, concept_cache):
+        measurement_source_value = item['test_name'][:50]
+        measurement_concept_id, measurement_source_concept_id = self._concept_ids(
+            item, loinc_cache, concept_cache,
+        )
 
         unit_concept_id = None
         unit_str = item.get('unit')
@@ -581,31 +650,39 @@ class SyncView(APIView):
     LIMIT 1
     """
 
-    def _find_existing_measurement(self, person_id, item, loinc_cache, hk_concept_cache):
-        """Return measurement_id of an existing duplicate, or None."""
-        loinc_code = item.get('loinc_code')
-        test_name = item['test_name']
+    # An unresolved row sits at concept 0 with no source concept, so the
+    # concept clause above stops telling rows apart -- two different tests from
+    # one draw reporting the same value would look like one row, and the second
+    # would be dropped as a duplicate. Their test name is the only identity
+    # they have left.
+    _DEDUP_UNRESOLVED_SQL = """
+    SELECT measurement_id FROM measurement
+    WHERE person_id = %s
+      AND measurement_date = %s
+      AND measurement_concept_id = 0
+      AND measurement_source_concept_id IS NULL
+      AND measurement_source_value = %s
+      AND value_as_number IS NOT DISTINCT FROM %s
+      AND value_as_string IS NOT DISTINCT FROM %s
+    LIMIT 1
+    """
 
-        concept_id = 0
-        source_concept_id = None
-        if loinc_code:
-            concept = loinc_cache.get(loinc_code)
-            if concept:
-                concept_id = concept.concept_id
-            else:
-                source_concept_id = hk_concept_cache.get(test_name)
+    def _find_existing_measurement(self, person_id, item, loinc_cache, concept_cache):
+        """Return measurement_id of an existing duplicate, or None."""
+        concept_id, source_concept_id = self._concept_ids(
+            item, loinc_cache, concept_cache,
+        )
+
+        if concept_id == 0 and source_concept_id is None:
+            sql = self._DEDUP_UNRESOLVED_SQL
+            params = [person_id, item['measured_at'], item['test_name'][:50]]
         else:
-            source_concept_id = hk_concept_cache.get(test_name)
+            sql = self._DEDUP_SQL
+            params = [person_id, item['measured_at'], concept_id, source_concept_id]
+        params += [item.get('value'), item.get('value_string') or '']
 
         from django.db import connection
         with connection.cursor() as cur:
-            cur.execute(self._DEDUP_SQL, [
-                person_id,
-                item['measured_at'],
-                concept_id,
-                source_concept_id,
-                item.get('value'),
-                item.get('value_string') or '',
-            ])
+            cur.execute(sql, params)
             row = cur.fetchone()
         return row[0] if row else None

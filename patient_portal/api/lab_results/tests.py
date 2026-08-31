@@ -12,7 +12,7 @@ from rest_framework.test import APIClient
 from omop_core.models import (
     CareSite, Concept, ConceptClass, Domain, LoincClass, LoincCodeClass,
     Measurement, MeasurementOwnership, Person, PatientRecord, ProvenanceRecord,
-    Vocabulary, VisitOccurrence,
+    SourceCodeConceptMapping, Vocabulary, VisitOccurrence,
 )
 
 
@@ -158,8 +158,11 @@ class SyncViewTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
 
         m = Measurement.objects.get(measurement_id=resp.data['measurement_ids'][0])
-        self.assertEqual(m.measurement_concept_id, 0)
+        # The minted concept lands in the destination column -- that is the one
+        # an approval re-points -- and in the source column, where rows written
+        # before hk-labs#50 carry it.
         self.assertIsNotNone(m.measurement_source_concept_id)
+        self.assertEqual(m.measurement_concept_id, m.measurement_source_concept_id)
 
         hk_concept = Concept.objects.get(concept_id=m.measurement_source_concept_id)
         self.assertEqual(hk_concept.vocabulary_id, 'HK-Labs')
@@ -1602,6 +1605,280 @@ class DedupSyncTest(TestCase):
 # ---------------------------------------------------------------------------
 # _resolve_person_id — email fallback cross-org safety (#17)
 # ---------------------------------------------------------------------------
+
+class SyncCodeMappingQueueTest(TestCase):
+    """hk-labs' LOINC-unmatched tests reach the Code Mapping queue (hk-labs#50).
+
+    hk-labs sends match_method on every measurement and promop used to read it
+    nowhere, minting HK-Labs concepts inline for anything LOINC did not answer.
+    Those mints were invisible to curation. Resolution now goes through
+    services.code_mapping.resolve_source_code, so every one of them is a
+    proposal a human can approve, edit, or reject.
+    """
+
+    UNMATCHED = {
+        'test_name': 'Obscure Regional Panel',
+        'test_name_normalized': 'obscure regional panel',
+        'match_method': 'unmatched',
+        'value': '42.0',
+        'measured_at': '2026-05-10',
+    }
+
+    def setUp(self):
+        _setup_vocab()
+        self.user = Identity.objects.create_user(email='queue@test.com', password='test')
+        self.user.is_staff = True
+        self.user.save()
+        self.person = Person.objects.create(person_id=1401)
+        PatientRecord.objects.create(person=self.person)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _sync(self, measurements, **extra):
+        payload = {'person_id': 1401, 'measurements': measurements}
+        payload.update(extra)
+        resp = self.client.post('/api/lab-results/sync/', payload, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        return resp
+
+    def _measurement(self, resp, index=0):
+        return Measurement.objects.get(
+            measurement_id=resp.data['measurement_ids'][index])
+
+    def test_unmatched_test_mints_concept_and_proposes_mapping(self):
+        resp = self._sync([dict(self.UNMATCHED)])
+
+        m = self._measurement(resp)
+        concept = Concept.objects.get(concept_id=m.measurement_concept_id)
+        self.assertEqual(concept.vocabulary_id, 'HK-Labs')
+        self.assertEqual(concept.concept_code, 'hkl:obscure-regional-panel')
+        self.assertEqual(concept.source, 'HealthKey')
+        self.assertEqual(m.measurement_source_concept_id, concept.concept_id)
+        self.assertEqual(m.measurement_source_value, 'Obscure Regional Panel')
+
+        mapping = SourceCodeConceptMapping.objects.get()
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertEqual(mapping.origin, 'import')
+        # The tier hk-labs assigned, so a curator can tell "needs a human" from
+        # "confirm my guess" without opening the source report.
+        self.assertEqual(mapping.origin_system, 'hk-labs:unmatched')
+        self.assertEqual(mapping.source_vocabulary_id, '')
+        self.assertEqual(mapping.source_code, 'obscure regional panel')
+        # The description carries what actually landed in
+        # measurement_source_value, which is how _source_value_match reaches
+        # these rows when the mapping is approved.
+        self.assertEqual(mapping.source_code_description, 'Obscure Regional Panel')
+        self.assertEqual(mapping.omop_table, 'measurement')
+        self.assertEqual(mapping.target_concept_id, concept.concept_id)
+        self.assertEqual(mapping.destination_vocabulary_id, 'HK-Labs')
+        self.assertEqual(mapping.occurrence_count, 1)
+
+    def test_match_method_qualifies_origin_system_per_tier(self):
+        self._sync([dict(self.UNMATCHED, test_name='Fallback Panel',
+                         test_name_normalized='fallback panel',
+                         match_method='name_fallback')])
+        mapping = SourceCodeConceptMapping.objects.get()
+        self.assertEqual(mapping.origin_system, 'hk-labs:name_fallback')
+
+    def test_sync_without_match_method_still_files_a_proposal(self):
+        item = dict(self.UNMATCHED)
+        del item['match_method']
+        self._sync([item])
+        mapping = SourceCodeConceptMapping.objects.get()
+        self.assertEqual(mapping.origin_system, 'hk-labs')
+
+    def test_lab_native_code_keys_the_proposal_and_still_finds_its_rows(self):
+        """A lab's own code is the key; the printed name is the description.
+
+        The measurement carries the *name* in measurement_source_value, so the
+        two keys differ -- exactly the asymmetry _source_value_match exists
+        for. Assert it can still reach the row, or an approval would report
+        success while moving nothing.
+        """
+        from omop_core.services.code_mapping import _source_value_match
+
+        resp = self._sync([{
+            'test_name': 'Serum Free Light Chain Kappa',
+            'source_code': 'SFLC-K',
+            'source_code_system': 'QUEST',
+            'match_method': 'alias_exact',
+            'value': '1.7',
+            'measured_at': '2026-05-11',
+        }])
+
+        mapping = SourceCodeConceptMapping.objects.get()
+        self.assertEqual(mapping.source_code, 'SFLC-K')
+        self.assertEqual(mapping.source_vocabulary_id, 'QUEST')
+        self.assertEqual(mapping.source_code_description, 'Serum Free Light Chain Kappa')
+        self.assertEqual(mapping.origin_system, 'hk-labs:alias_exact')
+
+        m = self._measurement(resp)
+        self.assertEqual(m.measurement_source_value, 'Serum Free Light Chain Kappa')
+        match = _source_value_match(
+            Measurement, 'measurement_source_value', mapping)
+        self.assertEqual(
+            list(Measurement.objects.filter(match).values_list(
+                'measurement_id', flat=True)),
+            [m.measurement_id],
+        )
+
+    def test_hk_vocabulary_is_never_recorded_as_a_source_system(self):
+        """HK-* is a minting destination; the model rejects it as a source."""
+        self._sync([{
+            'test_name': 'Locally Invented Panel',
+            'source_code': 'hkl:locally-invented-panel',
+            'source_code_system': 'HK-Labs',
+            'match_method': 'manual',
+            'value': '3',
+            'measured_at': '2026-05-12',
+        }])
+        mapping = SourceCodeConceptMapping.objects.get()
+        self.assertEqual(mapping.source_vocabulary_id, '')
+
+    def test_resolving_loinc_code_creates_no_mapping(self):
+        """Rule 1: a LOINC code is its own concept, so it needs no curation."""
+        resp = self._sync([{
+            'loinc_code': '718-7',
+            'test_name': 'Hemoglobin',
+            'match_method': 'loinc',
+            'value': '13.5',
+            'measured_at': '2026-05-15',
+        }])
+        m = self._measurement(resp)
+        self.assertEqual(m.measurement_concept_id, 3000963)
+        self.assertIsNone(m.measurement_source_concept_id)
+        self.assertEqual(SourceCodeConceptMapping.objects.count(), 0)
+
+    def test_unloaded_loinc_code_is_reported_but_never_shadowed(self):
+        """A LOINC code with no concept here is a vocabulary gap, not a mint."""
+        resp = self._sync([{
+            'loinc_code': '99999-9',
+            'test_name': 'Not Loaded Here',
+            'match_method': 'loinc',
+            'value': '5',
+            'measured_at': '2026-05-16',
+        }])
+        m = self._measurement(resp)
+        self.assertEqual(m.measurement_concept_id, 0)
+        self.assertIsNone(m.measurement_source_concept_id)
+
+        mapping = SourceCodeConceptMapping.objects.get()
+        self.assertEqual(mapping.source_vocabulary_id, 'LOINC')
+        self.assertEqual(mapping.source_code, '99999-9')
+        self.assertIsNone(mapping.target_concept_id)
+        self.assertEqual(mapping.origin_system, 'hk-labs:loinc')
+        self.assertFalse(
+            Concept.objects.filter(vocabulary_id='HK-Labs',
+                                   concept_code='hkl:not-loaded-here').exists())
+
+    def test_two_unresolved_tests_of_one_draw_are_not_deduped_into_one(self):
+        """Concept 0 with no source concept is not an identity; the name is."""
+        resp = self._sync([
+            {'loinc_code': '99999-9', 'test_name': 'Not Loaded A',
+             'value': '5', 'measured_at': '2026-05-16'},
+            {'loinc_code': '99999-8', 'test_name': 'Not Loaded B',
+             'value': '5', 'measured_at': '2026-05-16'},
+        ])
+        self.assertEqual(resp.data['created_count'], 2)
+        self.assertEqual(len(set(resp.data['measurement_ids'])), 2)
+
+    def test_repeat_sync_mints_once_and_bumps_occurrence_count(self):
+        self._sync([dict(self.UNMATCHED)], report_filename='first.pdf')
+        self._sync([dict(self.UNMATCHED)], report_filename='second.pdf')
+
+        self.assertEqual(
+            Concept.objects.filter(
+                vocabulary_id='HK-Labs',
+                concept_code='hkl:obscure-regional-panel').count(),
+            1,
+        )
+        mapping = SourceCodeConceptMapping.objects.get()
+        self.assertEqual(mapping.occurrence_count, 2)
+        # The measurement itself still dedups, and the second sync reuses it.
+        self.assertEqual(Measurement.objects.filter(person_id=1401).count(), 1)
+
+    def test_repeats_within_one_batch_count_as_one_sighting(self):
+        """occurrence_count is sightings of the code, not rows of the batch."""
+        self._sync([
+            dict(self.UNMATCHED, value='1', measured_at='2026-05-10'),
+            dict(self.UNMATCHED, value='2', measured_at='2026-05-11'),
+            dict(self.UNMATCHED, value='3', measured_at='2026-05-12'),
+        ])
+        mapping = SourceCodeConceptMapping.objects.get()
+        self.assertEqual(mapping.occurrence_count, 1)
+
+    def test_approved_mapping_steers_the_next_sync(self):
+        self._sync([dict(self.UNMATCHED)], report_filename='first.pdf')
+
+        mapping = SourceCodeConceptMapping.objects.get()
+        curated = Concept.objects.get(concept_id=3004249)
+        mapping.target_concept = curated
+        mapping.destination_vocabulary_id = 'LOINC'
+        mapping.status = 'approved'
+        mapping.save()
+
+        resp = self._sync(
+            [dict(self.UNMATCHED, measured_at='2026-06-10')],
+            report_filename='second.pdf',
+        )
+        m = self._measurement(resp)
+        self.assertEqual(m.measurement_concept_id, curated.concept_id)
+        # A curated destination is a real Athena concept, not this deploy's
+        # invention, so it is not the *source* concept.
+        self.assertIsNone(m.measurement_source_concept_id)
+
+        # An import never bumps or duplicates an approved row.
+        self.assertEqual(SourceCodeConceptMapping.objects.count(), 1)
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, 'approved')
+        self.assertEqual(mapping.occurrence_count, 1)
+
+    # --- query count ------------------------------------------------------
+
+    def _sync_queries(self, n, prefix, day):
+        """(concept/mapping queries, total queries) for a batch of n rows."""
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+
+        rows = [
+            {'test_name': f'{prefix} Panel {i % 4}',
+             'match_method': 'unmatched',
+             'value': str(i),
+             'measured_at': f'2026-07-{day:02d}'}
+            for i in range(n)
+        ]
+        with CaptureQueriesContext(connection) as ctx:
+            self._sync(rows, report_filename=f'{prefix}.pdf')
+        resolution = [
+            q for q in ctx.captured_queries
+            if '"concept"' in q['sql'] or 'source_code_concept_mapping' in q['sql']
+        ]
+        return len(resolution), len(ctx.captured_queries)
+
+    def test_resolution_query_count_does_not_scale_with_item_count(self):
+        """Resolution is per distinct code, not per row.
+
+        _preload_hk_concepts existed to keep concept work flat in the number of
+        measurements; routing through the resolver must not trade that away.
+        Both batches carry four distinct, previously unseen test names, so both
+        do the same resolution work -- only the row count differs.
+        """
+        small_resolution, small_total = self._sync_queries(5, 'Alpha', 4)
+        large_resolution, large_total = self._sync_queries(40, 'Beta', 5)
+
+        self.assertEqual(
+            small_resolution, large_resolution,
+            f'concept/mapping queries scaled with item count: '
+            f'{small_resolution} for 5 rows, {large_resolution} for 40. '
+            f'The resolver is being called per row instead of per distinct code.'
+        )
+        # What is left growing is the per-row dedup probe, one query each.
+        self.assertLessEqual(
+            large_total - small_total, 2 * (40 - 5),
+            f'total queries grew faster than one per extra row: '
+            f'{small_total} for 5, {large_total} for 40.'
+        )
+
 
 class ResolvePersonIdEmailFallbackTest(TestCase):
     """
