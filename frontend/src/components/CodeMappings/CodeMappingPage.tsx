@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Pencil, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
@@ -233,9 +233,34 @@ const READ_ONLY_CLASS =
 const INPUT_CLASS = "h-10 rounded-md border border-slate-300 px-3 text-sm font-normal text-slate-950";
 
 /**
- * A labelled control. The tooltip affordance sits outside the <label> and is
- * aria-hidden so the accessible name stays the field name alone.
+ * An accessible tooltip with content rendered by the application, rather than
+ * relying on the browser's native title bubble (which is absent on touch and
+ * unavailable in several embedded browsers).
  */
+function HelpTip({ tip }: { tip: string }) {
+  const tooltipId = useId();
+  return (
+    <span className="group relative inline-flex">
+      <button
+        type="button"
+        aria-label="Help"
+        aria-describedby={tooltipId}
+        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 text-[10px] leading-none text-slate-500 hover:border-slate-500 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-400"
+      >
+        ?
+      </button>
+      <span
+        id={tooltipId}
+        role="tooltip"
+        className="pointer-events-none absolute left-0 top-full z-20 mt-1 w-72 rounded-md bg-slate-900 px-3 py-2 text-xs font-normal normal-case leading-relaxed tracking-normal text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+      >
+        {tip}
+      </span>
+    </span>
+  );
+}
+
+/** A labelled control with visible help on hover or keyboard focus. */
 function Field({
   id,
   label,
@@ -255,9 +280,7 @@ function Field({
         <label htmlFor={id} className="text-sm font-medium text-slate-700">
           {label}
         </label>
-        <span title={tip} aria-hidden="true" className="cursor-help text-xs text-slate-400">
-          ⓘ
-        </span>
+        <HelpTip tip={tip} />
       </div>
       {children}
     </div>
@@ -1157,14 +1180,14 @@ export default function CodeMappingPage() {
                       <label className="text-sm font-medium text-slate-700" htmlFor="code-mapping-concept-search">
                         Search destination concepts
                       </label>
-                      <span title={TIP.search} aria-hidden="true" className="cursor-help text-xs text-slate-400">ⓘ</span>
+                      <HelpTip tip={TIP.search} />
                     </div>
                     <div className="flex items-center gap-3">
                       <div className="flex items-center gap-1">
                         <label className="text-sm font-medium text-slate-700" htmlFor="code-mapping-search-vocabulary">
                           Search vocabulary
                         </label>
-                        <span title={TIP.search_vocabulary} aria-hidden="true" className="cursor-help text-xs text-slate-400">ⓘ</span>
+                        <HelpTip tip={TIP.search_vocabulary} />
                       </div>
                       <button
                         type="button"
@@ -1327,7 +1350,7 @@ export default function CodeMappingPage() {
               <div className="mt-4 grid gap-1">
                 <div className="flex items-center gap-1">
                   <label className="text-sm font-medium text-slate-700" htmlFor="notes">Notes</label>
-                  <span title={TIP.notes} aria-hidden="true" className="cursor-help text-xs text-slate-400">ⓘ</span>
+                  <HelpTip tip={TIP.notes} />
                 </div>
                 <textarea
                   id="notes"
@@ -1371,7 +1394,7 @@ export default function CodeMappingPage() {
               <div className="flex items-center gap-3">
                 <div className="flex items-center gap-2">
                   <label className="text-sm font-medium text-slate-700" htmlFor="status">Status</label>
-                  <span title={TIP.status} aria-hidden="true" className="cursor-help text-xs text-slate-400">ⓘ</span>
+                  <HelpTip tip={TIP.status} />
                   {/* A new mapping is always proposed; the server enforces it.
                       Offering Approved here would promise a one-step create-and-
                       approve the API no longer honours, and approval is the only

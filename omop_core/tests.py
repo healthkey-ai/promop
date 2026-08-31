@@ -6463,9 +6463,8 @@ class MappingSuggestionsTest(_OmopBase):
             {('LOINC', 10), ('RxNorm', 10)},
         )
 
-    def test_an_unmatchable_code_still_reaches_the_queue(self):
-        """The code is real. Minting keeps the fact carrying a concept and the
-        curator still sees it."""
+    def test_an_unmatchable_code_reaches_the_queue_without_a_fake_destination(self):
+        """A raw code is evidence, not a meaningful HK-* concept name."""
         from omop_core.models import SourceCodeConceptMapping
         from omop_core.services.mapping_suggestions import suggest_mappings
         self._seed('ZZQQ NOTHING LIKE THIS', 11, start=95000)
@@ -6473,8 +6472,13 @@ class MappingSuggestionsTest(_OmopBase):
             suggest_mappings('measurement', min_occurrences=10)
         mapping = SourceCodeConceptMapping.objects.get(
             source_code='ZZQQ NOTHING LIKE THIS')
-        self.assertEqual(mapping.destination_vocabulary_id, 'HK-Labs')
+        self.assertIsNone(mapping.target_concept_id)
+        self.assertEqual(mapping.destination_vocabulary_id, '')
+        self.assertEqual(mapping.source_code_description, '')
         self.assertEqual(mapping.status, 'proposed')
+        self.assertFalse(Concept.objects.filter(
+            vocabulary_id='HK-Labs', concept_name='ZZQQ NOTHING LIKE THIS',
+        ).exists())
 
     def test_dry_run_writes_nothing(self):
         from omop_core.models import SourceCodeConceptMapping
