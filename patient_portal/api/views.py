@@ -7401,7 +7401,7 @@ def therapy_regimen_detail(request, code):
         regimen=regimen,
     ).select_related('component', 'component__concept').prefetch_related(
         Prefetch(
-            'component__therapycomponentclasslink_set',
+            'component__component_classes',
             queryset=TherapyComponentClassLink.objects.select_related('therapy_class'),
         )
     )
@@ -7412,7 +7412,7 @@ def therapy_regimen_detail(request, code):
         concept = comp.concept
         classes = [
             {'code': cl.therapy_class.code, 'title': cl.therapy_class.title, 'concept_id': cl.therapy_class.concept_id}
-            for cl in comp.therapycomponentclasslink_set.all()
+            for cl in comp.component_classes.all()
         ]
         components.append({
             'code': comp.code,
@@ -7463,7 +7463,7 @@ def therapy_component_list(request):
 
     qs = qs.prefetch_related(
         Prefetch(
-            'therapycomponentclasslink_set',
+            'component_classes',
             queryset=TherapyComponentClassLink.objects.select_related('therapy_class'),
         )
     )
@@ -7471,7 +7471,7 @@ def therapy_component_list(request):
     for comp in qs:
         classes = [
             {'code': link.therapy_class.code, 'title': link.therapy_class.title, 'concept_id': link.therapy_class.concept_id}
-            for link in comp.therapycomponentclasslink_set.all()
+            for link in comp.component_classes.all()
         ]
         items.append({'code': comp.code, 'title': comp.title, 'concept_id': comp.concept_id, 'classes': classes})
     return Response(items)

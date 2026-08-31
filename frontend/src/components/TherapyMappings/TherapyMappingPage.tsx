@@ -113,6 +113,7 @@ function RegimenComponentTab() {
   }, [newRegimen, loadRegimens]);
 
   const handleDeleteRegimen = useCallback(async (code: string) => {
+    if (!window.confirm('Delete this regimen and all its component links?')) return;
     try {
       await deleteRegimen(code);
       setExpanded(null);
@@ -506,6 +507,7 @@ function DiseaseRegimenTab() {
   }, [newItem, loadData]);
 
   const handleRemove = useCallback(async (id: number) => {
+    if (!window.confirm('Remove this disease-therapy association?')) return;
     try {
       await removeDiseaseTherapyRegimen(id);
       await loadData();
