@@ -23403,3 +23403,37 @@ class CodeMappingSignOffLifecycleTest(TestCase):
                                  {'notes': 'still unloaded'}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.assertIsNone(resp.data['destination_concept_id'])
+
+
+# ── Vocabulary scope & suggested-code tests (#803, #847) ──────────────
+
+
+class VocabScopeAndSuggestedCodesTest(TestCase):
+    """Verify that VOCAB_SCOPE includes vocabularies needed for field concept
+    mapping and that SUGGESTED_FIELD_CODES entries are correct."""
+
+    def test_mesh_in_vocab_scope(self):
+        """MeSH must be loaded so concept 19138268 (Chromosome Aberrations)
+        is available for cytogenetic_markers (#803)."""
+        from omop_core.management.commands.load_athena_vocabularies import VOCAB_SCOPE
+        self.assertIn('MeSH', VOCAB_SCOPE)
+
+    def test_icd9cm_in_vocab_scope(self):
+        """ICD9CM must be loaded so concept 45890957 (Estrogen receptor status)
+        is available for estrogen_receptor_status (#847)."""
+        from omop_core.management.commands.load_athena_vocabularies import VOCAB_SCOPE
+        self.assertIn('ICD9CM', VOCAB_SCOPE)
+
+    def test_cytogenic_markers_suggested_code(self):
+        """cytogenic_markers should suggest MeSH D002869 (#803)."""
+        from omop_core.services.mappings import SUGGESTED_FIELD_CODES
+        code, vocab = SUGGESTED_FIELD_CODES['cytogenic_markers']
+        self.assertEqual(code, 'D002869')
+        self.assertEqual(vocab, 'MeSH')
+
+    def test_estrogen_receptor_status_suggested_code(self):
+        """estrogen_receptor_status should suggest ICD9CM V86 (#847)."""
+        from omop_core.services.mappings import SUGGESTED_FIELD_CODES
+        code, vocab = SUGGESTED_FIELD_CODES['estrogen_receptor_status']
+        self.assertEqual(code, 'V86')
+        self.assertEqual(vocab, 'ICD9CM')

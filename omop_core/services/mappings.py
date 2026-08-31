@@ -536,7 +536,7 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'biopsy_grade_depr':             ('33732-9',   'LOINC'),   # deprecated biopsy_grade
 
     # Breast cancer specifics
-    'estrogen_receptor_status':      ('16112-5',   'LOINC'),   # Estrogen receptor [Interpretation]
+    'estrogen_receptor_status':      ('V86',       'ICD9CM'),  # Estrogen receptor status (#847)
     'progesterone_receptor_status':  ('16113-3',   'LOINC'),   # Progesterone receptor [Interpretation]
     'her2_status':                   ('48676-1',   'LOINC'),   # HER2 [Interpretation]
     'androgen_receptor_status':      ('85310-1',   'LOINC'),   # AR receptor
@@ -569,7 +569,7 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     # Genomics / molecular
     'genetic_mutations':             ('55232-3',   'LOINC'),   # Genetic analysis summary panel
     'molecular_markers':             ('55232-3',   'LOINC'),   # Genetic analysis summary panel
-    'cytogenic_markers':             ('55232-3',   'LOINC'),   # Genetic analysis summary panel
+    'cytogenic_markers':             ('D002869',   'MeSH'),    # Chromosome Aberrations (#803)
     'protein_expressions':           ('85337-4',   'LOINC'),   # Gene expression panel
 
     # Demographics / profile
