@@ -67,9 +67,14 @@ from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.services.code_mapping import (
     CLINICAL_TABLES,
+    _QUARANTINE_TARGETS,
     NO_MATCHING_CONCEPT_ID,
     normalize_omop_table,
     repoint_clinical_rows,
+)
+from omop_core.services.mapping_suggestions import (
+    DEFAULT_MIN_OCCURRENCES,
+    suggest_mappings,
 )
 from omop_core.services.write_descriptor import mapping_table_is_writable
 from omop_core.services import source_vocabularies
@@ -8462,6 +8467,67 @@ def code_mapping_detail(request, mapping_id):
     return Response(payload)
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def code_mapping_suggest(request):
+    """Propose mappings for unmapped source codes in one HK-* vocabulary.
+
+    The tab picks the vocabulary, the vocabulary picks the domain, and the
+    domain picks which clinical table's concept-0 rows to work from. Standard
+    vocabularies get no Suggest: they hold destinations a curator re-points
+    *into*, and enumerating SNOMED's 1.09M concepts is not a queue.
+
+    Defaults to codes seen ten or more times. Staging has 10,483 distinct
+    unmapped source values and 43% of them appear exactly once, so proposing
+    for everything would bury the 512 that carry the traffic.
+    """
+    if not _can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    vocabulary_id = str(request.data.get('destination_vocabulary_id') or '').strip()
+    table = _table_for_hk_vocabulary(vocabulary_id)
+    if table is None:
+        return Response(
+            {'destination_vocabulary_id': (
+                f'Suggest works on the HK-* vocabularies, not {vocabulary_id!r}. '
+                'Standard vocabularies hold destinations to re-point into, not '
+                'source codes to propose for.'
+            )},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        min_occurrences = int(request.data.get('min_occurrences', DEFAULT_MIN_OCCURRENCES))
+    except (TypeError, ValueError):
+        return Response({'min_occurrences': 'Enter a whole number.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    if min_occurrences < 1:
+        return Response({'min_occurrences': 'Must be at least 1.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    limit = request.data.get('limit')
+    limit = int(limit) if limit else SUGGEST_MAX_PER_CALL
+    limit = min(limit, SUGGEST_MAX_PER_CALL)
+
+    results = suggest_mappings(
+        table, min_occurrences=min_occurrences, limit=limit,
+        dry_run=bool(request.data.get('dry_run')),
+    )
+    created = [r for r in results if r.get('created')]
+    return Response({
+        'destination_vocabulary_id': vocabulary_id,
+        'omop_table': table,
+        'min_occurrences': min_occurrences,
+        'considered': len(results),
+        'created': len(created),
+        'ranked': sum(1 for r in results if r.get('suggested')),
+        'results': results,
+        # Said plainly rather than left for the curator to infer from a count
+        # that stopped at a round number.
+        'truncated': len(results) >= limit,
+    }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def code_mapping_reference(request):
@@ -8482,6 +8548,20 @@ def code_mapping_reference(request):
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     return Response(_code_mapping_reference_payload())
+
+
+# HK-* vocabulary -> the clinical table whose concept-0 rows it curates. The
+# inverse of _QUARANTINE_TARGETS, which the resolver keys the other way.
+def _table_for_hk_vocabulary(vocabulary_id):
+    for table, (hk_vocab, *_rest) in _QUARANTINE_TARGETS.items():
+        if hk_vocab == vocabulary_id:
+            return table
+    return None
+
+
+# One Suggest click ranks at most this many codes. Each is a model call, so an
+# unbounded button on HK-Drug's 3,344 codes would be a very long request.
+SUGGEST_MAX_PER_CALL = 50
 
 
 def _code_mapping_reference_payload():

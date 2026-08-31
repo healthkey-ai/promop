@@ -1,3 +1,4 @@
+anthropic==1.2.0
 asgiref==3.8.1
 google-cloud-bigquery==3.25.0
 google-cloud-storage>=3.1.1
