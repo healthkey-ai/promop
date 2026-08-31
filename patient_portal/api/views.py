@@ -8353,6 +8353,16 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # code left unresolved -- and any approval that also moved the destination
     # sweeps the old one. Both can apply at once, and their counts are summed
     # so the dialog reports everything it touched.
+    # Approving a row that points at nothing would leave the queue marked
+    # approved with no destination and no clinical rows moved -- the silent
+    # success this feature exists to prevent. These rows are reachable now that
+    # gap proposals surface in a tab.
+    if status_value == 'approved' and concept is None:
+        raise serializers.ValidationError({'destination_concept_id': (
+            'Choose a destination concept before approving. This mapping has '
+            'none yet — its code was seen at ingest but its concept is not loaded.'
+        )})
+
     repoint = None
     if status_value == 'approved' and concept is not None:
         sources = set()
@@ -8505,8 +8515,14 @@ def code_mapping_suggest(request):
         return Response({'min_occurrences': 'Must be at least 1.'},
                         status=status.HTTP_400_BAD_REQUEST)
 
-    limit = request.data.get('limit')
-    limit = int(limit) if limit else SUGGEST_MAX_PER_CALL
+    try:
+        limit = int(request.data.get('limit') or SUGGEST_MAX_PER_CALL)
+    except (TypeError, ValueError):
+        return Response({'limit': 'Enter a whole number.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    if limit < 1:
+        return Response({'limit': 'Must be at least 1.'},
+                        status=status.HTTP_400_BAD_REQUEST)
     limit = min(limit, SUGGEST_MAX_PER_CALL)
 
     results = suggest_mappings(
@@ -8514,7 +8530,17 @@ def code_mapping_suggest(request):
         dry_run=bool(request.data.get('dry_run')),
     )
     created = [r for r in results if r.get('created')]
+    # Where the new rows landed. A ranked suggestion's destination is a standard
+    # concept, so its mapping belongs to the LOINC/SNOMED tab, not the HK-* one
+    # the button was on -- correct by the tab semantics, and baffling unless the
+    # response says so.
+    landed = {}
+    for entry in created:
+        suggested = entry.get('suggested')
+        vocab = suggested['vocabulary_id'] if suggested else vocabulary_id
+        landed[vocab] = landed.get(vocab, 0) + 1
     return Response({
+        'landed_in': landed,
         'destination_vocabulary_id': vocabulary_id,
         'omop_table': table,
         'min_occurrences': min_occurrences,
@@ -8559,9 +8585,15 @@ def _table_for_hk_vocabulary(vocabulary_id):
     return None
 
 
-# One Suggest click ranks at most this many codes. Each is a model call, so an
-# unbounded button on HK-Drug's 3,344 codes would be a very long request.
-SUGGEST_MAX_PER_CALL = 50
+# One Suggest click ranks at most this many codes.
+#
+# Sized against the request timeout, not just cost: gunicorn runs with
+# --timeout 120 (Dockerfile), and each code costs an indexed trigram retrieval
+# (~0.4-1.6s) plus one model call. At 50 the worker was killed mid-run, the
+# browser saw a 502, and the proposals already committed were invisible because
+# the client never refetched. Ten leaves headroom, and the response says when
+# more remain.
+SUGGEST_MAX_PER_CALL = 10
 
 
 def _code_mapping_reference_payload():

@@ -142,13 +142,6 @@ const statusClass: Record<string, string> = {
 };
 
 /**
- * OMOP domain -> the clinical table its facts land in. Only a fallback: the
- * reference endpoint is authoritative, and hardcoding the mapping in the
- * frontend is what this table exists to avoid. It covers the window before the
- * first fetch resolves.
- */
-/** OMOP domain -> the HK-* vocabulary its locally-minted concepts live in. */
-/**
  * Which tab a row belongs to.
  *
  * A proposal with no destination yet -- a code seen at ingest whose concept is
@@ -157,10 +150,25 @@ const statusClass: Record<string, string> = {
  * a curator, so they fall back to the HK-* vocabulary of their domain.
  */
 function tabForRow(row: CodeMappingRow): string {
-  return row.destination_vocabulary_id
-    || (row.domain_id ? DOMAIN_TO_HK_VOCABULARY[row.domain_id] || "" : "");
+  if (row.destination_vocabulary_id) return row.destination_vocabulary_id;
+  // Fall back through both fields a gap row might carry. domain_id alone was
+  // not enough: the rows this fallback exists for are created by
+  // _record_proposal, which sets the OMOP table but historically not the
+  // domain, so keying on domain_id left them in no tab at all.
+  const domain = row.domain_id || TABLE_TO_DOMAIN[row.destination_omop_table] || "";
+  return DOMAIN_TO_HK_VOCABULARY[domain] || "";
 }
 
+/** Clinical table -> the OMOP domain whose facts it holds. */
+const TABLE_TO_DOMAIN: Record<string, string> = {
+  measurement: "Measurement",
+  observation: "Observation",
+  condition: "Condition",
+  drug_exposure: "Drug",
+  procedure: "Procedure",
+};
+
+/** OMOP domain -> the HK-* vocabulary its locally-minted concepts live in. */
 const DOMAIN_TO_HK_VOCABULARY: Record<string, string> = {
   Measurement: "HK-Labs",
   Observation: "HK-Observation",
@@ -169,6 +177,12 @@ const DOMAIN_TO_HK_VOCABULARY: Record<string, string> = {
   Procedure: "HK-Procedure",
 };
 
+/**
+ * OMOP domain -> the clinical table its facts land in. Only a fallback: the
+ * reference endpoint is authoritative, and hardcoding the mapping in the
+ * frontend is what this table exists to avoid. It covers the window before
+ * the first fetch resolves.
+ */
 const DOMAIN_TO_TABLE: Record<string, string> = {
   Condition: "condition",
   Drug: "drug_exposure",
@@ -366,7 +380,9 @@ export default function CodeMappingPage() {
   const [showRejected, setShowRejected] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
   const [suggesting, setSuggesting] = useState(false);
-  const [minOccurrences, setMinOccurrences] = useState(10);
+  // "" while the field is mid-edit; coerced when sent. Coercing on every
+  // keystroke snapped the box to 1 the moment a curator cleared it.
+  const [minOccurrences, setMinOccurrences] = useState<number | "">(10);
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
   const [form, setForm] = useState<MappingForm>(emptyForm);
@@ -463,7 +479,7 @@ export default function CodeMappingPage() {
   );
   const rejectedCount = useMemo(
     () => rows.filter((r) => r.status === "rejected"
-      && (!selectedVocabulary || r.destination_vocabulary_id === selectedVocabulary)).length,
+      && (!selectedVocabulary || tabForRow(r) === selectedVocabulary)).length,
     [rows, selectedVocabulary],
   );
   const mappedRows = useMemo(
@@ -684,16 +700,26 @@ export default function CodeMappingPage() {
     try {
       const resp = await api.post("/v1/code-mappings/suggest/", {
         destination_vocabulary_id: selectedVocabulary,
-        min_occurrences: minOccurrences,
+        min_occurrences: Number(minOccurrences) || 1,
       });
-      const { created = 0, considered = 0, ranked = 0, truncated } = resp.data || {};
+      const { created = 0, considered = 0, ranked = 0, truncated,
+              landed_in: landed = {} } = resp.data || {};
       await fetchAll();
+      // Say which tabs the new rows are in. A ranked suggestion's destination
+      // is a standard concept, so its mapping belongs to the LOINC or SNOMED
+      // tab rather than the HK-* one the button is on — correct, and baffling
+      // if the curator is left to discover it.
+      const where = Object.entries(landed as Record<string, number>)
+        .sort((a, b) => b[1] - a[1])
+        .map(([vocab, n]) => `${n} in ${vocab}`)
+        .join(", ");
       setBanner(
         created
           ? `Proposed ${created} mapping(s) from ${considered} unmapped code(s), `
-            + `${ranked} with a suggested destination.`
+            + `${ranked} with a suggested destination`
+            + (where ? ` — ${where}.` : ".")
             + (truncated ? " More remain — run Suggest again." : "")
-          : `No unmapped codes seen ${minOccurrences}+ times in this vocabulary.`,
+          : `No unmapped codes seen ${Number(minOccurrences) || 1}+ times in this vocabulary.`,
       );
     } catch (err) {
       const detail =
@@ -955,7 +981,7 @@ export default function CodeMappingPage() {
                   type="number"
                   min={1}
                   value={minOccurrences}
-                  onChange={(e) => setMinOccurrences(Number(e.target.value) || 1)}
+                  onChange={(e) => setMinOccurrences(e.target.value === "" ? "" : Number(e.target.value))}
                   title="How often a code must appear before it is worth a curator's time. 43% of unmapped codes are seen exactly once."
                   className="h-8 w-16 rounded-md border border-slate-300 px-2 text-xs"
                 />

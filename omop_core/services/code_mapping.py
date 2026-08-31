@@ -103,6 +103,11 @@ _COLLAPSE_IDENTITY = {
 }
 
 
+_DOMAIN_FOR_TABLE = {
+    table: domain for table, (_v, domain, _c, _p) in _QUARANTINE_TARGETS.items()
+}
+
+
 def normalize_omop_table(omop_table):
     """Fold the aliases callers use onto the canonical table keys."""
     value = (omop_table or '').strip().lower()
@@ -185,6 +190,9 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
                     source_vocabulary_id=source_vocabulary_id or '',
                     source_code=source_code,
                     source_code_description=(source_text or '')[:255],
+                    # Without this a gap row carries no domain, and the UI has
+                    # nothing to place it by -- it appeared in no tab at all.
+                    domain_id=_DOMAIN_FOR_TABLE.get(omop_table, ''),
                     target_concept=concept,
                     destination_vocabulary_id=(concept.vocabulary_id or '') if concept else '',
                     omop_table=omop_table,
@@ -240,7 +248,9 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
         # feature is for -- so it would be the likeliest way a code goes
         # missing. Record the gap without minting: the right fix is a
         # vocabulary load, not a HealthKey concept shadowing a real LOINC one.
-        _record_proposal(
+        # Returned, not discarded: the caller needs to know a queue entry now
+        # exists for this code, and the ingest paths log against it.
+        gap = _record_proposal(
             source_vocabulary_id=source_vocabulary_id,
             source_code=source_code,
             source_text=source_text,
@@ -248,7 +258,7 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
             omop_table=table,
             source_system=source_system,
         )
-        return None, None
+        return None, gap
 
     # Rule 2 — an approved mapping beats everything else.
     approved = approved_mapping_for(source_vocabulary_id, source_code)

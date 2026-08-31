@@ -7,8 +7,9 @@ destination for each one.
 
 Two stages, deliberately separated:
 
-**Retrieval is lexical, and already indexed.** pg_trgm on ``UPPER(concept_name)``
-and on 2.4M ``concept_synonym`` rows finds the right concept for most codes. A
+**Retrieval is lexical and index-backed.** The GIN trigram indexes narrow via
+the ``%`` operator; ``similarity()`` then scores only the survivors. Scoring
+first seq-scans 2.4M synonym rows -- 4.49s for one source value. A
 synonym hit is worth more than a name hit -- synonyms are the terms clinicians
 actually write, which is what a source value is.
 
@@ -74,11 +75,13 @@ def unmapped_source_values(omop_table, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     """
     model, concept_col, source_col = CLINICAL_TABLES[omop_table]
 
+    # Rejected counts as decided. Excluding it here put the code back at the
+    # front of the queue on every run -- it sorts by occurrence -- where it
+    # spent a model call and created nothing, and the caller reported
+    # "no unmapped codes" because nothing was created.
     already = {
         code.upper()
-        for code in SourceCodeConceptMapping.objects
-        .exclude(status='rejected')
-        .values_list('source_code', flat=True)
+        for code in SourceCodeConceptMapping.objects.values_list('source_code', flat=True)
     }
 
     rows = (
@@ -114,9 +117,27 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
     if len(query) < 3:
         return []
 
+    # Narrow with `%` first, score second.
+    #
+    # TrigramSimilarity(...) > x compiles to SIMILARITY(...) > x, which is not
+    # an indexable expression -- it seq-scans 2.4M synonym rows, measured at
+    # 4.49s for a single source value. `__trigram_similar` emits the `%`
+    # operator, which is what gin_trgm_ops answers, so the GIN index does the
+    # narrowing and similarity() only scores the handful that survive.
+    #
+    # The `%` must be applied to UPPER(col), not the raw column: both indexes
+    # are on the uppercased expression, and querying the raw column silently
+    # misses them -- the same raw-vs-UPPER mismatch that made concepts/search
+    # ineffective (#262).
+    #
+    # `%` uses pg_trgm.similarity_threshold (0.3 by default), the same cut
+    # MIN_TRIGRAM_SCORE applies -- the explicit filter stays so the constant
+    # governs regardless of the session setting.
     by_name = (
         Concept.objects
         .filter(standard_concept='S', domain_id=domain_id, invalid_reason__isnull=True)
+        .annotate(name_upper=Upper('concept_name'))
+        .filter(name_upper__trigram_similar=query)
         .annotate(score=TrigramSimilarity(Upper('concept_name'), query))
         .filter(score__gt=MIN_TRIGRAM_SCORE)
         .order_by('-score')[:limit]
@@ -126,6 +147,8 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
     # keeping whichever route scored higher.
     synonym_hits = (
         ConceptSynonym.objects
+        .annotate(name_upper=Upper('concept_synonym_name'))
+        .filter(name_upper__trigram_similar=query)
         .annotate(score=TrigramSimilarity(Upper('concept_synonym_name'), query))
         .filter(score__gt=MIN_TRIGRAM_SCORE)
         .values('concept_id')
@@ -228,7 +251,10 @@ def rank_candidates(source_value, candidates, source_description=''):
         client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
         response = client.messages.create(
             model='claude-opus-5',
-            max_tokens=1024,
+            # Thinking tokens count against this. At 1024 the response stopped
+            # at max_tokens with no text block, json.loads raised, and the
+            # ranker silently degraded to the lexical order it exists to fix.
+            max_tokens=16000,
             system=_RANKING_SYSTEM,
             thinking={'type': 'adaptive'},
             output_config={
@@ -255,7 +281,12 @@ def rank_candidates(source_value, candidates, source_description=''):
     try:
         verdict = json.loads(payload)
     except (TypeError, ValueError):
-        logger.warning('Concept ranking returned unparseable output for %r.', source_value)
+        verdict = None
+    # A bare `null` or a list parses fine and then has no .get -- and the system
+    # prompt asks for null, so this is the shape a model most plausibly gets
+    # wrong. Degrading is the contract; 500ing the request is not.
+    if not isinstance(verdict, dict):
+        logger.warning('Concept ranking returned unusable output for %r.', source_value)
         return top, lexical_note
 
     chosen_id = verdict.get('concept_id')
