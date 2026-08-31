@@ -610,24 +610,24 @@ class RefreshPatientRecordReceptorStatusTest(_OmopBase):
     def test_her2_positive(self):
         self._make_her2(92401, value_as_string='Positive')
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.her2_status, 'POSITIVE')
+        self.assertEqual(pi.her2_status, 'Positive')
 
     def test_her2_negative(self):
         self._make_her2(92402, value_as_string='Negative')
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.her2_status, 'NEGATIVE')
+        self.assertEqual(pi.her2_status, 'Negative')
 
     def test_her2_equivocal_is_preserved_not_dropped(self):
         """Regression for #220: an 'Equivocal' HER2 result must not be dropped."""
         self._make_her2(92403, value_as_string='Equivocal')
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.her2_status, 'EQUIVOCAL')
+        self.assertEqual(pi.her2_status, 'Equivocal')
 
     def test_her2_value_in_source_value_is_read(self):
         """HER2 result stored only in value_source_value is still derived."""
         self._make_her2(92404, value_source_value='Equivocal')
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.her2_status, 'EQUIVOCAL')
+        self.assertEqual(pi.her2_status, 'Equivocal')
 
     def test_her2_missing_value_yields_none(self):
         """No value at all still yields None (no spurious status)."""
@@ -640,13 +640,123 @@ class RefreshPatientRecordReceptorStatusTest(_OmopBase):
         pos_concept = _concept(9000201, 'Positive', self.dom_meas, self.vocab, self.cc)
         self._make_her2(92406, value_as_concept=pos_concept)
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.her2_status, 'POSITIVE')
+        self.assertEqual(pi.her2_status, 'Positive')
 
     def test_her2_nonstandard_value_preserved(self):
-        """A non-standard receptor value is preserved (upper-cased), not dropped."""
+        """A non-standard receptor value is preserved (title-cased), not dropped."""
         self._make_her2(92407, value_as_string='Indeterminate')
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.her2_status, 'INDETERMINATE')
+        self.assertEqual(pi.her2_status, 'Indeterminate')
+
+
+class ERStatusLoincMappingTest(_OmopBase):
+    """ER status derivation produces LOINC answer display names (#847)."""
+
+    PERSON_ID = 90241
+
+    def _make_er(self, mid, *, value_as_string=None, value_source_value=None,
+                 value_as_concept=None):
+        er_concept = _concept(
+            9016112, 'Estrogen receptor [Interpretation] in Tissue',
+            self.dom_meas, self.vocab, self.cc, code='16112-5',
+        )
+        return Measurement.objects.create(
+            measurement_id=mid,
+            person=self.person,
+            measurement_concept=er_concept,
+            measurement_date=date(2023, 6, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_string=value_as_string,
+            value_source_value=value_source_value,
+            value_as_concept=value_as_concept,
+            measurement_source_value='16112-5',
+        )
+
+    def test_er_positive_produces_title_case(self):
+        """ER Positive result uses LOINC answer display name."""
+        self._make_er(92501, value_as_string='Positive')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.estrogen_receptor_status, 'Positive')
+
+    def test_er_negative_produces_title_case(self):
+        """ER Negative result uses LOINC answer display name."""
+        self._make_er(92502, value_as_string='Negative')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.estrogen_receptor_status, 'Negative')
+
+    def test_er_equivocal_produces_title_case(self):
+        """ER Equivocal result uses LOINC answer display name."""
+        self._make_er(92503, value_as_string='Equivocal')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.estrogen_receptor_status, 'Equivocal')
+
+    def test_er_uppercase_input_normalized_to_title_case(self):
+        """Legacy UPPERCASE inputs are normalized to LOINC display names."""
+        self._make_er(92504, value_as_string='POSITIVE')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.estrogen_receptor_status, 'Positive')
+
+    def test_er_status_from_value_as_concept(self):
+        """ER status carried in value_as_concept is derived correctly."""
+        neg_concept = _concept(9000301, 'Negative', self.dom_meas, self.vocab, self.cc)
+        self._make_er(92505, value_as_concept=neg_concept)
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.estrogen_receptor_status, 'Negative')
+
+    def test_tnbc_derivation_uses_new_format(self):
+        """TNBC status uses title-case Negative for comparison."""
+        # Create ER, PR, HER2 all Negative
+        self._make_er(92506, value_as_string='Negative')
+        pr_concept = _concept(
+            9016113, 'Progesterone receptor [Interpretation] in Tissue',
+            self.dom_meas, self.vocab, self.cc, code='16113-3',
+        )
+        Measurement.objects.create(
+            measurement_id=92507, person=self.person,
+            measurement_concept=pr_concept,
+            measurement_date=date(2023, 6, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_string='Negative',
+            measurement_source_value='16113-3',
+        )
+        her2_concept = _concept(
+            9048677, 'HER2 [Interpretation] in Tissue',
+            self.dom_meas, self.vocab, self.cc, code='48676-1',
+        )
+        Measurement.objects.create(
+            measurement_id=92508, person=self.person,
+            measurement_concept=her2_concept,
+            measurement_date=date(2023, 6, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_string='Negative',
+            measurement_source_value='48676-1',
+        )
+        pi = refresh_patient_record(self.person)
+        self.assertTrue(pi.tnbc_status)
+
+    def test_hr_status_derivation_uses_new_format(self):
+        """HR status correctly derives from title-case receptor values."""
+        self._make_er(92509, value_as_string='Positive')
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.hr_status, 'HR+')
+
+    def test_hr_negative_from_both_receptors_negative(self):
+        """HR- when both ER and PR are Negative (title-case)."""
+        self._make_er(92510, value_as_string='Negative')
+        pr_concept = _concept(
+            9016114, 'Progesterone receptor [Interpretation] in Tissue',
+            self.dom_meas, self.vocab, self.cc, code='16113-3',
+        )
+        Measurement.objects.create(
+            measurement_id=92511, person=self.person,
+            measurement_concept=pr_concept,
+            measurement_date=date(2023, 6, 1),
+            measurement_type_concept=self.type_concept,
+            value_as_string='Negative',
+            measurement_source_value='16113-3',
+        )
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.hr_status, 'HR-')
 
 
 class CdmComplianceTablesTest(_OmopBase):

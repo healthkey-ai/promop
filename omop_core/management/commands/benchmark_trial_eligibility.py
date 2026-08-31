@@ -217,10 +217,12 @@ def _normalize_receptor_status(raw):
         return None
     value = str(raw).lower()
     if 'positive' in value:
-        return 'POSITIVE'
+        return 'Positive'
     if 'negative' in value:
-        return 'NEGATIVE'
-    return str(raw).strip().upper()
+        return 'Negative'
+    if 'equivocal' in value:
+        return 'Equivocal'
+    return str(raw).strip().title()
 
 
 def _normalize_disease(raw):
