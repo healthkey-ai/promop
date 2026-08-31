@@ -446,7 +446,13 @@ export default function CodeMappingPage() {
     const withWork = vocabularyTabs.find((t) => t.proposed > 0);
     if (withWork) return withWork.vocabulary_id;
     const withAny = vocabularyTabs.find((t) => t.proposed + t.approved > 0);
-    return withAny?.vocabulary_id ?? vocabularyTabs[0]?.vocabulary_id ?? "";
+    if (withAny) return withAny.vocabulary_id;
+    // Nothing anywhere: land on an HK-* tab, not the alphabetically-first
+    // standard one. Standard vocabularies come first in the tab strip, so an
+    // empty queue opened on SNOMED — a tab with no Suggest button, which made
+    // the button unreachable in exactly the state it exists to fix.
+    const local = vocabularyTabs.find((t) => t.vocabulary_id.startsWith("HK-"));
+    return local?.vocabulary_id ?? vocabularyTabs[0]?.vocabulary_id ?? "";
   }, [vocabularyTabs]);
 
   const selectedVocabulary = activeVocabulary || defaultVocabulary;
@@ -963,6 +969,45 @@ export default function CodeMappingPage() {
           })}
         </div>
 
+        {/* At the top of the tab, not buried in a section header: this is how
+            an empty queue gets filled, so it has to be visible before there is
+            anything to scroll past. Shown on every tab and disabled on the
+            standard ones — a button that silently vanishes reads as a bug. */}
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <label className="text-xs text-slate-600" htmlFor="min_occurrences">
+            Suggest mappings for codes seen at least
+          </label>
+          <input
+            id="min_occurrences"
+            type="number"
+            min={1}
+            value={minOccurrences}
+            onChange={(e) => setMinOccurrences(e.target.value === "" ? "" : Number(e.target.value))}
+            title="How often a code must appear before it is worth a curator's time. 43% of unmapped codes are seen exactly once."
+            className="h-8 w-16 rounded-md border border-slate-300 px-2 text-xs"
+          />
+          <span className="text-xs text-slate-600">times</span>
+          <button
+            type="button"
+            onClick={() => void runSuggest()}
+            disabled={suggesting || !isLocalVocabulary}
+            title={
+              isLocalVocabulary
+                ? "Propose mappings for source codes in this domain that nobody has mapped yet."
+                : `${selectedVocabulary} holds destinations to re-point into, not source codes to propose for. Switch to an HK-* tab to suggest.`
+            }
+            className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Sparkles size={13} />
+            {suggesting ? "Suggesting…" : "Suggest"}
+          </button>
+          {!isLocalVocabulary && (
+            <span className="text-xs text-slate-500">
+              — only on HK-* tabs, where locally minted destinations live
+            </span>
+          )}
+        </div>
+
         <section className="mb-6">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-700">
             Unmapped <span className="font-normal text-slate-500">({unmappedRows.length})</span>
@@ -971,32 +1016,6 @@ export default function CodeMappingPage() {
             <p className="text-xs text-slate-500">
               The destination concept exists — an import minted or chose it — but no curator has confirmed it.
             </p>
-            {isLocalVocabulary && (
-              <div className="flex shrink-0 items-center gap-2">
-                <label className="text-xs text-slate-600" htmlFor="min_occurrences">
-                  Seen at least
-                </label>
-                <input
-                  id="min_occurrences"
-                  type="number"
-                  min={1}
-                  value={minOccurrences}
-                  onChange={(e) => setMinOccurrences(e.target.value === "" ? "" : Number(e.target.value))}
-                  title="How often a code must appear before it is worth a curator's time. 43% of unmapped codes are seen exactly once."
-                  className="h-8 w-16 rounded-md border border-slate-300 px-2 text-xs"
-                />
-                <button
-                  type="button"
-                  onClick={() => void runSuggest()}
-                  disabled={suggesting}
-                  title="Propose mappings for source codes in this domain that nobody has mapped yet."
-                  className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-60"
-                >
-                  <Sparkles size={13} />
-                  {suggesting ? "Suggesting…" : "Suggest"}
-                </button>
-              </div>
-            )}
             {rejectedCount > 0 && (
               <label className="flex shrink-0 items-center gap-1.5 text-xs text-slate-600">
                 <input
