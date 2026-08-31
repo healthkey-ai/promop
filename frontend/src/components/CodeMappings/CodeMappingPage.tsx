@@ -45,6 +45,11 @@ interface CodeMappingRow {
   origin: string;
   origin_system: string;
   created_by: string;
+  // Who signed the mapping off, and when. Distinct from created_by: approval
+  // is the transition that rewrites stored patient data, and it survives every
+  // later edit of the row.
+  reviewer?: string;
+  reviewed_at?: string | null;
   occurrence_count: number;
   has_mapping: boolean;
 }
@@ -276,6 +281,32 @@ const byAuthorThenOccurrence = (a: CodeMappingRow, b: CodeMappingRow) => {
     || (a.created_by || "").localeCompare(b.created_by || "")
     || byOccurrence(a, b);
 };
+
+/**
+ * The sign-off half of the provenance line: " · approved by ada@x on 2026-08-31".
+ *
+ * Empty until a mapping has actually been approved. Rows approved before the
+ * reviewer was recorded carry neither field, and saying nothing is honest
+ * where naming whoever last edited the row would not be — that is exactly the
+ * confusion updated_by created (#848).
+ *
+ * The date is sliced off the ISO timestamp rather than formatted locally: the
+ * day a decision was made is what matters, and the server sends UTC.
+ */
+function approvalNote(row: CodeMappingRow): string {
+  // Only on an approved row. The stamp is cleared server-side when a mapping is
+  // un-approved, but a client holding an older payload must not assert
+  // "approved by X" over something that is no longer approved.
+  if (row.status !== "approved") return "";
+  if (!row.reviewer && !row.reviewed_at) return "";
+  const who = row.reviewer ? ` by ${row.reviewer}` : "";
+  // Rendered in the viewer's own timezone. Slicing the UTC string showed a
+  // curator at UTC-7 approving at 17:00 the following day's date.
+  const when = row.reviewed_at
+    ? ` on ${new Date(row.reviewed_at).toLocaleDateString()}`
+    : "";
+  return ` · approved${who}${when}`;
+}
 
 function buildEditForm(row: CodeMappingRow, reference: Reference): MappingForm {
   const domainId = row.domain_id || row.destination_domain_id || "";
@@ -1133,7 +1164,10 @@ export default function CodeMappingPage() {
                 </div>
               </fieldset>
 
-              {selectedRow && (selectedRow.origin === "import" || selectedRow.created_by) && (
+              {selectedRow
+                && (selectedRow.origin === "import"
+                  || selectedRow.created_by
+                  || approvalNote(selectedRow)) && (
                 <p className="mt-4 rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600">
                   {selectedRow.origin === "import" ? (
                     <>
@@ -1141,8 +1175,15 @@ export default function CodeMappingPage() {
                       {selectedRow.origin_system ? ` (${selectedRow.origin_system})` : ""}
                     </>
                   ) : (
-                    <>Created by {selectedRow.created_by}</>
+                    // created_by is SET_NULL, so a deleted author serializes
+                    // blank -- rendering "Created by " with nothing after it.
+                    selectedRow.created_by ? <>Created by {selectedRow.created_by}</> : null
                   )}
+                  {/* Both halves of the provenance: who raised it, and who
+                      signed it off. Approval is the only transition that
+                      rewrites patient data, so a reviewer looking at an
+                      approved mapping needs to see whose decision it was. */}
+                  {approvalNote(selectedRow)}
                   {selectedRow.occurrence_count ? ` · seen ${selectedRow.occurrence_count} time(s)` : ""}
                 </p>
               )}

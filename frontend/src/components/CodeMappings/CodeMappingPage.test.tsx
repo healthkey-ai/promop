@@ -42,6 +42,8 @@ const proposedRow = {
   origin: "import",
   origin_system: "hk-labs",
   created_by: "",
+  reviewer: "",              // never approved: the queue row this dialog exists for
+  reviewed_at: null,
   occurrence_count: 14,
   has_mapping: true,
 };
@@ -61,6 +63,8 @@ const approvedRow = {
   origin: "curator",
   origin_system: "",
   created_by: "zoe@example.com",
+  reviewer: "ada@example.com",          // signed off by someone other than its author
+  reviewed_at: "2026-08-31T09:14:00Z",
   occurrence_count: 3,
 };
 
@@ -586,6 +590,83 @@ describe("CodeMappingPage", () => {
       const statusSelect = screen.getByLabelText("Status") as HTMLSelectElement;
       expect(statusSelect.value).toBe("proposed");
       expect(statusSelect.disabled).toBe(true);
+    });
+  });
+
+  describe("Sign-off on the provenance line", () => {
+    /** Open the dialog for a row that lives under the collapsed Mapped section. */
+    const openApproved = async (code: string) => {
+      fireEvent.click(await screen.findByText(/^Mapped/));
+      const cell = await screen.findByText(code, { selector: "td" });
+      fireEvent.click(cell.closest("tr")!);
+      await screen.findByText("Edit Mapping");
+    };
+
+    it("names who approved the mapping and when, beside who created it", async () => {
+      // The reviewer is deliberately not the author: approval is a separate
+      // act by a separate person, and updated_by cannot stand in for it
+      // because the next edit overwrites it.
+      renderPage();
+      await openApproved("C90.00");
+      // The date renders in the viewer's own timezone, so derive the expected
+      // string rather than hardcoding a UTC slice — a runner west of UTC would
+      // otherwise see the previous day and fail.
+      const when = new Date("2026-08-31T09:14:00Z").toLocaleDateString();
+      expect(
+        screen.getByText(
+          `Created by zoe@example.com · approved by ada@example.com on ${when} · seen 3 time(s)`,
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it("shows both halves when an import raised it and a human signed it off", async () => {
+      renderPage([{
+        ...approvedRow,
+        source_code: "IMPORTED",
+        origin: "import",
+        origin_system: "fhir-sync",
+        created_by: "",
+      }]);
+      await openApproved("IMPORTED");
+      const when = new Date("2026-08-31T09:14:00Z").toLocaleDateString();
+      expect(
+        screen.getByText(
+          `Proposed by import (fhir-sync) · approved by ada@example.com on ${when} · seen 3 time(s)`,
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it("says nothing about approval on a row that is no longer approved", async () => {
+      // Un-approving is one click in the list. A stale stamp had the dialog
+      // assert "approved by ada@" over a proposed row.
+      renderPage([{
+        ...approvedRow, source_code: "UNAPPROVED", status: "proposed" as const,
+      }]);
+      const cell = await screen.findByText("UNAPPROVED", { selector: "td" });
+      fireEvent.click(cell.closest("tr")!);
+      await screen.findByText("Edit Mapping");
+      expect(screen.queryByText(/approved by/)).not.toBeInTheDocument();
+    });
+
+    it("does not render an empty author when created_by is blank", async () => {
+      // created_by is SET_NULL, so a deleted author serializes blank.
+      renderPage([{
+        ...approvedRow, source_code: "NOAUTHOR", origin: "curator", created_by: "",
+      }]);
+      await openApproved("NOAUTHOR");
+      expect(screen.queryByText(/Created by\s*·/)).not.toBeInTheDocument();
+      expect(screen.getByText(/approved by ada@example.com/)).toBeInTheDocument();
+    });
+
+    it("says nothing about approval on a row approved before reviewers were recorded", async () => {
+      // Naming whoever last edited such a row would assert something we do not
+      // know — the very confusion updated_by created.
+      renderPage([{
+        ...approvedRow, source_code: "LEGACY", reviewer: "", reviewed_at: null,
+      }]);
+      await openApproved("LEGACY");
+      expect(screen.getByText(/Created by zoe@example.com/)).toBeInTheDocument();
+      expect(screen.queryByText(/approved by/)).not.toBeInTheDocument();
     });
   });
 });
