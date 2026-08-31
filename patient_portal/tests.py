@@ -23660,3 +23660,283 @@ class VocabScopeAndSuggestedCodesTest(TestCase):
         code, vocab = SUGGESTED_FIELD_CODES['cytogenic_markers']
         self.assertEqual(code, 'D002869')
         self.assertEqual(vocab, 'MeSH')
+
+
+# =============================================================================
+# Role-based Mapping Approval (#872)
+# =============================================================================
+
+class MappingApprovalRoleTest(TestCase):
+    """Verify that doctors and analysts can access mapping pages but cannot
+    approve mappings — only staff and org_admin can approve.
+
+    Also checks that non-admins cannot un-approve (change approved→proposed),
+    delete approved mappings, or create field mappings as approved.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = Identity.objects.create_user(
+            email='approval_staff@t.com', password='x', is_staff=True,
+        )
+        cls.org_admin_user = Identity.objects.create_user(
+            email='approval_org_admin@t.com', password='x',
+        )
+        cls.doctor = Identity.objects.create_user(
+            email='approval_doctor@t.com', password='x',
+        )
+        cls.analyst = Identity.objects.create_user(
+            email='approval_analyst@t.com', password='x',
+        )
+        cls.org = Organization.objects.create(
+            name='Approval Test Org', slug='approval-test-org',
+        )
+        GroupAccess.objects.create(identity=cls.org_admin_user, org=cls.org, role='org_admin')
+        GroupAccess.objects.create(identity=cls.doctor, org=cls.org, role='doctor')
+        GroupAccess.objects.create(identity=cls.analyst, org=cls.org, role='analyst')
+
+        cls.domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        cls.concept_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+        cls.vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HK-Labs',
+            defaults={
+                'vocabulary_name': 'HealthKey Labs',
+                'vocabulary_reference': 'HealthKey local vocabulary',
+                'vocabulary_version': 'local',
+                'vocabulary_concept_id': 0,
+            },
+        )
+        cls.concept = Concept.objects.create(
+            concept_id=2039099901,
+            concept_name='Approval Test Concept',
+            domain=cls.domain,
+            vocabulary=cls.vocab,
+            concept_class=cls.concept_class,
+            standard_concept=None,
+            concept_code='hkl:approval-test',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+            source='HealthKey',
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+
+    # ---- Doctor/analyst CAN access mapping list endpoints ----
+
+    def test_doctor_can_list_field_mappings(self):
+        self.client.force_authenticate(user=self.doctor)
+        resp = self.client.get('/api/v1/field-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_analyst_can_list_code_mappings(self):
+        self.client.force_authenticate(user=self.analyst)
+        resp = self.client.get('/api/v1/code-mappings/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    # ---- Doctor CANNOT create field mapping as approved ----
+
+    def test_doctor_cannot_create_field_mapping_as_approved(self):
+        self.client.force_authenticate(user=self.doctor)
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'weight',
+            'concept_id': self.concept.concept_id,
+            'concept_code': self.concept.concept_code,
+            'vocabulary_id': self.concept.vocabulary.vocabulary_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    # ---- Org admin CAN create field mapping as approved ----
+
+    def test_org_admin_can_create_field_mapping_as_approved(self):
+        self.client.force_authenticate(user=self.org_admin_user)
+        resp = self.client.post('/api/v1/field-mappings/', {
+            'field_name': 'height',
+            'concept_id': self.concept.concept_id,
+            'concept_code': self.concept.concept_code,
+            'vocabulary_id': self.concept.vocabulary.vocabulary_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['status'], 'approved')
+        FieldConceptMapping.objects.filter(field_name='height').delete()
+
+    # ---- Doctor CANNOT approve field mapping (PATCH) ----
+
+    def test_doctor_cannot_approve_field_mapping(self):
+        mapping = FieldConceptMapping.objects.create(
+            field_name='ecog_performance_status',
+            concept=self.concept,
+            concept_code=self.concept.concept_code,
+            vocabulary_id=self.concept.vocabulary.vocabulary_id,
+            status='proposed',
+        )
+        self.client.force_authenticate(user=self.doctor)
+        resp = self.client.patch(f'/api/v1/field-mappings/{mapping.pk}/', {
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, 'proposed')
+        mapping.delete()
+
+    # ---- Doctor CANNOT un-approve field mapping ----
+
+    def test_doctor_cannot_unapprove_field_mapping(self):
+        mapping = FieldConceptMapping.objects.create(
+            field_name='bmi',
+            concept=self.concept,
+            concept_code=self.concept.concept_code,
+            vocabulary_id=self.concept.vocabulary.vocabulary_id,
+            status='approved',
+        )
+        self.client.force_authenticate(user=self.doctor)
+        resp = self.client.patch(f'/api/v1/field-mappings/{mapping.pk}/', {
+            'status': 'proposed',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, 'approved')
+        mapping.delete()
+
+    # ---- Doctor CANNOT delete approved field mapping ----
+
+    def test_doctor_cannot_delete_approved_field_mapping(self):
+        mapping = FieldConceptMapping.objects.create(
+            field_name='white_blood_cell_count',
+            concept=self.concept,
+            concept_code=self.concept.concept_code,
+            vocabulary_id=self.concept.vocabulary.vocabulary_id,
+            status='approved',
+        )
+        self.client.force_authenticate(user=self.doctor)
+        resp = self.client.delete(f'/api/v1/field-mappings/{mapping.pk}/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(FieldConceptMapping.objects.filter(pk=mapping.pk).exists())
+        mapping.delete()
+
+    # ---- Doctor CAN delete proposed field mapping ----
+
+    def test_doctor_can_delete_proposed_field_mapping(self):
+        mapping = FieldConceptMapping.objects.create(
+            field_name='diastolic_blood_pressure',
+            concept=self.concept,
+            concept_code=self.concept.concept_code,
+            vocabulary_id=self.concept.vocabulary.vocabulary_id,
+            status='proposed',
+        )
+        self.client.force_authenticate(user=self.doctor)
+        resp = self.client.delete(f'/api/v1/field-mappings/{mapping.pk}/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(FieldConceptMapping.objects.filter(pk=mapping.pk).exists())
+
+    # ---- Code mapping: doctor CANNOT approve ----
+
+    def test_doctor_cannot_approve_code_mapping(self):
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='APPROVAL-TEST-CODE',
+            source_code_description='Test code for approval',
+            target_concept=self.concept,
+            destination_vocabulary_id='HK-Labs',
+            omop_table='measurement',
+            status='proposed',
+            origin='import',
+        )
+        self.client.force_authenticate(user=self.doctor)
+        resp = self.client.patch(f'/api/v1/code-mappings/{mapping.pk}/', {
+            'status': 'approved',
+        }, format='json')
+        self.assertIn(resp.status_code, [status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN])
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, 'proposed')
+        mapping.delete()
+
+    # ---- Code mapping: doctor CANNOT un-approve ----
+
+    def test_doctor_cannot_unapprove_code_mapping(self):
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='APPROVAL-TEST-UNAPPROVE',
+            source_code_description='Test un-approve',
+            target_concept=self.concept,
+            destination_vocabulary_id='HK-Labs',
+            omop_table='measurement',
+            status='approved',
+            origin='import',
+        )
+        self.client.force_authenticate(user=self.doctor)
+        resp = self.client.patch(f'/api/v1/code-mappings/{mapping.pk}/', {
+            'status': 'proposed',
+        }, format='json')
+        self.assertIn(resp.status_code, [status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN])
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, 'approved')
+        mapping.delete()
+
+    # ---- Code mapping: doctor CANNOT delete approved ----
+
+    def test_doctor_cannot_delete_approved_code_mapping(self):
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='APPROVAL-TEST-DEL',
+            source_code_description='Test delete approved',
+            target_concept=self.concept,
+            destination_vocabulary_id='HK-Labs',
+            omop_table='measurement',
+            status='approved',
+            origin='import',
+        )
+        self.client.force_authenticate(user=self.doctor)
+        resp = self.client.delete(f'/api/v1/code-mappings/{mapping.pk}/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(SourceCodeConceptMapping.objects.filter(pk=mapping.pk).exists())
+        mapping.delete()
+
+    # ---- Staff CAN approve field mapping ----
+
+    def test_staff_can_approve_field_mapping(self):
+        mapping = FieldConceptMapping.objects.create(
+            field_name='systolic_blood_pressure',
+            concept=self.concept,
+            concept_code=self.concept.concept_code,
+            vocabulary_id=self.concept.vocabulary.vocabulary_id,
+            status='proposed',
+        )
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.patch(f'/api/v1/field-mappings/{mapping.pk}/', {
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, 'approved')
+        mapping.delete()
+
+    # ---- Org admin CAN approve code mapping ----
+
+    def test_org_admin_can_approve_code_mapping(self):
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='APPROVAL-TEST-ADMIN',
+            source_code_description='Test admin approve',
+            target_concept=self.concept,
+            destination_vocabulary_id='HK-Labs',
+            omop_table='measurement',
+            status='proposed',
+            origin='import',
+        )
+        self.client.force_authenticate(user=self.org_admin_user)
+        resp = self.client.patch(f'/api/v1/code-mappings/{mapping.pk}/', {
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, 'approved')
+        mapping.delete()
