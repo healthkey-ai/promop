@@ -785,9 +785,11 @@ Inline is what a developer machine with no Redis gets — the wire contract is
 the same, so a client needs one path either way. Inline lets a failing
 derivation propagate instead of recording it, because the caller is still
 holding the request, so an id is only ever issued for a derivation that
-already succeeded. That is why the id itself (`inline-<uuid>`) is the
+already succeeded. That is why the id itself (`inline-<signed uuid>`) is the
 completion record: a registry would be process-local, and under several
-gunicorn workers the poll would land on a process that never saw the POST.
+gunicorn workers the poll would land on a process that never saw the POST. It
+is signed with SECRET_KEY so only an id the deployment issued reads SUCCESS,
+and it verifies on any worker.
 Because it holds the request, it caps the derivation with a 25s
 `statement_timeout` — the queued path gets that bound from
 `CELERY_TASK_TIME_LIMIT` instead.

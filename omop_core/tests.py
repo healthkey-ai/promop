@@ -5250,6 +5250,16 @@ class DerivationDispatcherTest(TestCase):
 
         self.assertEqual(InlineDispatcher().status('never-seen').state, PENDING)
 
+    def test_inline_dispatcher_rejects_an_id_it_never_issued(self):
+        """The id is the completion record, so an invented one must not read SUCCESS."""
+        from omop_core.services.derivation_jobs import PENDING, InlineDispatcher
+
+        dispatcher = InlineDispatcher()
+
+        for forged in ('inline-typo', 'inline-', 'inline-' + 'a' * 32):
+            with self.subTest(forged=forged):
+                self.assertEqual(dispatcher.status(forged).state, PENDING)
+
     def test_inline_dispatcher_lets_a_failure_propagate(self):
         """The caller is still holding the request, so it can be told directly."""
         from omop_core.services.derivation_jobs import InlineDispatcher

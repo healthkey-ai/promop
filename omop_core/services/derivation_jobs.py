@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from django.conf import settings
+from django.core import signing
 from django.db import connection, transaction
 
 from omop_core.models import Person
@@ -83,12 +84,17 @@ class InlineDispatcher:
     the refresh response rather than having to poll for it.
     """
 
-    # An id is only ever handed out after the derivation returned, so the
-    # prefix is the completion record and nothing has to be remembered. A
+    # An id is only ever handed out after the derivation returned, so the id
+    # itself is the completion record and nothing has to be remembered. A
     # registry would be process-local, and under several gunicorn workers the
     # poll lands on a process that never saw the POST and answers PENDING for
     # ever.
+    #
+    # Signed, so only an id this deployment issued reads SUCCESS — an invented
+    # one is not a completion record and must not look like one. The signature
+    # is over SECRET_KEY, which every worker shares, so it verifies anywhere.
     _PREFIX = 'inline-'
+    _SALT = 'omop_core.derivation_jobs.inline'
 
     # The derivation holds the request and a database connection for as long
     # as it runs, so it needs the bound the queued path gets from
@@ -103,15 +109,22 @@ class InlineDispatcher:
                 with connection.cursor() as cur:
                     cur.execute(f"SET LOCAL statement_timeout = '{self._STATEMENT_TIMEOUT}'")
             refresh_patient_record(person)
-        return f'{self._PREFIX}{uuid.uuid4()}'
+        signed = signing.Signer(salt=self._SALT).sign(uuid.uuid4().hex)
+        return f'{self._PREFIX}{signed}'
 
     def status(self, task_id: str) -> DerivationStatus:
-        # An id from some other deployment mode reads PENDING, which is what
+        # Anything this deployment did not issue reads PENDING, which is what
         # Celery answers for an id it has never seen.
-        return DerivationStatus(
-            task_id=task_id,
-            state=SUCCESS if task_id.startswith(self._PREFIX) else PENDING,
-        )
+        return DerivationStatus(task_id=task_id, state=self._state(task_id))
+
+    def _state(self, task_id: str) -> str:
+        if not task_id.startswith(self._PREFIX):
+            return PENDING
+        try:
+            signing.Signer(salt=self._SALT).unsign(task_id[len(self._PREFIX):])
+        except signing.BadSignature:
+            return PENDING
+        return SUCCESS
 
 
 class FakeDispatcher:
