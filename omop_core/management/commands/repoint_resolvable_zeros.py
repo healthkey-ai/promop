@@ -49,12 +49,16 @@ def resolve_historical_value(source_value, table):
         target_concept__isnull=False,
     ).select_related('target_concept')
     mapping_exists = mappings.exists()
-    mapped = {
-        candidate.concept_id
+    mapped_destinations = [
+        _valid_destination(mapping.target_concept, expected_domain)
         for mapping in mappings
-        for candidate in [_valid_destination(mapping.target_concept, expected_domain)]
-        if candidate is not None
-    }
+    ]
+    # Historical rows retain only source text, not the system that emitted it.
+    # One malformed sibling mapping therefore makes the text ambiguous too;
+    # do not let a different, safe sibling silently win.
+    if mapping_exists and any(candidate is None for candidate in mapped_destinations):
+        return None, 'unsafe approved mappings'
+    mapped = {candidate.concept_id for candidate in mapped_destinations if candidate is not None}
     if mapped:
         if len(mapped) == 1:
             return Concept.objects.get(concept_id=mapped.pop()), 'approved mapping'
