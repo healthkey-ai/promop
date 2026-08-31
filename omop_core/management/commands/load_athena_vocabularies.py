@@ -36,9 +36,8 @@ VOCAB_SCOPE = frozenset({
     'OMOP Genomic', 'ICDO3', 'NCIt',
     # Oncology staging/grading modifiers + cancer registry
     'Cancer Modifier', 'NAACCR', 'CDISC',
-    # MeSH for cytogenetic/genomic field concepts (#803); ICD9CM for
-    # legacy ER-status concept (#847).
-    'MeSH', 'ICD9CM',
+    # MeSH for cytogenetic/genomic field concepts (#803)
+    'MeSH',
     # OMOP-generated metadata. 'Episode' carries the Treatment Regimen concept the
     # line-of-therapy episodes point at; 'CDM' carries the field concepts
     # EpisodeEvent references. Both were hand-seeded until the seeder was retired —
