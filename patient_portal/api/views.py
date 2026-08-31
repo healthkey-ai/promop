@@ -7301,13 +7301,25 @@ def vocabulary_list(request, model_name):
 # Therapy reference endpoints
 # =============================================================================
 
-@api_view(['GET'])
+@api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def therapy_regimen_list(request):
     """List therapy regimens, optionally filtered by disease, round, and/or search.
 
     GET /api/v1/therapy-regimens/?disease=MM&round=first_line_therapy&search=CHOP
+    POST /api/v1/therapy-regimens/  {code, title, concept_id?}
     """
+    if request.method == 'POST':
+        code = request.data.get('code', '').strip()
+        title = request.data.get('title', '').strip()
+        concept_id = request.data.get('concept_id')
+        if not code or not title:
+            return Response({'detail': 'code and title are required'}, status=status.HTTP_400_BAD_REQUEST)
+        if TherapyRegimen.objects.filter(code=code).exists():
+            return Response({'detail': f'Regimen with code {code} already exists'}, status=status.HTTP_409_CONFLICT)
+        regimen = TherapyRegimen.objects.create(code=code, title=title, concept_id=concept_id)
+        return Response({'code': regimen.code, 'title': regimen.title, 'concept_id': regimen.concept_id}, status=status.HTTP_201_CREATED)
+
     qs = TherapyRegimen.objects.all().order_by('title')
 
     disease_code = request.query_params.get('disease')
@@ -7330,17 +7342,31 @@ def therapy_regimen_list(request):
     return Response(items)
 
 
-@api_view(['GET'])
+@api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def therapy_regimen_detail(request, code):
     """Single regimen with nested components and their classes.
 
     GET /api/v1/therapy-regimens/<code>/
+    PATCH /api/v1/therapy-regimens/<code>/  {title?, concept_id?}
+    DELETE /api/v1/therapy-regimens/<code>/
     """
     try:
         regimen = TherapyRegimen.objects.get(code=code)
     except TherapyRegimen.DoesNotExist:
         return Response({'error': f'Regimen not found: {code}'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'DELETE':
+        regimen.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    if request.method == 'PATCH':
+        if 'title' in request.data:
+            regimen.title = request.data['title']
+        if 'concept_id' in request.data:
+            regimen.concept_id = request.data['concept_id']
+        regimen.save()
+        # Fall through to return the updated detail
 
     component_links = TherapyRegimenComponent.objects.filter(
         regimen=regimen,
@@ -7375,20 +7401,227 @@ def therapy_regimen_detail(request, code):
     })
 
 
-@api_view(['GET'])
+@api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def therapy_component_list(request):
-    """List all therapy components."""
+    """List all therapy components, or create a new one.
+
+    GET /api/v1/therapy-components/
+    POST /api/v1/therapy-components/  {code, title, concept_id?}
+    """
+    if request.method == 'POST':
+        code = request.data.get('code', '').strip()
+        title = request.data.get('title', '').strip()
+        concept_id = request.data.get('concept_id')
+        if not code or not title:
+            return Response({'detail': 'code and title are required'}, status=status.HTTP_400_BAD_REQUEST)
+        if TherapyComponent.objects.filter(code=code).exists():
+            return Response({'detail': f'Component with code {code} already exists'}, status=status.HTTP_409_CONFLICT)
+        comp = TherapyComponent.objects.create(code=code, title=title, concept_id=concept_id)
+        return Response({'code': comp.code, 'title': comp.title, 'concept_id': comp.concept_id}, status=status.HTTP_201_CREATED)
+
     items = list(TherapyComponent.objects.values('code', 'title', 'concept_id').order_by('title'))
     return Response(items)
 
 
-@api_view(['GET'])
+@api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def therapy_class_list(request):
-    """List all therapy classes."""
+    """List all therapy classes, or create a new one.
+
+    GET /api/v1/therapy-classes/
+    POST /api/v1/therapy-classes/  {code, title, concept_id?}
+    """
+    if request.method == 'POST':
+        code = request.data.get('code', '').strip()
+        title = request.data.get('title', '').strip()
+        concept_id = request.data.get('concept_id')
+        if not code or not title:
+            return Response({'detail': 'code and title are required'}, status=status.HTTP_400_BAD_REQUEST)
+        if TherapyClass.objects.filter(code=code).exists():
+            return Response({'detail': f'Class with code {code} already exists'}, status=status.HTTP_409_CONFLICT)
+        tc = TherapyClass.objects.create(code=code, title=title, concept_id=concept_id)
+        return Response({'code': tc.code, 'title': tc.title, 'concept_id': tc.concept_id}, status=status.HTTP_201_CREATED)
+
     items = list(TherapyClass.objects.values('code', 'title', 'concept_id').order_by('title'))
     return Response(items)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def mapping_stats(request):
+    """Summary stats for the mapping hub page.
+
+    GET /api/v1/mapping-stats/
+    Returns counts for field mappings, code mappings, and therapy reference data.
+    Restricted to staff or org_admin users.
+    """
+    if not (request.user.is_staff or getattr(request.user, 'is_org_admin', False)):
+        return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+
+    from omop_core.models import FieldConceptMapping
+
+    field_approved = FieldConceptMapping.objects.filter(status='approved').count()
+    field_proposed = FieldConceptMapping.objects.filter(status='proposed').count()
+    field_total = field_approved + field_proposed
+
+    code_approved = SourceCodeConceptMapping.objects.filter(status='approved').count()
+    code_proposed = SourceCodeConceptMapping.objects.filter(status='proposed').count()
+    code_total = code_approved + code_proposed
+
+    return Response({
+        'field_mappings': {'total': field_total, 'approved': field_approved, 'proposed': field_proposed},
+        'code_mappings': {'total': code_total, 'approved': code_approved, 'proposed': code_proposed},
+        'therapy': {
+            'regimens': TherapyRegimen.objects.count(),
+            'components': TherapyComponent.objects.count(),
+            'classes': TherapyClass.objects.count(),
+            'disease_links': DiseaseTherapyRegimen.objects.count(),
+        },
+    })
+
+
+@api_view(['POST', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def therapy_regimen_components(request, regimen_code, component_code=None):
+    """Add or remove a component from a regimen.
+
+    POST /api/v1/therapy-regimens/<regimen_code>/components/   {component_code}
+    DELETE /api/v1/therapy-regimens/<regimen_code>/components/<component_code>/
+    """
+    try:
+        regimen = TherapyRegimen.objects.get(code=regimen_code)
+    except TherapyRegimen.DoesNotExist:
+        return Response({'detail': 'Regimen not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'POST':
+        comp_code = request.data.get('component_code', '').strip()
+        if not comp_code:
+            return Response({'detail': 'component_code is required'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            component = TherapyComponent.objects.get(code=comp_code)
+        except TherapyComponent.DoesNotExist:
+            return Response({'detail': f'Component {comp_code} not found'}, status=status.HTTP_404_NOT_FOUND)
+        TherapyRegimenComponent.objects.get_or_create(regimen=regimen, component=component)
+        return Response({'status': 'added'}, status=status.HTTP_201_CREATED)
+
+    if request.method == 'DELETE' and component_code:
+        deleted, _ = TherapyRegimenComponent.objects.filter(
+            regimen=regimen, component__code=component_code,
+        ).delete()
+        if not deleted:
+            return Response({'detail': 'Link not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    return Response({'detail': 'component_code is required in URL for DELETE'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def therapy_component_classes(request, component_code, class_code=None):
+    """Add or remove a class from a component.
+
+    POST /api/v1/therapy-components/<component_code>/classes/   {class_code}
+    DELETE /api/v1/therapy-components/<component_code>/classes/<class_code>/
+    """
+    try:
+        component = TherapyComponent.objects.get(code=component_code)
+    except TherapyComponent.DoesNotExist:
+        return Response({'detail': 'Component not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'POST':
+        cls_code = request.data.get('class_code', '').strip()
+        if not cls_code:
+            return Response({'detail': 'class_code is required'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            therapy_class = TherapyClass.objects.get(code=cls_code)
+        except TherapyClass.DoesNotExist:
+            return Response({'detail': f'Class {cls_code} not found'}, status=status.HTTP_404_NOT_FOUND)
+        TherapyComponentClassLink.objects.get_or_create(component=component, therapy_class=therapy_class)
+        return Response({'status': 'added'}, status=status.HTTP_201_CREATED)
+
+    if request.method == 'DELETE' and class_code:
+        deleted, _ = TherapyComponentClassLink.objects.filter(
+            component=component, therapy_class__code=class_code,
+        ).delete()
+        if not deleted:
+            return Response({'detail': 'Link not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    return Response({'detail': 'class_code is required in URL for DELETE'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def disease_therapy_regimen_list(request):
+    """List or create disease-therapy-regimen links.
+
+    GET /api/v1/disease-therapy-regimens/
+    POST /api/v1/disease-therapy-regimens/  {disease_code, round_code, regimen_code}
+    """
+    if request.method == 'GET':
+        qs = DiseaseTherapyRegimen.objects.select_related('disease', 'round', 'regimen').all()
+        items = [{
+            'id': d.id,
+            'disease_code': d.disease.code,
+            'disease_title': d.disease.title,
+            'round_code': d.round.code,
+            'round_title': d.round.title,
+            'regimen_code': d.regimen.code,
+            'regimen_title': d.regimen.title,
+        } for d in qs]
+        return Response(items)
+
+    # POST
+    disease_code = request.data.get('disease_code', '').strip()
+    round_code = request.data.get('round_code', '').strip()
+    regimen_code = request.data.get('regimen_code', '').strip()
+    if not disease_code or not round_code or not regimen_code:
+        return Response(
+            {'detail': 'disease_code, round_code, and regimen_code are all required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        disease = Disease.objects.get(code=disease_code)
+    except Disease.DoesNotExist:
+        return Response({'detail': f'Disease {disease_code} not found'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        therapy_round = TherapyRound.objects.get(code=round_code)
+    except TherapyRound.DoesNotExist:
+        return Response({'detail': f'Round {round_code} not found'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        regimen = TherapyRegimen.objects.get(code=regimen_code)
+    except TherapyRegimen.DoesNotExist:
+        return Response({'detail': f'Regimen {regimen_code} not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    obj, created = DiseaseTherapyRegimen.objects.get_or_create(
+        disease=disease, round=therapy_round, regimen=regimen,
+    )
+    resp_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+    return Response({
+        'id': obj.id,
+        'disease_code': disease.code,
+        'disease_title': disease.title,
+        'round_code': therapy_round.code,
+        'round_title': therapy_round.title,
+        'regimen_code': regimen.code,
+        'regimen_title': regimen.title,
+    }, status=resp_status)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def disease_therapy_regimen_detail(request, pk):
+    """Delete a disease-therapy-regimen link.
+
+    DELETE /api/v1/disease-therapy-regimens/<pk>/
+    """
+    try:
+        obj = DiseaseTherapyRegimen.objects.get(pk=pk)
+    except DiseaseTherapyRegimen.DoesNotExist:
+        return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+    obj.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # =============================================================================

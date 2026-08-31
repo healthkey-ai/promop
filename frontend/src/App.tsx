@@ -20,6 +20,8 @@ import UploadCSV from "@/components/Patient/UploadCSV";
 import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
 import FieldMappingPage from "@/components/FieldMappings/FieldMappingPage";
 import CodeMappingPage from "@/components/CodeMappings/CodeMappingPage";
+import MappingHubPage from "@/components/MappingHub/MappingHubPage";
+import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
 import OrgLogin from "@/components/Auth/OrgLogin";
 import OrgSignup from "@/components/Auth/OrgSignup";
 import ForgotPassword from "@/components/Auth/ForgotPassword";
@@ -147,8 +149,10 @@ function AppRoutes() {
       <Route path="/upload-csv" element={providerRoute(<UploadCSV />)} />
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
       <Route path="/org-admin" element={providerRoute(<OrgAdminPage />)} />
+      <Route path="/mappings" element={mappingAdminRoute(<MappingHubPage />)} />
       <Route path="/field-mappings" element={mappingAdminRoute(<FieldMappingPage />)} />
       <Route path="/code-mappings" element={mappingAdminRoute(<CodeMappingPage />)} />
+      <Route path="/therapy-mappings" element={mappingAdminRoute(<TherapyMappingPage />)} />
       <Route
         path="/profile"
         element={

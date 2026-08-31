@@ -18,6 +18,9 @@ from .views import (
     vocabulary_list, concept_lookup, concept_search, concept_list,
     therapy_regimen_list, therapy_regimen_detail,
     therapy_component_list, therapy_class_list,
+    mapping_stats,
+    therapy_regimen_components, therapy_component_classes,
+    disease_therapy_regimen_list, disease_therapy_regimen_detail,
     concept_ancestors, concept_descendants, concept_detail, concept_graph_batch,
     concept_synonyms, concept_synonym_search, concept_replacement,
     vocab_release_list, vocab_release_detail, vocab_release_latest,
@@ -144,6 +147,14 @@ urlpatterns = [
     # Therapy reference endpoints
     path('therapy-regimens/', therapy_regimen_list, name='v1-therapy-regimen-list'),
     path('therapy-regimens/<str:code>/', therapy_regimen_detail, name='v1-therapy-regimen-detail'),
+    path('therapy-regimens/<str:regimen_code>/components/', therapy_regimen_components, name='v1-therapy-regimen-components'),
+    path('therapy-regimens/<str:regimen_code>/components/<str:component_code>/', therapy_regimen_components, name='v1-therapy-regimen-component-detail'),
     path('therapy-components/', therapy_component_list, name='v1-therapy-component-list'),
+    path('therapy-components/<str:component_code>/classes/', therapy_component_classes, name='v1-therapy-component-classes'),
+    path('therapy-components/<str:component_code>/classes/<str:class_code>/', therapy_component_classes, name='v1-therapy-component-class-detail'),
     path('therapy-classes/', therapy_class_list, name='v1-therapy-class-list'),
+    # Mapping hub
+    path('mapping-stats/', mapping_stats, name='v1-mapping-stats'),
+    path('disease-therapy-regimens/', disease_therapy_regimen_list, name='v1-disease-therapy-regimen-list'),
+    path('disease-therapy-regimens/<int:pk>/', disease_therapy_regimen_detail, name='v1-disease-therapy-regimen-detail'),
 ]
