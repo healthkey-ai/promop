@@ -18,7 +18,7 @@ from django.core.management import call_command
 from omop_core.concept_fixtures import seed_test_concepts
 from django.core.management.base import CommandError
 from django.db import IntegrityError, ProgrammingError, connection, transaction
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
@@ -6233,3 +6233,284 @@ class ManageLanguageSkillsCommandTest(TestCase):
     def test_find_language_says_so_when_nothing_matches(self):
         out = self._run(find_language='Klingon')
         self.assertIn('No loaded SNOMED Language concept', out)
+
+
+class MappingSuggestionsTest(_OmopBase):
+    """Suggest fills the curation queue for codes nobody has mapped.
+
+    Staging carries 10,483 distinct source values at concept 0 and 43% of them
+    appear exactly once, so the threshold is what makes the queue reviewable.
+    """
+
+    PERSON_ID = 90600
+
+    def setUp(self):
+        from omop_core.models import SourceCodeConceptMapping
+        SourceCodeConceptMapping.objects.all().delete()
+        self.creatinine = _concept(
+            4100000, 'Creatinine [Mass/volume] in Blood', self.dom_meas,
+            self.vocab, self.cc, code='38483-4')
+
+    def _measurement(self, mid, source_value, day=1):
+        return Measurement.objects.create(
+            measurement_id=mid, person=self.person,
+            measurement_concept_id=0,
+            measurement_date=date(2024, 3, day),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value=source_value,
+        )
+
+    def _seed(self, source_value, times, start=95000):
+        for i in range(times):
+            self._measurement(start + i, source_value, day=(i % 28) + 1)
+
+    # -- the threshold ----------------------------------------------------
+
+    def test_a_code_below_the_threshold_is_not_proposed(self):
+        """43% of staging's unmapped values appear once. Proposing for them
+        buries the codes that carry the traffic."""
+        from omop_core.services.mapping_suggestions import unmapped_source_values
+        self._seed('SEEN ONCE', 1, start=95000)
+        self._seed('SEEN OFTEN', 12, start=95100)
+
+        values = dict(unmapped_source_values('measurement', min_occurrences=10))
+        self.assertIn('SEEN OFTEN', values)
+        self.assertNotIn('SEEN ONCE', values)
+        self.assertEqual(values['SEEN OFTEN'], 12)
+
+    def test_lowering_the_threshold_reaches_the_tail(self):
+        from omop_core.services.mapping_suggestions import unmapped_source_values
+        self._seed('SEEN ONCE', 1, start=95000)
+        values = dict(unmapped_source_values('measurement', min_occurrences=1))
+        self.assertIn('SEEN ONCE', values)
+
+    def test_the_busiest_code_comes_first(self):
+        from omop_core.services.mapping_suggestions import unmapped_source_values
+        self._seed('QUIET', 10, start=95000)
+        self._seed('BUSY', 30, start=95200)
+        values = unmapped_source_values('measurement', min_occurrences=10)
+        self.assertEqual(values[0][0], 'BUSY')
+
+    def test_a_code_already_in_the_queue_is_not_proposed_again(self):
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.mapping_suggestions import unmapped_source_values
+        self._seed('ALREADY MAPPED', 12, start=95000)
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='', source_code='already mapped',   # case differs
+            target_concept=self.creatinine, omop_table='measurement',
+            domain_id='Measurement', status='proposed',
+        )
+        values = dict(unmapped_source_values('measurement', min_occurrences=10))
+        self.assertNotIn('ALREADY MAPPED', values)
+
+    # -- retrieval --------------------------------------------------------
+
+    def test_retrieval_is_scoped_to_the_domain(self):
+        """A lab name must not retrieve a drug."""
+        from omop_core.services.mapping_suggestions import lexical_candidates
+        _concept(4100001, 'Creatinine clearance drug', self.dom_drug,
+                 self.vocab, self.cc, code='D-CREAT')
+        hits = lexical_candidates('Creatinine', 'Measurement')
+        self.assertTrue(all(h['concept_id'] != 4100001 for h in hits))
+
+    def test_retrieval_ignores_non_standard_concepts(self):
+        from omop_core.services.mapping_suggestions import lexical_candidates
+        weak = _concept(4100002, 'Creatinine non standard', self.dom_meas,
+                        self.vocab, self.cc, code='NS-CREAT')
+        weak.standard_concept = None
+        weak.save(update_fields=['standard_concept'])
+        hits = lexical_candidates('Creatinine', 'Measurement')
+        self.assertTrue(all(h['concept_id'] != 4100002 for h in hits))
+
+    # -- ranking ----------------------------------------------------------
+
+    def test_without_a_key_the_lexical_order_stands_and_says_so(self):
+        """A Suggest that returns nothing because a third party is down is
+        worse than one that returns a guess a curator can correct."""
+        from omop_core.services.mapping_suggestions import rank_candidates
+        candidates = [
+            {'concept_id': 1, 'concept_name': 'A', 'concept_code': 'a',
+             'vocabulary_id': 'LOINC', 'concept_class_id': 'Lab Test',
+             'lexical_score': 0.7},
+            {'concept_id': 2, 'concept_name': 'B', 'concept_code': 'b',
+             'vocabulary_id': 'LOINC', 'concept_class_id': 'Lab Test',
+             'lexical_score': 0.6},
+        ]
+        with override_settings(ANTHROPIC_API_KEY=''):
+            chosen, note = rank_candidates('anything', candidates)
+        self.assertEqual(chosen['concept_id'], 1)
+        self.assertIn('Ranking model unavailable', note)
+
+    def test_the_ranker_can_overturn_the_lexical_order(self):
+        """The reason this exists: for SERUM FREE LIGHT CHAIN KAPPA trigram's
+        top hit is a *ratio*, clinically the wrong quantity."""
+        from unittest.mock import MagicMock, patch
+        from omop_core.services.mapping_suggestions import rank_candidates
+        candidates = [
+            {'concept_id': 37172937, 'concept_name': 'Free kappa/lambda ratio',
+             'concept_code': 'r', 'vocabulary_id': 'LOINC',
+             'concept_class_id': 'Lab Test', 'lexical_score': 0.674},
+            {'concept_id': 3034860, 'concept_name': 'Kappa light chains.free [Mass/volume]',
+             'concept_code': 'c', 'vocabulary_id': 'LOINC',
+             'concept_class_id': 'Lab Test', 'lexical_score': 0.645},
+        ]
+        block = MagicMock(type='text')
+        block.text = ('{"concept_id": 3034860, "confidence": "high",'
+                      ' "reason": "A ratio is not the analyte."}')
+        client = MagicMock()
+        client.messages.create.return_value = MagicMock(content=[block])
+        with override_settings(ANTHROPIC_API_KEY='test-key'), \
+                patch('anthropic.Anthropic', return_value=client):
+            chosen, note = rank_candidates('SERUM FREE LIGHT CHAIN KAPPA', candidates)
+        self.assertEqual(chosen['concept_id'], 3034860, 'the ratio was not demoted')
+        self.assertIn('A ratio is not the analyte', note)
+        self.assertEqual(client.messages.create.call_args.kwargs['model'], 'claude-opus-5')
+
+    def test_a_concept_outside_the_shortlist_is_refused(self):
+        """The candidates were domain-scoped and validated; an arbitrary id is
+        not, and writing one would put a concept nobody vetted into a record."""
+        from unittest.mock import MagicMock, patch
+        from omop_core.services.mapping_suggestions import rank_candidates
+        candidates = [{'concept_id': 1, 'concept_name': 'A', 'concept_code': 'a',
+                       'vocabulary_id': 'LOINC', 'concept_class_id': 'Lab Test',
+                       'lexical_score': 0.7}]
+        block = MagicMock(type='text')
+        block.text = '{"concept_id": 999999, "confidence": "high", "reason": "x"}'
+        client = MagicMock()
+        client.messages.create.return_value = MagicMock(content=[block])
+        with override_settings(ANTHROPIC_API_KEY='k'), \
+                patch('anthropic.Anthropic', return_value=client):
+            chosen, note = rank_candidates('x', candidates)
+        self.assertEqual(chosen['concept_id'], 1)
+        self.assertIn('Ranking model unavailable', note)
+
+    def test_a_ranker_failure_degrades_rather_than_raising(self):
+        from unittest.mock import patch
+        from omop_core.services.mapping_suggestions import rank_candidates
+        candidates = [{'concept_id': 1, 'concept_name': 'A', 'concept_code': 'a',
+                       'vocabulary_id': 'LOINC', 'concept_class_id': 'Lab Test',
+                       'lexical_score': 0.7}]
+        with override_settings(ANTHROPIC_API_KEY='k'), \
+                patch('anthropic.Anthropic', side_effect=RuntimeError('network down')):
+            chosen, note = rank_candidates('x', candidates)
+        self.assertEqual(chosen['concept_id'], 1)
+        self.assertIn('Ranking model unavailable', note)
+
+    def test_the_model_may_decline_to_choose(self):
+        from unittest.mock import MagicMock, patch
+        from omop_core.services.mapping_suggestions import rank_candidates
+        candidates = [{'concept_id': 1, 'concept_name': 'A', 'concept_code': 'a',
+                       'vocabulary_id': 'LOINC', 'concept_class_id': 'Lab Test',
+                       'lexical_score': 0.4}]
+        block = MagicMock(type='text')
+        block.text = '{"concept_id": null, "confidence": "low", "reason": "none match"}'
+        client = MagicMock()
+        client.messages.create.return_value = MagicMock(content=[block])
+        with override_settings(ANTHROPIC_API_KEY='k'), \
+                patch('anthropic.Anthropic', return_value=client):
+            chosen, note = rank_candidates('x', candidates)
+        self.assertIsNone(chosen, 'a wrong mapping is written into patient records')
+        self.assertIn('none match', note)
+
+    # -- creating the proposals -------------------------------------------
+
+    def test_suggest_creates_proposed_mappings_marked_as_a_machine_guess(self):
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.mapping_suggestions import suggest_mappings
+        self._seed('Creatinine', 12, start=95000)
+        with override_settings(ANTHROPIC_API_KEY=''):
+            results = suggest_mappings('measurement', min_occurrences=10)
+
+        self.assertEqual(len(results), 1)
+        mapping = SourceCodeConceptMapping.objects.get(source_code='Creatinine')
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertEqual(mapping.origin, 'import')
+        self.assertEqual(mapping.origin_system, 'suggest')
+        self.assertEqual(mapping.occurrence_count, 12)
+        self.assertEqual(mapping.omop_table, 'measurement')
+        self.assertTrue(mapping.notes, 'the curator needs to know why')
+
+    def test_an_unmatchable_code_still_reaches_the_queue(self):
+        """The code is real. Minting keeps the fact carrying a concept and the
+        curator still sees it."""
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.mapping_suggestions import suggest_mappings
+        self._seed('ZZQQ NOTHING LIKE THIS', 11, start=95000)
+        with override_settings(ANTHROPIC_API_KEY=''):
+            suggest_mappings('measurement', min_occurrences=10)
+        mapping = SourceCodeConceptMapping.objects.get(
+            source_code='ZZQQ NOTHING LIKE THIS')
+        self.assertEqual(mapping.destination_vocabulary_id, 'HK-Labs')
+        self.assertEqual(mapping.status, 'proposed')
+
+    def test_dry_run_writes_nothing(self):
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.mapping_suggestions import suggest_mappings
+        self._seed('Creatinine', 12, start=95000)
+        with override_settings(ANTHROPIC_API_KEY=''):
+            results = suggest_mappings('measurement', min_occurrences=10, dry_run=True)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(SourceCodeConceptMapping.objects.count(), 0)
+
+    def test_a_rejected_code_is_not_proposed_again(self):
+        """Rejected is decided. Re-proposing put it back at the front of the
+        queue every run, where it spent a model call and created nothing."""
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.mapping_suggestions import unmapped_source_values
+        self._seed('REJECTED CODE', 12, start=95000)
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='', source_code='REJECTED CODE',
+            target_concept=self.creatinine, omop_table='measurement',
+            domain_id='Measurement', status='rejected',
+        )
+        values = dict(unmapped_source_values('measurement', min_occurrences=10))
+        self.assertNotIn('REJECTED CODE', values)
+
+    def test_a_non_object_ranking_response_degrades(self):
+        """The system prompt asks for null, so a bare `null` is the shape a
+        model most plausibly returns -- it parses fine and has no .get."""
+        from unittest.mock import MagicMock, patch
+        from omop_core.services.mapping_suggestions import rank_candidates
+        candidates = [{'concept_id': 1, 'concept_name': 'A', 'concept_code': 'a',
+                       'vocabulary_id': 'LOINC', 'concept_class_id': 'Lab Test',
+                       'lexical_score': 0.7}]
+        for payload in ('null', '[1, 2]', '"text"'):
+            block = MagicMock(type='text')
+            block.text = payload
+            client = MagicMock()
+            client.messages.create.return_value = MagicMock(content=[block])
+            with override_settings(ANTHROPIC_API_KEY='k'), \
+                    patch('anthropic.Anthropic', return_value=client):
+                chosen, note = rank_candidates('x', candidates)
+            self.assertEqual(chosen['concept_id'], 1, f'{payload!r} was not handled')
+            self.assertIn('Ranking model unavailable', note)
+
+    def test_the_ranking_call_leaves_room_for_thinking(self):
+        """Thinking tokens count against max_tokens. At 1024 the response
+        stopped at the cap with no text and the ranker silently never ran."""
+        from unittest.mock import MagicMock, patch
+        from omop_core.services.mapping_suggestions import rank_candidates
+        candidates = [{'concept_id': 1, 'concept_name': 'A', 'concept_code': 'a',
+                       'vocabulary_id': 'LOINC', 'concept_class_id': 'Lab Test',
+                       'lexical_score': 0.7}]
+        block = MagicMock(type='text')
+        block.text = '{"concept_id": 1, "confidence": "high", "reason": "ok"}'
+        client = MagicMock()
+        client.messages.create.return_value = MagicMock(content=[block])
+        with override_settings(ANTHROPIC_API_KEY='k'), \
+                patch('anthropic.Anthropic', return_value=client):
+            rank_candidates('x', candidates)
+        kwargs = client.messages.create.call_args.kwargs
+        self.assertGreaterEqual(kwargs['max_tokens'], 8000)
+        self.assertEqual(kwargs['thinking'], {'type': 'adaptive'})
+
+    def test_a_gap_proposal_carries_its_domain(self):
+        """Without it the UI has nothing to place the row by, and it appeared
+        in no tab at all."""
+        from omop_core.services.code_mapping import resolve_source_code
+        _, mapping = resolve_source_code(
+            source_code='99999-9', source_vocabulary_id='LOINC',
+            source_text='Not loaded here', omop_table='measurement',
+        )
+        self.assertEqual(mapping.domain_id, 'Measurement')
+        self.assertIsNone(mapping.target_concept_id)

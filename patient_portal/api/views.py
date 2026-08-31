@@ -67,9 +67,14 @@ from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.services.code_mapping import (
     CLINICAL_TABLES,
+    _QUARANTINE_TARGETS,
     NO_MATCHING_CONCEPT_ID,
     normalize_omop_table,
     repoint_clinical_rows,
+)
+from omop_core.services.mapping_suggestions import (
+    DEFAULT_MIN_OCCURRENCES,
+    suggest_mappings,
 )
 from omop_core.services.write_descriptor import mapping_table_is_writable
 from omop_core.services import source_vocabularies
@@ -8348,6 +8353,16 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # code left unresolved -- and any approval that also moved the destination
     # sweeps the old one. Both can apply at once, and their counts are summed
     # so the dialog reports everything it touched.
+    # Approving a row that points at nothing would leave the queue marked
+    # approved with no destination and no clinical rows moved -- the silent
+    # success this feature exists to prevent. These rows are reachable now that
+    # gap proposals surface in a tab.
+    if status_value == 'approved' and concept is None:
+        raise serializers.ValidationError({'destination_concept_id': (
+            'Choose a destination concept before approving. This mapping has '
+            'none yet — its code was seen at ingest but its concept is not loaded.'
+        )})
+
     repoint = None
     if status_value == 'approved' and concept is not None:
         sources = set()
@@ -8462,6 +8477,83 @@ def code_mapping_detail(request, mapping_id):
     return Response(payload)
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def code_mapping_suggest(request):
+    """Propose mappings for unmapped source codes in one HK-* vocabulary.
+
+    The tab picks the vocabulary, the vocabulary picks the domain, and the
+    domain picks which clinical table's concept-0 rows to work from. Standard
+    vocabularies get no Suggest: they hold destinations a curator re-points
+    *into*, and enumerating SNOMED's 1.09M concepts is not a queue.
+
+    Defaults to codes seen ten or more times. Staging has 10,483 distinct
+    unmapped source values and 43% of them appear exactly once, so proposing
+    for everything would bury the 512 that carry the traffic.
+    """
+    if not _can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    vocabulary_id = str(request.data.get('destination_vocabulary_id') or '').strip()
+    table = _table_for_hk_vocabulary(vocabulary_id)
+    if table is None:
+        return Response(
+            {'destination_vocabulary_id': (
+                f'Suggest works on the HK-* vocabularies, not {vocabulary_id!r}. '
+                'Standard vocabularies hold destinations to re-point into, not '
+                'source codes to propose for.'
+            )},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        min_occurrences = int(request.data.get('min_occurrences', DEFAULT_MIN_OCCURRENCES))
+    except (TypeError, ValueError):
+        return Response({'min_occurrences': 'Enter a whole number.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    if min_occurrences < 1:
+        return Response({'min_occurrences': 'Must be at least 1.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        limit = int(request.data.get('limit') or SUGGEST_MAX_PER_CALL)
+    except (TypeError, ValueError):
+        return Response({'limit': 'Enter a whole number.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    if limit < 1:
+        return Response({'limit': 'Must be at least 1.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    limit = min(limit, SUGGEST_MAX_PER_CALL)
+
+    results = suggest_mappings(
+        table, min_occurrences=min_occurrences, limit=limit,
+        dry_run=bool(request.data.get('dry_run')),
+    )
+    created = [r for r in results if r.get('created')]
+    # Where the new rows landed. A ranked suggestion's destination is a standard
+    # concept, so its mapping belongs to the LOINC/SNOMED tab, not the HK-* one
+    # the button was on -- correct by the tab semantics, and baffling unless the
+    # response says so.
+    landed = {}
+    for entry in created:
+        suggested = entry.get('suggested')
+        vocab = suggested['vocabulary_id'] if suggested else vocabulary_id
+        landed[vocab] = landed.get(vocab, 0) + 1
+    return Response({
+        'landed_in': landed,
+        'destination_vocabulary_id': vocabulary_id,
+        'omop_table': table,
+        'min_occurrences': min_occurrences,
+        'considered': len(results),
+        'created': len(created),
+        'ranked': sum(1 for r in results if r.get('suggested')),
+        'results': results,
+        # Said plainly rather than left for the curator to infer from a count
+        # that stopped at a round number.
+        'truncated': len(results) >= limit,
+    }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def code_mapping_reference(request):
@@ -8482,6 +8574,26 @@ def code_mapping_reference(request):
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     return Response(_code_mapping_reference_payload())
+
+
+# HK-* vocabulary -> the clinical table whose concept-0 rows it curates. The
+# inverse of _QUARANTINE_TARGETS, which the resolver keys the other way.
+def _table_for_hk_vocabulary(vocabulary_id):
+    for table, (hk_vocab, *_rest) in _QUARANTINE_TARGETS.items():
+        if hk_vocab == vocabulary_id:
+            return table
+    return None
+
+
+# One Suggest click ranks at most this many codes.
+#
+# Sized against the request timeout, not just cost: gunicorn runs with
+# --timeout 120 (Dockerfile), and each code costs an indexed trigram retrieval
+# (~0.4-1.6s) plus one model call. At 50 the worker was killed mid-run, the
+# browser saw a 502, and the proposals already committed were invisible because
+# the client never refetched. Ten leaves headroom, and the response says when
+# more remain.
+SUGGEST_MAX_PER_CALL = 10
 
 
 def _code_mapping_reference_payload():

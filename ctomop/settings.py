@@ -361,6 +361,12 @@ AUTH_TOKEN_CACHE_TTL = int(os.environ.get("AUTH_TOKEN_CACHE_TTL", "60"))
 # REST Framework
 SERVICE_AUTH_TOKEN = os.environ.get("SERVICE_AUTH_TOKEN", "")
 
+# Ranking key for Code Mapping suggestions (#856). Deliberately optional: with
+# no key the suggester falls back to lexical order and says so on the proposal,
+# because a Suggest button that returns nothing when a third party is down is
+# worse than one that returns a guess a curator can correct.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
 _auth_classes = [
     'patient_portal.api.authentication.ServiceTokenAuthentication',
     'patient_portal.api.authentication.PartnerAuthentication',

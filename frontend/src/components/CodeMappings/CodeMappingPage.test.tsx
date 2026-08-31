@@ -669,4 +669,71 @@ describe("CodeMappingPage", () => {
       expect(screen.queryByText(/approved by/)).not.toBeInTheDocument();
     });
   });
+
+  describe("Suggest", () => {
+    it("offers Suggest on an HK-* tab and not on a standard one", async () => {
+      // HK-* tabs hold locally minted destinations for unmapped codes. A
+      // standard vocabulary is somewhere a curator re-points *into* —
+      // enumerating SNOMED's 1.09M concepts would not be a queue.
+      renderPage();
+      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      expect(screen.getByRole("button", { name: /Suggest/ })).toBeInTheDocument();
+
+      const tabs = within(screen.getByRole("tablist", { name: "Destination vocabularies" }));
+      fireEvent.click(tabs.getByRole("button", { name: /LOINC/ }));
+      expect(screen.queryByRole("button", { name: /Suggest/ })).not.toBeInTheDocument();
+    });
+
+    it("defaults the threshold to 10 and sends it", async () => {
+      // 43% of staging's unmapped codes appear exactly once; proposing for them
+      // buries the 512 that carry the traffic.
+      mockPost.mockResolvedValue({ data: { created: 3, considered: 5, ranked: 2 } });
+      renderPage();
+      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      expect(screen.getByLabelText(/Seen at least/)).toHaveValue(10);
+
+      fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
+      await waitFor(() => expect(mockPost).toHaveBeenCalled());
+      expect(mockPost.mock.calls[0][0]).toBe("/v1/code-mappings/suggest/");
+      expect(mockPost.mock.calls[0][1]).toMatchObject({
+        destination_vocabulary_id: "HK-Labs",
+        min_occurrences: 10,
+      });
+    });
+
+    it("reports what it proposed", async () => {
+      mockPost.mockResolvedValue({
+        data: { created: 3, considered: 5, ranked: 2, truncated: true },
+      });
+      renderPage();
+      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
+
+      const status = await screen.findByRole("status");
+      expect(status).toHaveTextContent("Proposed 3 mapping(s) from 5 unmapped code(s)");
+      expect(status).toHaveTextContent("More remain");
+    });
+
+    it("says so when nothing meets the threshold", async () => {
+      mockPost.mockResolvedValue({ data: { created: 0, considered: 0, ranked: 0 } });
+      renderPage();
+      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
+      expect(await screen.findByRole("status")).toHaveTextContent("No unmapped codes seen 10+ times");
+    });
+
+    it("shows a proposal with no destination yet in its domain's tab", async () => {
+      // These have a blank destination vocabulary, so matching the tab on that
+      // alone put them in no tab at all — and they are the rows that most need
+      // a curator.
+      renderPage([{
+        ...proposedRow,
+        source_code: "99999-9",
+        destination_vocabulary_id: "",
+        destination_concept_id: null as unknown as number,
+        domain_id: "Measurement",
+      }]);
+      expect(await screen.findByText("99999-9", { selector: "td" })).toBeInTheDocument();
+    });
+  });
 });
