@@ -334,29 +334,39 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
 
     Every proposal lands as ``proposed`` with ``origin='import'`` -- a machine
     guessed it, and the queue says so, which is the difference between a
-    suggestion and a decision. Where no candidate is convincing the proposal is
-    still created with a minted HK-* destination, because the code is real and
-    the curator needs to see it; the note records that nothing matched.
+    suggestion and a decision. Where no candidate is convincing, the proposal
+    deliberately has no destination. Minting an HK-* concept named only after
+    the source code would create a fake destination with no clinical meaning.
 
     Returns a list of result dicts, one per source value considered.
     """
-    from omop_core.services.regimen_resolution import _get_or_create_quarantine_concept, _slug
-
     target = _QUARANTINE_TARGETS.get(omop_table)
     if target is None:
         raise ValueError(f'No quarantine vocabulary for table {omop_table!r}.')
-    hk_vocabulary, domain_id, concept_class_id, slug_prefix = target
+    _hk_vocabulary, domain_id, _concept_class_id, _slug_prefix = target
 
     results = []
     for source_value, source_vocabulary_id, occurrences in unmapped_source_values(
         omop_table, min_occurrences=min_occurrences, limit=limit,
     ):
-        candidates = lexical_candidates(source_value, domain_id)
-        chosen, note = rank_candidates(source_value, candidates)
+        # If the incoming code's vocabulary is loaded, its own concept name is
+        # evidence supplied by the source system, not an inference from code
+        # punctuation. It makes ranking a code such as ``85319-5`` meaningful
+        # without pretending the code itself is a display name.
+        source_concept = Concept.objects.filter(
+            vocabulary_id=source_vocabulary_id,
+            concept_code__iexact=source_value,
+        ).first() if source_vocabulary_id else None
+        source_description = source_concept.concept_name if source_concept else ''
+        candidates = lexical_candidates(source_description or source_value, domain_id)
+        chosen, note = rank_candidates(
+            source_value, candidates, source_description=source_description,
+        )
 
         entry = {
             'source_code': source_value,
             'source_vocabulary_id': source_vocabulary_id,
+            'source_code_description': source_description,
             'occurrences': occurrences,
             'suggested': chosen,
             'note': note,
@@ -366,31 +376,16 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             results.append(entry)
             continue
 
-        if chosen is not None:
-            concept = Concept.objects.filter(concept_id=chosen['concept_id']).first()
-        else:
-            # No convincing standard concept. Mint, so the fact still carries a
-            # real concept and the code still reaches the queue.
-            concept = _get_or_create_quarantine_concept(
-                vocabulary_id=hk_vocabulary,
-                domain_id=domain_id,
-                concept_class_id=concept_class_id,
-                concept_code=_slug(source_value, slug_prefix),
-                concept_name=source_value,
-            )
-        if concept is None:
-            entry['created'] = False
-            results.append(entry)
-            continue
+        concept = Concept.objects.filter(concept_id=chosen['concept_id']).first() if chosen else None
 
         mapping, created = SourceCodeConceptMapping.objects.get_or_create(
             source_vocabulary_id=source_vocabulary_id,
             source_code=source_value[:SOURCE_CODE_MAX],
             defaults={
                 'domain_id': domain_id,
-                'source_code_description': source_value[:255],
+                'source_code_description': source_description[:255],
                 'target_concept': concept,
-                'destination_vocabulary_id': concept.vocabulary_id or '',
+                'destination_vocabulary_id': concept.vocabulary_id if concept else '',
                 'omop_table': omop_table,
                 'status': 'proposed',
                 'origin': 'import',
