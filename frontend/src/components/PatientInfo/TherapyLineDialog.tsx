@@ -82,27 +82,64 @@ export default function TherapyLineDialog({
   // Key on the computed round (3 values), not the raw lineNumber, so typing "12"
   // does not fire two calls — only a round change triggers a refetch.
   const round = lineToRound(Number(lineNumber) || 1);
+  // Track whether the initial regimen has been restored so we only do it once.
+  const initialRegimenRestored = useRef(false);
+
+  /** Restore the existing regimen when editing. Separated so the catch path can
+   *  also call it — a network error should not silently blank the regimen. */
+  const restoreLineRegimen = useCallback((regimens: TherapyRegimen[]) => {
+    if (!line || initialRegimenRestored.current) return;
+    initialRegimenRestored.current = true;
+    const cid = line.regimen_concept_id;
+    const name = line.regimen;
+    const match = cid
+      ? regimens.find((reg) => reg.concept_id === cid)
+      : name
+        ? regimens.find((reg) => reg.title === name)
+        : null;
+    if (match) {
+      // Directly set state rather than calling selectRegimen() — the drug list
+      // is already populated from the existing line; we don't want to overwrite it.
+      setSelectedRegimen(match);
+    } else if (name || cid) {
+      // Regimen exists but isn't in this disease+round list — show it as a
+      // synthetic entry so the clinician sees the current value and can clear it.
+      // concept_id is preserved so the submit payload does not silently erase it.
+      setSelectedRegimen({ code: '__current__', title: name ?? '', concept_id: cid ?? null });
+    }
+  }, [line]);
 
   const loadAvailableRegimens = useCallback(async (disease: string, r: string) => {
-    // Clear any previously selected regimen when the round changes so the
-    // clinician must re-select from the updated list.
-    setSelectedRegimen(null);
+    // Only clear a previously-selected regimen when the round changes after
+    // the initial restore has already run. Avoids a flash-of-null on first load.
+    if (initialRegimenRestored.current) {
+      setSelectedRegimen(null);
+    }
     setLoadingAvailable(true);
     try {
-      setAvailableRegimens(await listTherapyRegimens(disease, r));
+      const regimens = await listTherapyRegimens(disease, r);
+      setAvailableRegimens(regimens);
+      restoreLineRegimen(regimens);
     } catch {
       setAvailableRegimens([]);
+      // Still restore on error so the clinician sees the current regimen value.
+      restoreLineRegimen([]);
     } finally {
       setLoadingAvailable(false);
     }
-  }, []);
+  }, [restoreLineRegimen]);
 
   useEffect(() => {
-    if (!diseaseCode) return;
     (async () => {
+      if (!diseaseCode) {
+        // No disease code — still restore the regimen if editing.
+        await Promise.resolve();
+        restoreLineRegimen([]);
+        return;
+      }
       await loadAvailableRegimens(diseaseCode, round);
     })();
-  }, [diseaseCode, round, loadAvailableRegimens]);
+  }, [diseaseCode, round, loadAvailableRegimens, restoreLineRegimen]);
 
   const doRegimenSearch = useCallback(async (q: string) => {
     if (q.trim().length < 2) {
@@ -212,7 +249,9 @@ export default function TherapyLineDialog({
         start_date: startDate || null,
         end_date: endDate || null,
         outcome: outcome || null,
-        regimen_concept_id: selectedRegimen?.concept_id ?? null,
+        // Preserve the original concept_id when the clinician hasn't changed the
+        // regimen — a no-op save must not silently erase a stored concept.
+        regimen_concept_id: selectedRegimen?.concept_id ?? line?.regimen_concept_id ?? null,
         drugs: drugs.map((d) => ({
           concept_id: d.concept_id,
           source_value: (d.source_value || d.concept_name).slice(0, 50),
