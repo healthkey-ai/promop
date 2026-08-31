@@ -82,6 +82,8 @@ export default function TherapyLineDialog({
   // Key on the computed round (3 values), not the raw lineNumber, so typing "12"
   // does not fire two calls — only a round change triggers a refetch.
   const round = lineToRound(Number(lineNumber) || 1);
+  // Track whether the initial regimen has been restored so we only do it once.
+  const initialRegimenRestored = useRef(false);
 
   const loadAvailableRegimens = useCallback(async (disease: string, r: string) => {
     // Clear any previously selected regimen when the round changes so the
@@ -89,20 +91,52 @@ export default function TherapyLineDialog({
     setSelectedRegimen(null);
     setLoadingAvailable(true);
     try {
-      setAvailableRegimens(await listTherapyRegimens(disease, r));
+      const regimens = await listTherapyRegimens(disease, r);
+      setAvailableRegimens(regimens);
+
+      // When editing, pre-select the line's existing regimen if it appears in the
+      // available list. Match by concept_id first (reliable), fall back to title.
+      if (line && !initialRegimenRestored.current) {
+        initialRegimenRestored.current = true;
+        const cid = line.regimen_concept_id;
+        const name = line.regimen;
+        const match = cid
+          ? regimens.find((reg) => reg.concept_id === cid)
+          : name
+            ? regimens.find((reg) => reg.title === name)
+            : null;
+        if (match) {
+          setSelectedRegimen(match);
+        } else if (name) {
+          // Regimen exists but isn't in this disease+round list — show it as a
+          // synthetic entry so the clinician sees the current value and can clear it.
+          setSelectedRegimen({ code: '', title: name, concept_id: cid ?? null });
+        }
+      }
     } catch {
       setAvailableRegimens([]);
     } finally {
       setLoadingAvailable(false);
     }
-  }, []);
+  }, [line]);
 
   useEffect(() => {
-    if (!diseaseCode) return;
+    if (!diseaseCode) {
+      // No disease code — still restore the regimen if editing.
+      if (line && !initialRegimenRestored.current && (line.regimen || line.regimen_concept_id)) {
+        initialRegimenRestored.current = true;
+        setSelectedRegimen({
+          code: '',
+          title: line.regimen ?? '',
+          concept_id: line.regimen_concept_id ?? null,
+        });
+      }
+      return;
+    }
     (async () => {
       await loadAvailableRegimens(diseaseCode, round);
     })();
-  }, [diseaseCode, round, loadAvailableRegimens]);
+  }, [diseaseCode, round, loadAvailableRegimens, line]);
 
   const doRegimenSearch = useCallback(async (q: string) => {
     if (q.trim().length < 2) {

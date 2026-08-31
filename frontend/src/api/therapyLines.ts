@@ -50,6 +50,7 @@ export interface EditableTherapyLine {
   end_date?: string | null;
   outcome?: string | null;
   regimen?: string | null;
+  regimen_concept_id?: number | null;
   drugs?: Array<DrugConcept & { source_value?: string | null }>;
 }
 
