@@ -30,7 +30,7 @@ import logging
 
 from django.conf import settings
 from django.contrib.postgres.search import TrigramSimilarity
-from django.db.models import Count, Max
+from django.db.models import Case, CharField, Count, F, Max, Q, Value, When
 from django.db.models.functions import Upper
 
 from omop_core.models import Concept, ConceptSynonym, SourceCodeConceptMapping
@@ -69,19 +69,36 @@ def unmapped_source_values(omop_table, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                            limit=None):
     """Source values at concept 0 that nobody has proposed a mapping for.
 
+    A source value is identified by both its text and source vocabulary.  The
+    same text is valid in multiple code systems, and combining them would both
+    lose FHIR provenance and create a mapping that could re-point the wrong
+    facts.  ``''`` is reserved for genuinely uncoded rows.
+
     Ordered by how often they occur, because that is the order a curator should
     meet them in: the code seen 400 times is worth more of their attention than
     the one seen once.
     """
     model, concept_col, source_col = CLINICAL_TABLES[omop_table]
+    source_concept_col = source_col.replace('_source_value', '_source_concept_id')
+    source_vocabulary = Case(
+        When(
+            Q(**{f'{source_concept_col}__isnull': True})
+            | Q(**{source_concept_col: NO_MATCHING_CONCEPT_ID}),
+            then=Value(''),
+        ),
+        default=F(f'{source_concept_col}__vocabulary_id'),
+        output_field=CharField(),
+    )
 
     # Rejected counts as decided. Excluding it here put the code back at the
     # front of the queue on every run -- it sorts by occurrence -- where it
     # spent a model call and created nothing, and the caller reported
     # "no unmapped codes" because nothing was created.
     already = {
-        code.upper()
-        for code in SourceCodeConceptMapping.objects.values_list('source_code', flat=True)
+        ((vocabulary_id or ''), code.upper())
+        for vocabulary_id, code in SourceCodeConceptMapping.objects.values_list(
+            'source_vocabulary_id', 'source_code',
+        )
     }
 
     rows = (
@@ -89,18 +106,20 @@ def unmapped_source_values(omop_table, min_occurrences=DEFAULT_MIN_OCCURRENCES,
         .filter(**{concept_col: NO_MATCHING_CONCEPT_ID})
         .exclude(**{f'{source_col}__isnull': True})
         .exclude(**{source_col: ''})
-        .values(source_col)
+        .annotate(source_vocabulary_id=source_vocabulary)
+        .values(source_col, 'source_vocabulary_id')
         .annotate(occurrences=Count(model._meta.pk.name))
         .filter(occurrences__gte=min_occurrences)
-        .order_by('-occurrences', source_col)
+        .order_by('-occurrences', source_col, 'source_vocabulary_id')
     )
 
     out = []
     for row in rows.iterator():
         value = row[source_col]
-        if value.upper() in already:
+        source_vocabulary_id = row['source_vocabulary_id'] or ''
+        if (source_vocabulary_id, value.upper()) in already:
             continue
-        out.append((value, row['occurrences']))
+        out.append((value, source_vocabulary_id, row['occurrences']))
         if limit and len(out) >= limit:
             break
     return out
@@ -329,7 +348,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     hk_vocabulary, domain_id, concept_class_id, slug_prefix = target
 
     results = []
-    for source_value, occurrences in unmapped_source_values(
+    for source_value, source_vocabulary_id, occurrences in unmapped_source_values(
         omop_table, min_occurrences=min_occurrences, limit=limit,
     ):
         candidates = lexical_candidates(source_value, domain_id)
@@ -337,6 +356,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
 
         entry = {
             'source_code': source_value,
+            'source_vocabulary_id': source_vocabulary_id,
             'occurrences': occurrences,
             'suggested': chosen,
             'note': note,
@@ -364,7 +384,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             continue
 
         mapping, created = SourceCodeConceptMapping.objects.get_or_create(
-            source_vocabulary_id='',
+            source_vocabulary_id=source_vocabulary_id,
             source_code=source_value[:SOURCE_CODE_MAX],
             defaults={
                 'domain_id': domain_id,
