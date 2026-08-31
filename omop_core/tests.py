@@ -6534,11 +6534,12 @@ class RepointResolvableZerosCommandTest(_AllowsDuplicateConceptCodes):
             concept_code='WRONG-846', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
         )
 
-    def _measurement(self, pk, source_value, value):
+    def _measurement(self, pk, source_value, value, source_concept_id=None):
         return Measurement.objects.create(
             measurement_id=pk, person=self.person, measurement_concept_id=0,
             measurement_date=date(2024, 1, 1), measurement_type_concept_id=32817,
-            measurement_source_value=source_value, value_as_number=value,
+            measurement_source_value=source_value, measurement_source_concept_id=source_concept_id,
+            value_as_number=value,
         )
 
     def test_apply_moves_all_distinct_same_day_measurements_without_deleting(self):
@@ -6572,8 +6573,24 @@ class RepointResolvableZerosCommandTest(_AllowsDuplicateConceptCodes):
 
         self.assertEqual(Measurement.objects.get(measurement_id=84605).measurement_concept_id, 0)
 
-    def test_approved_mapping_with_a_source_system_outranks_direct_lookup(self):
+    def test_approved_mapping_requires_matching_source_system_provenance(self):
         from omop_core.models import SourceCodeConceptMapping
+        icd10cm, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='ICD10CM', defaults={'vocabulary_name': 'ICD10CM', 'vocabulary_concept_id': 0},
+        )
+        loinc, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC', defaults={'vocabulary_name': 'LOINC', 'vocabulary_concept_id': 0},
+        )
+        icd10cm_source = Concept.objects.create(
+            concept_id=8461006, concept_name='ICD-10-CM source code', domain=self.measurement_domain,
+            vocabulary=icd10cm, concept_class=self.concept_class, standard_concept=None,
+            concept_code='MAP-846', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        loinc_source = Concept.objects.create(
+            concept_id=8461005, concept_name='LOINC source code', domain=self.measurement_domain,
+            vocabulary=loinc, concept_class=self.concept_class, standard_concept=None,
+            concept_code='MAP-846', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
         direct = Concept.objects.create(
             concept_id=8461003, concept_name='Direct measurement', domain=self.measurement_domain,
             vocabulary=self.vocab, concept_class=self.concept_class, standard_concept='S',
@@ -6584,8 +6601,12 @@ class RepointResolvableZerosCommandTest(_AllowsDuplicateConceptCodes):
             destination_vocabulary_id=self.vocab.vocabulary_id, omop_table='measurement', status='approved',
         )
         self._measurement(84604, 'MAP-846', 1)
+        self._measurement(84606, 'MAP-846', 2, loinc_source.concept_id)
+        self._measurement(84607, 'MAP-846', 3, icd10cm_source.concept_id)
 
         call_command('repoint_resolvable_zeros', '--apply', '--table', 'measurement', verbosity=0)
 
-        self.assertEqual(Measurement.objects.get(measurement_id=84604).measurement_concept_id, self.measurement_target.concept_id)
+        self.assertEqual(Measurement.objects.get(measurement_id=84604).measurement_concept_id, 0)
+        self.assertEqual(Measurement.objects.get(measurement_id=84606).measurement_concept_id, self.measurement_target.concept_id)
+        self.assertEqual(Measurement.objects.get(measurement_id=84607).measurement_concept_id, 0)
         self.assertNotEqual(self.measurement_target.concept_id, direct.concept_id)

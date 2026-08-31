@@ -1,8 +1,8 @@
 """Safely re-point concept-0 clinical rows whose source value is unambiguous.
 
 This repairs facts written before their vocabulary was loaded.  It is more
-conservative than ingest: a historical row does not retain enough provenance to
-guess between colliding code systems, so ambiguity is reported and left at 0.
+conservative than ingest: some historical rows lack source-system provenance,
+so it never guesses between colliding code systems and leaves ambiguity at 0.
 It never deletes or collapses rows; a bulk repair must not trade an unresolved
 fact for a lost fact.
 """
@@ -34,7 +34,7 @@ def _valid_destination(concept, expected_domain):
     return resolved
 
 
-def resolve_historical_value(source_value, table):
+def resolve_historical_value(source_value, table, source_vocabulary_id=''):
     """Return (concept, reason), never selecting a cross-domain collision.
 
     An approved mapping wins, but only if all equally matching approved mappings
@@ -44,6 +44,7 @@ def resolve_historical_value(source_value, table):
     expected_domain = _QUARANTINE_TARGETS[table][1]
     mappings = SourceCodeConceptMapping.objects.filter(
         source_code__iexact=source_value,
+        source_vocabulary_id=source_vocabulary_id or '',
         status='approved',
         omop_table=table,
         target_concept__isnull=False,
@@ -53,9 +54,9 @@ def resolve_historical_value(source_value, table):
         _valid_destination(mapping.target_concept, expected_domain)
         for mapping in mappings
     ]
-    # Historical rows retain only source text, not the system that emitted it.
-    # One malformed sibling mapping therefore makes the text ambiguous too;
-    # do not let a different, safe sibling silently win.
+    # A nonblank mapping is considered only for rows with matching source
+    # provenance.  Within that system, one malformed sibling mapping makes the
+    # code ambiguous; do not let a different, safe sibling silently win.
     if mapping_exists and any(candidate is None for candidate in mapped_destinations):
         return None, 'unsafe approved mappings'
     mapped = {candidate.concept_id for candidate in mapped_destinations if candidate is not None}
@@ -70,6 +71,8 @@ def resolve_historical_value(source_value, table):
         return None, 'no safe approved mapping'
 
     direct = Concept.objects.filter(concept_code__iexact=source_value)
+    if source_vocabulary_id:
+        direct = direct.filter(vocabulary_id=source_vocabulary_id)
     resolved = {
         candidate.concept_id
         for concept in direct.iterator()
@@ -105,26 +108,35 @@ class Command(BaseCommand):
         totals = Counter()
         for table in tables:
             model, concept_col, source_col = CLINICAL_TABLES[table]
+            source_concept_col = source_col.replace('_source_value', '_source_concept_id')
             groups = (
                 model.objects.filter(**{concept_col: NO_MATCHING_CONCEPT_ID})
                 .exclude(**{f'{source_col}__isnull': True})
                 .exclude(**{source_col: ''})
-                .values(source_col).annotate(rows=Count('pk')).order_by(source_col)
+                .values(source_col, source_concept_col, f'{source_concept_col}__vocabulary_id')
+                .annotate(rows=Count('pk')).order_by(source_col, source_concept_col)
             )
             if limit is not None:
                 groups = groups[:limit]
             self.stdout.write(f'\n{table}:')
             for group in groups.iterator() if limit is None else groups:
                 source_value, count = group[source_col], group['rows']
+                source_concept_id = group[source_concept_col]
+                source_vocabulary_id = (
+                    group[f'{source_concept_col}__vocabulary_id']
+                    if source_concept_id not in (None, NO_MATCHING_CONCEPT_ID)
+                    else ''
+                ) or ''
                 totals['values_seen'] += 1
-                concept, reason = resolve_historical_value(source_value, table)
+                concept, reason = resolve_historical_value(source_value, table, source_vocabulary_id)
+                provenance = source_vocabulary_id or 'uncoded'
                 if concept is None:
                     totals[f'skipped_{reason}'] += 1
-                    self.stdout.write(f'  skip {source_value!r} ({count} rows): {reason}')
+                    self.stdout.write(f'  skip {source_value!r} [{provenance}] ({count} rows): {reason}')
                     continue
                 if not apply_changes:
                     totals['would_update'] += count
-                    self.stdout.write(f'  would update {count} {source_value!r} -> {concept.concept_id} ({reason})')
+                    self.stdout.write(f'  would update {count} {source_value!r} [{provenance}] -> {concept.concept_id} ({reason})')
                     continue
 
                 # Capture and lock exactly the rows this invocation owns.  A
@@ -132,7 +144,8 @@ class Command(BaseCommand):
                 # being changed without marking its PatientRecord stale.
                 with transaction.atomic():
                     locked = list(model.objects.select_for_update().filter(
-                        **{concept_col: NO_MATCHING_CONCEPT_ID, source_col: source_value},
+                        **{concept_col: NO_MATCHING_CONCEPT_ID, source_col: source_value,
+                           source_concept_col: source_concept_id},
                     ).values_list('pk', 'person_id'))
                     pks = [pk for pk, _person_id in locked]
                     person_ids = {person_id for _pk, person_id in locked}
@@ -144,7 +157,7 @@ class Command(BaseCommand):
                     )
                 totals['updated'] += len(pks)
                 totals['patients_marked_stale'] += len(person_ids)
-                self.stdout.write(f'  updated {len(pks)} {source_value!r} -> {concept.concept_id} ({reason})')
+                self.stdout.write(f'  updated {len(pks)} {source_value!r} [{provenance}] -> {concept.concept_id} ({reason})')
 
         verb = 'Updated' if apply_changes else 'Would update'
         self.stdout.write(self.style.SUCCESS(
