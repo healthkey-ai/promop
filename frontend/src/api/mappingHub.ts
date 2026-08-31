@@ -28,13 +28,12 @@ export interface TherapyClassItem {
 
 export interface DiseaseTherapyRegimenItem {
   id: number;
-  disease_concept_id: number;
-  disease_name?: string;
+  disease_code: string;
+  disease_title?: string;
   round_code: string;
   round_title?: string;
   regimen_code: string;
   regimen_title?: string;
-  regimen_concept_id?: number | null;
 }
 
 export async function fetchMappingStats(): Promise<MappingStats> {
@@ -120,13 +119,13 @@ export async function createClass(data: { code: string; title: string; concept_i
 
 // --- Disease-Therapy-Regimen ---
 
-export async function fetchDiseaseTherapyRegimens(params?: { disease?: number; round?: string }): Promise<DiseaseTherapyRegimenItem[]> {
+export async function fetchDiseaseTherapyRegimens(params?: { disease?: string; round?: string }): Promise<DiseaseTherapyRegimenItem[]> {
   const resp = await api.get('/v1/disease-therapy-regimens/', { params });
   return resp.data as DiseaseTherapyRegimenItem[];
 }
 
 export async function addDiseaseTherapyRegimen(data: {
-  disease_concept_id: number;
+  disease_code: string;
   round_code: string;
   regimen_code: string;
 }): Promise<DiseaseTherapyRegimenItem> {

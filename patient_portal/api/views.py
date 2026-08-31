@@ -13,7 +13,7 @@ from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
 from django.db import IntegrityError, models, transaction
-from django.db.models import Q, F
+from django.db.models import Q, F, Prefetch
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -7301,6 +7301,22 @@ def vocabulary_list(request, model_name):
 # Therapy reference endpoints
 # =============================================================================
 
+def _require_mapping_admin(request):
+    """Return a 403 Response if the user is not staff or org_admin, else None."""
+    if not (request.user.is_staff or getattr(request.user, 'is_org_admin', False)):
+        return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+    return None
+
+
+def _validate_concept_id(raw):
+    """Coerce concept_id to int or None. Returns (value, error_response)."""
+    if raw is None or raw == '':
+        return None, None
+    try:
+        return int(raw), None
+    except (TypeError, ValueError):
+        return None, Response({'detail': 'concept_id must be an integer'}, status=status.HTTP_400_BAD_REQUEST)
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def therapy_regimen_list(request):
@@ -7310,9 +7326,14 @@ def therapy_regimen_list(request):
     POST /api/v1/therapy-regimens/  {code, title, concept_id?}
     """
     if request.method == 'POST':
+        denied = _require_mapping_admin(request)
+        if denied:
+            return denied
         code = request.data.get('code', '').strip()
         title = request.data.get('title', '').strip()
-        concept_id = request.data.get('concept_id')
+        concept_id, err = _validate_concept_id(request.data.get('concept_id'))
+        if err:
+            return err
         if not code or not title:
             return Response({'detail': 'code and title are required'}, status=status.HTTP_400_BAD_REQUEST)
         if TherapyRegimen.objects.filter(code=code).exists():
@@ -7356,6 +7377,11 @@ def therapy_regimen_detail(request, code):
     except TherapyRegimen.DoesNotExist:
         return Response({'error': f'Regimen not found: {code}'}, status=status.HTTP_404_NOT_FOUND)
 
+    if request.method in ('DELETE', 'PATCH'):
+        denied = _require_mapping_admin(request)
+        if denied:
+            return denied
+
     if request.method == 'DELETE':
         regimen.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -7364,24 +7390,29 @@ def therapy_regimen_detail(request, code):
         if 'title' in request.data:
             regimen.title = request.data['title']
         if 'concept_id' in request.data:
-            regimen.concept_id = request.data['concept_id']
+            concept_id, err = _validate_concept_id(request.data['concept_id'])
+            if err:
+                return err
+            regimen.concept_id = concept_id
         regimen.save()
         # Fall through to return the updated detail
 
     component_links = TherapyRegimenComponent.objects.filter(
         regimen=regimen,
-    ).select_related('component', 'component__concept')
+    ).select_related('component', 'component__concept').prefetch_related(
+        Prefetch(
+            'component__therapycomponentclasslink_set',
+            queryset=TherapyComponentClassLink.objects.select_related('therapy_class'),
+        )
+    )
 
     components = []
     for link in component_links:
         comp = link.component
         concept = comp.concept
-        class_links = TherapyComponentClassLink.objects.filter(
-            component=comp,
-        ).select_related('therapy_class')
         classes = [
             {'code': cl.therapy_class.code, 'title': cl.therapy_class.title, 'concept_id': cl.therapy_class.concept_id}
-            for cl in class_links
+            for cl in comp.therapycomponentclasslink_set.all()
         ]
         components.append({
             'code': comp.code,
@@ -7410,9 +7441,14 @@ def therapy_component_list(request):
     POST /api/v1/therapy-components/  {code, title, concept_id?}
     """
     if request.method == 'POST':
+        denied = _require_mapping_admin(request)
+        if denied:
+            return denied
         code = request.data.get('code', '').strip()
         title = request.data.get('title', '').strip()
-        concept_id = request.data.get('concept_id')
+        concept_id, err = _validate_concept_id(request.data.get('concept_id'))
+        if err:
+            return err
         if not code or not title:
             return Response({'detail': 'code and title are required'}, status=status.HTTP_400_BAD_REQUEST)
         if TherapyComponent.objects.filter(code=code).exists():
@@ -7420,7 +7456,24 @@ def therapy_component_list(request):
         comp = TherapyComponent.objects.create(code=code, title=title, concept_id=concept_id)
         return Response({'code': comp.code, 'title': comp.title, 'concept_id': comp.concept_id}, status=status.HTTP_201_CREATED)
 
-    items = list(TherapyComponent.objects.values('code', 'title', 'concept_id').order_by('title'))
+    qs = TherapyComponent.objects.all().order_by('title')
+    search = request.query_params.get('search', '').strip()
+    if search:
+        qs = qs.filter(title__icontains=search)
+
+    qs = qs.prefetch_related(
+        Prefetch(
+            'therapycomponentclasslink_set',
+            queryset=TherapyComponentClassLink.objects.select_related('therapy_class'),
+        )
+    )
+    items = []
+    for comp in qs:
+        classes = [
+            {'code': link.therapy_class.code, 'title': link.therapy_class.title, 'concept_id': link.therapy_class.concept_id}
+            for link in comp.therapycomponentclasslink_set.all()
+        ]
+        items.append({'code': comp.code, 'title': comp.title, 'concept_id': comp.concept_id, 'classes': classes})
     return Response(items)
 
 
@@ -7433,9 +7486,14 @@ def therapy_class_list(request):
     POST /api/v1/therapy-classes/  {code, title, concept_id?}
     """
     if request.method == 'POST':
+        denied = _require_mapping_admin(request)
+        if denied:
+            return denied
         code = request.data.get('code', '').strip()
         title = request.data.get('title', '').strip()
-        concept_id = request.data.get('concept_id')
+        concept_id, err = _validate_concept_id(request.data.get('concept_id'))
+        if err:
+            return err
         if not code or not title:
             return Response({'detail': 'code and title are required'}, status=status.HTTP_400_BAD_REQUEST)
         if TherapyClass.objects.filter(code=code).exists():
@@ -7464,13 +7522,14 @@ def mapping_stats(request):
     field_approved = FieldConceptMapping.objects.filter(status='approved').count()
     field_proposed = FieldConceptMapping.objects.filter(status='proposed').count()
     field_total = field_approved + field_proposed
+    field_unmapped = max(0, field_total - field_approved - field_proposed)
 
     code_approved = SourceCodeConceptMapping.objects.filter(status='approved').count()
     code_proposed = SourceCodeConceptMapping.objects.filter(status='proposed').count()
     code_total = code_approved + code_proposed
 
     return Response({
-        'field_mappings': {'total': field_total, 'approved': field_approved, 'proposed': field_proposed},
+        'field_mappings': {'total': field_total, 'approved': field_approved, 'proposed': field_proposed, 'unmapped': field_unmapped},
         'code_mappings': {'total': code_total, 'approved': code_approved, 'proposed': code_proposed},
         'therapy': {
             'regimens': TherapyRegimen.objects.count(),
@@ -7489,6 +7548,9 @@ def therapy_regimen_components(request, regimen_code, component_code=None):
     POST /api/v1/therapy-regimens/<regimen_code>/components/   {component_code}
     DELETE /api/v1/therapy-regimens/<regimen_code>/components/<component_code>/
     """
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
     try:
         regimen = TherapyRegimen.objects.get(code=regimen_code)
     except TherapyRegimen.DoesNotExist:
@@ -7524,6 +7586,9 @@ def therapy_component_classes(request, component_code, class_code=None):
     POST /api/v1/therapy-components/<component_code>/classes/   {class_code}
     DELETE /api/v1/therapy-components/<component_code>/classes/<class_code>/
     """
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
     try:
         component = TherapyComponent.objects.get(code=component_code)
     except TherapyComponent.DoesNotExist:
@@ -7573,6 +7638,9 @@ def disease_therapy_regimen_list(request):
         return Response(items)
 
     # POST
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
     disease_code = request.data.get('disease_code', '').strip()
     round_code = request.data.get('round_code', '').strip()
     regimen_code = request.data.get('regimen_code', '').strip()
@@ -7616,6 +7684,9 @@ def disease_therapy_regimen_detail(request, pk):
 
     DELETE /api/v1/disease-therapy-regimens/<pk>/
     """
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
     try:
         obj = DiseaseTherapyRegimen.objects.get(pk=pk)
     except DiseaseTherapyRegimen.DoesNotExist:

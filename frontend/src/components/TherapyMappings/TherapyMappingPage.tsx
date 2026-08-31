@@ -14,6 +14,15 @@ import {
 
 type Tab = 'regimen-component' | 'component-class' | 'disease-regimen';
 
+function useDebouncedValue(value: string, delay = 300): string {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
+
 // ---------------------------------------------------------------------------
 // Regimen-Component Tab
 // ---------------------------------------------------------------------------
@@ -21,6 +30,7 @@ type Tab = 'regimen-component' | 'component-class' | 'disease-regimen';
 function RegimenComponentTab() {
   const [regimens, setRegimens] = useState<TherapyRegimenItem[]>([]);
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [detail, setDetail] = useState<TherapyRegimenItem | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -31,12 +41,12 @@ function RegimenComponentTab() {
 
   const loadRegimens = useCallback(async () => {
     try {
-      const data = await fetchRegimens(search || undefined);
+      const data = await fetchRegimens(debouncedSearch || undefined);
       setRegimens(data);
     } catch {
       setError('Failed to load regimens.');
     }
-  }, [search]);
+  }, [debouncedSearch]);
 
   useEffect(() => {
     (async () => {
@@ -253,6 +263,7 @@ function ComponentClassTab() {
   const [components, setComponents] = useState<TherapyComponentItem[]>([]);
   const [allClasses, setAllClasses] = useState<TherapyClassItem[]>([]);
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search);
   const [showAddComponent, setShowAddComponent] = useState(false);
   const [showAddClass, setShowAddClass] = useState(false);
   const [newComponent, setNewComponent] = useState({ code: '', title: '', concept_id: '' });
@@ -262,7 +273,7 @@ function ComponentClassTab() {
   const loadData = useCallback(async () => {
     try {
       const [comps, cls] = await Promise.all([
-        fetchComponents(search || undefined),
+        fetchComponents(debouncedSearch || undefined),
         fetchClasses(),
       ]);
       setComponents(comps);
@@ -270,7 +281,7 @@ function ComponentClassTab() {
     } catch {
       setError('Failed to load data.');
     }
-  }, [search]);
+  }, [debouncedSearch]);
 
   useEffect(() => {
     (async () => {
@@ -456,21 +467,21 @@ function DiseaseRegimenTab() {
   const [items, setItems] = useState<DiseaseTherapyRegimenItem[]>([]);
   const [regimens, setRegimens] = useState<TherapyRegimenItem[]>([]);
   const [showAdd, setShowAdd] = useState(false);
-  const [newItem, setNewItem] = useState({ disease_concept_id: '', round_code: '', regimen_code: '' });
+  const [newItem, setNewItem] = useState({ disease_code: '', round_code: '', regimen_code: '' });
   const [error, setError] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     try {
       const [dtr, regs] = await Promise.all([
         fetchDiseaseTherapyRegimens(),
-        regimens.length ? Promise.resolve(regimens) : fetchRegimens(),
+        fetchRegimens(),
       ]);
       setItems(dtr);
-      if (!regimens.length) setRegimens(regs);
+      setRegimens(regs);
     } catch {
       setError('Failed to load disease-therapy data.');
     }
-  }, [regimens]);
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -479,14 +490,14 @@ function DiseaseRegimenTab() {
   }, [loadData]);
 
   const handleAdd = useCallback(async () => {
-    if (!newItem.disease_concept_id || !newItem.round_code || !newItem.regimen_code) return;
+    if (!newItem.disease_code || !newItem.round_code || !newItem.regimen_code) return;
     try {
       await addDiseaseTherapyRegimen({
-        disease_concept_id: Number(newItem.disease_concept_id),
+        disease_code: newItem.disease_code,
         round_code: newItem.round_code,
         regimen_code: newItem.regimen_code,
       });
-      setNewItem({ disease_concept_id: '', round_code: '', regimen_code: '' });
+      setNewItem({ disease_code: '', round_code: '', regimen_code: '' });
       setShowAdd(false);
       await loadData();
     } catch {
@@ -524,8 +535,8 @@ function DiseaseRegimenTab() {
       {showAdd && (
         <div className="mb-4 rounded-md border border-border bg-muted/30 p-4 flex items-end gap-3">
           <label className="flex flex-col gap-1 text-sm flex-1">
-            Disease Concept ID
-            <input className="h-8 rounded-md border border-input bg-background px-2 text-sm" value={newItem.disease_concept_id} onChange={e => setNewItem(n => ({ ...n, disease_concept_id: e.target.value }))} placeholder="e.g. 35918372" />
+            Disease Code
+            <input className="h-8 rounded-md border border-input bg-background px-2 text-sm" value={newItem.disease_code} onChange={e => setNewItem(n => ({ ...n, disease_code: e.target.value }))} placeholder="e.g. C3242" />
           </label>
           <label className="flex flex-col gap-1 text-sm flex-1">
             Round Code
@@ -562,16 +573,13 @@ function DiseaseRegimenTab() {
               items.map((item) => (
                 <tr key={item.id} className="border-b border-border last:border-b-0 hover:bg-muted/30">
                   <td className="px-4 py-2">
-                    {item.disease_name ?? `Concept ${item.disease_concept_id}`}
+                    {item.disease_title ?? item.disease_code}
                   </td>
                   <td className="px-4 py-2">
                     {item.round_title ?? item.round_code}
                   </td>
                   <td className="px-4 py-2">
                     {item.regimen_title ?? item.regimen_code}
-                    {item.regimen_concept_id && (
-                      <span className="text-xs text-muted-foreground ml-1">HemOnc:{item.regimen_concept_id}</span>
-                    )}
                   </td>
                   <td className="px-4 py-2">
                     <button
