@@ -253,14 +253,16 @@ describe("CodeMappingPage", () => {
       expect(nameless.map((el) => el.outerHTML)).toEqual([]);
     });
 
-    it("gives every control a tooltip carrying the field's meaning", async () => {
+    it("renders explanatory tooltip content for every dialog control", async () => {
       await openDialog();
       const dialog = screen.getByRole("dialog");
       const controls = Array.from(dialog.querySelectorAll("input, select, textarea"));
-      const untipped = controls.filter((el) => !(el.getAttribute("title") || "").trim());
-      expect(untipped.map((el) => accessibleName(el))).toEqual([]);
-      // And the tooltip is visibly advertised next to the label.
-      expect(within(dialog).getAllByText("ⓘ").length).toBe(controls.length);
+      const helpButtons = within(dialog).getAllByRole("button", { name: "Help" });
+      const tooltips = within(dialog).getAllByRole("tooltip");
+      expect(helpButtons.length).toBe(controls.length);
+      expect(tooltips).toHaveLength(controls.length);
+      expect(tooltips.every((tip) => Boolean(tip.textContent?.trim()))).toBe(true);
+      expect(helpButtons.every((button) => button.getAttribute("aria-describedby"))).toBe(true);
     });
 
     it("labels the source code value field, and never calls it a concept code", async () => {
