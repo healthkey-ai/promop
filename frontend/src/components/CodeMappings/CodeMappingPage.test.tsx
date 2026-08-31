@@ -608,8 +608,14 @@ describe("CodeMappingPage", () => {
       // because the next edit overwrites it.
       renderPage();
       await openApproved("C90.00");
+      // The date renders in the viewer's own timezone, so derive the expected
+      // string rather than hardcoding a UTC slice — a runner west of UTC would
+      // otherwise see the previous day and fail.
+      const when = new Date("2026-08-31T09:14:00Z").toLocaleDateString();
       expect(
-        screen.getByText(/Created by zoe@example.com · approved by ada@example.com on 2026-08-31/),
+        screen.getByText(
+          `Created by zoe@example.com · approved by ada@example.com on ${when} · seen 3 time(s)`,
+        ),
       ).toBeInTheDocument();
     });
 
@@ -622,9 +628,34 @@ describe("CodeMappingPage", () => {
         created_by: "",
       }]);
       await openApproved("IMPORTED");
+      const when = new Date("2026-08-31T09:14:00Z").toLocaleDateString();
       expect(
-        screen.getByText(/Proposed by import \(fhir-sync\) · approved by ada@example.com on 2026-08-31/),
+        screen.getByText(
+          `Proposed by import (fhir-sync) · approved by ada@example.com on ${when} · seen 3 time(s)`,
+        ),
       ).toBeInTheDocument();
+    });
+
+    it("says nothing about approval on a row that is no longer approved", async () => {
+      // Un-approving is one click in the list. A stale stamp had the dialog
+      // assert "approved by ada@" over a proposed row.
+      renderPage([{
+        ...approvedRow, source_code: "UNAPPROVED", status: "proposed" as const,
+      }]);
+      const cell = await screen.findByText("UNAPPROVED", { selector: "td" });
+      fireEvent.click(cell.closest("tr")!);
+      await screen.findByText("Edit Mapping");
+      expect(screen.queryByText(/approved by/)).not.toBeInTheDocument();
+    });
+
+    it("does not render an empty author when created_by is blank", async () => {
+      // created_by is SET_NULL, so a deleted author serializes blank.
+      renderPage([{
+        ...approvedRow, source_code: "NOAUTHOR", origin: "curator", created_by: "",
+      }]);
+      await openApproved("NOAUTHOR");
+      expect(screen.queryByText(/Created by\s*·/)).not.toBeInTheDocument();
+      expect(screen.getByText(/approved by ada@example.com/)).toBeInTheDocument();
     });
 
     it("says nothing about approval on a row approved before reviewers were recorded", async () => {

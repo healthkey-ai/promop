@@ -294,9 +294,17 @@ const byAuthorThenOccurrence = (a: CodeMappingRow, b: CodeMappingRow) => {
  * day a decision was made is what matters, and the server sends UTC.
  */
 function approvalNote(row: CodeMappingRow): string {
+  // Only on an approved row. The stamp is cleared server-side when a mapping is
+  // un-approved, but a client holding an older payload must not assert
+  // "approved by X" over something that is no longer approved.
+  if (row.status !== "approved") return "";
   if (!row.reviewer && !row.reviewed_at) return "";
   const who = row.reviewer ? ` by ${row.reviewer}` : "";
-  const when = row.reviewed_at ? ` on ${row.reviewed_at.slice(0, 10)}` : "";
+  // Rendered in the viewer's own timezone. Slicing the UTC string showed a
+  // curator at UTC-7 approving at 17:00 the following day's date.
+  const when = row.reviewed_at
+    ? ` on ${new Date(row.reviewed_at).toLocaleDateString()}`
+    : "";
   return ` · approved${who}${when}`;
 }
 
@@ -1157,7 +1165,9 @@ export default function CodeMappingPage() {
               </fieldset>
 
               {selectedRow
-                && (selectedRow.origin === "import" || selectedRow.created_by || selectedRow.reviewer) && (
+                && (selectedRow.origin === "import"
+                  || selectedRow.created_by
+                  || approvalNote(selectedRow)) && (
                 <p className="mt-4 rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600">
                   {selectedRow.origin === "import" ? (
                     <>
@@ -1165,7 +1175,9 @@ export default function CodeMappingPage() {
                       {selectedRow.origin_system ? ` (${selectedRow.origin_system})` : ""}
                     </>
                   ) : (
-                    <>Created by {selectedRow.created_by}</>
+                    // created_by is SET_NULL, so a deleted author serializes
+                    // blank -- rendering "Created by " with nothing after it.
+                    selectedRow.created_by ? <>Created by {selectedRow.created_by}</> : null
                   )}
                   {/* Both halves of the provenance: who raised it, and who
                       signed it off. Approval is the only transition that

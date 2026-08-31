@@ -23292,3 +23292,114 @@ class CodeMappingReviewerStampTest(TestCase):
         row = next(r for r in resp.data if r['source_code'] == 'SODIUM')
         self.assertEqual(row['reviewer'], '')
         self.assertIsNone(row['reviewed_at'])
+
+
+class CodeMappingSignOffLifecycleTest(TestCase):
+    """The sign-off records the *live* approval, not an archaeological one.
+
+    Found in review of #852: nothing cleared reviewer/reviewed_at, so
+    un-approving a mapping left the dialog asserting "approved by X" over a
+    proposed row -- and un-approve is a one-click action in the list.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.curator = Identity.objects.create_user(
+            email='signoff_curator@t.com', password='x', is_staff=True)
+        cls.editor = Identity.objects.create_user(
+            email='signoff_editor@t.com', password='x', is_staff=True)
+        cls.domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21})
+        cls.cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0})
+        cls.vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_reference': 'x',
+                      'vocabulary_version': '2.77', 'vocabulary_concept_id': 0})
+
+        def concept(cid, code, name):
+            return Concept.objects.create(
+                concept_id=cid, concept_name=name, domain=cls.domain,
+                vocabulary=cls.vocab, concept_class=cls.cc, standard_concept='S',
+                concept_code=code, valid_start_date=date(1970, 1, 1),
+                valid_end_date=date(2099, 12, 31))
+
+        cls.dest = concept(3046360, '2823-3', 'Potassium')
+        cls.other_dest = concept(3046361, '2951-2', 'Sodium')
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.curator)
+        self.mapping = SourceCodeConceptMapping.objects.create(
+            domain_id='Measurement', source_vocabulary_id='',
+            source_code='POTASSIUM', target_concept=self.dest,
+            destination_vocabulary_id='LOINC', omop_table='measurement',
+            status='proposed', origin='curator', created_by=self.curator,
+        )
+
+    def _patch(self, user=None, **body):
+        if user:
+            self.client.force_authenticate(user=user)
+        return self.client.patch(
+            f'/api/v1/code-mappings/{self.mapping.id}/', body, format='json')
+
+    def test_unapproving_clears_the_sign_off(self):
+        self._patch(status='approved')
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.reviewer_id, self.curator.id)
+
+        self._patch(status='proposed')
+        self.mapping.refresh_from_db()
+        self.assertIsNone(self.mapping.reviewer_id,
+                          'a proposed row still claimed someone approved it')
+        self.assertIsNone(self.mapping.reviewed_at)
+
+    def test_rejecting_clears_the_sign_off(self):
+        self._patch(status='approved')
+        self._patch(status='rejected')
+        self.mapping.refresh_from_db()
+        self.assertIsNone(self.mapping.reviewer_id)
+
+    def test_a_plain_resave_leaves_the_sign_off_alone(self):
+        """A notes fix is not a new decision."""
+        self._patch(status='approved')
+        self.mapping.refresh_from_db()
+        stamped_at = self.mapping.reviewed_at
+
+        self._patch(user=self.editor, notes='tidied')
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.reviewer_id, self.curator.id)
+        self.assertEqual(self.mapping.reviewed_at, stamped_at)
+        self.assertEqual(self.mapping.updated_by_id, self.editor.id)
+
+    def test_repointing_an_approved_mapping_restamps_it(self):
+        """Moving the destination rewrites stored patient rows, so it is a
+        fresh clinical decision and the audit trail must name whoever made it."""
+        self._patch(status='approved')
+        self._patch(user=self.editor, status='approved',
+                    destination_concept_id=self.other_dest.concept_id)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.target_concept_id, self.other_dest.concept_id)
+        self.assertEqual(self.mapping.reviewer_id, self.editor.id,
+                         'the re-point was credited to the wrong person')
+
+    def test_approval_still_leaves_origin_alone(self):
+        self._patch(status='approved')
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.origin, 'curator')
+
+    def test_saving_a_mapping_with_no_destination_does_not_error(self):
+        """A gap row -- a code seen at ingest whose concept is not loaded here
+        -- is a real review-queue state, and dereferencing its null destination
+        used to 500 every save."""
+        gap = SourceCodeConceptMapping.objects.create(
+            domain_id='Measurement', source_vocabulary_id='LOINC',
+            source_code='99999-9', target_concept=None,
+            omop_table='measurement', status='proposed', origin='import',
+        )
+        resp = self.client.patch(f'/api/v1/code-mappings/{gap.id}/',
+                                 {'notes': 'still unloaded'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIsNone(resp.data['destination_concept_id'])

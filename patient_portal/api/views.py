@@ -8266,9 +8266,12 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     if mapping is None or 'source_code_description' in data:
         values['source_code_description'] = str(data.get('source_code_description') or '').strip()
     if mapping is None or 'destination_vocabulary_id' in data or not mapping.destination_vocabulary_id:
+        # concept is None for a gap row -- a code seen at ingest whose concept
+        # is not loaded here. That is a real review-queue state, and
+        # dereferencing it 500'd every save of such a row.
         values['destination_vocabulary_id'] = (
             str(data.get('destination_vocabulary_id') or '').strip()
-            or concept.vocabulary_id or ''
+            or (concept.vocabulary_id if concept else '') or ''
         )
     if omop_table:
         values['omop_table'] = omop_table
@@ -8276,19 +8279,42 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         values['source'] = str(data.get('source') or '').strip()
     if mapping is None or 'status' in data:
         values['status'] = status_value
-    # The sign-off, stamped on the proposed -> approved transition only.
-    # Re-saving an approved mapping (a notes fix, a re-point) must not
-    # reassign it to whoever happened to save last -- that is what
-    # updated_by/updated_at already record, and letting them stand in for
-    # approval is how the only trace of who signed a mapping off got
-    # overwritten by the next edit (#848).
-    if status_value == 'approved' and not was_approved:
+    # The sign-off. It records the *live* approval: who authorised the state
+    # the mapping is in now, not an archaeological first-ever approval.
+    #
+    #   proposed -> approved   stamp
+    #   approved -> anything   clear, because a row that is no longer approved
+    #                          must not keep claiming someone approved it. The
+    #                          list's one-click checkbox un-approves, so a stale
+    #                          stamp would have the dialog assert "approved by
+    #                          X" over a proposed row.
+    #   re-point while approved  re-stamp: moving the destination rewrites
+    #                          stored patient rows, so it is a fresh clinical
+    #                          decision and the person who made it is the one
+    #                          the audit trail should name.
+    #
+    # A plain re-save (a notes fix) changes neither, which is the case
+    # updated_by/updated_at are for.
+    destination_moved = (
+        was_approved
+        and previous_concept_id is not None
+        and concept is not None
+        and previous_concept_id != concept.concept_id
+    )
+    if status_value == 'approved' and (not was_approved or destination_moved):
         values['reviewer'] = user
         values['reviewed_at'] = timezone.now()
+    elif was_approved and status_value != 'approved':
+        values['reviewer'] = None
+        values['reviewed_at'] = None
     if 'notes' in data:
         values['notes'] = str(data.get('notes') or '').strip()
     try:
         if mapping is None:
+            if concept is None:
+                raise serializers.ValidationError({
+                    'destination_concept_id': 'A new mapping needs a destination concept.'
+                })
             mapping = SourceCodeConceptMapping.objects.create(
                 target_concept=concept,
                 created_by=user,
@@ -8323,7 +8349,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # sweeps the old one. Both can apply at once, and their counts are summed
     # so the dialog reports everything it touched.
     repoint = None
-    if status_value == 'approved':
+    if status_value == 'approved' and concept is not None:
         sources = set()
         if not was_approved:
             sources.add(NO_MATCHING_CONCEPT_ID)
