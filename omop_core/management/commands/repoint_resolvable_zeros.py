@@ -40,6 +40,8 @@ import logging
 from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Count
 
+from omop_core.models import resolve_concept_replacement
+
 from omop_core.services.code_mapping import (
     CLINICAL_TABLES,
     NO_MATCHING_CONCEPT_ID,
@@ -193,7 +195,24 @@ class Command(BaseCommand):
         approved = approved_mapping_for('', source_value)
         if approved is not None and normalize_omop_table(approved.omop_table) == table:
             return approved.target_concept
-        return _direct_concept('', source_value)
+
+        concept = _direct_concept('', source_value)
+        if concept is None:
+            return None
+        # Follow the replacement chain. A code can resolve to a concept Athena
+        # has since deprecated: 21000-5 lands on 3015182 "Deprecated Erythrocyte
+        # distribution width", which maps to 3019897. Parking 2,547 rows on the
+        # deprecated one is better than concept 0 and still wrong, and would
+        # need a second repair pass later.
+        replacement, chain = resolve_concept_replacement(concept.concept_id)
+        if replacement is not None and replacement.concept_id != concept.concept_id:
+            logger.info(
+                'Source value %r resolves to deprecated concept %s; following '
+                'replacement chain %s to %s.',
+                source_value, concept.concept_id, chain, replacement.concept_id,
+            )
+            return replacement
+        return concept
 
     def _summarise(self, totals, persons, apply_changes):
         self.stdout.write('')

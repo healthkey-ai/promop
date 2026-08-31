@@ -6286,6 +6286,45 @@ class RepointResolvableZerosCommandTest(_OmopBase):
         row.refresh_from_db()
         self.assertEqual(row.measurement_concept_id, self.creatinine.concept_id)
 
+    def test_deprecated_destination_follows_its_replacement(self):
+        """A code can resolve to a concept Athena has since deprecated.
+
+        LOINC 21000-5 lands on 3015182 "Deprecated Erythrocyte distribution
+        width", which carries a "Concept replaced by" edge to 3019897. Parking 2,547 staging rows on the
+        deprecated one would be better than concept 0 and still wrong, and
+        would need a second repair pass later.
+        """
+        from omop_core.models import (
+            CONCEPT_REPLACED_BY, ConceptRelationship, Relationship,
+        )
+
+        deprecated = _concept(
+            3015182, 'Deprecated Erythrocyte distribution width',
+            self.dom_meas, self.vocab, self.cc, code='21000-5')
+        deprecated.invalid_reason = 'U'
+        deprecated.save(update_fields=['invalid_reason'])
+        live = _concept(
+            3019897, 'Erythrocyte [DistWidth] in Red Blood Cells',
+            self.dom_meas, self.vocab, self.cc, code='788-0')
+        rel, _ = Relationship.objects.get_or_create(
+            relationship_id=CONCEPT_REPLACED_BY,
+            defaults={'relationship_name': CONCEPT_REPLACED_BY, 'is_hierarchical': '0',
+                      'defines_ancestry': '0', 'reverse_relationship_id': 'Concept replaces',
+                      'relationship_concept_id': 0},
+        )
+        ConceptRelationship.objects.create(
+            concept_1=deprecated, concept_2=live, relationship=rel,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+        row = self._measurement(90810, '21000-5')
+        self._run(apply=True, table=['measurement'])
+        row.refresh_from_db()
+        self.assertEqual(
+            row.measurement_concept_id, live.concept_id,
+            'rows were parked on the deprecated concept',
+        )
+
     def test_unresolvable_source_value_is_left_at_concept_zero(self):
         """Free text that Athena does not know is the other command's job."""
         row = self._measurement(90802, 'M-PROTEIN, SERUM')
