@@ -8538,12 +8538,17 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # transition that does, which is a far easier property to reason about.
     status_value = 'proposed' if mapping is None else (requested_status or mapping.status)
 
-    # Workflow enforcement: only staff can approve.
-    if status_value == 'approved' and not _can_approve_mappings(user):
-        raise serializers.ValidationError({
-            'status': 'Only administrators can approve mappings. '
-                      'Analysts and doctors may propose mappings for review.'
-        })
+    # Role enforcement: only staff/org-admin can approve or change an approved mapping.
+    if not _can_approve_mappings(user):
+        if status_value == 'approved':
+            raise serializers.ValidationError({
+                'status': 'Only org admins and staff can approve mappings. '
+                          'Doctors and analysts may propose mappings for review.'
+            })
+        if mapping is not None and mapping.status == 'approved' and status_value != 'approved':
+            raise serializers.ValidationError({
+                'status': 'Only org admins and staff can change the status of an approved mapping.'
+            })
 
     omop_table = normalize_omop_table(data.get('omop_table') or data.get('destination_omop_table'))
     if omop_table and not mapping_table_is_writable(omop_table):
@@ -8785,9 +8790,15 @@ def code_mapping_detail(request, mapping_id):
         return Response({'detail': 'Mapping not found.'}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method == 'DELETE':
+        if mapping.status == 'approved' and not _can_approve_mappings(request.user):
+            return Response(
+                {'detail': 'Only org admins and staff can delete approved mappings.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         mapping.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    # PATCH — approval check is inside _upsert_source_code_mapping.
     data = request.data
     concept = (
         _get_destination_concept(data)
@@ -9026,13 +9037,15 @@ def field_mapping_list(request):
             descriptors = [d for d in descriptors if q in d['field_name'].lower()]
         return Response(descriptors)
 
-    # POST — create a mapping.  Non-staff users cannot create as approved.
-    data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
-    if data.get('status') == 'approved' and not _can_approve_mappings(request.user):
-        data['status'] = 'proposed'
+    # POST — create a mapping.  Non-admin users cannot create as approved.
+    if request.data.get('status') == 'approved' and not _can_approve_mappings(request.user):
+        return Response(
+            {'detail': 'Only org admins and staff can approve mappings.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
 
     from .serializers import FieldConceptMappingSerializer
-    serializer = FieldConceptMappingSerializer(data=data, context={'request': request})
+    serializer = FieldConceptMappingSerializer(data=request.data, context={'request': request})
     serializer.is_valid(raise_exception=True)
     serializer.save()
     return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -9056,15 +9069,27 @@ def field_mapping_detail(request, pk):
         return Response(FieldConceptMappingSerializer(mapping).data)
 
     if request.method == 'DELETE':
+        if mapping.status == 'approved' and not _can_approve_mappings(request.user):
+            return Response(
+                {'detail': 'Only org admins and staff can delete approved mappings.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         mapping.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    # PATCH — enforce approval workflow
-    if request.data.get('status') == 'approved' and not _can_approve_mappings(request.user):
-        return Response(
-            {'detail': 'Only org admins and staff can approve mappings. Doctors and analysts may propose mappings for review.'},
-            status=status.HTTP_403_FORBIDDEN,
-        )
+    # PATCH — enforce approval restrictions
+    new_status = request.data.get('status')
+    if new_status and not _can_approve_mappings(request.user):
+        if new_status == 'approved':
+            return Response(
+                {'detail': 'Only org admins and staff can approve mappings.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if mapping.status == 'approved':
+            return Response(
+                {'detail': 'Only org admins and staff can change the status of an approved mapping.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
     from .serializers import FieldConceptMappingSerializer
     serializer = FieldConceptMappingSerializer(
