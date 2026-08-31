@@ -391,6 +391,7 @@ describe("FieldMappingPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Assign Concept")).toBeInTheDocument();
     });
+    expect(screen.getByRole("option", { name: "CDISC" })).toBeInTheDocument();
   });
 
   it("suggests field mappings for the active tab", async () => {

@@ -260,6 +260,7 @@ export function ConceptAssignDialog({
             <option value="">All vocabularies</option>
             <option value="LOINC">LOINC</option>
             <option value="SNOMED">SNOMED</option>
+            <option value="CDISC">CDISC</option>
             <option value="RxNorm">RxNorm</option>
             <option value="HemOnc">HemOnc</option>
           </select>
