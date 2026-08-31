@@ -569,7 +569,7 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     # Genomics / molecular
     'genetic_mutations':             ('55232-3',   'LOINC'),   # Genetic analysis summary panel
     'molecular_markers':             ('55232-3',   'LOINC'),   # Genetic analysis summary panel
-    'cytogenic_markers':             ('55232-3',   'LOINC'),   # Genetic analysis summary panel
+    'cytogenic_markers':             ('D002869',   'MeSH'),    # Chromosome Aberrations (#803)
     'protein_expressions':           ('85337-4',   'LOINC'),   # Gene expression panel
 
     # Demographics / profile
