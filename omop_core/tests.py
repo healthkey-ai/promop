@@ -6514,3 +6514,78 @@ class MappingSuggestionsTest(_OmopBase):
         )
         self.assertEqual(mapping.domain_id, 'Measurement')
         self.assertIsNone(mapping.target_concept_id)
+class RepointResolvableZerosCommandTest(_AllowsDuplicateConceptCodes):
+    """Safety contract for #846/#854: an automated repair never guesses."""
+
+    PERSON_ID = 846001
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.vocab, cls.condition_domain, cls.measurement_domain, cls.drug_domain, _type, cls.observation_domain, cls.concept_class = _make_vocab()
+        cls.measurement_target = Concept.objects.create(
+            concept_id=8461001, concept_name='Safe measurement', domain=cls.measurement_domain,
+            vocabulary=cls.vocab, concept_class=cls.concept_class, standard_concept='S',
+            concept_code='SAFE-846', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        cls.wrong_domain_target = Concept.objects.create(
+            concept_id=8461002, concept_name='Wrong-domain observation', domain=cls.observation_domain,
+            vocabulary=cls.vocab, concept_class=cls.concept_class, standard_concept='S',
+            concept_code='WRONG-846', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+    def _measurement(self, pk, source_value, value):
+        return Measurement.objects.create(
+            measurement_id=pk, person=self.person, measurement_concept_id=0,
+            measurement_date=date(2024, 1, 1), measurement_type_concept_id=32817,
+            measurement_source_value=source_value, value_as_number=value,
+        )
+
+    def test_apply_moves_all_distinct_same_day_measurements_without_deleting(self):
+        self.measurement_target.concept_code = 'GLU-846'
+        self.measurement_target.save(update_fields=['concept_code'])
+        self._measurement(84601, 'GLU-846', 1)
+        self._measurement(84602, 'GLU-846', 2)
+
+        call_command('repoint_resolvable_zeros', '--apply', '--table', 'measurement', verbosity=0)
+
+        rows = Measurement.objects.filter(measurement_id__in=[84601, 84602]).order_by('measurement_id')
+        self.assertEqual(rows.count(), 2)
+        self.assertEqual({row.measurement_concept_id for row in rows}, {self.measurement_target.concept_id})
+
+    def test_apply_skips_a_code_that_only_resolves_in_the_wrong_domain(self):
+        self._measurement(84603, 'WRONG-846', 1)
+
+        call_command('repoint_resolvable_zeros', '--apply', '--table', 'measurement', verbosity=0)
+
+        self.assertEqual(Measurement.objects.get(measurement_id=84603).measurement_concept_id, 0)
+
+    def test_apply_skips_a_non_standard_destination(self):
+        Concept.objects.create(
+            concept_id=8461004, concept_name='Non-standard measurement', domain=self.measurement_domain,
+            vocabulary=self.vocab, concept_class=self.concept_class, standard_concept=None,
+            concept_code='NONSTANDARD-846', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        self._measurement(84605, 'NONSTANDARD-846', 1)
+
+        call_command('repoint_resolvable_zeros', '--apply', '--table', 'measurement', verbosity=0)
+
+        self.assertEqual(Measurement.objects.get(measurement_id=84605).measurement_concept_id, 0)
+
+    def test_approved_mapping_with_a_source_system_outranks_direct_lookup(self):
+        from omop_core.models import SourceCodeConceptMapping
+        direct = Concept.objects.create(
+            concept_id=8461003, concept_name='Direct measurement', domain=self.measurement_domain,
+            vocabulary=self.vocab, concept_class=self.concept_class, standard_concept='S',
+            concept_code='MAP-846', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='LOINC', source_code='MAP-846', target_concept=self.measurement_target,
+            destination_vocabulary_id=self.vocab.vocabulary_id, omop_table='measurement', status='approved',
+        )
+        self._measurement(84604, 'MAP-846', 1)
+
+        call_command('repoint_resolvable_zeros', '--apply', '--table', 'measurement', verbosity=0)
+
+        self.assertEqual(Measurement.objects.get(measurement_id=84604).measurement_concept_id, self.measurement_target.concept_id)
+        self.assertNotEqual(self.measurement_target.concept_id, direct.concept_id)
