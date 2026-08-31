@@ -6251,13 +6251,14 @@ class MappingSuggestionsTest(_OmopBase):
             4100000, 'Creatinine [Mass/volume] in Blood', self.dom_meas,
             self.vocab, self.cc, code='38483-4')
 
-    def _measurement(self, mid, source_value, day=1):
+    def _measurement(self, mid, source_value, day=1, source_concept_id=None):
         return Measurement.objects.create(
             measurement_id=mid, person=self.person,
             measurement_concept_id=0,
             measurement_date=date(2024, 3, day),
             measurement_type_concept=self.type_concept,
             measurement_source_value=source_value,
+            measurement_source_concept_id=source_concept_id,
         )
 
     def _seed(self, source_value, times, start=95000):
@@ -6273,16 +6274,15 @@ class MappingSuggestionsTest(_OmopBase):
         self._seed('SEEN ONCE', 1, start=95000)
         self._seed('SEEN OFTEN', 12, start=95100)
 
-        values = dict(unmapped_source_values('measurement', min_occurrences=10))
-        self.assertIn('SEEN OFTEN', values)
-        self.assertNotIn('SEEN ONCE', values)
-        self.assertEqual(values['SEEN OFTEN'], 12)
+        values = unmapped_source_values('measurement', min_occurrences=10)
+        self.assertIn(('SEEN OFTEN', '', 12), values)
+        self.assertFalse(any(value == 'SEEN ONCE' for value, _vocabulary, _count in values))
 
     def test_lowering_the_threshold_reaches_the_tail(self):
         from omop_core.services.mapping_suggestions import unmapped_source_values
         self._seed('SEEN ONCE', 1, start=95000)
-        values = dict(unmapped_source_values('measurement', min_occurrences=1))
-        self.assertIn('SEEN ONCE', values)
+        values = unmapped_source_values('measurement', min_occurrences=1)
+        self.assertTrue(any(value == 'SEEN ONCE' for value, _vocabulary, _count in values))
 
     def test_the_busiest_code_comes_first(self):
         from omop_core.services.mapping_suggestions import unmapped_source_values
@@ -6300,8 +6300,8 @@ class MappingSuggestionsTest(_OmopBase):
             target_concept=self.creatinine, omop_table='measurement',
             domain_id='Measurement', status='proposed',
         )
-        values = dict(unmapped_source_values('measurement', min_occurrences=10))
-        self.assertNotIn('ALREADY MAPPED', values)
+        values = unmapped_source_values('measurement', min_occurrences=10)
+        self.assertFalse(any(value == 'ALREADY MAPPED' for value, _vocabulary, _count in values))
 
     # -- retrieval --------------------------------------------------------
 
@@ -6430,6 +6430,39 @@ class MappingSuggestionsTest(_OmopBase):
         self.assertEqual(mapping.omop_table, 'measurement')
         self.assertTrue(mapping.notes, 'the curator needs to know why')
 
+    def test_suggest_preserves_source_vocabulary_and_separates_colliding_codes(self):
+        """Destination vocabulary must never be substituted for FHIR provenance."""
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.mapping_suggestions import suggest_mappings
+        rxnorm, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RxNorm', defaults={'vocabulary_name': 'RxNorm', 'vocabulary_concept_id': 0},
+        )
+        loinc, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC', defaults={'vocabulary_name': 'LOINC', 'vocabulary_concept_id': 0},
+        )
+        rxnorm_source = _concept(
+            4100003, 'RxNorm source', self.dom_meas, rxnorm, self.cc, code='SAME-CODE',
+        )
+        loinc_source = _concept(
+            4100004, 'LOINC source', self.dom_meas, loinc, self.cc, code='SAME-CODE',
+        )
+        for i in range(10):
+            self._measurement(95400 + i, 'SAME-CODE', day=(i % 28) + 1,
+                              source_concept_id=rxnorm_source.concept_id)
+            self._measurement(95500 + i, 'SAME-CODE', day=(i % 28) + 1,
+                              source_concept_id=loinc_source.concept_id)
+
+        with override_settings(ANTHROPIC_API_KEY=''):
+            results = suggest_mappings('measurement', min_occurrences=10)
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            set(SourceCodeConceptMapping.objects.filter(source_code='SAME-CODE').values_list(
+                'source_vocabulary_id', 'occurrence_count',
+            )),
+            {('LOINC', 10), ('RxNorm', 10)},
+        )
+
     def test_an_unmatchable_code_still_reaches_the_queue(self):
         """The code is real. Minting keeps the fact carrying a concept and the
         curator still sees it."""
@@ -6463,8 +6496,8 @@ class MappingSuggestionsTest(_OmopBase):
             target_concept=self.creatinine, omop_table='measurement',
             domain_id='Measurement', status='rejected',
         )
-        values = dict(unmapped_source_values('measurement', min_occurrences=10))
-        self.assertNotIn('REJECTED CODE', values)
+        values = unmapped_source_values('measurement', min_occurrences=10)
+        self.assertFalse(any(value == 'REJECTED CODE' for value, _vocabulary, _count in values))
 
     def test_a_non_object_ranking_response_degrades(self):
         """The system prompt asks for null, so a bare `null` is the shape a
