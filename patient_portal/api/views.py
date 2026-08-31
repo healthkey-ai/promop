@@ -8011,7 +8011,11 @@ def _mapping_author(mapping):
     sort key as well as the label -- an import row has no author and sorts
     above every human's.
     """
-    user = getattr(mapping, 'created_by', None) if mapping else None
+    return _user_display(getattr(mapping, 'created_by', None) if mapping else None)
+
+
+def _user_display(user):
+    """Human-readable label for a user, '' for None."""
     if user is None:
         return ''
     return (
@@ -8055,6 +8059,10 @@ def _serialize_code_mapping_row(concept, mapping=None):
             'origin': mapping.origin if mapping else '',
             'origin_system': mapping.origin_system if mapping else '',
             'created_by': _mapping_author(mapping),
+            # Who signed it off, which survives every later edit -- unlike
+            # created_by/updated_by, which say only who last touched the row.
+            'reviewer': _user_display(getattr(mapping, 'reviewer', None) if mapping else None),
+            'reviewed_at': mapping.reviewed_at if mapping else None,
             'occurrence_count': mapping.occurrence_count if mapping else 0,
             'first_seen': mapping.first_seen if mapping else None,
             'last_seen': mapping.last_seen if mapping else None,
@@ -8100,6 +8108,10 @@ def _serialize_code_mapping_row(concept, mapping=None):
         'origin': mapping.origin if mapping else '',
         'origin_system': mapping.origin_system if mapping else '',
         'created_by': _mapping_author(mapping),
+        # Who signed it off, which survives every later edit -- unlike
+        # created_by/updated_by, which say only who last touched the row.
+        'reviewer': _user_display(getattr(mapping, 'reviewer', None) if mapping else None),
+        'reviewed_at': mapping.reviewed_at if mapping else None,
         'occurrence_count': mapping.occurrence_count if mapping else 0,
         'first_seen': mapping.first_seen if mapping else None,
         'last_seen': mapping.last_seen if mapping else None,
@@ -8264,6 +8276,15 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         values['source'] = str(data.get('source') or '').strip()
     if mapping is None or 'status' in data:
         values['status'] = status_value
+    # The sign-off, stamped on the proposed -> approved transition only.
+    # Re-saving an approved mapping (a notes fix, a re-point) must not
+    # reassign it to whoever happened to save last -- that is what
+    # updated_by/updated_at already record, and letting them stand in for
+    # approval is how the only trace of who signed a mapping off got
+    # overwritten by the next edit (#848).
+    if status_value == 'approved' and not was_approved:
+        values['reviewer'] = user
+        values['reviewed_at'] = timezone.now()
     if 'notes' in data:
         values['notes'] = str(data.get('notes') or '').strip()
     try:
@@ -8343,7 +8364,7 @@ def code_mapping_list(request):
 
     if request.method == 'GET':
         mappings = SourceCodeConceptMapping.objects.select_related(
-            'target_concept', 'created_by')
+            'target_concept', 'created_by', 'reviewer')
         source_filter = request.query_params.get('source')
         if source_filter:
             mappings = mappings.filter(source_vocabulary_id=source_filter)
@@ -8394,7 +8415,7 @@ def code_mapping_detail(request, mapping_id):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     mapping = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related(
-        'target_concept', 'created_by').first()
+        'target_concept', 'created_by', 'reviewer').first()
     if mapping is None:
         return Response({'detail': 'Mapping not found.'}, status=status.HTTP_404_NOT_FOUND)
 

@@ -42,6 +42,8 @@ const proposedRow = {
   origin: "import",
   origin_system: "hk-labs",
   created_by: "",
+  reviewer: "",              // never approved: the queue row this dialog exists for
+  reviewed_at: null,
   occurrence_count: 14,
   has_mapping: true,
 };
@@ -61,6 +63,8 @@ const approvedRow = {
   origin: "curator",
   origin_system: "",
   created_by: "zoe@example.com",
+  reviewer: "ada@example.com",          // signed off by someone other than its author
+  reviewed_at: "2026-08-31T09:14:00Z",
   occurrence_count: 3,
 };
 
@@ -586,6 +590,52 @@ describe("CodeMappingPage", () => {
       const statusSelect = screen.getByLabelText("Status") as HTMLSelectElement;
       expect(statusSelect.value).toBe("proposed");
       expect(statusSelect.disabled).toBe(true);
+    });
+  });
+
+  describe("Sign-off on the provenance line", () => {
+    /** Open the dialog for a row that lives under the collapsed Mapped section. */
+    const openApproved = async (code: string) => {
+      fireEvent.click(await screen.findByText(/^Mapped/));
+      const cell = await screen.findByText(code, { selector: "td" });
+      fireEvent.click(cell.closest("tr")!);
+      await screen.findByText("Edit Mapping");
+    };
+
+    it("names who approved the mapping and when, beside who created it", async () => {
+      // The reviewer is deliberately not the author: approval is a separate
+      // act by a separate person, and updated_by cannot stand in for it
+      // because the next edit overwrites it.
+      renderPage();
+      await openApproved("C90.00");
+      expect(
+        screen.getByText(/Created by zoe@example.com · approved by ada@example.com on 2026-08-31/),
+      ).toBeInTheDocument();
+    });
+
+    it("shows both halves when an import raised it and a human signed it off", async () => {
+      renderPage([{
+        ...approvedRow,
+        source_code: "IMPORTED",
+        origin: "import",
+        origin_system: "fhir-sync",
+        created_by: "",
+      }]);
+      await openApproved("IMPORTED");
+      expect(
+        screen.getByText(/Proposed by import \(fhir-sync\) · approved by ada@example.com on 2026-08-31/),
+      ).toBeInTheDocument();
+    });
+
+    it("says nothing about approval on a row approved before reviewers were recorded", async () => {
+      // Naming whoever last edited such a row would assert something we do not
+      // know — the very confusion updated_by created.
+      renderPage([{
+        ...approvedRow, source_code: "LEGACY", reviewer: "", reviewed_at: null,
+      }]);
+      await openApproved("LEGACY");
+      expect(screen.getByText(/Created by zoe@example.com/)).toBeInTheDocument();
+      expect(screen.queryByText(/approved by/)).not.toBeInTheDocument();
     });
   });
 });

@@ -23145,3 +23145,150 @@ class CodeMappingCuratorWorkflowTest(TestCase):
             other_producer.measurement_concept_id, 0,
             'the concept-0 sweep claimed a row it only matched by description',
         )
+
+
+class CodeMappingReviewerStampTest(TestCase):
+    """Who signed a mapping off, recorded so a later edit cannot erase it.
+
+    `updated_by`/`updated_at` say who last touched the row, and any subsequent
+    save overwrites them -- a typo fix in the notes destroyed the only trace of
+    who approved the mapping. Approval is the transition that rewrites stored
+    patient data, so it gets its own two fields (#848).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.curator = Identity.objects.create_user(
+            email='signoff_curator@t.com', password='x', is_staff=True,
+        )
+        cls.editor = Identity.objects.create_user(
+            email='later_editor@t.com', password='x', is_staff=True,
+        )
+        cls.domain, _ = Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        cls.concept_class, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+        cls.vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_reference': 'x',
+                      'vocabulary_version': '2.77', 'vocabulary_concept_id': 0},
+        )
+        cls.destination = Concept.objects.create(
+            concept_id=3046360, concept_name='Sodium [Moles/volume] in Serum',
+            domain=cls.domain, vocabulary=cls.vocab, concept_class=cls.concept_class,
+            standard_concept='S', concept_code='2951-2',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.curator)
+
+    def _create(self):
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'domain_id': 'Measurement',
+            'source_vocabulary_id': '',
+            'source_code': 'SODIUM',
+            'destination_concept_id': self.destination.concept_id,
+            'omop_table': 'measurement',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        return resp.data['mapping_id']
+
+    def _approve(self, mapping_id, **extra):
+        resp = self.client.patch(f'/api/v1/code-mappings/{mapping_id}/',
+                                 {'status': 'approved', **extra}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return resp
+
+    def test_approval_stamps_the_reviewer_and_the_time(self):
+        mapping_id = self._create()
+        before = timezone.now()
+        self._approve(mapping_id)
+        mapping = SourceCodeConceptMapping.objects.get(id=mapping_id)
+        self.assertEqual(mapping.reviewer, self.curator)
+        self.assertIsNotNone(mapping.reviewed_at)
+        self.assertGreaterEqual(mapping.reviewed_at, before)
+
+    def test_a_proposed_mapping_has_no_reviewer(self):
+        """Editing a row in the queue is not signing off on it."""
+        mapping_id = self._create()
+        self.client.patch(f'/api/v1/code-mappings/{mapping_id}/',
+                          {'notes': 'still thinking'}, format='json')
+        mapping = SourceCodeConceptMapping.objects.get(id=mapping_id)
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertIsNone(mapping.reviewer)
+        self.assertIsNone(mapping.reviewed_at)
+
+    def test_a_later_save_does_not_reassign_the_sign_off(self):
+        """The bug this field exists for: a typo fix by someone else must not
+        make them the approver."""
+        mapping_id = self._create()
+        self._approve(mapping_id)
+        mapping = SourceCodeConceptMapping.objects.get(id=mapping_id)
+        original_reviewer_id, original_time = mapping.reviewer_id, mapping.reviewed_at
+
+        self.client.force_authenticate(user=self.editor)
+        self.client.patch(f'/api/v1/code-mappings/{mapping_id}/',
+                          {'notes': 'fixed a typo', 'status': 'approved'}, format='json')
+
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.reviewer_id, original_reviewer_id)
+        self.assertEqual(mapping.reviewed_at, original_time)
+        # updated_by does move -- which is exactly why it cannot stand in for
+        # the reviewer.
+        self.assertEqual(mapping.updated_by, self.editor)
+
+    def test_re_approving_after_a_rejection_records_the_new_reviewer(self):
+        """Not-approved -> approved is a real transition, whichever state it
+        came from, so the second sign-off is the one that stands."""
+        mapping_id = self._create()
+        self._approve(mapping_id)
+        self.client.patch(f'/api/v1/code-mappings/{mapping_id}/',
+                          {'status': 'rejected'}, format='json')
+        self.client.force_authenticate(user=self.editor)
+        self._approve(mapping_id)
+        mapping = SourceCodeConceptMapping.objects.get(id=mapping_id)
+        self.assertEqual(mapping.reviewer, self.editor)
+
+    def test_approval_does_not_touch_origin(self):
+        """origin is provenance of *creation*, and it is load-bearing:
+        _source_value_match only admits source_code_description into the
+        re-point match set when origin == 'import'. Flipping it to 'curator' on
+        approve broke exactly that -- an import-proposed mapping approved and
+        moved zero rows. reviewer carries the human so origin does not have to.
+        """
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='', source_code='CHLORIDE',
+            source_code_description='Chloride level',
+            target_concept=self.destination, omop_table='measurement',
+            domain_id='Measurement', status='proposed',
+            origin='import', origin_system='fhir-sync',
+        )
+        self._approve(mapping.id)
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.origin, 'import')
+        self.assertEqual(mapping.origin_system, 'fhir-sync')
+        self.assertEqual(mapping.reviewer, self.curator)
+
+    def test_the_serialized_row_carries_the_sign_off(self):
+        mapping_id = self._create()
+        approve = self._approve(mapping_id)
+        self.assertEqual(approve.data['reviewer'], 'signoff_curator@t.com')
+        self.assertIsNotNone(approve.data['reviewed_at'])
+
+        resp = self.client.get('/api/v1/code-mappings/')
+        row = next(r for r in resp.data if r['source_code'] == 'SODIUM')
+        self.assertEqual(row['reviewer'], 'signoff_curator@t.com')
+        self.assertIsNotNone(row['reviewed_at'])
+
+    def test_an_unapproved_row_serializes_an_empty_sign_off(self):
+        self._create()
+        resp = self.client.get('/api/v1/code-mappings/')
+        row = next(r for r in resp.data if r['source_code'] == 'SODIUM')
+        self.assertEqual(row['reviewer'], '')
+        self.assertIsNone(row['reviewed_at'])

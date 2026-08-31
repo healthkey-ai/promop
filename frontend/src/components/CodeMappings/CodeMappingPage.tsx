@@ -45,6 +45,11 @@ interface CodeMappingRow {
   origin: string;
   origin_system: string;
   created_by: string;
+  // Who signed the mapping off, and when. Distinct from created_by: approval
+  // is the transition that rewrites stored patient data, and it survives every
+  // later edit of the row.
+  reviewer?: string;
+  reviewed_at?: string | null;
   occurrence_count: number;
   has_mapping: boolean;
 }
@@ -276,6 +281,24 @@ const byAuthorThenOccurrence = (a: CodeMappingRow, b: CodeMappingRow) => {
     || (a.created_by || "").localeCompare(b.created_by || "")
     || byOccurrence(a, b);
 };
+
+/**
+ * The sign-off half of the provenance line: " · approved by ada@x on 2026-08-31".
+ *
+ * Empty until a mapping has actually been approved. Rows approved before the
+ * reviewer was recorded carry neither field, and saying nothing is honest
+ * where naming whoever last edited the row would not be — that is exactly the
+ * confusion updated_by created (#848).
+ *
+ * The date is sliced off the ISO timestamp rather than formatted locally: the
+ * day a decision was made is what matters, and the server sends UTC.
+ */
+function approvalNote(row: CodeMappingRow): string {
+  if (!row.reviewer && !row.reviewed_at) return "";
+  const who = row.reviewer ? ` by ${row.reviewer}` : "";
+  const when = row.reviewed_at ? ` on ${row.reviewed_at.slice(0, 10)}` : "";
+  return ` · approved${who}${when}`;
+}
 
 function buildEditForm(row: CodeMappingRow, reference: Reference): MappingForm {
   const domainId = row.domain_id || row.destination_domain_id || "";
@@ -1133,7 +1156,8 @@ export default function CodeMappingPage() {
                 </div>
               </fieldset>
 
-              {selectedRow && (selectedRow.origin === "import" || selectedRow.created_by) && (
+              {selectedRow
+                && (selectedRow.origin === "import" || selectedRow.created_by || selectedRow.reviewer) && (
                 <p className="mt-4 rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600">
                   {selectedRow.origin === "import" ? (
                     <>
@@ -1143,6 +1167,11 @@ export default function CodeMappingPage() {
                   ) : (
                     <>Created by {selectedRow.created_by}</>
                   )}
+                  {/* Both halves of the provenance: who raised it, and who
+                      signed it off. Approval is the only transition that
+                      rewrites patient data, so a reviewer looking at an
+                      approved mapping needs to see whose decision it was. */}
+                  {approvalNote(selectedRow)}
                   {selectedRow.occurrence_count ? ` · seen ${selectedRow.occurrence_count} time(s)` : ""}
                 </p>
               )}

@@ -1903,6 +1903,28 @@ class SourceCodeConceptMapping(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='+',
     )
+    # ── Sign-off: who approved this and when ─────────────────────────────
+    # Distinct from created_by/updated_by, which record who last touched the
+    # row. Approval is the only transition that rewrites stored patient data,
+    # so the person who made it must survive every later edit -- before this,
+    # a typo fix in the notes erased the only trace of who signed it off.
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+        help_text=(
+            'The human who approved this mapping. Stamped on the '
+            'proposed -> approved transition only, so a later edit by someone '
+            'else does not reassign the sign-off. Null means never approved '
+            '(or approved before this field existed).'
+        ),
+    )
+    reviewed_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text=(
+            'When the mapping was approved. Distinct from updated_at, which '
+            'moves on every save.'
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
