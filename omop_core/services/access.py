@@ -216,3 +216,20 @@ def has_org_admin_access(user, slug: str | None = None) -> bool:
     if slug is None:
         return admin_orgs.exists()
     return admin_orgs.filter(slug=slug).exists()
+
+
+def has_professional_access(user) -> bool:
+    """Return True when the user holds any professional role (org_admin, doctor, analyst).
+
+    Used to gate access to mapping curation pages — any professional can
+    propose mappings, but only org admins and staff can approve them.
+    """
+    if getattr(user, 'is_staff', False):
+        return True
+    now = timezone.now()
+    return GroupAccess.objects.filter(
+        identity=user,
+        role__in=('org_admin', 'doctor', 'analyst'),
+    ).filter(
+        Q(expires_at__isnull=True) | Q(expires_at__gt=now),
+    ).exists()

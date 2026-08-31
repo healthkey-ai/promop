@@ -105,11 +105,14 @@ function AppRoutes() {
     return element;
   };
 
-  // Mapping administration is available to platform staff and organization
-  // administrators.  The API independently enforces the same policy.
+  // Mapping curation is available to any professional role (staff, org_admin,
+  // doctor, analyst).  Doctors and analysts can propose; only staff and
+  // org_admin can approve.  The API independently enforces the same policy.
+  const hasProfessionalRole = currentUser?.is_staff || currentUser?.is_org_admin
+    || currentUser?.org_accesses?.some(a => ['org_admin', 'doctor', 'analyst'].includes(a.role));
   const mappingAdminRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
-    if (!currentUser.is_staff && !currentUser.is_org_admin) return <Navigate to="/" replace />;
+    if (!hasProfessionalRole) return <Navigate to="/" replace />;
     return element;
   };
 

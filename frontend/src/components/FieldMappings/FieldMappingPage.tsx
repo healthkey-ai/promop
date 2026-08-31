@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, ChevronDown, ChevronRight, Search, BookOpen, Check, X, Pencil, Plus, Sparkles } from "lucide-react";
 import api from "@/api/axios";
+import { useAuth } from "@/hooks/useAuth";
 import { ConceptAssignDialog } from "./ConceptAssignDialog";
 import { SynonymDialog } from "./SynonymDialog";
 import { FieldChoiceEditor } from "./FieldChoiceEditor";
@@ -106,6 +107,8 @@ const getDisplayCategory = (d: FieldDescriptor): string => {
 
 export default function FieldMappingPage() {
   const navigate = useNavigate();
+  const { currentUser } = useAuth();
+  const canApprove = !!(currentUser?.is_staff || currentUser?.is_org_admin);
   const [descriptors, setDescriptors] = useState<FieldDescriptor[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -390,10 +393,16 @@ export default function FieldMappingPage() {
                       className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
                         f.mapping?.status === "approved"
                           ? "border-green-500 bg-green-500 text-white"
-                          : "border-gray-300 hover:border-primary"
+                          : canApprove
+                            ? "border-gray-300 hover:border-primary"
+                            : "border-gray-200 bg-gray-100 cursor-not-allowed"
                       }`}
-                      title={f.mapping?.status === "approved" ? "Mark mapping as proposed" : "Approve mapping"}
-                      disabled={!f.mapping && !f.suggestion}
+                      title={
+                        !canApprove
+                          ? "Only org admins and staff can approve mappings. Doctors and analysts may propose mappings for review."
+                          : f.mapping?.status === "approved" ? "Mark mapping as proposed" : "Approve mapping"
+                      }
+                      disabled={(!f.mapping && !f.suggestion) || (!canApprove && f.mapping?.status !== "approved")}
                     >
                       {f.mapping?.status === "approved" && <Check size={10} />}
                     </button>
@@ -732,6 +741,7 @@ export default function FieldMappingPage() {
           initialConceptName={selectedField.mapping?.concept_name}
           initialStatus={selectedField.mapping?.status as "proposed" | "approved" | "rejected" | undefined}
           initialNotes={selectedField.mapping?.notes}
+          canApprove={canApprove}
           commonUnits={selectedField.unit_options}
           choices={selectedField.choices}
           onEditChoices={() => {

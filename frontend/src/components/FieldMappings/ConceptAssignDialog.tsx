@@ -36,13 +36,14 @@ interface Props {
   commonUnits?: string[];
   choices?: FieldChoiceInfo[];
   onEditChoices?: () => void;
+  canApprove?: boolean;
 }
 
 export function ConceptAssignDialog({
   fieldName, fieldType, onClose, onSaved,
   initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
   existingMappingId, initialConceptId, initialConceptName, initialStatus, initialNotes, commonUnits,
-  choices, onEditChoices,
+  choices, onEditChoices, canApprove = true,
 }: Props) {
   const isEditing = !!existingMappingId;
   const [searchQuery, setSearchQuery] = useState("");
@@ -133,7 +134,8 @@ export function ConceptAssignDialog({
         notes,
         // Clearing a mapping returns it to review rather than leaving an
         // approved row with no concept in the Mapped list.
-        status: selected ? "approved" : "proposed",
+        // Non-staff users can only propose, not approve.
+        status: selected ? (canApprove ? "approved" : "proposed") : "proposed",
       };
       if (isEditing) {
         // An existing field already owns this mapping.  Update that row in
@@ -420,8 +422,9 @@ export function ConceptAssignDialog({
             onClick={handleSubmit}
             disabled={(!selected && !isEditing) || saving}
             className="rounded bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            title={canApprove ? undefined : "Only org admins and staff can approve mappings. This will be saved as a proposal for review."}
           >
-            {saving ? "Saving..." : isEditing ? "Update/Approve Mapping" : "Save Mapping"}
+            {saving ? "Saving..." : canApprove ? (isEditing ? "Update/Approve Mapping" : "Save Mapping") : (isEditing ? "Update Proposal" : "Save as Proposal")}
           </button>
         </div>
       </div>

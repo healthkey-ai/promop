@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Pencil, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 import api from "@/api/axios";
+import { useAuth } from "@/hooks/useAuth";
 
 /**
  * Code Mapping: incoming source codes -> destination OMOP concepts.
@@ -222,9 +223,9 @@ const TIP = {
   search_vocabulary:
     "Which vocabulary the search looks in. Defaults to the destination's own vocabulary; widen it to re-point a minted HK-* mapping at a standard concept.",
   status:
-    "Proposed is awaiting review. Approving also re-points the clinical rows already stored. Rejected hides the row behind a filter.",
+    "Proposed is awaiting review. Approving also re-points the clinical rows already stored. Rejected hides the row behind a filter. Only org admins and staff can approve mappings — doctors and analysts may propose mappings for review.",
   status_new:
-    "A new mapping always starts as Proposed. Approve it once it has been reviewed — approval is what rewrites the clinical rows already stored.",
+    "A new mapping always starts as Proposed. Only org admins and staff can approve it once reviewed — approval is what rewrites the clinical rows already stored.",
   notes: "Why this decision was made, for the next curator who opens the row.",
 } as const;
 
@@ -392,6 +393,8 @@ function buildEditForm(row: CodeMappingRow, reference: Reference): MappingForm {
 
 export default function CodeMappingPage() {
   const navigate = useNavigate();
+  const { currentUser } = useAuth();
+  const canApprove = !!(currentUser?.is_staff || currentUser?.is_org_admin);
   const [rows, setRows] = useState<CodeMappingRow[]>([]);
   const [reference, setReference] = useState<Reference>(emptyReference);
   const [loading, setLoading] = useState(true);
@@ -1408,7 +1411,9 @@ export default function CodeMappingPage() {
                     className="h-9 rounded-md border border-slate-300 px-2 text-sm font-normal text-slate-950 disabled:bg-slate-100 disabled:text-slate-500"
                   >
                     <option value="proposed">Proposed</option>
-                    <option value="approved">Approved</option>
+                    <option value="approved" disabled={!canApprove}>
+                      {canApprove ? "Approved" : "Approved (admin only)"}
+                    </option>
                     <option value="rejected">Rejected</option>
                   </select>
                 </div>

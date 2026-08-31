@@ -87,7 +87,7 @@ from omop_core.services.regimen_resolution import (
     validate_hemonc_regimen,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
-from omop_core.services.access import get_visible_orgs, build_trusting_map, get_admin_orgs, has_org_admin_access
+from omop_core.services.access import get_visible_orgs, build_trusting_map, get_admin_orgs, has_org_admin_access, has_professional_access
 from datetime import date as _date, datetime, timedelta
 from django.utils.timezone import localdate, make_aware, is_naive
 import datetime as _dt
@@ -8293,7 +8293,20 @@ class VocabSnapshotView(APIView):
 # =============================================================================
 
 def _can_manage_field_mappings(user):
-    """Whether a user may curate the shared field mapping configuration."""
+    """Whether a user may access the mapping curation pages.
+
+    Any professional role (org_admin, doctor, analyst) can view and propose
+    mappings.  Approval requires a higher privilege — see _can_approve_mappings.
+    """
+    return bool(getattr(user, 'is_staff', False) or has_professional_access(user))
+
+
+def _can_approve_mappings(user):
+    """Whether a user may set a mapping's status to 'approved'.
+
+    Only staff and org-admin users can approve.  Doctors and analysts may
+    propose or reject mappings but cannot approve them.
+    """
     return bool(getattr(user, 'is_staff', False) or has_org_admin_access(user))
 
 
@@ -8524,6 +8537,13 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # also what let a create write clinical data -- now approval is the only
     # transition that does, which is a far easier property to reason about.
     status_value = 'proposed' if mapping is None else (requested_status or mapping.status)
+
+    # Workflow enforcement: only staff can approve.
+    if status_value == 'approved' and not _can_approve_mappings(user):
+        raise serializers.ValidationError({
+            'status': 'Only administrators can approve mappings. '
+                      'Analysts and doctors may propose mappings for review.'
+        })
 
     omop_table = normalize_omop_table(data.get('omop_table') or data.get('destination_omop_table'))
     if omop_table and not mapping_table_is_writable(omop_table):
@@ -9006,9 +9026,13 @@ def field_mapping_list(request):
             descriptors = [d for d in descriptors if q in d['field_name'].lower()]
         return Response(descriptors)
 
-    # POST — create a mapping.
+    # POST — create a mapping.  Non-staff users cannot create as approved.
+    data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+    if data.get('status') == 'approved' and not _can_approve_mappings(request.user):
+        data['status'] = 'proposed'
+
     from .serializers import FieldConceptMappingSerializer
-    serializer = FieldConceptMappingSerializer(data=request.data, context={'request': request})
+    serializer = FieldConceptMappingSerializer(data=data, context={'request': request})
     serializer.is_valid(raise_exception=True)
     serializer.save()
     return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -9035,7 +9059,13 @@ def field_mapping_detail(request, pk):
         mapping.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    # PATCH
+    # PATCH — enforce approval workflow
+    if request.data.get('status') == 'approved' and not _can_approve_mappings(request.user):
+        return Response(
+            {'detail': 'Only org admins and staff can approve mappings. Doctors and analysts may propose mappings for review.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
     from .serializers import FieldConceptMappingSerializer
     serializer = FieldConceptMappingSerializer(
         mapping, data=request.data, partial=True, context={'request': request},
