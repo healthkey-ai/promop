@@ -23405,6 +23405,242 @@ class CodeMappingSignOffLifecycleTest(TestCase):
         self.assertIsNone(resp.data['destination_concept_id'])
 
 
+# =============================================================================
+# Mapping Hub & Therapy Mapping CRUD  (#868, #869)
+# =============================================================================
+
+
+class MappingHubTestBase(TestCase):
+    """Shared fixtures for mapping hub tests."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = Identity.objects.create_superuser(
+            email='admin-mapping@test.com', password='testpass',
+        )
+        cls.admin.is_org_admin = True
+        cls.admin.save()
+
+        cls.regular = Identity.objects.create_user(
+            email='regular@test.com', password='testpass',
+        )
+
+        # Therapy reference data
+        from omop_core.models import (
+            TherapyRegimen, TherapyComponent, TherapyClass,
+            TherapyRegimenComponent, TherapyComponentClassLink,
+            TherapyRound, Disease, DiseaseTherapyRegimen,
+        )
+        cls.reg, _ = TherapyRegimen.objects.get_or_create(code='test_rd', defaults={'title': 'Test Rd'})
+        cls.comp, _ = TherapyComponent.objects.get_or_create(code='test_lenalidomide', defaults={'title': 'Test Lenalidomide'})
+        cls.comp2, _ = TherapyComponent.objects.get_or_create(code='test_dexamethasone', defaults={'title': 'Test Dexamethasone'})
+        cls.cls1, _ = TherapyClass.objects.get_or_create(code='test_imid', defaults={'title': 'Test IMiD'})
+        cls.cls2, _ = TherapyClass.objects.get_or_create(code='test_steroid', defaults={'title': 'Test Steroid'})
+        TherapyRegimenComponent.objects.get_or_create(regimen=cls.reg, component=cls.comp)
+        TherapyComponentClassLink.objects.get_or_create(component=cls.comp, therapy_class=cls.cls1)
+        cls.disease, _ = Disease.objects.get_or_create(code='TEST_MM', defaults={'title': 'Test Multiple Myeloma'})
+        cls.rnd, _ = TherapyRound.objects.get_or_create(code='test_first_line', defaults={'title': 'Test First Line'})
+        cls.dtr, _ = DiseaseTherapyRegimen.objects.get_or_create(
+            disease=cls.disease, round=cls.rnd, regimen=cls.reg,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+
+
+class MappingStatsTest(MappingHubTestBase):
+    """GET /api/v1/mapping-stats/ — summary stats for the hub page."""
+
+    def test_staff_can_see_stats(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get('/api/v1/mapping-stats/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('field_mappings', resp.data)
+        self.assertIn('code_mappings', resp.data)
+        self.assertIn('therapy', resp.data)
+        self.assertIn('unmapped', resp.data['field_mappings'])
+        self.assertGreaterEqual(resp.data['therapy']['regimens'], 1)
+
+    def test_regular_user_forbidden(self):
+        self.client.force_authenticate(user=self.regular)
+        resp = self.client.get('/api/v1/mapping-stats/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unauthenticated_rejected(self):
+        resp = self.client.get('/api/v1/mapping-stats/')
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class TherapyRegimenCRUDTest(MappingHubTestBase):
+    """CRUD on /api/v1/therapy-regimens/."""
+
+    def test_list_regimens(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get('/api/v1/therapy-regimens/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        codes = [r['code'] for r in resp.data]
+        self.assertIn('test_rd', codes)
+
+    def test_create_regimen(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.post('/api/v1/therapy-regimens/',
+                                {'code': 'vrd', 'title': 'VRd'},
+                                format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['code'], 'vrd')
+
+    def test_create_duplicate_code_rejected(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.post('/api/v1/therapy-regimens/',
+                                {'code': 'test_rd', 'title': 'Rd duplicate'},
+                                format='json')
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_create_invalid_concept_id_rejected(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.post('/api/v1/therapy-regimens/',
+                                {'code': 'bad', 'title': 'Bad', 'concept_id': 'abc'},
+                                format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_regular_user_cannot_create(self):
+        self.client.force_authenticate(user=self.regular)
+        resp = self.client.post('/api/v1/therapy-regimens/',
+                                {'code': 'nope', 'title': 'Nope'},
+                                format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_detail_with_nested_components(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get('/api/v1/therapy-regimens/test_rd/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['code'], 'test_rd')
+        self.assertGreaterEqual(len(resp.data['components']), 1)
+        comp = resp.data['components'][0]
+        self.assertIn('classes', comp)
+
+    def test_delete_regimen(self):
+        self.client.force_authenticate(user=self.admin)
+        from omop_core.models import TherapyRegimen
+        TherapyRegimen.objects.create(code='todelete', title='To Delete')
+        resp = self.client.delete('/api/v1/therapy-regimens/todelete/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(TherapyRegimen.objects.filter(code='todelete').exists())
+
+
+class TherapyRegimenComponentTest(MappingHubTestBase):
+    """POST/DELETE on regimen component links."""
+
+    def test_add_and_remove_component(self):
+        self.client.force_authenticate(user=self.admin)
+        # Add dexamethasone to Rd
+        resp = self.client.post(
+            '/api/v1/therapy-regimens/test_rd/components/',
+            {'component_code': 'test_dexamethasone'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        # Verify it appears in detail
+        resp = self.client.get('/api/v1/therapy-regimens/test_rd/')
+        comp_codes = [c['code'] for c in resp.data['components']]
+        self.assertIn('test_dexamethasone', comp_codes)
+
+        # Remove it
+        resp = self.client.delete('/api/v1/therapy-regimens/test_rd/components/test_dexamethasone/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+    def test_regular_user_cannot_manage_components(self):
+        self.client.force_authenticate(user=self.regular)
+        resp = self.client.post(
+            '/api/v1/therapy-regimens/test_rd/components/',
+            {'component_code': 'test_dexamethasone'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class TherapyComponentClassTest(MappingHubTestBase):
+    """POST/DELETE on component class links."""
+
+    def test_add_and_remove_class(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.post(
+            '/api/v1/therapy-components/test_lenalidomide/classes/',
+            {'class_code': 'test_steroid'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        resp = self.client.delete('/api/v1/therapy-components/test_lenalidomide/classes/test_steroid/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+
+class TherapyComponentListTest(MappingHubTestBase):
+    """GET /api/v1/therapy-components/ — includes search and nested classes."""
+
+    def test_list_includes_classes(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get('/api/v1/therapy-components/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        lena = next((c for c in resp.data if c['code'] == 'test_lenalidomide'), None)
+        self.assertIsNotNone(lena)
+        self.assertIn('classes', lena)
+        self.assertGreaterEqual(len(lena['classes']), 1)
+
+    def test_search_filters(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get('/api/v1/therapy-components/?search=Test+Lenali')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(any(c['code'] == 'test_lenalidomide' for c in resp.data))
+        self.assertFalse(any(c['code'] == 'test_dexamethasone' for c in resp.data))
+
+
+class DiseaseTherapyRegimenTest(MappingHubTestBase):
+    """CRUD on /api/v1/disease-therapy-regimens/."""
+
+    def test_list_associations(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get('/api/v1/disease-therapy-regimens/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertGreaterEqual(len(resp.data), 1)
+        item = resp.data[0]
+        self.assertIn('disease_code', item)
+        self.assertIn('disease_title', item)
+        self.assertIn('round_code', item)
+        self.assertIn('regimen_code', item)
+
+    def test_create_and_delete(self):
+        self.client.force_authenticate(user=self.admin)
+        from omop_core.models import TherapyRegimen, TherapyRound, Disease
+        Disease.objects.get_or_create(code='DLBCL', defaults={'title': 'DLBCL'})
+        TherapyRound.objects.get_or_create(code='second_line_therapy', defaults={'title': 'Second Line'})
+
+        resp = self.client.post('/api/v1/disease-therapy-regimens/', {
+            'disease_code': 'DLBCL',
+            'round_code': 'second_line_therapy',
+            'regimen_code': 'test_rd',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        pk = resp.data['id']
+
+        resp = self.client.delete(f'/api/v1/disease-therapy-regimens/{pk}/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+    def test_regular_user_cannot_create(self):
+        self.client.force_authenticate(user=self.regular)
+        resp = self.client.post('/api/v1/disease-therapy-regimens/', {
+            'disease_code': 'TEST_MM',
+            'round_code': 'test_first_line',
+            'regimen_code': 'test_rd',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_missing_fields_rejected(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.post('/api/v1/disease-therapy-regimens/', {
+            'disease_code': 'TEST_MM',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
 # ── Vocabulary scope & suggested-code tests (#803) ────────────────────
 
 
