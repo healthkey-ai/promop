@@ -28,6 +28,7 @@ the rows already stored, or the decision only ever reaches data that happens to
 arrive again.
 """
 import logging
+from dataclasses import dataclass
 
 from django.contrib.contenttypes.models import ContentType
 from django.db import IntegrityError, transaction
@@ -291,6 +292,30 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
 # --------------------------------------------------------------------------
 # Re-pointing rows already stored
 # --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class RepointTarget:
+    """The subset of a mapping that ``repoint_clinical_rows`` actually reads.
+
+    A re-point does not always begin at a curated row. The concept-0 sweep in
+    ``repoint_resolvable_zeros`` walks *source values* -- codes written before
+    their vocabulary was loaded, which resolve against Athena today and so need
+    no mapping row at all (rule 1 in the module docstring: a LOINC or SNOMED
+    code is its own concept). Minting a ``SourceCodeConceptMapping`` just to
+    satisfy an argument would put exactly the rows rule 1 exists to keep out of
+    the curation queue into it.
+
+    So this carries the four attributes the re-point reads and nothing else,
+    rather than a second bulk-rewrite path existing beside the real one.
+    ``id`` appears only in that function's log lines.
+    """
+
+    source_code: str
+    omop_table: str
+    source_code_description: str = ''
+    origin: str = ''
+    id: str = 'uncurated'
+
 
 def _source_value_match(model, source_col, mapping, include_description=True):
     """Match the clinical rows a mapping actually produced.

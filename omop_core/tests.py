@@ -6233,3 +6233,158 @@ class ManageLanguageSkillsCommandTest(TestCase):
     def test_find_language_says_so_when_nothing_matches(self):
         out = self._run(find_language='Klingon')
         self.assertIn('No loaded SNOMED Language concept', out)
+
+
+# ===========================================================================
+# repoint_resolvable_zeros — moving rows off concept 0 (#846)
+# ===========================================================================
+
+class RepointResolvableZerosCommandTest(_OmopBase):
+    """Rows written before Athena was loaded, whose codes resolve today.
+
+    5,737 creatinine measurements in staging sit at concept 0 for LOINC
+    ``38483-4``, which the loaded vocabulary knows perfectly well. The command
+    moves those; everything else it must leave exactly where it is.
+    """
+
+    PERSON_ID = 90800
+
+    def setUp(self):
+        from omop_core.test_utils import ensure_test_concept_zero
+        self.zero = ensure_test_concept_zero()
+        # The destination: a real concept whose code is what the rows carry.
+        self.creatinine = _concept(
+            3051825, 'Creatinine [Mass/volume] in Blood',
+            self.dom_meas, self.vocab, self.cc, code='38483-4')
+        self.other = _concept(
+            3000285, 'Sodium [Moles/volume] in Blood',
+            self.dom_meas, self.vocab, self.cc, code='2947-0')
+
+    def _measurement(self, mid, source_value, *, concept=None, value=1.0,
+                     day=1):
+        return Measurement.objects.create(
+            measurement_id=mid,
+            person=self.person,
+            measurement_concept=concept or self.zero,
+            measurement_date=date(2024, 3, day),
+            measurement_type_concept=self.type_concept,
+            value_as_number=value,
+            measurement_source_value=source_value,
+        )
+
+    def _run(self, **kwargs):
+        from io import StringIO
+        out = StringIO()
+        call_command('repoint_resolvable_zeros', stdout=out, **kwargs)
+        return out.getvalue()
+
+    # -- the fix itself ----------------------------------------------------
+
+    def test_resolvable_source_value_is_repointed(self):
+        row = self._measurement(90801, '38483-4')
+        self._run(apply=True, table=['measurement'])
+        row.refresh_from_db()
+        self.assertEqual(row.measurement_concept_id, self.creatinine.concept_id)
+
+    def test_unresolvable_source_value_is_left_at_concept_zero(self):
+        """Free text that Athena does not know is the other command's job."""
+        row = self._measurement(90802, 'M-PROTEIN, SERUM')
+        out = self._run(apply=True, table=['measurement'])
+        row.refresh_from_db()
+        self.assertEqual(row.measurement_concept_id, 0)
+        self.assertIn('do not resolve', out)
+
+    def test_row_already_on_a_real_concept_is_untouched(self):
+        """A concept somebody already corrected must not be clobbered.
+
+        The sweep is keyed on the old destination as well as the source value,
+        so a row carrying the same code at a different concept is out of scope.
+        """
+        row = self._measurement(90803, '38483-4', concept=self.other)
+        self._run(apply=True, table=['measurement'])
+        row.refresh_from_db()
+        self.assertEqual(row.measurement_concept_id, self.other.concept_id)
+
+    def test_distinct_same_day_results_all_survive(self):
+        """The trap: collapsing on (person, date) would delete real results.
+
+        Three creatinine draws on one day are three facts. Only the full event
+        identity separates them, and the re-point makes all three carry the
+        same concept -- which is precisely when a (person, date) key would eat
+        two of them.
+        """
+        for i, value in enumerate((0.9, 1.4, 2.1)):
+            self._measurement(90810 + i, '38483-4', value=value, day=4)
+        self._run(apply=True, table=['measurement'])
+        rows = Measurement.objects.filter(person=self.person)
+        self.assertEqual(rows.count(), 3)
+        self.assertEqual(
+            {r.measurement_concept_id for r in rows},
+            {self.creatinine.concept_id})
+        self.assertEqual(
+            sorted(float(r.value_as_number) for r in rows), [0.9, 1.4, 2.1])
+
+    def test_genuinely_identical_rows_collapse(self):
+        """Same code, same day, same value -- one fact stored twice."""
+        self._measurement(90820, '38483-4', value=1.1, day=5)
+        self._measurement(90821, '38483-4', value=1.1, day=5)
+        out = self._run(apply=True, table=['measurement'])
+        self.assertEqual(Measurement.objects.filter(person=self.person).count(), 1)
+        self.assertIn('1 collapsed', out)
+
+    # -- what the command deliberately does NOT do -------------------------
+
+    def test_affected_patient_records_are_marked_stale(self):
+        """Not re-derived inline: 12-32s per bulk-loaded patient."""
+        self._measurement(90830, '38483-4')
+        PatientRecord.objects.filter(person=self.person).update(derivation_version=7)
+        out = self._run(apply=True, table=['measurement'])
+        record = PatientRecord.objects.get(person=self.person)
+        self.assertEqual(record.derivation_version, 0)
+        self.assertIn('backfill_patient_records', out)
+
+    def test_dry_run_writes_nothing(self):
+        row = self._measurement(90840, '38483-4')
+        PatientRecord.objects.filter(person=self.person).update(derivation_version=7)
+        out = self._run()
+        row.refresh_from_db()
+        self.assertEqual(row.measurement_concept_id, 0)
+        self.assertEqual(
+            PatientRecord.objects.get(person=self.person).derivation_version, 7)
+        self.assertIn('Would re-point', out)
+        self.assertIn('Nothing was written', out)
+
+    def test_apply_and_dry_run_together_are_refused(self):
+        with self.assertRaises(CommandError):
+            self._run(apply=True, dry_run=True)
+
+    # -- reporting ---------------------------------------------------------
+
+    def test_limit_says_what_it_dropped(self):
+        """Silence about a cap reads as 'covered everything'."""
+        self._measurement(90850, '38483-4', value=1.0)
+        self._measurement(90851, '2947-0', value=140.0)
+        out = self._run(table=['measurement'], limit=1)
+        self.assertIn('capped at 1', out)
+        self.assertIn('--limit reached in: measurement', out)
+
+    def test_table_option_limits_the_sweep(self):
+        row = self._measurement(90860, '38483-4')
+        out = self._run(apply=True, table=['observation'])
+        row.refresh_from_db()
+        self.assertEqual(row.measurement_concept_id, 0)
+        self.assertNotIn('measurement:', out)
+
+    def test_an_approved_mapping_for_the_table_outranks_the_direct_hit(self):
+        """Rule 2: a curator's decision beats an automatic resolution."""
+        from omop_core.models import SourceCodeConceptMapping
+        curated = _concept(3099999, 'Curated destination', self.dom_meas,
+                           self.vocab, self.cc, code='CURATED-1')
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='', source_code='38483-4',
+            target_concept=curated, omop_table='measurement', status='approved',
+        )
+        row = self._measurement(90870, '38483-4')
+        self._run(apply=True, table=['measurement'])
+        row.refresh_from_db()
+        self.assertEqual(row.measurement_concept_id, curated.concept_id)
