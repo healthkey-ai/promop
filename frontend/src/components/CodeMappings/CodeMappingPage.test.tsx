@@ -41,6 +41,7 @@ const proposedRow = {
   notes: "",
   origin: "import",
   origin_system: "hk-labs",
+  created_by: "",
   occurrence_count: 14,
   has_mapping: true,
 };
@@ -59,6 +60,7 @@ const approvedRow = {
   status: "approved" as const,
   origin: "curator",
   origin_system: "",
+  created_by: "zoe@example.com",
   occurrence_count: 3,
 };
 
@@ -535,6 +537,55 @@ describe("CodeMappingPage", () => {
       const select = screen.getByLabelText("Source Code System") as HTMLSelectElement;
       expect(select.value).toBe("ICD10CM");
       expect(Array.from(select.options).map((o) => o.value)).toContain("ICD10CM");
+    });
+  });
+
+  describe("Unmapped queue ordering", () => {
+    const row = (over: Partial<typeof proposedRow>) => ({ ...proposedRow, ...over });
+
+    it("puts import proposals above hand-written ones, then sorts humans by name", async () => {
+      // An import's proposal is nobody's decision yet — it is the work the
+      // queue exists for. Human drafts then group by author so one curator's
+      // in-progress work stays together.
+      renderPage([
+        row({ mapping_id: 1, source_code: "HUMAN-ZOE", origin: "curator", created_by: "zoe@example.com", occurrence_count: 900 }),
+        row({ mapping_id: 2, source_code: "HUMAN-ADA", origin: "curator", created_by: "ada@example.com", occurrence_count: 1 }),
+        row({ mapping_id: 3, source_code: "MACHINE", origin: "import", created_by: "", occurrence_count: 5 }),
+      ]);
+      await screen.findByText("MACHINE", { selector: "td" });
+
+      // The data rows carry role="button" (whole-row click), which overrides
+      // their implicit "row" role — so query the code cells directly. Testing
+      // Library returns them in DOM order.
+      const codes = screen
+        .getAllByText(/^(MACHINE|HUMAN-ADA|HUMAN-ZOE)$/, { selector: "td" })
+        .map((cell) => cell.textContent);
+      // Machine first despite the lowest count; then Ada before Zoe despite
+      // Zoe's row being seen 900 times.
+      expect(codes).toEqual(["MACHINE", "HUMAN-ADA", "HUMAN-ZOE"]);
+    });
+
+    it("names the creating curator instead of an import system", async () => {
+      renderPage([row({ origin: "curator", created_by: "ada@example.com", origin_system: "" })]);
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      fireEvent.click(cell.closest("tr")!);
+      await screen.findByText("Edit Mapping");
+      expect(screen.getByText(/Created by ada@example.com/)).toBeInTheDocument();
+      expect(screen.queryByText(/Proposed by import/)).not.toBeInTheDocument();
+    });
+
+    it("locks Status to Proposed on a new mapping", async () => {
+      // Approval is the only transition that rewrites patient data, and the
+      // server enforces proposed-on-create; offering Approved here would
+      // promise a one-step create-and-approve the API no longer honours.
+      renderPage();
+      await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
+      fireEvent.click(screen.getByRole("button", { name: /New Mapping/ }));
+      await screen.findByText("New Mapping", { selector: "h2" });
+
+      const statusSelect = screen.getByLabelText("Status") as HTMLSelectElement;
+      expect(statusSelect.value).toBe("proposed");
+      expect(statusSelect.disabled).toBe(true);
     });
   });
 });

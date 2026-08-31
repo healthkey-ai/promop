@@ -44,6 +44,7 @@ interface CodeMappingRow {
   notes: string;
   origin: string;
   origin_system: string;
+  created_by: string;
   occurrence_count: number;
   has_mapping: boolean;
 }
@@ -181,6 +182,8 @@ const TIP = {
     "Which vocabulary the search looks in. Defaults to the destination's own vocabulary; widen it to re-point a minted HK-* mapping at a standard concept.",
   status:
     "Proposed is awaiting review. Approving also re-points the clinical rows already stored. Rejected hides the row behind a filter.",
+  status_new:
+    "A new mapping always starts as Proposed. Approve it once it has been reviewed — approval is what rewrites the clinical rows already stored.",
   notes: "Why this decision was made, for the next curator who opens the row.",
 } as const;
 
@@ -254,6 +257,26 @@ function omopTableFor(reference: Reference, domainId: string): string {
   return reference.omop_tables[domainId] || DOMAIN_TO_TABLE[domainId] || "";
 }
 
+/** Highest occurrence count first: the code seen 400 times is worth more of a curator's time. */
+const byOccurrence = (a: CodeMappingRow, b: CodeMappingRow) =>
+  (b.occurrence_count || 0) - (a.occurrence_count || 0)
+  || (a.source_code || "").localeCompare(b.source_code || "");
+
+/**
+ * Machines first, then humans alphabetically.
+ *
+ * An import's proposal is nobody's decision yet — it is the work the queue
+ * exists for, so it sorts above every hand-written mapping. Human drafts then
+ * group by author, which keeps one curator's in-progress work together
+ * instead of interleaving it with everyone else's by occurrence count.
+ */
+const byAuthorThenOccurrence = (a: CodeMappingRow, b: CodeMappingRow) => {
+  const machine = (r: CodeMappingRow) => (r.origin === "import" ? 0 : 1);
+  return machine(a) - machine(b)
+    || (a.created_by || "").localeCompare(b.created_by || "")
+    || byOccurrence(a, b);
+};
+
 function buildEditForm(row: CodeMappingRow, reference: Reference): MappingForm {
   const domainId = row.domain_id || row.destination_domain_id || "";
   return {
@@ -288,6 +311,7 @@ export default function CodeMappingPage() {
   const [activeVocabulary, setActiveVocabulary] = useState("");
   const [mappedCollapsed, setMappedCollapsed] = useState(true);
   const [showRejected, setShowRejected] = useState(false);
+  const [banner, setBanner] = useState<string | null>(null);
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
   const [form, setForm] = useState<MappingForm>(emptyForm);
@@ -377,13 +401,8 @@ export default function CodeMappingPage() {
     });
   }, [rows, searchQuery, selectedVocabulary, showRejected]);
 
-  /** Highest occurrence count first: the code seen 400 times is worth more of a curator's time. */
-  const byOccurrence = (a: CodeMappingRow, b: CodeMappingRow) =>
-    (b.occurrence_count || 0) - (a.occurrence_count || 0)
-    || (a.source_code || "").localeCompare(b.source_code || "");
-
   const unmappedRows = useMemo(
-    () => visibleRows.filter((r) => r.status !== "approved").sort(byOccurrence),
+    () => visibleRows.filter((r) => r.status !== "approved").sort(byAuthorThenOccurrence),
     [visibleRows],
   );
   const rejectedCount = useMemo(
@@ -537,6 +556,12 @@ export default function CodeMappingPage() {
     void searchConcepts(query.replace(/[-_]/g, " "));
   };
 
+  // Keyed on the same condition submitForm branches on. dialogMode can say
+  // "edit" for a row with no mapping_id (toggleApproval opens one that way),
+  // and the two diverging let a curator pick Approved on what the server then
+  // treats as a create and silently downgrades.
+  const isNewMapping = !selectedRow?.mapping_id;
+
   const willRepoint =
     dialogMode === "edit"
     && form.status === "approved"
@@ -594,8 +619,13 @@ export default function CodeMappingPage() {
       return;
     }
     setError("");
+    // Approving from the table triggers the same clinical rewrite the dialog
+    // does. Dropping the response left a curator with no sign that 400 rows
+    // had just moved -- the table simply refetched.
+    const approving = row.status !== "approved";
+    if (approving) setBanner(null);
     try {
-      await api.patch(`/v1/code-mappings/${row.mapping_id}/`, {
+      const resp = await api.patch(`/v1/code-mappings/${row.mapping_id}/`, {
         domain_id: row.domain_id || row.destination_domain_id || "",
         source_vocabulary_id: row.source_vocabulary_id,
         source_code: row.source_code,
@@ -606,7 +636,16 @@ export default function CodeMappingPage() {
         status: row.status === "approved" ? "proposed" : "approved",
         notes: row.notes,
       });
+      const repoint: RepointResult | null = resp.data?.repoint ?? null;
       await fetchAll();
+      if (repoint && repoint.rows_updated) {
+        setBanner(
+          `${row.source_code}: updated ${repoint.rows_updated} row(s) across `
+          + `${repoint.persons_marked_stale} patient(s)`
+          + (repoint.rows_collapsed ? `, ${repoint.rows_collapsed} duplicate(s) collapsed` : "")
+          + ". Patient records queued for re-derivation.",
+        );
+      }
     } catch {
       setError("Failed to update code mapping status.");
     }
@@ -749,6 +788,15 @@ export default function CodeMappingPage() {
         {error && (
           <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             {error}
+          </div>
+        )}
+
+        {banner && (
+          <div
+            role="status"
+            className="mb-4 rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900"
+          >
+            {banner}
           </div>
         )}
 
@@ -1085,9 +1133,16 @@ export default function CodeMappingPage() {
                 </div>
               </fieldset>
 
-              {selectedRow?.origin === "import" && (
+              {selectedRow && (selectedRow.origin === "import" || selectedRow.created_by) && (
                 <p className="mt-4 rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                  Proposed by import{selectedRow.origin_system ? ` (${selectedRow.origin_system})` : ""}
+                  {selectedRow.origin === "import" ? (
+                    <>
+                      Proposed by import
+                      {selectedRow.origin_system ? ` (${selectedRow.origin_system})` : ""}
+                    </>
+                  ) : (
+                    <>Created by {selectedRow.created_by}</>
+                  )}
                   {selectedRow.occurrence_count ? ` · seen ${selectedRow.occurrence_count} time(s)` : ""}
                 </p>
               )}
@@ -1140,12 +1195,17 @@ export default function CodeMappingPage() {
                 <div className="flex items-center gap-2">
                   <label className="text-sm font-medium text-slate-700" htmlFor="status">Status</label>
                   <span title={TIP.status} aria-hidden="true" className="cursor-help text-xs text-slate-400">ⓘ</span>
+                  {/* A new mapping is always proposed; the server enforces it.
+                      Offering Approved here would promise a one-step create-and-
+                      approve the API no longer honours, and approval is the only
+                      transition that rewrites patient data. */}
                   <select
                     id="status"
-                    title={TIP.status}
-                    value={form.status}
+                    title={isNewMapping ? TIP.status_new : TIP.status}
+                    value={isNewMapping ? "proposed" : form.status}
+                    disabled={isNewMapping}
                     onChange={(e) => setField("status", e.target.value)}
-                    className="h-9 rounded-md border border-slate-300 px-2 text-sm font-normal text-slate-950"
+                    className="h-9 rounded-md border border-slate-300 px-2 text-sm font-normal text-slate-950 disabled:bg-slate-100 disabled:text-slate-500"
                   >
                     <option value="proposed">Proposed</option>
                     <option value="approved">Approved</option>

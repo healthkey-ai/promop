@@ -810,3 +810,42 @@ Live round trip re-run after all of it: 4 passed, and the row moved from the min
 concept to LOINC 3046299 with no duplicate. One harness note recorded in the test header — the
 component's axios uses the `/api` prefix as it does in the browser, so the Vite dev proxy must be
 up or every request 404s at :3000 and the page reports "Failed to load code mappings".
+
+---
+
+## 12. Curator-created mappings and queue order (#849)
+
+**Creation is always `proposed`.** A curator could previously create a mapping already approved,
+which collapsed writing a mapping and signing it off into one act and skipped the review step the
+Unmapped queue exists to provide. It also meant a *create* could rewrite clinical data. Now
+approval is the only transition that touches patient rows, which is a much easier property to hold
+in your head. The dialog disables Status on a new mapping rather than offering an option the API
+would refuse.
+
+**The trap that made this more than a one-line change.** Keying the re-point on "the destination
+changed" happens to work when a curator re-points an import's proposal, and silently fails when
+they write the mapping themselves: they choose the destination at creation, so by approval time it
+has not moved, `moved` is false, and the mapping approves while every unresolved row stays at
+concept 0 — reporting success. That is the silent-approval failure §10 and §11 each removed once,
+reachable through a third door.
+
+The rule is now what it should always have been: **a human signing off on what a code means is
+what moves the rows.** A first approval sweeps `NO_MATCHING_CONCEPT_ID`, claiming the rows its
+source code left unresolved; any approval that also moved the destination sweeps the old one.
+Both can apply at once and their counts are summed, so the dialog reports everything it touched.
+
+**Who created it lives in `created_by`, not `origin`.** The literal suggestion was to put the
+userid in `origin`. `created_by` is already a proper FK holding exactly that (`None` on import
+rows), while `origin` is `CharField(max_length=10)` with `choices` — an email does not fit, the
+enum would have to go, and it is load-bearing: `_source_value_match` only admits
+`source_code_description` into the re-point match set when `origin == 'import'`. So `origin` stays
+the machine-vs-human enum, `created_by` carries the person, and the queue sorts on both:
+
+- import proposals first — nobody has decided anything about them yet, which is the work the queue
+  is for;
+- then humans alphabetically by author, so one curator's drafts stay together instead of
+  interleaving with everyone else's by occurrence count;
+- then by occurrence count within each group, as before.
+
+The dialog's provenance line reads *"Proposed by import (fhir-sync)"* for machine rows and
+*"Created by ada@example.com"* for hand-written ones.
