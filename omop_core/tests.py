@@ -6545,8 +6545,8 @@ class RepointResolvableZerosCommandTest(_AllowsDuplicateConceptCodes):
     def test_apply_moves_all_distinct_same_day_measurements_without_deleting(self):
         self.measurement_target.concept_code = 'GLU-846'
         self.measurement_target.save(update_fields=['concept_code'])
-        self._measurement(84601, 'GLU-846', 1)
-        self._measurement(84602, 'GLU-846', 2)
+        self._measurement(84601, 'GLU-846', 1, self.measurement_target.concept_id)
+        self._measurement(84602, 'GLU-846', 2, self.measurement_target.concept_id)
 
         call_command('repoint_resolvable_zeros', '--apply', '--table', 'measurement', verbosity=0)
 

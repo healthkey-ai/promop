@@ -70,9 +70,14 @@ def resolve_historical_value(source_value, table, source_vocabulary_id=''):
     if mapping_exists:
         return None, 'no safe approved mapping'
 
-    direct = Concept.objects.filter(concept_code__iexact=source_value)
-    if source_vocabulary_id:
-        direct = direct.filter(vocabulary_id=source_vocabulary_id)
+    # Without source-system provenance, a direct code match can be from any
+    # vocabulary.  That is precisely the collision this repair must not guess.
+    if not source_vocabulary_id:
+        return None, 'missing source vocabulary'
+    direct = Concept.objects.filter(
+        concept_code__iexact=source_value,
+        vocabulary_id=source_vocabulary_id,
+    )
     resolved = {
         candidate.concept_id
         for concept in direct.iterator()
