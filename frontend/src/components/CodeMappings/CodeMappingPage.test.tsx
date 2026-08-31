@@ -671,17 +671,33 @@ describe("CodeMappingPage", () => {
   });
 
   describe("Suggest", () => {
-    it("offers Suggest on an HK-* tab and not on a standard one", async () => {
+    it("enables Suggest on an HK-* tab and disables it on a standard one", async () => {
       // HK-* tabs hold locally minted destinations for unmapped codes. A
       // standard vocabulary is somewhere a curator re-points *into* —
-      // enumerating SNOMED's 1.09M concepts would not be a queue.
+      // enumerating SNOMED's 1.09M concepts would not be a queue. Disabled
+      // with a reason rather than hidden: a button that vanishes reads as a bug.
       renderPage();
       await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
-      expect(screen.getByRole("button", { name: /Suggest/ })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Suggest/ })).toBeEnabled();
 
       const tabs = within(screen.getByRole("tablist", { name: "Destination vocabularies" }));
       fireEvent.click(tabs.getByRole("button", { name: /LOINC/ }));
-      expect(screen.queryByRole("button", { name: /Suggest/ })).not.toBeInTheDocument();
+      const button = screen.getByRole("button", { name: /Suggest/ });
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("title", expect.stringContaining("HK-*") as unknown as string);
+    });
+
+    it("opens on an HK-* tab when nothing is mapped anywhere", async () => {
+      // The state Suggest exists for. Standard vocabularies come first in the
+      // tab strip, so an empty queue opened on SNOMED — where the button is
+      // disabled — making it unreachable exactly when it is needed.
+      renderPage([]);
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: /Suggest/ })).toBeEnabled());
+      const tabs = within(screen.getByRole("tablist", { name: "Destination vocabularies" }));
+      const selected = tabs.getAllByRole("button")
+        .find((b) => b.className.includes("border-slate-950"));
+      expect(selected?.textContent).toMatch(/^HK-/);
     });
 
     it("defaults the threshold to 10 and sends it", async () => {
@@ -690,7 +706,7 @@ describe("CodeMappingPage", () => {
       mockPost.mockResolvedValue({ data: { created: 3, considered: 5, ranked: 2 } });
       renderPage();
       await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
-      expect(screen.getByLabelText(/Seen at least/)).toHaveValue(10);
+      expect(screen.getByLabelText(/seen at least/i)).toHaveValue(10);
 
       fireEvent.click(screen.getByRole("button", { name: /Suggest/ }));
       await waitFor(() => expect(mockPost).toHaveBeenCalled());
