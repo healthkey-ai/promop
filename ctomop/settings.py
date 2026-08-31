@@ -539,6 +539,11 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {
     # running task was lost and hands the same job to a second worker.
     'visibility_timeout': int(
         os.environ.get('CELERY_BROKER_VISIBILITY_TIMEOUT', '1800')),
+    # The refresh endpoint enqueues inside the request, so an unreachable
+    # broker has to fail fast. Unset, kombu waits on the connect indefinitely
+    # and the caller sits there until gunicorn kills the worker.
+    'socket_connect_timeout': 5,
+    'socket_timeout': 5,
 }
 # How long a caller can still poll a finished task id.
 CELERY_RESULT_EXPIRES = int(os.environ.get('CELERY_RESULT_EXPIRES', '86400'))
