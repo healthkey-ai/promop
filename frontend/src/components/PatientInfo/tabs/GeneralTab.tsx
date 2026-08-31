@@ -29,11 +29,18 @@ interface Props {
  * reads back. `writeFieldValue` routes on the target, so the tab does not need
  * to know which is which — only to stop offering boxes the server refuses.
  *
- * Sixteen of its thirty fields are writable. The rest divide into three honest
- * refusals: twelve are unmapped and have no write path at all yet, `bmi` is
- * computed from height and weight, and `date_of_birth` is fillable only while
+ * Sixteen of its thirty-eight fields are writable. The rest divide into four
+ * honest refusals: twelve are unmapped and have no write path at all yet, `bmi`
+ * is computed from height and weight, `date_of_birth` is fillable only while
  * empty — the persons endpoint never overwrites one, so a box that appeared to
- * accept a correction would lie about the outcome.
+ * accept a correction would lie about the outcome — and the eight language
+ * capabilities are derived from PersonLanguageSkill rows, which this tab has no
+ * way to create.
+ *
+ * Those eight render as three-state rather than as checkboxes on purpose. Blank
+ * means nobody asked about that language; false means the patient was asked and
+ * does not have the capability. A checkbox collapses the two, and the difference
+ * is exactly what a trial filter acts on.
  *
  * Where the descriptor carries its own `options` — gender, race, ethnicity —
  * those win over the local constant. They are the curated set the server
@@ -210,6 +217,22 @@ export default function GeneralTab({
           {field('No Hepatitis B', 'no_hepatitis_b_status', 'boolean')}
           {field('Hepatitis C Positive', 'hepatitis_c_status', 'boolean')}
           {field('No Hepatitis C', 'no_hepatitis_c_status', 'boolean')}
+        </div>
+      </Section>
+
+      <Section
+        title="Language Capabilities"
+        description="Derived from the patient's recorded language skills. Blank means nobody has asked about that language, which is not the same as an inability."
+      >
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          {field('Speaks English', 'english_speak', 'boolean')}
+          {field('Speaks Spanish', 'spanish_speak', 'boolean')}
+          {field('Reads English', 'english_read', 'boolean')}
+          {field('Reads Spanish', 'spanish_read', 'boolean')}
+          {field('Writes English', 'english_write', 'boolean')}
+          {field('Writes Spanish', 'spanish_write', 'boolean')}
+          {field('Understands English', 'english_understand', 'boolean')}
+          {field('Understands Spanish', 'spanish_understand', 'boolean')}
         </div>
       </Section>
 

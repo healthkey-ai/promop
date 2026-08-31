@@ -2,7 +2,7 @@
 
 import pytest
 
-from omop_core.models import PatientRecord, FieldConceptMapping
+from omop_core.models import PatientRecord, FieldConceptMapping, FieldChoice, FieldChoiceCode, FieldFormula
 from omop_core.services.field_descriptor import (
     get_all_field_descriptors,
     _INTERNAL_FIELDS,
@@ -14,11 +14,12 @@ pytestmark = pytest.mark.django_db
 
 
 def test_all_concrete_fields_covered():
-    """Every non-internal concrete PatientRecord field appears in the descriptor output."""
+    """Every mapping-relevant concrete PatientRecord field appears in the output."""
     concrete_names = {
         f.name for f in PatientRecord._meta.get_fields()
         if getattr(f, 'concrete', False)
     } - _INTERNAL_FIELDS
+    concrete_names = {name for name in concrete_names if not name.endswith('_units')}
     descriptors = get_all_field_descriptors()
     descriptor_names = {d['field_name'] for d in descriptors}
     missing = concrete_names - descriptor_names
@@ -31,6 +32,17 @@ def test_internal_fields_excluded():
     descriptor_names = {d['field_name'] for d in descriptors}
     for field in _INTERNAL_FIELDS:
         assert field not in descriptor_names, f"Internal field '{field}' should be excluded"
+
+
+def test_unit_companion_fields_excluded():
+    """Units are configured on measurement mappings, not mapped as fields themselves."""
+    descriptor_names = {d['field_name'] for d in get_all_field_descriptors()}
+    unit_fields = {
+        f.name for f in PatientRecord._meta.get_fields()
+        if getattr(f, 'concrete', False) and f.name.endswith('_units')
+    }
+    assert unit_fields
+    assert descriptor_names.isdisjoint(unit_fields)
 
 
 def test_lab_fields_categorized_editable():
@@ -51,6 +63,21 @@ def test_provenance_merged():
     hb = next(d for d in descriptors if d['field_name'] == 'hemoglobin_g_dl')
     assert hb['provenance'] is not None
     assert '718-7' in hb['provenance']['concept_codes']
+
+
+def test_active_condition_derivations_are_read_only_computed_descriptors():
+    descriptors = {d['field_name']: d for d in get_all_field_descriptors()}
+
+    infection = descriptors['active_infection_status']
+    malignancies = descriptors['active_malignancies']
+
+    assert infection['category'] == 'computed'
+    assert infection['mappable'] is False
+    assert infection['provenance']['concept_codes'] == ['40733004']
+    assert infection['provenance']['extractor'] == '_get_active_condition_data'
+    assert malignancies['category'] == 'computed'
+    assert malignancies['mappable'] is False
+    assert malignancies['provenance']['concept_codes'] == ['363346000']
 
 
 def test_mapping_merged():
@@ -74,7 +101,7 @@ def test_descriptors_have_required_keys():
     descriptors = get_all_field_descriptors()
     required_keys = {
         'field_name', 'field_type', 'category', 'tab', 'provenance', 'mapping',
-        'suggestion', 'mappable', 'locked_table',
+        'suggestion', 'mappable', 'locked_table', 'choices', 'formula', 'derivation_error',
     }
     for d in descriptors:
         missing = required_keys - set(d.keys())
@@ -84,7 +111,7 @@ def test_descriptors_have_required_keys():
 def test_categories_are_valid():
     """All categories returned are from the known set."""
     valid_categories = {
-        'editable', 'alias', 'unit', 'profile', 'location',
+        'editable', 'alias', 'profile', 'location',
         'therapy-inference', 'computed', 'needs-concept-set', 'other',
     }
     descriptors = get_all_field_descriptors()
@@ -158,6 +185,12 @@ def test_reclassified_fields():
         'toxicity_grade': 'treatment',
         'condition_code_icd_10': 'disease',
         'prior_procedures': 'disease',
+        'metastatic_status': 'disease',
+        'reason_for_discontinuation': 'treatment',
+        'serum_creatinine_mg_dl': 'labs',
+        'renal_adequacy_status': 'labs',
+        'pregnancy_test_result': 'behavior',
+        'median_daily_steps_30d': 'behavior',
     }
     for field, expected_tab in checks.items():
         if field in by_name:
@@ -260,3 +293,72 @@ def test_locked_table_none_for_others():
             assert d['locked_table'] is None, (
                 f"Field '{d['field_name']}' (category={d['category']}) should have locked_table=None"
             )
+
+
+# ── Choices tests (Phase 3) ─────────────────────────────────────
+
+
+def test_choices_included_in_descriptors():
+    """Field choices appear in descriptor output when seeded."""
+    FieldChoice.objects.all().delete()
+    choice = FieldChoice.objects.create(field_name='disease', display='Test Disease', sort_order=0)
+    FieldChoiceCode.objects.create(choice=choice, code='12345', vocabulary_id='SNOMED', is_primary=True)
+
+    descriptors = get_all_field_descriptors()
+    disease = next(d for d in descriptors if d['field_name'] == 'disease')
+    assert len(disease['choices']) == 1
+    assert disease['choices'][0]['display'] == 'Test Disease'
+    assert disease['choices'][0]['codes'][0]['code'] == '12345'
+
+
+def test_choices_empty_for_fields_without():
+    """Non-choice fields have empty choices list."""
+    FieldChoice.objects.all().delete()
+    descriptors = get_all_field_descriptors()
+    hb = next(d for d in descriptors if d['field_name'] == 'hemoglobin_g_dl')
+    assert hb['choices'] == []
+
+
+# ── Formula tests (Phase 5) ─────────────────────────────────────
+
+
+def test_formula_included_in_descriptors():
+    """Formula data appears in descriptors for computed fields with formulas."""
+    FieldFormula.objects.all().delete()
+    FieldFormula.objects.create(field_name='bmi', formula='weight / (height / 100) ^ 2', is_active=False)
+
+    descriptors = get_all_field_descriptors()
+    bmi = next(d for d in descriptors if d['field_name'] == 'bmi')
+    assert bmi['formula'] is not None
+    assert bmi['formula']['expression'] == 'weight / (height / 100) ^ 2'
+    assert bmi['formula']['is_active'] is False
+
+
+def test_formula_none_for_non_computed():
+    """Non-computed fields without formulas have formula=None."""
+    FieldFormula.objects.all().delete()
+    descriptors = get_all_field_descriptors()
+    hb = next(d for d in descriptors if d['field_name'] == 'hemoglobin_g_dl')
+    assert hb['formula'] is None
+
+
+def test_invalid_stored_formula_is_flagged_as_a_derivation_error():
+    """Legacy/direct DB formula rows remain visible but cannot look healthy."""
+    FieldFormula.objects.all().delete()
+    FieldFormula.objects.create(field_name='bmi', formula='unknown_input + 1', is_active=False)
+
+    descriptors = {d['field_name']: d for d in get_all_field_descriptors()}
+
+    assert descriptors['bmi']['derivation_error'] == 'Invalid formula: Unknown field: unknown_input'
+
+
+# ── Descriptor keys test (updated for new keys) ────────────────
+
+
+def test_descriptors_have_choices_and_formula_keys():
+    """Each descriptor dict contains choices and formula keys."""
+    descriptors = get_all_field_descriptors()
+    for d in descriptors:
+        assert 'choices' in d, f"Descriptor for {d['field_name']} missing 'choices' key"
+        assert 'formula' in d, f"Descriptor for {d['field_name']} missing 'formula' key"
+        assert 'derivation_error' in d, f"Descriptor for {d['field_name']} missing 'derivation_error' key"

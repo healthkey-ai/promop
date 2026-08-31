@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, ChevronDown, ChevronRight, Search, BookOpen, Check, X } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, Search, BookOpen, Check, X, Pencil, Plus, Sparkles } from "lucide-react";
 import api from "@/api/axios";
 import { ConceptAssignDialog } from "./ConceptAssignDialog";
 import { SynonymDialog } from "./SynonymDialog";
+import { FieldChoiceEditor } from "./FieldChoiceEditor";
+import { FormulaEditDialog } from "./FormulaEditDialog";
+import { DerivationInfoDialog } from "./DerivationInfoDialog";
+import { AddCustomFieldDialog } from "@/components/PatientInfo/CustomPatientFields";
 
 interface FieldDescriptor {
   field_name: string;
@@ -22,6 +26,7 @@ interface FieldDescriptor {
   mapping: {
     id: number;
     concept_id: number | null;
+    concept_name: string;
     vocabulary_id: string;
     concept_code: string;
     unit: string;
@@ -36,21 +41,31 @@ interface FieldDescriptor {
     vocabulary_id: string | null;
     unit: string | null;
     omop_table: string;
+    common_units: string[];
   } | null;
   mappable: boolean;
   locked_table: string | null;
+  unit_options: string[];
+  choices: {
+    id: number;
+    display: string;
+    sort_order: number;
+    codes: { code: string; vocabulary_id: string; display: string; is_primary: boolean }[];
+  }[];
+  formula: {
+    id: number;
+    expression: string;
+    is_active: boolean;
+  } | null;
+  explanation: string | null;
+  derivation_error: string | null;
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
   "needs-concept-set": "Needs Concept Assignment",
   editable: "Mapped",
-  "therapy-inference": "Therapy Inference",
   computed: "Computed",
-  alias: "Legacy Aliases",
-  unit: "Unit Fields",
   profile: "Person",
-  location: "Location",
-  other: "Other",
 };
 
 const TAB_LABELS: Record<string, string> = {
@@ -60,15 +75,33 @@ const TAB_LABELS: Record<string, string> = {
   blood: "Blood",
   labs: "Labs",
   behavior: "Behavior",
-  other: "Other",
 };
 
-const TAB_ORDER = ["general", "disease", "treatment", "blood", "labs", "behavior", "other"];
+const TAB_ORDER = ["general", "disease", "treatment", "blood", "labs", "behavior"];
 
 const STATUS_BADGE: Record<string, string> = {
   proposed: "bg-yellow-100 text-yellow-800",
   approved: "bg-green-100 text-green-800",
   rejected: "bg-red-100 text-red-800",
+};
+
+/**
+ * Omit descriptors that cannot be administered here. Location persistence is
+ * not supported end-to-end, while aliases only preserve older import names
+ * and are not active PatientRecord fields with their own mappings.
+ */
+const isSupportedMapperField = (descriptor: FieldDescriptor) =>
+  !["location", "alias"].includes(descriptor.category);
+
+/** Display category: approved mappings move from their backend category to "editable" (Mapped). */
+const getDisplayCategory = (d: FieldDescriptor): string => {
+  if (d.category === "computed") return "computed";
+  // Mapped is an approval ledger: every mappable field remains review work
+  // until approved. This includes Person fields, which retain their Person
+  // table lock in the dialog.
+  if (d.mapping?.status === "approved") return "editable";
+  if (d.mapping || d.mappable) return "needs-concept-set";
+  return d.category;
 };
 
 export default function FieldMappingPage() {
@@ -80,19 +113,23 @@ export default function FieldMappingPage() {
   const [categoryFilter, setCategoryFilter] = useState("");
   const [activeTab, setActiveTab] = useState("general");
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(
-    new Set(["alias", "unit", "other", "computed"])
+    new Set(["computed"])
   );
   const [dialogOpen, setDialogOpen] = useState(false);
   const [selectedField, setSelectedField] = useState<FieldDescriptor | null>(null);
   const [synonymDialogField, setSynonymDialogField] = useState<string | null>(null);
   const [batchSynonyms, setBatchSynonyms] = useState<Record<string, string[]>>({});
+  const [choiceEditorField, setChoiceEditorField] = useState<FieldDescriptor | null>(null);
+  const [formulaEditorField, setFormulaEditorField] = useState<FieldDescriptor | null>(null);
+  const [derivationInfoField, setDerivationInfoField] = useState<FieldDescriptor | null>(null);
+  const [addFieldDialogOpen, setAddFieldDialogOpen] = useState(false);
 
   const fetchDescriptors = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
       const resp = await api.get("/v1/field-mappings/");
-      setDescriptors(resp.data);
+      setDescriptors(resp.data.filter(isSupportedMapperField));
     } catch {
       setError("Failed to load field mappings.");
     } finally {
@@ -147,12 +184,12 @@ export default function FieldMappingPage() {
     const mappable: Record<string, FieldDescriptor[]> = {};
     const computed: FieldDescriptor[] = [];
     for (const d of filtered) {
-      if (d.category === "computed") {
+      const displayCat = getDisplayCategory(d);
+      if (displayCat === "computed") {
         computed.push(d);
       } else {
-        const cat = d.category;
-        if (!mappable[cat]) mappable[cat] = [];
-        mappable[cat].push(d);
+        if (!mappable[displayCat]) mappable[displayCat] = [];
+        mappable[displayCat].push(d);
       }
     }
     return { mappableGroups: mappable, computedFields: computed };
@@ -161,7 +198,8 @@ export default function FieldMappingPage() {
   const stats = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const d of descriptors) {
-      counts[d.category] = (counts[d.category] || 0) + 1;
+      const displayCat = getDisplayCategory(d);
+      counts[displayCat] = (counts[displayCat] || 0) + 1;
     }
     return counts;
   }, [descriptors]);
@@ -173,6 +211,15 @@ export default function FieldMappingPage() {
     }
     return counts;
   }, [descriptors]);
+
+  const activeTabUnmapped = useMemo(() => (
+    descriptors.filter((d) =>
+      d.tab === activeTab
+      && d.mappable
+      && !d.mapping
+      && getDisplayCategory(d) !== "computed"
+    ).length
+  ), [activeTab, descriptors]);
 
   const toggleSection = (cat: string) => {
     setCollapsedSections((prev) => {
@@ -208,24 +255,27 @@ export default function FieldMappingPage() {
   const handleConfirm = async (field: FieldDescriptor) => {
     try {
       if (field.mapping) {
-        // Approve existing proposed mapping.
-        if (field.mapping.status === "proposed") {
-          await api.patch(`/v1/field-mappings/${field.mapping.id}/`, { status: "approved" });
-        }
+        // This is a state toggle, not a one-way confirmation.  An approved
+        // mapping is still retained as a proposal when a reviewer unchecks it.
+        const status = field.mapping.status === "approved" ? "proposed" : "approved";
+        await api.patch(`/v1/field-mappings/${field.mapping.id}/`, { status });
+        await fetchDescriptors();
       } else if (field.suggestion) {
-        // Create mapping from suggestion with approved status.
-        await api.post("/v1/field-mappings/", {
-          field_name: field.field_name,
-          vocabulary_id: field.suggestion.vocabulary_id || "",
-          concept_code: field.suggestion.concept_code,
-          unit: field.suggestion.unit || "",
-          omop_table: field.locked_table || field.suggestion.omop_table || "",
-          status: "approved",
-        });
+        // Suggestion has no resolved concept FK — open the dialog so the user
+        // can search, select a concept, and create a complete mapping.
+        handleCellClick(field);
       }
-      fetchDescriptors();
     } catch {
       setError("Failed to confirm mapping.");
+    }
+  };
+
+  const handleSuggestCurrentTab = async () => {
+    try {
+      await api.post("/v1/field-mappings/propose-all/", { tab: activeTab });
+      await fetchDescriptors();
+    } catch {
+      setError("Failed to suggest field mappings.");
     }
   };
 
@@ -234,7 +284,10 @@ export default function FieldMappingPage() {
     if (f.mapping) {
       return (
         <span className="inline-flex items-center gap-1.5">
-          <span className="font-mono text-xs">{f.mapping.concept_code}</span>
+          <span className={`text-xs ${f.mapping.status === "proposed" ? "font-bold" : ""}`}>
+            <span className="font-mono">{f.mapping.concept_code}</span>
+            {f.mapping.concept_name && <span className="ml-1 break-words text-gray-600">— {f.mapping.concept_name}</span>}
+          </span>
           <span
             className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
               STATUS_BADGE[f.mapping.status] || "bg-gray-100"
@@ -247,21 +300,22 @@ export default function FieldMappingPage() {
     }
     if (f.suggestion) {
       return (
-        <span className="font-mono text-xs italic text-gray-400">
+        <span className="font-mono text-xs font-bold text-gray-700">
           {f.suggestion.concept_code}
         </span>
       );
     }
-    return <span className="text-xs text-gray-400">&mdash;</span>;
+    return (
+      <span className="text-xs text-gray-400 group-hover:text-gray-500">
+        click to map
+      </span>
+    );
   };
 
   /** Render coding (vocabulary_id) cell. */
   const renderCodingCell = (f: FieldDescriptor) => {
     if (f.mapping?.vocabulary_id) {
       return <span className="text-xs">{f.mapping.vocabulary_id}</span>;
-    }
-    if (f.suggestion?.vocabulary_id) {
-      return <span className="text-xs italic text-gray-400">{f.suggestion.vocabulary_id}</span>;
     }
     return <span className="text-xs text-gray-400">&mdash;</span>;
   };
@@ -270,11 +324,7 @@ export default function FieldMappingPage() {
   const renderTableCell = (f: FieldDescriptor) => {
     if (f.locked_table) {
       return (
-        <span className="text-xs text-gray-400" title={
-          f.category === "location"
-            ? "Location is an independent table — no OMOP mapping needed"
-            : "Person table (locked)"
-        }>
+        <span className="text-xs text-gray-400" title="Person table (locked)">
           {f.locked_table}
         </span>
       );
@@ -284,17 +334,6 @@ export default function FieldMappingPage() {
     }
     if (f.suggestion?.omop_table) {
       return <span className="text-xs italic text-gray-400">{f.suggestion.omop_table}</span>;
-    }
-    return <span className="text-xs text-gray-400">&mdash;</span>;
-  };
-
-  /** Render unit cell. */
-  const renderUnitCell = (f: FieldDescriptor) => {
-    if (f.mapping?.unit) {
-      return <span className="text-xs">{f.mapping.unit}</span>;
-    }
-    if (f.suggestion?.unit) {
-      return <span className="text-xs italic text-gray-400">{f.suggestion.unit}</span>;
     }
     return <span className="text-xs text-gray-400">&mdash;</span>;
   };
@@ -336,13 +375,12 @@ export default function FieldMappingPage() {
             </th>
             <th className="px-3 py-2">Coding</th>
             <th className="px-3 py-2">Table</th>
-            <th className="px-3 py-2">Units</th>
             <th className="px-3 py-2">Synonyms</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
           {fields.map((f) => (
-            <tr key={f.field_name} className="hover:bg-gray-50/50">
+            <tr key={f.field_name} className="group hover:bg-gray-50/50">
               <td className="px-3 py-2 font-mono text-xs">{f.field_name}</td>
               <td className="px-3 py-2">
                 <div className="flex items-center gap-1.5">
@@ -354,18 +392,22 @@ export default function FieldMappingPage() {
                           ? "border-green-500 bg-green-500 text-white"
                           : "border-gray-300 hover:border-primary"
                       }`}
-                      title={f.mapping?.status === "approved" ? "Confirmed" : "Confirm mapping"}
-                      disabled={f.mapping?.status === "approved" || (!f.mapping && !f.suggestion)}
+                      title={f.mapping?.status === "approved" ? "Mark mapping as proposed" : "Approve mapping"}
+                      disabled={!f.mapping && !f.suggestion}
                     >
                       {f.mapping?.status === "approved" && <Check size={10} />}
                     </button>
                   )}
                   <button
                     onClick={() => f.mappable && handleCellClick(f)}
-                    className={`${f.mappable ? "cursor-pointer hover:text-primary" : ""}`}
+                    className={`inline-flex items-center gap-1 ${f.mappable ? "cursor-pointer hover:text-primary hover:underline" : ""}`}
                     disabled={!f.mappable}
+                    title={f.mappable ? "Click to assign or edit concept" : undefined}
                   >
                     {renderConceptCell(f)}
+                    {f.mappable && (
+                      <Pencil size={10} className="opacity-0 group-hover:opacity-100 text-gray-400" />
+                    )}
                   </button>
                   {f.mapping && (
                     <button
@@ -400,7 +442,6 @@ export default function FieldMappingPage() {
                   </button>
                 )}
               </td>
-              <td className="px-3 py-2">{renderUnitCell(f)}</td>
               <td className="px-3 py-2">{renderSynonyms(f)}</td>
             </tr>
           ))}
@@ -433,7 +474,9 @@ export default function FieldMappingPage() {
                 <tr className="bg-gray-50 text-left text-[11px] uppercase text-gray-500">
                   <th className="px-3 py-2">Field Name</th>
                   <th className="px-3 py-2">Type</th>
+                  <th className="px-3 py-2">Formula / Explanation</th>
                   <th className="px-3 py-2">Provenance</th>
+                  <th className="px-3 py-2">Derivation status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -442,12 +485,44 @@ export default function FieldMappingPage() {
                     <td className="px-3 py-2 font-mono text-xs">{f.field_name}</td>
                     <td className="px-3 py-2 text-xs">{f.field_type}</td>
                     <td className="px-3 py-2 text-xs">
-                      {f.provenance ? (
-                        <span title={f.provenance.description}>
+                      {f.formula ? (
+                        <button
+                          onClick={() => setFormulaEditorField(f)}
+                          className="not-italic hover:text-primary hover:underline"
+                        >
+                          <span className="font-mono">{f.formula.expression}</span>
+                        </button>
+                      ) : f.explanation ? (
+                        <span className="not-italic text-gray-500">{f.explanation}</span>
+                      ) : (
+                        <button
+                          onClick={() => setFormulaEditorField(f)}
+                          className="not-italic hover:text-primary hover:underline"
+                        >
+                          <span className="text-gray-400">none</span>
+                        </button>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-xs">
+                      <button
+                        onClick={() => setDerivationInfoField(f)}
+                        className="not-italic text-left hover:text-primary hover:underline"
+                        title="View read-only derivation details"
+                      >
+                        {f.provenance ? (
+                          <span title={f.provenance.description}>
                           {f.provenance.lookup_strategy} / {f.provenance.omop_table}
+                          </span>
+                        ) : "application code"}
+                      </button>
+                    </td>
+                    <td className="px-3 py-2 text-xs not-italic">
+                      {f.derivation_error ? (
+                        <span className="font-medium text-red-600" title={f.derivation_error}>
+                          Error in derivation
                         </span>
                       ) : (
-                        "application code"
+                        <span className="text-gray-400">OK</span>
                       )}
                     </td>
                   </tr>
@@ -477,7 +552,7 @@ export default function FieldMappingPage() {
       <div className="mx-auto max-w-7xl p-6">
         <div className="rounded border border-red-300 bg-red-50 p-4 text-red-700">
           {error}
-          <button onClick={fetchDescriptors} className="ml-3 underline">Retry</button>
+          <button onClick={() => fetchDescriptors()} className="ml-3 underline">Retry</button>
         </div>
       </div>
     );
@@ -497,6 +572,12 @@ export default function FieldMappingPage() {
           Back
         </button>
         <h1 className="text-xl font-semibold">Field Concept Mappings</h1>
+        <button
+          onClick={() => setAddFieldDialogOpen(true)}
+          className="ml-auto inline-flex items-center gap-1 rounded border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+        >
+          <Plus size={15} /> Add field
+        </button>
       </div>
 
       {/* Tab bar */}
@@ -545,6 +626,21 @@ export default function FieldMappingPage() {
         <span className="rounded-full bg-blue-100 px-2.5 py-1 font-medium text-blue-800">
           Total: {descriptors.length}
         </span>
+      </div>
+
+      <div className="mb-4 flex flex-wrap items-center gap-3 text-sm text-gray-600">
+        <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-800">
+          Unmapped Fields: {activeTabUnmapped}
+        </span>
+        <button
+          type="button"
+          onClick={handleSuggestCurrentTab}
+          disabled={activeTabUnmapped === 0}
+          className="inline-flex items-center gap-2 rounded border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+        >
+          <Sparkles size={15} />
+          Suggest
+        </button>
       </div>
 
       {/* Filter bar */}
@@ -631,11 +727,32 @@ export default function FieldMappingPage() {
           initialVocabularyId={selectedField.mapping?.vocabulary_id || (selectedField.suggestion?.vocabulary_id ?? undefined)}
           initialUnit={selectedField.mapping?.unit || (selectedField.suggestion?.unit ?? undefined)}
           initialOmopTable={selectedField.locked_table || selectedField.mapping?.omop_table || selectedField.suggestion?.omop_table || undefined}
+          existingMappingId={selectedField.mapping?.id}
+          initialConceptId={selectedField.mapping?.concept_id}
+          initialConceptName={selectedField.mapping?.concept_name}
+          initialStatus={selectedField.mapping?.status as "proposed" | "approved" | "rejected" | undefined}
+          initialNotes={selectedField.mapping?.notes}
+          commonUnits={selectedField.unit_options}
+          choices={selectedField.choices}
+          onEditChoices={() => {
+            const fieldToEdit = selectedField;
+            setDialogOpen(false);
+            setSelectedField(null);
+            setChoiceEditorField(fieldToEdit);
+          }}
           onClose={() => {
             setDialogOpen(false);
             setSelectedField(null);
           }}
           onSaved={handleMappingSaved}
+        />
+      )}
+
+      {addFieldDialogOpen && (
+        <AddCustomFieldDialog
+          tab={activeTab}
+          onClose={() => setAddFieldDialogOpen(false)}
+          onCreated={() => { void fetchDescriptors(); }}
         />
       )}
 
@@ -648,6 +765,38 @@ export default function FieldMappingPage() {
             setSynonymDialogField(null);
             fetchBatchSynonyms([fieldName]);
           }}
+        />
+      )}
+
+      {/* Field Choice Editor */}
+      {choiceEditorField && (
+        <FieldChoiceEditor
+          fieldName={choiceEditorField.field_name}
+          onClose={() => {
+            setChoiceEditorField(null);
+            fetchDescriptors();
+          }}
+        />
+      )}
+
+      {/* Formula Edit Dialog */}
+      {formulaEditorField && (
+        <FormulaEditDialog
+          fieldName={formulaEditorField.field_name}
+          fieldType={formulaEditorField.field_type}
+          existingFormula={formulaEditorField.formula}
+          onClose={() => {
+            setFormulaEditorField(null);
+            fetchDescriptors();
+          }}
+        />
+      )}
+
+      {derivationInfoField && (
+        <DerivationInfoDialog
+          fieldName={derivationInfoField.field_name}
+          provenance={derivationInfoField.provenance}
+          onClose={() => setDerivationInfoField(null)}
         />
       )}
     </div>

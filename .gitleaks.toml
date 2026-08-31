@@ -1,0 +1,59 @@
+# gitleaks configuration.
+#
+# The gate exists to catch a real credential reaching the repository. The test
+# suite legitimately contains fake ones, so some allowlisting is unavoidable —
+# but note what is deliberately NOT done here: there is no blanket path
+# exclusion for test files. Excluding `tests.py` wholesale would mean a real AWS
+# key pasted into a 17,000-line test file is caught by nothing, trading the
+# point of the gate for a little convenience. The noise is suppressed by scoping
+# to the single low-signal rule that produces it.
+#
+# There is also no custom [[rules]] block. Redefining a rule id that gitleaks
+# ships (e.g. generic-api-key) REPLACES the built-in regex rather than adding to
+# it, silently narrowing detection. Tune with allowlists, never redefinitions.
+#
+# Adding here is a judgement call: allowlist a value that is structurally
+# test-only. A real secret gets rotated, not allowlisted.
+#
+# Known blind spot, measured rather than assumed: gitleaks' own defaults do not
+# flag credentials inside test paths even with no config of ours at all — an AWS
+# key committed to patient_portal/tests.py is missed by stock gitleaks. So test
+# files are not covered by this gate whatever is written here. GitHub's push
+# protection has no such blind spot, which is a reason to keep it enabled rather
+# than treat this gate as a replacement for it.
+#
+# Requires gitleaks 8.30+ for targetRules; the CI step pins that version.
+
+[extend]
+useDefault = true
+
+# Applies to every rule.
+[[allowlists]]
+description = "Documented non-secrets and machine-generated hashes"
+regexes = [
+  # CI placeholder values, named so they cannot be mistaken for live secrets.
+  '''ci-[a-z-]*-(secret|key)-not-for-runtime[a-z0-9-]*''',
+  # Django's own marker for a generated development key.
+  '''django-insecure-[a-zA-Z0-9!@#$%^&*(\-_=+)]{20,}''',
+  # Documentation placeholder in docs/quickstart.md's curl examples.
+  '''admin@example\.com:secret''',
+]
+paths = [
+  # Lockfiles carry integrity hashes that look like high-entropy secrets and
+  # cannot contain a credential by construction.
+  '''package-lock\.json$''',
+  '''pnpm-lock\.yaml$''',
+]
+
+# Scoped to ONE rule. The high-signal rules — AWS keys, private keys, GitHub
+# PATs — remain active everywhere this gate can see.
+[[allowlists]]
+description = "generic-api-key noise from test fixtures"
+targetRules = ["generic-api-key"]
+paths = [
+  '''.*tests?\.py$''',
+  '''.*/tests?/.*''',
+  '''.*/test_[^/]*\.py$''',
+  '''.*\.(test|itest)\.tsx?$''',
+  '''.*/__tests__/.*''',
+]

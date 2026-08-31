@@ -120,6 +120,7 @@ describe('TherapyLineDialog', () => {
       start_date: '2025-03-01',
       end_date: null,
       outcome: null,
+      regimen_concept_id: null,
       drugs: [{ concept_id: 19026972, source_value: 'lenalidomide' }],
     });
     // Nothing about episodes, type concepts or primary keys.
@@ -199,6 +200,62 @@ describe('TherapyLineDialog', () => {
     expect(mockPost).not.toHaveBeenCalled();
   });
 
+  it('pre-populates regimen dropdown filtered by disease and line', async () => {
+    // With a diseaseCode, the dialog loads regimens for that disease+line on mount.
+    mockGet.mockResolvedValue({ data: [{ code: 'rd', title: 'Rd', concept_id: 35806112 }] });
+    render(
+      <TherapyLineDialog
+        personId={262}
+        defaultLineNumber={1}
+        diseaseCode="C3242"
+        onClose={onClose}
+        onAuthored={onAuthored}
+      />,
+    );
+
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    const regimenCall = mockGet.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('therapy-regimens'),
+    );
+    expect(regimenCall).toBeDefined();
+    expect((regimenCall![1] as { params: Record<string, unknown> }).params).toMatchObject({
+      disease: 'C3242',
+      round: 'first_line_therapy',
+    });
+    // Dropdown is rendered with the regimen option.
+    await waitFor(() => expect(screen.getByLabelText('Select regimen')).toBeInTheDocument());
+    expect(screen.getByText('Rd')).toBeInTheDocument();
+  });
+
+  it('falls back to search mode when diseaseCode is undefined', async () => {
+    // Without a diseaseCode, the dropdown cannot be populated — the dialog shows
+    // a link to search all regimens instead.
+    mockGet.mockResolvedValue({ data: [{ code: 'rd', title: 'Rd', concept_id: 35806112 }] });
+    render(
+      <TherapyLineDialog
+        personId={262}
+        defaultLineNumber={1}
+        onClose={onClose}
+        onAuthored={onAuthored}
+      />,
+    );
+
+    // Click the "Search all regimens" link to enter search mode.
+    fireEvent.click(screen.getByText(/search all regimens/i));
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByLabelText('Search regimens'), { target: { value: 'Rd' } });
+    await act(async () => { vi.advanceTimersByTime(400); });
+    vi.useRealTimers();
+
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    const regimenCall = mockGet.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('therapy-regimens'),
+    );
+    expect(regimenCall).toBeDefined();
+    expect((regimenCall![1] as { params: Record<string, unknown> }).params).not.toHaveProperty('disease');
+  });
+
   it('edits an existing line by patching its episode', async () => {
     render(
       <TherapyLineDialog
@@ -232,6 +289,7 @@ describe('TherapyLineDialog', () => {
       start_date: '2025-01-15',
       end_date: '2025-06-15',
       outcome: 'Partial Response',
+      regimen_concept_id: null,
       drugs: [{ concept_id: 1518254, source_value: 'dexamethasone' }],
     });
     expect(mockPost).not.toHaveBeenCalled();

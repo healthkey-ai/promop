@@ -8,9 +8,11 @@ from omop_core.models import (
     StemCellTransplant, SctEligibility, PostTransformationOutcome,
     Organization, OrgTrust, OrgInvitation, GroupAccess,
     InterchangeAgreement,
+    FieldChoice, FieldChoiceCode, FieldFormula, CustomPatientField,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from datetime import date
+import re
 from django.utils.timezone import localdate
 from django.utils import timezone
 from omop_core.services.access import has_org_admin_access
@@ -293,7 +295,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             # Derivation versioning — set only by refresh_patient_record, never by client.
             'derivation_version', 'derived_at',
             # Internal migration bookkeeping; clients must not set it.
-            'user_edited_fields',
+            'user_edited_fields', 'custom_fields',
         ) + tuple(sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS))
 
     def get_patient_name(self, obj):
@@ -1052,10 +1054,13 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
             return value
         from omop_core.services.mappings import LAB_FIELD_TO_LOINC
         vocab_id = self.initial_data.get('vocabulary_id', '')
+        field_name = self.initial_data.get(
+            'field_name', getattr(self.instance, 'field_name', ''),
+        )
         # Check collision with LAB_FIELD_TO_LOINC (hardcoded LOINC mappings).
         if vocab_id == 'LOINC':
             for _field, (code, _unit, _display) in LAB_FIELD_TO_LOINC.items():
-                if code == value:
+                if code == value and _field != field_name:
                     raise serializers.ValidationError(
                         f"LOINC code {value} is already mapped to field '{_field}' via LAB_FIELD_TO_LOINC."
                     )
@@ -1108,6 +1113,132 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
             validated_data['reviewer'] = request.user
             validated_data['reviewed_at'] = timezone.now()
         return super().update(instance, validated_data)
+
+
+class CustomPatientFieldSerializer(serializers.ModelSerializer):
+    """Public definition returned to every signed-in Patient Info reader."""
+    mapping_status = serializers.CharField(source='mapping.status', read_only=True)
+    concept_id = serializers.IntegerField(source='mapping.concept_id', read_only=True)
+    concept_name = serializers.CharField(source='mapping.concept.concept_name', read_only=True, default='')
+    vocabulary_id = serializers.CharField(source='mapping.vocabulary_id', read_only=True)
+    concept_code = serializers.CharField(source='mapping.concept_code', read_only=True)
+    omop_table = serializers.CharField(source='mapping.omop_table', read_only=True)
+    unit = serializers.CharField(source='mapping.unit', read_only=True)
+
+    class Meta:
+        model = CustomPatientField
+        fields = [
+            'id', 'field_name', 'display_name', 'tab', 'field_type',
+            'mode',
+            'mapping_status', 'concept_id', 'concept_name', 'vocabulary_id',
+            'concept_code', 'omop_table', 'unit', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class CustomPatientFieldCreateSerializer(serializers.Serializer):
+    """Create a runtime PatientRecord field and its approved mapping together."""
+    confirm_patient_record = serializers.BooleanField()
+    field_name = serializers.CharField(max_length=100)
+    display_name = serializers.CharField(max_length=200)
+    tab = serializers.ChoiceField(choices=CustomPatientField.TAB_CHOICES)
+    field_type = serializers.ChoiceField(choices=CustomPatientField.FIELD_TYPE_CHOICES)
+    mode = serializers.ChoiceField(choices=CustomPatientField.MODE_CHOICES, default='editable')
+    concept = serializers.PrimaryKeyRelatedField(queryset=Concept.objects.all())
+    omop_table = serializers.CharField(max_length=30)
+    unit = serializers.CharField(max_length=30, required=False, allow_blank=True, default='')
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+    formula = serializers.CharField(required=False, allow_blank=False)
+
+    def validate_confirm_patient_record(self, value):
+        if not value:
+            raise serializers.ValidationError(
+                'Explicit confirmation is required before adding a field to PatientRecord.'
+            )
+        return value
+
+    def validate_field_name(self, value):
+        candidate = value.strip()
+        if not candidate or not re.fullmatch(r'[a-z][a-z0-9_]*', candidate):
+            raise serializers.ValidationError('Use lower_snake_case starting with a letter.')
+        concrete_names = {
+            field.name for field in PatientRecord._meta.get_fields()
+            if getattr(field, 'concrete', False)
+        }
+        if candidate in concrete_names:
+            raise serializers.ValidationError('This name is already a PatientRecord field.')
+        if CustomPatientField.objects.filter(field_name=candidate).exists():
+            raise serializers.ValidationError('A custom PatientRecord field already uses this name.')
+        if FieldConceptMapping.objects.filter(field_name=candidate).exists():
+            raise serializers.ValidationError('A field mapping already uses this name.')
+        return candidate
+
+    def validate_omop_table(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError('Select the OMOP table where this fact is stored.')
+        return value
+
+    def validate(self, attrs):
+        if attrs['mode'] == 'computed':
+            formula = attrs.get('formula', '').strip()
+            if not formula:
+                raise serializers.ValidationError({'formula': 'Computed fields require a formula.'})
+            from omop_core.services.formula_evaluator import validate_formula
+            result = validate_formula(formula)
+            if not result.valid:
+                raise serializers.ValidationError({'formula': result.errors})
+            attrs['formula'] = formula
+        else:
+            attrs.pop('formula', None)
+        return attrs
+
+    def create(self, validated_data):
+        from django.db import transaction
+
+        request = self.context['request']
+        concept = validated_data.pop('concept')
+        validated_data.pop('confirm_patient_record')
+        formula = validated_data.pop('formula', None)
+        field_formula = None
+        with transaction.atomic():
+            mapping = FieldConceptMapping.objects.create(
+                field_name=validated_data['field_name'],
+                concept=concept,
+                vocabulary_id=concept.vocabulary_id,
+                concept_code=concept.concept_code,
+                omop_table=validated_data.pop('omop_table'),
+                unit=validated_data.pop('unit'),
+                notes=validated_data.pop('notes'),
+                source_value=f"custom:{validated_data['field_name']}",
+                value_kind=(
+                    'number' if validated_data['field_type'] == 'number'
+                    else 'boolean' if validated_data['field_type'] == 'boolean'
+                    else 'date' if validated_data['field_type'] == 'date'
+                    else 'string'
+                ),
+                status='approved',
+                reviewer=request.user,
+                reviewed_at=timezone.now(),
+            )
+            custom_field = CustomPatientField(
+                mapping=mapping,
+                created_by=request.user,
+                **validated_data,
+            )
+            custom_field.full_clean()
+            custom_field.save()
+            if custom_field.mode == 'computed':
+                field_formula = FieldFormula.objects.create(
+                    field_name=custom_field.field_name,
+                    formula=formula,
+                    is_active=True,
+                    created_by=request.user,
+                )
+        if field_formula:
+            from omop_core.services.patient_record_service import recompute_formula_field
+            recompute_formula_field(field_formula)
+        return custom_field
 
 
 
@@ -1175,3 +1306,105 @@ class TherapyLineWriteSerializer(serializers.Serializer):
                 'therapy field would follow from it.',
             )
         return attrs
+
+
+# =============================================================================
+# Field Choice serializers (curator-managed value sets)
+# =============================================================================
+
+class FieldChoiceCodeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FieldChoiceCode
+        fields = ['id', 'code', 'vocabulary_id', 'display', 'is_primary']
+        read_only_fields = ['id']
+
+
+class FieldChoiceSerializer(serializers.ModelSerializer):
+    codes = FieldChoiceCodeSerializer(many=True, required=False)
+    created_by = serializers.CharField(
+        source='created_by.username', read_only=True, default=None,
+    )
+
+    class Meta:
+        model = FieldChoice
+        fields = [
+            'id', 'field_name', 'display', 'sort_order',
+            'codes', 'created_by', 'created_at',
+        ]
+        read_only_fields = ['id', 'created_by', 'created_at']
+
+    def validate_field_name(self, value):
+        from omop_core.models import PatientRecord
+        concrete_names = {
+            f.name for f in PatientRecord._meta.get_fields()
+            if getattr(f, 'concrete', False)
+        }
+        if value not in concrete_names:
+            raise serializers.ValidationError(
+                f"'{value}' is not a concrete PatientRecord field."
+            )
+        return value
+
+    def create(self, validated_data):
+        codes_data = validated_data.pop('codes', [])
+        request = self.context.get('request')
+        choice = FieldChoice.objects.create(
+            **validated_data,
+            created_by=request.user if request else None,
+        )
+        for code_data in codes_data:
+            FieldChoiceCode.objects.create(choice=choice, **code_data)
+        return choice
+
+    def update(self, instance, validated_data):
+        codes_data = validated_data.pop('codes', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if codes_data is not None:
+            instance.codes.all().delete()
+            for code_data in codes_data:
+                FieldChoiceCode.objects.create(choice=instance, **code_data)
+        return instance
+
+
+# =============================================================================
+# Field Formula serializer
+# =============================================================================
+
+class FieldFormulaSerializer(serializers.ModelSerializer):
+    created_by = serializers.CharField(
+        source='created_by.username', read_only=True, default=None,
+    )
+
+    class Meta:
+        model = FieldFormula
+        fields = [
+            'id', 'field_name', 'formula', 'is_active',
+            'created_by', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_by', 'created_at', 'updated_at']
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        return FieldFormula.objects.create(
+            **validated_data,
+            created_by=request.user if request else None,
+        )
+
+    def validate_field_name(self, value):
+        from omop_core.services.field_descriptor import _COMPUTED_FIELDS
+        if value not in _COMPUTED_FIELDS and not CustomPatientField.objects.filter(
+            field_name=value, mode='computed',
+        ).exists():
+            raise serializers.ValidationError(
+                f"'{value}' is not an application-computed PatientRecord field."
+            )
+        return value
+
+    def validate_formula(self, value):
+        from omop_core.services.formula_evaluator import validate_formula
+        result = validate_formula(value)
+        if not result.valid:
+            raise serializers.ValidationError(result.errors)
+        return value

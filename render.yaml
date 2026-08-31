@@ -12,6 +12,16 @@ services:
         value: 3.11.0
       - key: SECRET_KEY
         generateValue: true
+      # Required by patient_portal.E001/E002/E003, which start.sh enforces
+      # before migrate. Without these a service created from this blueprint —
+      # a DR rebuild, a second environment, a preview — hard-fails at boot.
+      # Independent values: audit tamper-evidence and export signatures are
+      # separate controls, and must not share a key with each other or with
+      # SECRET_KEY. Rotation procedure: docs/signing-key-rotation.md.
+      - key: AUDIT_HMAC_KEY
+        generateValue: true
+      - key: EXPORT_SIGNING_KEY
+        generateValue: true
       - key: DEBUG
         value: False
       - key: DATABASE_URL
@@ -61,6 +71,45 @@ services:
     plan: starter
     # Reachable from the other services in this blueprint only.
     ipAllowList: []
+
+      # ── Required because DEBUG is False above ────────────────────────────
+      # ctomop/settings.py raises ImproperlyConfigured at import when DEBUG is
+      # False and either of these is unset (see the guard at settings.py:57-65),
+      # so a service built from this blueprint could not boot without them.
+      - key: ALLOWED_HOSTS
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+
+      # ── Application configuration ────────────────────────────────────────
+      # sync: false means Render prompts for the value rather than storing it
+      # here. Deliberate: this repository is public, and CLAUDE.md forbids
+      # committing hostnames and connection strings.
+      - key: APP_BASE_URL
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+
+      # ── Secrets — never values in a blueprint ────────────────────────────
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SERVICE_AUTH_TOKEN
+        sync: false
+      - key: MAILGUN_API_KEY
+        sync: false
+      - key: MAILGUN_SENDER_DOMAIN
+        sync: false
+
+      # ── PHR federation ───────────────────────────────────────────────────
+      # PHR_AUDIENCE is a shared constant, not a secret: phr stamps it as the
+      # token's `aud` and PROMOP requires the match. Both sides must agree, so
+      # it is pinned here rather than left to a dashboard entry. An unset value
+      # fails CLOSED and rejects every PHR token — see healthkey-ai/phr#65,
+      # which must land before this does anything but reject.
+      - key: PHR_AUDIENCE
+        value: promop-api
+      - key: PHR_BASE_URL
+        sync: false
 
 databases:
   - name: promop-db

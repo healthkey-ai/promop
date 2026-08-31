@@ -20,6 +20,7 @@ import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
+import { CustomPatientFields } from "@/components/PatientInfo/CustomPatientFields";
 import PatientOmopTab from "./PatientOmopTab";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
@@ -481,6 +482,21 @@ export default function PatientDetail({
   }, [doSave]);
 
    
+  // Re-read the record from the server. Used where an edit lands somewhere the
+  // form does not own -- wearable imports, and language skills, whose eight
+  // flattened columns are derived from PersonLanguageSkill rows rather than
+  // patched directly.
+  const reloadPatientInfo = useCallback(() => {
+    if (!personId) return;
+    api.get(`/patient-info/${personId}/`)
+      .then((res) => {
+        const d = res.data.patient_info;
+        setPatientInfo(d);
+        setEditedInfo(d);
+      })
+      .catch(() => {});
+  }, [personId]);
+
   const handleFieldChange = useCallback((field: string, value: unknown) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
     const updated = { ...base, [field]: value };
@@ -592,6 +608,23 @@ export default function PatientDetail({
     }
   }, [personId]);
 
+  const handleCustomEditableValue = useCallback(async (
+    field: { field_name: string }, value: unknown,
+  ) => {
+    if (!personId) return;
+    const descriptors = await fetchWritableFields();
+    const descriptor = descriptors[field.field_name];
+    if (!descriptor?.writable) {
+      throw new Error(`${field.field_name} does not have a complete writable OMOP mapping.`);
+    }
+    await writeFieldValues(personId, [{ field: field.field_name, descriptor, value }]);
+    const response = await api.get(`/patient-info/${personId}/`);
+    const refreshed = response.data.patient_info;
+    setPatientInfo(refreshed);
+    setEditedInfo(refreshed);
+    patientInfoRef.current = { ...refreshed };
+  }, [personId]);
+
   const getDiseaseType = (): "breast" | "lymphoma" | "myeloma" | "cll" | "other" => {
     const d = (typeof editedInfo?.disease === "string" ? editedInfo.disease : "").toLowerCase();
     if (d.includes("breast")) return "breast";
@@ -642,6 +675,11 @@ export default function PatientDetail({
   const wearablesIdx = behaviorIdx + 1;
   const surveysIdx = patientMode ? wearablesIdx + 1 : -1;
   const omopIdx = canViewOmop ? tabLabels.length - 1 : -1;
+  const activeCustomTab = ({
+    0: 'general', 1: 'disease', 2: 'treatment', 3: 'blood', 4: 'labs',
+    [behaviorIdx]: 'behavior', [wearablesIdx]: 'wearable',
+  } as Record<number, string>)[activeTab];
+  const canManageCustomFields = !!(user?.is_staff || user?.is_org_admin);
 
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
@@ -837,10 +875,18 @@ export default function PatientDetail({
                 {activeTab === 3 && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
                 {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
-                {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
-                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={() => { if (personId) { api.get(`/patient-info/${personId}/`).then(res => { const d = res.data.patient_info; setPatientInfo(d); setEditedInfo(d); }).catch(() => {}); } }} />}
+                {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
+                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
                 {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} />}
+                {activeCustomTab && (
+                  <CustomPatientFields
+                    tab={activeCustomTab}
+                    formData={editedInfo}
+                    canManage={canManageCustomFields}
+                    onEditableValueChange={handleCustomEditableValue}
+                  />
+                )}
               </div>
             </div>
           </>

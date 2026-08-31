@@ -239,7 +239,7 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
     <>
       <Section title="Disease Characteristics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField label="Myeloma Type" name="myeloma_type" descriptor={descriptors.myeloma_type} type="select" value={formData?.myeloma_type} options={myelomaTypeOptions.length ? myelomaTypeOptions.map((o: { value: string }) => o.value) : MYELOMA_TYPE_OPTIONS} onChange={onChange} vocabSource={myelomaTypeSource} />
+          <ClinicalField label="M-Protein Type" name="myeloma_type" descriptor={descriptors.myeloma_type} type="select" value={formData?.myeloma_type} options={myelomaTypeOptions.length ? myelomaTypeOptions.map((o: { value: string }) => o.value) : MYELOMA_TYPE_OPTIONS} onChange={onChange} vocabSource={myelomaTypeSource} />
           <ClinicalField label="ISS Stage" name="stage" descriptor={descriptors.stage} type="select" value={formData?.stage} options={ISS_STAGE_OPTIONS} onChange={onChange} />
           <ClinicalField label="R-ISS Stage" name="r_iss_stage" descriptor={descriptors.r_iss_stage} unknownField type="select" value={formData?.r_iss_stage} options={ISS_STAGE_OPTIONS} onChange={onChange} />
           <ClinicalField label="Durie-Salmon Stage" name="durie_salmon_stage" descriptor={descriptors.durie_salmon_stage} unknownField type="text" value={formData?.durie_salmon_stage} onChange={onChange} />
@@ -266,7 +266,8 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
           <ClinicalField label="Urine M-Protein (mg/24h)" name="monoclonal_protein_urine" descriptor={descriptors.monoclonal_protein_urine} type="number" value={formData?.monoclonal_protein_urine} onChange={onChange} />
           <ClinicalField label="Kappa Free Light Chains" name="kappa_flc" descriptor={descriptors.kappa_flc} type="number" value={formData?.kappa_flc} onChange={onChange} />
           <ClinicalField label="Lambda Free Light Chains" name="lambda_flc" descriptor={descriptors.lambda_flc} type="number" value={formData?.lambda_flc} onChange={onChange} />
-          <ClinicalField label="Free Light Chain Ratio" name="free_light_chain_ratio" descriptor={descriptors.free_light_chain_ratio} type="number" value={formData?.free_light_chain_ratio} onChange={onChange} />
+          <ClinicalField label="Kappa/Lambda Ratio" name="kappa_lambda_ratio" descriptor={descriptors.kappa_lambda_ratio} type="number" value={formData?.kappa_lambda_ratio} onChange={onChange} />
+          <ClinicalField label="Involved/Uninvolved Ratio" name="involved_uninvolved_ratio" descriptor={descriptors.involved_uninvolved_ratio} type="number" value={formData?.involved_uninvolved_ratio} onChange={onChange} />
           <ClinicalField label="Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" descriptor={descriptors.beta2_microglobulin} type="number" value={formData?.beta2_microglobulin} onChange={onChange} />
           <ClinicalField label="LDH Level (U/L)" name="ldh_level" descriptor={descriptors.ldh_level} type="number" value={formData?.ldh_level} onChange={onChange} />
         </div>

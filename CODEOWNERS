@@ -1,0 +1,37 @@
+# Code owners for healthkey-ai/promop.
+#
+# Purpose is SOC2 CC8.1 change management: an auditor asks who reviews changes to
+# security-relevant code, and this file is the answer that GitHub enforces rather
+# than a convention people remember. Paths below are ordered least- to
+# most-specific; the LAST matching pattern wins, so the security paths at the
+# bottom override the catch-all at the top.
+#
+# This file only requests review. It becomes a control once branch protection on
+# `dev` and `main` requires review from code owners — see issue #752.
+
+# Default owner for everything not matched below.
+*                                   @adamblum
+
+# ── Authorization and identity ────────────────────────────────────────────────
+# Every P0 finding in the security audit lived in one of these paths.
+/omop_core/authorization.py         @adamblum
+/patient_portal/api/permissions.py  @adamblum
+/patient_portal/api/authentication.py  @adamblum
+/patient_portal/api/providers/      @adamblum
+/patient_portal/services.py         @adamblum
+/patient_portal/api/break_glass.py  @adamblum
+
+# ── Deployment, configuration and secrets ─────────────────────────────────────
+# Changes here alter what runs in production or what guards it.
+/ctomop/settings.py                 @adamblum
+/patient_portal/checks.py           @adamblum
+/start.sh                           @adamblum
+/Dockerfile                         @adamblum
+/Dockerfile.gcp                     @adamblum
+/requirements.txt                   @adamblum
+
+# ── CI and the security gates themselves ──────────────────────────────────────
+# A change that weakens a gate should be as visible as a change that trips it.
+/.github/                           @adamblum
+/.gitleaks.toml                     @adamblum
+/.bandit-baseline.json              @adamblum

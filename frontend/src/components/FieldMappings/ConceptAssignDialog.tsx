@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Search, X } from "lucide-react";
+import { Search, Sparkles, X } from "lucide-react";
 import api from "@/api/axios";
 
 interface ConceptResult {
@@ -9,6 +9,14 @@ interface ConceptResult {
   vocabulary_id: string;
   domain_id: string;
   standard_concept: string | null;
+  suggested_unit?: string;
+}
+
+interface FieldChoiceInfo {
+  id: number;
+  display: string;
+  sort_order: number;
+  codes: { code: string; vocabulary_id: string; display: string; is_primary: boolean }[];
 }
 
 interface Props {
@@ -20,24 +28,62 @@ interface Props {
   initialVocabularyId?: string;
   initialUnit?: string;
   initialOmopTable?: string;
+  existingMappingId?: number;
+  initialConceptId?: number | null;
+  initialConceptName?: string;
+  initialStatus?: "proposed" | "approved" | "rejected";
+  initialNotes?: string;
+  commonUnits?: string[];
+  choices?: FieldChoiceInfo[];
+  onEditChoices?: () => void;
 }
 
 export function ConceptAssignDialog({
   fieldName, fieldType, onClose, onSaved,
   initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
+  existingMappingId, initialConceptId, initialConceptName, initialStatus, initialNotes, commonUnits,
+  choices, onEditChoices,
 }: Props) {
-  const [searchQuery, setSearchQuery] = useState(initialConceptCode || "");
-  const [vocabFilter, setVocabFilter] = useState(initialVocabularyId || "");
+  const isEditing = !!existingMappingId;
+  const [searchQuery, setSearchQuery] = useState("");
+  const [vocabFilter, setVocabFilter] = useState("");
   const [results, setResults] = useState<ConceptResult[]>([]);
   const [searching, setSearching] = useState(false);
-  const [selected, setSelected] = useState<ConceptResult | null>(null);
+  const [selected, setSelected] = useState<ConceptResult | null>(() => (
+    initialConceptId != null
+      ? {
+          concept_id: initialConceptId,
+          concept_code: initialConceptCode || "",
+          concept_name: initialConceptName || "",
+          vocabulary_id: initialVocabularyId || "",
+          domain_id: "",
+          standard_concept: null,
+        }
+      : null
+  ));
   const [unit, setUnit] = useState(initialUnit || "");
+  const [customUnit, setCustomUnit] = useState("");
   const [omopTable, setOmopTable] = useState(initialOmopTable || "Measurement");
-  const [notes, setNotes] = useState("");
+  const [notes, setNotes] = useState(initialNotes || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
+
+  const unitChoices = commonUnits || [];
+  const hasCommonUnits = unitChoices.length > 0;
+  const isCustomUnit = hasCommonUnits && unit !== "" && !unitChoices.includes(unit);
+  const mappingState = initialStatus || (selected ? "proposed" : "unmapped");
+
+  // These are the OMOP CDM clinical and reference tables implemented by this
+  // application.  A mapping can be advisory for tables that are not currently
+  // writable; limiting the curator UI to the write pipeline hid valid mappings.
+  const OMOP_TABLES = [
+    "Person", "Location", "CareSite", "Provider", "ObservationPeriod",
+    "VisitOccurrence", "ConditionOccurrence", "DrugExposure",
+    "ProcedureOccurrence", "Measurement", "Observation", "Death",
+    "Specimen", "Note", "NoteNlp",
+  ];
 
   const doSearch = useCallback(async (q: string) => {
     if (q.length < 3) {
@@ -61,27 +107,42 @@ export function ConceptAssignDialog({
     }
   }, [vocabFilter]);
 
+  const handleSuggest = () => {
+    setSearchQuery(fieldName.replace(/_/g, " "));
+  };
+
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => doSearch(searchQuery), 300);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [searchQuery, doSearch]);
 
+  const effectiveUnit = isCustomUnit ? customUnit || unit : unit;
+
   const handleSubmit = async () => {
-    if (!selected) return;
+    if (!selected && !isEditing) return;
     setSaving(true);
     setError("");
     try {
-      await api.post("/v1/field-mappings/", {
-        field_name: fieldName,
-        concept: selected.concept_id,
-        vocabulary_id: selected.vocabulary_id,
-        concept_code: selected.concept_code,
-        unit,
+      const mappingPayload = {
+        concept: selected?.concept_id ?? null,
+        vocabulary_id: selected?.vocabulary_id ?? "",
+        concept_code: selected?.concept_code ?? "",
+        unit: effectiveUnit,
         omop_table: omopTable,
         notes,
-        status: "proposed",
-      });
+        // Clearing a mapping returns it to review rather than leaving an
+        // approved row with no concept in the Mapped list.
+        status: selected ? "approved" : "proposed",
+      };
+      if (isEditing) {
+        // An existing field already owns this mapping.  Update that row in
+        // place and approve it; never send a create-style field_name payload
+        // that could be interpreted as a duplicate mapping request.
+        await api.patch(`/v1/field-mappings/${existingMappingId}/`, mappingPayload);
+      } else {
+        await api.post("/v1/field-mappings/", { field_name: fieldName, ...mappingPayload });
+      }
       onSaved();
     } catch (err: unknown) {
       const msg =
@@ -94,16 +155,24 @@ export function ConceptAssignDialog({
     }
   };
 
-  // Close on Escape key
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, [onClose]);
 
-  // Close on overlay click
   const handleOverlayClick = (e: React.MouseEvent) => {
     if (e.target === overlayRef.current) onClose();
+  };
+
+  const handleUnitDropdownChange = (value: string) => {
+    if (value === "__custom__") {
+      setCustomUnit(unit);
+      setUnit(value);
+    } else {
+      setUnit(value);
+      setCustomUnit("");
+    }
   };
 
   return (
@@ -120,12 +189,57 @@ export function ConceptAssignDialog({
           <X size={16} />
         </button>
 
-        <h2 className="mb-1 text-lg font-semibold">Assign Concept</h2>
+        <h2 className="mb-1 text-lg font-semibold">
+          {isEditing ? "Edit Concept Mapping" : "Assign Concept"}
+        </h2>
         <p className="mb-4 text-sm text-gray-500">
           Field: <span className="font-mono">{fieldName}</span> ({fieldType})
         </p>
 
+        {/* Mapping summary comes before search so the current decision is clear. */}
+        <div className="mb-3">
+          <div className="mb-1 flex items-center justify-between text-xs font-medium text-gray-600">
+            <span>Mapped Concept</span>
+            <span className={`rounded-full px-2 py-0.5 text-[10px] capitalize ${
+              mappingState === "approved" ? "bg-green-100 text-green-800" :
+              mappingState === "proposed" ? "bg-amber-100 text-amber-800" :
+              "bg-gray-100 text-gray-600"
+            }`}>
+              {mappingState}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 rounded border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
+            {selected ? (
+              <>
+                <span className="font-mono font-medium">{selected.vocabulary_id}:{selected.concept_code}</span>
+                <span className="min-w-0 break-words">{selected.concept_name || "Unnamed concept"}</span>
+                <button onClick={() => setSelected(null)} className="rounded p-0.5 text-gray-400 hover:text-gray-600" title="Clear selection">
+                  <X size={14} />
+                </button>
+              </>
+            ) : <span className="text-gray-400">No concept selected</span>}
+            <select
+              aria-label="OMOP Table"
+              value={omopTable}
+              onChange={(e) => setOmopTable(e.target.value)}
+              className="ml-auto h-8 max-w-48 rounded border border-gray-300 bg-white px-2 text-sm"
+            >
+              {OMOP_TABLES.map((table) => <option key={table} value={table}>{table}</option>)}
+            </select>
+          </div>
+        </div>
+
         {/* Concept search */}
+        <div className="mb-2 flex justify-end">
+          <button
+            type="button"
+            onClick={handleSuggest}
+            className="inline-flex items-center gap-1.5 rounded border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+          >
+            <Sparkles size={13} />
+            Suggest
+          </button>
+        </div>
         <div className="mb-3 flex gap-2">
           <div className="relative flex-1">
             <Search size={14} className="absolute left-2.5 top-2.5 text-gray-400" />
@@ -173,7 +287,12 @@ export function ConceptAssignDialog({
                 {results.slice(0, 50).map((c) => (
                   <tr
                     key={c.concept_id}
-                    onClick={() => setSelected(c)}
+                    onClick={() => {
+                      setSelected(c);
+                      if (c.suggested_unit && !unit) {
+                        setUnit(c.suggested_unit);
+                      }
+                    }}
                     className={`cursor-pointer hover:bg-blue-50 ${
                       selected?.concept_id === c.concept_id ? "bg-blue-100" : ""
                     }`}
@@ -189,41 +308,47 @@ export function ConceptAssignDialog({
           )}
         </div>
 
-        {/* Selected concept */}
-        {selected && (
-          <div className="mb-4 rounded bg-blue-50 px-3 py-2 text-sm">
-            Selected:{" "}
-            <span className="font-medium">
-              {selected.vocabulary_id}:{selected.concept_code}
-            </span>{" "}
-            — {selected.concept_name}
-          </div>
-        )}
-
         {/* Additional fields */}
-        <div className="mb-4 grid grid-cols-2 gap-3">
+        <div className="mb-4">
           <div>
-            <label className="mb-1 block text-xs font-medium text-gray-600">Unit</label>
-            <input
-              type="text"
-              value={unit}
-              onChange={(e) => setUnit(e.target.value)}
-              placeholder="e.g. mg/dL"
-              className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-medium text-gray-600">OMOP Table</label>
-            <select
-              value={omopTable}
-              onChange={(e) => setOmopTable(e.target.value)}
-              className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
-            >
-              <option value="Measurement">Measurement</option>
-              <option value="Observation">Observation</option>
-              <option value="ConditionOccurrence">ConditionOccurrence</option>
-              <option value="ProcedureOccurrence">ProcedureOccurrence</option>
-            </select>
+            <label className="mb-1 block text-xs font-medium text-gray-600">
+              Unit
+              {selected?.suggested_unit && unit === selected.suggested_unit && (
+                <span className="ml-1 text-[10px] font-normal text-gray-400">(suggested)</span>
+              )}
+            </label>
+            {hasCommonUnits ? (
+              <div className="space-y-1.5">
+                <select
+                  value={isCustomUnit ? "__custom__" : unit}
+                  onChange={(e) => handleUnitDropdownChange(e.target.value)}
+                  className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
+                >
+                  <option value="">Select unit...</option>
+                  {unitChoices.map((u) => (
+                    <option key={u} value={u}>{u}</option>
+                  ))}
+                  <option value="__custom__">Other...</option>
+                </select>
+                {isCustomUnit && (
+                  <input
+                    type="text"
+                    value={customUnit}
+                    onChange={(e) => setCustomUnit(e.target.value)}
+                    placeholder="Enter custom unit..."
+                    className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
+                  />
+                )}
+              </div>
+            ) : (
+              <input
+                type="text"
+                value={unit}
+                onChange={(e) => setUnit(e.target.value)}
+                placeholder="e.g. mg/dL"
+                className="h-8 w-full rounded border border-gray-300 px-2 text-sm"
+              />
+            )}
           </div>
         </div>
         <div className="mb-4">
@@ -237,6 +362,50 @@ export function ConceptAssignDialog({
           />
         </div>
 
+        {/* Field Choices */}
+        {choices !== undefined && (
+          <div className="mb-4">
+            <div className="mb-1 flex items-center gap-2">
+              <label className="text-xs font-medium text-gray-600">
+                Field Choices (Value Set)
+              </label>
+              {onEditChoices && (
+                <button
+                  onClick={onEditChoices}
+                  className="text-[10px] text-primary hover:underline"
+                >
+                  Edit choices
+                </button>
+              )}
+            </div>
+            {choices.length > 0 ? (
+              <div className="max-h-28 overflow-y-auto rounded border border-gray-200 text-xs">
+                <table className="w-full">
+                  <tbody className="divide-y divide-gray-100">
+                    {choices.map((ch) => (
+                      <tr key={ch.id} className="hover:bg-gray-50">
+                        <td className="px-2 py-1">{ch.display}</td>
+                        <td className="px-2 py-1 text-gray-400">
+                          {ch.codes.map((c) => `${c.vocabulary_id}:${c.code}`).join(", ") || "no codes"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="rounded border border-dashed border-gray-300 px-3 py-1.5 text-xs text-gray-400">
+                No choices defined
+                {onEditChoices && (
+                  <button onClick={onEditChoices} className="ml-1 text-primary hover:underline">
+                    — add some
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {error && <div className="mb-3 text-sm text-red-600">{error}</div>}
 
         {/* Footer */}
@@ -249,10 +418,10 @@ export function ConceptAssignDialog({
           </button>
           <button
             onClick={handleSubmit}
-            disabled={!selected || saving}
+            disabled={(!selected && !isEditing) || saving}
             className="rounded bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
-            {saving ? "Saving..." : "Save Mapping"}
+            {saving ? "Saving..." : isEditing ? "Update/Approve Mapping" : "Save Mapping"}
           </button>
         </div>
       </div>

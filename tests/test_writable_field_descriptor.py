@@ -466,7 +466,7 @@ class TestAttributionsTrackDerivation:
 
 _LIFECYCLE = {
     'id', 'person', 'organization', 'created_at', 'updated_at',
-    'derived_at', 'derivation_version', 'user_edited_fields',
+    'derived_at', 'derivation_version', 'user_edited_fields', 'custom_fields',
 }
 
 

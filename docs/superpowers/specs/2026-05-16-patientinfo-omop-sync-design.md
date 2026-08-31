@@ -6,7 +6,7 @@
 > columns; the derivation pipeline refreshes PatientRecord.
 
 **Date:** 2026-05-16  
-**Status:** Approved  
+**Status:** Historical design; superseded by the PatientRecord derived-read-model architecture
 **Related issues:** #31 (OMOP write APIs), #67 (LOT inference)
 
 ---

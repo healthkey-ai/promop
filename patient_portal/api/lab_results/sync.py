@@ -24,7 +24,7 @@ from rest_framework import serializers, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from omop_core.authorization import can_access_patient, get_actor_role
+from omop_core.authorization import can_write_patient
 from omop_core.models import (
     CareSite, Concept, Measurement, MeasurementOwnership,
     Person, ProvenanceRecord, VisitOccurrence,
@@ -187,6 +187,8 @@ class SyncView(APIView):
         if not is_privileged and getattr(request.user, 'is_authenticated', False):
             actor_iss = getattr(request.user, 'issuer', '') or ''
             actor_sub = getattr(request.user, 'sub', '') or ''
+        elif not is_privileged:
+            actor_iss = actor_sub = ''
 
         if not person_id:
             if hasattr(request.user, 'issuer') and request.user.issuer != 'urn:service':
@@ -209,27 +211,33 @@ class SyncView(APIView):
 
         actor_identity = self._resolve_actor_identity(actor_iss, actor_sub, request.user)
         has_explicit_actor = bool(actor_iss and actor_sub)
+        org = get_request_org(request)
 
         if is_on_behalf_of:
-            if has_explicit_actor and actor_identity is None:
-                return Response(
-                    {'detail': 'Actor identity not found.'},
-                    status=status.HTTP_403_FORBIDDEN,
-                )
-            if has_explicit_actor and actor_identity:
-                if not can_access_patient(actor_identity, person_id):
+            if is_service:
+                if has_explicit_actor and actor_identity is None:
                     return Response(
-                        {'detail': 'Actor does not have access to this patient.'},
+                        {'detail': 'Actor identity not found.'},
                         status=status.HTTP_403_FORBIDDEN,
                     )
-            elif not has_explicit_actor and not is_service:
-                return Response(
-                    {'detail': 'actor_iss and actor_sub required when writing on behalf of another person.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                if has_explicit_actor and not can_write_patient(actor_identity, person_id):
+                    return Response(
+                        {'detail': 'Actor does not have write access to this patient.'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+            elif org is None:
+                if not has_explicit_actor:
+                    return Response(
+                        {'detail': 'actor_iss and actor_sub required when writing on behalf of another person.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if not can_write_patient(actor_identity, person_id):
+                    return Response(
+                        {'detail': 'Actor does not have write access to this patient.'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
 
         # Org-scope enforcement for OAuth2 service clients
-        org = get_request_org(request)
         if org is not None:
             from omop_core.models import PatientRecord
             if not PatientRecord.objects.filter(person_id=person_id, organization=org).exists():
@@ -448,6 +456,11 @@ class SyncView(APIView):
                     vocabulary_id=HK_LABS_VOCAB_ID,
                     concept_class_id='Lab Test',
                     standard_concept=None,
+                    # Every HK-* row is HealthKey-authored; concept_fixtures
+                    # asserts that invariant and this path was breaking it,
+                    # leaving locally minted labs indistinguishable from
+                    # licensed vocabulary content.
+                    source='HealthKey',
                     concept_code=code[:50],
                     valid_start_date=date(1970, 1, 1),
                     valid_end_date=date(2099, 12, 31),

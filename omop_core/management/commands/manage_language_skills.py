@@ -1,41 +1,66 @@
+"""Manage a person's language skills (#812).
+
+Rewritten. What it replaced minted its own concepts and then looked them up by
+name, which broke four rules at once (see #812):
+
+  - concept_ids 40000001-40000010, inside the range OHDSI assigns, rather than
+    the local block at >= 2_000_000_000
+  - standard_concept='S' on locally-authored rows, which only OHDSI assigns
+  - a fabricated 'LANGUAGE' vocabulary, when SNOMED already carries 878
+    Language-domain concepts
+  - resolution by concept_name, falling back across *every* loaded vocabulary,
+    so "English" could match anything so named
+
+None of it was needed. This version mints nothing and identifies a language the
+only way the codebase permits: by (vocabulary_id, concept_code), constrained to
+the Language domain.
+
+Because a code is not memorable, --find-language searches the loaded
+vocabulary and prints codes to use. Searching by name is safe; *writing* by
+name is not, and the two are kept apart deliberately.
+"""
 from django.core.management.base import BaseCommand
-from django.db import transaction
-from omop_core.models import Person, PersonLanguageSkill, Concept, Vocabulary, Domain, ConceptClass
+
+from omop_core.models import (
+    Person, PersonLanguageSkill, Concept, SKILL_LEVEL_CHOICES,
+)
+from omop_core.services.patient_record_service import (
+    LanguageSkillError, refresh_patient_record, set_language_skills_by_code,
+)
+
+_CAPABILITIES = [value for value, _label in SKILL_LEVEL_CHOICES]
 
 
 class Command(BaseCommand):
-    help = 'Manage language skills for persons'
+    help = "Manage a person's language skills, addressing languages by SNOMED code"
 
     def add_arguments(self, parser):
         parser.add_argument(
-            '--person-id',
-            type=int,
-            help='Person ID to manage languages for'
+            '--person-id', type=int,
+            help='Person ID to manage languages for',
         )
         parser.add_argument(
-            '--add-language',
-            type=str,
-            help='Add a language (format: "language_name:skill_level", e.g., "English:both")'
+            '--find-language', type=str, metavar='TEXT',
+            help='Search loaded SNOMED Language concepts and print their codes',
         )
         parser.add_argument(
-            '--set-primary',
-            type=str,
-            help='Set primary language by name'
+            '--set-language', type=str, metavar='CODE:CAPS',
+            help=('Replace the capabilities for one language, e.g. '
+                  '"297487008:speak,read". Capabilities: '
+                  + ', '.join(_CAPABILITIES) + '. An empty list clears it.'),
         )
         parser.add_argument(
-            '--list-languages',
-            action='store_true',
-            help='List all languages for the person'
+            '--set-primary', type=str, metavar='CODE',
+            help='Mark the given language as the primary one, by SNOMED code',
         )
         parser.add_argument(
-            '--create-sample-concepts',
-            action='store_true',
-            help='Create sample language concepts for testing'
+            '--list-languages', action='store_true',
+            help='List the languages recorded for the person',
         )
 
     def handle(self, *args, **options):
-        if options['create_sample_concepts']:
-            self.create_sample_language_concepts()
+        if options.get('find_language'):
+            self.find_language(options['find_language'])
             return
 
         person_id = options.get('person_id')
@@ -51,161 +76,122 @@ class Command(BaseCommand):
 
         if options['list_languages']:
             self.list_languages(person)
-        elif options['add_language']:
-            self.add_language(person, options['add_language'])
+        elif options['set_language']:
+            self.set_language(person, options['set_language'])
         elif options['set_primary']:
-            self.set_primary_language(person, options['set_primary'])
+            self.set_primary(person, options['set_primary'])
         else:
-            self.stdout.write(self.style.WARNING('Please specify an action'))
+            self.stdout.write(self.style.ERROR(
+                'Nothing to do. Use --list-languages, --set-language, '
+                '--set-primary or --find-language.'))
 
-    def create_sample_language_concepts(self):
-        """Create sample language concepts for testing"""
-        with transaction.atomic():
-            # Create or get vocabulary
-            vocabulary, _ = Vocabulary.objects.get_or_create(
-                vocabulary_id='LANGUAGE',
-                defaults={
-                    'vocabulary_name': 'Language Vocabulary',
-                    'vocabulary_concept_id': 40000000
-                }
-            )
+    # -- lookup ------------------------------------------------------------
 
-            # Create or get domain
-            domain, _ = Domain.objects.get_or_create(
-                domain_id='Meas Value',
-                defaults={
-                    'domain_name': 'Measurement Value',
-                    'domain_concept_id': 21
-                }
-            )
+    def find_language(self, text):
+        """Print candidate codes. Read-only, so matching on name is safe here.
 
-            # Create or get concept class
-            concept_class, _ = ConceptClass.objects.get_or_create(
-                concept_class_id='Language',
-                defaults={
-                    'concept_class_name': 'Language',
-                    'concept_class_concept_id': 40000001
-                }
-            )
+        The rule the old command broke is about resolving a *write* target by
+        name. Showing an operator what is available so they can choose a code
+        is the opposite: the ambiguity is on screen instead of silently
+        resolved.
+        """
+        matches = (
+            Concept.objects
+            .filter(vocabulary_id='SNOMED', domain_id='Language',
+                    concept_name__icontains=text)
+            .order_by('concept_name')[:25]
+        )
+        if not matches:
+            self.stdout.write(self.style.WARNING(
+                f'No loaded SNOMED Language concept matches "{text}". '
+                f'If the vocabulary has not been loaded, run '
+                f'load_athena_vocabularies first.'))
+            return
+        for concept in matches:
+            flag = '' if concept.standard_concept == 'S' else '  (non-standard)'
+            self.stdout.write(
+                f'  {concept.concept_code:<14} {concept.concept_name}{flag}')
 
-            # Sample languages with their concept IDs
-            languages = [
-                (40000001, 'English'),
-                (40000002, 'Spanish'),
-                (40000003, 'French'),
-                (40000004, 'German'),
-                (40000005, 'Italian'),
-                (40000006, 'Portuguese'),
-                (40000007, 'Chinese'),
-                (40000008, 'Japanese'),
-                (40000009, 'Korean'),
-                (40000010, 'Arabic'),
-            ]
-
-            for concept_id, language_name in languages:
-                concept, created = Concept.objects.get_or_create(
-                    concept_id=concept_id,
-                    defaults={
-                        'concept_name': language_name,
-                        'domain': domain,
-                        'vocabulary': vocabulary,
-                        'concept_class': concept_class,
-                        'standard_concept': 'S',
-                        'concept_code': language_name.upper(),
-                        'valid_start_date': '2024-01-01',
-                        'valid_end_date': '2099-12-31',
-                    }
-                )
-                if created:
-                    self.stdout.write(f'Created language concept: {language_name}')
+    # -- read --------------------------------------------------------------
 
     def list_languages(self, person):
-        """List all languages for a person"""
-        language_skills = person.language_skills.all()
-        if not language_skills:
-            self.stdout.write('No languages recorded for this person')
+        skills = (
+            PersonLanguageSkill.objects
+            .filter(person=person)
+            .select_related('language_concept')
+            .order_by('language_concept__concept_name', 'skill_level')
+        )
+        if not skills:
+            self.stdout.write('No languages recorded.')
             return
 
-        self.stdout.write(f'Languages for Person {person.person_id}:')
-        for skill in language_skills:
-            primary_indicator = ' (PRIMARY)' if skill.is_primary else ''
-            self.stdout.write(f'  {skill.language_concept.concept_name}: {skill.skill_level}{primary_indicator}')
+        by_language = {}
+        primary_code = None
+        for skill in skills:
+            concept = skill.language_concept
+            by_language.setdefault(
+                (concept.concept_code, concept.concept_name), []
+            ).append(skill.skill_level)
+            if skill.is_primary:
+                primary_code = concept.concept_code
 
-        # Show summary
-        summary = person.get_language_skills_summary()
-        display = person.patient_record.get_languages_display() if hasattr(person, 'patient_record') else 'No PatientRecord'
-        self.stdout.write(f'\nSummary: {display}')
+        for (code, name), capabilities in by_language.items():
+            marker = '  [primary]' if code == primary_code else ''
+            self.stdout.write(f'  {code:<14} {name}: '
+                              f'{", ".join(capabilities)}{marker}')
 
-    def add_language(self, person, language_spec):
-        """Add a language skill"""
+    # -- write -------------------------------------------------------------
+
+    def set_language(self, person, spec):
+        code, _, raw_capabilities = spec.partition(':')
+        code = code.strip()
+        if not code:
+            self.stdout.write(self.style.ERROR(
+                'Invalid format. Use "CODE:capability,capability" — for '
+                'example "297487008:speak,read". Find a code with '
+                '--find-language.'))
+            return
+
+        capabilities = [c.strip() for c in raw_capabilities.split(',') if c.strip()]
         try:
-            language_name, skill_level = language_spec.split(':')
-            language_name = language_name.strip()
-            skill_level = skill_level.strip()
+            created, removed = set_language_skills_by_code(
+                person, {code: capabilities})
+        except LanguageSkillError as exc:
+            self.stdout.write(self.style.ERROR(str(exc)))
+            return
 
-            if skill_level not in ['speak', 'write', 'both']:
-                self.stdout.write(self.style.ERROR(f'Invalid skill level: {skill_level}. Use: speak, write, both'))
-                return
+        # The eight flattened PatientRecord columns and languages_skills are
+        # derived, and nothing on PersonLanguageSkill triggers a refresh, so a
+        # command that only wrote the row left the read model disagreeing with
+        # the database until something else happened to re-derive it.
+        refresh_patient_record(person)
+        self.stdout.write(self.style.SUCCESS(
+            f'{code}: {created} added, {removed} removed'))
 
-            # Find language concept (prefer LANGUAGE vocabulary)
-            try:
-                language_concept = Concept.objects.filter(
-                    concept_name__iexact=language_name,
-                    vocabulary__vocabulary_id='LANGUAGE'
-                ).first()
-                
-                if not language_concept:
-                    language_concept = Concept.objects.get(concept_name__iexact=language_name)
-            except Concept.DoesNotExist:
-                self.stdout.write(self.style.ERROR(f'Language concept "{language_name}" not found. Use --create-sample-concepts first.'))
-                return
+    def set_primary(self, person, code):
+        # A person holds one row per capability, so a language can have up to
+        # four. The primary flag lives on a single representative row, so pick
+        # the earliest deterministically rather than whichever the database
+        # happens to return.
+        language_skill = (
+            PersonLanguageSkill.objects
+            .filter(person=person,
+                    language_concept__vocabulary_id='SNOMED',
+                    language_concept__concept_code=code)
+            .order_by('created_date', 'id')
+            .first()
+        )
+        if language_skill is None:
+            self.stdout.write(self.style.ERROR(
+                f'Person has no skill recorded for {code}. Add it first with '
+                f'--set-language.'))
+            return
 
-            # Create or update language skill
-            language_skill, created = PersonLanguageSkill.objects.update_or_create(
-                person=person,
-                language_concept=language_concept,
-                defaults={'skill_level': skill_level}
-            )
+        # Clear first, then set: the partial unique index allows only one
+        # primary row per person, so setting before clearing would collide.
+        PersonLanguageSkill.objects.filter(person=person).update(is_primary=False)
+        PersonLanguageSkill.objects.filter(pk=language_skill.pk).update(is_primary=True)
 
-            action = 'Created' if created else 'Updated'
-            self.stdout.write(self.style.SUCCESS(f'{action} language skill: {language_name} - {skill_level}'))
-
-        except ValueError:
-            self.stdout.write(self.style.ERROR('Invalid format. Use: "language_name:skill_level"'))
-
-    def set_primary_language(self, person, language_name):
-        """Set a language as primary"""
-        try:
-            language_concept = Concept.objects.filter(
-                concept_name__iexact=language_name,
-                vocabulary__vocabulary_id='LANGUAGE'
-            ).first()
-            
-            if not language_concept:
-                language_concept = Concept.objects.filter(concept_name__iexact=language_name).first()
-                
-            if not language_concept:
-                self.stdout.write(self.style.ERROR(f'Language concept "{language_name}" not found'))
-                return
-            
-            # Check if person has this language skill
-            try:
-                language_skill = PersonLanguageSkill.objects.get(
-                    person=person,
-                    language_concept=language_concept
-                )
-            except PersonLanguageSkill.DoesNotExist:
-                self.stdout.write(self.style.ERROR(f'Person does not have {language_name} skill. Add it first.'))
-                return
-
-            # Remove primary from all other languages
-            PersonLanguageSkill.objects.filter(person=person).update(is_primary=False)
-            
-            # Set this language as primary
-            language_skill.is_primary = True
-            language_skill.save()
-
-            self.stdout.write(self.style.SUCCESS(f'Set {language_name} as primary language'))
-
-        except Exception as e:
-            self.stdout.write(self.style.ERROR(f'Error: {str(e)}'))
+        refresh_patient_record(person)
+        self.stdout.write(self.style.SUCCESS(
+            f'Set {language_skill.language_concept.concept_name} as primary'))

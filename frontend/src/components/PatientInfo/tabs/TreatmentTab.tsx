@@ -97,7 +97,40 @@ function HowToAuthor({ descriptor }: { descriptor?: FieldDescriptor }) {
   );
 }
 
-export default function TreatmentTab({ formData, onChange, onRecordRefreshed }: Props) {
+/**
+ * Map the patient's disease string to the Disease vocabulary code for API filtering.
+ *
+ * Uses the raw disease string (not diseaseType) so MCL and FL are distinguishable —
+ * both map to diseaseType='lymphoma' but have different Disease codes.
+ * Falls back to the broader diseaseType when the raw string is absent.
+ */
+function diseaseToDiseaseCode(
+  disease: unknown,
+  diseaseType: Props['diseaseType'],
+): string | undefined {
+  // Try the raw disease string first for finer discrimination (MCL vs FL).
+  if (typeof disease === 'string') {
+    const d = disease.toLowerCase();
+    if (d.includes('mantle')) return 'MCL';
+    if (d.includes('follicular')) return 'C3209';
+    if (d.includes('myeloma') || d === 'mm') return 'C3242';
+    if (d.includes('cll') || d.includes('chronic lymphocytic') || d.includes('chronic lymphoid')) return 'C2987';
+    if (d.includes('breast')) return 'C9335';
+    if (d.includes('diffuse large b-cell') || d.includes('dlbcl')) return 'DLBCL';
+  }
+  // Fall back to the type-safe diseaseType prop.
+  // 'lymphoma' is intentionally omitted — it groups MCL and FL, and picking
+  // one code would show the wrong regimens for the other. Without a raw
+  // disease string the picker falls back to "search all regimens".
+  const TYPE_TO_CODE: Record<string, string> = {
+    myeloma: 'C3242',
+    cll: 'C2987',
+    breast: 'C9335',
+  };
+  return TYPE_TO_CODE[diseaseType];
+}
+
+export default function TreatmentTab({ formData, onChange, diseaseType, onRecordRefreshed }: Props) {
   // person_id rides in the record the tab already receives, so neither the
   // descriptor nor authoring needs an extra prop threaded through both hosts.
   const personId = Number(formData?.person_id ?? formData?.person ?? 0) || null;
@@ -182,6 +215,7 @@ export default function TreatmentTab({ formData, onChange, onRecordRefreshed }: 
           personId={personId}
           defaultLineNumber={linesCount + 1}
           line={dialogState.mode === 'edit' ? dialogState.line : undefined}
+          diseaseCode={diseaseToDiseaseCode(formData?.disease, diseaseType)}
           onClose={() => setDialogState(null)}
           onAuthored={(info) => onRecordRefreshed?.(info)}
         />

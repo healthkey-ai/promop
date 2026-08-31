@@ -6,13 +6,16 @@ concept assignments and which still need one.
 """
 from __future__ import annotations
 
-from omop_core.models import PatientRecord, FieldConceptMapping
+from omop_core.models import CustomPatientField, PatientRecord, FieldConceptMapping, FieldChoice, FieldFormula
 from omop_core.services.mappings import (
     LAB_FIELD_TO_LOINC,
     LAB_FIELD_ALIAS_TO_CANONICAL,
     DEMOGRAPHIC_FIELDS,
     THERAPY_LINE_FIELDS,
     DERIVED_FIELD_TO_CODE,
+    FIELD_COMMON_UNITS,
+    STANDARD_UNIT_CHOICES,
+    SUGGESTED_FIELD_CODES,
 )
 from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
@@ -20,12 +23,17 @@ from omop_core.services.patient_record_service import (
     _LOINC_LAB_FIELDS,
 )
 from omop_core.services.provenance_registry import get_registry
+from omop_core.services.formula_evaluator import validate_formula
 
 
 # Fields that are purely internal / structural and not clinical.
 _INTERNAL_FIELDS = frozenset({
     'id', 'person', 'organization', 'created_at', 'updated_at',
     'derivation_version', 'derived_at', 'user_edited_fields',
+    # Redundant generic therapy fields — duplicated by per-line fields.
+    'therapy_intent', 'reason_for_discontinuation',
+    # Renamed field — replaced by remission_duration.
+    'remission_duration_min',
 })
 
 # Person/profile fields projected from Person model.
@@ -33,6 +41,13 @@ _PERSON_FIELDS = frozenset({
     'date_of_birth', 'gender', 'race', 'ethnicity', 'languages_skills',
     'email', 'phone_number', 'facility_name', 'validated', 'validated_by',
     'validation_date', 'suppress_demographics_for_others', 'patient_age',
+})
+
+# These audit attributes are copied verbatim from Person during refresh.  They
+# are shown as computed fields so the mapper makes that relationship explicit,
+# rather than inviting a clinical Concept mapping for administrative metadata.
+_DIRECT_PERSON_EQUIVALENCE_FIELDS = frozenset({
+    'validated', 'validated_by', 'validation_date',
 })
 
 # Location fields.
@@ -46,14 +61,108 @@ _WEARABLE_METADATA_FIELDS = frozenset({
     'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
 })
 
-# Computed fields (derived from other fields, not directly from OMOP).
-_COMPUTED_FIELDS = frozenset({
-    'bmi', 'disease_slug', 'therapy_lines_count',
-    'meets_crab', 'meets_slim',
+# Treatment fields that curators can directly edit (not computed).
+# Therapy line fields from THERAPY_LINE_FIELDS are editable, plus supportive
+# therapy, concomitant medication, and toxicity fields.
+_EDITABLE_TREATMENT_FIELDS = frozenset({
+    # Supportive therapy
+    'supportive_therapies', 'supportive_therapy_start_date',
+    'supportive_therapy_end_date', 'supportive_therapy_intent',
+    'supportive_therapy_date',
+    # Concomitant medication (editable; no_concomitant_medication_status is computed)
+    'concomitant_medication_date', 'concomitant_medications',
+    'concomitant_medication_details',
+    # Other editable treatment fields
+    'toxicity_grade', 'planned_therapies', 'concomitant_medication',
+    'remission_duration',
 })
 
-# Unit-companion fields (always paired with a measurement field).
+# Computed therapy-related fields (IDs, counts, summaries — not directly editable).
+_COMPUTED_THERAPY_FIELDS = frozenset({
+    # Per-line IDs
+    'first_line_therapy_id', 'first_line_component_ids', 'first_line_therapy_type_ids',
+    'second_line_therapy_id', 'second_line_component_ids', 'second_line_therapy_type_ids',
+    'later_therapy_ids', 'later_component_ids', 'later_therapy_type_ids',
+    'therapy_component_ids', 'therapy_type_ids',
+    # Summaries and provenance
+    'therapy_ids_provenance', 'therapy_lines_count', 'last_treatment',
+    'treatment_refractory_status', 'relapse_count', 'refractory_status',
+    'washout_period_duration', 'prior_therapy', 'line_of_therapy',
+    'later_therapies', 'later_date',
+    # Negation field
+    'no_concomitant_medication_status',
+})
+
+# Computed fields (derived from other fields, not directly from OMOP).
+_COMPUTED_FIELDS = frozenset({
+    # Flattened language capabilities (#827) -- derived from
+    # PersonLanguageSkill, so editing them here would be overwritten by
+    # the next refresh.
+    'english_speak', 'english_read', 'english_write', 'english_understand',
+    'spanish_speak', 'spanish_read', 'spanish_write', 'spanish_understand',
+    'bmi', 'disease_slug',
+    'meets_crab', 'meets_slim', 'involved_uninvolved_ratio',
+    'active_infection_status', 'active_malignancies',
+    'no_active_infection_status', 'no_hiv_status', 'no_hepatitis_b_status',
+    'no_hepatitis_c_status', 'no_other_active_malignancies',
+    'no_pre_existing_conditions', 'no_pregnancy_or_lactation_status',
+    'no_mental_health_disorder_status',
+    'no_tobacco_use_status', 'no_substance_use_status',
+    'no_geographic_exposure_risk',
+})
+
+# Unit-companion fields (always paired with a measurement field). Units are
+# curated on the corresponding measurement mapping, so these implementation
+# columns do not belong in the Field Concept Mapping inventory.
 _UNIT_SUFFIX = '_units'
+
+# Specific explanations for computed therapy fields.
+_COMPUTED_THERAPY_EXPLANATIONS = {
+    'therapy_lines_count': 'Count of therapy line Episode records',
+    'last_treatment': 'Latest therapy end date across all lines',
+    'prior_therapy': 'Derived from therapy_lines_count',
+    'treatment_refractory_status': 'Computed from therapy line outcomes',
+    'relapse_count': 'Computed from therapy line outcomes',
+    'refractory_status': 'Computed from therapy line outcomes',
+    'washout_period_duration': 'Computed from last therapy received',
+    'line_of_therapy': 'Derived from therapy line Episode records',
+    'no_concomitant_medication_status': 'Computed negation of concomitant medication presence',
+    'english_speak': 'Derived from PersonLanguageSkill rows for this language',
+    'english_read': 'Derived from PersonLanguageSkill rows for this language',
+    'english_write': 'Derived from PersonLanguageSkill rows for this language',
+    'english_understand': 'Derived from PersonLanguageSkill rows for this language',
+    'spanish_speak': 'Derived from PersonLanguageSkill rows for this language',
+    'spanish_read': 'Derived from PersonLanguageSkill rows for this language',
+    'spanish_write': 'Derived from PersonLanguageSkill rows for this language',
+    'spanish_understand': 'Derived from PersonLanguageSkill rows for this language',
+    'later_therapies': 'Derived from Episode and DrugExposure records',
+    'later_date': 'Derived from Episode and DrugExposure records',
+}
+
+
+def _get_explanation(field_name: str, category: str) -> str | None:
+    """Return a human-readable explanation for a computed field without a formula."""
+    if category != 'computed':
+        return None
+    if field_name in _DIRECT_PERSON_EQUIVALENCE_FIELDS:
+        return f'Equivalent to Person.{field_name}'
+    if field_name in _COMPUTED_THERAPY_FIELDS:
+        return _COMPUTED_THERAPY_EXPLANATIONS.get(
+            field_name, 'Derived from Episode and DrugExposure records',
+        )
+    if field_name in _COMPUTED_FIELDS:
+        explanations = {
+            'bmi': 'Calculated from weight and height',
+            'disease_slug': 'URL-safe slug derived from disease name',
+            'meets_crab': 'Derived from CRAB criteria fields',
+            'meets_slim': 'Derived from SLiM criteria fields',
+            'involved_uninvolved_ratio': 'Calculated from kappa and lambda FLC values',
+        }
+        return explanations.get(field_name)
+    if field_name.endswith(_WEARABLE_30D_SUFFIX) or field_name in _WEARABLE_METADATA_FIELDS:
+        return 'Aggregated from wearable device data (30-day window)'
+    return None
+
 
 # Build the set of all alias field names.
 _ALL_ALIASES = set(LAB_FIELD_ALIAS_TO_CANONICAL.keys())
@@ -105,11 +214,13 @@ _TAB_GENERAL = frozenset({
     'hepatitis_c_status', 'no_hepatitis_c_status',
     'weight', 'height', 'bmi', 'systolic_blood_pressure', 'diastolic_blood_pressure',
     'heartrate', 'languages_skills', 'facility_name',
+    'english_speak', 'english_read', 'english_write', 'english_understand',
+    'spanish_speak', 'spanish_read', 'spanish_write', 'spanish_understand',
     'validated', 'validated_by', 'validation_date', 'patient_age',
     'suppress_demographics_for_others',
     # Reclassified from "other"
     'diagnosis_date', 'death_date', 'heartrate_variability',
-    'no_pre_existing_conditions',
+    'no_pre_existing_conditions', 'ejection_fraction',
 })
 
 _TAB_DISEASE = frozenset({
@@ -133,7 +244,7 @@ _TAB_DISEASE = frozenset({
     'measurable_disease_imwg', 'mrd_status', 'meets_crab', 'meets_slim',
     'stem_cell_transplant_history', 'sct_date', 'sct_eligibility',
     'monoclonal_protein_serum', 'monoclonal_protein_urine',
-    'kappa_flc', 'lambda_flc', 'free_light_chain_ratio',
+    'kappa_flc', 'lambda_flc', 'kappa_lambda_ratio', 'involved_uninvolved_ratio',
     'bone_lesions', 'hypercalcemia', 'renal_impairment', 'anemia',
     'clonal_plasma_cells', 'cytogenetic_risk', 'cytogenetic_abnormalities',
     # CLL
@@ -153,6 +264,8 @@ _TAB_DISEASE = frozenset({
     'cytogenic_markers', 'molecular_markers',
     'condition_code_icd_10', 'condition_code_snomed_ct',
     'condition_clinical_status', 'prior_procedures',
+    'metastatic_status', 'active_infection_status', 'active_malignancies',
+    'no_active_infection_status', 'no_other_active_malignancies',
 })
 
 _TAB_TREATMENT = frozenset({
@@ -172,7 +285,10 @@ _TAB_TREATMENT = frozenset({
     # Reclassified from "other"
     'toxicity_grade', 'concomitant_medications', 'concomitant_medication_date',
     'concomitant_medication_details', 'washout_period_duration',
-    'remission_duration_min',
+    'remission_duration',
+    'no_concomitant_medication_status', 'later_date',
+    'treatment_refractory_status', 'therapy_ids_provenance',
+    'last_treatment', 'prior_therapy', 'line_of_therapy',
 })
 
 _TAB_BLOOD = frozenset({
@@ -183,6 +299,8 @@ _TAB_BLOOD = frozenset({
     'troponin_ng_ml', 'bnp_pg_ml', 'glucose_mg_dl', 'hba1c_percent', 'ldh_u_l',
     'inr', 'pt_seconds', 'ptt_seconds',
     'cea_ng_ml', 'ca19_9_u_ml', 'psa_ng_ml',
+    # Legacy aliases for blood counts
+    'hemoglobin_level', 'platelet_count', 'white_blood_cell_count',
 })
 
 _TAB_LABS = frozenset({
@@ -193,6 +311,13 @@ _TAB_LABS = frozenset({
     'serum_bilirubin_level_total', 'serum_bilirubin_level_direct', 'albumin_g_dl',
     'ldh', 'alkaline_phosphatase', 'c_reactive_protein', 'esr',
     'pulmonary_function_test_result', 'bone_imaging_result',
+    # Additional laboratory and organ-function measurements.
+    'alkaline_phosphatase_u_l', 'alt_u_l', 'ast_u_l', 'bilirubin_total_mg_dl',
+    'bun_mg_dl', 'creatinine_clearance_ml_min', 'creatinine_mg_dl',
+    'egfr_ml_min_173m2', 'estimated_glomerular_filtration_rate',
+    'lactate_dehydrogenase_level', 'renal_adequacy_status',
+    'serum_calcium_mg_dl', 'serum_creatinine_mg_dl',
+    'liver_enzyme_levels',
 })
 
 _TAB_BEHAVIOR = frozenset({
@@ -206,6 +331,19 @@ _TAB_BEHAVIOR = frozenset({
     'no_mental_health_disorder_status', 'no_substance_use_status',
     'substance_use_details', 'no_geographic_exposure_risk',
     'geographic_exposure_risk_details',
+    # Reproductive results and wearable lifestyle summaries are best reviewed
+    # alongside the other behavior and eligibility information.
+    'pregnancy_test_result', 'no_pregnancy_or_lactation_status',
+    'no_tobacco_use_status', 'tobacco_use_details',
+    'wearable_last_sync_at', 'wearable_coverage_ratio_30d',
+    'median_daily_steps_30d', 'active_minutes_per_day_30d', 'activity_trend_30d',
+    'resting_heart_rate_avg_30d', 'hrv_sdnn_avg_30d', 'hrv_rmssd_avg_30d',
+    'oxygen_saturation_min_30d', 'oxygen_saturation_avg_30d', 'respiratory_rate_avg_30d',
+    'sleep_duration_hours_avg_30d', 'vo2_max_avg_30d',
+    'distance_km_per_day_30d', 'walking_speed_avg_30d', 'walking_step_length_avg_30d',
+    'walking_double_support_pct_avg_30d', 'walking_hr_avg_30d',
+    'flights_climbed_per_day_30d', 'active_energy_per_day_30d',
+    'basal_energy_per_day_30d', 'body_mass_avg_30d',
 })
 
 
@@ -241,6 +379,8 @@ def _classify_field(field_name: str) -> str:
     """Assign a category to a PatientRecord field."""
     if field_name in _INTERNAL_FIELDS:
         return 'internal'
+    if field_name in _DIRECT_PERSON_EQUIVALENCE_FIELDS:
+        return 'computed'
     if field_name in _PERSON_FIELDS:
         return 'profile'
     if field_name in _LOCATION_FIELDS:
@@ -253,28 +393,28 @@ def _classify_field(field_name: str) -> str:
         return 'unit'
     if field_name in DEMOGRAPHIC_FIELDS:
         return 'profile'
+    # Therapy line fields (names, dates, outcomes, intents, reasons) are editable.
     if field_name in THERAPY_LINE_FIELDS:
-        return 'therapy-inference'
+        return 'editable'
+    # Additional editable treatment fields (supportive therapy, concomitant meds, toxicity).
+    if field_name in _EDITABLE_TREATMENT_FIELDS:
+        return 'editable'
+    # Computed therapy fields (IDs, counts, summaries).
+    if field_name in _COMPUTED_THERAPY_FIELDS:
+        return 'computed'
     if field_name in _COMPUTED_FIELDS:
         return 'computed'
     if field_name in _WEARABLE_METADATA_FIELDS:
         return 'computed'
     if field_name.endswith(_WEARABLE_30D_SUFFIX):
         return 'computed'
-    # Therapy-related fields not in THERAPY_LINE_FIELDS but containing therapy keywords.
-    therapy_keywords = (
-        'therapy', 'treatment', 'line_', 'component_ids', 'therapy_type_ids',
-        'therapy_ids', 'concomitant_medication',
-    )
-    if any(kw in field_name for kw in therapy_keywords):
-        return 'therapy-inference'
     if field_name in PATIENT_RECORD_OMOP_MAPPED_FIELDS:
         return 'needs-concept-set'
     return 'other'
 
 
 _NON_MAPPABLE_CATEGORIES = frozenset({
-    'internal', 'computed', 'location', 'alias', 'unit',
+    'internal', 'computed', 'location', 'alias', 'unit', 'therapy-inference',
 })
 
 
@@ -294,6 +434,8 @@ def _get_locked_table(category: str) -> str | None:
 
 def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
     """Build auto-suggestion from LAB_FIELD_TO_LOINC, DERIVED_FIELD_TO_CODE, or provenance."""
+    common_units = FIELD_COMMON_UNITS.get(name, [])
+
     if name in LAB_FIELD_TO_LOINC:
         code, unit, display = LAB_FIELD_TO_LOINC[name]
         return {
@@ -301,6 +443,7 @@ def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
             'vocabulary_id': 'LOINC',
             'unit': unit,
             'omop_table': 'Measurement',
+            'common_units': common_units,
         }
 
     if name in DERIVED_FIELD_TO_CODE:
@@ -311,6 +454,7 @@ def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
             'vocabulary_id': vocab,
             'unit': None,
             'omop_table': omop_table,
+            'common_units': common_units,
         }
 
     if prov_dict and prov_dict.get('concept_codes'):
@@ -321,6 +465,19 @@ def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
             'vocabulary_id': strategy.upper() if strategy in ('loinc', 'snomed') else None,
             'unit': None,
             'omop_table': prov_dict.get('omop_table', ''),
+            'common_units': common_units,
+        }
+
+    # Curator-oriented suggestions — not used by derivation/write-through.
+    if name in SUGGESTED_FIELD_CODES:
+        code, vocab = SUGGESTED_FIELD_CODES[name]
+        omop_table = prov_dict.get('omop_table', 'Observation') if prov_dict else 'Observation'
+        return {
+            'concept_code': code,
+            'vocabulary_id': vocab,
+            'unit': None,
+            'omop_table': omop_table,
+            'common_units': common_units,
         }
 
     return None
@@ -354,14 +511,32 @@ def get_all_field_descriptors() -> list[dict]:
         for m in FieldConceptMapping.objects.select_related('concept', 'reviewer').all()
     }
 
+    # 3b. Load field choices (curator-managed value sets).
+    choices_by_field: dict[str, list[dict]] = {}
+    for fc in FieldChoice.objects.prefetch_related('codes').all():
+        choices_by_field.setdefault(fc.field_name, []).append({
+            'id': fc.id,
+            'display': fc.display,
+            'sort_order': fc.sort_order,
+            'codes': [
+                {'code': c.code, 'vocabulary_id': c.vocabulary_id,
+                 'display': c.display, 'is_primary': c.is_primary}
+                for c in fc.codes.all()
+            ],
+        })
+
+    # 3c. Load field formulas.
+    formulas_by_field = {f.field_name: f for f in FieldFormula.objects.all()}
+
     # 4. Build descriptors (excluding internal fields).
     result = []
     for f in concrete_fields:
         name = f.name
         category = _classify_field(name)
 
-        # Skip internal fields — they have no OMOP mapping relevance.
-        if category == 'internal':
+        # Skip internal and unit-companion fields — neither has an independent
+        # OMOP concept mapping to curate.
+        if category in {'internal', 'unit'}:
             continue
 
         # Provenance from registry.
@@ -385,6 +560,7 @@ def get_all_field_descriptors() -> list[dict]:
             mapping_dict = {
                 'id': mapping.id,
                 'concept_id': mapping.concept_id,
+                'concept_name': mapping.concept.concept_name if mapping.concept else '',
                 'vocabulary_id': mapping.vocabulary_id,
                 'concept_code': mapping.concept_code,
                 'unit': mapping.unit,
@@ -395,6 +571,19 @@ def get_all_field_descriptors() -> list[dict]:
                 'notes': mapping.notes,
             }
 
+        formula = formulas_by_field.get(name)
+        formula_dict = None
+        derivation_error = None
+        if formula:
+            formula_dict = {
+                'id': formula.id,
+                'expression': formula.formula,
+                'is_active': formula.is_active,
+            }
+            validation = validate_formula(formula.formula)
+            if not validation.valid:
+                derivation_error = f"Invalid formula: {'; '.join(validation.errors)}"
+
         result.append({
             'field_name': name,
             'field_type': _get_field_type_label(f),
@@ -403,8 +592,61 @@ def get_all_field_descriptors() -> list[dict]:
             'provenance': prov_dict,
             'mapping': mapping_dict,
             'suggestion': _build_suggestion(name, prov_dict),
+            'unit_options': FIELD_COMMON_UNITS.get(name, STANDARD_UNIT_CHOICES),
             'mappable': _is_mappable(category),
             'locked_table': _get_locked_table(category),
+            'choices': choices_by_field.get(name, []),
+            'formula': formula_dict,
+            'explanation': _get_explanation(name, category),
+            # Generic derivation health surface. Other extractors can add a
+            # message here without changing the admin API contract.
+            'derivation_error': derivation_error,
+        })
+
+    # Runtime PatientRecord fields use the JSON projection rather than Django
+    # columns, so they are appended explicitly.  This keeps a newly added field
+    # discoverable in the mapper immediately after its approved mapping saves.
+    for custom in CustomPatientField.objects.select_related('mapping__concept').all():
+        mapping = custom.mapping
+        formula = formulas_by_field.get(custom.field_name)
+        formula_dict = None
+        derivation_error = None
+        if formula:
+            formula_dict = {
+                'id': formula.id,
+                'expression': formula.formula,
+                'is_active': formula.is_active,
+            }
+            validation = validate_formula(formula.formula)
+            if not validation.valid:
+                derivation_error = f"Invalid formula: {'; '.join(validation.errors)}"
+        result.append({
+            'field_name': custom.field_name,
+            'field_type': custom.field_type,
+            'category': 'computed' if custom.mode == 'computed' else 'needs-concept-set',
+            'tab': custom.tab,
+            'provenance': None,
+            'mapping': {
+                'id': mapping.id,
+                'concept_id': mapping.concept_id,
+                'concept_name': mapping.concept.concept_name if mapping.concept else '',
+                'vocabulary_id': mapping.vocabulary_id,
+                'concept_code': mapping.concept_code,
+                'unit': mapping.unit,
+                'omop_table': mapping.omop_table,
+                'status': mapping.status,
+                'reviewer': mapping.reviewer.username if mapping.reviewer else None,
+                'reviewed_at': mapping.reviewed_at.isoformat() if mapping.reviewed_at else None,
+                'notes': mapping.notes,
+            },
+            'suggestion': None,
+            'unit_options': STANDARD_UNIT_CHOICES,
+            'mappable': True,
+            'locked_table': None,
+            'choices': choices_by_field.get(custom.field_name, []),
+            'formula': formula_dict,
+            'explanation': 'Administrator-defined PatientRecord field.',
+            'derivation_error': derivation_error,
         })
 
     # Sort: needs-concept-set first, then by field name.

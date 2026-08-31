@@ -19,6 +19,9 @@ import UploadFHIR from "@/components/Patient/UploadFHIR";
 import UploadCSV from "@/components/Patient/UploadCSV";
 import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
 import FieldMappingPage from "@/components/FieldMappings/FieldMappingPage";
+import CodeMappingPage from "@/components/CodeMappings/CodeMappingPage";
+import MappingHubPage from "@/components/MappingHub/MappingHubPage";
+import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
 import OrgLogin from "@/components/Auth/OrgLogin";
 import OrgSignup from "@/components/Auth/OrgSignup";
 import ForgotPassword from "@/components/Auth/ForgotPassword";
@@ -102,10 +105,11 @@ function AppRoutes() {
     return element;
   };
 
-  // Staff-only routes: require a signed-in staff user.
-  const staffRoute = (element: ReactNode) => {
+  // Mapping administration is available to platform staff and organization
+  // administrators.  The API independently enforces the same policy.
+  const mappingAdminRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
-    if (!currentUser.is_staff) return <Navigate to="/" replace />;
+    if (!currentUser.is_staff && !currentUser.is_org_admin) return <Navigate to="/" replace />;
     return element;
   };
 
@@ -145,7 +149,10 @@ function AppRoutes() {
       <Route path="/upload-csv" element={providerRoute(<UploadCSV />)} />
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
       <Route path="/org-admin" element={providerRoute(<OrgAdminPage />)} />
-      <Route path="/field-mappings" element={staffRoute(<FieldMappingPage />)} />
+      <Route path="/mappings" element={mappingAdminRoute(<MappingHubPage />)} />
+      <Route path="/field-mappings" element={mappingAdminRoute(<FieldMappingPage />)} />
+      <Route path="/code-mappings" element={mappingAdminRoute(<CodeMappingPage />)} />
+      <Route path="/therapy-mappings" element={mappingAdminRoute(<TherapyMappingPage />)} />
       <Route
         path="/profile"
         element={

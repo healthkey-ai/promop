@@ -1,6 +1,35 @@
+import { useState } from 'react';
 import { useWritableFields } from '@/hooks/useWritableFields';
+import {
+  FLATTENED_LANGUAGES, LANGUAGE_CAPABILITIES, languageCapabilitiesFrom,
+  writeLanguageSkills,
+  type FlattenedLanguage, type LanguageCapability,
+} from '@/api/clinicalFacts';
 import ClinicalField from '../ClinicalField';
+import MultiSelectControl from '../controls/MultiSelectControl';
 import Section from '../Section';
+
+const LANGUAGE_LABELS: Record<FlattenedLanguage, string> = {
+  english: 'English',
+  spanish: 'Spanish',
+};
+
+const CAPABILITY_LABELS: Record<LanguageCapability, string> = {
+  speak: 'Speak',
+  read: 'Read',
+  write: 'Write',
+  understand: 'Understand',
+};
+
+const CAPABILITY_OPTIONS = LANGUAGE_CAPABILITIES.map((value) => ({
+  value,
+  label: CAPABILITY_LABELS[value],
+}));
+
+function describeCapabilities(selected: LanguageCapability[]): string {
+  if (selected.length === 0) return 'Not recorded';
+  return selected.map((c) => CAPABILITY_LABELS[c]).join(', ');
+}
 import {
   SMOKING_STATUS_OPTIONS, ALCOHOL_USE_OPTIONS, EXERCISE_FREQUENCY_OPTIONS,
   DIET_TYPE_OPTIONS, SLEEP_QUALITY_OPTIONS, STRESS_LEVEL_OPTIONS, SOCIAL_SUPPORT_OPTIONS,
@@ -10,6 +39,8 @@ import {
 interface Props {
   formData: Record<string, unknown>;
   onChange: (field: string, value: unknown) => void;
+  /** Re-read the record after a language edit; the flattened columns are derived. */
+  onRefresh?: () => void;
 }
 
 /**
@@ -24,11 +55,35 @@ interface Props {
  * A concept assigned through the mapping interface turns any of the others
  * editable without further work here, because the rendering follows the server.
  */
-export default function BehaviorTab({ formData, onChange }: Props) {
+export default function BehaviorTab({ formData, onChange, onRefresh }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
   const { descriptors, loading } = useWritableFields(personId);
+
+  // Language skills are rows rather than a PatientRecord column, so they do not
+  // go through `onChange` with the rest of the tab: the edit is saved on the
+  // spot and the derived columns are what the control reads back.
+  const [savingLanguage, setSavingLanguage] = useState<FlattenedLanguage | null>(null);
+  const [languageError, setLanguageError] = useState<string | null>(null);
+
+  const saveLanguage = async (
+    language: FlattenedLanguage, capabilities: LanguageCapability[],
+  ) => {
+    setSavingLanguage(language);
+    setLanguageError(null);
+    try {
+      await writeLanguageSkills(personId!, { [language]: capabilities });
+      // The eight flattened columns are derived server-side, so the tab re-reads
+      // rather than guessing at them -- same contract WearableTab uses.
+      onRefresh?.();
+    } catch {
+      setLanguageError(
+        `Could not save ${LANGUAGE_LABELS[language]} language skills. Please try again.`);
+    } finally {
+      setSavingLanguage(null);
+    }
+  };
 
   return (
     <div>
@@ -104,6 +159,31 @@ export default function BehaviorTab({ formData, onChange }: Props) {
             <ClinicalField label="Exposure Risk Details" name="geographic_exposure_risk_details" descriptor={descriptors.geographic_exposure_risk_details} type="text" value={formData?.geographic_exposure_risk_details} onChange={onChange} />
           </div>
         </div>
+      </Section>
+
+      <Section
+        title="Language Skills"
+        description="Which languages the patient uses, and how. Leaving a language empty means nobody has asked — which is not the same as the patient having no ability in it."
+      >
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          {FLATTENED_LANGUAGES.map((language) => (
+            <div key={language}>
+              <label className="mb-1.5 block text-sm font-medium" htmlFor={`language_${language}`}>
+                {LANGUAGE_LABELS[language]}
+              </label>
+              <MultiSelectControl
+                options={CAPABILITY_OPTIONS}
+                selectedValues={languageCapabilitiesFrom(formData, language)}
+                display={describeCapabilities(languageCapabilitiesFrom(formData, language))}
+                disabled={savingLanguage !== null}
+                onChange={(next) => saveLanguage(language, next as LanguageCapability[])}
+              />
+            </div>
+          ))}
+        </div>
+        {languageError && (
+          <p className="mt-2 text-xs text-destructive">{languageError}</p>
+        )}
       </Section>
     </div>
   );
