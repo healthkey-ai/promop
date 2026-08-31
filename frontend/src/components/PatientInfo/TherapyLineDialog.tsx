@@ -85,58 +85,61 @@ export default function TherapyLineDialog({
   // Track whether the initial regimen has been restored so we only do it once.
   const initialRegimenRestored = useRef(false);
 
+  /** Restore the existing regimen when editing. Separated so the catch path can
+   *  also call it — a network error should not silently blank the regimen. */
+  const restoreLineRegimen = useCallback((regimens: TherapyRegimen[]) => {
+    if (!line || initialRegimenRestored.current) return;
+    initialRegimenRestored.current = true;
+    const cid = line.regimen_concept_id;
+    const name = line.regimen;
+    const match = cid
+      ? regimens.find((reg) => reg.concept_id === cid)
+      : name
+        ? regimens.find((reg) => reg.title === name)
+        : null;
+    if (match) {
+      // Directly set state rather than calling selectRegimen() — the drug list
+      // is already populated from the existing line; we don't want to overwrite it.
+      setSelectedRegimen(match);
+    } else if (name || cid) {
+      // Regimen exists but isn't in this disease+round list — show it as a
+      // synthetic entry so the clinician sees the current value and can clear it.
+      // concept_id is preserved so the submit payload does not silently erase it.
+      setSelectedRegimen({ code: '__current__', title: name ?? '', concept_id: cid ?? null });
+    }
+  }, [line]);
+
   const loadAvailableRegimens = useCallback(async (disease: string, r: string) => {
-    // Clear any previously selected regimen when the round changes so the
-    // clinician must re-select from the updated list.
-    setSelectedRegimen(null);
+    // Only clear a previously-selected regimen when the round changes after
+    // the initial restore has already run. Avoids a flash-of-null on first load.
+    if (initialRegimenRestored.current) {
+      setSelectedRegimen(null);
+    }
     setLoadingAvailable(true);
     try {
       const regimens = await listTherapyRegimens(disease, r);
       setAvailableRegimens(regimens);
-
-      // When editing, pre-select the line's existing regimen if it appears in the
-      // available list. Match by concept_id first (reliable), fall back to title.
-      if (line && !initialRegimenRestored.current) {
-        initialRegimenRestored.current = true;
-        const cid = line.regimen_concept_id;
-        const name = line.regimen;
-        const match = cid
-          ? regimens.find((reg) => reg.concept_id === cid)
-          : name
-            ? regimens.find((reg) => reg.title === name)
-            : null;
-        if (match) {
-          setSelectedRegimen(match);
-        } else if (name) {
-          // Regimen exists but isn't in this disease+round list — show it as a
-          // synthetic entry so the clinician sees the current value and can clear it.
-          setSelectedRegimen({ code: '', title: name, concept_id: cid ?? null });
-        }
-      }
+      restoreLineRegimen(regimens);
     } catch {
       setAvailableRegimens([]);
+      // Still restore on error so the clinician sees the current regimen value.
+      restoreLineRegimen([]);
     } finally {
       setLoadingAvailable(false);
     }
-  }, [line]);
+  }, [restoreLineRegimen]);
 
   useEffect(() => {
-    if (!diseaseCode) {
-      // No disease code — still restore the regimen if editing.
-      if (line && !initialRegimenRestored.current && (line.regimen || line.regimen_concept_id)) {
-        initialRegimenRestored.current = true;
-        setSelectedRegimen({
-          code: '',
-          title: line.regimen ?? '',
-          concept_id: line.regimen_concept_id ?? null,
-        });
-      }
-      return;
-    }
     (async () => {
+      if (!diseaseCode) {
+        // No disease code — still restore the regimen if editing.
+        await Promise.resolve();
+        restoreLineRegimen([]);
+        return;
+      }
       await loadAvailableRegimens(diseaseCode, round);
     })();
-  }, [diseaseCode, round, loadAvailableRegimens, line]);
+  }, [diseaseCode, round, loadAvailableRegimens, restoreLineRegimen]);
 
   const doRegimenSearch = useCallback(async (q: string) => {
     if (q.trim().length < 2) {
@@ -246,7 +249,9 @@ export default function TherapyLineDialog({
         start_date: startDate || null,
         end_date: endDate || null,
         outcome: outcome || null,
-        regimen_concept_id: selectedRegimen?.concept_id ?? null,
+        // Preserve the original concept_id when the clinician hasn't changed the
+        // regimen — a no-op save must not silently erase a stored concept.
+        regimen_concept_id: selectedRegimen?.concept_id ?? line?.regimen_concept_id ?? null,
         drugs: drugs.map((d) => ({
           concept_id: d.concept_id,
           source_value: (d.source_value || d.concept_name).slice(0, 50),
