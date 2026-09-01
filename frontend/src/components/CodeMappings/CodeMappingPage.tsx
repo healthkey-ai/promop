@@ -719,7 +719,7 @@ export default function CodeMappingPage() {
   };
 
   const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, { hideStatus = false, hideOrigin = false }: { hideStatus?: boolean; hideOrigin?: boolean } = {}) => {
-    const colCount = (hideStatus ? 6 : 8) + (hideOrigin ? 0 : 1);
+    const colCount = 7 + (hideOrigin ? 0 : 1) + (hideStatus ? 0 : 2);
     return (
     <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
       <table className="w-full border-collapse text-left text-sm">

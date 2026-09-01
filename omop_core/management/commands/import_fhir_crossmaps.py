@@ -15,7 +15,7 @@ appears in a clinical table for at least one patient are imported.  Pass
 ``--all`` to import every valid mapping regardless.
 
 Re-runnable: existing SCCM rows are left untouched (get_or_create); new
-mappings are inserted as approved rows with ``origin_system='FHIR'``.
+mappings are inserted as approved rows with ``origin_system='HK-ETL'``.
 
 Only standard concepts (``standard_concept='S'``) are accepted as targets.
 Non-standard targets are skipped with a count reported at the end.
@@ -117,7 +117,10 @@ class Command(BaseCommand):
                 snomed_codes.add(snomed_code)
             cpt_id = entry.get('cptConceptId')
             if cpt_id:
-                cpt_concept_ids.add(int(cpt_id))
+                try:
+                    cpt_concept_ids.add(int(cpt_id))
+                except (ValueError, TypeError):
+                    pass
 
         # Batch-lookup SNOMED concepts by (vocabulary_id, concept_code)
         snomed_concepts = {}
@@ -146,6 +149,7 @@ class Command(BaseCommand):
 
         created = 0
         existed = 0
+        conflicts = 0
         no_target = 0
         no_source = 0
         not_standard = 0
@@ -175,7 +179,10 @@ class Command(BaseCommand):
             cpt_code = entry.get('cptCode', '')
             cpt_desc = entry.get('cptDescriptor', '')
             cpt_id = entry.get('cptConceptId')
-            source_concept = cpt_concepts.get(int(cpt_id)) if cpt_id else None
+            try:
+                source_concept = cpt_concepts.get(int(cpt_id)) if cpt_id else None
+            except (ValueError, TypeError):
+                source_concept = None
 
             omop_table = DOMAIN_TO_TABLE.get(target.domain_id, '')
 
@@ -183,7 +190,7 @@ class Command(BaseCommand):
                 created += 1
                 continue
 
-            _obj, was_created = SourceCodeConceptMapping.objects.get_or_create(
+            obj, was_created = SourceCodeConceptMapping.objects.get_or_create(
                 source_vocabulary_id='CPT4',
                 source_code=cpt_code[:100],
                 defaults={
@@ -204,9 +211,15 @@ class Command(BaseCommand):
                 created += 1
             else:
                 existed += 1
+                if obj.target_concept_id and obj.target_concept_id != target.concept_id:
+                    conflicts += 1
+                    logger.warning(
+                        'CPT %s: existing target=%s differs from cross-map target=%d',
+                        cpt_code, obj.target_concept_id, target.concept_id,
+                    )
 
         self._report(dry_run, 'CPT4→SNOMED', created, existed,
-                     no_target, no_source, not_standard, out_of_scope)
+                     no_target, no_source, not_standard, out_of_scope, conflicts)
 
     def _import_snomed_to_rxnorm(self, data, dry_run, import_all):
         """Import SNOMED→RxNorm cross-map.
@@ -249,6 +262,7 @@ class Command(BaseCommand):
 
         created = 0
         existed = 0
+        conflicts = 0
         no_target = 0
         no_source = 0
         not_standard = 0
@@ -281,7 +295,7 @@ class Command(BaseCommand):
                 created += 1
                 continue
 
-            _obj, was_created = SourceCodeConceptMapping.objects.get_or_create(
+            obj, was_created = SourceCodeConceptMapping.objects.get_or_create(
                 source_vocabulary_id='SNOMED',
                 source_code=snomed_code[:100],
                 defaults={
@@ -302,12 +316,19 @@ class Command(BaseCommand):
                 created += 1
             else:
                 existed += 1
+                if obj.target_concept_id and obj.target_concept_id != target.concept_id:
+                    conflicts += 1
+                    logger.warning(
+                        'SNOMED %s: existing target=%s differs from cross-map RxNorm target=%d',
+                        snomed_code, obj.target_concept_id, target.concept_id,
+                    )
 
         self._report(dry_run, 'SNOMED→RxNorm', created, existed,
-                     no_target, no_source, not_standard, out_of_scope)
+                     no_target, no_source, not_standard, out_of_scope, conflicts)
 
     def _report(self, dry_run, label, created, existed,
-                no_target, no_source, not_standard, out_of_scope):
+                no_target, no_source, not_standard, out_of_scope,
+                conflicts=0):
         verb = 'Would create' if dry_run else 'Created'
         self.stdout.write(self.style.SUCCESS(
             f'{verb} {created:,} SCCM rows from {label} cross-map.'
@@ -325,3 +346,8 @@ class Command(BaseCommand):
             parts.append(f'{out_of_scope:,} out of patient scope')
         if parts:
             self.stdout.write(f'Skipped: {", ".join(parts)}.')
+        if conflicts:
+            self.stdout.write(self.style.WARNING(
+                f'{conflicts:,} existing rows map to a different target '
+                f'(see WARNING log for details).'
+            ))
