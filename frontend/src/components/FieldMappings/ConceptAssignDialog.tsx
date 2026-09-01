@@ -294,7 +294,12 @@ export function ConceptAssignDialog({
       onClick={handleOverlayClick}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
     >
-      <div className="relative flex w-full max-w-2xl flex-col rounded-lg border bg-white shadow-xl">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="concept-assign-dialog-title"
+        className="relative flex w-full max-w-2xl flex-col rounded-lg border bg-white shadow-xl"
+      >
         {/* Header */}
         <div className="border-b border-slate-200 px-5 py-4">
           <button
@@ -304,7 +309,7 @@ export function ConceptAssignDialog({
             <X size={16} />
           </button>
 
-          <h2 className="text-lg font-semibold text-slate-900">
+          <h2 id="concept-assign-dialog-title" className="text-lg font-semibold text-slate-900">
             {isEditing ? "Edit Concept Mapping" : "Assign Concept"}
           </h2>
           <p className="mt-1 text-sm text-slate-500">

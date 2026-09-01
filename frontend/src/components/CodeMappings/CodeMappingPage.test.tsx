@@ -196,22 +196,19 @@ describe("CodeMappingPage", () => {
     expect(await screen.findByText("C90.00")).toBeInTheDocument();
   });
 
-  it("offers destination tabs for standard vocabularies, not just HK-*", async () => {
-    // A curator re-points a proposed mapping at a LOINC or SNOMED concept, so
-    // those mappings need somewhere to live.
+  it("offers tabs for the source vocabularies represented in the queue", async () => {
     renderPage();
     await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
-    const tabs = within(screen.getByRole("tablist", { name: "Destination vocabularies" }));
-    expect(tabs.getByRole("button", { name: /SNOMED/ })).toBeInTheDocument();
-    expect(tabs.getByRole("button", { name: /LOINC/ })).toBeInTheDocument();
-    expect(tabs.getByRole("button", { name: /HK-Labs/ })).toBeInTheDocument();
+    const tabs = within(screen.getByRole("tablist", { name: "Source vocabularies" }));
+    expect(tabs.getByRole("tab", { name: /Uncoded/ })).toBeInTheDocument();
+    expect(tabs.getByRole("tab", { name: /ICD10CM/ })).toBeInTheDocument();
   });
 
   it("has no All tab", async () => {
     renderPage();
     await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
-    const tabs = within(screen.getByRole("tablist", { name: "Destination vocabularies" }));
-    expect(tabs.queryByRole("button", { name: /^All/ })).not.toBeInTheDocument();
+    const tabs = within(screen.getByRole("tablist", { name: "Source vocabularies" }));
+    expect(tabs.queryByRole("tab", { name: /^All/ })).not.toBeInTheDocument();
   });
 
   it("lands on the tab that has review work, not the first tab", async () => {
@@ -673,33 +670,22 @@ describe("CodeMappingPage", () => {
   });
 
   describe("Suggest", () => {
-    it("enables Suggest on an HK-* tab and disables it on a standard one", async () => {
-      // HK-* tabs hold locally minted destinations for unmapped codes. A
-      // standard vocabulary is somewhere a curator re-points *into* —
-      // enumerating SNOMED's 1.09M concepts would not be a queue. Disabled
-      // with a reason rather than hidden: a button that vanishes reads as a bug.
+    it("keeps Suggest available after switching source vocabularies", async () => {
       renderPage();
       await screen.findByText("M-PROTEIN, SERUM", { selector: "td" });
       expect(screen.getByRole("button", { name: /Suggest/ })).toBeEnabled();
 
-      const tabs = within(screen.getByRole("tablist", { name: "Destination vocabularies" }));
-      fireEvent.click(tabs.getByRole("button", { name: /LOINC/ }));
+      const tabs = within(screen.getByRole("tablist", { name: "Source vocabularies" }));
+      fireEvent.click(tabs.getByRole("tab", { name: /ICD10CM/ }));
       const button = screen.getByRole("button", { name: /Suggest/ });
-      expect(button).toBeDisabled();
-      expect(button).toHaveAttribute("title", expect.stringContaining("HK-*") as unknown as string);
+      expect(button).toBeEnabled();
+      expect(button).toHaveAttribute("title", expect.stringContaining("source codes"));
     });
 
-    it("opens on an HK-* tab when nothing is mapped anywhere", async () => {
-      // The state Suggest exists for. Standard vocabularies come first in the
-      // tab strip, so an empty queue opened on SNOMED — where the button is
-      // disabled — making it unreachable exactly when it is needed.
+    it("keeps Suggest available when the queue is empty", async () => {
       renderPage([]);
       await waitFor(() =>
         expect(screen.getByRole("button", { name: /Suggest/ })).toBeEnabled());
-      const tabs = within(screen.getByRole("tablist", { name: "Destination vocabularies" }));
-      const selected = tabs.getAllByRole("button")
-        .find((b) => b.className.includes("border-slate-950"));
-      expect(selected?.textContent).toMatch(/^HK-/);
     });
 
     it("defaults the threshold to 10 and sends it", async () => {
@@ -714,7 +700,7 @@ describe("CodeMappingPage", () => {
       await waitFor(() => expect(mockPost).toHaveBeenCalled());
       expect(mockPost.mock.calls[0][0]).toBe("/v1/code-mappings/suggest/");
       expect(mockPost.mock.calls[0][1]).toMatchObject({
-        destination_vocabulary_id: "HK-Labs",
+        source_vocabulary_id: "",
         min_occurrences: 10,
       });
     });

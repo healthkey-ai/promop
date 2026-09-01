@@ -50,15 +50,14 @@ SOURCE_VOCABULARIES = {
     'dm+d', 'CVX', 'ICDO3',
 }
 
-# Maps each clinical table to the concept_id column that holds the
-# standard concept for a fact row.
-_CLINICAL_CONCEPT_COLUMNS = {
-    'drug_exposure': 'drug_concept_id',
-    'condition_occurrence': 'condition_concept_id',
-    'measurement': 'measurement_concept_id',
-    'observation': 'observation_concept_id',
-    'procedure_occurrence': 'procedure_concept_id',
-}
+# Fixed queries for standard concept IDs used by patient clinical facts.
+_PATIENT_SCOPED_CONCEPT_QUERIES = (
+    'SELECT DISTINCT drug_concept_id FROM drug_exposure WHERE drug_concept_id != 0',
+    'SELECT DISTINCT condition_concept_id FROM condition_occurrence WHERE condition_concept_id != 0',
+    'SELECT DISTINCT measurement_concept_id FROM measurement WHERE measurement_concept_id != 0',
+    'SELECT DISTINCT observation_concept_id FROM observation WHERE observation_concept_id != 0',
+    'SELECT DISTINCT procedure_concept_id FROM procedure_occurrence WHERE procedure_concept_id != 0',
+)
 
 
 def _patient_scoped_concept_ids():
@@ -69,10 +68,8 @@ def _patient_scoped_concept_ids():
     """
     ids = set()
     with connection.cursor() as cur:
-        for table, col in _CLINICAL_CONCEPT_COLUMNS.items():
-            cur.execute(
-                f'SELECT DISTINCT {col} FROM {table} WHERE {col} != 0'  # noqa: S608
-            )
+        for query in _PATIENT_SCOPED_CONCEPT_QUERIES:
+            cur.execute(query)
             ids.update(row[0] for row in cur.fetchall())
     return ids
 
