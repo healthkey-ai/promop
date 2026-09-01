@@ -57,6 +57,7 @@ from omop_core.services.patient_record_service import (
     refresh_patient_record,
     set_language_skills,
 )
+from omop_core.services.derivation_jobs import get_dispatcher
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.episode_service import upsert_therapy_line_episode
@@ -5022,7 +5023,13 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
     @action(detail=True, methods=['post'], url_path='refresh',
             permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def refresh(self, request: Request, pk: str | None = None) -> Response:
-        """Re-derive this person's PatientRecord once, on demand."""
+        """Queue a re-derivation of this person's PatientRecord.
+
+        202, not 200: the record is not rebuilt yet when this returns. Poll
+        /api/v1/derivation-status/{task_id}/ for the outcome. With no broker
+        configured the derivation has already run by the time this answers,
+        but the contract is the same either way so a client needs one path.
+        """
         person, patient_info, err = self._resolve_patient_with_auth(request, pk)
         if err:
             return err
@@ -5033,22 +5040,34 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # Unguarded on purpose. A 2xx over a record that did not re-derive
-        # would be a lie on an endpoint that exists only to derive.
-        # Safety net: abort any single SQL statement that exceeds 25 s so a
-        # pathologically large patient cannot hold a DB connection indefinitely.
-        # SET LOCAL scopes to the enclosing transaction and auto-reverts on commit.
-        from django.db import connection
-        with transaction.atomic():
-            with connection.cursor() as cur:
-                cur.execute("SET LOCAL statement_timeout = '25s'")
-            record: PatientRecord = refresh_patient_record(person)
-        return Response({
-            'person_id': person.person_id,
-            'refreshed': True,
-            'derived_at': getattr(record, 'derived_at', None),
-            'derivation_version': getattr(record, 'derivation_version', None),
-        })
+        task_id = get_dispatcher().dispatch(person)
+        return Response(
+            {'person_id': person.person_id, 'task_id': task_id},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def derivation_status(request: Request, task_id: str) -> Response:
+    """Where a queued derivation got to.
+
+    Admin only, matching the refresh action that hands out the ids. A task id
+    carries no person, so there is no narrower ownership check to make here.
+    """
+    if not _is_admin_actor(request):
+        return Response(
+            {'detail': 'Only administrators can read derivation status.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    state = get_dispatcher().status(task_id)
+    return Response({
+        'task_id': state.task_id,
+        'state': state.state,
+        'error': state.error,
+    })
 
 
 

@@ -28,6 +28,49 @@ services:
         fromDatabase:
           name: promop-db
           property: connectionString
+      # Deliberately dashboard-managed, not wired from the blueprint. Setting
+      # it here would make production the first place the queued path ever
+      # runs. Paste the redis connection string in once the path has been
+      # exercised somewhere else; clearing it is the rollback.
+      - key: CELERY_BROKER_URL
+        sync: false
+
+  - type: worker
+    name: promop-worker
+    runtime: python
+    repo: https://github.com/healthkey-ai/promop
+    branch: main
+    autoDeploy: true
+    # No frontend build: the worker serves nothing.
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "celery -A ctomop worker --loglevel=info"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      # Taken from the web service rather than generated: two different keys
+      # would be two different signing secrets for the same data.
+      - key: SECRET_KEY
+        fromService:
+          name: promop
+          type: web
+          envVarKey: SECRET_KEY
+      - key: DEBUG
+        value: False
+      - key: DATABASE_URL
+        fromDatabase:
+          name: promop-db
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: promop-redis
+          type: redis
+          property: connectionString
+
+  - type: redis
+    name: promop-redis
+    plan: starter
+    # Reachable from the other services in this blueprint only.
+    ipAllowList: []
 
       # ── Required because DEBUG is False above ────────────────────────────
       # ctomop/settings.py raises ImproperlyConfigured at import when DEBUG is

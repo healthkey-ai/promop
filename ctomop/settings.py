@@ -43,6 +43,9 @@ if not DEBUG:
     # are not broken when DATABASE_URL is absent at import time.
     _management_commands = {'migrate', 'test', 'collectstatic', 'check', 'makemigrations'}
     _running_mgmt = len(_sys.argv) > 1 and _sys.argv[1] in _management_commands
+    # A Celery worker serves no HTTP, so the host and origin checks below would
+    # only stop it from booting. Its secret and database still have to be real.
+    _running_worker = os.path.basename(_sys.argv[0] if _sys.argv else '') == 'celery'
     if not _running_mgmt:
         from django.core.exceptions import ImproperlyConfigured
         _config_errors = []
@@ -54,11 +57,11 @@ if not DEBUG:
             _config_errors.append(
                 'DATABASE_URL must be set (SQLite is not supported in production)'
             )
-        if not os.environ.get('ALLOWED_HOSTS'):
+        if not _running_worker and not os.environ.get('ALLOWED_HOSTS'):
             _config_errors.append(
                 'ALLOWED_HOSTS must be set to your domain(s), e.g. "app.example.com"'
             )
-        if not os.environ.get('CORS_ALLOWED_ORIGINS'):
+        if not _running_worker and not os.environ.get('CORS_ALLOWED_ORIGINS'):
             _config_errors.append(
                 'CORS_ALLOWED_ORIGINS must be set to your frontend origin(s), '
                 'e.g. "https://app.example.com"'
@@ -514,6 +517,51 @@ for host in ALLOWED_HOSTS:
         csrf_origins.append(f'https://{host}')
 
 CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(csrf_origins))
+
+
+# ── Celery ────────────────────────────────────────────────────────────────
+# An empty broker means no queue, so the derivation runs inline in the request.
+# That is what a developer machine with no Redis gets, and it is the switch the
+# dispatcher reads — see omop_core/services/derivation_jobs.py.
+CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', '')
+CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', CELERY_BROKER_URL)
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_ACCEPT_CONTENT = ['json']
+
+# Each worker process holds its own DB connection, so concurrency x instances
+# has to stay under the database's connection cap.
+CELERY_WORKER_CONCURRENCY = int(os.environ.get('CELERY_WORKER_CONCURRENCY', '4'))
+# Default is 4, which lets one worker reserve four slow patients while its
+# siblings idle. Derivation is minutes-long, so reserve one at a time.
+CELERY_WORKER_PREFETCH_MULTIPLIER = int(
+    os.environ.get('CELERY_WORKER_PREFETCH_MULTIPLIER', '1'))
+
+CELERY_TASK_TIME_LIMIT = int(os.environ.get('CELERY_TASK_TIME_LIMIT', '900'))
+# Acknowledge after the task finishes, so a worker killed mid-derivation
+# releases the job instead of dropping it. Safe because deriving twice is
+# the same as deriving once.
+CELERY_TASK_ACKS_LATE = True
+# acks_late on its own still drops the task when the worker *process* dies —
+# an OOM kill or a hard time limit acknowledges it rather than redelivering.
+# Idempotent, so redelivery is the better failure mode.
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+# Off by default, which would leave a 15-25s derivation reading PENDING for its
+# whole run. The status endpoint publishes STARTED, so it has to be tracked.
+CELERY_TASK_TRACK_STARTED = True
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    # Must exceed CELERY_TASK_TIME_LIMIT. Below it, Redis decides a still
+    # running task was lost and hands the same job to a second worker.
+    'visibility_timeout': int(
+        os.environ.get('CELERY_BROKER_VISIBILITY_TIMEOUT', '1800')),
+    # The refresh endpoint enqueues inside the request, so an unreachable
+    # broker has to fail fast. Unset, kombu waits on the connect indefinitely
+    # and the caller sits there until gunicorn kills the worker.
+    'socket_connect_timeout': 5,
+    'socket_timeout': 5,
+}
+# How long a caller can still poll a finished task id.
+CELERY_RESULT_EXPIRES = int(os.environ.get('CELERY_RESULT_EXPIRES', '86400'))
 
 
 # ── Firebase Admin SDK ────────────────────────────────────────────────────

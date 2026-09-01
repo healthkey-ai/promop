@@ -5307,6 +5307,157 @@ class SeededEmploymentStatusMappingTest(TestCase):
         self.assertEqual(record.employment_status, 'Employed full-time')
 
 
+# ---------------------------------------------------------------------------
+# Async derivation — dispatchers and the Celery task
+# ---------------------------------------------------------------------------
+
+class DerivationDispatcherTest(TestCase):
+    """The DI seam the refresh endpoint runs the derivation through."""
+
+    def setUp(self):
+        self.person = Person.objects.create(person_id=990101, year_of_birth=1970)
+        PatientRecord.objects.create(person=self.person)
+
+    def test_no_broker_selects_the_inline_dispatcher(self):
+        from omop_core.services.derivation_jobs import InlineDispatcher, get_dispatcher
+
+        with self.settings(CELERY_BROKER_URL=''):
+            self.assertIsInstance(get_dispatcher(), InlineDispatcher)
+
+    def test_a_configured_broker_selects_the_celery_dispatcher(self):
+        from omop_core.services.derivation_jobs import CeleryDispatcher, get_dispatcher
+
+        with self.settings(CELERY_BROKER_URL='redis://localhost:6379/0'):
+            self.assertIsInstance(get_dispatcher(), CeleryDispatcher)
+
+    def test_use_dispatcher_overrides_and_restores(self):
+        from omop_core.services.derivation_jobs import (
+            FakeDispatcher, get_dispatcher, use_dispatcher,
+        )
+
+        fake = FakeDispatcher()
+        with use_dispatcher(fake):
+            self.assertIs(get_dispatcher(), fake)
+        self.assertIsNot(get_dispatcher(), fake)
+
+    def test_inline_dispatcher_derives_and_reports_success(self):
+        from omop_core.services.derivation_jobs import SUCCESS, InlineDispatcher
+
+        dispatcher = InlineDispatcher()
+        with patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+            task_id = dispatcher.dispatch(self.person)
+
+        refresh.assert_called_once_with(self.person)
+        self.assertEqual(dispatcher.status(task_id).state, SUCCESS)
+
+    def test_inline_dispatcher_bounds_the_derivation(self):
+        """It runs in the request, so it needs the bound the worker gets from Celery."""
+        from django.db import connection
+
+        from omop_core.services.derivation_jobs import InlineDispatcher
+
+        seen = []
+
+        def record(person):
+            with connection.cursor() as cur:
+                cur.execute('SHOW statement_timeout')
+                seen.append(cur.fetchone()[0])
+
+        with patch('omop_core.services.patient_record_service.refresh_patient_record',
+                   side_effect=record):
+            InlineDispatcher().dispatch(self.person)
+
+        self.assertEqual(seen, ['25s'])
+
+    def test_inline_dispatcher_reports_a_foreign_id_as_pending(self):
+        from omop_core.services.derivation_jobs import PENDING, InlineDispatcher
+
+        self.assertEqual(InlineDispatcher().status('never-seen').state, PENDING)
+
+    def test_inline_dispatcher_rejects_an_id_it_never_issued(self):
+        """The id is the completion record, so an invented one must not read SUCCESS."""
+        from omop_core.services.derivation_jobs import PENDING, InlineDispatcher
+
+        dispatcher = InlineDispatcher()
+
+        for forged in ('inline-typo', 'inline-', 'inline-' + 'a' * 32):
+            with self.subTest(forged=forged):
+                self.assertEqual(dispatcher.status(forged).state, PENDING)
+
+    def test_inline_dispatcher_lets_a_failure_propagate(self):
+        """The caller is still holding the request, so it can be told directly."""
+        from omop_core.services.derivation_jobs import InlineDispatcher
+
+        with patch('omop_core.services.patient_record_service.refresh_patient_record',
+                   side_effect=ValueError('boom')):
+            with self.assertRaises(ValueError):
+                InlineDispatcher().dispatch(self.person)
+
+    def test_an_inline_id_reads_success_on_a_process_that_never_saw_the_post(self):
+        """Several gunicorn workers, so the poll rarely lands where the POST did."""
+        from omop_core.services.derivation_jobs import SUCCESS, InlineDispatcher
+
+        with patch('omop_core.services.patient_record_service.refresh_patient_record'):
+            task_id = InlineDispatcher().dispatch(self.person)
+
+        other_process = InlineDispatcher()
+
+        self.assertEqual(other_process.status(task_id).state, SUCCESS)
+
+    def test_celery_dispatcher_enqueues_only_on_commit(self):
+        """A worker starting inside the open transaction derives the old state."""
+        from omop_core.services.derivation_jobs import CeleryDispatcher
+
+        with patch('omop_core.tasks.refresh_patient_record_task.apply_async') as enqueue:
+            with self.captureOnCommitCallbacks(execute=True):
+                task_id = CeleryDispatcher().dispatch(self.person)
+                enqueue.assert_not_called()
+
+        enqueue.assert_called_once_with(
+            args=[self.person.person_id], task_id=task_id)
+
+    def test_celery_dispatcher_returns_the_id_it_enqueues_under(self):
+        from omop_core.services.derivation_jobs import CeleryDispatcher
+
+        with patch('omop_core.tasks.refresh_patient_record_task.apply_async') as enqueue:
+            with self.captureOnCommitCallbacks(execute=True):
+                task_id = CeleryDispatcher().dispatch(self.person)
+
+        self.assertEqual(enqueue.call_args.kwargs['task_id'], task_id)
+
+
+class RefreshPatientRecordTaskTest(TestCase):
+    """The task body, called directly — no broker involved."""
+
+    def setUp(self):
+        self.person = Person.objects.create(person_id=990102, year_of_birth=1970)
+        PatientRecord.objects.create(person=self.person)
+
+    def test_task_derives_the_person_and_returns_json_safe_values(self):
+        from omop_core.tasks import refresh_patient_record_task
+
+        result = refresh_patient_record_task(self.person.person_id)
+
+        self.assertEqual(result['person_id'], self.person.person_id)
+        # Serialized here rather than left as a datetime, which the JSON result
+        # backend cannot carry.
+        self.assertIsInstance(result['derived_at'], str)
+
+    def test_task_raises_for_an_unknown_person(self):
+        from omop_core.tasks import refresh_patient_record_task
+
+        with self.assertRaises(Person.DoesNotExist):
+            refresh_patient_record_task(99999999)
+
+    def test_task_does_not_swallow_a_failing_derivation(self):
+        from omop_core.tasks import refresh_patient_record_task
+
+        with patch('omop_core.services.patient_record_service.refresh_patient_record',
+                   side_effect=RuntimeError('derivation exploded')):
+            with self.assertRaises(RuntimeError):
+                refresh_patient_record_task(self.person.person_id)
+
+
 class PersonLanguageSkillConstraintTest(TestCase):
     """#809 — person_language_skill enforces its rules in the database.
 
