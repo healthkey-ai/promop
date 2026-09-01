@@ -80,10 +80,12 @@ class TestCptSnomedImport:
             source_vocabulary_id='CPT4', source_code='99213',
         )
         assert mapping.target_concept_id == 4001
+        assert mapping.source_concept_id == 5001  # FK set from pre-fetched concept
         assert mapping.status == 'approved'
         assert mapping.origin == 'import'
         assert mapping.origin_system == 'etl-cross-map'
-        assert mapping.domain_id == 'Procedure'
+        assert mapping.domain_id == 'Procedure'  # derived from target concept
+        assert mapping.omop_table == 'procedure'
         assert mapping.destination_vocabulary_id == 'SNOMED'
 
     def test_skips_unmapped_entries(self):

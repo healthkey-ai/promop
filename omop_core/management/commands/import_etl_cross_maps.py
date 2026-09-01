@@ -67,6 +67,15 @@ class Command(BaseCommand):
         if not options['skip_rxnorm']:
             self._import_snomed_rxnorm(options['snomed_rxnorm_file'], dry_run, limit)
 
+    # Domain → OMOP table, matching sync_athena_mappings.DOMAIN_TO_TABLE.
+    DOMAIN_TO_TABLE = {
+        'Drug': 'drug_exposure',
+        'Procedure': 'procedure',
+        'Condition': 'condition',
+        'Observation': 'observation',
+        'Measurement': 'measurement',
+    }
+
     def _import_cpt_snomed(self, file_path, dry_run, limit):
         path = Path(file_path)
         if not path.exists():
@@ -76,52 +85,75 @@ class Command(BaseCommand):
         with open(path) as f:
             data = json.load(f)
 
-        created = 0
-        skipped = 0
-        conflicts = 0
-        no_mapping = 0
-        missing_target = 0
-
         entries = list(data.values())
         if limit:
             entries = entries[:limit]
 
+        # Filter to entries that have a mapping (snomedId != '0').
+        mapped_entries = []
+        no_mapping = 0
         for entry in entries:
             snomed_id_str = entry.get('snomedId', '0')
             if snomed_id_str == '0' or not snomed_id_str:
                 no_mapping += 1
-                continue
+            else:
+                mapped_entries.append(entry)
 
-            target_concept_id = int(snomed_id_str)
+        # Pre-fetch all target SNOMED concepts in one query.
+        target_ids = {int(e['snomedId']) for e in mapped_entries}
+        target_concepts = {
+            c.concept_id: c
+            for c in Concept.objects.filter(concept_id__in=target_ids)
+        }
+
+        # Pre-fetch all source CPT concepts in one query.
+        source_ids = {int(e['cptConceptId']) for e in mapped_entries}
+        source_concepts = {
+            c.concept_id: c
+            for c in Concept.objects.filter(concept_id__in=source_ids)
+        }
+
+        created = 0
+        skipped = 0
+        conflicts = 0
+        missing_target = 0
+
+        for entry in mapped_entries:
+            target_concept_id = int(entry['snomedId'])
             source_concept_id = int(entry['cptConceptId'])
             source_code = entry['cptCode'][:100]
             description = (entry.get('cptDescriptor') or '')[:255]
 
-            # Validate target concept exists
-            if not dry_run:
-                target_exists = Concept.objects.filter(concept_id=target_concept_id).exists()
-                if not target_exists:
-                    missing_target += 1
+            target_concept = target_concepts.get(target_concept_id)
+            if not target_concept:
+                missing_target += 1
+                if not dry_run:
                     logger.warning(
                         'CPT %s: target SNOMED concept_id %d not in DB',
                         source_code, target_concept_id,
                     )
-                    continue
+                continue
 
             if dry_run:
                 created += 1
                 continue
 
+            source_concept = source_concepts.get(source_concept_id)
+
+            # Derive domain from target concept instead of hardcoding.
+            domain_id = target_concept.domain_id or 'Procedure'
+            omop_table = self.DOMAIN_TO_TABLE.get(domain_id, 'procedure')
+
             obj, was_created = SourceCodeConceptMapping.objects.get_or_create(
                 source_vocabulary_id='CPT4',
                 source_code=source_code,
                 defaults={
-                    'domain_id': 'Procedure',
+                    'domain_id': domain_id,
                     'source_code_description': description,
-                    'source_concept_id': source_concept_id,
-                    'target_concept_id': target_concept_id,
+                    'source_concept': source_concept,
+                    'target_concept': target_concept,
                     'destination_vocabulary_id': 'SNOMED',
-                    'omop_table': 'procedure',
+                    'omop_table': omop_table,
                     'status': 'approved',
                     'origin': 'import',
                     'origin_system': 'etl-cross-map',
