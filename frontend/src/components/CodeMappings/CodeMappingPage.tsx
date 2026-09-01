@@ -725,7 +725,7 @@ export default function CodeMappingPage() {
   };
 
   const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, { hideStatus = false }: { hideStatus?: boolean } = {}) => {
-    const colCount = 8 + (hideStatus ? 0 : 2);
+    const colCount = 6 + (hideStatus ? 0 : 2);
     return (
     <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
       <table className="w-full border-collapse text-left text-sm">
@@ -733,7 +733,6 @@ export default function CodeMappingPage() {
           <tr>
             <th className="px-4 py-3 font-semibold">Provenance</th>
             <th className="px-4 py-3 font-semibold">Source code</th>
-            <th className="px-4 py-3 font-semibold">Source code system</th>
             <th className="px-4 py-3 font-semibold">Destination concept</th>
             <th className="px-4 py-3 font-semibold">Concept ID</th>
             <th className="px-4 py-3 font-semibold">OMOP table</th>
@@ -759,9 +758,6 @@ export default function CodeMappingPage() {
             >
               <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>
               <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.source_code}</td>
-              <td className="px-4 py-3 font-mono text-xs text-slate-700">
-                {row.source_vocabulary_id || <span className="italic text-slate-400">uncoded</span>}
-              </td>
               <td className="px-4 py-3">
                 <div className="font-medium text-slate-950">{row.destination_concept_name}</div>
                 <div className="font-mono text-xs text-slate-500">
