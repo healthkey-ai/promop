@@ -24212,3 +24212,142 @@ class CodeMappingSourceVocabTabsTest(TestCase):
         self.assertIsNone(cr.reviewed_at)
         self.assertIsNone(cr.updated_at)
         cr.delete()
+
+
+# ---------------------------------------------------------------------------
+# Code mapping batch lookup
+# ---------------------------------------------------------------------------
+
+class CodeMappingLookupTest(TestCase):
+    """Tests for POST /api/v1/code-mappings/lookup/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        # Ensure SNOMED vocabulary exists
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='SNOMED',
+            defaults={'vocabulary_name': 'SNOMED', 'vocabulary_concept_id': 0},
+        )
+        cls.admin = Identity.objects.create_superuser(
+            email='lookup-admin@test.com', password='testpass'
+        )
+        # Create an approved mapping
+        cls.target_concept = Concept.objects.create(
+            concept_id=990001,
+            concept_name='Test Procedure',
+            domain_id='Procedure',
+            vocabulary_id='SNOMED',
+            concept_class_id='Clinical Finding',
+            concept_code='12345',
+            standard_concept='S',
+            valid_start_date='1970-01-01',
+            valid_end_date='2099-12-31',
+        )
+        cls.mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='CPT4',
+            source_code='99213',
+            source_code_description='Office visit',
+            target_concept=cls.target_concept,
+            destination_vocabulary_id='SNOMED',
+            domain_id='Procedure',
+            omop_table='procedure',
+            status='approved',
+            origin='import',
+            origin_system='etl-cross-map',
+            source='ETL',
+        )
+        # Create a proposed (non-approved) mapping — should NOT be returned
+        cls.proposed_target = Concept.objects.create(
+            concept_id=990002,
+            concept_name='Proposed Target',
+            domain_id='Procedure',
+            vocabulary_id='SNOMED',
+            concept_class_id='Clinical Finding',
+            concept_code='99999',
+            standard_concept='S',
+            valid_start_date='1970-01-01',
+            valid_end_date='2099-12-31',
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='CPT4',
+            source_code='99214',
+            target_concept=cls.proposed_target,
+            destination_vocabulary_id='SNOMED',
+            domain_id='Procedure',
+            omop_table='procedure',
+            status='proposed',
+            origin='import',
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+        self.url = '/api/v1/code-mappings/lookup/'
+
+    def test_lookup_returns_approved_mapping(self):
+        resp = self.client.post(self.url, {
+            'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': '99213'}],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data['resolved'], 1)
+        self.assertEqual(data['unresolved'], 0)
+        hit = data['mappings']['CPT4|99213']
+        self.assertEqual(hit['target_concept_id'], 990001)
+        self.assertEqual(hit['target_concept_code'], '12345')
+        self.assertEqual(hit['destination_vocabulary_id'], 'SNOMED')
+        self.assertEqual(hit['domain_id'], 'Procedure')
+
+    def test_lookup_excludes_proposed_mappings(self):
+        resp = self.client.post(self.url, {
+            'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': '99214'}],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIsNone(data['mappings']['CPT4|99214'])
+        self.assertEqual(data['resolved'], 0)
+        self.assertEqual(data['unresolved'], 1)
+
+    def test_lookup_returns_null_for_unknown_code(self):
+        resp = self.client.post(self.url, {
+            'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': 'XXXXX'}],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.json()['mappings']['CPT4|XXXXX'])
+
+    def test_lookup_mixed_resolved_and_unresolved(self):
+        resp = self.client.post(self.url, {
+            'codes': [
+                {'source_vocabulary_id': 'CPT4', 'source_code': '99213'},
+                {'source_vocabulary_id': 'CPT4', 'source_code': 'XXXXX'},
+            ],
+        }, format='json')
+        data = resp.json()
+        self.assertEqual(data['resolved'], 1)
+        self.assertEqual(data['unresolved'], 1)
+
+    def test_lookup_rejects_empty_codes(self):
+        resp = self.client.post(self.url, {}, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_lookup_rejects_missing_fields(self):
+        resp = self.client.post(self.url, {
+            'codes': [{'source_vocabulary_id': 'CPT4'}],
+        }, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_lookup_rejects_too_many_codes(self):
+        codes = [
+            {'source_vocabulary_id': 'CPT4', 'source_code': str(i)}
+            for i in range(1001)
+        ]
+        resp = self.client.post(self.url, {'codes': codes}, format='json')
+        self.assertEqual(resp.status_code, 413)
+
+    def test_lookup_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+        resp = self.client.post(self.url, {
+            'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': '99213'}],
+        }, format='json')
+        self.assertIn(resp.status_code, [401, 403])
