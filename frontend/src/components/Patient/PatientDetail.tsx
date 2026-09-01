@@ -292,9 +292,9 @@ export default function PatientDetail({
           d.ecog_performance_status = String(d.ecog_performance_status);
 
         if (d.estrogen_receptor_status && d.progesterone_receptor_status && d.her2_status) {
-          const erNeg = ["Negative", "ER-"].includes(d.estrogen_receptor_status);
-          const prNeg = ["Negative", "PR-"].includes(d.progesterone_receptor_status);
-          const her2Neg = ["Negative", "HER2-"].includes(d.her2_status);
+          const erNeg = d.estrogen_receptor_status === "Negative";
+          const prNeg = d.progesterone_receptor_status === "Negative";
+          const her2Neg = d.her2_status === "Negative";
           d.tnbc_status = erNeg && prNeg && her2Neg;
         }
 
@@ -505,7 +505,7 @@ export default function PatientDetail({
       const er = String(field === "estrogen_receptor_status" ? value : updated.estrogen_receptor_status ?? "");
       const pr = String(field === "progesterone_receptor_status" ? value : updated.progesterone_receptor_status ?? "");
       const her2 = String(field === "her2_status" ? value : updated.her2_status ?? "");
-      const neg = (v: string) => ["Negative", "ER-", "PR-", "HER2-"].includes(v);
+      const neg = (v: string) => v === "Negative";
       if (neg(er) && neg(pr) && neg(her2)) updated.tnbc_status = true;
       else if (er || pr || her2) updated.tnbc_status = false;
     }

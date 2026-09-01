@@ -2201,10 +2201,11 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     def _receptor_status(measurement):
         """Return a normalized receptor status from a Measurement row.
 
-        Recognizes positive/negative/equivocal explicitly; any other non-empty
-        value is preserved (upper-cased) rather than dropped, so clinically
-        meaningful results such as a HER2 'Equivocal' (IHC 2+) reading are not
-        silently lost. Returns None only when no value is present at all.
+        Returns LOINC answer list LL2160-7 display names: ``Positive``,
+        ``Negative``, ``Equivocal``.  Any other non-empty value is preserved
+        (title-cased) rather than dropped, so clinically meaningful results
+        such as a HER2 'Equivocal' (IHC 2+) reading are not silently lost.
+        Returns None only when no value is present at all.
         """
         raw = None
         if measurement.value_as_concept:
@@ -2217,12 +2218,12 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             return None
         s = raw.strip().lower()
         if 'positive' in s:
-            return 'POSITIVE'
+            return 'Positive'
         if 'negative' in s:
-            return 'NEGATIVE'
+            return 'Negative'
         if 'equivocal' in s:
-            return 'EQUIVOCAL'
-        return raw.strip().upper()
+            return 'Equivocal'
+        return raw.strip().title()
 
     er_measurement = next((m for m in measurements if _measurement_code(m) == '16112-5'), None)
     if er_measurement:
@@ -2244,9 +2245,9 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
 
     if 'estrogen_receptor_status' in data and 'progesterone_receptor_status' in data and 'her2_status' in data:
         data['tnbc_status'] = (
-            data['estrogen_receptor_status'] == 'NEGATIVE'
-            and data['progesterone_receptor_status'] == 'NEGATIVE'
-            and data['her2_status'] == 'NEGATIVE'
+            data['estrogen_receptor_status'] == 'Negative'
+            and data['progesterone_receptor_status'] == 'Negative'
+            and data['her2_status'] == 'Negative'
         )
 
     def _first_m(concept_code):
@@ -3727,7 +3728,7 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
     if er is not None or pr is not None:
         if (er and 'positive' in er.lower()) or (pr and 'positive' in pr.lower()):
             patient_info.hr_status = 'HR+'
-        elif er == 'NEGATIVE' and pr == 'NEGATIVE':
+        elif er == 'Negative' and pr == 'Negative':
             patient_info.hr_status = 'HR-'
 
     # Metastatic status — True when M stage is M1

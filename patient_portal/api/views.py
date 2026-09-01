@@ -3911,12 +3911,24 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _patch['bone_only_metastasis_status'] = bone_only_metastasis_status
                     if clonal_bone_marrow_b_lymphocytes is not None:
                         _patch['clonal_bone_marrow_b_lymphocytes'] = clonal_bone_marrow_b_lymphocytes
+                    def _norm_receptor(raw):
+                        if not raw:
+                            return raw
+                        s = raw.strip().lower()
+                        if 'positive' in s:
+                            return 'Positive'
+                        if 'negative' in s:
+                            return 'Negative'
+                        if 'equivocal' in s:
+                            return 'Equivocal'
+                        return raw.strip().title()
+
                     if er_status:
-                        _patch['estrogen_receptor_status'] = er_status
+                        _patch['estrogen_receptor_status'] = _norm_receptor(er_status)
                     if pr_status:
-                        _patch['progesterone_receptor_status'] = pr_status
+                        _patch['progesterone_receptor_status'] = _norm_receptor(pr_status)
                     if her2_status:
-                        _patch['her2_status'] = her2_status
+                        _patch['her2_status'] = _norm_receptor(her2_status)
                     if ki67_index is not None:
                         _patch['ki67_proliferation_index'] = ki67_index
                     if pdl1_percentage is not None:

@@ -46,9 +46,9 @@ def _seed_trial_eligibility_patient(org):
         ast_u_l=18,
         alt_u_l=21,
         albumin_g_dl=4.0,
-        her2_status='NEGATIVE',
-        estrogen_receptor_status='POSITIVE',
-        progesterone_receptor_status='POSITIVE',
+        her2_status='Negative',
+        estrogen_receptor_status='Positive',
+        progesterone_receptor_status='Positive',
     )
 
     ConditionOccurrenceFactory(
