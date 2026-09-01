@@ -241,7 +241,7 @@ export function ConceptAssignDialog({
         ? "proposed"
         : canApprove
           ? mappingStatus
-          : (mappingStatus === "approved" ? "proposed" : mappingStatus);
+          : (mappingStatus === "approved" || mappingStatus === "rejected" ? "proposed" : mappingStatus);
       const mappingPayload = {
         concept: selected?.concept_id ?? null,
         vocabulary_id: selected?.vocabulary_id ?? "",
@@ -249,7 +249,7 @@ export function ConceptAssignDialog({
         unit: effectiveUnit,
         omop_table: omopTable,
         notes,
-        status: selected ? effectiveStatus : "proposed",
+        status: effectiveStatus,
       };
       if (isEditing) {
         await api.patch(`/v1/field-mappings/${existingMappingId}/`, mappingPayload);
@@ -390,6 +390,24 @@ export function ConceptAssignDialog({
                 ))}
               </div>
             </div>
+
+            {/* Clear selection */}
+            {selected && (
+              <div className="mb-3 flex items-center justify-between rounded-md bg-slate-50 px-3 py-2">
+                <span className="text-sm text-slate-700">
+                  Selected: <span className="font-mono font-medium">{selected.vocabulary_id}:{selected.concept_code}</span>{" "}
+                  {selected.concept_name}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSelected(null)}
+                  className="ml-2 rounded p-0.5 text-slate-400 hover:text-slate-600"
+                  title="Clear selection"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
 
             {/* Read-only concept detail fields, matching Code Mapping layout */}
             <div className="grid gap-4 md:grid-cols-2">
@@ -565,7 +583,9 @@ export function ConceptAssignDialog({
               <option value="approved" disabled={!canApprove}>
                 {canApprove ? "Approved" : "Approved (admin only)"}
               </option>
-              <option value="rejected">Rejected</option>
+              <option value="rejected" disabled={!canApprove}>
+                {canApprove ? "Rejected" : "Rejected (admin only)"}
+              </option>
             </select>
           </div>
           <div className="flex gap-2">
