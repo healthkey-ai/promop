@@ -635,10 +635,11 @@ class Relationship(models.Model):
 class ConceptRelationship(models.Model):
     """OMOP CDM Concept Relationship table - pairwise relationships between concepts.
 
-    Athena-loaded rows have all provenance columns NULL.  HealthKey-written rows
-    (mirrored from SourceCodeConceptMapping on approval) carry ``source``,
-    ``status``, ``reviewer``, and ``reviewed_at`` so the audit trail survives in
-    the OMOP-standard table alongside the curation table.
+    This is Athena's table.  We never extend its schema — all curation
+    metadata lives in SourceCodeConceptMapping.  We read from it
+    (sync_athena_mappings imports Maps-to rows into SCCM) and mirror
+    approved SCCM mappings back as standard Maps-to / Mapped-from rows
+    using only the columns CR already has.
     """
     concept_1 = models.ForeignKey(
         Concept, on_delete=models.DO_NOTHING,
@@ -654,31 +655,6 @@ class ConceptRelationship(models.Model):
     valid_start_date = models.DateField()
     valid_end_date = models.DateField()
     invalid_reason = models.CharField(max_length=1, null=True, blank=True)
-
-    # ── Provenance (NULL on Athena-loaded rows) ─────────────────────────
-    source = models.CharField(
-        max_length=50, null=True, blank=True, db_index=True,
-        help_text="NULL = Athena-loaded, 'HealthKey' = curated by us.",
-    )
-    origin_system = models.CharField(
-        max_length=50, null=True, blank=True,
-        help_text="'curator', 'suggest', 'fhir-upload', etc.",
-    )
-    status = models.CharField(
-        max_length=20, null=True, blank=True,
-        help_text="'proposed', 'approved', 'rejected'. NULL = Athena.",
-    )
-    notes = models.TextField(null=True, blank=True)
-    reviewer = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
-        null=True, blank=True, related_name='+',
-        help_text='Who approved. The high-stakes decision in a mapping.',
-    )
-    reviewed_at = models.DateTimeField(
-        null=True, blank=True,
-        help_text='When approved.',
-    )
-    updated_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'concept_relationship'
