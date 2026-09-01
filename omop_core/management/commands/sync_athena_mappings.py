@@ -10,12 +10,20 @@ resolve_source_code() has a single lookup table.
 Re-runnable: safe to call after every vocabulary refresh.  Existing SCCM
 rows are left untouched (get_or_create); new Athena relationships are
 inserted as approved rows with origin_system='athena'.
+
+1:N mappings (one source code → multiple targets in CR) are handled by
+keeping the first target encountered. SCCM enforces a unique constraint on
+(source_vocabulary_id, source_code) because resolve_source_code() needs a
+single answer. Additional targets for the same source code are logged at
+WARNING so curators can review them.
 """
 import logging
+from collections import defaultdict
 
 from django.core.management.base import BaseCommand
 
 from omop_core.models import ConceptRelationship, SourceCodeConceptMapping
+from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
 
 logger = logging.getLogger(__name__)
 
@@ -32,15 +40,6 @@ SOURCE_VOCABULARIES = {
     'OPCS4', 'OPS', 'CCAM',
     'MedDRA', 'MeSH', 'Nebraska Lexicon',
     'dm+d', 'CVX', 'ICDO3',
-}
-
-# Domain → OMOP table, matching source_vocabularies.DOMAIN_TO_TABLE.
-DOMAIN_TO_TABLE = {
-    'Drug': 'drug_exposure',
-    'Procedure': 'procedure',
-    'Condition': 'condition',
-    'Observation': 'observation',
-    'Measurement': 'measurement',
 }
 
 
@@ -73,6 +72,10 @@ class Command(BaseCommand):
 
         created_count = 0
         skipped_count = 0
+        # Track source codes we've already seen in this run, so we can detect
+        # 1:N Athena mappings (same source code → multiple targets).
+        seen_keys = {}  # (vocab_id, code) → first target concept_id
+        multi_target = defaultdict(list)  # keys with >1 target
         for cr in qs.iterator(chunk_size=2000):
             c1 = cr.concept_1
             c2 = cr.concept_2
@@ -80,6 +83,17 @@ class Command(BaseCommand):
                 skipped_count += 1
                 continue
 
+            key = (c1.vocabulary_id, c1.concept_code[:100])
+            if key in seen_keys:
+                # 1:N: this source code already has a target. Log extra target.
+                multi_target[key].append(c2.concept_id)
+                skipped_count += 1
+                continue
+            seen_keys[key] = c2.concept_id
+
+            # Use target concept's domain to determine OMOP table — a source
+            # vocabulary can span multiple domains, but the target's domain
+            # tells us where the mapped fact should land.
             omop_table = DOMAIN_TO_TABLE.get(c2.domain_id, '')
 
             if dry_run:
@@ -108,8 +122,27 @@ class Command(BaseCommand):
             else:
                 skipped_count += 1
 
+        if multi_target:
+            logger.warning(
+                '%d source codes had multiple Athena Maps-to targets; '
+                'first target kept, extras skipped. '
+                'Review these in concept_relationship if needed.',
+                len(multi_target),
+            )
+            # Log the first few for debugging.
+            for (vocab, code), extras in list(multi_target.items())[:10]:
+                logger.warning(
+                    '  %s:%s → kept %s, skipped %s',
+                    vocab, code, seen_keys[(vocab, code)], extras,
+                )
+
         verb = 'Would create' if dry_run else 'Created'
         self.stdout.write(self.style.SUCCESS(
             f'{verb} {created_count} SCCM rows from Athena CR. '
-            f'Skipped {skipped_count} (already mapped or missing concept).'
+            f'Skipped {skipped_count} (already mapped, 1:N extra, or missing concept).'
         ))
+        if multi_target:
+            self.stdout.write(self.style.WARNING(
+                f'{len(multi_target)} source codes had multiple Athena targets '
+                f'(first kept, extras in concept_relationship).'
+            ))
